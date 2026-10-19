@@ -10,7 +10,14 @@ publication contracts in SKILL.md and read the curation reference before repairs
    `graph.audit.batch_size` bounds semantic work (1..100). If no candidate exists,
    report the returned counts and stop successfully. Do not expand the batch to
    reduce the whole backlog to zero.
+   Check `input.status` before reading: `oversized` retains the exact candidates
+   because their complete page and selected RSS payload bytes exceed
+   `graph.audit.max_input_bytes`. Report the measured bytes and configured bound;
+   do not truncate evidence, skip candidates or record a completed assessment.
 2. For each candidate, read the complete concept and the actual evidence it cites.
+   The candidate's evidence is the complete graph-derived set. For independent
+   discovery, `wiki citations CONCEPT --snapshot ID` paginates that set; do not
+   substitute ordinary outgoing Sources links or stop after its first page.
    Use `wiki read` outlines and revision-checked sections. For an RSS event citation,
    read the exact selected event through `wiki original ORIGIN --evidence-concept
    CONCEPT`, including its event ID and payload revision. An uncited concept has an

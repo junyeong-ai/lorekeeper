@@ -447,6 +447,7 @@ concepts:
 #   audit:
 #     schedule: "0 7 * * 0"         # weekly semantic maintenance, independent of synthesis
 #     batch_size: 5                # rotate changed and first-time concepts fairly (1..100)
+#     max_input_bytes: 262144      # complete selected pages + selected RSS payloads per batch; larger input is retained, not truncated
 #                                  # requires an explicit execution profile and deployed skills
 #   scope:
 #     dirs: [wiki]                   # vault-relative dirs to scan (default: vault.dirs.wiki)

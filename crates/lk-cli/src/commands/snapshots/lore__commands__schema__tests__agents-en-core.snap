@@ -124,7 +124,9 @@ Search/browse hits expose `knowledge_status`, tags and scoped review previews. A
 
 Name retrieval ignores spacing when suggesting a whole declared name (`matched: name-variant`), without changing exact name ownership. For other visible prose use `--phrase` for one contiguous phrase and `--spacing` to ignore whitespace within a visible Markdown block. These operators may be combined, remain lexical candidate retrieval, and never join separate paragraphs/list items/table cells. Exact identity/name and contiguous phrase hits precede scattered terms. Raw `--body` evidence uses literal or explicit regex matching and does not accept these operators. Prepared search, browse, links and provenance share the same `--snapshot`; read selected live pages with their returned file revisions.
 
-Guarded `wiki curate` may correct concept categories and tags. Omit `category` to retain it, use a configured category ID to replace it, or null to clear it. Omit `tags` to retain them, provide the complete replacement list, or use [] to clear them. Tags are unique nonblank single lines and describe the concept itself; source tags are not inherited automatically. Evidence and target file revisions must still match at publication.
+Use `wiki citations EXACT_CONCEPT_PATH --snapshot ID` for complete graph-derived evidence, following `next_offset` within the same snapshot. This set differs from ordinary link occurrences; RSS entries preserve event selectors and immutable payload revisions. `total` counts citation entries while `source_count` counts origin pages. Capture does not certify current source bytes or factual confidence.
+
+Guarded `wiki curate` may correct concept categories and tags. Omit `category` to retain it, use a configured category ID to replace it, or null to clear it explicitly through later extraction. Omit `tags` to retain them, provide the complete replacement list, or use [] to clear them. Tags are unique nonblank single lines and describe the concept itself; source tags are not inherited automatically. Evidence and target file revisions must still match at publication.
 
 ## Concept convergence
 

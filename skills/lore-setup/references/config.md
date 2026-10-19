@@ -58,7 +58,7 @@ synthesis: {weekly: {...}}           # cross-source weekly themes (domain-neutra
 concepts:                            # LLM concept-page taxonomy
   categories: [{id: ..., label: ...}] # classifies concepts for metadata browsing
 graph:                               # link graph analysis and optional semantic maintenance
-  audit: {schedule: "0 7 * * 0", batch_size: 5} # uses the configured execution profile
+  audit: {schedule: "0 7 * * 0", batch_size: 5, max_input_bytes: 262144} # uses the configured execution profile
   scope: {dirs: [...]}               # defaults to vault.dirs.wiki
   metrics: {min_hub_degree: 5, orphan_exclude: []}
   cluster: {resolution: 1.0, min_community_size: 1, suggest_min_shared_neighbors: 2}

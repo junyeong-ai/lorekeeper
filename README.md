@@ -221,6 +221,7 @@ lore wiki search "인증정보" --spacing --snapshot <id> --json
 lore wiki browse --tag security --tag 인증정보 --snapshot <id> --json
 lore wiki read wiki/concepts/vector-database.md # 목차와 revision 확인 → 필요한 section 선택
 lore wiki links wiki/concepts/vector-database.md --limit 20
+lore wiki citations wiki/concepts/vector-database.md --snapshot <id> --limit 20
 lore wiki reviews        # 현재 미해결 판단을 별도로 확인
 ```
 
@@ -232,6 +233,10 @@ Markdown이 지식의 정본이고 `.lorekeeper/search.sqlite`는 재생성 가�
 HTML 표는 셀 순서와 빈 셀을 보존하며, 병합 셀·중첩 표는 HTML 구조로 유지합니다. 이 표의 텍스트도 같은 경계로 검색하고, 태그·링크 주소·스크립트·스타일은 검색 본문에서 제외합니다.
 태그는 주제별 AND 필터이며 보존된 수동 원문의 태그도 포함합니다. 별칭은 같은 대상의 이름이고 태그는 분류이므로 서로 대신하지 않습니다.
 검색 순위나 출처 수는 사실의 신뢰도 점수가 아닙니다.
+`wiki citations`는 그래프가 도출한 정확한 개념 근거를 SQLite에서 조회합니다. 일반 링크 목록과
+구분되며, RSS는 선택한 기사와 원본 판본을 보존합니다. `total`은 근거 항목 수이고
+`source_count`는 출처 페이지 수입니다. 같은 snapshot과 `next_offset`으로 전체를 이어서 읽습니다.
+현재 원문을 다시 읽지는 않으므로, 판본이 바뀌었으면 다시 준비하고 선택한 원문을 검증하세요.
 
 기본 검색은 활성 지식만 보여 줍니다. `--knowledge-status retired|all`로 비활성 항목을 조회할 수 있으며,
 주소·본문·인용·판단 이력은 보존됩니다. 출처 하나나 오래된 날짜만으로 비활성화하지 않습니다.
@@ -358,6 +363,7 @@ lore wiki original wiki/documents/example.md # 보존된 수동 원본·첨부 �
 lore wiki original daily/tech-news/2026-10-18.md # RSS 수집 원문 목록·authority·revision
 lore wiki original daily/tech-news/2026-10-18.md --revision REV --event EVENT_ID --text-offset 0 --text-limit 4096
 lore wiki links wiki/concepts/example.md --limit 20 # 연결된 원문 행·설명·리비전 조회
+lore wiki citations wiki/concepts/example.md --snapshot <id> --limit 20 # 정확한 전체 근거를 페이지 단위로 조회
 lore wiki provenance wiki/documents/example.md --snapshot <id> # 정확한 문서 ID로 선언 관계·후속 문서 조회
 lore wiki curate --file plan.json --dry-run # 근거 판본·이름·분류·태그·검토 기록 검증; 옵션을 빼면 원자적으로 반영
 lore wiki concepts            # 개념 목록
@@ -586,6 +592,7 @@ graph:
   audit:
     schedule: "0 7 * * 0"
     batch_size: 5
+    max_input_bytes: 262144
 ```
 
 처음 보는 개념과 변경된 개념을 번갈아 검토하고, 동일 입력은 반복 검토하지 않습니다.
@@ -596,8 +603,11 @@ Markdown 검토 문서에 남깁니다. 단일 출처나 인용 수만으로 병
 각 배치 뒤에는 실행 잠금을 해제하며, 실패·취소 시 중단하고 검증된 검토 기록부터 재개합니다.
 `stop_reason: batch-limit`는 지정한 실행량에 도달했다는 뜻이고, `settled`는 현재 개념 검수
 계획에 대기 항목이 없다는 뜻입니다. 모든 원문 문서의 전수 검수 완료를 의미하지는 않습니다.
-배치 수와 세션 시간 제한은 전체 원문 크기나 비용의 상한을 보장하지 않으므로 실제 실행량에
-맞게 조정하세요. 검토 기록·lint·정상 종료만으로 전체 지식의 의미적 일관성을 보증하지 않습니다.
+`audit-plan`은 선택한 개념·출처·직접 관련 개념의 전체 파일과 선택한 RSS 원본의 중복을 제외한
+바이트 수를 보고합니다. `max_input_bytes`를 넘으면 후보를 그대로 보존하고 에이전트 실행과
+검토 완료 기록을 거부합니다. `input.status: oversized`이면 근거를 자르지 말고 배치 크기나
+명시적 입력 한도를 조정하세요. 이 한도는 읽을 근거의 범위이며 반복 호출의 누적 토큰이나
+요금 상한은 아닙니다. 검토 기록·lint·정상 종료만으로 전체 지식의 의미적 일관성을 보증하지 않습니다.
 
 리마인더는 OS 알림 명령이 성공한 뒤에만 소진합니다. 이는 OS의 접수이며 사람이 보았다는
 확인은 아닙니다. 접수 직후 저장 전에 중단되면 재전달될 수 있습니다. 실패한 알림은 다음 실행에 남습니다.
