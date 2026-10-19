@@ -4,7 +4,7 @@ use lk_core::concept::{
     Citation, ConceptIdentity, ConceptRegistry, ExtractedConcept, Resolution, citation_digest,
     slugify,
 };
-use lk_core::config::VaultDirs;
+use lk_core::config::{ConceptPolicy, VaultDirs};
 use lk_core::frontmatter::field;
 use lk_core::i18n::Locale;
 use lk_core::vault_path::VaultPath;
@@ -171,7 +171,13 @@ impl ConceptDrafts {
         name: &str,
         reader: &dyn VaultStore,
         dirs: &VaultDirs,
+        policy: ConceptPolicy,
     ) -> Result<ConceptIdentity, PipelineError> {
+        if !policy.is_enabled() {
+            return Err(PipelineError::Render(
+                "concept extraction is disabled".into(),
+            ));
+        }
         let registry = match &mut self.registry {
             Some(registry) => registry,
             slot => slot.insert(lk_vault::load_concept_registry(reader, dirs).await?),
@@ -187,6 +193,11 @@ impl ConceptDrafts {
                     .join(", ")
             ))),
             Resolution::Absent => {
+                if policy == ConceptPolicy::ExistingOnly {
+                    return Err(PipelineError::Render(format!(
+                        "existing-only concept policy refuses new concept `{name}`"
+                    )));
+                }
                 let slug = registry.available_slug(name).ok_or_else(|| {
                     PipelineError::Render(format!("no unoccupied concept address for `{name}`"))
                 })?;
@@ -241,8 +252,11 @@ impl ConceptDrafts {
         concept: &ExtractedConcept,
         reader: &dyn VaultStore,
         dirs: &VaultDirs,
+        policy: ConceptPolicy,
     ) -> Result<StagedConcept, PipelineError> {
-        let identity = self.resolve_identity(&concept.name, reader, dirs).await?;
+        let identity = self
+            .resolve_identity(&concept.name, reader, dirs, policy)
+            .await?;
         let (aliases, refused) = self.adopt_aliases(&identity, &concept.aliases);
         // A slug already staged this run needs no read: the draft in hand is newer than the
         // page on disk, and `commit` folds into it.
@@ -775,6 +789,7 @@ mod tests {
                 },
                 &reader,
                 &dirs,
+                ConceptPolicy::SupportedNew,
             )
             .await
             .unwrap();
@@ -801,7 +816,12 @@ mod tests {
         assert!(rendered.body.contains("Preserved historical judgment."));
         assert_eq!(
             drafts
-                .resolve_identity("Additional Alias", &reader, &dirs)
+                .resolve_identity(
+                    "Additional Alias",
+                    &reader,
+                    &dirs,
+                    ConceptPolicy::SupportedNew
+                )
                 .await
                 .unwrap()
                 .slug,
@@ -879,7 +899,7 @@ mod tests {
         let unparseable = OneBadPage(lk_vault::VaultError::Frontmatter("bad".into()));
         assert!(
             ConceptDrafts::new()
-                .resolve_identity("VectorDB", &unparseable, &dirs)
+                .resolve_identity("VectorDB", &unparseable, &dirs, ConceptPolicy::SupportedNew)
                 .await
                 .is_err()
         );
@@ -893,6 +913,7 @@ mod tests {
                     },
                     &unparseable,
                     &dirs,
+                    ConceptPolicy::SupportedNew,
                 )
                 .await
                 .is_err(),
@@ -902,7 +923,7 @@ mod tests {
         let unreadable = OneBadPage(lk_vault::VaultError::Io(std::io::Error::other("x")));
         assert!(
             ConceptDrafts::new()
-                .resolve_identity("VectorDB", &unreadable, &dirs)
+                .resolve_identity("VectorDB", &unreadable, &dirs, ConceptPolicy::SupportedNew)
                 .await
                 .is_err(),
             "a page nothing could read is not a page with no names"
@@ -933,13 +954,19 @@ mod tests {
                 },
                 &empty,
                 &dirs,
+                ConceptPolicy::SupportedNew,
             )
             .await
             .expect("an empty vault stages cleanly");
         drafts.commit(staged, date);
 
         let by_alias = drafts
-            .resolve_identity("에이전트 호출 가능 애플리케이션 단위", &empty, &dirs)
+            .resolve_identity(
+                "에이전트 호출 가능 애플리케이션 단위",
+                &empty,
+                &dirs,
+                ConceptPolicy::SupportedNew,
+            )
             .await
             .expect("resolving a registered alias reads nothing new");
         assert_eq!(
@@ -956,6 +983,7 @@ mod tests {
                 },
                 &empty,
                 &dirs,
+                ConceptPolicy::SupportedNew,
             )
             .await
             .expect("an empty vault stages cleanly");
@@ -966,7 +994,12 @@ mod tests {
         drafts.commit(staged, date);
         assert_eq!(
             drafts
-                .resolve_identity("Agent Capability", &empty, &dirs)
+                .resolve_identity(
+                    "Agent Capability",
+                    &empty,
+                    &dirs,
+                    ConceptPolicy::SupportedNew
+                )
                 .await
                 .expect("resolving reads nothing new")
                 .slug,
@@ -1030,6 +1063,7 @@ mod tests {
                     },
                     &empty,
                     &dirs,
+                    ConceptPolicy::SupportedNew,
                 )
                 .await
                 .expect("an empty vault stages cleanly");
@@ -1075,6 +1109,7 @@ mod tests {
                 },
                 &FailsOn("nothing"),
                 &dirs,
+                ConceptPolicy::SupportedNew,
             )
             .await
             .expect("stages cleanly");
@@ -1089,6 +1124,7 @@ mod tests {
                 },
                 &FailsOn("nothing"),
                 &dirs,
+                ConceptPolicy::SupportedNew,
             )
             .await
             .expect("stages cleanly");
@@ -1152,6 +1188,7 @@ mod tests {
                 },
                 &OnDisk,
                 &dirs,
+                ConceptPolicy::SupportedNew,
             )
             .await
             .expect("the established page reads cleanly");
@@ -1166,6 +1203,7 @@ mod tests {
                 },
                 &OnDisk,
                 &dirs,
+                ConceptPolicy::SupportedNew,
             )
             .await
             .expect("the rival stages cleanly");
@@ -1208,6 +1246,7 @@ mod tests {
                 },
                 &FailsOn("agent-capability"),
                 &dirs,
+                ConceptPolicy::SupportedNew,
             )
             .await;
         assert!(
@@ -1224,6 +1263,7 @@ mod tests {
                 },
                 &FailsOn("agent-capability"),
                 &dirs,
+                ConceptPolicy::SupportedNew,
             )
             .await
             .expect("the later batch stages cleanly");
@@ -1296,6 +1336,7 @@ mod tests {
                 },
                 &FailsOn("nothing"),
                 &dirs,
+                ConceptPolicy::SupportedNew,
             )
             .await
             .expect("stages cleanly");
@@ -1312,6 +1353,7 @@ mod tests {
                 },
                 &Holds("rag"),
                 &dirs,
+                ConceptPolicy::SupportedNew,
             )
             .await
             .expect("stages cleanly");
@@ -1340,6 +1382,7 @@ mod tests {
                 },
                 &reader,
                 &dirs,
+                ConceptPolicy::SupportedNew,
             )
             .await
             .unwrap();
@@ -1395,8 +1438,16 @@ mod tests {
             category: None,
             aliases: Vec::new(),
         };
-        let staged = drafts.stage(&first, &reader, &dirs).await.unwrap();
-        assert!(drafts.stage(&second, &reader, &dirs).await.is_err());
+        let staged = drafts
+            .stage(&first, &reader, &dirs, ConceptPolicy::SupportedNew)
+            .await
+            .unwrap();
+        assert!(
+            drafts
+                .stage(&second, &reader, &dirs, ConceptPolicy::SupportedNew)
+                .await
+                .is_err()
+        );
         assert!(
             drafts.drafts.is_empty(),
             "staging alone must fold nothing, so the batch can be abandoned whole"

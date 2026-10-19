@@ -804,7 +804,7 @@ pub struct SourceConfig {
     #[serde(default)]
     pub labels: Vec<String>,
     #[serde(default)]
-    pub extract_concepts: bool,
+    pub concept_policy: ConceptPolicy,
     /// Optional natural-language relevance criterion. When set, the LLM keeps only
     /// concepts (and summary content) matching it — so a broad source (e.g. a news
     /// aggregator) contributes focused knowledge instead of off-topic noise.
@@ -817,6 +817,21 @@ pub struct SourceConfig {
     /// list with no extra sections — no per-source-type branching in the core.
     #[serde(default)]
     pub highlights: Vec<HighlightSection>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ConceptPolicy {
+    #[default]
+    Disabled,
+    ExistingOnly,
+    SupportedNew,
+}
+
+impl ConceptPolicy {
+    pub fn is_enabled(self) -> bool {
+        self != Self::Disabled
+    }
 }
 
 /// A daily-page highlight section: events classified into `category` (by this source's
@@ -1507,6 +1522,27 @@ mod observation_unit_tests {
     use super::*;
 
     #[test]
+    fn concept_policy_is_explicit_and_legacy_switches_are_rejected() {
+        let source =
+            |value: &str| crate::yaml::from_str::<SourceConfig>(&format!("type: manual\n{value}"));
+        assert_eq!(source("").unwrap().concept_policy, ConceptPolicy::Disabled);
+        for (value, expected) in [
+            ("disabled", ConceptPolicy::Disabled),
+            ("existing-only", ConceptPolicy::ExistingOnly),
+            ("supported-new", ConceptPolicy::SupportedNew),
+        ] {
+            assert_eq!(
+                source(&format!("concept_policy: {value}\n"))
+                    .unwrap()
+                    .concept_policy,
+                expected
+            );
+        }
+        assert!(source("concept_policy: invent-all\n").is_err());
+        assert!(source("extract_concepts: true\n").is_err());
+    }
+
+    #[test]
     fn shared_credentials_resolve_relative_to_config_and_reject_blank() {
         let tmp = tempfile::TempDir::new().unwrap();
         let path = tmp.path().join("config.yaml");
@@ -1572,7 +1608,7 @@ mod tests {
         assert_eq!(starter.sources.len(), 1);
         let source = starter.sources.get("manual-inbox").unwrap();
         assert_eq!(source.source_type, SourceType::Manual);
-        assert!(source.enabled && source.extract_concepts);
+        assert!(source.enabled && source.concept_policy.is_enabled());
         assert_eq!(source.params["inbox_dir"], "inbox");
         assert!(starter.personal.is_none());
         assert!(starter.credentials.file.is_none());
@@ -1589,7 +1625,7 @@ mod tests {
             params: empty_object(),
             classify: vec![],
             labels: vec![],
-            extract_concepts: true,
+            concept_policy: ConceptPolicy::SupportedNew,
             focus: f.map(str::to_owned),
             highlights: vec![],
         };

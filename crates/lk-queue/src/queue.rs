@@ -122,6 +122,13 @@ impl QueueTask {
             self.generation_policy()?;
         }
         if self.kind == TaskKind::ExtractConcepts
+            && let Some(value) = self.input.get("concept_policy")
+            && serde_json::from_value::<lk_core::config::ConceptPolicy>(value.clone())
+                .is_ok_and(|policy| !policy.is_enabled())
+        {
+            return Err("disabled concept policy cannot produce an extraction task".into());
+        }
+        if self.kind == TaskKind::ExtractConcepts
             && let Some(value) = self.input.get("rss_original")
         {
             let manifest: lk_core::rss_original::RssOriginalManifest =
@@ -213,6 +220,7 @@ impl QueueTask {
 /// itself a pure function of the page it read.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskResult {
+    pub concept_policy: lk_core::config::ConceptPolicy,
     pub task_id: String,
     /// The task's `cache_hash`, carried back so the applier can re-check staleness against
     /// the target page: the page may have been re-rendered while the drain was running.
@@ -424,7 +432,7 @@ impl TaskKind {
     pub fn generation_policy(self) -> &'static str {
         match self {
             Self::Summarize => "summary-v1",
-            Self::ExtractConcepts => "concept-extraction-v1",
+            Self::ExtractConcepts => "concept-extraction-v2",
             Self::IdentifyThemes => "themes-v1",
             Self::RefineEvents => "event-refinement-v1",
             Self::SynthesizeConcept => "concept-synthesis-v1",
@@ -926,6 +934,7 @@ mod tests {
         std::fs::create_dir_all(&results).unwrap();
 
         let good = TaskResult {
+            concept_policy: lk_core::config::ConceptPolicy::SupportedNew,
             target_revision: String::new(),
             task_id: "ext-1".into(),
             cache_hash: "h".into(),
@@ -1116,6 +1125,7 @@ mod tests {
         let client = QueueLlmClient::new(dir.path().to_path_buf());
 
         let req = ExtractConceptsRequest {
+            concept_policy: lk_core::config::ConceptPolicy::SupportedNew,
             rss_original: None,
             text: "Anthropic releases Opus 4.7".into(),
             source_id: "ai-news".into(),
@@ -1149,6 +1159,7 @@ mod tests {
         let client = QueueLlmClient::new(dir.path().to_path_buf());
         client
             .extract_concepts(ExtractConceptsRequest {
+                concept_policy: lk_core::config::ConceptPolicy::SupportedNew,
                 rss_original: None,
                 text: "mixed feed".into(),
                 source_id: "tech-news".into(),
@@ -1228,6 +1239,7 @@ mod tests {
         use crate::CategoryReference;
         let date = jiff::civil::date(2026, 5, 23);
         let a = ExtractConceptsRequest {
+            concept_policy: lk_core::config::ConceptPolicy::SupportedNew,
             rss_original: None,
             text: "x".into(),
             source_id: "ai-news".into(),
@@ -1254,6 +1266,9 @@ mod tests {
         let mut b = a.clone();
         b.categories.reverse();
         assert_eq!(a.cache_hash(), b.cache_hash());
+        b.concept_policy = lk_core::config::ConceptPolicy::ExistingOnly;
+        assert_ne!(a.cache_hash(), b.cache_hash());
+        assert_eq!(b.task_input()["concept_policy"], "existing-only");
     }
 
     #[tokio::test]
@@ -1339,6 +1354,7 @@ mod tests {
         // for every daily page and document in the vault, and a rewrite for every concept,
         // the first time `vault.locale` moved.
         let extract = ExtractConceptsRequest {
+            concept_policy: lk_core::config::ConceptPolicy::SupportedNew,
             rss_original: None,
             text: "combined source text".into(),
             source_id: "src".into(),
@@ -1356,6 +1372,7 @@ mod tests {
         assert_eq!(
             extract.cache_hash(),
             ExtractConceptsRequest {
+                concept_policy: lk_core::config::ConceptPolicy::SupportedNew,
                 rss_original: None,
                 locale: Locale::En,
                 ..extract.clone()
@@ -1459,6 +1476,7 @@ mod tests {
             .unwrap();
         client
             .extract_concepts(ExtractConceptsRequest {
+                concept_policy: lk_core::config::ConceptPolicy::SupportedNew,
                 rss_original: None,
                 text: "t".into(),
                 source_id: "src".into(),

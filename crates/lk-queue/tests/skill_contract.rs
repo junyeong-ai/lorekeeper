@@ -152,6 +152,7 @@ fn skill_documents_the_result_protocol_it_must_produce() {
 
     // Field names as serde writes them, taken from a real value so the test cannot drift.
     let sample = lk_queue::TaskResult {
+        concept_policy: lk_core::config::ConceptPolicy::SupportedNew,
         target_revision: "r".into(),
         task_id: "t".into(),
         cache_hash: "h".into(),

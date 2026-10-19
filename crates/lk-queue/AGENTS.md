@@ -17,7 +17,7 @@ lives in `lk-vault`/`lk-pipeline`.
 - `task_input()` contains worker context; `cache_identity()` only output-affecting
   fields. Keep their distinction and backwards-compatible serialization explicit:
   summary hashes text/max_sentences/locale/focus; themes text/max_themes/locale;
-  extraction text/source_id/date/focus/sorted categories and optional RSS manifest.
+  extraction text/source_id/date/concept_policy/focus/sorted categories and optional RSS manifest.
   Concept synthesis uses shared `citation_digest`, not a second hash implementation.
 - Locale changes rederive summary/themes, not accumulated concept extraction or
   authored synthesis. Target/heading/source_type are payload context, not cache
@@ -64,9 +64,11 @@ lives in `lk-vault`/`lk-pipeline`.
 
 ## RSS evidence policy
 
-A provided bound manifest selects `concept-extraction-rss-v2` and enters cache
+A provided bound manifest selects `concept-extraction-rss-v3` and enters cache
 identity; selectors select `concept-synthesis-rss-v2`. Page-only v1 inputs retain
 wire/hash/policy. Typed validation refuses malformed/downgraded v2 requests.
+Every extraction explicitly carries concept_policy through its request, hash and result.
+Disabled extraction requests are invalid; existing-only cannot create a new owner.
 Selections may name only provided immutable event/payload pairs; omission does not
 retract prior evidence. Original membership/content guards remain necessary even
 when a daily page's interpretation changed independently.

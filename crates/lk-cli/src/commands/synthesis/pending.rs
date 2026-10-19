@@ -399,7 +399,7 @@ fn source_scope(config: &Config, id: &str) -> miette::Result<String> {
         serde_json::json!({
             "type": source.source_type, "instance": source.instance,
             "enabled": source.enabled, "params": source.params, "classify": source.classify,
-            "labels": source.labels, "extract_concepts": source.extract_concepts,
+            "labels": source.labels, "concept_policy": source.concept_policy,
             "focus": source.normalized_focus(),
             "highlights": source.highlights.iter().map(|highlight| serde_json::json!({
                 "category": highlight.category, "label": highlight.label,

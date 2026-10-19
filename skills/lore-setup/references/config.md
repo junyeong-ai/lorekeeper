@@ -47,7 +47,7 @@ sources:                             # key = source id; document sources use wik
     highlights:                      # optional daily-page highlight sections (per category)
       - { category: action_required, label: "Action Required" }
     labels: [ ... ]
-    extract_concepts: true|false     # whether to run LLM concept extraction
+    concept_policy: supported-new  # disabled | existing-only | supported-new
 
 personal:                            # OPTIONAL personal-productivity module (work-log +
   tracked_sources: [<id>, ...]       # reviews + contribution taxonomy). OMIT for a pure

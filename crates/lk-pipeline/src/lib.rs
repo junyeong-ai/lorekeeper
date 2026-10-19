@@ -426,8 +426,9 @@ impl Pipeline {
                 tracing::debug!(source = source_id, date = %date, "refine-events cached; skipping enqueue");
             }
 
-            let (concepts_decision, day_concepts) = if config.extract_concepts {
+            let (concepts_decision, day_concepts) = if config.concept_policy.is_enabled() {
                 let concepts_req = lk_queue::ExtractConceptsRequest {
+                    concept_policy: config.concept_policy,
                     rss_original: rss_originals
                         .get(date)
                         .map(|capture| capture.manifest.clone()),
@@ -480,7 +481,12 @@ impl Pipeline {
             for c in &day_concepts {
                 extracted.push(
                     self.concept_drafts
-                        .resolve_identity(&c.name, self.reader.as_ref(), &self.ctx.dirs)
+                        .resolve_identity(
+                            &c.name,
+                            self.reader.as_ref(),
+                            &self.ctx.dirs,
+                            config.concept_policy,
+                        )
                         .await?,
                 );
             }
@@ -543,7 +549,7 @@ impl Pipeline {
                     labels: &labels,
                     summary: &summary,
                     concepts: &concept_names,
-                    extract_concepts: config.extract_concepts,
+                    extract_concepts: config.concept_policy.is_enabled(),
                     highlights: &config.highlights,
                     locale: self.ctx.locale,
                     llm_inputs,
@@ -638,7 +644,12 @@ impl Pipeline {
         for (concept, date) in &staged_concepts {
             reads.push((
                 self.concept_drafts
-                    .stage(concept, self.reader.as_ref(), &self.ctx.dirs)
+                    .stage(
+                        concept,
+                        self.reader.as_ref(),
+                        &self.ctx.dirs,
+                        config.concept_policy,
+                    )
                     .await?,
                 *date,
             ));
@@ -719,6 +730,11 @@ impl Pipeline {
         page: &str,
         manifest: Option<&lk_core::rss_original::RssOriginalManifest>,
     ) -> Result<String, PipelineError> {
+        if !result.concept_policy.is_enabled() {
+            return Err(PipelineError::Render(
+                "concept extraction is disabled".into(),
+            ));
+        }
         // Both edits are settled before any concept is folded into the run's drafts.
         // `render_concept_pages` emits those drafts whatever happens here, so a result that
         // failed afterwards would leave concept pages behind with nothing citing them while
@@ -792,7 +808,12 @@ impl Pipeline {
             };
             staged.push((
                 self.concept_drafts
-                    .stage(&concept, self.reader.as_ref(), &self.ctx.dirs)
+                    .stage(
+                        &concept,
+                        self.reader.as_ref(),
+                        &self.ctx.dirs,
+                        result.concept_policy,
+                    )
                     .await?,
                 reported.synthesis.as_deref(),
                 reported.rss_evidence.clone(),
@@ -1209,8 +1230,9 @@ impl Pipeline {
                 String::new()
             };
 
-            let (concepts_decision, doc_concepts) = if config.extract_concepts {
+            let (concepts_decision, doc_concepts) = if config.concept_policy.is_enabled() {
                 let concepts_req = lk_queue::ExtractConceptsRequest {
+                    concept_policy: config.concept_policy,
                     rss_original: None,
                     text: combined.clone(),
                     source_id: source_id.to_string(),
@@ -1260,7 +1282,12 @@ impl Pipeline {
             for c in &doc_concepts {
                 extracted.push(
                     self.concept_drafts
-                        .resolve_identity(&c.name, self.reader.as_ref(), &self.ctx.dirs)
+                        .resolve_identity(
+                            &c.name,
+                            self.reader.as_ref(),
+                            &self.ctx.dirs,
+                            config.concept_policy,
+                        )
                         .await?,
                 );
             }
@@ -1304,7 +1331,7 @@ impl Pipeline {
                         .and_then(|v| v.as_str()),
                     summary: &summary,
                     concepts: &concept_names,
-                    extract_concepts: config.extract_concepts,
+                    extract_concepts: config.concept_policy.is_enabled(),
                     locale: self.ctx.locale,
                     llm_inputs,
                 },
@@ -1342,7 +1369,12 @@ impl Pipeline {
         for (concept, date) in &staged_concepts {
             reads.push((
                 self.concept_drafts
-                    .stage(concept, self.reader.as_ref(), &self.ctx.dirs)
+                    .stage(
+                        concept,
+                        self.reader.as_ref(),
+                        &self.ctx.dirs,
+                        config.concept_policy,
+                    )
                     .await?,
                 *date,
             ));

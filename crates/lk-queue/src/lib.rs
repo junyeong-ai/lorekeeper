@@ -259,6 +259,7 @@ pub struct CategoryReference {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ExtractConceptsRequest {
+    pub concept_policy: lk_core::config::ConceptPolicy,
     #[serde(default)]
     pub rss_original: Option<lk_core::rss_original::RssOriginalManifest>,
     pub text: String,
@@ -408,6 +409,10 @@ impl ExtractConceptsRequest {
                 serde_json::to_value(original).expect("RSS manifest serializes"),
             );
         }
+        v.insert(
+            "concept_policy".into(),
+            serde_json::to_value(self.concept_policy).expect("concept policy serializes"),
+        );
         v.insert("text".into(), self.text.clone().into());
         v.insert("source_id".into(), self.source_id.clone().into());
         v.insert("date".into(), self.date.to_string().into());

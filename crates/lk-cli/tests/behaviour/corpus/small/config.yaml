@@ -29,7 +29,7 @@ sources:
     type: manual
     enabled: false
     labels: [fixture]
-    extract_concepts: true
+    concept_policy: supported-new
   # The intent plane's other half. Disabled like every source here: what it would read is the
   # transition log, which only a mutating command writes, and the sweep observes a vault that
   # already exists.

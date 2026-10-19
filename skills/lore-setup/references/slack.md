@@ -31,7 +31,7 @@ team-slack:
     exclude_bots: true        # drop bots/integrations (default true)
     # watch_users: ["U0123456789"]   # only threads a user authored/was mentioned in; empty = whole channel
   labels: [team-ops, personal]
-  extract_concepts: true
+  concept_policy: supported-new
   # To split your authored messages (identity.slack_id) into the work-log, add this
   # source id to personal.tracked_sources (the optional personal: module).
 ```

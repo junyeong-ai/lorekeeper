@@ -95,12 +95,16 @@ request and recompute its identity; invalid or mismatched inputs are `unreadable
 pending even when page markers say done. Never repair a hash merely to make an old answer
 applicable. See the stale-task guard in the skill body.
 
+Extraction carries `input.concept_policy` (`existing-only` or `supported-new`) in
+its cache identity and result. A policy change requires a fresh extraction. Missing
+or disabled policies are invalid; never assume permission to create concepts.
+
 For `synthesize-concept`, `input.citations` is an array of
 `{"path": "wiki/documents/spec.md", "revision": "<hash>"}` objects. Paths are relative to
 the vault root. `queue status` checks revisions against current source pages; an edit makes
 pending work `stale`, and an unreadable source leaves it `unreadable` until repaired.
 
-New bound RSS extraction uses `concept-extraction-rss-v2` with a typed
+New bound RSS extraction uses `concept-extraction-rss-v3` with a typed
 `input.rss_original` manifest. Read selected originals from that inventory; return an
 optional `rss_evidence: [{"event_id":"...","revision":"<payload revision>"}]` on each
 reported concept only after verifying that article supports it. Omission accumulates no
@@ -190,7 +194,7 @@ citation payload remains blocked for repair rather than being retired as stale.
 ## Generation policy provenance and explicit regeneration
 
 New task inputs include `generation_policy` (`summary-v1`, `event-refinement-v1`,
-`themes-v1`, `concept-extraction-v1`, or `concept-synthesis-v1`). These identifiers
+`themes-v1`, `concept-extraction-v2`, or `concept-synthesis-v1`). These identifiers
 change only when generation semantics change, independently of binary release numbers.
 They are not part of `cache_hash`; old tasks without them remain valid legacy inputs.
 Result JSON stays unchanged: apply reads policy from its matching task and writes

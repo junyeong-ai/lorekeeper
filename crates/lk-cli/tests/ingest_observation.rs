@@ -176,7 +176,7 @@ fn partial_daily_refetch_preserves_pages_queue_and_work_observations() {
         .unwrap();
     let write_config = |cap| {
         std::fs::write(&config, format!(
-        "vault:\n  root: {}\n  timezone: UTC\nidentity:\n  name: Test\n  email: test@example.invalid\ncredentials:\n  file: {}\npersonal:\n  tasks: {{}}\nsources:\n  issues:\n    type: jira\n    instance: fixture\n    extract_concepts: true\n    params:\n      jql: 'project = TEST'\n      max_issues: {cap}\n  tasks:\n    type: tasks\n    enabled: false\n", vault.display(), credentials.display()
+        "vault:\n  root: {}\n  timezone: UTC\nidentity:\n  name: Test\n  email: test@example.invalid\ncredentials:\n  file: {}\npersonal:\n  tasks: {{}}\nsources:\n  issues:\n    type: jira\n    instance: fixture\n    concept_policy: supported-new\n    params:\n      jql: 'project = TEST'\n      max_issues: {cap}\n  tasks:\n    type: tasks\n    enabled: false\n", vault.display(), credentials.display()
     )).unwrap()
     };
     write_config(10);
