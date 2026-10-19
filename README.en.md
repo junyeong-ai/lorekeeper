@@ -400,7 +400,7 @@ normal search and knowledge briefs exclude retired content.
 |---|---|
 | `/lore-process` | Drains the LLM queue after ingest — fills summaries, concepts, themes, reviews |
 | `/lore-setup` | Builds your config by inspecting your workspace — discovers Slack channel / Jira project / calendar IDs |
-| `/lore-wiki` | Evidence-based `query`, source `add`, current-work `capture`, structural/semantic `audit` |
+| `/lore-wiki` | Evidence-based `query`, source `add`, current-work `capture`, `audit`, guarded `curate`, bounded `maintain` |
 | `/lore-extract` | Batch-extract transferable knowledge from a project repo (scan→run→audit) |
 | `/lore-ingest` | Wraps the `lore` CLI (ingest, synthesis, status, schedule) |
 | `/lore-day` | Daily agenda, knowledge briefing, reminders and closing the day |
@@ -561,9 +561,32 @@ Manual contention refuses before starting the command unless `--wait` is explici
 
 `ingest.schedule` emits one job that collects **every source in one process**, using `lore-daily.sh` with `--pipeline-dir` and bare `lore ingest` otherwise. A source-filtered ingest skips the cross-source work-log. Each synthesis period (weekly/monthly/quarterly/annual) keeps its own calendar, and `maintenance.schedule` automates retention and queue pruning.
 
-For unattended operation the installer ships `lore-daily.sh` (daily ingest + queue drain + graph reconcile), `lore-weekly.sh` (weekly synthesis + knowledge audit), and separate monthly, quarterly, annual and maintenance entry scripts. A system scheduler (launchd or cron) fires them, so they run whether or not Claude Desktop is open.
+For unattended operation the installer ships `lore-daily.sh` (daily ingest + queue drain + graph reconcile), `lore-weekly.sh` (weekly synthesis), `lore-knowledge.sh` (independent semantic maintenance), and separate monthly, quarterly, annual and maintenance entry scripts. A system scheduler (launchd or cron) fires them, so they run whether or not Claude Desktop is open.
 
 `--pipeline-dir` is what actually puts those scripts on the schedule. `lore ingest` and `lore synthesis weekly` are only a pipeline's FIRST stage — the queue drain and `queue apply` live in the scripts — so emitting without it ingests every morning and leaves summaries and concepts empty forever. A scheduler hands a job almost no environment, so the entry also carries the `PATH`, `lore`, `claude` and config path the scripts need, inherited from the session that ran the command rather than guessed. Prefer launchd on macOS: it coalesces missed calendar runs after sleep rather than replaying every missed date. Cron skips runs while asleep.
+
+Configure semantic maintenance independently from ingestion and period synthesis:
+
+```yaml
+graph:
+  audit:
+    schedule: "0 7 * * 0"
+    batch_size: 5
+```
+
+With `--pipeline-dir`, this runs `/lore-wiki maintain` over a bounded batch of
+changed and first-time concepts. Its persistent order prevents new arrivals from
+starving older work. Unchanged inputs are skipped; changed evidence or missing/stale
+finding reviews reopen work. `.lorekeeper/knowledge-audit.json` records completed
+input revisions and pending order, while the actual judgments remain in Markdown
+reviews. Omitting the schedule disables automatic semantic maintenance; inspect the
+backlog without writes through `wiki audit-plan`.
+
+A batch limit bounds concept count, not source bytes or LLM cost. Choose cadence
+and batch size against measured run time and the backlog; an initial corpus review
+needs separate capacity. Completion requires settling repair tasks and checking
+reviews, structural integrity and the queue. A current receipt or clean lint does
+not certify that the entire corpus is semantically consistent.
 
 ---
 

@@ -1353,7 +1353,7 @@ impl Default for GraphAuditConfig {
     fn default() -> Self {
         Self {
             schedule: None,
-            batch_size: 50,
+            batch_size: 5,
         }
     }
 }
@@ -2263,7 +2263,7 @@ sources:
                     assert_eq!(config.validate().is_ok(), valid, "{settings}");
                     if settings.is_empty() {
                         assert!(config.graph.audit.schedule.is_none());
-                        assert_eq!(config.graph.audit.batch_size, 50);
+                        assert_eq!(config.graph.audit.batch_size, 5);
                     }
                 }
                 Err(_) => assert!(!valid, "{settings}"),

@@ -443,7 +443,7 @@ concepts:
 # graph:
 #   audit:
 #     schedule: "0 7 * * 0"         # weekly semantic maintenance, independent of synthesis
-#     batch_size: 50               # rotate changed and first-time concepts fairly (1..100)
+#     batch_size: 5                # rotate changed and first-time concepts fairly (1..100)
 #                                  # requires installed pipelines via --pipeline-dir
 #   scope:
 #     dirs: [wiki]                   # vault-relative dirs to scan (default: vault.dirs.wiki)
