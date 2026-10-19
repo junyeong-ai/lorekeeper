@@ -835,11 +835,31 @@ fn a_citation_on_an_excluded_page_survives_the_sweeps_that_rewrite_the_vault() {
 
     assert_eq!(ws.code(&["graph", "backlinks-sync"]), 0);
     let page = ws.read("wiki/concepts/cited.md");
-    assert!(
-        page.contains("- [Notes](../../daily/notes/2026-05-23.md)"),
-        "the sweep deleted a citation its excluded citer justifies\n{page}"
-    );
     assert!(page.contains("source_count: 1"), "{page}");
+    let prepared = ws.run(&["wiki", "prepare"]);
+    assert!(prepared.status.success(), "{prepared:?}");
+    let prepared: serde_json::Value = serde_json::from_slice(&prepared.stdout).unwrap();
+    let captured = ws.run(&[
+        "wiki",
+        "citations",
+        "wiki/concepts/cited.md",
+        "--snapshot",
+        prepared["snapshot"].as_str().unwrap(),
+    ]);
+    assert!(captured.status.success(), "{captured:?}");
+    let captured: serde_json::Value = serde_json::from_slice(&captured.stdout).unwrap();
+    assert_eq!(captured["total"], 1);
+    assert_eq!(captured["source_count"], 1);
+    assert_eq!(
+        captured["citations"][0]["path"],
+        "daily/notes/2026-05-23.md"
+    );
+    assert_eq!(
+        captured["citations"][0]["revision"],
+        lk_core::concept::source_revision(
+            &lk_core::frontmatter::parse_page(&ws.read("daily/notes/2026-05-23.md")).unwrap()
+        )
+    );
 }
 
 /// Observation filters never suppress structural broken-link findings.
