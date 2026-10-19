@@ -140,8 +140,9 @@ freshness; `self status` is installation coherence. Neither proves semantic qual
 
 Scheduled jobs capture the selected config and runtime data directory. Interactive
 skill deployment is separate: Claude uses `.claude/skills`, Codex `.agents/skills`.
-Set `execution.default_profile` to the authenticated CLI. Optional operation
-profiles and explicit `--profile` override it. A session deadline preserves
+Choose the authenticated CLI in a named `execution.profiles` entry using
+`engine: claude-code` or `engine: codex`, then set `execution.default_profile`
+to that profile name. Optional operation profiles and explicit `--profile` override it. A session deadline preserves
 unfinished work rather than marking it complete. Regenerate and reload schedules
 after changing paths or relevant host/proxy environment.
 
