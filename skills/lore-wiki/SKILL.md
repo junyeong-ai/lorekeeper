@@ -1,25 +1,16 @@
 ---
-name: lore-wiki:lore-wiki
-version: 0.66.1
-description: Searches and maintains a Lorekeeper knowledge wiki. Use for grounded questions, adding source documents, capturing discoveries from current work, or auditing knowledge and relationships. Repository-wide extraction uses lore-extract; ingest queue processing uses lore-process.
-argument-hint: "query|add|capture|audit|curate|maintain|status [question, source or topic]"
-allowed-tools: |
-  Bash(lore *)
-  Bash(ls *)
-  Bash(cat *)
-  Bash(find *)
-  Bash(grep *)
-  Bash(wc *)
-  Bash(jq *)
-  Bash(date *)
-  Read
-  Edit
-  Write
+name: lore-wiki
+description: Searches and maintains a Lorekeeper knowledge wiki. Use for grounded
+  questions, adding source documents, capturing discoveries from current work, or
+  auditing knowledge and relationships. Repository-wide extraction uses lore-extract;
+  ingest queue processing uses lore-process.
+metadata:
+  version: 0.66.1
 ---
 
 # Lorekeeper wiki
 
-Use `$ARGUMENTS` to choose the operation. Infer it from a clear user request;
+Use the request arguments to choose the operation. Infer it from a clear user request;
 ask only when different interpretations would change the requested writes.
 Do not run the other modes as part of a lookup.
 
@@ -62,7 +53,7 @@ by an individual new source.
 ## Publication and conflicts
 
 Direct authoring must not overlap a synthesis worker wave. Start a long manual
-session under `lore --config /absolute/config.yaml workflow -- claude` before
+session under `lore --config /absolute/config.yaml workflow -- claude` or `lore --config /absolute/config.yaml workflow -- codex` before
 reading its evidence; scheduled skill sessions already hold this cooperative
 Unix lease. Do not reacquire it inside a guarded session. External editors and
 programs that detach or close inherited descriptors remain outside its guarantee.

@@ -1,0 +1,5 @@
+{
+  "argument-hint": "[what the user said]",
+  "allowed-tools": "Bash(lore *)\n",
+  "name": "lore-day:lore-day"
+}

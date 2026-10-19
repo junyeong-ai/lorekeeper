@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use crate::embedded::{
-    EmbeddedFile, config_files, pipeline_files, skill_files, skill_names, template_files,
+    EmbeddedFile, config_files, pipeline_files, skill_files_for, skill_names, template_files,
 };
 use crate::layout::{Installation, Prune, SkillLevel};
 use crate::target::ReleaseTarget;
@@ -145,6 +145,7 @@ pub struct InstallationReport {
     pub target: Option<String>,
     pub self_replaceable: bool,
     pub skills: Vec<(String, DeployedGroup)>,
+    pub runtime_skills: Vec<(String, DeployedGroup)>,
     pub pipelines: DeployedGroup,
     pub templates: DeployedGroup,
     pub config: DeployedGroup,
@@ -158,45 +159,72 @@ impl InstallationReport {
     /// the vault the config names, and this crate knows nothing about vaults.
     pub fn build(installation: &Installation, schema: SchemaState) -> Self {
         let target = ReleaseTarget::current();
-        let skills = installation
-            .deployed_skill_levels()
+        let engines = [
+            lk_core::execution::AgentEngine::ClaudeCode,
+            lk_core::execution::AgentEngine::Codex,
+        ];
+        let skills = engines
             .into_iter()
-            .filter_map(|level: SkillLevel| {
-                let root = installation.skills_dir(level)?;
-                let prune = Prune::for_level(level);
-                let mut artifacts: Vec<DeployedArtifact> = skill_names()
+            .flat_map(|engine| {
+                let installation = installation.for_engine(engine);
+                let groups = installation
+                    .deployed_skill_levels()
                     .into_iter()
-                    .map(|name| {
-                        let path = root.join(name);
-                        DeployedArtifact {
-                            state: compare_tree(&path, &skill_files(name), prune),
-                            name: name.to_string(),
-                            path,
-                        }
+                    .filter_map(|level: SkillLevel| {
+                        let root = installation.skills_dir(level)?;
+                        let prune = Prune::for_level(level);
+                        let mut artifacts: Vec<DeployedArtifact> = skill_names()
+                            .into_iter()
+                            .map(|name| {
+                                let path = root.join(name);
+                                DeployedArtifact {
+                                    state: compare_tree(
+                                        &path,
+                                        &skill_files_for(engine, name),
+                                        prune,
+                                    ),
+                                    name: name.to_string(),
+                                    path,
+                                }
+                            })
+                            .collect();
+                        artifacts.extend(
+                            installation
+                                .retired_skills(level)
+                                .into_iter()
+                                .filter(|_| prune.sweeps())
+                                .map(|path| DeployedArtifact {
+                                    name: path
+                                        .file_name()
+                                        .map(|name| name.to_string_lossy().into_owned())
+                                        .unwrap_or_default(),
+                                    path,
+                                    state: ArtifactState::Retired,
+                                }),
+                        );
+                        Some((
+                            format!("{}/{}", engine.as_str(), level.as_str()),
+                            DeployedGroup {
+                                location: root,
+                                deployed: true,
+                                artifacts,
+                            },
+                        ))
                     })
-                    .collect();
-                artifacts.extend(
-                    installation
-                        .retired_skills(level)
-                        .into_iter()
-                        .filter(|_| prune.sweeps())
-                        .map(|path| DeployedArtifact {
-                            name: path
-                                .file_name()
-                                .map(|name| name.to_string_lossy().into_owned())
-                                .unwrap_or_default(),
-                            path,
-                            state: ArtifactState::Retired,
-                        }),
-                );
-                Some((
-                    level.as_str().to_string(),
-                    DeployedGroup {
-                        location: root,
-                        deployed: true,
-                        artifacts,
-                    },
-                ))
+                    .collect::<Vec<_>>();
+                groups
+            })
+            .collect();
+        let runtime_skills = engines
+            .into_iter()
+            .flat_map(|engine| {
+                let root = installation.for_engine(engine).runtime_skills_dir();
+                skill_names().into_iter().map(move |name| {
+                    (
+                        format!("{}/{name}", engine.as_str()),
+                        group(&root.join(name), &skill_files_for(engine, name)),
+                    )
+                })
             })
             .collect();
 
@@ -206,6 +234,7 @@ impl InstallationReport {
             target: target.map(|t| t.triple.to_string()),
             self_replaceable: target.is_some_and(ReleaseTarget::is_self_replaceable),
             skills,
+            runtime_skills,
             pipelines: group(&installation.pipelines_dir(), &pipeline_files()),
             templates: group(&installation.templates_dir(), &template_files()),
             config: group(installation.config_dir(), &config_files()),
@@ -240,6 +269,7 @@ impl InstallationReport {
             target: _,
             self_replaceable: _,
             skills,
+            runtime_skills,
             pipelines,
             templates,
             config,
@@ -247,6 +277,7 @@ impl InstallationReport {
         } = self;
         skills
             .iter()
+            .chain(runtime_skills.iter())
             .map(|(_, group)| group.stale().count())
             .sum::<usize>()
             + pipelines.stale().count()

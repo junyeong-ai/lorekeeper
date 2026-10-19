@@ -1,8 +1,9 @@
+use lk_core::execution::AgentEngine;
 use std::path::{Path, PathBuf};
 
 use crate::DistError;
 use crate::embedded::{
-    EmbeddedFile, config_files, pipeline_files, skill_files, skill_names, template_files,
+    EmbeddedFile, config_files, pipeline_files, skill_files_for, skill_names, template_files,
 };
 
 /// Where a set of agent skills is deployed.
@@ -37,6 +38,7 @@ pub struct Installation {
     config_dir: PathBuf,
     home: Option<PathBuf>,
     project: Option<PathBuf>,
+    engine: AgentEngine,
 }
 
 impl Installation {
@@ -54,6 +56,7 @@ impl Installation {
             project: std::env::current_dir().ok(),
             home,
             binary,
+            engine: AgentEngine::ClaudeCode,
         })
     }
 
@@ -82,7 +85,31 @@ impl Installation {
             config_dir,
             home,
             project,
+            engine: AgentEngine::ClaudeCode,
         }
+    }
+
+    pub fn for_engine(&self, engine: AgentEngine) -> Self {
+        Self {
+            engine,
+            ..self.clone()
+        }
+    }
+
+    pub fn engine(&self) -> AgentEngine {
+        self.engine
+    }
+
+    pub fn runtime_skills_dir(&self) -> PathBuf {
+        self.data_dir.join("skills").join(self.engine.as_str())
+    }
+
+    pub fn deploy_runtime_skills(&self) -> Result<PathBuf, DistError> {
+        let root = self.runtime_skills_dir();
+        for name in skill_names() {
+            write_tree(&root.join(name), &skill_files_for(self.engine, name))?;
+        }
+        Ok(root)
     }
 
     /// Write down which data directory this installation uses.
@@ -136,7 +163,7 @@ impl Installation {
                 project
             }
         };
-        Some(base.join(".claude").join("skills"))
+        Some(base.join(self.engine.skills_directory()).join("skills"))
     }
 
     /// The levels that already hold a deployment of any skill.
@@ -200,7 +227,7 @@ impl Installation {
     /// not provenance" argument one step in. An installation with no record for a level prunes
     /// nothing there, which is the right answer for one this tool has not written to.
     fn deployed_record(&self, level: SkillLevel) -> Vec<String> {
-        let prefix = format!("{}:", level.as_str());
+        let prefix = format!("{}/{}:", self.engine.as_str(), level.as_str());
         std::fs::read_to_string(self.config_dir.join(DEPLOYED_SKILLS_RECORD))
             .map(|body| {
                 body.lines()
@@ -215,7 +242,7 @@ impl Installation {
     /// Replace this level's entries, leaving every other level's alone.
     fn record_deployed(&self, level: SkillLevel, names: &[&str]) -> Result<(), DistError> {
         let path = self.config_dir.join(DEPLOYED_SKILLS_RECORD);
-        let prefix = format!("{}:", level.as_str());
+        let prefix = format!("{}/{}:", self.engine.as_str(), level.as_str());
         let mut lines: Vec<String> = std::fs::read_to_string(&path)
             .map(|body| {
                 body.lines()
@@ -267,7 +294,7 @@ impl Installation {
         let mut written = Vec::new();
         for name in skill_names() {
             let dir = root.join(name);
-            if let Err(error) = write_tree_with(&dir, &skill_files(name), prune) {
+            if let Err(error) = write_tree_with(&dir, &skill_files_for(self.engine, name), prune) {
                 return Err(DeployFailure {
                     done: Deployed { written, removed },
                     error,
@@ -780,6 +807,32 @@ mod tests {
             Some(project),
         );
         assert_eq!(installation.deployed_skill_levels(), [SkillLevel::User]);
+    }
+
+    #[test]
+    fn agent_deployments_and_ownership_are_independent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let installation = Installation::at(
+            tmp.path().join("bin/lore"),
+            tmp.path().join("data"),
+            tmp.path().join("config"),
+            Some(tmp.path().join("home")),
+            None,
+        );
+        let codex = installation.for_engine(AgentEngine::Codex);
+        installation.deploy_skills(SkillLevel::User).unwrap();
+        assert!(codex.deployed_skill_levels().is_empty());
+        assert!(codex.deployed_record(SkillLevel::User).is_empty());
+        codex.deploy_skills(SkillLevel::User).unwrap();
+        let root = codex.skills_dir(SkillLevel::User).unwrap();
+        assert!(root.ends_with(".agents/skills"));
+        let source = std::fs::read_to_string(root.join("lore-process/SKILL.md")).unwrap();
+        let page = lk_core::frontmatter::parse_page(&source).unwrap();
+        assert_eq!(page.frontmatter.get("name").unwrap(), "lore-process");
+        assert_eq!(
+            installation.deployed_record(SkillLevel::User),
+            codex.deployed_record(SkillLevel::User)
+        );
     }
 
     /// The checkout is where the skills come FROM. A build run inside it would otherwise write

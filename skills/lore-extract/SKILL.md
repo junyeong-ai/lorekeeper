@@ -1,25 +1,10 @@
 ---
-name: lore-extract:lore-extract
-version: 0.66.1
-description: Extracts repository decisions and reusable knowledge into a Lorekeeper vault using a persistent scan/run/audit manifest. Uses source documents, code boundaries and optional Git history; use lore-wiki capture for an insight from current work.
-argument-hint: "scan|run|audit <repo-path> [--domain <name>] [--transferability T1|T2|T3] [--include-git] [--full]"
-allowed-tools: |
-  Bash(lore *)
-  Bash(ls *)
-  Bash(cat *)
-  Bash(head *)
-  Bash(find *)
-  Bash(grep *)
-  Bash(git *)
-  Bash(wc *)
-  Bash(jq *)
-  Bash(date *)
-  Bash(mkdir *)
-  Bash(python3 *)
-  Bash(cargo metadata *)
-  Read
-  Edit
-  Write
+name: lore-extract
+description: Extracts repository decisions and reusable knowledge into a Lorekeeper
+  vault using a persistent scan/run/audit manifest. Uses source documents, code boundaries
+  and optional Git history; use lore-wiki capture for an insight from current work.
+metadata:
+  version: 0.66.1
 ---
 
 # Repository knowledge extraction
@@ -40,7 +25,7 @@ freshness checks separate, inspectable operations.
 - Resolve paths with `lore config vault-root` and `lore config schema-path`.
   Read the generated AGENTS.md before page writes; run `lore schema` if missing.
   It owns formats, headings, vocabulary, link syntax and locale. Never guess `wiki/`.
-- Start a foreground publishing session under `lore workflow -- claude` before
+- Start a foreground publishing session under `lore workflow -- claude` or `lore workflow -- codex` before
   reading evidence. Do not nest it in an already guarded pipeline/session. Pause
   other concept/source writers during a wave; external editors do not share this lease.
 - These are directly authored COMPLETE pages: fill their owned sections, omit

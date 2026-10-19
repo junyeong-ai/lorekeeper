@@ -9,8 +9,8 @@ use std::path::PathBuf;
 
 #[test]
 fn every_skill_version_matches_the_crate_version() {
-    let skills_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.claude/skills");
-    let needle = format!("version: {}", env!("CARGO_PKG_VERSION"));
+    let skills_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../skills");
+    let version = env!("CARGO_PKG_VERSION");
 
     let mut checked = 0;
     for entry in std::fs::read_dir(&skills_dir)
@@ -23,15 +23,14 @@ fn every_skill_version_matches_the_crate_version() {
         let path = dir.join("SKILL.md");
         let doc = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-        let frontmatter: Vec<&str> = doc
-            .lines()
-            .skip(1)
-            .take_while(|line| *line != "---")
-            .collect();
-        assert!(
-            frontmatter.iter().any(|line| line.trim() == needle),
-            "{} frontmatter must carry `{needle}` \
-             (release version bumped without restamping the skill?)",
+        let page = lk_core::frontmatter::parse_page(&doc).unwrap();
+        assert_eq!(
+            page.frontmatter
+                .get("metadata")
+                .and_then(|value| value.get("version"))
+                .and_then(|value| value.as_str()),
+            Some(version),
+            "{} version differs",
             path.display()
         );
         checked += 1;

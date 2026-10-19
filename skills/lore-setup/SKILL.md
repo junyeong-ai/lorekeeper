@@ -1,23 +1,10 @@
 ---
-name: lore-setup:lore-setup
-version: 0.66.1
-description: Guides initial Lorekeeper setup or edits source configuration using workspace metadata. Discovers requested source IDs, preserves existing selections, and distinguishes config validation, native authentication, first processing and optional scheduling.
-argument-hint: "[source-type]"
-allowed-tools: |
-  Bash(slack-cli *)
-  Bash(atlassian-cli *)
-  Bash(gws *)
-  Bash(jq *)
-  Bash(grep *)
-  Bash(ls *)
-  Bash(lore validate)
-  Bash(lore schema)
-  Bash(lore schedule *)
-  Bash(lore config *)
-  Bash(lore ingest --dry-run *)
-  Read
-  Edit
-  Write
+name: lore-setup
+description: Guides initial Lorekeeper setup or edits source configuration using workspace
+  metadata. Discovers requested source IDs, preserves existing selections, and distinguishes
+  config validation, native authentication, first processing and optional scheduling.
+metadata:
+  version: 0.66.1
 ---
 
 # lore-setup — Interactive config builder

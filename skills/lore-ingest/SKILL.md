@@ -1,13 +1,10 @@
 ---
-name: lore-ingest:lore-ingest
-version: 0.66.1
-description: Runs Lorekeeper collection and operations commands for configured sources, manual inboxes, period synthesis, schedules and maintenance. Collection writes structured pages and queues semantic work; lore-process completes that work.
-argument-hint: "<subcommand> [args]"
-disable-model-invocation: true
-allowed-tools: |
-  Bash(lore *)
-  Bash(crontab *)
-  Read
+name: lore-ingest
+description: Runs Lorekeeper collection and operations commands for configured sources,
+  manual inboxes, period synthesis, schedules and maintenance. Collection writes structured
+  pages and queues semantic work; lore-process completes that work.
+metadata:
+  version: 0.66.1
 ---
 
 # Lorekeeper collection and operations

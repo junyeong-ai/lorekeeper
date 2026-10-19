@@ -38,8 +38,16 @@ pub fn skill_names() -> Vec<&'static str> {
 
 /// The files of one skill, addressed relative to that skill's own directory.
 pub fn skill_files(name: &str) -> Vec<EmbeddedFile> {
+    skill_files_for(lk_core::execution::AgentEngine::Codex, name)
+}
+
+pub fn skill_files_for(engine: lk_core::execution::AgentEngine, name: &str) -> Vec<EmbeddedFile> {
     let prefix = format!("{name}/");
-    SKILL_FILES
+    let files = match engine {
+        lk_core::execution::AgentEngine::ClaudeCode => CLAUDE_SKILL_FILES,
+        lk_core::execution::AgentEngine::Codex => SKILL_FILES,
+    };
+    files
         .iter()
         .filter_map(|(path, contents)| {
             path.strip_prefix(&prefix).map(|relative| EmbeddedFile {
@@ -119,7 +127,7 @@ mod tests {
     }
 
     #[test]
-    fn every_skill_declares_its_qualified_invocation_name() {
+    fn each_host_receives_its_own_invocation_metadata_and_the_same_procedure() {
         for name in skill_names() {
             let files = skill_files(name);
             let instructions = files
@@ -127,14 +135,25 @@ mod tests {
                 .find(|file| file.relative == "SKILL.md")
                 .unwrap();
             let page = lk_core::frontmatter::parse_page(instructions.contents).unwrap();
-            let expected = format!("{name}:{name}");
+            let expected = name;
             assert_eq!(
                 page.frontmatter
                     .get("name")
                     .and_then(|value| value.as_str()),
-                Some(expected.as_str()),
-                "{name} must expose the same invocation through skill and plugin loading"
+                Some(expected),
+                "{name} must use a portable canonical name"
             );
+            let host = skill_files_for(lk_core::execution::AgentEngine::ClaudeCode, name);
+            let host = host
+                .iter()
+                .find(|file| file.relative == "SKILL.md")
+                .unwrap();
+            let host = lk_core::frontmatter::parse_page(host.contents).unwrap();
+            assert_eq!(
+                host.frontmatter.get("name").unwrap(),
+                &format!("{name}:{name}")
+            );
+            assert_eq!(host.body, page.body);
         }
     }
 

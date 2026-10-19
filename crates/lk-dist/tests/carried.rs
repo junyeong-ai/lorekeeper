@@ -49,7 +49,7 @@ fn tree(dir: &Path) -> Vec<String> {
 /// manifest that collects it to the directory it collects from.
 #[test]
 fn the_binary_carries_every_skill_the_repository_holds() {
-    let root = repo_root().join(".claude/skills");
+    let root = repo_root().join("skills");
     let mut on_disk: Vec<String> = std::fs::read_dir(&root)
         .unwrap_or_else(|e| panic!("read {}: {e}", root.display()))
         .flatten()

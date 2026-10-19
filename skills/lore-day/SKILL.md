@@ -1,10 +1,11 @@
 ---
-name: lore-day:lore-day
-version: 0.66.1
-description: Manages the Lorekeeper task board and daily knowledge brief through conversational requests. Reads agenda JSON, records requested task changes and completion notes, and reports source freshness. Use for this board or its brief, not unrelated questions or external task services.
-argument-hint: "[what the user said]"
-allowed-tools: |
-  Bash(lore *)
+name: lore-day
+description: Manages the Lorekeeper task board and daily knowledge brief through conversational
+  requests. Reads agenda JSON, records requested task changes and completion notes,
+  and reports source freshness. Use for this board or its brief, not unrelated questions
+  or external task services.
+metadata:
+  version: 0.66.1
 ---
 
 # Lorekeeper working day

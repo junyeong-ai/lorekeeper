@@ -35,7 +35,7 @@ fn subcommands() -> Vec<String> {
 /// Every markdown file the skills ship, by path: the corpus concatenates them, which loses
 /// which file a line came from.
 fn skill_markdown() -> Vec<PathBuf> {
-    let skills_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.claude/skills");
+    let skills_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../skills");
     let mut files = Vec::new();
     let mut stack = vec![skills_dir];
     while let Some(dir) = stack.pop() {
@@ -57,7 +57,7 @@ fn skill_markdown() -> Vec<PathBuf> {
 }
 
 fn skill_corpus() -> String {
-    let skills_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.claude/skills");
+    let skills_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../skills");
     let mut corpus = String::new();
     let mut stack = vec![skills_dir.clone()];
     while let Some(dir) = stack.pop() {

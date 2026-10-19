@@ -30,8 +30,8 @@ pub use coherence::{
     ArtifactState, DeployedArtifact, DeployedGroup, InstallationReport, SchemaState,
 };
 pub use embedded::{
-    EmbeddedFile, config_files, pipeline_files, pipeline_names, skill_files, skill_names,
-    template_files,
+    EmbeddedFile, config_files, pipeline_files, pipeline_names, skill_files, skill_files_for,
+    skill_names, template_files,
 };
 pub use layout::{DeployFailure, Deployed, Installation, Prune, SkillLevel};
 pub use release::{Latest, Provenance, REPO, ReleaseClient, archive_name, asset_url, parse_tag};

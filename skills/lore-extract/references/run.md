@@ -2,7 +2,7 @@
 
 Contents: source selection; transformation; document and concept publication; finalization.
 
-`/lore-extract run $ARGUMENTS`
+`lore-extract run <repository and options>`
 
 Extract knowledge using the manifest. Requires a prior scan.
 

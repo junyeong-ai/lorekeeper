@@ -19,7 +19,7 @@ fn read(path: &Path) -> String {
 /// Every directory under `.claude/skills`, which is what the release workflow packages (it
 /// enumerates the directory) and therefore what a release ships.
 fn shipped_skills() -> Vec<String> {
-    let dir = repo_root().join(".claude/skills");
+    let dir = repo_root().join("skills");
     let mut names: Vec<String> = std::fs::read_dir(&dir)
         .unwrap_or_else(|e| panic!("read {}: {e}", dir.display()))
         .flatten()
@@ -284,14 +284,15 @@ fn a_spelled_command_is_read_the_way_a_shell_would() {
 #[test]
 fn every_command_a_skill_spells_is_one_it_permits() {
     let mut denied: Vec<String> = Vec::new();
-    for dir in std::fs::read_dir(repo_root().join(".claude/skills"))
+    for dir in std::fs::read_dir(repo_root().join("skills"))
         .expect("skills dir")
         .flatten()
         .filter(|entry| entry.path().is_dir())
     {
         let skill = dir.file_name().to_string_lossy().into_owned();
         let manifest = read(&dir.path().join("SKILL.md"));
-        let permitted = permitted_tools(manifest.split("---").nth(1).expect("skill frontmatter"));
+        let metadata: serde_json::Value = serde_json::from_str(&read(&dir.path().join("agents/claude.json"))).unwrap();
+        let permitted = permitted_tools(metadata["allowed-tools"].as_str().expect("Claude tools"));
         if permitted.is_empty() {
             continue;
         }
@@ -355,13 +356,14 @@ fn the_pipeline_permits_every_tool_the_skills_it_runs_declare() {
     );
 
     for skill in invoked {
-        let manifest = read(
+        let metadata = read(
             &repo_root()
-                .join(".claude/skills")
+                .join("skills")
                 .join(&skill)
-                .join("SKILL.md"),
+                .join("agents/claude.json"),
         );
-        for tool in permitted_tools(manifest.split("---").nth(1).expect("skill frontmatter")) {
+        let metadata: serde_json::Value = serde_json::from_str(&metadata).unwrap();
+        for tool in permitted_tools(metadata["allowed-tools"].as_str().unwrap()) {
             assert!(
                 allowed.contains(&tool),
                 "{skill} declares it runs `{tool}`, which the pipeline's --allowedTools denies"
@@ -445,7 +447,7 @@ fn names_word(text: &str, word: &str) -> bool {
 /// Every `.md` under `.claude/skills`, SKILL.md and `references/` alike.
 fn glob_skill_markdown() -> Vec<PathBuf> {
     let mut found = Vec::new();
-    let mut stack = vec![repo_root().join(".claude/skills")];
+    let mut stack = vec![repo_root().join("skills")];
     while let Some(dir) = stack.pop() {
         for entry in std::fs::read_dir(&dir)
             .unwrap_or_else(|e| panic!("read {}: {e}", dir.display()))
@@ -547,7 +549,7 @@ fn every_source_type_is_documented_and_exemplified() {
     // a new adapter; stated as a list, it silently does. The gate is that it stays a rule: no
     // adapter name beside the path template it routes to.
     const DAILY_TEMPLATE: &str = "`<daily>/{source-id}/DATE.md`";
-    let enumerated: Vec<String> = read(&root.join(".claude/skills/lore-ingest/SKILL.md"))
+    let enumerated: Vec<String> = read(&root.join("skills/lore-ingest/SKILL.md"))
         .lines()
         .filter(|line| line.contains(DAILY_TEMPLATE))
         .flat_map(|line| {

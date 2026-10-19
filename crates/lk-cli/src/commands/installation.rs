@@ -36,6 +36,9 @@ pub enum SelfCommand {
         /// are and created nowhere — an install that took none must not acquire them.
         #[arg(long, value_enum)]
         skills: Option<SkillScope>,
+        /// Agent receiving interactive skills; unattended skills are always carried locally
+        #[arg(long, value_enum, default_value_t = AgentTarget::Both)]
+        agent: AgentTarget,
         /// Directory holding the templates and pipelines (default: the installer's data dir)
         #[arg(long)]
         data_dir: Option<PathBuf>,
@@ -81,6 +84,25 @@ pub enum SkillScope {
     None,
 }
 
+#[derive(clap::ValueEnum, Clone, Copy, Default)]
+pub enum AgentTarget {
+    ClaudeCode,
+    Codex,
+    #[default]
+    Both,
+}
+
+impl AgentTarget {
+    fn engines(self) -> &'static [lk_core::execution::AgentEngine] {
+        use lk_core::execution::AgentEngine::{ClaudeCode, Codex};
+        match self {
+            Self::ClaudeCode => &[ClaudeCode],
+            Self::Codex => &[Codex],
+            Self::Both => &[ClaudeCode, Codex],
+        }
+    }
+}
+
 impl SkillScope {
     fn level(self) -> Option<SkillLevel> {
         match self {
@@ -94,9 +116,11 @@ impl SkillScope {
 pub async fn run(opts: &GlobalOptions, cmd: SelfCommand) -> miette::Result<()> {
     match cmd {
         SelfCommand::Status { json, data_dir } => status(opts, json, data_dir),
-        SelfCommand::Deploy { skills, data_dir } => {
-            deploy(opts, &installation(data_dir)?, skills).await
-        }
+        SelfCommand::Deploy {
+            skills,
+            agent,
+            data_dir,
+        } => deploy(opts, &installation(data_dir)?, skills, agent).await,
         SelfCommand::Update {
             version,
             force,
@@ -170,7 +194,7 @@ fn print_report(report: &InstallationReport) {
     if report.skills.is_empty() {
         row("skills", "not deployed", None);
     }
-    for (level, group) in &report.skills {
+    for (level, group) in report.skills.iter().chain(&report.runtime_skills) {
         print_group(&format!("skills ({level})"), group);
     }
     print_group("pipelines", &report.pipelines);
@@ -236,48 +260,61 @@ async fn deploy(
     opts: &GlobalOptions,
     installation: &Installation,
     skills: Option<SkillScope>,
+    agent: AgentTarget,
 ) -> miette::Result<()> {
-    let levels: Vec<SkillLevel> = match skills {
-        Some(scope) => scope.level().into_iter().collect(),
-        None => installation.deployed_skill_levels(),
-    };
-    for level in levels {
-        // A level with no directory is nothing to write, not a reason to abandon the rest: the
-        // checkout this binary was built from already HOLDS these skills — they are what it
-        // carries — so the requested state is satisfied, and failing here left an install with
-        // no pipelines, no templates and no config example.
-        let Some(root) = installation.skills_dir(level) else {
-            eprintln!(
-                "Skills      skipped — {}",
-                installation.skills_reason(level)
-            );
-            continue;
+    for engine in agent.engines() {
+        let selected = installation.for_engine(*engine);
+        let installation = &selected;
+        let levels: Vec<SkillLevel> = match skills {
+            Some(scope) => scope.level().into_iter().collect(),
+            None => installation.deployed_skill_levels(),
         };
-        // The removals come back on BOTH paths, because the failure path is the one where the
-        // user most needs them: a deploy that deleted a directory and then failed on a write
-        // reported only "permission denied", which reads as "nothing happened".
-        let (outcome, failure) = match installation.deploy_skills(level) {
-            Ok(outcome) => (outcome, None),
-            Err(lk_dist::DeployFailure { done, error }) => (done, Some(error)),
-        };
-        for removed in &outcome.removed {
+        for level in levels {
+            // A level with no directory is nothing to write, not a reason to abandon the rest: the
+            // checkout this binary was built from already HOLDS these skills — they are what it
+            // carries — so the requested state is satisfied, and failing here left an install with
+            // no pipelines, no templates and no config example.
+            let Some(root) = installation.skills_dir(level) else {
+                eprintln!(
+                    "Skills      skipped — {}",
+                    installation.skills_reason(level)
+                );
+                continue;
+            };
+            // The removals come back on BOTH paths, because the failure path is the one where the
+            // user most needs them: a deploy that deleted a directory and then failed on a write
+            // reported only "permission denied", which reads as "nothing happened".
+            let (outcome, failure) = match installation.deploy_skills(level) {
+                Ok(outcome) => (outcome, None),
+                Err(lk_dist::DeployFailure { done, error }) => (done, Some(error)),
+            };
+            for removed in &outcome.removed {
+                eprintln!(
+                    "            removed {} — this build no longer carries it",
+                    removed.display()
+                );
+            }
+            if let Some(error) = failure {
+                return Err(miette::miette!("{error}"));
+            }
+            eprintln!("Skills      {} → {}", outcome.written.len(), root.display());
             eprintln!(
-                "            removed {} — this build no longer carries it",
-                removed.display()
+                "            {}",
+                lk_dist::skill_names()
+                    .iter()
+                    .map(|name| format!("/{name}"))
+                    .collect::<Vec<_>>()
+                    .join("  ")
             );
         }
-        if let Some(error) = failure {
-            return Err(miette::miette!("{error}"));
-        }
-        eprintln!("Skills      {} → {}", outcome.written.len(), root.display());
-        eprintln!(
-            "            {}",
-            lk_dist::skill_names()
-                .iter()
-                .map(|name| format!("/{name}"))
-                .collect::<Vec<_>>()
-                .join("  ")
-        );
+    }
+
+    for engine in AgentTarget::Both.engines() {
+        let root = installation
+            .for_engine(*engine)
+            .deploy_runtime_skills()
+            .map_err(|e| miette::miette!("{e}"))?;
+        eprintln!("Agent skills {} → {}", engine.as_str(), root.display());
     }
 
     for (label, outcome) in [
@@ -493,13 +530,22 @@ fn redeploy_through(binary: &std::path::Path, opts: &GlobalOptions, data_dir: &s
 }
 
 fn uninstall(installation: &Installation, yes: bool, purge_config: bool) -> miette::Result<()> {
-    let levels = installation.deployed_skill_levels();
+    let deployments = AgentTarget::Both
+        .engines()
+        .iter()
+        .flat_map(|engine| {
+            let view = installation.for_engine(*engine);
+            view.deployed_skill_levels()
+                .into_iter()
+                .map(move |level| (view.clone(), level))
+        })
+        .collect::<Vec<_>>();
     eprintln!("This removes:");
     eprintln!("  {}", installation.binary().display());
     eprintln!("  {}", installation.pipelines_dir().display());
     eprintln!("  {}", installation.templates_dir().display());
-    for level in &levels {
-        if let Some(dir) = installation.skills_dir(*level) {
+    for (view, level) in &deployments {
+        if let Some(dir) = view.skills_dir(*level) {
             eprintln!("  {}/lore-*", dir.display());
         }
     }
@@ -515,8 +561,8 @@ fn uninstall(installation: &Installation, yes: bool, purge_config: bool) -> miet
         return Ok(());
     }
 
-    for level in levels {
-        let Some(root) = installation.skills_dir(level) else {
+    for (view, level) in deployments {
+        let Some(root) = view.skills_dir(level) else {
             continue;
         };
         for name in lk_dist::skill_names() {
@@ -525,6 +571,7 @@ fn uninstall(installation: &Installation, yes: bool, purge_config: bool) -> miet
     }
     remove_dir(&installation.pipelines_dir())?;
     remove_dir(&installation.templates_dir())?;
+    remove_dir(&installation.data_dir().join("skills"))?;
     // Only when it is now empty: a data directory holding something this tool did not put
     // there is not this tool's to delete.
     let _ = std::fs::remove_dir(installation.data_dir());

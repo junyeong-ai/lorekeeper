@@ -28,7 +28,7 @@ Read the current conversation to identify:
 - **Solution** — how it was resolved
 - **Pattern** — the generalised lesson
 
-Use the text after `capture` in `$ARGUMENTS` as the topic anchor if provided. Otherwise derive
+Use the text after `capture` in the request arguments as the topic anchor if provided. Otherwise derive
 from the conversation's most recent troubleshooting thread.
 
 ### 2. Load context

@@ -1,0 +1,5 @@
+{
+  "argument-hint": "[source-type]",
+  "allowed-tools": "Bash(slack-cli *)\nBash(atlassian-cli *)\nBash(gws *)\nBash(jq *)\nBash(grep *)\nBash(ls *)\nBash(lore validate)\nBash(lore schema)\nBash(lore schedule *)\nBash(lore config *)\nBash(lore ingest --dry-run *)\nRead\nEdit\nWrite\n",
+  "name": "lore-setup:lore-setup"
+}
