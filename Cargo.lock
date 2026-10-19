@@ -1620,7 +1620,7 @@ dependencies = [
  "encoding_rs",
  "feed-rs",
  "htmd",
- "html5ever 0.38.0",
+ "html5ever 0.39.0",
  "jiff",
  "lk-core",
  "lk-task",
@@ -1662,7 +1662,7 @@ version = "0.62.1"
 dependencies = [
  "async-trait",
  "blake3",
- "html5ever 0.38.0",
+ "html5ever 0.39.0",
  "jiff",
  "lk-core",
  "markup5ever_rcdom",
