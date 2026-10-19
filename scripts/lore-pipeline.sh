@@ -94,7 +94,8 @@ failed, keep going; a report that names what is left is still a turn that ended 
 Report only what you can point to a tool result for. If a step failed or was skipped, say
 so plainly with the evidence; state finished work plainly without hedging.'
 
-# Run a Claude Code skill headlessly against the vault.
+# Run a Claude Code skill headlessly against the vault, loading explicit dependency
+# directories after the entry skill directory.
 #
 # Run from the vault so the sandbox covers the pages being edited; the skill's own reference
 # files live outside it and are added explicitly. Tool access is whitelisted rather than
@@ -106,12 +107,18 @@ so plainly with the evidence; state finished work plainly without hedging.'
 # list has to cover the protocol exactly rather than approximately.
 claude_skill() {
     local prompt="$1" skill_dir="$2"
-    if [ ! -f "$skill_dir/SKILL.md" ]; then
-        log "✗ skill not installed at $skill_dir — re-run the installer, or point"
-        log "  LORE_SKILL_DIR at where you installed the skills (\`--skill project\` puts them"
-        log "  under the project's .claude/skills)"
-        return 1
-    fi
+    shift 2
+    local skill
+    local plugin_args=()
+    for skill in "$skill_dir" "$@"; do
+        if [ ! -f "$skill/SKILL.md" ]; then
+            log "✗ skill not installed at $skill — re-run the installer, or point"
+            log "  LORE_SKILL_DIR at where you installed the skills (\`--skill project\` puts them"
+            log "  under the project's .claude/skills)"
+            return 1
+        fi
+        plugin_args+=(--plugin-dir "$skill" --add-dir "$skill")
+    done
     local plugin_name="${skill_dir##*/}"
     prompt="/${plugin_name}:${prompt#/}"
     # The carried SKILL.md declares this qualified name for both ordinary skill
@@ -124,14 +131,13 @@ claude_skill() {
     # Collection/period selection and short deterministic writers keep their own locks.
     # workflow passes the selected canonical config/template paths to this exec chain.
     lore_cmd workflow --wait -- env -C "$VAULT" "$CLAUDE" -p "$prompt" \
-        --plugin-dir "$skill_dir" \
+        "${plugin_args[@]}" \
         --append-system-prompt "$AUTONOMOUS_PREAMBLE" \
         --permission-mode acceptEdits \
         --allowedTools "Bash(lore:*)" "Bash(ls:*)" "Bash(cat:*)" "Bash(jq:*)" \
         "Bash(mkdir:*)" "Bash(mv:*)" "Bash(basename:*)" "Bash(test:*)" "Bash([:*)" \
         "Bash(find:*)" "Bash(wc:*)" "Bash(head:*)" "Bash(date:*)" "Bash(grep:*)" \
         "Read" "Edit" "Write" "Glob" "Grep" \
-        --add-dir "$skill_dir" \
         --output-format text
 }
 
