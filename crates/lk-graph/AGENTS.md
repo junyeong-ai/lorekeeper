@@ -48,8 +48,12 @@ and CLI discovery, not a second graph authority.
   backlink authority. Receipts describe completed reads, never factual confidence.
 - Preserve pending first-discovery order and rotate changed/first-time work. A bounded
   weekly batch must not starve old work or grow into an unbounded full-corpus audit.
-- A missing, invalid or stale scoped review reopens its receipt. Valid open findings
-  remain durable without weekly prose rewrites. Record only after guarded final reads.
+- Scope reviews by their declared subjects, the concept's `knowledge_review` pointer,
+  and prior receipt review paths. Omitting result review paths cannot bypass a missing,
+  invalid or stale scoped review. Valid open findings remain durable follow-up.
+  Bind authored review/evidence revisions and guard exact read bytes when recording.
+  Read/count verified prior evidence only when current evidence differs or is missing;
+  an identical archive or bookkeeping-only change does not reopen semantic work.
 - Audit completion follows native merge receipts from the same workflow to a currently
   assessed survivor. Merge receipts join the page mutation journal and retain only
   the latest merging workflow. A correlation ID never authorizes a lease bypass.

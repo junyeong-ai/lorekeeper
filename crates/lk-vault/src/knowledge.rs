@@ -408,7 +408,7 @@ fn build_curation(
                     citation.path
                 )));
             }
-            let archive = crate::review::archive_path(&citation.revision)?;
+            let archive = crate::review::evidence_archive_path(&citation.revision)?;
             if archive_paths.insert(archive.clone()) {
                 match crate::load_archived_evidence(root, &citation.revision)? {
                     Some(page) => plan.require_unchanged(
@@ -427,7 +427,7 @@ fn build_curation(
                 continue;
             }
             let revision = source_revision(&crate::parse_page(before).map_err(invalid)?);
-            let archive = crate::review::archive_path(&revision)?;
+            let archive = crate::review::evidence_archive_path(&revision)?;
             if archive_paths.insert(archive.clone()) {
                 match crate::load_archived_evidence(root, &revision)? {
                     Some(page) => plan.require_unchanged(
@@ -758,7 +758,7 @@ mod tests {
         let evidence = "wiki/documents/deleted.md";
         let raw = "---\ntype: document\ntitle: Deleted source\n---\n## Summary\nThe historical observation.\n";
         let revision = source_revision(&crate::parse_page(raw).unwrap());
-        let archive = crate::review::archive_path(&revision).unwrap();
+        let archive = crate::review::evidence_archive_path(&revision).unwrap();
         crate::VaultWriter::new(root.path())
             .write_page_sync(&archive, raw)
             .unwrap();

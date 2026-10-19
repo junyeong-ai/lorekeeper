@@ -59,9 +59,9 @@ pub use self::provenance::{
 };
 pub use self::review::{
     EvidenceReport, KnowledgeReview, ReviewEffectiveState, ReviewReport, ReviewStatus,
-    archive_evidence, inspect_evidence, is_archived_evidence, list_reviews, load_archived_evidence,
-    publish_document, publish_document_expected, publish_document_expected_with_plan,
-    same_existing_file,
+    archive_evidence, evidence_archive_path, inspect_evidence, is_archived_evidence, list_reviews,
+    load_archived_evidence, publish_document, publish_document_expected,
+    publish_document_expected_with_plan, same_existing_file,
 };
 pub use self::rss_evidence::{
     RssEvidencePreview, accumulate_rss_evidence, guard_rss_citation, guard_rss_evidence,

@@ -99,7 +99,7 @@ impl KnowledgeReview {
             if Path::new(&citation.path) == path {
                 errors.push("a review cannot serve as its own evidence".into());
             }
-            if let Err(error) = archive_path(&citation.revision) {
+            if let Err(error) = evidence_archive_path(&citation.revision) {
                 errors.push(error.to_string());
             }
         }
@@ -262,7 +262,7 @@ fn read_source(root: &Path, path: &str) -> Result<crate::VaultPage, VaultError> 
     read_source_snapshot(root, path).map(|(_, page)| page)
 }
 
-pub(crate) fn archive_path(revision: &str) -> Result<std::path::PathBuf, VaultError> {
+pub fn evidence_archive_path(revision: &str) -> Result<std::path::PathBuf, VaultError> {
     if revision.len() != 32
         || !revision
             .bytes()
@@ -280,7 +280,7 @@ pub fn is_archived_evidence(root: &Path, path: &Path) -> Result<bool, VaultError
     let Some(revision) = path.file_stem().and_then(|name| name.to_str()) else {
         return Ok(false);
     };
-    if archive_path(revision).ok().as_deref() != Some(path) {
+    if evidence_archive_path(revision).ok().as_deref() != Some(path) {
         return Ok(false);
     }
     Ok(load_archived_evidence(root, revision)?.is_some())
@@ -292,7 +292,7 @@ pub fn load_archived_evidence(
     root: &Path,
     revision: &str,
 ) -> Result<Option<crate::VaultPage>, VaultError> {
-    let path = archive_path(revision)?;
+    let path = evidence_archive_path(revision)?;
     let raw = match std::fs::read_to_string(crate::page_path(root, &path)?) {
         Ok(raw) => raw,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -455,7 +455,7 @@ pub fn publish_document_expected_with_plan(
                     .ok_or_else(|| {
                         VaultError::Frontmatter("archived evidence disappeared".into())
                     })?;
-                plan.require_unchanged(archive_path(&revision)?, archived);
+                plan.require_unchanged(evidence_archive_path(&revision)?, archived);
             }
             // MutationPlan compares the exact captured bytes again before writing.
             plan.edit(path, before, content.to_owned());
@@ -471,7 +471,7 @@ fn publish_archive(root: &Path, revision: &str, raw: &str) -> Result<(), VaultEr
     // Publish durable bytes through VaultWriter, then a no-clobber hard link.
     // Even concurrent archivers cannot silently replace an existing snapshot.
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let destination = crate::writable_page_path(root, &archive_path(revision)?)?;
+    let destination = crate::writable_page_path(root, &evidence_archive_path(revision)?)?;
     let directory = destination
         .parent()
         .expect("archive has an evidence directory");
@@ -660,7 +660,7 @@ mod tests {
         let before = "---\ntitle: Source\n---\nOriginal evidence\n";
         publish_document(&session, path, before).unwrap();
         let revision = lk_core::concept::source_revision(&parse_page(before).unwrap());
-        let archive = root.path().join(archive_path(&revision).unwrap());
+        let archive = root.path().join(evidence_archive_path(&revision).unwrap());
         std::fs::create_dir_all(archive.parent().unwrap()).unwrap();
         std::fs::write(archive, "corrupt evidence").unwrap();
         assert!(publish_document(&session, path, "---\ntitle: Source\n---\nChanged\n").is_err());
@@ -741,7 +741,9 @@ mod tests {
         std::fs::write(root.path().join("source.md"), original).unwrap();
         let report = archive_evidence(root.path(), &["source.md".into()]).unwrap();
         let citation = &report.citations[0];
-        let archived = root.path().join(archive_path(&citation.revision).unwrap());
+        let archived = root
+            .path()
+            .join(evidence_archive_path(&citation.revision).unwrap());
         assert_eq!(std::fs::read_to_string(&archived).unwrap(), original);
         let directory = root
             .path()
@@ -817,7 +819,7 @@ mod tests {
         let first = archive_evidence(root.path(), &["a.md".into()]).unwrap();
         let archive = root
             .path()
-            .join(archive_path(&first.citations[0].revision).unwrap());
+            .join(evidence_archive_path(&first.citations[0].revision).unwrap());
         std::fs::write(
             root.path().join("a.md"),
             original.replace("updated: old", "updated: new"),
