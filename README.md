@@ -363,7 +363,7 @@ lore wiki curate --file plan.json --dry-run # 근거 판본·이름·분류·태
 lore wiki concepts            # 개념 목록
 lore resolve <name>           # 어떤 개념 페이지가 그 이름을 갖는지 (0 소유 / 1 없음 / 2 중복)
 lore graph lint               # 구조 건강검진(고아·깨진링크·중복개념·…)
-lore graph suggest-links      # 개념 간 관계 후보(Adamic-Adar)
+lore graph suggest-links --limit 20 # 관계 후보; next_offset과 --revision으로 이어서 조회
 lore graph cluster            # 토픽 커뮤니티(Louvain)
 lore graph backlinks-sync     # 개념의 ## Sources·인용수·요약 입력 재도출(변한 요약은 큐로)
 lore graph merge <from> <into># 중복 개념 통합

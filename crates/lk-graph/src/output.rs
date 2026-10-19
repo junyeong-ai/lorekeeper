@@ -125,7 +125,10 @@ impl Observations {
 #[derive(Debug, Serialize)]
 pub struct SuggestLinksReport {
     pub pairs: Vec<LinkSuggestion>,
-    pub count: usize,
+    pub revision: String,
+    pub total: usize,
+    pub offset: usize,
+    pub next_offset: Option<usize>,
 }
 
 #[derive(Serialize)]
@@ -374,7 +377,7 @@ fn print_observations(o: &Observations) {
 }
 
 pub fn print_suggest_links(r: &SuggestLinksReport) {
-    if r.pairs.is_empty() {
+    if r.total == 0 {
         println!("(no link suggestions)");
         return;
     }
@@ -384,7 +387,15 @@ pub fn print_suggest_links(r: &SuggestLinksReport) {
             s.a, s.b, s.score, s.shared_neighbors
         );
     }
-    println!("{} suggestion(s)", r.count);
+    println!(
+        "{} of {} candidate(s), offset {}",
+        r.pairs.len(),
+        r.total,
+        r.offset
+    );
+    if let Some(offset) = r.next_offset {
+        eprintln!("next page: --offset {offset} --revision {}", r.revision);
+    }
 }
 
 #[derive(Debug, Serialize)]
