@@ -7,6 +7,7 @@
 | `lore ingest <source>` | Refresh one source's pages only — never rewrites the work-log (it sees a subset) |
 | `lore ingest --dry-run` | Preview without vault writes |
 | `lore ingest --date YYYY-MM-DD` | Re-materialize a specific day — RE-FETCHES it; see Safety notes before using it on a past date |
+| `lore fetch <URL> [--source ID]` | Save an HTML article, Markdown or text document into a configured manual inbox. Then ingest that source and run lore-process; fetching alone does not complete knowledge integration |
 | `lore synthesis weekly [--previous]` | Weekly synthesis + personal review |
 | `lore synthesis monthly [--previous]` | Monthly performance review |
 | `lore synthesis quarterly [--previous]` | Quarterly review with category stats |
