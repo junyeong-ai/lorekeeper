@@ -471,6 +471,121 @@ fn refuse_while_work_is_queued(opts: &GlobalOptions, force: bool) -> miette::Res
     ))
 }
 
+/// Deploy through the NEW binary, never from here.
+///
+/// This process carries the skills, pipelines and templates of the version being replaced, so
+/// writing them from here would deploy the predecessor over the successor. Best-effort: the
+/// binary is already in place and working, so a data directory that cannot be written is a
+/// follow-up rather than a failed update.
+fn redeploy_through(binary: &std::path::Path, opts: &GlobalOptions, data_dir: &std::path::Path) {
+    let mut child = std::process::Command::new(binary);
+    // The config the CALLER named, not whatever the child would auto-discover: `--config`
+    // decides which vault's `AGENTS.md` the deploy regenerates, and a child that re-discovered
+    // it would rewrite the contract of a different vault and leave this one behind.
+    if let Ok(path) = find_config(opts) {
+        child.arg("--config").arg(path);
+    }
+    child.args(["self", "deploy", "--data-dir"]).arg(data_dir);
+    match child.status() {
+        Ok(status) if status.success() => {}
+        _ => eprintln!("warning: could not redeploy — run `lore self deploy`"),
+    }
+}
+
+fn uninstall(installation: &Installation, yes: bool, purge_config: bool) -> miette::Result<()> {
+    let levels = installation.deployed_skill_levels();
+    eprintln!("This removes:");
+    eprintln!("  {}", installation.binary().display());
+    eprintln!("  {}", installation.pipelines_dir().display());
+    eprintln!("  {}", installation.templates_dir().display());
+    for level in &levels {
+        if let Some(dir) = installation.skills_dir(*level) {
+            eprintln!("  {}/lore-*", dir.display());
+        }
+    }
+    if purge_config {
+        eprintln!("  {}", installation.config_dir().display());
+    }
+    // The vault holds the user's knowledge and their credentials; the tool is the disposable
+    // half of the pair. Saying so is part of the confirmation, not a footnote after it.
+    eprintln!("\nYour vault is not touched.");
+
+    if !confirm("Remove this installation?", yes)? {
+        eprintln!("Cancelled");
+        return Ok(());
+    }
+
+    for level in levels {
+        let Some(root) = installation.skills_dir(level) else {
+            continue;
+        };
+        for name in lk_dist::skill_names() {
+            remove_dir(&root.join(name))?;
+        }
+    }
+    remove_dir(&installation.pipelines_dir())?;
+    remove_dir(&installation.templates_dir())?;
+    // Only when it is now empty: a data directory holding something this tool did not put
+    // there is not this tool's to delete.
+    let _ = std::fs::remove_dir(installation.data_dir());
+
+    if purge_config {
+        remove_dir(installation.config_dir())?;
+    } else {
+        // The records go with the copies they describe. Leaving `data-dir` behind meant a later
+        // bare `self deploy` resurrected the very directory this removed, in preference to the
+        // default, with nothing said.
+        for name in lk_dist::config_files()
+            .iter()
+            .map(|file| file.relative)
+            .chain(["data-dir", "deployed-skills"])
+        {
+            remove_file(&installation.config_dir().join(name))?;
+        }
+    }
+
+    remove_file(installation.binary())?;
+    eprintln!("Removed");
+    Ok(())
+}
+
+fn remove_dir(path: &std::path::Path) -> miette::Result<()> {
+    match std::fs::remove_dir_all(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(miette::miette!("remove {}: {e}", path.display())),
+    }
+}
+
+fn remove_file(path: &std::path::Path) -> miette::Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(miette::miette!("remove {}: {e}", path.display())),
+    }
+}
+
+/// Ask, unless the caller already answered — or unless nobody is there to.
+///
+/// A scheduled run has no terminal, so a prompt would block a job nobody is watching until it
+/// is killed. Refusing and naming the flag is the only outcome that leaves the operator
+/// something to act on.
+fn confirm(question: &str, yes: bool) -> miette::Result<bool> {
+    if yes {
+        return Ok(true);
+    }
+    if !std::io::stdin().is_terminal() {
+        return Err(miette::miette!(
+            "{question} — no terminal to ask on; pass `--yes` to answer in advance"
+        ));
+    }
+    dialoguer::Confirm::new()
+        .with_prompt(question)
+        .default(false)
+        .interact()
+        .map_err(|e| miette::miette!("{e}"))
+}
+
 #[cfg(test)]
 mod update_boundary_tests {
     use super::*;
@@ -600,119 +715,4 @@ mod update_boundary_tests {
             assert!(refuse_while_work_is_queued(&opts, true).is_ok());
         }
     }
-}
-
-/// Deploy through the NEW binary, never from here.
-///
-/// This process carries the skills, pipelines and templates of the version being replaced, so
-/// writing them from here would deploy the predecessor over the successor. Best-effort: the
-/// binary is already in place and working, so a data directory that cannot be written is a
-/// follow-up rather than a failed update.
-fn redeploy_through(binary: &std::path::Path, opts: &GlobalOptions, data_dir: &std::path::Path) {
-    let mut child = std::process::Command::new(binary);
-    // The config the CALLER named, not whatever the child would auto-discover: `--config`
-    // decides which vault's `AGENTS.md` the deploy regenerates, and a child that re-discovered
-    // it would rewrite the contract of a different vault and leave this one behind.
-    if let Ok(path) = find_config(opts) {
-        child.arg("--config").arg(path);
-    }
-    child.args(["self", "deploy", "--data-dir"]).arg(data_dir);
-    match child.status() {
-        Ok(status) if status.success() => {}
-        _ => eprintln!("warning: could not redeploy — run `lore self deploy`"),
-    }
-}
-
-fn uninstall(installation: &Installation, yes: bool, purge_config: bool) -> miette::Result<()> {
-    let levels = installation.deployed_skill_levels();
-    eprintln!("This removes:");
-    eprintln!("  {}", installation.binary().display());
-    eprintln!("  {}", installation.pipelines_dir().display());
-    eprintln!("  {}", installation.templates_dir().display());
-    for level in &levels {
-        if let Some(dir) = installation.skills_dir(*level) {
-            eprintln!("  {}/lore-*", dir.display());
-        }
-    }
-    if purge_config {
-        eprintln!("  {}", installation.config_dir().display());
-    }
-    // The vault holds the user's knowledge and their credentials; the tool is the disposable
-    // half of the pair. Saying so is part of the confirmation, not a footnote after it.
-    eprintln!("\nYour vault is not touched.");
-
-    if !confirm("Remove this installation?", yes)? {
-        eprintln!("Cancelled");
-        return Ok(());
-    }
-
-    for level in levels {
-        let Some(root) = installation.skills_dir(level) else {
-            continue;
-        };
-        for name in lk_dist::skill_names() {
-            remove_dir(&root.join(name))?;
-        }
-    }
-    remove_dir(&installation.pipelines_dir())?;
-    remove_dir(&installation.templates_dir())?;
-    // Only when it is now empty: a data directory holding something this tool did not put
-    // there is not this tool's to delete.
-    let _ = std::fs::remove_dir(installation.data_dir());
-
-    if purge_config {
-        remove_dir(installation.config_dir())?;
-    } else {
-        // The records go with the copies they describe. Leaving `data-dir` behind meant a later
-        // bare `self deploy` resurrected the very directory this removed, in preference to the
-        // default, with nothing said.
-        for name in lk_dist::config_files()
-            .iter()
-            .map(|file| file.relative)
-            .chain(["data-dir", "deployed-skills"])
-        {
-            remove_file(&installation.config_dir().join(name))?;
-        }
-    }
-
-    remove_file(installation.binary())?;
-    eprintln!("Removed");
-    Ok(())
-}
-
-fn remove_dir(path: &std::path::Path) -> miette::Result<()> {
-    match std::fs::remove_dir_all(path) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(miette::miette!("remove {}: {e}", path.display())),
-    }
-}
-
-fn remove_file(path: &std::path::Path) -> miette::Result<()> {
-    match std::fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(miette::miette!("remove {}: {e}", path.display())),
-    }
-}
-
-/// Ask, unless the caller already answered — or unless nobody is there to.
-///
-/// A scheduled run has no terminal, so a prompt would block a job nobody is watching until it
-/// is killed. Refusing and naming the flag is the only outcome that leaves the operator
-/// something to act on.
-fn confirm(question: &str, yes: bool) -> miette::Result<bool> {
-    if yes {
-        return Ok(true);
-    }
-    if !std::io::stdin().is_terminal() {
-        return Err(miette::miette!(
-            "{question} — no terminal to ask on; pass `--yes` to answer in advance"
-        ));
-    }
-    dialoguer::Confirm::new()
-        .with_prompt(question)
-        .default(false)
-        .interact()
-        .map_err(|e| miette::miette!("{e}"))
 }
