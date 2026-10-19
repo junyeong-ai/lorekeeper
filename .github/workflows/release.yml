@@ -163,10 +163,10 @@ jobs:
           else
             cp "target/${TARGET}/release/lore" "$stage/"
           fi
-          # The binary carries the templates, the skills, the pipeline scripts and the config
+          # The binary carries the templates, the runtime skills and the config
           # example, and `lore self deploy` writes them — so an archive holding copies would
           # publish a second set that nothing installs and that could disagree with the first.
-          cp README.md LICENSE "$stage/"
+          cp README.md README.en.md LICENSE "$stage/"
           archive="${stage}.${ARCHIVE_EXT}"
           if [ "$ARCHIVE_EXT" = "zip" ]; then
             powershell -Command "Compress-Archive -Path '$stage' -DestinationPath '$archive' -Force"
