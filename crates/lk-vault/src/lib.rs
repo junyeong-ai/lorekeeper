@@ -39,8 +39,8 @@ pub use self::indexed_links::{
     IndexedLink, IndexedLinkOptions, IndexedLinks, LinkDirection, inspect_indexed_links,
 };
 pub use self::knowledge::{
-    ConceptCuration, CurationPlan, CurationResult, PageRevision, ReviewCuration, curate,
-    preview_curation,
+    CategoryUpdate, ConceptCuration, CurationPlan, CurationResult, PageRevision, ReviewCuration,
+    curate, preview_curation,
 };
 pub use self::links::{LinkDetail, LinkDetails, LinkOptions, inspect_links};
 pub use self::log::{IngestLog, LogEntry, LogStatus};

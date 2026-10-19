@@ -43,7 +43,7 @@ fn reviewed_curation_is_read_only_in_preview_guarded_and_discoverable_after_publ
         source_revision(&lk_vault::parse_page(source_before).unwrap())
     );
     let plan = root.path().join("curation.json");
-    let request = json!({"evidence":[{"path":source,"revision":file_revision(source_before)}],"concepts":[{"path":concept,"revision":file_revision(concept_before),"aliases":["Stored","저장된 사례"],"knowledge_status":"retired","knowledge_review":review}],"reviews":[{"path":review,"revision":null,"content":assessment}]});
+    let request = json!({"evidence":[{"path":source,"revision":file_revision(source_before)}],"concepts":[{"path":concept,"revision":file_revision(concept_before),"aliases":["Stored","저장된 사례"],"tags":["source-assessment"],"knowledge_status":"retired","knowledge_review":review}],"reviews":[{"path":review,"revision":null,"content":assessment}]});
     std::fs::write(&plan, serde_json::to_vec(&request).unwrap()).unwrap();
     ok(
         &config,
@@ -111,6 +111,7 @@ fn reviewed_curation_is_read_only_in_preview_guarded_and_discoverable_after_publ
         "resolved"
     );
     assert_eq!(retired["hits"][0]["source_count"], 1);
+    assert_eq!(retired["hits"][0]["tags"], json!(["source-assessment"]));
     let draft = root.path().join("draft.md");
     std::fs::write(&draft, &after).unwrap();
     let fingerprint = ok(

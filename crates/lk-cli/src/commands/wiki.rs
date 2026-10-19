@@ -490,11 +490,21 @@ pub async fn run(opts: &super::GlobalOptions, cmd: WikiCommand) -> miette::Resul
             )
             .map_err(|error| miette::miette!("{error}"))?;
             let report = if dry_run {
-                lk_vault::preview_curation(&config.vault.root_path(), &config.vault.dirs, request)
+                lk_vault::preview_curation(
+                    &config.vault.root_path(),
+                    &config.vault.dirs,
+                    &config.concepts.categories,
+                    request,
+                )
             } else {
                 let session = lk_vault::MutationSession::acquire(&config.vault.root_path())
                     .map_err(|error| miette::miette!("{error}"))?;
-                lk_vault::curate(&session, &config.vault.dirs, request)
+                lk_vault::curate(
+                    &session,
+                    &config.vault.dirs,
+                    &config.concepts.categories,
+                    request,
+                )
             }
             .map_err(|error| miette::miette!("{error}"))?;
             let mut output =
