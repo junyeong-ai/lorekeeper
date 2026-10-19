@@ -100,7 +100,8 @@ continued factual support; explicit reviewed retraction is separate.
   Limits: 4MiB/event, 64MiB/source, 256MiB per CLI-planned RSS set. Dry-run is memory-only.
 - New binding is not historical proof about old pages/legacy logs. Page-only task
   behavior remains unchanged unless explicit event-aware policy is selected.
-- New selections come only from the request's provided manifest; accumulate links
+- Each concept from a manifest-bearing extraction requires an explicit article selection;
+  empty extraction is valid. New selections come only from the request's provided manifest; accumulate links
   and declarations under the exact origin guard. Carried selections retain and
   verify their historical manifest even after current collection changes. Daily
   rerenders preserve declarations; omission is not retraction.

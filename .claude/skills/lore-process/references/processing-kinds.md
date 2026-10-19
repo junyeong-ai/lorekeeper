@@ -278,7 +278,8 @@ When `input.rss_original` is present under `concept-extraction-rss-v2`, discover
 bound original and compare discovery `page_revision` to the captured target revision.
 Read each article you select through the pinned collection revision and full supporting
 context; return `rss_evidence: [{"event_id":"...","revision":"<payload revision>"}]`
-inside that concept object. Every pair must occur in the task's exact provided manifest.
+inside that concept object. Every returned concept requires at least one selected
+article; application refuses a missing selection before any publication. Every pair must occur in the task's exact provided manifest.
 Do not copy `concept_evidence` metadata from the page as fresh semantic judgment.
 A legacy task cannot acquire event authority by guessing a title, URL, date or EventId.
 Existing selections accumulate even if omitted; explicit retraction is a separate reviewed act.

@@ -767,6 +767,12 @@ impl Pipeline {
         // updated to cite.
         let mut staged = Vec::with_capacity(result.concepts.len());
         for reported in &result.concepts {
+            if manifest.is_some() && reported.rss_evidence.is_empty() {
+                return Err(PipelineError::Render(
+                    "each RSS concept requires selected article evidence from the task manifest"
+                        .into(),
+                ));
+            }
             if !reported.rss_evidence.is_empty() {
                 let provided = manifest.ok_or_else(|| {
                     PipelineError::Render("RSS selections require a versioned task manifest".into())
