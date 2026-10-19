@@ -759,6 +759,56 @@ pub fn has_valid_slug(concept: &ExtractedConcept) -> bool {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn nested_alias_extraction_preserves_the_existing_retired_owner() {
+        let dirs = VaultDirs::default();
+        let path = "wiki/concepts/group/stored.md";
+        let original = "---\ntype: concept\ntitle: Established\naliases: [Synonym]\nknowledge_status: retired\nsource_count: 7\n---\n# Established\n\n## Synthesis\nPreserved historical judgment.\n\n## Sources\n\n## Related\n";
+        let reader = lk_vault::InMemoryVault::new().with_page(path, original);
+        let mut drafts = ConceptDrafts::new();
+        let staged = drafts
+            .stage(
+                &ExtractedConcept {
+                    name: "Synonym".into(),
+                    aliases: vec!["Additional Alias".into()],
+                    category: None,
+                },
+                &reader,
+                &dirs,
+            )
+            .await
+            .unwrap();
+        assert_eq!(staged.identity().slug, "group/stored");
+        assert_eq!(
+            staged.existing.as_ref().unwrap().original.as_deref(),
+            Some(original)
+        );
+        drafts.commit(staged, jiff::civil::date(2026, 10, 19));
+        let pages = drafts
+            .render_pages(&TemplateEngine::build(None).unwrap(), &dirs, Locale::En)
+            .unwrap();
+        assert_eq!(pages.len(), 1);
+        assert_eq!(pages[0].path.to_string(), path);
+        let rendered = lk_vault::parse_page(&pages[0].content).unwrap();
+        assert_eq!(
+            rendered
+                .frontmatter
+                .get("knowledge_status")
+                .and_then(|value| value.as_str()),
+            Some("retired")
+        );
+        assert_eq!(rendered.frontmatter.source_count(), Some(7));
+        assert!(rendered.body.contains("Preserved historical judgment."));
+        assert_eq!(
+            drafts
+                .resolve_identity("Additional Alias", &reader, &dirs)
+                .await
+                .unwrap()
+                .slug,
+            "group/stored"
+        );
+    }
+
     /// A vault whose every page is missing, except one path whose read fails outright.
     struct FailsOn(&'static str);
 
@@ -1082,9 +1132,9 @@ mod tests {
             }
             async fn list_markdown(
                 &self,
-                _rel_dir: &std::path::Path,
+                rel_dir: &std::path::Path,
             ) -> Result<Vec<std::path::PathBuf>, lk_vault::VaultError> {
-                Ok(vec![std::path::PathBuf::from("zeta-capability.md")])
+                Ok(vec![rel_dir.join("zeta-capability.md")])
             }
         }
 

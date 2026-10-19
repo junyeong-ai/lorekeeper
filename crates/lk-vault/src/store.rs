@@ -33,6 +33,8 @@ pub trait VaultStore: Send + Sync {
     async fn list_markdown(&self, rel_dir: &Path) -> Result<Vec<PathBuf>, VaultError>;
 
     /// All Markdown descendants, retaining their complete vault-relative addresses.
+    /// Filesystem inventories validate leaf aliases and refuse directory aliases they
+    /// cannot traverse completely; an incomplete identity collection is not empty.
     async fn list_markdown_recursive(&self, rel_dir: &Path) -> Result<Vec<PathBuf>, VaultError>;
 }
 
@@ -43,16 +45,24 @@ pub async fn load_concept_registry(
 ) -> Result<lk_core::concept::ConceptRegistry, VaultError> {
     use lk_core::concept::{ConceptIdentity, ConceptRegistry};
     let mut registry = ConceptRegistry::new();
-    for path in reader
-        .list_markdown(&lk_core::vault_path::concepts_dir(dirs))
-        .await?
-    {
-        let slug = path
+    let directory = lk_core::vault_path::concepts_dir(dirs);
+    for path in reader.list_markdown_recursive(&directory).await? {
+        let stem = path
             .file_stem()
             .and_then(|stem| stem.to_str())
             .ok_or_else(|| {
                 std::io::Error::other(format!("concept address is not UTF-8: {}", path.display()))
             })?;
+        let relative = path
+            .strip_prefix(&directory)
+            .map_err(std::io::Error::other)?;
+        let slug = relative
+            .with_extension("")
+            .to_str()
+            .ok_or_else(|| {
+                std::io::Error::other(format!("concept address is not UTF-8: {}", path.display()))
+            })?
+            .replace(std::path::MAIN_SEPARATOR, "/");
         let page = reader.read_page(&path).await?.ok_or_else(|| {
             std::io::Error::other(format!(
                 "concept disappeared during registry read: {}",
@@ -63,7 +73,7 @@ pub async fn load_concept_registry(
             .frontmatter
             .get("title")
             .and_then(|value| value.as_str())
-            .unwrap_or(slug);
+            .unwrap_or(stem);
         let aliases = page
             .frontmatter
             .get("aliases")
@@ -75,7 +85,7 @@ pub async fn load_concept_registry(
             .collect::<Vec<_>>();
         registry.register(
             ConceptIdentity {
-                slug: slug.into(),
+                slug,
                 title: title.into(),
             },
             &aliases,
@@ -99,16 +109,49 @@ impl FsVault {
 impl VaultStore for FsVault {
     async fn list_markdown_recursive(&self, rel_dir: &Path) -> Result<Vec<PathBuf>, VaultError> {
         let full = crate::page_path(&self.root, rel_dir)?;
-        crate::search::markdown_files(&self.root, &full)?
-            .into_iter()
-            .map(|path| {
-                let relative = path
-                    .strip_prefix(&self.root)
-                    .map_err(std::io::Error::other)?;
-                crate::page_path(&self.root, relative)?;
-                Ok(relative.to_path_buf())
-            })
-            .collect()
+        match std::fs::metadata(&full) {
+            Ok(metadata) if metadata.is_dir() => {}
+            Ok(_) => {
+                return Err(std::io::Error::other("vault collection is not a directory").into());
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error.into()),
+        }
+        let mut paths = Vec::new();
+        for entry in walkdir::WalkDir::new(&full).follow_links(false) {
+            let entry = entry.map_err(|error| std::io::Error::other(error.to_string()))?;
+            if entry.depth() > 0
+                && entry.file_type().is_symlink()
+                && std::fs::metadata(entry.path())?.is_dir()
+            {
+                return Err(std::io::Error::other(
+                    "vault collection contains an untraversed directory alias",
+                )
+                .into());
+            }
+            if entry.file_type().is_dir()
+                || entry
+                    .path()
+                    .extension()
+                    .is_none_or(|extension| extension != "md")
+            {
+                continue;
+            }
+            let relative = entry
+                .path()
+                .strip_prefix(&self.root)
+                .map_err(std::io::Error::other)?;
+            let checked = crate::page_path(&self.root, relative)?;
+            if !std::fs::metadata(checked)?.is_file() {
+                return Err(std::io::Error::other(
+                    "Markdown collection entry is not a regular file",
+                )
+                .into());
+            }
+            paths.push(relative.to_path_buf());
+        }
+        paths.sort();
+        Ok(paths)
     }
 
     async fn read_page(&self, rel_path: &Path) -> Result<Option<VaultPage>, VaultError> {
@@ -221,6 +264,81 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn recursive_inventory_validates_nested_aliases_and_refuses_incomplete_walks() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let nested = root.path().join("wiki/concepts/group");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(
+            root.path().join("source.md"),
+            "---\ntitle: Alias Owner\n---\nBody.",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink("../../../source.md", nested.join("alias.md")).unwrap();
+        let reader = FsVault::new(root.path());
+        let registry = load_concept_registry(&reader, &Default::default())
+            .await
+            .unwrap();
+        assert!(
+            matches!(registry.resolve("Alias Owner"), lk_core::concept::Resolution::Owned(owner) if owner.slug == "group/alias")
+        );
+        for target in [outside.path().join("outside.md"), nested.join("missing.md")] {
+            std::fs::write(outside.path().join("outside.md"), "Outside.").unwrap();
+            std::os::unix::fs::symlink(&target, nested.join("invalid.md")).unwrap();
+            assert!(
+                load_concept_registry(&reader, &Default::default())
+                    .await
+                    .is_err()
+            );
+            std::fs::remove_file(nested.join("invalid.md")).unwrap();
+        }
+        std::os::unix::fs::symlink(root.path(), nested.join("directory-alias")).unwrap();
+        assert!(
+            load_concept_registry(&reader, &Default::default())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn registry_preserves_nested_addresses_aliases_and_retired_reservations() {
+        use lk_core::concept::Resolution;
+
+        let vault = InMemoryVault::new()
+            .with_page(
+                "wiki/concepts/first/entry.md",
+                "---\ntitle: Established\naliases: [Synonym, Shared]\nknowledge_status: retired\n---\nHistorical definition.\n",
+            )
+            .with_page(
+                "wiki/concepts/second/entry.md",
+                "---\ntitle: Other\naliases: [Shared]\n---\nOther definition.\n",
+            )
+            .with_page("wiki/concepts/third/fallback.md", "No declared title.\n");
+        let registry = load_concept_registry(&vault, &Default::default())
+            .await
+            .unwrap();
+        for name in ["Established", "Synonym"] {
+            let Resolution::Owned(owner) = registry.resolve(name) else {
+                panic!("nested retired owner must reserve {name}");
+            };
+            assert_eq!(owner.slug, "first/entry");
+            assert_eq!(owner.title, "Established");
+        }
+        let Resolution::Ambiguous { claimants } = registry.resolve("Shared") else {
+            panic!("same basename in different folders must remain distinct owners");
+        };
+        assert_eq!(claimants.len(), 2);
+        assert_eq!(claimants[0].slug, "first/entry");
+        assert_eq!(claimants[1].slug, "second/entry");
+        assert!(matches!(registry.resolve("entry"), Resolution::Absent));
+        let Resolution::Owned(fallback) = registry.resolve("fallback") else {
+            panic!("title fallback remains the file stem, not the nested address");
+        };
+        assert_eq!(fallback.slug, "third/fallback");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn filesystem_readers_share_the_vault_boundary() {
         let root = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
@@ -238,6 +356,12 @@ mod tests {
         assert!(
             vault
                 .list_markdown(Path::new("wiki/concepts"))
+                .await
+                .is_err()
+        );
+        assert!(
+            vault
+                .list_markdown_recursive(Path::new("wiki/concepts"))
                 .await
                 .is_err()
         );
@@ -261,6 +385,14 @@ mod tests {
         assert_eq!(
             vault
                 .list_markdown(Path::new("wiki/concepts"))
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            vault
+                .list_markdown_recursive(Path::new("wiki/concepts"))
                 .await
                 .unwrap()
                 .len(),

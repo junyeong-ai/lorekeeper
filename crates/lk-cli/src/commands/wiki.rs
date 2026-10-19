@@ -3,8 +3,8 @@
 
 use std::path::PathBuf;
 
-use lk_core::frontmatter;
 use lk_core::i18n::Locale;
+use lk_vault::VaultStore;
 
 use super::{find_config, load_config};
 
@@ -1154,7 +1154,8 @@ async fn run_concepts(opts: &super::GlobalOptions, json: bool) -> miette::Result
     let config_path = find_config(opts)?;
     let config = load_config(&config_path)?;
     let vault_root = config.vault.root_path();
-    let concept_dir = vault_root.join(lk_core::vault_path::concepts_dir(&config.vault.dirs));
+    let concept_dir = lk_core::vault_path::concepts_dir(&config.vault.dirs);
+    let reader = lk_vault::FsVault::new(&vault_root);
 
     let mut entries: Vec<ConceptEntry> = Vec::new();
     // A page this cannot read is a concept the caller will not see. `/lore-process` loads this as
@@ -1164,49 +1165,38 @@ async fn run_concepts(opts: &super::GlobalOptions, json: bool) -> miette::Result
     // that looks complete.
     let mut unreadable: Vec<String> = Vec::new();
 
-    let dir_exists = tokio::fs::metadata(&concept_dir)
-        .await
-        .map(|m| m.is_dir())
-        .unwrap_or(false);
-
-    if !dir_exists {
-        if json {
-            println!("[]");
-        } else {
-            println!("# 0 concepts");
-        }
-        return Ok(());
-    }
-
-    let mut dir = tokio::fs::read_dir(&concept_dir)
+    let paths = reader
+        .list_markdown_recursive(&concept_dir)
         .await
         .map_err(|e| miette::miette!("read {}: {e}", concept_dir.display()))?;
-
-    while let Some(entry) = dir.next_entry().await.map_err(|e| miette::miette!("{e}"))? {
-        let path = entry.path();
-        if path.extension().is_none_or(|ext| ext != "md") {
-            continue;
-        }
-        let content = match tokio::fs::read_to_string(&path).await {
-            Ok(c) => c,
+    for path in paths {
+        let page = match reader.read_page(&path).await {
+            Ok(Some(page)) => page,
+            Ok(None) => {
+                unreadable.push(format!(
+                    "{}: concept disappeared during inventory",
+                    path.display()
+                ));
+                continue;
+            }
             Err(e) => {
                 unreadable.push(format!("{}: {e}", path.display()));
                 continue;
             }
         };
-        let page = match frontmatter::parse_page(&content) {
-            Ok(p) => p,
-            Err(e) => {
-                unreadable.push(format!("{}: {e}", path.display()));
-                continue;
-            }
-        };
-        // The file stem, never the `id` frontmatter: a page's ADDRESS is where it sits, which
+        // The collection-relative address, never the `id` frontmatter: a page's ADDRESS is where it sits, which
         // is what a link resolves to and what the graph keys a node on. Reading `id` would be
         // a second answer to the same question, and a page missing the field — hand-authored,
         // or with frontmatter someone edited — would have no address at all and drop out of a
         // registry whose whole job is to be complete.
-        let Some(slug) = path.file_stem().and_then(|s| s.to_str()).map(String::from) else {
+        let address = path
+            .strip_prefix(&concept_dir)
+            .map_err(|error| miette::miette!("{error}"))?
+            .with_extension("");
+        let Some(slug) = address
+            .to_str()
+            .map(|value| value.replace(std::path::MAIN_SEPARATOR, "/"))
+        else {
             unreadable.push(format!("{}: filename is not valid UTF-8", path.display()));
             continue;
         };
@@ -1214,7 +1204,11 @@ async fn run_concepts(opts: &super::GlobalOptions, json: bool) -> miette::Result
             .frontmatter
             .get("title")
             .and_then(|v| v.as_str())
-            .unwrap_or(&slug)
+            .unwrap_or_else(|| {
+                path.file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .unwrap_or(&slug)
+            })
             .to_string();
         let category = page
             .frontmatter
