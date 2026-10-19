@@ -396,6 +396,11 @@ Use Claude Code 2.1.246 or later. Each skill declares a qualified name such as
 Scheduled runs explicitly load the selected skill from `LORE_SKILL_DIR` and invoke
 its qualified name.
 
+Existing concepts may live at addresses such as `wiki/concepts/group/stored.md`.
+Resolution and concept inventory return `group/stored` as the `slug`, and later
+ingestion retains that address. Retired names remain reserved against duplicates;
+normal search and knowledge briefs exclude retired content.
+
 | Skill | What it does |
 |---|---|
 | `/lore-process` | Drains the LLM queue after ingest — fills summaries, concepts, themes, reviews |

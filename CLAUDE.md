@@ -39,8 +39,9 @@ one source to infer that distinction.
 
 - **Use shared representations.** Paths go through `VaultPath`/`vault_path` constants,
   links through `lk_core::link`, names through `ConceptRegistry`, evidence through
-  `Citation`/`citation_digest`. A slug is a filename, not name identity; preserve
-  established addresses and resolve declared titles/aliases before creating a page.
+  `Citation`/`citation_digest`. A concept slug is its collection-relative address
+  without `.md`, not name identity; retain nested addresses and resolve declared
+  titles/aliases before creating a page.
 - **Keep the vault portable.** Every page declares its format in `type`. Internal
   links are CommonMark `[label](relative/path.md)`, not wikilinks. Exact addresses
   survive rewriting; names are source-written, while generated prose uses `vault.locale`.
