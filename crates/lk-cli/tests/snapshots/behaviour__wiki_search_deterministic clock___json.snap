@@ -24,20 +24,33 @@ exit: 0
       "file_revision": "5ff21ff52d4ae9fcb3a3dfb3c04024bc9477e438e96b78a1d3fd63e8f4b77385",
       "format": "concept",
       "id": "deterministic-clock",
+      "knowledge_status": "active",
       "matched": "name",
       "path": "wiki/concepts/deterministic-clock.md",
+      "phrase_match": true,
+      "reviews": [],
       "source_count": 2,
+      "spacing_match": false,
+      "tags": [],
       "title": "Deterministic clock"
     }
   ],
   "include_sources": false,
+  "knowledge_status": "active",
+  "knowledge_statuses": {
+    "active": 1
+  },
   "next_offset": null,
   "offset": 0,
+  "phrase": false,
   "query": "deterministic clock",
   "source_status": null,
   "source_statuses": {
     "": 1
   },
+  "spacing": false,
+  "tag_filters": [],
+  "tags": {},
   "total": 1,
   "type": null
 }

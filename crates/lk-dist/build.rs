@@ -10,10 +10,11 @@ use std::path::{Path, PathBuf};
 
 /// The scheduled pipelines, named because `scripts/` also holds the installers and the gate
 /// runner — files a user never receives through `lore`.
-const PIPELINES: [&str; 8] = [
+const PIPELINES: [&str; 9] = [
     "lore-pipeline.sh",
     "lore-daily.sh",
     "lore-weekly.sh",
+    "lore-knowledge.sh",
     "lore-remind.sh",
     "lore-maintenance.sh",
     "lore-monthly.sh",

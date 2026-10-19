@@ -24,6 +24,8 @@ log() { printf '%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*"; }
 
 failed=()
 
+pipeline_failed() { [ ${#failed[@]} -gt 0 ]; }
+
 # Run one stage, recording its outcome without stopping the pipeline.
 run() {
     local name="$1"; shift
@@ -183,7 +185,7 @@ drain_queue() {
 # category, one name on two pages — and a run of this pipeline is what produces those. What a
 # healthy vault carries (uncited concepts, hubs, open conflicts) it reports without gating, so its
 # exit code belongs in `failed`.
-sync_graph() {
+reconcile_graph() {
     run "schema"         lore_cmd schema
     run "queue apply"    lore_cmd queue apply
     run "backlinks-sync" lore_cmd graph backlinks-sync
@@ -198,6 +200,10 @@ sync_graph() {
     run "wiki refresh"   lore_cmd wiki refresh
     run "graph lint"     lore_cmd graph lint
     run "queue completion" lore_cmd queue check
+}
+
+sync_graph() {
+    reconcile_graph
     run "knowledge reviews" lore_cmd wiki reviews --check
 }
 

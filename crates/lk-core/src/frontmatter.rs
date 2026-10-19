@@ -2,6 +2,23 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum KnowledgeStatus {
+    #[default]
+    Active,
+    Retired,
+}
+
+impl KnowledgeStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Retired => "retired",
+        }
+    }
+}
+
 /// Names of this system's PRIVATE machine-coordination frontmatter fields — keys invented
 /// by the tooling with no meaning outside the vault — that cross a crate boundary (one
 /// crate writes, another reads). A bare literal on either side would let an internal
@@ -55,6 +72,14 @@ pub struct Frontmatter {
 }
 
 impl Frontmatter {
+    pub fn knowledge_status(&self) -> Result<KnowledgeStatus, String> {
+        match self.get("knowledge_status") {
+            None => Ok(KnowledgeStatus::Active),
+            Some(value) => serde_json::from_value(value.clone())
+                .map_err(|_| "knowledge_status must be active or retired".to_owned()),
+        }
+    }
+
     pub fn get(&self, key: &str) -> Option<&serde_json::Value> {
         self.fields.get(key)
     }

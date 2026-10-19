@@ -59,10 +59,9 @@ sources:
     type: google-drive
     enabled: false
     params:
-      folder: "AI-Briefing/briefings"
-      file_pattern: "briefing-{date}.md"
-      # max_files: 200            # (optional) per-run cap; the fetch paginates the whole
-                                  # folder listing and warns if this cap actually drops files
+      folder_id: "YOUR_DRIVE_FOLDER_ID" # copy the ID from the Drive folder URL; "root" is valid
+      # name_prefix: "briefing-"       # optional filename prefix, not a date or glob pattern
+      # max_files: 200                 # a reached cap is a partial observation
     labels: [ai-industry]
     extract_concepts: true
 
@@ -444,6 +443,10 @@ concepts:
 # Link graph analysis (lore graph lint/cluster/suggest-links).
 # Fully optional — omit the entire block to use defaults.
 # graph:
+#   audit:
+#     schedule: "0 7 * * 0"         # weekly semantic maintenance, independent of synthesis
+#     batch_size: 50               # rotate changed and first-time concepts fairly (1..100)
+#                                  # requires installed pipelines via --pipeline-dir
 #   scope:
 #     dirs: [wiki]                   # vault-relative dirs to scan (default: vault.dirs.wiki)
 #     exclude: []                    # glob patterns to skip (e.g., ["wiki/log.md"])

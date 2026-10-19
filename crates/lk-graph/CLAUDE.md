@@ -44,6 +44,15 @@ and CLI discovery, not a second graph authority.
   applies declared direction/type/scope before pagination; facets describe the
   pre-filter scope. Direct links do not establish causation.
 
+## Incremental semantic maintenance (`audit.rs`)
+
+- Derive inputs from actual concept/evidence/related-page revisions using the shared
+  backlink authority. Receipts describe completed reads, never factual confidence.
+- Preserve pending first-discovery order and rotate changed/first-time work. A bounded
+  weekly batch must not starve old work or grow into an unbounded full-corpus audit.
+- A missing, invalid or stale scoped review reopens its receipt. Valid open findings
+  remain durable without weekly prose rewrites. Record only after guarded final reads.
+
 ## Concept names and diagnostics (`concept_lint.rs`)
 
 Names are declared title and aliases (file-stem fallback when title is missing),

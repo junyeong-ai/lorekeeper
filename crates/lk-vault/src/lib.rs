@@ -4,6 +4,7 @@ mod brief;
 mod document;
 mod index;
 mod indexed_links;
+mod knowledge;
 mod links;
 mod log;
 mod manual_original;
@@ -11,6 +12,7 @@ mod mutation;
 mod navigation;
 mod original_io;
 mod provenance;
+mod provenance_index;
 mod review;
 mod rss_evidence;
 mod rss_original;
@@ -37,6 +39,10 @@ pub use self::document::{
 pub use self::index::{IndexCatalog, build_catalog, build_index, write_index};
 pub use self::indexed_links::{
     IndexedLink, IndexedLinkOptions, IndexedLinks, LinkDirection, inspect_indexed_links,
+};
+pub use self::knowledge::{
+    ConceptCuration, CurationPlan, CurationResult, PageRevision, ReviewCuration, curate,
+    preview_curation,
 };
 pub use self::links::{LinkDetail, LinkDetails, LinkOptions, inspect_links};
 pub use self::log::{IngestLog, LogEntry, LogStatus};

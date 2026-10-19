@@ -37,10 +37,6 @@ const EMBEDDED: &[(&str, &str)] = &[
         include_str!("../../../templates/google-calendar.md.jinja"),
     ),
     (
-        "google-drive.md.jinja",
-        include_str!("../../../templates/google-drive.md.jinja"),
-    ),
-    (
         "jira.md.jinja",
         include_str!("../../../templates/jira.md.jinja"),
     ),

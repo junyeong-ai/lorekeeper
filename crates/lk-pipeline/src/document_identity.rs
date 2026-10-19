@@ -1,18 +1,11 @@
 use lk_core::frontmatter::Frontmatter;
-use serde::Deserialize;
+use lk_core::source_identity::SourceIdentity;
 
 use crate::PipelineError;
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct RepositoryDocument {
-    pub repository: String,
-    pub document: String,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum DocumentIdentity {
-    Repository(RepositoryDocument),
+    Stable(SourceIdentity),
     Location(String),
 }
 
@@ -23,16 +16,10 @@ impl DocumentIdentity {
         url: Option<&str>,
     ) -> Result<Option<Self>, PipelineError> {
         if let Some(stable) = stable.filter(|value| !value.is_null()) {
-            let identity: RepositoryDocument =
-                serde_json::from_value(stable.clone()).map_err(|error| {
-                    PipelineError::Render(format!("invalid source_identity: {error}"))
-                })?;
-            if identity.repository.trim().is_empty() || identity.document.trim().is_empty() {
-                return Err(PipelineError::Render(
-                    "source_identity repository and document must be nonempty".into(),
-                ));
-            }
-            return Ok(Some(Self::Repository(identity)));
+            return SourceIdentity::from_value(stable.clone())
+                .map(Self::Stable)
+                .map(Some)
+                .map_err(PipelineError::Render);
         }
         Ok(file
             .filter(|value| !value.is_empty())
@@ -56,11 +43,7 @@ impl DocumentIdentity {
 impl std::fmt::Display for DocumentIdentity {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Repository(identity) => write!(
-                formatter,
-                "repository {:?}, document {:?}",
-                identity.repository, identity.document
-            ),
+            Self::Stable(identity) => identity.fmt(formatter),
             Self::Location(location) => formatter.write_str(location),
         }
     }

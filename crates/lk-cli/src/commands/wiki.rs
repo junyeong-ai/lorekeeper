@@ -46,6 +46,9 @@ pub enum WikiCommand {
     Provenance {
         /// Exact vault-relative imported document path
         path: PathBuf,
+        /// Read exact captured identities and relations from wiki prepare
+        #[arg(long)]
+        snapshot: Option<String>,
         /// Follow declarations made by this page, to its identity, or both
         #[arg(long, value_enum, default_value_t = ProvenanceDirection::Outgoing)]
         direction: ProvenanceDirection,
@@ -69,6 +72,36 @@ pub enum WikiCommand {
     },
     /// Prepare a reusable lexical search snapshot from current pages (JSON)
     Prepare,
+    /// Plan a bounded semantic audit of changed or never-reviewed concepts (read-only JSON)
+    AuditPlan {
+        /// Maximum concepts (1..100); defaults to graph.audit.batch_size
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Re-read exact original batch members after repairs; repeat for each address
+        #[arg(long = "path")]
+        paths: Vec<String>,
+    },
+    /// Record completed semantic reads with current concept and dependency guards (JSON)
+    AuditRecord {
+        /// JSON assessments with exact concept and semantic input revisions
+        #[arg(long)]
+        file: PathBuf,
+    },
+    /// Publish reviewed concept metadata and durable reviews with exact evidence guards
+    Curate {
+        /// Validate evidence, names and reviews without publishing or journal recovery
+        #[arg(long)]
+        dry_run: bool,
+        /// JSON curation plan; see lore-wiki's curation reference for the contract
+        #[arg(long)]
+        file: PathBuf,
+    },
+    /// Compute exact file and authored-page revisions for a local Markdown draft (read-only JSON)
+    Fingerprint {
+        /// Local Markdown draft; does not publish or read configuration
+        #[arg(long)]
+        file: PathBuf,
+    },
     /// Read a page outline or a revision-checked section in bounded Unicode characters (JSON)
     Read {
         /// Exact vault-relative Markdown path
@@ -169,6 +202,8 @@ pub enum WikiCommand {
         #[command(flatten)]
         options: DiscoveryOptions,
         #[command(flatten)]
+        matching: VisibleSearchOptions,
+        #[command(flatten)]
         evidence: BodyEvidenceOptions,
     },
     /// Browse metadata by title, or newest declared created date (not ingestion time)
@@ -256,6 +291,12 @@ pub struct DiscoveryOptions {
     /// Exact frontmatter type, such as concept, document or exploration
     #[arg(long = "type")]
     format: Option<String>,
+    /// Require every tag (case-insensitive), including preserved manual-source tags
+    #[arg(long = "tag")]
+    tags: Vec<String>,
+    /// Include active knowledge, retired knowledge, or both; source lifecycle is separate
+    #[arg(long, value_enum, default_value_t = KnowledgeScope::Active)]
+    knowledge_status: KnowledgeScope,
     /// Include daily observations and managed reviews
     #[arg(long)]
     include_sources: bool,
@@ -264,10 +305,40 @@ pub struct DiscoveryOptions {
     json: bool,
 }
 
+#[derive(Default, clap::Args)]
+pub struct VisibleSearchOptions {
+    /// Require a contiguous visible phrase instead of separate words
+    #[arg(long, conflicts_with = "body")]
+    phrase: bool,
+    /// Ignore whitespace within visible-text blocks; matches remain retrieval candidates
+    #[arg(long, conflicts_with = "body")]
+    spacing: bool,
+}
+
+#[derive(Clone, Copy, clap::ValueEnum, Default, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum KnowledgeScope {
+    #[default]
+    Active,
+    Retired,
+    All,
+}
+
+impl KnowledgeScope {
+    fn status(self) -> Option<lk_core::frontmatter::KnowledgeStatus> {
+        match self {
+            Self::Active => Some(lk_core::frontmatter::KnowledgeStatus::Active),
+            Self::Retired => Some(lk_core::frontmatter::KnowledgeStatus::Retired),
+            Self::All => None,
+        }
+    }
+}
+
 pub async fn run(opts: &super::GlobalOptions, cmd: WikiCommand) -> miette::Result<()> {
     match cmd {
         WikiCommand::Provenance {
             path,
+            snapshot,
             direction,
             relation,
             limit,
@@ -290,6 +361,7 @@ pub async fn run(opts: &super::GlobalOptions, cmd: WikiCommand) -> miette::Resul
                     limit,
                     offset,
                     revision: revision.as_deref(),
+                    snapshot: snapshot.as_deref(),
                 },
             )
             .map_err(|e| miette::miette!("{e}"))?;
@@ -398,6 +470,79 @@ pub async fn run(opts: &super::GlobalOptions, cmd: WikiCommand) -> miette::Resul
         }
         WikiCommand::DocumentIdentity { command } => {
             super::document_identity::run(opts, command).await
+        }
+        WikiCommand::AuditPlan { limit, paths } => {
+            let config = load_config(&find_config(opts)?)?;
+            let root = config.vault.root_path();
+            let pages = lk_graph::scan::scan_vault(&root, config.graph.scope.follow_links)
+                .map_err(|error| miette::miette!("{error}"))?;
+            let result = lk_graph::audit::plan_selected(
+                &root,
+                &config.vault.dirs,
+                &pages,
+                limit.unwrap_or(config.graph.audit.batch_size),
+                &paths,
+            )
+            .map_err(|error| miette::miette!("{error}"))?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&result)
+                    .map_err(|error| miette::miette!("{error}"))?
+            );
+            Ok(())
+        }
+        WikiCommand::AuditRecord { file } => {
+            let config = load_config(&find_config(opts)?)?;
+            let results: lk_graph::audit::AuditResults = serde_json::from_slice(
+                &std::fs::read(file).map_err(|error| miette::miette!("{error}"))?,
+            )
+            .map_err(|error| miette::miette!("{error}"))?;
+            let root = config.vault.root_path();
+            let session = lk_vault::MutationSession::acquire(&root)
+                .map_err(|error| miette::miette!("{error}"))?;
+            let pages = lk_graph::scan::scan_vault(&root, config.graph.scope.follow_links)
+                .map_err(|error| miette::miette!("{error}"))?;
+            let recorded = lk_graph::audit::record(&session, &config.vault.dirs, &pages, results)
+                .map_err(|error| miette::miette!("{error}"))?;
+            println!("{}", serde_json::json!({"recorded":recorded}));
+            Ok(())
+        }
+        WikiCommand::Curate { file, dry_run } => {
+            let config = load_config(&find_config(opts)?)?;
+            let request: lk_vault::CurationPlan = serde_json::from_slice(
+                &std::fs::read(file).map_err(|error| miette::miette!("{error}"))?,
+            )
+            .map_err(|error| miette::miette!("{error}"))?;
+            let report = if dry_run {
+                lk_vault::preview_curation(&config.vault.root_path(), &config.vault.dirs, request)
+            } else {
+                let session = lk_vault::MutationSession::acquire(&config.vault.root_path())
+                    .map_err(|error| miette::miette!("{error}"))?;
+                lk_vault::curate(&session, &config.vault.dirs, request)
+            }
+            .map_err(|error| miette::miette!("{error}"))?;
+            let mut output =
+                serde_json::to_value(report).map_err(|error| miette::miette!("{error}"))?;
+            output["dry_run"] = serde_json::json!(dry_run);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&output)
+                    .map_err(|error| miette::miette!("{error}"))?
+            );
+            Ok(())
+        }
+        WikiCommand::Fingerprint { file } => {
+            let raw = std::fs::read_to_string(&file)
+                .map_err(|error| miette::miette!("{}: {error}", file.display()))?;
+            let page = lk_vault::parse_page(&raw).map_err(|error| miette::miette!("{error}"))?;
+            println!(
+                "{}",
+                serde_json::json!({
+                    "file_revision": lk_core::concept::file_revision(&raw),
+                    "source_revision": lk_core::concept::source_revision(&page),
+                })
+            );
+            Ok(())
         }
         WikiCommand::Prepare => {
             let config = load_config(&find_config(opts)?)?;
@@ -543,6 +688,7 @@ pub async fn run(opts: &super::GlobalOptions, cmd: WikiCommand) -> miette::Resul
         WikiCommand::Search {
             query,
             options,
+            matching,
             evidence,
         } => {
             if evidence.body {
@@ -553,11 +699,14 @@ pub async fn run(opts: &super::GlobalOptions, cmd: WikiCommand) -> miette::Resul
                     Some(&query.join(" ")),
                     options,
                     BrowseOptions::default(),
+                    matching,
                 )
                 .await
             }
         }
-        WikiCommand::Browse { options, dates } => run_search(opts, None, options, dates).await,
+        WikiCommand::Browse { options, dates } => {
+            run_search(opts, None, options, dates, VisibleSearchOptions::default()).await
+        }
     }
 }
 
@@ -581,6 +730,8 @@ async fn run_body_search(
                 category: options.category.as_deref(),
                 source_status: options.source_status.as_deref(),
                 format: options.format.as_deref(),
+                tags: &options.tags,
+                knowledge_status: options.knowledge_status.status(),
                 ..Default::default()
             },
             regex: evidence.regex,
@@ -597,6 +748,10 @@ async fn run_body_search(
         output["category"] = serde_json::json!(options.category);
         output["source_status"] = serde_json::json!(options.source_status);
         output["type"] = serde_json::json!(options.format);
+        output["tag_filters"] = serde_json::json!(options.tags);
+        output["knowledge_status"] = serde_json::json!(options.knowledge_status);
+        output["phrase"] = serde_json::json!(false);
+        output["spacing"] = serde_json::json!(false);
         println!(
             "{}",
             serde_json::to_string_pretty(&output).map_err(|error| miette::miette!("{error}"))?
@@ -654,6 +809,7 @@ async fn run_search(
     query: Option<&str>,
     options: DiscoveryOptions,
     dates: BrowseOptions,
+    matching: VisibleSearchOptions,
 ) -> miette::Result<()> {
     if query.is_some_and(|query| query.trim().is_empty()) {
         return Err(miette::miette!(
@@ -682,6 +838,10 @@ async fn run_search(
             category: options.category.as_deref(),
             source_status: options.source_status.as_deref(),
             format: options.format.as_deref(),
+            tags: &options.tags,
+            knowledge_status: options.knowledge_status.status(),
+            phrase: matching.phrase,
+            spacing: matching.spacing,
         },
     )
     .map_err(|e| miette::miette!("{e}"))?;
@@ -699,6 +859,10 @@ async fn run_search(
         output["category"] = serde_json::json!(options.category);
         output["source_status"] = serde_json::json!(options.source_status);
         output["type"] = serde_json::json!(options.format);
+        output["tag_filters"] = serde_json::json!(options.tags);
+        output["knowledge_status"] = serde_json::json!(options.knowledge_status);
+        output["phrase"] = serde_json::json!(matching.phrase);
+        output["spacing"] = serde_json::json!(matching.spacing);
         println!(
             "{}",
             serde_json::to_string_pretty(&output).map_err(|e| miette::miette!("{e}"))?
@@ -1133,4 +1297,34 @@ struct ConceptEntry {
     category: String,
     source_count: u64,
     aliases: Vec<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::{CommandFactory, Parser};
+
+    #[derive(Parser)]
+    struct WikiParser {
+        #[command(subcommand)]
+        command: WikiCommand,
+    }
+
+    #[test]
+    fn visible_matching_options_belong_only_to_search() {
+        WikiParser::command().debug_assert();
+        assert!(WikiParser::try_parse_from(["wiki", "browse"]).is_ok());
+        assert!(WikiParser::try_parse_from(["wiki", "browse", "--phrase"]).is_err());
+        assert!(WikiParser::try_parse_from(["wiki", "browse", "--spacing"]).is_err());
+        assert!(
+            WikiParser::try_parse_from(["wiki", "search", "CloudRun", "--spacing", "--phrase"])
+                .is_ok()
+        );
+        for matching in ["--phrase", "--spacing"] {
+            assert!(
+                WikiParser::try_parse_from(["wiki", "search", "CloudRun", "--body", matching])
+                    .is_err()
+            );
+        }
+    }
 }

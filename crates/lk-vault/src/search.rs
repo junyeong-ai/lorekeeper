@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 
 use lk_core::concept::identity_key;
 use lk_core::config::VaultDirs;
+use lk_core::frontmatter::KnowledgeStatus;
 use lk_core::vault_path::{concepts_dir, documents_dir, explorations_dir};
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 use unicode_normalization::UnicodeNormalization;
@@ -37,6 +38,8 @@ pub enum MatchField {
     /// The query IS one of the page's names, by the same exact fold `lore resolve` uses. The
     /// page does not merely discuss the subject; it is the page the name addresses.
     Identity,
+    /// A declared name with different whitespace; this does not establish name ownership.
+    NameVariant,
     /// The subject is named in the page's declared title or aliases.
     Name,
     /// The subject is named in the page's opening statement — the first line of its first
@@ -66,6 +69,13 @@ pub struct SearchHit {
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub created_truncated: bool,
     pub source_count: u64,
+    pub knowledge_status: KnowledgeStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub knowledge_review: Option<String>,
+    pub tags: Vec<String>,
+    pub phrase_match: bool,
+    pub spacing_match: bool,
+    pub reviews: Vec<crate::review::ReviewPreview>,
     pub matched: MatchField,
     pub excerpt: String,
     pub file_revision: String,
@@ -120,6 +130,10 @@ pub struct SearchOptions<'a> {
     pub category: Option<&'a str>,
     pub source_status: Option<&'a str>,
     pub format: Option<&'a str>,
+    pub tags: &'a [String],
+    pub knowledge_status: Option<KnowledgeStatus>,
+    pub phrase: bool,
+    pub spacing: bool,
 }
 
 impl Default for SearchOptions<'_> {
@@ -136,13 +150,19 @@ impl Default for SearchOptions<'_> {
             category: None,
             source_status: None,
             format: None,
+            tags: &[],
+            knowledge_status: Some(KnowledgeStatus::Active),
+            phrase: false,
+            spacing: false,
         }
     }
 }
 
 impl SearchOptions<'_> {
     pub(crate) fn validate_browse(&self) -> Result<(), VaultError> {
-        let message = if self.query.is_some()
+        let message = if self.query.is_none() && (self.phrase || self.spacing) {
+            Some("phrase and spacing matching require a query")
+        } else if self.query.is_some()
             && (self.sort != BrowseSort::Title
                 || self.created_from.is_some()
                 || self.created_to.is_some())
@@ -178,6 +198,8 @@ pub struct SearchResult {
     pub categories: BTreeMap<String, usize>,
     pub source_statuses: BTreeMap<String, usize>,
     pub formats: BTreeMap<String, usize>,
+    pub tags: BTreeMap<String, usize>,
+    pub knowledge_statuses: BTreeMap<String, usize>,
 }
 
 /// Discovery exposes recorded navigation fields; full source metadata remains in the page.
@@ -223,20 +245,33 @@ fn source_identity_preview(
     if value.is_null() {
         return Some(serde_json::Value::Null);
     }
-    let Some(identity) = value.as_object() else {
-        issues.push("source_identity must be an object or null".into());
-        return None;
-    };
-    let mut selected = serde_json::Map::new();
-    for key in ["repository", "document"] {
-        match identity.get(key) {
-            Some(serde_json::Value::String(value)) if !value.trim().is_empty() => {
-                selected.insert(key.into(), value.clone().into());
-            }
-            _ => issues.push(format!("source_identity.{key} must be a nonblank string")),
+    match lk_core::source_identity::SourceIdentity::from_value(value.clone()) {
+        Ok(_) => Some(value.clone()),
+        Err(error) => {
+            issues.push(error);
+            None
         }
     }
-    Some(serde_json::Value::Object(selected))
+}
+
+fn knowledge_review_preview(page: &crate::VaultPage, issues: &mut Vec<String>) -> Option<String> {
+    let value = page.frontmatter.get("knowledge_review")?;
+    let Some(address) = value.as_str() else {
+        issues.push("knowledge_review must be a vault-relative Markdown address".into());
+        return None;
+    };
+    if address.chars().count() > 400
+        || !lk_core::link::resolve_dest(Path::new(""), address).is_some_and(|path| {
+            path.to_string_lossy() == address
+                && path.extension().is_some_and(|extension| extension == "md")
+        })
+    {
+        issues.push(
+            "knowledge_review must be an exact Markdown address of at most 400 characters".into(),
+        );
+        return None;
+    }
+    Some(address.to_owned())
 }
 
 fn source_file_preview(
@@ -277,8 +312,8 @@ pub fn search(
 ) -> Result<SearchResult, VaultError> {
     options.validate_browse()?;
     let query = options.query.unwrap_or_default();
-    let terms: Vec<String> = query.split_whitespace().map(fold).collect();
-    if options.limit == 0 || (options.query.is_some() && terms.is_empty()) {
+    let terms = query_terms(query, options.phrase);
+    if options.limit == 0 || options.query.is_some_and(|query| query.trim().is_empty()) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             "search requires a nonempty query and positive limit; omit query to browse",
@@ -290,7 +325,8 @@ pub fn search(
     if let Some(snapshot) = options.snapshot {
         return super::search_index::search(vault_root, dirs, options, snapshot);
     }
-    let pages = load_pages(vault_root, dirs, options.include_sources)?;
+    let mut pages = load_pages(vault_root, dirs, options.include_sources)?;
+    attach_reviews(vault_root, dirs, &mut pages)?;
     let spellings = spellings_of(query_identity.as_deref(), &pages);
 
     Ok(search_pages(
@@ -355,6 +391,10 @@ pub(super) fn visit_pages(
                     .map_err(std::io::Error::other)?,
             )?)?;
             let page = crate::parse_page(&raw).map_err(VaultError::Frontmatter)?;
+            let knowledge_status = page
+                .frontmatter
+                .knowledge_status()
+                .map_err(VaultError::Frontmatter)?;
             if page.frontmatter.get("type").and_then(|v| v.as_str()) == Some("task-board") {
                 continue;
             }
@@ -382,6 +422,9 @@ pub(super) fn visit_pages(
                     title,
                     concept,
                     page,
+                    knowledge_status,
+                    reviews: Vec::new(),
+                    projection: None,
                 },
                 body_line_offset,
             )?;
@@ -402,13 +445,29 @@ pub(super) fn search_pages(
     let mut categories = BTreeMap::new();
     let mut source_statuses = BTreeMap::new();
     let mut formats = BTreeMap::new();
+    let mut tags = BTreeMap::new();
+    let mut knowledge_statuses = BTreeMap::new();
     for entry in pages {
         let names: Vec<&str> = entry.names().collect();
-        let matched = if options.query.is_none() {
+        let projection = entry.match_projection();
+        let exact_match = if options.query.is_none() {
             Some(MatchField::Catalog)
         } else {
-            match_page(terms, query_identity, spellings, &names, &entry.page.body)
+            match_page(
+                terms,
+                query_identity,
+                spellings,
+                &names,
+                &entry.page.body,
+                Some(&projection),
+            )
         };
+        let matched = exact_match.or_else(|| {
+            options
+                .spacing
+                .then(|| match_spacing(terms, spellings, &names, &projection))
+                .flatten()
+        });
         let Some(matched) = matched else {
             continue;
         };
@@ -424,6 +483,12 @@ pub(super) fn search_pages(
             .entry(metadata("category").to_owned())
             .or_insert(0) += 1;
         *formats.entry(metadata("type").to_owned()).or_insert(0) += 1;
+        for tag in search_tags(&entry.page) {
+            *tags.entry(tag).or_insert(0) += 1;
+        }
+        *knowledge_statuses
+            .entry(entry.knowledge_status().as_str().to_owned())
+            .or_insert(0) += 1;
         let source_status = entry
             .page
             .frontmatter
@@ -435,45 +500,73 @@ pub(super) fn search_pages(
         if !entry.matches_filters(options) {
             continue;
         }
-        candidates.push((entry, matched));
+        let phrase_match = options.query.is_some_and(|query| {
+            let phrase = fold_name(query);
+            entry
+                .names()
+                .any(|name| contains_term(&fold_name(name), &phrase))
+                || contains_term(&projection.text, &phrase)
+        });
+        let spacing_match = exact_match.is_none() || matched == MatchField::NameVariant;
+        candidates.push((entry, matched, phrase_match, spacing_match));
     }
 
-    candidates.sort_by(|(a, a_match), (b, b_match)| {
-        if options.query.is_none() {
-            return match options.sort {
-                BrowseSort::Title => a.title.cmp(&b.title).then(a.rel_path.cmp(&b.rel_path)),
-                BrowseSort::Created => b
-                    .created_date()
-                    .cmp(&a.created_date())
-                    .then(a.rel_path.cmp(&b.rel_path)),
+    candidates.sort_by(
+        |(a, a_match, a_phrase, a_spacing), (b, b_match, b_phrase, b_spacing)| {
+            if options.query.is_none() {
+                return match options.sort {
+                    BrowseSort::Title => a.title.cmp(&b.title).then(a.rel_path.cmp(&b.rel_path)),
+                    BrowseSort::Created => b
+                        .created_date()
+                        .cmp(&a.created_date())
+                        .then(a.rel_path.cmp(&b.rel_path)),
+                };
+            }
+            let priority = |matched: &MatchField, phrase: bool, spacing: bool| match matched {
+                MatchField::Identity => 0,
+                MatchField::NameVariant => 1,
+                _ if phrase => 2,
+                _ if !spacing => 3,
+                _ => 4,
             };
-        }
-        a_match
-            .cmp(b_match)
-            .then(
-                b.page
-                    .frontmatter
-                    .source_count()
-                    .unwrap_or(0)
-                    .cmp(&a.page.frontmatter.source_count().unwrap_or(0)),
-            )
-            .then(a.id.cmp(&b.id))
-            .then(a.rel_path.cmp(&b.rel_path))
-    });
+            priority(a_match, *a_phrase, *a_spacing)
+                .cmp(&priority(b_match, *b_phrase, *b_spacing))
+                .then(
+                    a_match
+                        .cmp(b_match)
+                        .then(
+                            b.page
+                                .frontmatter
+                                .source_count()
+                                .unwrap_or(0)
+                                .cmp(&a.page.frontmatter.source_count().unwrap_or(0)),
+                        )
+                        .then(a.id.cmp(&b.id))
+                        .then(a.rel_path.cmp(&b.rel_path)),
+                )
+        },
+    );
     let total = candidates.len();
     // Excerpts strip and search the body again. Only the selected hits need one.
     let hits = candidates
         .into_iter()
         .skip(options.offset)
         .take(options.limit)
-        .map(|(entry, matched)| {
+        .map(|(entry, matched, phrase_match, spacing_match)| {
             let mut metadata_issues = Vec::new();
             let source_record = source_record_preview(&entry.page, &mut metadata_issues);
             let source_identity = source_identity_preview(&entry.page, &mut metadata_issues);
             let source_file = source_file_preview(&entry.page, &mut metadata_issues);
             let source_url = source_url_preview(&entry.page, &mut metadata_issues);
+            let knowledge_review = knowledge_review_preview(&entry.page, &mut metadata_issues);
             SearchHit {
-                excerpt: excerpt(&entry.page.body, matched, terms, spellings),
+                excerpt: excerpt_with_spacing(
+                    &entry.page.body,
+                    matched,
+                    terms,
+                    spellings,
+                    spacing_match,
+                ),
                 file_revision: entry.file_revision.clone(),
                 source_record,
                 source_identity,
@@ -515,6 +608,12 @@ pub(super) fn search_pages(
                     .and_then(|v| v.as_str())
                     .is_some_and(|value| value.chars().count() > 160),
                 source_count: entry.page.frontmatter.source_count().unwrap_or(0),
+                knowledge_status: entry.knowledge_status(),
+                knowledge_review,
+                tags: search_tags(&entry.page),
+                phrase_match,
+                spacing_match,
+                reviews: entry.reviews.clone(),
                 matched,
             }
         })
@@ -529,6 +628,8 @@ pub(super) fn search_pages(
         categories,
         source_statuses,
         formats,
+        tags,
+        knowledge_statuses,
     }
 }
 
@@ -548,9 +649,44 @@ pub(super) struct Page {
     /// addresses, and the only ones [`spellings_of`] reads a query's other spellings from.
     pub(super) concept: bool,
     pub(super) page: lk_core::frontmatter::VaultPage,
+    pub(super) knowledge_status: KnowledgeStatus,
+    pub(super) reviews: Vec<crate::review::ReviewPreview>,
+    #[serde(skip)]
+    pub(super) projection: Option<MatchProjection>,
+}
+
+pub(super) fn attach_reviews(
+    root: &Path,
+    dirs: &VaultDirs,
+    pages: &mut [Page],
+) -> Result<(), VaultError> {
+    let mut reviews = crate::review::review_previews(root, dirs)?;
+    for page in pages {
+        page.reviews = reviews
+            .remove(page.rel_path.to_string_lossy().as_ref())
+            .unwrap_or_default();
+    }
+    Ok(())
+}
+
+#[derive(Clone)]
+pub(super) struct MatchProjection {
+    pub summary: String,
+    pub text: String,
+    pub spacing_text: String,
 }
 
 impl Page {
+    pub(super) fn knowledge_status(&self) -> KnowledgeStatus {
+        self.knowledge_status
+    }
+
+    pub(super) fn match_projection(&self) -> std::borrow::Cow<'_, MatchProjection> {
+        match &self.projection {
+            Some(projection) => std::borrow::Cow::Borrowed(projection),
+            None => std::borrow::Cow::Owned(MatchProjection::from_body(&self.page.body)),
+        }
+    }
     pub(super) fn created_date(&self) -> Option<jiff::civil::Date> {
         self.page
             .frontmatter
@@ -579,6 +715,13 @@ impl Page {
             .is_none_or(|value| metadata("category") == value)
             && options.format.is_none_or(|value| metadata("type") == value)
             && options.source_status.is_none_or(|value| status == value)
+            && options
+                .knowledge_status
+                .is_none_or(|value| self.knowledge_status() == value)
+            && options
+                .tags
+                .iter()
+                .all(|tag| search_tags(&self.page).contains(&tag_key(tag)))
             && (options.created_from.is_none() && options.created_to.is_none()
                 || self.created_date().is_some_and(|date| {
                     options.created_from.is_none_or(|from| date >= from)
@@ -609,25 +752,42 @@ impl Page {
 /// Empty when the query names nothing, which leaves the term-by-term match as the only path
 /// and is the answer for a query that is a phrase rather than a name.
 ///
-/// Expansion requires one owner under the search fold. Ambiguous folded names do not
-/// borrow aliases. A declared alias may still occur in another sense or within a Korean
+/// Exact identity ownership takes precedence over retrieval folding and spacing.
+/// Ambiguous candidates do not borrow aliases. A declared alias may still occur in another sense or within a Korean
 /// compound; such matches are retrieval candidates, not semantic identity decisions.
 /// Excerpts expose the matched prose for the caller to assess.
 pub(super) fn spellings_of(query_identity: Option<&str>, pages: &[Page]) -> Vec<String> {
     let Some(key) = query_identity else {
         return Vec::new();
     };
-    let mut owners = pages.iter().filter(|p| p.concept).filter(|p| {
-        p.names()
-            .any(|name| identity_key(name).is_some_and(|name| fold(&name) == fold(key)))
-    });
-    let Some(owner) = owners.next() else {
-        return Vec::new();
-    };
-    if owners.next().is_some() {
+    let mut owners: Vec<_> = pages
+        .iter()
+        .filter(|p| p.concept)
+        .filter(|p| {
+            p.names()
+                .any(|name| identity_key(name).as_deref() == Some(key))
+        })
+        .collect();
+    if owners.is_empty() {
+        let folded = fold_name(key);
+        owners = pages
+            .iter()
+            .filter(|p| p.concept)
+            .filter(|p| p.names().any(|name| fold_name(name) == folded))
+            .collect();
+    }
+    if owners.is_empty() {
+        let key = spacing_key(key);
+        owners = pages
+            .iter()
+            .filter(|p| p.concept)
+            .filter(|p| p.names().any(|name| spacing_key(name) == key))
+            .collect();
+    }
+    if owners.len() != 1 {
         return Vec::new();
     }
-    owner
+    owners[0]
         .names()
         .map(fold_name)
         .filter(|name| !name.is_empty())
@@ -652,6 +812,7 @@ fn match_page(
     spellings: &[String],
     names: &[&str],
     body: &str,
+    projection: Option<&MatchProjection>,
 ) -> Option<MatchField> {
     if let Some(key) = query_identity
         && names
@@ -660,26 +821,88 @@ fn match_page(
     {
         return Some(MatchField::Identity);
     }
-    let prose = search_text(body);
+    if let Some(key) = query_identity {
+        let compact = spacing_key(key);
+        if names
+            .iter()
+            .any(|name| fold_name(name) != fold_name(key) && spacing_key(name) == compact)
+        {
+            return Some(MatchField::NameVariant);
+        }
+    }
+    let computed;
+    let projection = match projection {
+        Some(projection) => projection,
+        None => {
+            computed = MatchProjection::from_body(body);
+            &computed
+        }
+    };
+    let name_text = names
+        .iter()
+        .map(|name| fold_name(name))
+        .collect::<Vec<_>>()
+        .join("\n");
     let fields = [
-        (
-            MatchField::Name,
-            names
-                .iter()
-                .map(|name| fold_name(name))
-                .collect::<Vec<_>>()
-                .join("\n"),
-        ),
-        (
-            MatchField::Summary,
-            fold(&search_summary(body).unwrap_or_default()),
-        ),
-        (MatchField::Text, fold(&prose)),
+        (MatchField::Name, name_text.as_str()),
+        (MatchField::Summary, projection.summary.as_str()),
+        (MatchField::Text, projection.text.as_str()),
     ];
+    match_fields(terms, spellings, &fields)
+}
+
+impl MatchProjection {
+    fn from_body(body: &str) -> Self {
+        let text = fold(&search_text(body));
+        Self {
+            summary: fold(&search_summary(body).unwrap_or_default()),
+            spacing_text: compact_blocks(&text),
+            text,
+        }
+    }
+}
+
+fn match_spacing(
+    terms: &[String],
+    spellings: &[String],
+    names: &[&str],
+    projection: &MatchProjection,
+) -> Option<MatchField> {
+    let names = names
+        .iter()
+        .map(|name| fold_name(name))
+        .collect::<Vec<_>>()
+        .join("\n");
+    match_fields_by(
+        terms,
+        spellings,
+        &[
+            (MatchField::Name, &names),
+            (MatchField::Summary, &projection.summary),
+            (MatchField::Text, &projection.text),
+        ],
+        contains_spacing_term,
+    )
+}
+
+fn match_fields(
+    terms: &[String],
+    spellings: &[String],
+    fields: &[(MatchField, &str)],
+) -> Option<MatchField> {
+    match_fields_by(terms, spellings, fields, contains_term)
+}
+
+fn match_fields_by(
+    terms: &[String],
+    spellings: &[String],
+    fields: &[(MatchField, &str)],
+    contains: impl Fn(&str, &str) -> bool,
+) -> Option<MatchField> {
     let field_of = |needle: &str| {
         fields
             .iter()
-            .find(|(_, text)| contains_term(text, needle))
+            .find(|(_, text)| contains(text, needle))
             .map(|(field, _)| *field)
     };
     if !spellings.is_empty() {
@@ -706,16 +929,45 @@ fn match_page(
 /// word — which keep plain containment: unconstrained rather than wrongly constrained, which
 /// is the state this started from.
 fn contains_term(text: &str, term: &str) -> bool {
+    text.match_indices(term)
+        .any(|(at, _)| has_term_boundaries(text, term, at, at + term.len()))
+}
+
+fn has_term_boundaries(text: &str, term: &str, start: usize, end: usize) -> bool {
     let (Some(first), Some(last)) = (term.chars().next(), term.chars().last()) else {
         return false;
     };
     let open_anywhere = !first.is_ascii_alphanumeric();
     let close_anywhere = !last.is_ascii_alphanumeric();
-    text.match_indices(term).any(|(at, _)| {
-        let before = text[..at].chars().next_back();
-        let after = text[at + term.len()..].chars().next();
-        (open_anywhere || !before.is_some_and(|c| c.is_ascii_alphanumeric()))
-            && (close_anywhere || !after.is_some_and(|c| c.is_ascii_alphanumeric()))
+    let before = text[..start].chars().next_back();
+    let after = text[end..].chars().next();
+    (open_anywhere || !before.is_some_and(|c| c.is_ascii_alphanumeric()))
+        && (close_anywhere || !after.is_some_and(|c| c.is_ascii_alphanumeric()))
+}
+
+fn contains_spacing_term(text: &str, term: &str) -> bool {
+    let needle = spacing_key(term);
+    if needle.is_empty() {
+        return false;
+    }
+    text.lines().any(|line| {
+        let mut compact = String::new();
+        let mut original_bytes = Vec::new();
+        for (start, character) in line.char_indices() {
+            if !character.is_whitespace() {
+                compact.push(character);
+                original_bytes.extend(start..start + character.len_utf8());
+            }
+        }
+        compact.match_indices(&needle).any(|(start, _)| {
+            let end = start + needle.len();
+            has_term_boundaries(
+                line,
+                &needle,
+                original_bytes[start],
+                original_bytes[end - 1] + 1,
+            )
+        })
     })
 }
 
@@ -733,9 +985,11 @@ pub(super) fn excerpt(
     // concept's names shows the line carrying that name rather than the page's opening.
     let prose = search_text(body);
     let text = match matched {
-        MatchField::Catalog | MatchField::Identity | MatchField::Name | MatchField::Summary => {
-            search_summary(body)
-        }
+        MatchField::Catalog
+        | MatchField::Identity
+        | MatchField::NameVariant
+        | MatchField::Name
+        | MatchField::Summary => search_summary(body),
         MatchField::Text => prose
             .lines()
             .map(str::trim)
@@ -749,6 +1003,32 @@ pub(super) fn excerpt(
     };
     text.map(|t| crate::index::truncate_summary(&t))
         .unwrap_or_default()
+}
+
+pub(super) fn excerpt_with_spacing(
+    body: &str,
+    matched: MatchField,
+    terms: &[String],
+    spellings: &[String],
+    spacing: bool,
+) -> String {
+    if !spacing || matched != MatchField::Text {
+        return excerpt(body, matched, terms, spellings);
+    }
+    search_text(body)
+        .lines()
+        .find(|line| {
+            let text = fold(line);
+            if spellings.is_empty() {
+                terms.iter().all(|term| contains_spacing_term(&text, term))
+            } else {
+                spellings
+                    .iter()
+                    .any(|name| contains_spacing_term(&text, name))
+            }
+        })
+        .map(crate::index::truncate_summary)
+        .unwrap_or_else(|| excerpt(body, matched, terms, spellings))
 }
 
 /// Visible text with one line per Markdown block. Inline formatting and soft breaks
@@ -796,6 +1076,55 @@ fn search_summary(body: &str) -> Option<String> {
 
 pub(super) fn fold_name(text: &str) -> String {
     fold(&text.split_whitespace().collect::<Vec<_>>().join(" "))
+}
+
+pub(super) fn spacing_key(text: &str) -> String {
+    fold(text)
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect()
+}
+
+pub(super) fn compact_blocks(text: &str) -> String {
+    text.lines()
+        .map(|line| {
+            line.chars()
+                .filter(|character| !character.is_whitespace())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+pub(super) fn query_terms(query: &str, phrase: bool) -> Vec<String> {
+    if phrase {
+        vec![fold_name(query)]
+    } else {
+        query.split_whitespace().map(fold).collect()
+    }
+}
+
+pub(super) fn tag_key(value: &str) -> String {
+    value.nfc().flat_map(char::to_lowercase).collect()
+}
+
+pub(super) fn search_tags(page: &crate::VaultPage) -> Vec<String> {
+    let manual = page
+        .frontmatter
+        .get("source_record")
+        .and_then(|record| record.get("manual_frontmatter"))
+        .and_then(|record| record.get("tags"));
+    [page.frontmatter.get("tags"), manual]
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_array)
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .filter(|tag| !tag.trim().is_empty())
+        .map(tag_key)
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 /// What the page says it is: the body of its first `## ` section.
@@ -1113,6 +1442,41 @@ mod tests {
     }
 
     #[test]
+    fn metadata_previews_preserve_typed_provider_identity_and_exact_review_addresses() {
+        let page = crate::parse_page(
+            "---\ntype: document\ntitle: Drive source\nsource_identity: {provider: google-drive, namespace: drive-team, document: opaque-file-id}\nknowledge_review: wiki/explorations/drive-scope.md\n---\nSource content.\n",
+        )
+        .unwrap();
+        let mut issues = Vec::new();
+        assert_eq!(
+            source_identity_preview(&page, &mut issues),
+            Some(
+                serde_json::json!({"provider":"google-drive","namespace":"drive-team","document":"opaque-file-id"})
+            )
+        );
+        assert_eq!(
+            knowledge_review_preview(&page, &mut issues).as_deref(),
+            Some("wiki/explorations/drive-scope.md")
+        );
+        assert!(issues.is_empty());
+        for invalid in [
+            serde_json::json!("https://example.test/review.md"),
+            serde_json::json!("../outside.md"),
+            serde_json::json!("wiki/explorations/review.md#scope"),
+            serde_json::json!("x".repeat(401)),
+            serde_json::json!(["wiki/explorations/review.md"]),
+        ] {
+            let mut page = page.clone();
+            page.frontmatter
+                .fields
+                .insert("knowledge_review".into(), invalid);
+            let mut issues = Vec::new();
+            assert!(knowledge_review_preview(&page, &mut issues).is_none());
+            assert_eq!(issues.len(), 1);
+        }
+    }
+
+    #[test]
     fn discovery_metadata_stays_compact_without_losing_source_evidence() {
         let tmp = tempfile::tempdir().unwrap();
         let dirs = VaultDirs::default();
@@ -1197,7 +1561,7 @@ mod tests {
         .unwrap();
         let payload: String = connection
             .query_row(
-                "SELECT payload FROM pages WHERE path = 'wiki/documents/record.md'",
+                "SELECT metadata FROM pages WHERE path = 'wiki/documents/record.md'",
                 [],
                 |row| row.get(0),
             )
@@ -1439,18 +1803,19 @@ mod tests {
                     None,
                     &spellings,
                     &["Other"],
-                    &format!("## Summary\n{body}")
+                    &format!("## Summary\n{body}"),
+                    None,
                 ),
                 expected,
                 "{body}"
             );
         }
         assert_eq!(
-            match_page(&terms, None, &spellings, &["Knowledge", "Graph"], ""),
+            match_page(&terms, None, &spellings, &["Knowledge", "Graph"], "", None),
             None
         );
         assert_eq!(
-            match_page(&terms, None, &spellings, &["Knowledge\t  Graph"], ""),
+            match_page(&terms, None, &spellings, &["Knowledge\t  Graph"], "", None),
             Some(MatchField::Name)
         );
     }

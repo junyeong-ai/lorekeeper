@@ -428,6 +428,16 @@ impl Config {
                 })?;
             }
         }
+        if !(1..=100).contains(&self.graph.audit.batch_size) {
+            return Err(ConfigError::Validation(
+                "graph.audit.batch_size must be 1..100".into(),
+            ));
+        }
+        if let Some(schedule) = &self.graph.audit.schedule {
+            validate_cron(schedule).map_err(|error| {
+                ConfigError::Validation(format!("graph.audit.schedule: {error}"))
+            })?;
+        }
         if let Some(ref sched) = self.maintenance.schedule {
             validate_cron(sched)
                 .map_err(|e| ConfigError::Validation(format!("maintenance.schedule: {e}")))?;
@@ -965,10 +975,10 @@ impl SourceType {
         match self {
             SourceType::GoogleDrive => SourceDescriptor {
                 streaming: false,
-                default_template: "google-drive.md.jinja",
+                default_template: "document.md.jinja",
                 scheduled: false,
                 item_kind: ItemKind::Event,
-                unit: ObservationUnit::Day,
+                unit: ObservationUnit::Document,
             },
             SourceType::Gmail => SourceDescriptor {
                 streaming: false,
@@ -1335,9 +1345,26 @@ pub struct IngestConfig {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct GraphConfig {
+    pub audit: GraphAuditConfig,
     pub scope: GraphScopeConfig,
     pub metrics: GraphMetricsConfig,
     pub cluster: GraphClusterConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GraphAuditConfig {
+    pub schedule: Option<String>,
+    pub batch_size: usize,
+}
+
+impl Default for GraphAuditConfig {
+    fn default() -> Self {
+        Self {
+            schedule: None,
+            batch_size: 50,
+        }
+    }
 }
 
 impl GraphConfig {
@@ -2227,6 +2254,35 @@ sources:
         assert_eq!(config.graph.cluster.resolution, 1.0);
         assert_eq!(config.graph.cluster.max_iterations, 100);
         assert_eq!(config.graph.cluster.min_community_size, 1);
+    }
+
+    #[test]
+    fn semantic_audit_configuration_is_optional_bounded_and_validates_schedules() {
+        let base = "vault:\n  root: /tmp/vault\nidentity:\n  name: Test\n  email: test@example.invalid\nsources:\n  notes:\n    type: manual\n";
+        for (settings, valid) in [
+            ("", true),
+            (
+                "graph:\n  audit:\n    schedule: '0 7 * * 0'\n    batch_size: 1\n",
+                true,
+            ),
+            ("graph:\n  audit:\n    batch_size: 100\n", true),
+            ("graph:\n  audit:\n    batch_size: 0\n", false),
+            ("graph:\n  audit:\n    batch_size: 101\n", false),
+            ("graph:\n  audit:\n    schedule: 'not a schedule'\n", false),
+            ("graph:\n  audit:\n    batchsize: 50\n", false),
+        ] {
+            let parsed = crate::yaml::from_str::<Config>(&format!("{base}{settings}"));
+            match parsed {
+                Ok(mut config) => {
+                    assert_eq!(config.validate().is_ok(), valid, "{settings}");
+                    if settings.is_empty() {
+                        assert!(config.graph.audit.schedule.is_none());
+                        assert_eq!(config.graph.audit.batch_size, 50);
+                    }
+                }
+                Err(_) => assert!(!valid, "{settings}"),
+            }
+        }
     }
 
     #[test]

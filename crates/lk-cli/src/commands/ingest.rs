@@ -268,7 +268,11 @@ pub async fn run(
                     lk_source::SourceObservation {
                         items: capture.items,
                         scope: lk_source::ObservationScope::Unverified,
-                        outcome: lk_source::ObservationOutcome::Unverified,
+                        outcome: if retirement_blocked {
+                            lk_source::ObservationOutcome::Partial
+                        } else {
+                            lk_source::ObservationOutcome::Unverified
+                        },
                     },
                     capture.originals,
                     retirement_blocked,
@@ -299,6 +303,16 @@ pub async fn run(
                 "  ! partial observation: source reach is incomplete; rerun the same ingest command with RUST_LOG=warn and --dry-run for provider diagnostics"
             );
             had_failure = true;
+            let descriptor = sc.source_type.descriptor();
+            if descriptor.unit == lk_core::config::ObservationUnit::Day && !descriptor.streaming {
+                observations.insert(id.clone(), observed);
+                let error = "incomplete source observation cannot replace a daily snapshot; existing pages and task observations were preserved";
+                eprintln!("  ✗ {error}");
+                if !dry_run {
+                    record_failure(&log, id, &started_at, error, &mut had_failure).await;
+                }
+                continue;
+            }
         }
         let raw = observation.items;
         eprintln!("  extracted: {} items", raw.len());

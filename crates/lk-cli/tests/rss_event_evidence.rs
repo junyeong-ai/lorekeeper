@@ -17,6 +17,11 @@ struct Fixture {
 
 impl Fixture {
     fn build() -> Self {
+        let fixture = Self::pending();
+        fixture.ok(&["queue", "apply"]);
+        fixture
+    }
+    fn pending() -> Self {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         let config = root.join("config.yaml");
@@ -93,14 +98,12 @@ impl Fixture {
             serde_json::to_vec(&result).unwrap(),
         )
         .unwrap();
-        let fixture = Self {
+        Self {
             tmp,
             config,
             capture,
             origin,
-        };
-        fixture.ok(&["queue", "apply"]);
-        fixture
+        }
     }
     fn root(&self) -> &Path {
         self.tmp.path()
@@ -162,6 +165,40 @@ impl Fixture {
                 lk_vault::set_llm_input(&raw, "synthesis_done", &format!("\"{hash}\"")).unwrap(),
             )
             .unwrap();
+        }
+    }
+}
+
+#[test]
+fn bound_rss_concepts_require_article_selection_but_empty_extraction_is_valid() {
+    for empty in [false, true] {
+        let fixture = Fixture::pending();
+        let before = fixture.raw();
+        let results = fixture.root().join(".lorekeeper/queue/results");
+        let path = std::fs::read_dir(&results)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let mut result: lk_queue::TaskResult =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        if empty {
+            result.concepts.clear();
+        } else {
+            result.concepts[0].rss_evidence.clear();
+        }
+        std::fs::write(&path, serde_json::to_vec(&result).unwrap()).unwrap();
+        let output = fixture.run(&["queue", "apply"]);
+        assert_eq!(
+            output.status.success(),
+            empty,
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!fixture.root().join("wiki/concepts").exists());
+        if !empty {
+            assert_eq!(fixture.raw(), before);
         }
     }
 }

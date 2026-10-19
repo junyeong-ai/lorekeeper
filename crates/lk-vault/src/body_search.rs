@@ -100,6 +100,11 @@ pub fn search_body(
     };
     let search = &options.search;
     search.validate_browse()?;
+    if search.phrase || search.spacing {
+        return Err(invalid(
+            "body search does not accept visible-text phrase or spacing matching",
+        ));
+    }
     let query = search.query.unwrap_or_default();
     if query.trim().is_empty() || query.len() > MAX_QUERY_BYTES || query.contains(['\r', '\n']) {
         return Err(invalid(
@@ -452,7 +457,7 @@ mod tests {
             .unwrap();
             connection
                 .execute(
-                    "UPDATE pages SET payload = 'not JSON' WHERE path = ?1",
+                    "UPDATE pages SET metadata = 'not JSON' WHERE path = ?1",
                     [bad],
                 )
                 .unwrap();

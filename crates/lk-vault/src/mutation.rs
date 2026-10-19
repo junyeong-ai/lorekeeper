@@ -16,6 +16,9 @@ pub struct MutationPlan {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 enum Step {
+    RequireAbsent {
+        path: PathBuf,
+    },
     Create {
         path: PathBuf,
         after: String,
@@ -67,6 +70,10 @@ impl Progress {
 }
 
 impl MutationPlan {
+    pub fn require_absent(&mut self, path: impl Into<PathBuf>) {
+        self.steps.push(Step::RequireAbsent { path: path.into() });
+    }
+
     pub fn create(&mut self, path: impl Into<PathBuf>, after: String) {
         self.steps.push(Step::Create {
             path: path.into(),
@@ -281,7 +288,10 @@ impl MutationSession {
         let mut state: HashMap<PathBuf, Option<String>> = HashMap::new();
         for step in &plan.steps {
             let paths: Vec<&Path> = match step {
-                Step::Create { path, .. } | Step::Edit { path, .. } | Step::Remove { path, .. } => {
+                Step::RequireAbsent { path }
+                | Step::Create { path, .. }
+                | Step::Edit { path, .. }
+                | Step::Remove { path, .. } => {
                     vec![path]
                 }
                 Step::Rename { from, to, .. } => vec![from, to],
@@ -292,6 +302,11 @@ impl MutationSession {
                 }
             }
             match step {
+                Step::RequireAbsent { path } => {
+                    if state[path].is_some() {
+                        return Err(Self::conflict(path));
+                    }
+                }
                 Step::Create { path, after } => {
                     if state[path].is_some() {
                         return Err(Self::conflict(path));
@@ -361,6 +376,11 @@ impl MutationSession {
             Err(e) => return Err(e.into()),
         }
         for step in &journal.plan.steps[..completed] {
+            if let Step::RequireAbsent { path } = step
+                && self.read(path)?.is_some()
+            {
+                return Err(Self::conflict(path));
+            }
             if let Step::Edit {
                 path,
                 before,
@@ -374,6 +394,11 @@ impl MutationSession {
         }
         while let Some(step) = journal.plan.steps.get(completed) {
             match step {
+                Step::RequireAbsent { path } => {
+                    if self.read(path)?.is_some() {
+                        return Err(Self::conflict(path));
+                    }
+                }
                 Step::Create { path, after } => {
                     let current = self.read(path)?;
                     if current.as_ref() != Some(after) {
@@ -484,6 +509,40 @@ mod tests {
         p.rename("Old.md", "new.md", "original".into());
         p.edit("links.md", "Old.md".into(), "new.md".into());
         p
+    }
+
+    #[test]
+    fn absence_guards_refuse_creation_before_publication_and_during_recovery() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("gate.md"), "expected").unwrap();
+        fs::write(root.path().join("target.md"), "before").unwrap();
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let mut plan = MutationPlan::default();
+        plan.require_absent("missing.md");
+        plan.edit("gate.md", "expected".into(), "done".into());
+        plan.edit("target.md", "before".into(), "after".into());
+        fs::write(root.path().join("missing.md"), "external").unwrap();
+        assert!(session.preflight(&plan).is_err());
+        assert!(!session.journal.exists());
+        fs::remove_file(root.path().join("missing.md")).unwrap();
+        let journal = Journal { version: 1, plan };
+        session.save(&journal).unwrap();
+        fs::write(root.path().join("gate.md"), "external").unwrap();
+        assert!(session.finish(&journal).is_err());
+        fs::write(root.path().join("missing.md"), "external").unwrap();
+        fs::write(root.path().join("gate.md"), "expected").unwrap();
+        drop(session);
+        assert!(MutationSession::acquire(root.path()).is_err());
+        assert_eq!(
+            fs::read_to_string(root.path().join("target.md")).unwrap(),
+            "before"
+        );
+        fs::remove_file(root.path().join("missing.md")).unwrap();
+        let _session = MutationSession::acquire(root.path()).unwrap();
+        assert_eq!(
+            fs::read_to_string(root.path().join("target.md")).unwrap(),
+            "after"
+        );
     }
 
     #[test]

@@ -18,7 +18,9 @@ Answer a question grounded in vault content, with compounding.
    investigation. A single lookup can use live search without preparing a snapshot.
    For an unfamiliar topic, start with `lore wiki browse --snapshot <id> --json`
    in a prepared session (omit `--snapshot` for a single live lookup).
-   Use its category/type counts to select a scope with `--category` and `--type`.
+   Use its category/type/tag counts to select a scope with `--category`, `--type` and
+   repeated `--tag` (all required, case-insensitive). Tags include preserved manual-source
+   metadata; they do not create concept identity or evidence relationships.
    Browse orders by title, without treating citation frequency as relevance.
    When time matters, use `lore wiki browse --snapshot <id> --sort created
    --from YYYY-MM-DD --to YYYY-MM-DD --json`. Bounds are inclusive; unknown or invalid
@@ -29,16 +31,26 @@ Answer a question grounded in vault content, with compounding.
    category key denotes uncategorized pages. Do not call the first page a complete inventory.
    Run `lore wiki search "<terms>" --snapshot <id> --json` — it answers which pages the
    question reaches and, in `matched`, whether each ANSWERS to it (`identity`/`name`), opens
-   by stating it (`summary`), or merely mentions it (`text`). Query the question's terms
+   by stating it (`summary`), or merely mentions it (`text`). A whole declared name with
+   different spacing is `name-variant`: a retrieval candidate, not exact registry ownership. Query the question's terms
    separately when it spans several. A query naming one concept matches its declared
    names and aliases as phrases; other queries require every term. Markdown formatting
    and soft line breaks preserve a phrase; separate blocks and separate aliases do not
-   combine into one. Ask for the full
+   combine into one. Use `--phrase` when separate words are too broad (for example
+   `"API 토큰"`). Use `--spacing` to ignore whitespace within a visible block (for example
+   `"인증정보"`); combine both for a compound phrase. These are explicit lexical operators,
+   not semantic equivalence or spelling aliases. Exact matches rank ahead of broader
+   spacing matches, while named subjects retain priority. Ask for the full
    registered name to reach its alternate spellings in either language. Open each
    selected page with `lore wiki read <path> --revision <file_revision from the hit>`.
    Inspect its outline, then read relevant `--section ID` content and follow `next_offset`.
    Carry `--revision` through pagination; a mismatch requires fresh retrieval. A section
    includes nested subsections. Read the sources behind the claim, not only its synthesis.
+   Normal discovery shows active knowledge. `knowledge_status: retired` preserves a page
+   and its history but excludes it; use `--knowledge-status retired|all` explicitly to inspect
+   its `knowledge_review` and scoped `reviews` previews. A single source does not imply poor
+   knowledge; verify supported scope and future retrieval value. Open or changed assessments
+   require reading their reasoning, not merely counting them.
    Hits carry a compact `source_record` lifecycle preview and optional `source_identity`,
    `source_file`, `source_url`. Full declarations, relations and original manifests remain
    in the page; inspect them only for selected evidence. `metadata_issues` reports malformed
@@ -66,7 +78,8 @@ Answer a question grounded in vault content, with compounding.
    not proof of a daily's historical derivation. Acquisition time may be unknown;
    `event_timestamp` is published-or-updated adapter time, not acquisition time. A summary omission or a live URL refetch
    cannot establish what the original collection contained.
-   Follow declared document relations with `lore wiki provenance <exact-path>`.
+   Follow declared document relations with `lore wiki provenance <exact-path> --snapshot <id>`
+   in the same prepared session (omit the flag for a live collection).
    It resolves only exact repository/document identities; missing or ambiguous owners
    remain explicit. Use `--direction incoming|both` or `--relation <name>` to narrow,
    then paginate with `--offset` and its collection `--revision`. Target candidates

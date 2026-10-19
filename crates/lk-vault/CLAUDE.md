@@ -47,6 +47,10 @@ canonical; SQLite and Markdown navigation exports are derived.
 
 ## Reviews and authored evidence (`review.rs`)
 
+- `knowledge.rs` validates guarded metadata/review curation as one plan, archives prior
+  authored states and validates evidence against proposed final pages. Preview is read-only.
+  Retired concepts keep addresses and evidence; normal discovery excludes them. Curation
+  never owns synthesis/related/source sections or completion markers.
 - Reviews are authored explorations: effective state is invalid on errors, needs
   reassessment on changed evidence, otherwise authored status. Open isn't invalid.
   Evidence pins the current assessment, not a union of all historical revisions.
@@ -61,8 +65,11 @@ canonical; SQLite and Markdown navigation exports are derived.
 
 ## Read surfaces
 
-- `search.rs`: rank by weakest required field (`Identity`, `Name`, `Summary`, `Text`),
-  then source count/exact path. Summary means opening statement, not whole synthesis.
+- `search.rs`: exact identity, whole-name spacing candidates and contiguous visible
+  phrases precede scattered terms, then weakest field/source count/exact path. Retrieval
+  folding never changes identity. `--phrase` and block-bounded `--spacing` are explicit;
+  raw body matching rejects them. Tags and authored knowledge lifecycle filter separately
+  from source lifecycle. Review subjects are scoped assessments, not citations. Summary means opening statement, not whole synthesis.
   Default scope concepts/documents/explorations; source scope adds managed pages,
   never task boards. Resolve aliases across scope before metadata filtering;
   ambiguity doesn't expand. Declared names match phrases, other queries every term.
@@ -80,7 +87,7 @@ canonical; SQLite and Markdown navigation exports are derived.
   addresses/verified filesystem aliases, not names; missing links remain visible.
   Prepared links use captured lexical addresses only. Context ≤400 Unicode chars
   with truncation flag; do not clip destination/label into a different address.
-- `provenance.rs`: resolve exact `(repository, document)` source identities, never
+- `provenance.rs`: resolve exact typed repository/provider namespace and document identities, never
   title/URL/alias guesses. Duplicate/missing owners stay ambiguous/unresolved;
   verified symlink spellings share an owner, hard links don't. Revision covers the
   collection/query, including added owners and malformed/legacy coverage counts.
@@ -94,7 +101,8 @@ canonical; SQLite and Markdown navigation exports are derived.
 - `prepare_search` atomically commits a reconstructible FTS5 snapshot; failed reads
   preserve old snapshot. Explicit `--snapshot` pins captured corpus/config/paths/full
   revisions; default search is live. External edits aren't frozen during capture.
-  Projection/schema changes bump snapshot version; selected scalar rows use SQL
+  Projection/schema changes bump snapshot version. Indexed name/tag/document identities
+  and declared relations avoid full vocabulary/collection reads; selected scalar rows use SQL
   filters/LIMIT/OFFSET. FTS narrows candidates only; shared matcher decides hits.
   Body search scans captured full scope without visible-text FTS omissions.
 - Default refresh journals the small entry guide and retires only exact marked

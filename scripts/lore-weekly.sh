@@ -9,9 +9,4 @@ pipeline_start
 
 run "synthesis weekly intent" lore_cmd synthesis weekly --previous --defer --wait-for-vault
 
-# The semantic review the deterministic linter cannot do: contradiction worklist,
-# two different names for one concept, relationship gaps. Read-mostly — destructive
-# consolidation (`lore graph merge`) stays a human decision.
-run "knowledge audit" claude_skill "/lore-wiki audit" "$SKILL_DIR/lore-wiki"
-
 pipeline_finish
