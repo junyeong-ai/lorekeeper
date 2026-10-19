@@ -54,3 +54,49 @@ EXPECTED
     rm "$TEST_ROOT/calls"
 done
 printf 'period dependency chain: 3 scenarios passed\n'
+
+# The semantic maintenance consumer can publish repairs that queue synthesis after
+# the initial reconciliation. Exercise the real finalization functions with that
+# queue transition, including a consumer that exits successfully too early.
+KNOWLEDGE_SOURCE="$(dirname "$PIPELINE_SOURCE")/lore-knowledge.sh"
+export KNOWLEDGE_SOURCE
+for scenario in repaired blocked audit-failure review-failure; do
+    export scenario
+    rm -f "$TEST_ROOT/pending" "$TEST_ROOT/audited"
+    code=0
+    bash <<'KNOWLEDGE' > "$TEST_ROOT/knowledge-output" || code=$?
+source "$PIPELINE_SOURCE"
+# Keep the actual plumbing above while sourcing the knowledge entrypoint below.
+source() { :; }
+pipeline_start() { VAULT="$TEST_ROOT"; }
+log() { :; }
+lore_cmd() {
+    case "$*" in
+        'queue count')
+            if [ -f "$TEST_ROOT/pending" ]; then printf '1\n'; else printf '0\n'; fi ;;
+        'queue check') [ ! -f "$TEST_ROOT/pending" ] ;;
+        'wiki reviews --check') [ "$scenario" != review-failure ] ;;
+    esac
+}
+claude_skill() {
+    if [ "$1" = '/lore-wiki maintain' ]; then
+        touch "$TEST_ROOT/audited" "$TEST_ROOT/pending"
+        [ "$scenario" != audit-failure ]
+    else
+        [ "$scenario" != blocked ] || return 1
+        rm "$TEST_ROOT/pending"
+    fi
+}
+builtin source "$KNOWLEDGE_SOURCE"
+KNOWLEDGE
+    if [ "$scenario" = repaired ]; then
+        [ "$code" -eq 0 ]
+    else
+        [ "$code" -ne 0 ] || { echo "knowledge pipeline hid $scenario" >&2; exit 1; }
+    fi
+    [ -f "$TEST_ROOT/audited" ]
+    if [ "$scenario" != blocked ]; then
+        [ ! -f "$TEST_ROOT/pending" ] || { echo 'knowledge pipeline left queued repairs' >&2; exit 1; }
+    fi
+done
+printf 'knowledge finalization: 4 scenarios passed\n'
