@@ -32,9 +32,9 @@ pub trait VaultStore: Send + Sync {
     /// missing directory is the legitimate empty state and yields an empty list.
     async fn list_markdown(&self, rel_dir: &Path) -> Result<Vec<PathBuf>, VaultError>;
 
-    /// All Markdown descendants, retaining their complete vault-relative addresses.
-    /// Filesystem inventories validate leaf aliases and refuse directory aliases they
-    /// cannot traverse completely; an incomplete identity collection is not empty.
+    /// Distinct Markdown descendants with complete vault-relative addresses. Filesystem
+    /// aliases share one owner, preferring its direct address; hard links stay distinct.
+    /// Refuse directory aliases that cannot be traversed completely.
     async fn list_markdown_recursive(&self, rel_dir: &Path) -> Result<Vec<PathBuf>, VaultError>;
 }
 
@@ -117,7 +117,7 @@ impl VaultStore for FsVault {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(error) => return Err(error.into()),
         }
-        let mut paths = Vec::new();
+        let mut owners = std::collections::BTreeMap::<PathBuf, (bool, PathBuf)>::new();
         for entry in walkdir::WalkDir::new(&full).follow_links(false) {
             let entry = entry.map_err(|error| std::io::Error::other(error.to_string()))?;
             if entry.depth() > 0
@@ -142,14 +142,27 @@ impl VaultStore for FsVault {
                 .strip_prefix(&self.root)
                 .map_err(std::io::Error::other)?;
             let checked = crate::page_path(&self.root, relative)?;
-            if !std::fs::metadata(checked)?.is_file() {
+            if !std::fs::metadata(&checked)?.is_file() {
                 return Err(std::io::Error::other(
                     "Markdown collection entry is not a regular file",
                 )
                 .into());
             }
-            paths.push(relative.to_path_buf());
+            let canonical = checked.canonicalize()?;
+            let candidate = (entry.file_type().is_symlink(), relative.to_path_buf());
+            owners
+                .entry(canonical)
+                .and_modify(|owner| {
+                    if candidate < *owner {
+                        *owner = candidate.clone();
+                    }
+                })
+                .or_insert(candidate);
         }
+        let mut paths = owners
+            .into_values()
+            .map(|(_, path)| path)
+            .collect::<Vec<_>>();
         paths.sort();
         Ok(paths)
     }
@@ -261,6 +274,55 @@ impl VaultStore for InMemoryVault {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn recursive_inventory_shares_symlink_owners_but_preserves_hard_links() {
+        use lk_core::concept::Resolution;
+
+        let root = tempfile::tempdir().unwrap();
+        let directory = Path::new("wiki/concepts");
+        let nested = root.path().join(directory).join("group");
+        std::fs::create_dir_all(&nested).unwrap();
+        let owner = nested.join("owner.md");
+        std::fs::write(
+            &owner,
+            "---\ntitle: Established\naliases: [Synonym]\n---\nDefinition.\n",
+        )
+        .unwrap();
+        for name in ["a-alias.md", "z-alias.md"] {
+            std::os::unix::fs::symlink("group/owner.md", root.path().join(directory).join(name))
+                .unwrap();
+        }
+        let reader = FsVault::new(root.path());
+        assert_eq!(
+            reader.list_markdown_recursive(directory).await.unwrap(),
+            vec![directory.join("group/owner.md")]
+        );
+        let registry = load_concept_registry(&reader, &Default::default())
+            .await
+            .unwrap();
+        assert!(
+            matches!(registry.resolve("Synonym"), Resolution::Owned(owner) if owner.slug == "group/owner")
+        );
+
+        std::fs::hard_link(&owner, nested.join("independent.md")).unwrap();
+        assert_eq!(
+            reader
+                .list_markdown_recursive(directory)
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+        let registry = load_concept_registry(&reader, &Default::default())
+            .await
+            .unwrap();
+        let Resolution::Ambiguous { claimants } = registry.resolve("Synonym") else {
+            panic!("hard-linked addresses remain distinct owners");
+        };
+        assert_eq!(claimants.len(), 2);
+    }
 
     #[cfg(unix)]
     #[tokio::test]
