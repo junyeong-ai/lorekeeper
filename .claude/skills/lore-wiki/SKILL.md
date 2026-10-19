@@ -5,7 +5,7 @@ description: Searches and maintains a Lorekeeper knowledge wiki. Use for grounde
 when_to_use: |
   query wiki, search vault, add to wiki, capture this discovery, record insight,
   wiki audit, knowledge contradictions, knowledge relationships, 위키 검색, 지식 기록
-argument-hint: "query|add|capture|audit|curate|status [question, source or topic]"
+argument-hint: "query|add|capture|audit|curate|maintain|status [question, source or topic]"
 allowed-tools: |
   Bash(lore *)
   Bash(ls *)
@@ -32,6 +32,7 @@ Do not run the other modes as part of a lookup.
 | `add <source>` | Import a file, folder, pasted text or URL; reuse existing concept owners | [Add sources](references/add.md) |
 | `capture [topic]` | Record an observed insight from the current conversation or work | [Capture](references/capture.md) |
 | `audit` | Examine structure, relationships, contradictions, coverage and concept identity | [Audit](references/audit.md) |
+| `maintain` | Process one bounded batch of changed and never-reviewed knowledge | [Maintenance](references/maintenance.md) |
 | `curate` | Apply authorized evidence-based name, lifecycle or review corrections | [Curation](references/curation.md) |
 | `status` | Report source currency, queue state and knowledge counts without writes | Commands below |
 | Imported identity migration | Verify legacy copies against a configured nodex source before assigning stable identity | [Add sources](references/add.md#imported-document-identity-migration) |

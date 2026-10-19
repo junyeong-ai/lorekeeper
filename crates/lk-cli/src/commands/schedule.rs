@@ -242,6 +242,11 @@ pub async fn run(
         flags.push(p.display().to_string());
     }
 
+    if config.graph.audit.schedule.is_some() && pipeline_dir.is_none() {
+        return Err(miette::miette!(
+            "scheduled graph.audit requires --pipeline-dir for its semantic consumer"
+        ));
+    }
     let jobs = build_jobs(&config, &flags, pipeline_dir);
 
     let mut env = match pipeline_dir {
@@ -378,6 +383,14 @@ fn build_jobs(
             Some(dir) => pipeline_job(dir, "ingest", sched, "lore-daily.sh"),
             None => lore_job("ingest", sched, &["ingest"]),
         });
+    }
+    if let (Some(directory), Some(schedule)) = (pipeline_dir, &config.graph.audit.schedule) {
+        jobs.push(pipeline_job(
+            directory,
+            "knowledge-audit",
+            schedule,
+            "lore-knowledge.sh",
+        ));
     }
     if config.synthesis.weekly.enabled
         && let Some(sched) = &config.synthesis.weekly.schedule
@@ -944,6 +957,31 @@ mod tests {
             );
             assert!(matches!(&job.schedule, When::Calendar(value) if value == schedule));
         }
+    }
+
+    #[test]
+    fn semantic_audit_schedule_is_independent_of_synthesis_and_personal_tracking() {
+        let mut config = config_with_schedules();
+        config.synthesis.weekly.enabled = false;
+        config.personal = None;
+        config.graph.audit.schedule = Some("0 7 * * 0".into());
+        let jobs = build_jobs(&config, &[], Some(std::path::Path::new("/data/pipelines")));
+        assert!(!jobs.iter().any(|job| job.name == "synthesis-weekly"));
+        let audit = jobs
+            .iter()
+            .find(|job| job.name == "knowledge-audit")
+            .unwrap();
+        assert_eq!(
+            audit.program.as_deref(),
+            Some("/data/pipelines/lore-knowledge.sh")
+        );
+        assert!(matches!(&audit.schedule, When::Calendar(value) if value == "0 7 * * 0"));
+        config.graph.audit.schedule = None;
+        assert!(
+            !build_jobs(&config, &[], Some(std::path::Path::new("/data/pipelines")))
+                .iter()
+                .any(|job| job.name == "knowledge-audit")
+        );
     }
 
     #[test]

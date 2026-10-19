@@ -444,6 +444,10 @@ concepts:
 # Link graph analysis (lore graph lint/cluster/suggest-links).
 # Fully optional — omit the entire block to use defaults.
 # graph:
+#   audit:
+#     schedule: "0 7 * * 0"         # weekly semantic maintenance, independent of synthesis
+#     batch_size: 50               # rotate changed and first-time concepts fairly (1..100)
+#                                  # requires installed pipelines via --pipeline-dir
 #   scope:
 #     dirs: [wiki]                   # vault-relative dirs to scan (default: vault.dirs.wiki)
 #     exclude: []                    # glob patterns to skip (e.g., ["wiki/log.md"])

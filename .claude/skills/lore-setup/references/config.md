@@ -48,12 +48,18 @@ personal:                            # OPTIONAL personal-productivity module (wo
 synthesis: {weekly: {...}}           # cross-source weekly themes (domain-neutral)
 concepts:                            # LLM concept-page taxonomy
   categories: [{id: ..., label: ...}] # classifies concepts; labels optional Markdown exports
-graph:                               # link graph analysis (lore graph *)
+graph:                               # link graph analysis and optional semantic maintenance
+  audit: {schedule: "0 7 * * 0", batch_size: 50} # requires installed --pipeline-dir
   scope: {dirs: [...]}               # defaults to vault.dirs.wiki
   metrics: {min_hub_degree: 5, orphan_exclude: []}
   cluster: {resolution: 1.0, min_community_size: 1, suggest_min_shared_neighbors: 2}
 llm: {provider: queue}
 ```
+
+Semantic maintenance is optional and separate from weekly synthesis and retention.
+Enable `graph.audit.schedule` deliberately: each run uses the LLM to review at most
+`batch_size` changed/first-time concepts. The scheduler requires `--pipeline-dir`
+for this job; structural lint alone cannot perform the semantic read.
 
 ## Initial setup
 

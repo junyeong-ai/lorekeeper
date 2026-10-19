@@ -72,6 +72,21 @@ pub enum WikiCommand {
     },
     /// Prepare a reusable lexical search snapshot from current pages (JSON)
     Prepare,
+    /// Plan a bounded semantic audit of changed or never-reviewed concepts (read-only JSON)
+    AuditPlan {
+        /// Maximum concepts (1..100); defaults to graph.audit.batch_size
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Re-read exact original batch members after repairs; repeat for each address
+        #[arg(long = "path")]
+        paths: Vec<String>,
+    },
+    /// Record completed semantic reads with current concept and dependency guards (JSON)
+    AuditRecord {
+        /// JSON assessments with exact concept and semantic input revisions
+        #[arg(long)]
+        file: PathBuf,
+    },
     /// Publish reviewed concept metadata and durable reviews with exact evidence guards
     Curate {
         /// Validate evidence, names and reviews without publishing or journal recovery
@@ -455,6 +470,42 @@ pub async fn run(opts: &super::GlobalOptions, cmd: WikiCommand) -> miette::Resul
         }
         WikiCommand::DocumentIdentity { command } => {
             super::document_identity::run(opts, command).await
+        }
+        WikiCommand::AuditPlan { limit, paths } => {
+            let config = load_config(&find_config(opts)?)?;
+            let root = config.vault.root_path();
+            let pages = lk_graph::scan::scan_vault(&root, config.graph.scope.follow_links)
+                .map_err(|error| miette::miette!("{error}"))?;
+            let result = lk_graph::audit::plan_selected(
+                &root,
+                &config.vault.dirs,
+                &pages,
+                limit.unwrap_or(config.graph.audit.batch_size),
+                &paths,
+            )
+            .map_err(|error| miette::miette!("{error}"))?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&result)
+                    .map_err(|error| miette::miette!("{error}"))?
+            );
+            Ok(())
+        }
+        WikiCommand::AuditRecord { file } => {
+            let config = load_config(&find_config(opts)?)?;
+            let results: lk_graph::audit::AuditResults = serde_json::from_slice(
+                &std::fs::read(file).map_err(|error| miette::miette!("{error}"))?,
+            )
+            .map_err(|error| miette::miette!("{error}"))?;
+            let root = config.vault.root_path();
+            let session = lk_vault::MutationSession::acquire(&root)
+                .map_err(|error| miette::miette!("{error}"))?;
+            let pages = lk_graph::scan::scan_vault(&root, config.graph.scope.follow_links)
+                .map_err(|error| miette::miette!("{error}"))?;
+            let recorded = lk_graph::audit::record(&session, &config.vault.dirs, &pages, results)
+                .map_err(|error| miette::miette!("{error}"))?;
+            println!("{}", serde_json::json!({"recorded":recorded}));
+            Ok(())
         }
         WikiCommand::Curate { file, dry_run } => {
             let config = load_config(&find_config(opts)?)?;

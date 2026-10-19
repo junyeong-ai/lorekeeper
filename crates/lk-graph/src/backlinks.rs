@@ -304,6 +304,34 @@ fn citations_for(
         .collect()
 }
 
+/// Derive the current evidence for all concepts in one graph pass, including empty sets.
+pub fn concept_evidence(
+    pages: &[ScannedPage],
+    root: &Path,
+    dirs: &VaultDirs,
+) -> Result<BTreeMap<PathBuf, Vec<Citation>>, GraphError> {
+    let incoming = incoming_citations(pages, root, dirs)?;
+    let rss = rss_evidence(pages, root, dirs)?;
+    let by_id: HashMap<&str, &ScannedPage> =
+        pages.iter().map(|page| (page.id.as_str(), page)).collect();
+    Ok(pages
+        .iter()
+        .filter(|page| {
+            is_concept_page(&page.path, dirs) && page.format.as_deref() == Some("concept")
+        })
+        .map(|page| {
+            let sources = incoming
+                .get(&page.id)
+                .map(|sources| sources.iter().cloned().collect::<Vec<_>>())
+                .unwrap_or_default();
+            (
+                page.path.clone(),
+                citations_for(&sources, &page.path, &by_id, &rss),
+            )
+        })
+        .collect())
+}
+
 /// Derive one exact concept's current evidence and replacement sections without writes.
 /// This does not depend on retained queue history or an unanswered completion marker.
 pub fn concept_resynthesis(

@@ -163,6 +163,14 @@ const EXEMPT: &[(&[&str], &str)] = &[
         "publishes verified identity metadata; document_identity tests archival, guarded journal publication, blocked entries and replay",
     ),
     (
+        &["wiki", "audit-plan"],
+        "graph audit tests bounded incremental coverage and dependency revisions; wiki_curation exercises the CLI with guarded receipts",
+    ),
+    (
+        &["wiki", "audit-record"],
+        "requires semantic assessment results with exact input revisions; graph audit and wiki_curation test recording and stale refusal",
+    ),
+    (
         &["wiki", "curate"],
         "requires a revision-guarded evidence/review plan; wiki_curation tests preview, atomic publication, lifecycle discovery and stale refusal",
     ),

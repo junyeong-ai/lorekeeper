@@ -402,7 +402,7 @@ lore schema                   # wiki/AGENTS.md(페이지 포맷 스키마) 생�
 |---|---|
 | `/lore-process` | 수집 후 LLM 큐를 비움 — 요약·개념·테마·리뷰 채우기 |
 | `/lore-setup` | 워크스페이스를 들여다보며 config 작성 — Slack 채널·Jira 프로젝트·캘린더 ID 자동 발견 |
-| `/lore-wiki` | `query` 근거 기반 질의 · `add` 소스 추가 · `capture` 작업 중 발견 기록 · `audit` 구조/의미 감사 · `curate` 검토 반영 |
+| `/lore-wiki` | `query` 근거 기반 질의 · `add` 소스 추가 · `capture` 작업 중 발견 기록 · `audit` 구조/의미 감사 · `curate` 검토 반영 · `maintain` 분할 점검 |
 | `/lore-extract` | 프로젝트 repo의 전이가능한 지식을 일괄 추출 (scan→run→audit) |
 | `/lore-ingest` | `lore` CLI 래퍼 (수집·합성·상태·스케줄) |
 | `/lore-day` | 오늘의 할 일·지식 브리핑·리마인더·마감 |
@@ -549,9 +549,25 @@ lore --config /absolute/config.yaml workflow --wait -- claude
 
 `ingest.schedule`은 **전체 소스를 한 번에** 수집하는 작업 하나를 발행합니다. `--pipeline-dir`가 있으면 `lore-daily.sh`, 없으면 `lore ingest`를 실행합니다. 소스를 지정한 수집은 전체 소스의 일일 집계인 work-log를 건너뜁니다. 각 합성 주기(weekly/monthly/quarterly/annual)는 독립된 일정을 유지하며, `maintenance.schedule`은 보존 기간 정리와 큐 정리를 자동화합니다.
 
-무인 운영용으로 `lore-daily.sh`(일일 수집+큐 처리+그래프 정합), `lore-weekly.sh`(주간 합성+지식 감사)와 월간·분기·연간·유지보수용 진입 스크립트가 함께 설치됩니다. 시스템 스케줄러(launchd/cron)가 이를 실행하므로 Claude 데스크탑이 떠 있지 않아도 동작합니다.
+무인 운영용으로 `lore-daily.sh`(일일 수집+큐 처리+그래프 정합), `lore-weekly.sh`(주간 합성), `lore-knowledge.sh`(독립 지식 점검)와 월간·분기·연간·유지보수용 진입 스크립트가 함께 설치됩니다. 시스템 스케줄러(launchd/cron)가 이를 실행하므로 Claude 데스크탑이 떠 있지 않아도 동작합니다.
 
 `--pipeline-dir`가 그 스크립트를 **실제로 스케줄에 태우는** 플래그입니다. `lore ingest`와 `lore synthesis weekly`는 파이프라인의 첫 단계일 뿐이고 큐 드레인과 `queue apply`는 스크립트에만 있으므로, 이 플래그 없이 발행하면 매일 수집만 하고 요약·개념은 영원히 비어 있게 됩니다. 스케줄러는 환경을 거의 물려주지 않으므로 스크립트가 필요로 하는 `PATH`/`lore`/`claude`/config 경로도 함께 실립니다 — 추측이 아니라 이 명령을 실행한 세션에서 그대로 상속합니다. macOS는 launchd를 권합니다: 잠든 사이 놓친 실행은 깨어나면 한 번 실행되지만 모든 누락 날짜를 backfill하지는 않습니다. cron은 잠든 동안의 실행을 건너뜁니다.
+
+지식 점검은 수집·기간 합성과 별도 일정으로 설정합니다. 예를 들어 매주 일요일 최대 50개를 검토하려면:
+
+```yaml
+graph:
+  audit:
+    schedule: "0 7 * * 0"
+    batch_size: 50
+```
+
+`--pipeline-dir`로 등록하면 `/lore-wiki maintain`이 실제 원문·개념·관계의 의미를 검토합니다.
+처음 보는 개념과 근거가 바뀐 개념을 번갈아 처리하고, 대기 순서를 보존해 새 문서에 계속 밀리지 않게 합니다.
+변하지 않은 입력은 반복 검토하지 않습니다. 검토 문서가 사라지거나 그 근거가 바뀌면 다시 점검합니다.
+`.lorekeeper/knowledge-audit.json`은 최신 작업 판본과 대기 순서만 보관하며, 실제 판단·상충 근거는 Markdown 검토 문서에 남깁니다.
+설정을 생략하면 자동 의미 점검은 실행하지 않으며, `wiki audit-plan`으로 쓰기 없이 대상을 확인할 수 있습니다.
+미해결 판단은 보존하고, 단일 출처나 인용 수만으로 병합·삭제하지 않습니다.
 
 ### 볼트를 git으로 관리하기 (선택)
 

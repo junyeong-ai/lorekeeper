@@ -119,6 +119,37 @@ fn reviewed_curation_is_read_only_in_preview_guarded_and_discoverable_after_publ
     );
     assert_eq!(fingerprint["file_revision"], file_revision(&after));
     assert_eq!(fingerprint["source_revision"], source_revision(&after_page));
+    let audit = ok(&config, &["wiki", "audit-plan", "--limit", "1"]);
+    assert_eq!(audit["unreviewed"], 1);
+    let candidate = &audit["candidates"][0];
+    let result = root.path().join("audit.json");
+    std::fs::write(&result, serde_json::to_vec(&json!({"assessments":[{
+        "path":concept,"file_revision":candidate["file_revision"],
+        "input_revision":candidate["input_revision"],"disposition":"reviewed",
+        "reason":"Verified the source-only assessment, retained evidence and retired discovery state.",
+        "reviews":[review]
+    }]})).unwrap()).unwrap();
+    let recorded = ok(
+        &config,
+        &["wiki", "audit-record", "--file", result.to_str().unwrap()],
+    );
+    assert_eq!(recorded["recorded"], json!([concept]));
+    assert_eq!(ok(&config, &["wiki", "audit-plan"])["reviewed_current"], 1);
+    assert_eq!(
+        ok(&config, &["wiki", "audit-plan", "--path", concept])["candidates"][0]["path"],
+        concept
+    );
+    std::fs::write(
+        root.path().join(source),
+        source_before.replace("single incident", "different incident"),
+    )
+    .unwrap();
+    let stale = run(
+        &config,
+        &["wiki", "audit-record", "--file", result.to_str().unwrap()],
+    );
+    assert!(!stale.status.success());
+    assert_eq!(ok(&config, &["wiki", "audit-plan"])["changed"], 1);
     let refused = run(
         &config,
         &["wiki", "curate", "--file", plan.to_str().unwrap()],
