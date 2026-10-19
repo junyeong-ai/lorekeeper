@@ -83,7 +83,7 @@ sources:
       # max_messages_per_channel: 500 # (optional) per-run history cap; raise for very busy channels
       # max_thread_messages: 200      # (optional) per-thread fetch cap (root message + replies)
     labels: [team-ops]
-    concept_policy: supported-new
+    concept_policy: existing-only
 
   # ── Personal (my activity — collected directly) ──
   my-tasks:
@@ -106,7 +106,7 @@ sources:
       # max_issues: 200           # (optional) per-run cap; the fetch paginates the whole
                                   # JQL result and warns if this cap actually drops issues
     labels: [personal]
-    concept_policy: supported-new
+    concept_policy: existing-only
 
   # Wiki pages I wrote or edited that day. A Confluence page is a LIVING document, so the
   # page version is folded into the event identity: re-ingesting an unchanged page dedups
@@ -143,7 +143,7 @@ sources:
       # max_events: 500           # (optional) per-run cap; the fetch paginates the whole
                                   # window and warns if this cap actually drops events
     labels: [personal]
-    concept_policy: supported-new
+    concept_policy: existing-only
 
   email-digest:
     type: gmail
