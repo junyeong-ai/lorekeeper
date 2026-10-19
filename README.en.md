@@ -298,7 +298,7 @@ Each day's ingest grows the concept graph; synthesis summarizes it at ever-highe
 | `google-calendar` | Schedule + meeting notes (auto-extracted from Drive links) | Google OAuth |
 | `google-drive` | Curated docs in a Drive folder | Google OAuth |
 | `rss` | Vendor blogs / news → concepts (no auth, multi-feed) | none |
-| `nodex` | A project repository's own decision and learning records → concepts (needs `nodex.toml` and nodex `>=0.60,<0.61`; see [binary selection and evidence versions](.claude/skills/lore-setup/references/config.md#nodex-binary-selection)) | none |
+| `nodex` | A project repository's own decision and learning records → concepts (needs `nodex.toml` and nodex `>=0.60,<0.61`; see [binary selection and evidence versions](skills/lore-setup/references/config.md#nodex-binary-selection)) | none |
 | `manual` | Markdown, text, and HTML files dropped in `inbox/` | none |
 | `tasks` | Your own finished tasks — what `lore task` closed becomes the day's page | none |
 
