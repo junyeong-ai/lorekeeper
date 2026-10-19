@@ -183,13 +183,15 @@ fn resolve_existing_dir(
     Ok(Some(absolute))
 }
 
-/// First EXECUTABLE named `name` on `PATH`, resolved the way a shell would. A non-executable
-/// file of that name earlier on the path is skipped rather than returned, since pointing the
-/// job at it produces the permission-denied failure this lookup exists to avoid.
+/// First executable named `name` on `PATH`, skipping non-executable matches.
+/// Resolve relative and empty entries against this process's working directory so
+/// the scheduled consumer can change directories. Preserve symlinks so CLI updates
+/// can replace their targets without leaving schedules pinned to an older version.
 fn find_on_path(name: &str) -> Option<std::path::PathBuf> {
     std::env::split_paths(&std::env::var_os("PATH")?)
         .map(|dir| dir.join(name))
         .find(|candidate| is_executable_file(candidate))
+        .and_then(|candidate| std::path::absolute(candidate).ok())
 }
 
 #[cfg(unix)]
