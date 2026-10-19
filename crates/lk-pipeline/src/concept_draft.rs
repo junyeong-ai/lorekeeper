@@ -183,7 +183,19 @@ impl ConceptDrafts {
             slot => slot.insert(lk_vault::load_concept_registry(reader, dirs).await?),
         };
         match registry.resolve(name) {
-            Resolution::Owned(identity) => Ok(identity),
+            Resolution::Owned(identity) => {
+                if policy == ConceptPolicy::ExistingOnly
+                    && reader
+                        .read_page(VaultPath::concept(dirs, &identity.slug).as_ref())
+                        .await?
+                        .is_none()
+                {
+                    return Err(PipelineError::Render(format!(
+                        "existing-only concept policy requires a published owner for `{name}`"
+                    )));
+                }
+                Ok(identity)
+            }
             Resolution::Ambiguous { claimants, .. } => Err(PipelineError::Render(format!(
                 "ambiguous concept `{name}`: {}",
                 claimants
@@ -1451,6 +1463,13 @@ mod tests {
         assert!(
             drafts.drafts.is_empty(),
             "staging alone must fold nothing, so the batch can be abandoned whole"
+        );
+        assert!(
+            drafts
+                .stage(&first, &reader, &dirs, ConceptPolicy::ExistingOnly)
+                .await
+                .is_err(),
+            "a reserved name from an abandoned batch is not a published owner"
         );
 
         let date = jiff::civil::date(2026, 5, 23);
