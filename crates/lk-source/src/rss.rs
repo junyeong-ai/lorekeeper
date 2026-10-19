@@ -190,7 +190,10 @@ impl Source for RssSource {
                 // Counted here, where the entry is actually examined — the cap breaks out
                 // above without looking at one.
                 seen += 1;
-                let Some(mut item) = map_entry(&feed_cfg.id, &feed_title, entry, &mut partial)
+                let Some(MappedEntry {
+                    mut item,
+                    supplied_unrepresentable_body,
+                }) = map_entry(&feed_cfg.id, &feed_title, entry)
                 else {
                     partial = true;
                     continue;
@@ -201,6 +204,7 @@ impl Source for RssSource {
                     observed += 1;
                     continue;
                 }
+                let mut article_recovered_body = false;
                 // Article enrichment is separate from feed/query reach. Failure keeps
                 // the collected summary and its warning, just like optional meeting notes.
                 if feed_cfg.fetch_full_text
@@ -213,6 +217,7 @@ impl Source for RssSource {
                         // known-clean content we'd otherwise lose.
                         Ok(Some(full)) if full.trim().len() >= item.body.trim().len() => {
                             item.body = full;
+                            article_recovered_body = true;
                         }
                         Ok(Some(_)) => {
                             tracing::warn!(
@@ -238,6 +243,10 @@ impl Source for RssSource {
                         }
                     }
                 }
+                if supplied_unrepresentable_body && !article_recovered_body {
+                    partial = true;
+                    continue;
+                }
                 items.push(item);
                 kept += 1;
                 observed += 1;
@@ -250,7 +259,7 @@ impl Source for RssSource {
                 tracing::warn!(
                     feed = %feed_cfg.id,
                     unusable = seen,
-                    "rss: every entry was unusable (no date or no title); treating the feed as unread"
+                    "rss: every entry was unusable (date, title, or inline representation); treating the feed as unread"
                 );
             } else {
                 feeds_read += 1;
@@ -285,16 +294,22 @@ impl Source for RssSource {
     }
 }
 
-/// Map one feed entry to a [`RawItem`], or `None` when it cannot become an observation at
-/// all: no usable publication date, or no title. The day window is deliberately NOT decided
+struct MappedEntry {
+    item: RawItem,
+    /// Defer refusal until configured article enrichment can recover readable text.
+    supplied_unrepresentable_body: bool,
+}
+
+/// Map one feed entry, or `None` when its publication date/title is unusable.
+/// Nonempty unsupported inline content still has a chance to be recovered by
+/// configured article enrichment. The day window is deliberately NOT decided
 /// here — an entry outside it is a perfectly good observation belonging to another day, and
 /// conflating the two would make a quiet feed indistinguishable from a broken one.
 fn map_entry(
     feed_id: &str,
     feed_title: &Option<String>,
     entry: feed_rs::model::Entry,
-    incomplete: &mut bool,
-) -> Option<RawItem> {
+) -> Option<MappedEntry> {
     let dt = entry.published.or(entry.updated)?;
     let ts = jiff::Timestamp::from_millisecond(dt.timestamp_millis()).ok()?;
 
@@ -303,20 +318,25 @@ fn map_entry(
         return None;
     }
 
-    let body = entry
-        .content
-        .and_then(|content| {
-            content
-                .body
-                .as_deref()
-                .and_then(|body| feed_text(body, content.content_type.as_str(), incomplete))
-        })
-        .or_else(|| {
-            entry.summary.and_then(|summary| {
-                feed_text(&summary.content, summary.content_type.as_str(), incomplete)
-            })
-        })
-        .unwrap_or_default();
+    let content = entry.content.as_ref().and_then(|content| {
+        content
+            .body
+            .as_deref()
+            .map(|body| (body, content.content_type.as_str()))
+    });
+    let summary = entry
+        .summary
+        .as_ref()
+        .map(|summary| (summary.content.as_str(), summary.content_type.as_str()));
+    let body = content
+        .and_then(|(text, media)| feed_text(text, media))
+        .or_else(|| summary.and_then(|(text, media)| feed_text(text, media)));
+    let supplied_unrepresentable_body = body.is_none()
+        && content
+            .into_iter()
+            .chain(summary)
+            .any(|(text, _)| !text.trim().is_empty());
+    let body = body.unwrap_or_default();
 
     let url = entry
         .links
@@ -345,34 +365,36 @@ fn map_entry(
 
     let categories: Vec<String> = entry.categories.into_iter().map(|c| c.term).collect();
 
-    Some(RawItem {
-        labels: Vec::new(),
-        external_id: Some(external_id),
-        title,
-        body,
-        url,
-        author: Some(author),
-        timestamp: ts,
-        is_self: false,
-        work: None,
-        metadata: serde_json::json!({
-            "feed_id": feed_id,
-            "feed_title": feed_title,
-            "categories": categories,
-        }),
+    Some(MappedEntry {
+        supplied_unrepresentable_body,
+        item: RawItem {
+            labels: Vec::new(),
+            external_id: Some(external_id),
+            title,
+            body,
+            url,
+            author: Some(author),
+            timestamp: ts,
+            is_self: false,
+            work: None,
+            metadata: serde_json::json!({
+                "feed_id": feed_id,
+                "feed_title": feed_title,
+                "categories": categories,
+            }),
+        },
     })
 }
 
 /// Feed parsers already decode Atom text constructs. Only declared HTML is markup;
 /// literal text must also stay literal when embedded in the Markdown daily page.
-fn feed_text(text: &str, content_type: &str, incomplete: &mut bool) -> Option<String> {
+fn feed_text(text: &str, content_type: &str) -> Option<String> {
     if text.trim().is_empty() {
         return None;
     }
     let media = match content_type.parse::<mime::Mime>() {
         Ok(media) => media,
         Err(error) => {
-            *incomplete = true;
             tracing::warn!(content_type, %error, "rss: invalid feed content type; trying summary");
             return None;
         }
@@ -386,13 +408,11 @@ fn feed_text(text: &str, content_type: &str, incomplete: &mut bool) -> Option<St
         "text/plain" => match crate::fetch::literal_markdown(text) {
             Ok(body) => Some(body),
             Err(error) => {
-                *incomplete = true;
                 tracing::warn!(%error, "rss: could not project plain feed text as Markdown");
                 None
             }
         },
         _ => {
-            *incomplete = true;
             tracing::warn!(
                 content_type,
                 "rss: unsupported feed content type; trying summary"
@@ -411,7 +431,7 @@ mod tests {
         feed_title: &Option<String>,
         entry: feed_rs::model::Entry,
     ) -> Option<RawItem> {
-        super::map_entry(feed_id, feed_title, entry, &mut false)
+        super::map_entry(feed_id, feed_title, entry).map(|mapped| mapped.item)
     }
 
     /// Per-feed isolation must not extend to a source that reached NOTHING. An empty
@@ -540,7 +560,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unsupported_inline_content_keeps_summary_and_reports_partial() {
+    async fn unsupported_inline_content_with_valid_summary_is_observed() {
         let server = tiny_feed_server(
             r#"<feed xmlns="http://www.w3.org/2005/Atom">
 <entry><title>Attachment</title><id>a</id><updated>2026-05-23T01:00:00Z</updated>
@@ -553,7 +573,7 @@ mod tests {
         let params = serde_json::json!({"feeds": [{"id": "a", "url": format!("http://{}/f.xml", server.addr)}]});
         let observation = source.observe(&params, &test_ctx()).await.unwrap();
         assert_eq!(observation.items.len(), 1);
-        assert_eq!(observation.outcome, crate::ObservationOutcome::Partial);
+        assert_eq!(observation.outcome, crate::ObservationOutcome::Observed);
         let visible = pulldown_cmark::Parser::new(&observation.items[0].body)
             .filter_map(|event| match event {
                 pulldown_cmark::Event::Text(text) => Some(text.into_string()),
@@ -561,6 +581,82 @@ mod tests {
             })
             .collect::<String>();
         assert_eq!(visible, "<b>literal fallback</b>");
+    }
+
+    #[tokio::test]
+    async fn unsupported_inline_content_without_summary_is_unobserved() {
+        let bad_entry = r#"<entry><title>Unsupported</title><id>bad</id><updated>2026-05-23T01:00:00Z</updated>
+<content type="application/octet-stream">Ym9keQ==</content></entry>"#;
+        let entry_xml = format!(r#"<feed xmlns="http://www.w3.org/2005/Atom">{bad_entry}</feed>"#);
+        assert!(
+            super::map_entry("fixture", &None, parse_one(&entry_xml))
+                .unwrap()
+                .supplied_unrepresentable_body
+        );
+
+        let only_bad = tiny_feed_server(
+            r#"<feed xmlns="http://www.w3.org/2005/Atom">
+<entry><title>Unsupported</title><id>bad</id><updated>2026-05-23T01:00:00Z</updated>
+<content type="application/octet-stream">Ym9keQ==</content></entry></feed>"#,
+        )
+        .await;
+        let source = RssSource::new(loopback_client());
+        let params = serde_json::json!({"feeds": [{"id": "a", "url": format!("http://{}/f.xml", only_bad.addr)}]});
+        assert!(matches!(
+            source.observe(&params, &test_ctx()).await,
+            Err(SourceError::NothingObserved { .. })
+        ));
+
+        let mixed = tiny_feed_server(
+            r#"<feed xmlns="http://www.w3.org/2005/Atom">
+<entry><title>Good</title><id>good</id><updated>2026-05-23T01:00:00Z</updated><summary>Readable</summary></entry>
+<entry><title>Unsupported</title><id>bad</id><updated>2026-05-23T01:00:00Z</updated>
+<content type="application/octet-stream">Ym9keQ==</content></entry></feed>"#,
+        )
+        .await;
+        let params = serde_json::json!({"feeds": [{"id": "a", "url": format!("http://{}/f.xml", mixed.addr)}]});
+        let observation = source.observe(&params, &test_ctx()).await.unwrap();
+        assert_eq!(observation.items.len(), 1);
+        assert_eq!(observation.items[0].title, "Good");
+        assert_eq!(observation.outcome, crate::ObservationOutcome::Partial);
+    }
+
+    #[tokio::test]
+    async fn configured_article_can_rescue_unsupported_inline_content() {
+        let article = tiny_server(
+            "Readable article text recovered through configured enrichment.",
+            "text/plain",
+        )
+        .await;
+        for (fetch_full_text, article_url, recovered) in [
+            (true, format!("http://{}/article", article.addr), true),
+            (false, format!("http://{}/article", article.addr), false),
+            (true, "http://127.0.0.1:1/unavailable".into(), false),
+        ] {
+            let feed = tiny_feed_server(format!(
+                r#"<feed xmlns="http://www.w3.org/2005/Atom">
+<entry><title>Article</title><id>a</id><updated>2026-05-23T01:00:00Z</updated>
+<content type="application/octet-stream">Ym9keQ==</content>
+<link rel="alternate" href="{article_url}"/></entry></feed>"#
+            ))
+            .await;
+            let source = RssSource::new(loopback_client());
+            let params = serde_json::json!({"feeds": [{"id": "a", "url": format!("http://{}/f.xml", feed.addr), "fetch_full_text": fetch_full_text}]});
+            match source.observe(&params, &test_ctx()).await {
+                Ok(observation) => {
+                    assert!(recovered);
+                    assert_eq!(observation.outcome, crate::ObservationOutcome::Observed);
+                    assert_eq!(observation.items.len(), 1);
+                    assert!(
+                        observation.items[0]
+                            .body
+                            .contains("Readable article text recovered")
+                    );
+                }
+                Err(SourceError::NothingObserved { .. }) => assert!(!recovered),
+                Err(error) => panic!("unexpected observation error: {error}"),
+            }
+        }
     }
 
     #[tokio::test]
@@ -601,7 +697,12 @@ mod tests {
         addr: std::net::SocketAddr,
     }
 
-    async fn tiny_feed_server(body: &'static str) -> TinyServer {
+    async fn tiny_feed_server(body: impl Into<String>) -> TinyServer {
+        tiny_server(body, "application/atom+xml").await
+    }
+
+    async fn tiny_server(body: impl Into<String>, content_type: &'static str) -> TinyServer {
+        let body = body.into();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
@@ -610,7 +711,7 @@ mod tests {
                 let mut buf = [0u8; 1024];
                 let _ = stream.read(&mut buf).await;
                 let resp = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/atom+xml\r\n\
+                    "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\n\
                      Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
                 );
@@ -826,7 +927,7 @@ mod tests {
 
     #[test]
     fn atom_unusable_content_falls_back_to_typed_summary() {
-        assert!(feed_text("", "text/plain", &mut false).is_none());
+        assert!(feed_text("", "text/plain").is_none());
         for content in [
             r#"<content type="application/octet-stream">Ym9keQ==</content>"#,
             r#"<content type="text/plain" src="https://example.com/body"/>"#,
@@ -837,9 +938,7 @@ mod tests {
 {content}<summary type="text">&lt;b&gt;literal fallback&lt;/b&gt;</summary>
 </entry></feed>"#
             );
-            let mut incomplete = false;
-            let item =
-                super::map_entry("fixture", &None, parse_one(&xml), &mut incomplete).unwrap();
+            let item = map_entry("fixture", &None, parse_one(&xml)).unwrap();
             let visible = pulldown_cmark::Parser::new(&item.body)
                 .filter_map(|event| match event {
                     pulldown_cmark::Event::Text(text) => Some(text.into_string()),
@@ -850,7 +949,6 @@ mod tests {
                 visible.contains("<b>literal fallback</b>"),
                 "{content}: {visible}"
             );
-            assert_eq!(incomplete, content.contains("application/octet-stream"));
         }
     }
 
