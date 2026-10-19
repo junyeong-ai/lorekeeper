@@ -1,5 +1,6 @@
 //! Prepared exact citation discovery. Graph derives evidence; this module only stores and
 //! paginates its complete projection. Explicit link occurrences are a separate read surface.
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 
 use lk_core::concept::{Citation, citation_digest};
@@ -57,28 +58,62 @@ pub(super) fn write(
     projection: Option<&ConceptCitationProjection>,
 ) -> Result<(), VaultError> {
     connection.execute_batch(
-        "DROP TABLE IF EXISTS concept_citations;
-         DROP TABLE IF EXISTS concept_evidence;
-         CREATE TABLE concept_evidence(path TEXT PRIMARY KEY, source_count INTEGER NOT NULL,
-             citation_count INTEGER NOT NULL, digest TEXT NOT NULL);
-         CREATE TABLE concept_citations(concept TEXT NOT NULL, ordinal INTEGER NOT NULL,
+        "CREATE TABLE IF NOT EXISTS concept_evidence(path TEXT PRIMARY KEY, source_count INTEGER NOT NULL,
+             citation_count INTEGER NOT NULL, digest TEXT NOT NULL, input_revision TEXT NOT NULL);
+         CREATE TABLE IF NOT EXISTS concept_citations(concept TEXT NOT NULL, ordinal INTEGER NOT NULL,
              payload TEXT NOT NULL, PRIMARY KEY(concept, ordinal));",
     )?;
+    let mut stored = {
+        let mut query = connection.prepare(
+            "SELECT path, source_count, citation_count, digest, input_revision FROM concept_evidence",
+        )?;
+        query
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    (
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                    ),
+                ))
+            })?
+            .collect::<Result<BTreeMap<_, _>, _>>()?
+    };
     let Some(projection) = projection else {
+        connection.execute("DELETE FROM concept_citations", [])?;
+        connection.execute("DELETE FROM concept_evidence", [])?;
         return Ok(());
     };
-    let mut header = connection.prepare("INSERT INTO concept_evidence VALUES (?1,?2,?3,?4)")?;
+    let mut header = connection.prepare("INSERT INTO concept_evidence VALUES (?1,?2,?3,?4,?5)
+        ON CONFLICT(path) DO UPDATE SET source_count=excluded.source_count,
+            citation_count=excluded.citation_count, digest=excluded.digest, input_revision=excluded.input_revision")?;
     let mut citation = connection.prepare("INSERT INTO concept_citations VALUES (?1,?2,?3)")?;
+    let mut seen = BTreeSet::new();
     for concept in &projection.concepts {
-        header.execute(params![
-            concept
-                .path
-                .to_str()
-                .ok_or_else(|| invalid("concept address is not UTF-8"))?,
+        let path = concept
+            .path
+            .to_str()
+            .ok_or_else(|| invalid("concept address is not UTF-8"))?;
+        if !seen.insert(path) {
+            return Err(invalid("duplicate concept evidence address"));
+        }
+        // The public digest intentionally ignores order and repetition; row reuse
+        // must additionally preserve the provider's exact ordered pagination values.
+        let input = serde_json::to_string(&concept.citations)
+            .map_err(|error| invalid(error.to_string()))?;
+        let state = (
             integer(concept.source_count)?,
             integer(concept.citations.len())?,
             citation_digest(&concept.citations),
-        ])?;
+            lk_core::concept::file_revision(&input),
+        );
+        if stored.remove(path).as_ref() == Some(&state) {
+            continue;
+        }
+        header.execute(params![path, state.0, state.1, state.2, state.3,])?;
+        connection.execute("DELETE FROM concept_citations WHERE concept=?1", [path])?;
         for (ordinal, value) in concept.citations.iter().enumerate() {
             citation.execute(params![
                 concept.path.to_str().expect("validated concept address"),
@@ -86,6 +121,10 @@ pub(super) fn write(
                 serde_json::to_string(value).map_err(|error| invalid(error.to_string()))?,
             ])?;
         }
+    }
+    for path in stored.keys() {
+        connection.execute("DELETE FROM concept_citations WHERE concept=?1", [path])?;
+        connection.execute("DELETE FROM concept_evidence WHERE path=?1", [path])?;
     }
     Ok(())
 }
@@ -169,6 +208,88 @@ pub fn inspect_concept_citations(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn incremental_citations_preserve_exact_order_and_explicit_capture_capability() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let path = Path::new("wiki/concepts/topic.md");
+        std::fs::create_dir_all(root.path().join(path.parent().unwrap())).unwrap();
+        std::fs::write(
+            root.path().join(path),
+            "---\ntype: concept\ntitle: Topic\n---\nEvidence.\n",
+        )
+        .unwrap();
+        let session = crate::MutationSession::acquire(root.path()).unwrap();
+        let mut projection = ConceptCitationProjection {
+            input_revision: "capture".into(),
+            concepts: vec![ConceptCitationSet {
+                path: path.into(),
+                source_count: 2,
+                citations: ["daily/a.md", "daily/b.md"]
+                    .into_iter()
+                    .map(|path| Citation::at_revision(Path::new(path), "revision".into()))
+                    .collect(),
+            }],
+        };
+        let before =
+            crate::prepare_search_with_citations(&session, &dirs, &projection, |_| Ok(())).unwrap();
+        projection.concepts[0].citations.reverse();
+        let reordered =
+            crate::prepare_search_with_citations(&session, &dirs, &projection, |_| Ok(())).unwrap();
+        let read = inspect_concept_citations(
+            root.path(),
+            &dirs,
+            path,
+            &CitationOptions {
+                snapshot: &reordered.snapshot,
+                limit: 100,
+                offset: 0,
+            },
+        )
+        .unwrap();
+        assert_ne!(before.snapshot, reordered.snapshot);
+        assert_eq!(read.citations, projection.concepts[0].citations);
+        let retained_digest = read.digest;
+        projection.concepts.clear();
+        let empty =
+            crate::prepare_search_with_citations(&session, &dirs, &projection, |_| Ok(())).unwrap();
+        assert!(empty.citations_available);
+        assert!(
+            inspect_concept_citations(
+                root.path(),
+                &dirs,
+                path,
+                &CitationOptions {
+                    snapshot: &empty.snapshot,
+                    limit: 100,
+                    offset: 0,
+                }
+            )
+            .is_err()
+        );
+        let lexical = crate::prepare_search(&session, &dirs).unwrap();
+        assert!(!lexical.citations_available);
+        let error = inspect_concept_citations(
+            root.path(),
+            &dirs,
+            path,
+            &CitationOptions {
+                snapshot: &lexical.snapshot,
+                limit: 100,
+                offset: 0,
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("no graph evidence capture"));
+        assert_eq!(
+            retained_digest,
+            citation_digest(&[
+                Citation::at_revision(Path::new("daily/a.md"), "revision".into()),
+                Citation::at_revision(Path::new("daily/b.md"), "revision".into()),
+            ])
+        );
+    }
 
     #[test]
     fn prepared_citations_paginate_complete_values_and_preserve_snapshot_on_rejection() {

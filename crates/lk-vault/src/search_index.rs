@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use lk_core::config::VaultDirs;
@@ -8,7 +9,7 @@ use crate::search::{MatchProjection, Page, SearchOptions, SearchResult, fold_nam
 use crate::{MutationSession, VaultError};
 
 pub(super) const INDEX_PATH: &str = ".lorekeeper/search.sqlite";
-const VERSION: i32 = 12;
+const VERSION: i32 = 13;
 
 #[derive(Serialize)]
 pub struct SearchSnapshot {
@@ -30,7 +31,7 @@ fn invalid(message: impl Into<String>) -> VaultError {
     std::io::Error::other(message.into()).into()
 }
 
-/// Replace a reconstructible search snapshot in one SQLite transaction. The source
+/// Refresh a reconstructible search snapshot in one SQLite transaction. The source
 /// files are read under the cooperating writer lock; external editors are not frozen.
 /// This lexical-only entry point captures no graph evidence; citation queries refuse it.
 pub fn prepare_search(
@@ -84,6 +85,7 @@ fn prepare_search_inner(
     let snapshot = lk_core::concept::file_revision(&identity);
     let path = crate::writable_page_path(root, Path::new(INDEX_PATH))?;
     let mut connection = Connection::open(path)?;
+    let mut compatible = false;
     if connection.table_exists(Some("main"), "snapshot")? {
         let current: (String, String, i32) =
             connection.query_row("SELECT id, context, version FROM snapshot", [], |row| {
@@ -100,9 +102,11 @@ fn prepare_search_inner(
                 citations_available: citations.is_some(),
             });
         }
+        compatible = current.1 == context && current.2 == VERSION;
     }
     let transaction = connection.transaction()?;
-    transaction.execute_batch("DROP TABLE IF EXISTS links;
+    if !compatible {
+        transaction.execute_batch("DROP TABLE IF EXISTS links;
         DROP TABLE IF EXISTS terms;
         DROP TABLE IF EXISTS names;
         DROP TABLE IF EXISTS tags;
@@ -113,7 +117,8 @@ fn prepare_search_inner(
         CREATE TABLE pages (id INTEGER PRIMARY KEY, path TEXT NOT NULL UNIQUE, title TEXT NOT NULL,
             aliases TEXT NOT NULL, concept INTEGER NOT NULL, knowledge INTEGER NOT NULL, body TEXT NOT NULL, metadata TEXT NOT NULL, intro TEXT NOT NULL,
             category TEXT NOT NULL, format TEXT NOT NULL, source_status TEXT NOT NULL, created_date TEXT, path_rank INTEGER NOT NULL,
-            knowledge_status TEXT NOT NULL, summary TEXT NOT NULL, text TEXT NOT NULL, name_text TEXT NOT NULL, spacing_text TEXT NOT NULL, spacing_name_text TEXT NOT NULL);
+            knowledge_status TEXT NOT NULL, summary TEXT NOT NULL, text TEXT NOT NULL, name_text TEXT NOT NULL, spacing_text TEXT NOT NULL, spacing_name_text TEXT NOT NULL,
+            input_revision TEXT NOT NULL, traversal_rank INTEGER NOT NULL);
         CREATE INDEX browse_title ON pages(knowledge, title, path_rank);
         CREATE INDEX browse_created ON pages(knowledge, created_date DESC, path_rank);
         CREATE INDEX browse_all_title ON pages(title, path_rank);
@@ -130,10 +135,38 @@ fn prepare_search_inner(
             destination TEXT NOT NULL, target TEXT, context TEXT NOT NULL,
             context_truncated INTEGER NOT NULL, rss_evidence TEXT NOT NULL,
             PRIMARY KEY (source, ordinal));
-        CREATE INDEX links_target ON links(target, source, ordinal);")?;
+        CREATE INDEX links_target ON links(target, source, ordinal);
+        CREATE INDEX pages_traversal ON pages(traversal_rank);")?;
+        // These projections have their own writers, but share this schema version.
+        transaction.execute_batch(
+            "DROP TABLE IF EXISTS provenance_documents;
+            DROP TABLE IF EXISTS provenance_addresses;
+            DROP TABLE IF EXISTS provenance_relations;
+            DROP TABLE IF EXISTS provenance_coverage;
+            DROP TABLE IF EXISTS concept_citations;
+            DROP TABLE IF EXISTS concept_evidence;",
+        )?;
+    }
+    let mut stored = {
+        let mut statement = transaction
+            .prepare("SELECT path, id, input_revision, path_rank, traversal_rank FROM pages")?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                (
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                ),
+            ))
+        })?;
+        rows.collect::<Result<BTreeMap<_, _>, _>>()?
+    };
+    let mut next_id = stored.values().map(|row| row.0).max().unwrap_or(-1);
     {
         let mut insert_page = transaction.prepare(
-            "INSERT INTO pages VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
+            "INSERT INTO pages VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
         )?;
         let mut insert_terms =
             transaction.prepare("INSERT INTO terms(rowid, name_text, text, spacing_name_text, spacing_text) VALUES (?1, ?2, ?3, ?4, ?5)")?;
@@ -142,7 +175,51 @@ fn prepare_search_inner(
         let mut insert_name =
             transaction.prepare("INSERT OR IGNORE INTO names VALUES (?1, ?2, ?3, ?4, ?5)")?;
         let mut insert_tag = transaction.prepare("INSERT INTO tags VALUES (?1, ?2)")?;
-        for (id, page) in pages.iter().enumerate() {
+        for (traversal_rank, page) in pages.iter().enumerate() {
+            let page_path = page.rel_path.to_string_lossy();
+            let traversal_rank = integer(traversal_rank)?;
+            let path_rank = integer(path_ranks[&page.rel_path])?;
+            // Immutable RSS payloads must still verify on a changed snapshot even
+            // when their origin page's exact bytes and lexical projection are retained.
+            let evidence_previews = if page
+                .page
+                .frontmatter
+                .get(lk_core::rss_evidence::CONCEPT_EVIDENCE_FIELD)
+                .is_some()
+            {
+                let raw = std::fs::read_to_string(crate::page_path(root, &page.rel_path)?)?;
+                if lk_core::concept::file_revision(&raw) != page.file_revision {
+                    return Err(invalid("evidence source changed during snapshot"));
+                }
+                crate::rss_concept_citations(root, &page.rel_path, &raw)?;
+                crate::rss_link_previews(root, &page.rel_path, &raw)?
+            } else {
+                BTreeMap::new()
+            };
+            let input_revision = lk_core::concept::file_revision(
+                &serde_json::to_string(&(&page.file_revision, &page.reviews, &evidence_previews))
+                    .map_err(|error| VaultError::Serialization(error.to_string()))?,
+            );
+            let id = if let Some((id, previous, old_path_rank, old_traversal_rank)) =
+                stored.remove(page_path.as_ref())
+            {
+                if previous == input_revision {
+                    if old_path_rank != path_rank || old_traversal_rank != traversal_rank {
+                        transaction.execute(
+                            "UPDATE pages SET path_rank=?1, traversal_rank=?2 WHERE id=?3",
+                            params![path_rank, traversal_rank, id],
+                        )?;
+                    }
+                    continue;
+                }
+                remove_page(&transaction, id, &page_path)?;
+                id
+            } else {
+                next_id = next_id
+                    .checked_add(1)
+                    .ok_or_else(|| invalid("page ID overflow"))?;
+                next_id
+            };
             let aliases = serde_json::to_string(&page.aliases)
                 .map_err(|e| VaultError::Serialization(e.to_string()))?;
             let mut metadata = page.clone();
@@ -171,7 +248,7 @@ fn prepare_search_inner(
             .iter()
             .any(|dir| page.rel_path.starts_with(dir));
             insert_page.execute(params![
-                id as i64,
+                id,
                 page.rel_path.to_string_lossy(),
                 page.title,
                 aliases,
@@ -197,16 +274,18 @@ fn prepare_search_inner(
                     .and_then(|v| v.as_str())
                     .unwrap_or(""),
                 page.created_date().map(|date| date.to_string()),
-                path_ranks[&page.rel_path] as i64,
+                path_rank,
                 page.knowledge_status().as_str(),
                 projection.summary,
                 projection.text,
                 name_text,
                 projection.spacing_text,
                 spacing_name_text,
+                input_revision,
+                traversal_rank,
             ])?;
             insert_terms.execute(params![
-                id as i64,
+                id,
                 name_text,
                 projection.text,
                 spacing_name_text,
@@ -214,7 +293,7 @@ fn prepare_search_inner(
             ])?;
             for name in page.names() {
                 insert_name.execute(params![
-                    id as i64,
+                    id,
                     name,
                     lk_core::concept::identity_key(name).unwrap_or_default(),
                     fold_name(name),
@@ -222,23 +301,8 @@ fn prepare_search_inner(
                 ])?;
             }
             for tag in super::search::search_tags(&page.page) {
-                insert_tag.execute(params![id as i64, tag])?;
+                insert_tag.execute(params![id, tag])?;
             }
-            let evidence_previews = if page
-                .page
-                .frontmatter
-                .get(lk_core::rss_evidence::CONCEPT_EVIDENCE_FIELD)
-                .is_some()
-            {
-                let raw = std::fs::read_to_string(crate::page_path(root, &page.rel_path)?)?;
-                if lk_core::concept::file_revision(&raw) != page.file_revision {
-                    return Err(invalid("evidence source changed during snapshot"));
-                }
-                crate::rss_concept_citations(root, &page.rel_path, &raw)?;
-                crate::rss_link_previews(root, &page.rel_path, &raw)?
-            } else {
-                std::collections::BTreeMap::new()
-            };
             for (ordinal, occurrence) in
                 lk_core::link::extract_page_link_occurrences(&page.page.body)
                     .into_iter()
@@ -252,9 +316,9 @@ fn prepare_search_inner(
                     serde_json::to_string(&evidence).map_err(|e| invalid(e.to_string()))?;
                 insert_link.execute(params![
                     page.rel_path.to_string_lossy(),
-                    ordinal as i64,
+                    integer(ordinal)?,
                     page.file_revision,
-                    (page.body_line_offset + occurrence.line) as i64,
+                    integer(page.body_line_offset + occurrence.line)?,
                     occurrence.link.text,
                     occurrence.link.dest,
                     target.map(|path| path.to_string_lossy().into_owned()),
@@ -265,6 +329,10 @@ fn prepare_search_inner(
             }
         }
     }
+    for (path, (id, ..)) in stored {
+        remove_page(&transaction, id, &path)?;
+    }
+    transaction.execute("DELETE FROM snapshot", [])?;
     transaction.execute(
         "INSERT INTO snapshot VALUES (?1, ?2, ?3, ?4)",
         params![snapshot, context, VERSION, citations.is_some()],
@@ -281,6 +349,25 @@ fn prepare_search_inner(
         pages: pages.len(),
         citations_available: citations.is_some(),
     })
+}
+
+fn integer(value: usize) -> Result<i64, VaultError> {
+    i64::try_from(value).map_err(|error| invalid(error.to_string()))
+}
+
+/// FTS5 external-content deletion needs the old indexed values before the content
+/// row changes; deleting only the page would leave old term matches behind.
+fn remove_page(connection: &Connection, id: i64, path: &str) -> Result<(), VaultError> {
+    connection.execute(
+        "INSERT INTO terms(terms, rowid, name_text, text, spacing_name_text, spacing_text)
+         SELECT 'delete', id, name_text, text, spacing_name_text, spacing_text FROM pages WHERE id=?1",
+        [id],
+    )?;
+    connection.execute("DELETE FROM names WHERE page_id=?1", [id])?;
+    connection.execute("DELETE FROM tags WHERE page_id=?1", [id])?;
+    connection.execute("DELETE FROM links WHERE source=?1", [path])?;
+    connection.execute("DELETE FROM pages WHERE id=?1", [id])?;
+    Ok(())
 }
 
 /// Search and graph have deliberately different inventories. Guard the selected search
@@ -396,7 +483,7 @@ pub(super) fn search(
         "knowledge = 1"
     };
     let sql = format!(
-        "SELECT metadata, summary, text, spacing_text FROM pages WHERE {scope} AND {filter} ORDER BY id"
+        "SELECT metadata, summary, text, spacing_text FROM pages WHERE {scope} AND {filter} ORDER BY traversal_rank"
     );
     let mut statement = transaction.prepare(&sql)?;
     let rows = statement.query_map(rusqlite::params_from_iter(&arguments), |row| {
@@ -588,7 +675,7 @@ pub(super) fn visit_body_pages(
     verify_snapshot(&transaction, root, dirs, expected)?;
     let (filter, arguments) = scalar_filter(options);
     let mut statement = transaction.prepare(&format!(
-        "SELECT metadata, body FROM pages WHERE {filter} ORDER BY id"
+        "SELECT metadata, body FROM pages WHERE {filter} ORDER BY traversal_rank"
     ))?;
     let rows = statement.query_map(rusqlite::params_from_iter(&arguments), |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
@@ -1146,5 +1233,569 @@ mod tests {
         assert_eq!(empty.pages, 0);
         assert_ne!(empty.snapshot, snapshot.snapshot);
         assert!(crate::search(root.path(), &dirs, &options).is_err());
+    }
+
+    fn citation_projection(paths: &[(&str, &[&str])]) -> crate::ConceptCitationProjection {
+        crate::ConceptCitationProjection {
+            input_revision: "captured-graph".into(),
+            concepts: paths
+                .iter()
+                .map(|(path, sources)| crate::ConceptCitationSet {
+                    path: (*path).into(),
+                    source_count: sources.len(),
+                    citations: sources
+                        .iter()
+                        .map(|source| {
+                            lk_core::concept::Citation::at_revision(
+                                Path::new(source),
+                                "captured-source".into(),
+                            )
+                        })
+                        .collect(),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn incremental_refresh_matches_fresh_views_without_replacing_unchanged_owners() {
+        let root = tempfile::tempdir().unwrap();
+        let fresh = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let mut files = BTreeMap::from([
+            (
+                "wiki/concepts/a.md",
+                "---\ntype: concept\ntitle: Alpha\naliases: [Old Alias]\ntags: [old]\n---\n## Synthesis\nOldneedle evidence. [Old](../documents/old.md)\n",
+            ),
+            (
+                "wiki/concepts/z.md",
+                "---\ntype: concept\ntitle: Zulu\ntags: [stable]\n---\n## Synthesis\nEvidence remains. [Alpha](a.md)\n",
+            ),
+            (
+                "wiki/documents/old.md",
+                "---\ntype: document\ntitle: Old\nsource_identity: {repository: r, document: old}\nsource_record: {superseded_by: new}\n---\nOldneedle evidence.\n",
+            ),
+            (
+                "wiki/documents/new.md",
+                "---\ntype: document\ntitle: New\nsource_identity: {repository: r, document: new}\n---\nEvidence retained.\n",
+            ),
+        ]);
+        for (path, text) in &files {
+            write(root.path(), path, text);
+        }
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let before_projection = citation_projection(&[
+            ("wiki/concepts/a.md", &["wiki/documents/old.md"]),
+            ("wiki/concepts/z.md", &[]),
+        ]);
+        let before =
+            prepare_search_with_citations(&session, &dirs, &before_projection, |_| Ok(())).unwrap();
+        let connection = Connection::open(root.path().join(INDEX_PATH)).unwrap();
+        let ids = |connection: &Connection| {
+            connection
+                .prepare("SELECT path, id FROM pages")
+                .unwrap()
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                })
+                .unwrap()
+                .collect::<Result<BTreeMap<_, _>, _>>()
+                .unwrap()
+        };
+        let before_ids = ids(&connection);
+        connection.execute_batch("CREATE TRIGGER keep_page BEFORE DELETE ON pages
+            WHEN old.path='wiki/concepts/z.md' BEGIN SELECT RAISE(ABORT, 'unchanged page deleted'); END;
+            CREATE TRIGGER keep_body BEFORE UPDATE OF body,metadata ON pages
+            WHEN old.path='wiki/concepts/z.md' BEGIN SELECT RAISE(ABORT, 'unchanged page replaced'); END;
+            CREATE TRIGGER keep_names BEFORE DELETE ON names
+            WHEN old.page_id=(SELECT id FROM pages WHERE path='wiki/concepts/z.md')
+            BEGIN SELECT RAISE(ABORT, 'unchanged names deleted'); END;
+            CREATE TRIGGER keep_tags BEFORE DELETE ON tags
+            WHEN old.page_id=(SELECT id FROM pages WHERE path='wiki/concepts/z.md')
+            BEGIN SELECT RAISE(ABORT, 'unchanged tags deleted'); END;
+            CREATE TRIGGER keep_links BEFORE DELETE ON links WHEN old.source='wiki/concepts/z.md'
+            BEGIN SELECT RAISE(ABORT, 'unchanged links deleted'); END;
+            CREATE TRIGGER keep_provenance BEFORE UPDATE ON provenance_documents
+            WHEN old.path='wiki/documents/new.md' BEGIN SELECT RAISE(ABORT, 'unchanged provenance replaced'); END;
+            CREATE TRIGGER keep_citations BEFORE UPDATE ON concept_evidence
+            WHEN old.path='wiki/concepts/z.md' BEGIN SELECT RAISE(ABORT, 'unchanged citations replaced'); END;").unwrap();
+        files.insert("wiki/concepts/a.md", "---\ntype: concept\ntitle: Beta\naliases: [New Alias]\ncategory: updated\ntags: [new]\n---\n## Synthesis\nNewneedle evidence. [First](z.md) [Second](z.md)\n");
+        files.insert(
+            "wiki/concepts/000.md",
+            "---\ntype: concept\ntitle: First\n---\n## Synthesis\nNewneedle evidence first.\n",
+        );
+        files.insert("wiki/documents/child.md", "---\ntype: document\ntitle: Child\nsource_identity: {repository: r, document: child}\nsource_record: {superseded_by: new}\n---\nNewneedle evidence.\n");
+        files.remove("wiki/documents/old.md");
+        std::fs::remove_file(root.path().join("wiki/documents/old.md")).unwrap();
+        for (path, text) in &files {
+            write(root.path(), path, text);
+            write(fresh.path(), path, text);
+        }
+        let projection = citation_projection(&[
+            ("wiki/concepts/000.md", &[]),
+            ("wiki/concepts/a.md", &["wiki/documents/new.md"]),
+            ("wiki/concepts/z.md", &[]),
+        ]);
+        let updated =
+            prepare_search_with_citations(&session, &dirs, &projection, |_| Ok(())).unwrap();
+        let fresh_session = MutationSession::acquire(fresh.path()).unwrap();
+        let rebuilt =
+            prepare_search_with_citations(&fresh_session, &dirs, &projection, |_| Ok(())).unwrap();
+        assert_ne!(updated.snapshot, before.snapshot);
+        let after_ids = ids(&connection);
+        for path in [
+            "wiki/concepts/a.md",
+            "wiki/concepts/z.md",
+            "wiki/documents/new.md",
+        ] {
+            assert_eq!(before_ids[path], after_ids[path], "{path}");
+        }
+        assert!(after_ids["wiki/concepts/000.md"] > *before_ids.values().max().unwrap());
+        assert!(!after_ids.contains_key("wiki/documents/old.md"));
+        let triggers: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM sqlite_schema WHERE type='trigger' AND name LIKE 'keep_%'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            triggers, 7,
+            "compatible refresh must not rebuild the schema"
+        );
+        connection
+            .execute(
+                "INSERT INTO terms(terms, rank) VALUES ('integrity-check', 1)",
+                [],
+            )
+            .unwrap();
+        for query in [
+            None,
+            Some("Oldneedle"),
+            Some("Newneedle"),
+            Some("Old Alias"),
+            Some("New Alias"),
+            Some("evidence"),
+        ] {
+            for tags in [vec![], vec!["old".to_owned()], vec!["new".to_owned()]] {
+                let mut options = SearchOptions {
+                    query,
+                    include_sources: true,
+                    tags: &tags,
+                    limit: 100,
+                    ..Default::default()
+                };
+                let live = crate::search(root.path(), &dirs, &options).unwrap();
+                options.snapshot = Some(&updated.snapshot);
+                let mut incremental = crate::search(root.path(), &dirs, &options).unwrap();
+                options.snapshot = Some(&rebuilt.snapshot);
+                let mut full = crate::search(fresh.path(), &dirs, &options).unwrap();
+                incremental.snapshot = None;
+                full.snapshot = None;
+                assert_eq!(
+                    serde_json::to_value(&incremental).unwrap(),
+                    serde_json::to_value(&full).unwrap(),
+                    "{query:?} {tags:?}"
+                );
+                assert_eq!(
+                    serde_json::to_value(&incremental.hits).unwrap(),
+                    serde_json::to_value(&live.hits).unwrap(),
+                    "{query:?} {tags:?}"
+                );
+            }
+        }
+        let mut body = crate::BodySearchOptions {
+            search: SearchOptions {
+                query: Some("evidence"),
+                include_sources: true,
+                limit: 2,
+                offset: 1,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let live = crate::search_body(root.path(), &dirs, &body).unwrap();
+        body.search.snapshot = Some(&updated.snapshot);
+        let captured = crate::search_body(root.path(), &dirs, &body).unwrap();
+        assert_eq!(
+            serde_json::to_value(live.hits).unwrap(),
+            serde_json::to_value(captured.hits).unwrap(),
+            "stable IDs must not change traversal pagination"
+        );
+        let links = crate::inspect_indexed_links(
+            root.path(),
+            &dirs,
+            Path::new("wiki/concepts/a.md"),
+            &crate::IndexedLinkOptions {
+                snapshot: &updated.snapshot,
+                direction: crate::LinkDirection::Outgoing,
+                limit: 100,
+                offset: 0,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            links
+                .links
+                .iter()
+                .map(|link| link.label.as_str())
+                .collect::<Vec<_>>(),
+            ["First", "Second"]
+        );
+        let provenance = crate::ProvenanceOptions {
+            direction: crate::ProvenanceDirection::Incoming,
+            relation: None,
+            limit: 100,
+            offset: 0,
+            revision: None,
+            snapshot: None,
+        };
+        let live = crate::inspect_provenance(
+            root.path(),
+            &dirs,
+            Path::new("wiki/documents/new.md"),
+            &provenance,
+        )
+        .unwrap();
+        let captured = crate::inspect_provenance(
+            root.path(),
+            &dirs,
+            Path::new("wiki/documents/new.md"),
+            &crate::ProvenanceOptions {
+                snapshot: Some(&updated.snapshot),
+                ..provenance
+            },
+        )
+        .unwrap();
+        assert_eq!(live.entries, captured.entries);
+        assert_eq!(live.total, captured.total);
+        let citations = crate::inspect_concept_citations(
+            root.path(),
+            &dirs,
+            Path::new("wiki/concepts/a.md"),
+            &crate::CitationOptions {
+                snapshot: &updated.snapshot,
+                limit: 100,
+                offset: 0,
+            },
+        )
+        .unwrap();
+        assert_eq!(citations.citations, projection.concepts[1].citations);
+        assert!(
+            crate::search(
+                root.path(),
+                &dirs,
+                &SearchOptions {
+                    query: None,
+                    snapshot: Some(&before.snapshot),
+                    ..Default::default()
+                }
+            )
+            .is_err()
+        );
+    }
+
+    fn database_rows(root: &Path) -> Vec<Vec<Vec<rusqlite::types::Value>>> {
+        let connection = Connection::open(root.join(INDEX_PATH)).unwrap();
+        [
+            "snapshot",
+            "pages",
+            "names",
+            "tags",
+            "links",
+            "provenance_documents",
+            "provenance_addresses",
+            "provenance_relations",
+            "provenance_coverage",
+            "concept_evidence",
+            "concept_citations",
+        ]
+        .into_iter()
+        .map(|table| {
+            let mut query = connection
+                .prepare(&format!("SELECT * FROM {table} ORDER BY rowid"))
+                .unwrap();
+            let count = query.column_count();
+            query
+                .query_map([], |row| (0..count).map(|column| row.get(column)).collect())
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        })
+        .collect()
+    }
+
+    #[test]
+    fn incremental_refresh_rolls_back_all_views_on_verifier_or_sql_rejection() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let path = "wiki/concepts/a.md";
+        write(
+            root.path(),
+            path,
+            "---\ntype: concept\ntitle: Alpha\naliases: [Old Alias]\ntags: [old]\n---\nOldneedle [old](../documents/old.md).\n",
+        );
+        write(
+            root.path(),
+            "wiki/documents/old.md",
+            "---\ntype: document\ntitle: Old\nsource_identity: {repository: r, document: old}\n---\nOldneedle.\n",
+        );
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let projection = citation_projection(&[(path, &["wiki/documents/old.md"])]);
+        let before =
+            prepare_search_with_citations(&session, &dirs, &projection, |_| Ok(())).unwrap();
+        let rows = database_rows(root.path());
+        write(
+            root.path(),
+            path,
+            "---\ntype: concept\ntitle: Beta\ntags: [new]\n---\nNewneedle [new](../documents/new.md).\n",
+        );
+        std::fs::remove_file(root.path().join("wiki/documents/old.md")).unwrap();
+        write(
+            root.path(),
+            "wiki/documents/new.md",
+            "---\ntype: document\ntitle: New\nsource_identity: {repository: r, document: new}\n---\nNewneedle.\n",
+        );
+        let changed = citation_projection(&[(path, &["wiki/documents/new.md"])]);
+        let error = prepare_search_with_citations(&session, &dirs, &changed, |_| {
+            Err(invalid("deterministic capture drift"))
+        })
+        .err()
+        .unwrap();
+        assert!(error.to_string().contains("deterministic capture drift"));
+        assert_eq!(database_rows(root.path()), rows);
+        let connection = Connection::open(root.path().join(INDEX_PATH)).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TRIGGER reject_provenance BEFORE INSERT ON provenance_documents
+            BEGIN SELECT RAISE(ABORT, 'deterministic SQL rejection'); END;",
+            )
+            .unwrap();
+        let error = prepare_search_with_citations(&session, &dirs, &changed, |_| Ok(()))
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("deterministic SQL rejection"));
+        assert_eq!(database_rows(root.path()), rows);
+        let captured = crate::search(
+            root.path(),
+            &dirs,
+            &SearchOptions {
+                query: Some("Oldneedle"),
+                snapshot: Some(&before.snapshot),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(captured.total, 2);
+        connection
+            .execute(
+                "INSERT INTO terms(terms, rank) VALUES ('integrity-check', 1)",
+                [],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn incremental_refresh_updates_review_previews_without_target_byte_changes() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let concept = "wiki/concepts/a.md";
+        let source = "wiki/documents/evidence.md";
+        write(
+            root.path(),
+            concept,
+            "---\ntype: concept\ntitle: Alpha\n---\nEvidence.\n",
+        );
+        let raw = "---\ntype: document\ntitle: Evidence\n---\nOriginal evidence.\n";
+        write(root.path(), source, raw);
+        let revision = lk_core::concept::source_revision(&crate::parse_page(raw).unwrap());
+        let review = serde_json::json!({"status":"open", "subjects":[concept], "evidence":[{"path":source,"revision":revision}], "resolution":null});
+        write(
+            root.path(),
+            "wiki/explorations/review.md",
+            &format!(
+                "---\ntype: exploration\ntitle: Review\nreview: {review}\n---\nAuthored judgment.\n"
+            ),
+        );
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let prepared = prepare_search(&session, &dirs).unwrap();
+        let mut options = SearchOptions {
+            query: Some("Alpha"),
+            snapshot: Some(&prepared.snapshot),
+            ..Default::default()
+        };
+        let before = crate::search(root.path(), &dirs, &options).unwrap();
+        crate::archive_evidence(root.path(), &[source.into()]).unwrap();
+        write(root.path(), source, &raw.replace("Original", "Changed"));
+        let refreshed = prepare_search(&session, &dirs).unwrap();
+        options.snapshot = Some(&refreshed.snapshot);
+        let after = crate::search(root.path(), &dirs, &options).unwrap();
+        assert_eq!(before.hits[0].file_revision, after.hits[0].file_revision);
+        assert_ne!(
+            serde_json::to_value(&before.hits[0]).unwrap(),
+            serde_json::to_value(&after.hits[0]).unwrap()
+        );
+        options.snapshot = None;
+        let live = crate::search(root.path(), &dirs, &options).unwrap();
+        assert_eq!(
+            serde_json::to_value(after.hits).unwrap(),
+            serde_json::to_value(live.hits).unwrap()
+        );
+    }
+
+    #[test]
+    fn incompatible_version_or_configuration_rebuilds_the_current_snapshot() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        write(
+            root.path(),
+            "wiki/concepts/a.md",
+            "---\ntype: concept\ntitle: Alpha\n---\nEvidence.\n",
+        );
+        write(
+            root.path(),
+            "daily/feed/old.md",
+            "---\ntype: daily\ntitle: Old\n---\nOld scope.\n",
+        );
+        write(
+            root.path(),
+            "observations/feed/new.md",
+            "---\ntype: daily\ntitle: New\n---\nNew scope.\n",
+        );
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let before = prepare_search(&session, &dirs).unwrap();
+        let connection = Connection::open(root.path().join(INDEX_PATH)).unwrap();
+        // Simulate the absence of maintenance columns in a previous schema.
+        connection
+            .execute_batch(
+                "DROP INDEX pages_traversal;
+            ALTER TABLE pages DROP COLUMN input_revision;
+            ALTER TABLE pages DROP COLUMN traversal_rank;
+            ALTER TABLE concept_evidence DROP COLUMN input_revision;
+            UPDATE snapshot SET version=0;",
+            )
+            .unwrap();
+        let migrated = prepare_search(&session, &dirs).unwrap();
+        assert_eq!(migrated.snapshot, before.snapshot);
+        connection
+            .execute(
+                "INSERT INTO terms(terms, rank) VALUES ('integrity-check', 1)",
+                [],
+            )
+            .unwrap();
+        let changed = VaultDirs {
+            daily: "observations".into(),
+            ..dirs.clone()
+        };
+        let prepared = prepare_search(&session, &changed).unwrap();
+        assert_ne!(prepared.snapshot, before.snapshot);
+        let options = SearchOptions {
+            query: None,
+            include_sources: true,
+            limit: 100,
+            snapshot: Some(&prepared.snapshot),
+            ..Default::default()
+        };
+        let captured = crate::search(root.path(), &changed, &options).unwrap();
+        assert_eq!(captured.total, 2);
+        assert!(
+            captured
+                .hits
+                .iter()
+                .any(|hit| hit.path == "observations/feed/new.md")
+        );
+        assert!(
+            !captured
+                .hits
+                .iter()
+                .any(|hit| hit.path == "daily/feed/old.md")
+        );
+        assert!(crate::search(root.path(), &dirs, &options).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unchanged_rss_origin_refreshes_alias_previews_and_still_verifies_immutable_payloads() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        for name in ["a", "b"] {
+            write(
+                root.path(),
+                &format!("wiki/concepts/{name}.md"),
+                &format!("---\ntype: concept\ntitle: {name}\n---\nEvidence.\n"),
+            );
+        }
+        let alias = root.path().join("wiki/concepts/alias.md");
+        std::os::unix::fs::symlink("a.md", &alias).unwrap();
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let event: lk_core::event::Event = serde_json::from_value(serde_json::json!({
+            "id":"rss:2026-10-18:0000000000000001", "source_id":"rss", "source_type":"rss",
+            "timestamp":"2026-10-18T00:00:00Z", "date":"2026-10-18", "title":"Title", "body":"Original evidence.",
+            "url":"https://example.com", "author":null, "labels":[], "category":null,
+            "performance_category":null, "is_self":false, "is_personal":false, "metadata":{}
+        })).unwrap();
+        let capture = lk_core::rss_original::RssOriginalCapture::from_events(&[&event]).unwrap();
+        let reference = crate::publish_rss_original(&session, &capture).unwrap();
+        let entry = &capture.manifest.events[0];
+        let bindings = serde_json::json!([{
+            "schema":lk_core::rss_evidence::RSS_EVIDENCE_SCHEMA, "concept":"wiki/concepts/a.md",
+            "manifest":reference, "events":[{"event_id":entry.event_id,"revision":entry.revision}]
+        }]);
+        let source = "daily/rss.md";
+        let raw = format!(
+            "---\ntype: daily\nsource: rss\ncreated: 2026-10-18\nsource_record: {{rss_original: {}}}\nconcept_evidence: {bindings}\n---\n## Related Concepts\n- [Canonical](../wiki/concepts/a.md)\n- [Alias](../wiki/concepts/alias.md)\n",
+            serde_json::to_string(&reference).unwrap()
+        );
+        write(root.path(), source, &raw);
+        let prepared = prepare_search(&session, &dirs).unwrap();
+        let links = |snapshot: &str| {
+            crate::inspect_indexed_links(
+                root.path(),
+                &dirs,
+                Path::new(source),
+                &crate::IndexedLinkOptions {
+                    snapshot,
+                    direction: crate::LinkDirection::Outgoing,
+                    limit: 100,
+                    offset: 0,
+                },
+            )
+            .unwrap()
+        };
+        let before = links(&prepared.snapshot);
+        assert_eq!(before.links.len(), 2);
+        assert!(before.links.iter().all(|link| link.rss_evidence.is_some()));
+        std::fs::remove_file(&alias).unwrap();
+        std::os::unix::fs::symlink("b.md", &alias).unwrap();
+        // Lexical-only capture does not enumerate concept leaf aliases. Change
+        // its selected inventory so this exercises incremental refresh rather
+        // than the existing identical-snapshot fast path.
+        write(
+            root.path(),
+            "wiki/documents/new.md",
+            "---\ntype: document\ntitle: New\n---\nNew evidence.\n",
+        );
+        let refreshed = prepare_search(&session, &dirs).unwrap();
+        assert_ne!(prepared.snapshot, refreshed.snapshot);
+        let after = links(&refreshed.snapshot);
+        assert_eq!(before.file_revision, after.file_revision);
+        assert!(after.links[0].rss_evidence.is_some());
+        assert!(after.links[1].rss_evidence.is_none());
+        std::fs::write(
+            root.path().join(format!(
+                "{}/events/{}.json",
+                lk_core::rss_original::RSS_ORIGINAL_STORE,
+                entry.revision
+            )),
+            "corrupt",
+        )
+        .unwrap();
+        write(
+            root.path(),
+            "wiki/concepts/b.md",
+            "---\ntype: concept\ntitle: Changed\n---\nNew evidence.\n",
+        );
+        assert!(prepare_search(&session, &dirs).is_err());
+        assert!(links(&refreshed.snapshot).links[1].rss_evidence.is_none());
     }
 }

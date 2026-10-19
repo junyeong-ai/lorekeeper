@@ -73,32 +73,51 @@ pub(super) fn capture(
 }
 
 pub(super) fn write(connection: &Connection, captured: &Capture) -> Result<(), VaultError> {
-    connection.execute_batch("DROP TABLE IF EXISTS provenance_documents;
-        DROP TABLE IF EXISTS provenance_addresses;
-        DROP TABLE IF EXISTS provenance_relations;
-        DROP TABLE IF EXISTS provenance_coverage;
-        CREATE TABLE provenance_documents(path TEXT PRIMARY KEY, namespace TEXT, document TEXT, payload TEXT NOT NULL);
-        CREATE INDEX provenance_identity ON provenance_documents(namespace, document, path);
-        CREATE TABLE provenance_addresses(path TEXT PRIMARY KEY, owner TEXT NOT NULL);
-        CREATE TABLE provenance_relations(source TEXT NOT NULL, relation TEXT NOT NULL, namespace TEXT, target TEXT NOT NULL);
-        CREATE INDEX provenance_outgoing ON provenance_relations(source, relation, target);
-        CREATE INDEX provenance_incoming ON provenance_relations(namespace, target, relation, source);
-        CREATE TABLE provenance_coverage(payload TEXT NOT NULL);")?;
+    connection.execute_batch("CREATE TABLE IF NOT EXISTS provenance_documents(path TEXT PRIMARY KEY, namespace TEXT, document TEXT, payload TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS provenance_identity ON provenance_documents(namespace, document, path);
+        CREATE TABLE IF NOT EXISTS provenance_addresses(path TEXT PRIMARY KEY, owner TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS provenance_relations(source TEXT NOT NULL, relation TEXT NOT NULL, namespace TEXT, target TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS provenance_outgoing ON provenance_relations(source, relation, target);
+        CREATE INDEX IF NOT EXISTS provenance_incoming ON provenance_relations(namespace, target, relation, source);
+        CREATE TABLE IF NOT EXISTS provenance_coverage(payload TEXT NOT NULL);")?;
+    let mut stored_documents = {
+        let mut query = connection.prepare("SELECT path, payload FROM provenance_documents")?;
+        query
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<Result<BTreeMap<_, _>, _>>()?
+    };
+    let mut stored_addresses = {
+        let mut query = connection.prepare("SELECT path, owner FROM provenance_addresses")?;
+        query
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<Result<BTreeMap<_, _>, _>>()?
+    };
     let mut document =
-        connection.prepare("INSERT INTO provenance_documents VALUES (?1,?2,?3,?4)")?;
-    let mut address = connection.prepare("INSERT INTO provenance_addresses VALUES (?1,?2)")?;
+        connection.prepare("INSERT INTO provenance_documents VALUES (?1,?2,?3,?4)
+            ON CONFLICT(path) DO UPDATE SET namespace=excluded.namespace, document=excluded.document, payload=excluded.payload")?;
+    let mut address = connection.prepare(
+        "INSERT INTO provenance_addresses VALUES (?1,?2)
+        ON CONFLICT(path) DO UPDATE SET owner=excluded.owner",
+    )?;
     let mut relation =
         connection.prepare("INSERT INTO provenance_relations VALUES (?1,?2,?3,?4)")?;
     for page in &captured.documents {
+        let payload = serde_json::to_string(page)
+            .map_err(|error| VaultError::Serialization(error.to_string()))?;
+        if stored_documents.remove(&page.path).as_ref() == Some(&payload) {
+            continue;
+        }
         let repository = page.identity.as_ref().map(|(repository, _)| repository);
         let id = page.identity.as_ref().map(|(_, id)| id);
-        document.execute(params![
-            page.path,
-            repository,
-            id,
-            serde_json::to_string(page)
-                .map_err(|error| VaultError::Serialization(error.to_string()))?
-        ])?;
+        document.execute(params![page.path, repository, id, payload,])?;
+        connection.execute(
+            "DELETE FROM provenance_relations WHERE source=?1",
+            [&page.path],
+        )?;
         for declaration in &page.declarations {
             relation.execute(params![
                 page.path,
@@ -108,13 +127,28 @@ pub(super) fn write(connection: &Connection, captured: &Capture) -> Result<(), V
             ])?;
         }
     }
-    for (path, owner) in &captured.addresses {
-        address.execute(params![path, owner])?;
+    for path in stored_documents.keys() {
+        connection.execute("DELETE FROM provenance_relations WHERE source=?1", [path])?;
+        connection.execute("DELETE FROM provenance_documents WHERE path=?1", [path])?;
     }
+    for (path, owner) in &captured.addresses {
+        if stored_addresses.remove(path).as_ref() != Some(owner) {
+            address.execute(params![path, owner])?;
+        }
+    }
+    for path in stored_addresses.keys() {
+        connection.execute("DELETE FROM provenance_addresses WHERE path=?1", [path])?;
+    }
+    let coverage = serde_json::to_string(&captured.coverage)
+        .map_err(|error| VaultError::Serialization(error.to_string()))?;
     connection.execute(
-        "INSERT INTO provenance_coverage VALUES (?1)",
-        [serde_json::to_string(&captured.coverage)
-            .map_err(|error| VaultError::Serialization(error.to_string()))?],
+        "UPDATE provenance_coverage SET payload=?1 WHERE payload!=?1",
+        [&coverage],
+    )?;
+    connection.execute(
+        "INSERT INTO provenance_coverage SELECT ?1
+        WHERE NOT EXISTS (SELECT 1 FROM provenance_coverage)",
+        [&coverage],
     )?;
     Ok(())
 }
