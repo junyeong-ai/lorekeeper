@@ -352,7 +352,7 @@ sources:
     type: tasks
     enabled: false
     labels: [personal]
-    concept_policy: supported-new
+    concept_policy: existing-only
 
 # ─── Personal module (OPTIONAL) ───────────────────────────
 # The personal-productivity module: the work-log + weekly/monthly/quarterly/annual personal
