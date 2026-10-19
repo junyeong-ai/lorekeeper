@@ -81,6 +81,58 @@ impl Fixture {
     }
 }
 
+const RECORD_FIRST_AUDIT: &str = r#"
+"$LORE_BIN" wiki audit-plan > "$TEST_EXECUTION_ROOT/plan.json" || exit 31
+python3 - <<'ASSESS'
+import json, os
+from pathlib import Path
+root=Path(os.environ['TEST_EXECUTION_ROOT'])
+candidate=json.loads((root/'plan.json').read_text())['candidates'][0]
+assessment={key:candidate[key] for key in ['path','file_revision','input_revision']}
+assessment.update(disposition='reviewed', reason='Read the exact selected concept and its scoped evidence.', reviews=[])
+(root/'assessment.json').write_text(json.dumps({'assessments':[assessment]}))
+ASSESS
+"$LORE_BIN" wiki audit-record --file "$TEST_EXECUTION_ROOT/assessment.json" || exit 32
+"#;
+
+fn write_audit_concept(fixture: &Fixture, name: &str) {
+    let concepts = fixture.root().join("vault/wiki/concepts");
+    std::fs::create_dir_all(&concepts).unwrap();
+    let template = include_str!("behaviour/corpus/small/vault/wiki/concepts/unlinked-note.md");
+    std::fs::write(
+        concepts.join(format!("{name}.md")),
+        template
+            .replace("Unlinked note", name)
+            .replace("unlinked-note", name),
+    )
+    .unwrap();
+}
+
+fn write_review_attention(fixture: &Fixture, subject: &str, invalid: bool) {
+    let vault = fixture.root().join("vault");
+    let evidence = "wiki/documents/reviewed.md";
+    std::fs::create_dir_all(vault.join("wiki/documents")).unwrap();
+    let prior = "---\ntype: document\ntitle: Evidence\n---\nOriginal evidence.\n";
+    std::fs::write(vault.join(evidence), prior).unwrap();
+    let revision = lk_core::concept::source_revision(&lk_vault::parse_page(prior).unwrap());
+    if invalid {
+        std::fs::remove_file(vault.join(evidence)).unwrap();
+    } else {
+        lk_vault::archive_evidence(&vault, &[evidence.into()]).unwrap();
+        std::fs::write(vault.join(evidence), prior.replace("Original", "Changed")).unwrap();
+    }
+    let review = serde_json::json!({
+        "status":"open", "subjects":[subject],
+        "evidence":[{"path":evidence,"revision":revision}], "resolution":null,
+    });
+    std::fs::create_dir_all(vault.join("wiki/explorations")).unwrap();
+    std::fs::write(
+        vault.join("wiki/explorations/review.md"),
+        format!("---\ntype: exploration\ntitle: Scoped review\nreview: {review}\n---\nExisting scoped judgment.\n"),
+    )
+    .unwrap();
+}
+
 #[test]
 fn empty_work_does_not_launch_or_require_an_agent() {
     let fixture = Fixture::new("codex", 30, "exit 91");
@@ -113,6 +165,7 @@ fn both_hosts_receive_distinct_contracts_and_exit_zero_does_not_prove_completion
         assert_eq!(result["ok"], false);
         assert_eq!(result["execution"]["engine"], engine);
         let arguments = std::fs::read_to_string(fixture.root().join("arguments")).unwrap();
+        assert!(!arguments.contains("bounded knowledge maintenance"));
         if engine == "codex" {
             assert!(arguments.starts_with("exec\n"));
             assert!(arguments.contains("--sandbox\nworkspace-write\n"));
@@ -132,6 +185,22 @@ fn both_hosts_receive_distinct_contracts_and_exit_zero_does_not_prove_completion
                 > 0
         );
     }
+}
+
+#[test]
+fn knowledge_queue_consumer_receives_bounded_maintenance_context() {
+    let fixture = Fixture::new("codex", 30, "exit 0");
+    fixture.ingest();
+    let (output, result) = fixture.run("knowledge");
+    assert!(
+        !output.status.success(),
+        "the mock leaves current queue work unfinished"
+    );
+    assert_eq!(result["ok"], false);
+    let arguments = std::fs::read_to_string(fixture.root().join("arguments")).unwrap();
+    assert!(arguments.contains("bounded knowledge maintenance job"));
+    assert!(arguments.contains("unrelated needs-reassessment remains backlog"));
+    assert!(arguments.contains("invalid reviews or review inspection errors fail"));
 }
 
 #[test]
@@ -263,6 +332,126 @@ fn audit_exit_zero_without_assessments_is_incomplete() {
             .join("vault/.lorekeeper/knowledge-audit.json")
             .exists()
     );
+}
+
+#[test]
+fn unrelated_review_drift_remains_visible_while_knowledge_campaign_progresses() {
+    let fixture = Fixture::new("codex", 30, RECORD_FIRST_AUDIT);
+    let config =
+        std::fs::read_to_string(&fixture.config).unwrap() + "graph:\n  audit:\n    batch_size: 1\n";
+    std::fs::write(&fixture.config, config).unwrap();
+    for name in ["a", "b"] {
+        write_audit_concept(&fixture, name);
+    }
+    write_review_attention(&fixture, "wiki/documents/reviewed.md", false);
+    let output = fixture
+        .command()
+        .args(["run", "knowledge", "--batches", "2", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["ok"], true);
+    assert_eq!(result["stop_reason"], "batch-limit");
+    let runs = result["runs"].as_array().unwrap();
+    assert_eq!(runs.len(), 2);
+    for run in runs {
+        assert_eq!(
+            run["review_health"],
+            serde_json::json!({
+                "open":0,"resolved":0,"needs_reassessment":1,"invalid":0,
+            })
+        );
+        assert_eq!(run["audit"].as_array().unwrap().len(), 1);
+    }
+    assert_ne!(
+        runs[0]["audit"][0]["requested_path"],
+        runs[1]["audit"][0]["requested_path"]
+    );
+    let strict = fixture
+        .command()
+        .args(["wiki", "reviews", "--check"])
+        .output()
+        .unwrap();
+    assert!(
+        !strict.status.success(),
+        "the standalone whole-vault health gate stays strict"
+    );
+    let reports: serde_json::Value = serde_json::from_slice(&strict.stdout).unwrap();
+    assert_eq!(reports[0]["effective_state"], "needs-reassessment");
+}
+
+#[test]
+fn empty_knowledge_plan_still_reports_review_attention_without_launching_agent() {
+    let fixture = Fixture::new("codex", 30, "exit 91");
+    write_review_attention(&fixture, "wiki/documents/reviewed.md", false);
+    let (output, result) = fixture.run("knowledge");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(result["review_health"]["needs_reassessment"], 1);
+    assert_eq!(result["review_health"]["invalid"], 0);
+    assert_eq!(result["audit"], serde_json::json!([]));
+    assert!(result["execution"].is_null());
+    assert!(!fixture.root().join("arguments").exists());
+}
+
+#[test]
+fn invalid_review_evidence_blocks_knowledge_before_launching_agent() {
+    let fixture = Fixture::new("codex", 30, RECORD_FIRST_AUDIT);
+    write_audit_concept(&fixture, "a");
+    write_review_attention(&fixture, "wiki/documents/reviewed.md", true);
+    let (output, result) = fixture.run("knowledge");
+    assert!(!output.status.success());
+    assert_eq!(result["review_health"]["invalid"], 1);
+    assert_eq!(result["review_health"]["needs_reassessment"], 0);
+    assert!(result["execution"].is_null());
+    assert!(result["audit"].is_null());
+    assert!(
+        result["stages"].as_array().unwrap().iter().any(|stage| {
+            stage["name"] == "knowledge review health" && stage["state"] == "failed"
+        })
+    );
+    assert!(!fixture.root().join("arguments").exists());
+}
+
+#[test]
+fn selected_review_drift_blocks_audit_completion_without_becoming_a_global_health_failure() {
+    let fixture = Fixture::new("codex", 30, RECORD_FIRST_AUDIT);
+    write_audit_concept(&fixture, "a");
+    write_review_attention(&fixture, "wiki/concepts/a.md", false);
+    let (output, result) = fixture.run("knowledge");
+    assert!(!output.status.success());
+    assert_eq!(result["review_health"]["needs_reassessment"], 1);
+    assert_eq!(result["review_health"]["invalid"], 0);
+    assert!(result["audit"].is_null());
+    let stages = result["stages"].as_array().unwrap();
+    assert!(
+        stages
+            .iter()
+            .any(|stage| { stage["name"] == "audit completion" && stage["state"] == "failed" })
+    );
+    assert!(
+        stages
+            .iter()
+            .filter(|stage| stage["name"] == "knowledge review health")
+            .all(|stage| stage["state"] == "completed")
+    );
+    let plan = fixture
+        .command()
+        .args(["wiki", "audit-plan"])
+        .output()
+        .unwrap();
+    assert!(plan.status.success());
+    let plan: serde_json::Value = serde_json::from_slice(&plan.stdout).unwrap();
+    assert_eq!(plan["reviewed_current"], 0);
+    assert_eq!(plan["candidates"].as_array().unwrap().len(), 1);
 }
 
 #[test]

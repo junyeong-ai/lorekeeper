@@ -74,6 +74,14 @@ mod native {
         requested_model: Option<String>,
     }
 
+    #[derive(Default, Serialize)]
+    struct ReviewHealth {
+        open: usize,
+        resolved: usize,
+        needs_reassessment: usize,
+        invalid: usize,
+    }
+
     #[derive(Serialize)]
     struct JobResult {
         operation: Operation,
@@ -82,6 +90,7 @@ mod native {
         execution: Option<ExecutionInfo>,
         workflow_id: Option<lk_core::execution::WorkflowId>,
         audit: Option<Vec<lk_graph::audit::AuditCompletion>>,
+        review_health: Option<ReviewHealth>,
         stages: Vec<StageResult>,
     }
 
@@ -333,7 +342,12 @@ mod native {
                     false
                 }
                 Ok(_) => {
-                    let completed = self.consumer("lore-process", "").await;
+                    let operation = if matches!(self.result.operation, Operation::Knowledge) {
+                        "Process current queue tasks as part of this bounded knowledge maintenance job. Report whole-vault review attention separately: unrelated needs-reassessment remains backlog, while invalid reviews or review inspection errors fail."
+                    } else {
+                        ""
+                    };
+                    let completed = self.consumer("lore-process", operation).await;
                     self.drain_blocked = !completed;
                     completed
                 }
@@ -442,9 +456,52 @@ mod native {
             .map_err(|e| miette::miette!("{e}"))
         }
 
+        fn inspect_review_health(&mut self) -> bool {
+            if self.result.cancelled || !self.configuration_is_current() {
+                return false;
+            }
+            self.result.review_health = None;
+            let reports = match lk_vault::list_reviews(&self.root, &self.config.vault.dirs) {
+                Ok(reports) => reports,
+                Err(error) => return self.failure("knowledge review health", error),
+            };
+            if !self.configuration_is_current() {
+                return false;
+            }
+            let mut health = ReviewHealth::default();
+            for report in reports {
+                match report.effective_state {
+                    lk_vault::ReviewEffectiveState::Open => health.open += 1,
+                    lk_vault::ReviewEffectiveState::Resolved => health.resolved += 1,
+                    lk_vault::ReviewEffectiveState::NeedsReassessment => {
+                        health.needs_reassessment += 1;
+                    }
+                    lk_vault::ReviewEffectiveState::Invalid => health.invalid += 1,
+                }
+            }
+            let detail = format!(
+                "open={}, resolved={}, needs_reassessment={}, invalid={}; inspect `lore wiki reviews` for details",
+                health.open, health.resolved, health.needs_reassessment, health.invalid,
+            );
+            let valid = health.invalid == 0;
+            self.result.review_health = Some(health);
+            self.record(
+                "knowledge review health",
+                if valid {
+                    StageState::Completed
+                } else {
+                    StageState::Failed
+                },
+                Some(detail),
+            )
+        }
+
         async fn knowledge(&mut self) {
             self.reconcile().await;
             if !self.result.ok || self.result.cancelled {
+                return;
+            }
+            if !self.inspect_review_health() {
                 return;
             }
             let plan = match self.audit_plan(&[]) {
@@ -475,9 +532,7 @@ mod native {
             let selection = serde_json::to_string(&paths).expect("string paths serialize");
             self.consumer("lore-wiki", &format!("maintain. The controller selected this exact batch: {selection}. Start with audit-plan --path for these addresses; do not select another batch.")).await;
             self.reconcile().await;
-            self.native("knowledge reviews", &["wiki", "reviews", "--check"])
-                .await;
-            if self.result.cancelled || self.configuration_failed {
+            if !self.inspect_review_health() {
                 return;
             }
             match self.verify_audit(&plan.candidates) {
@@ -606,6 +661,7 @@ mod native {
                 execution: None,
                 workflow_id: None,
                 audit: None,
+                review_health: None,
                 stages: Vec::new(),
             },
         };
