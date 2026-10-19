@@ -23,7 +23,7 @@ impl Workspace {
     }
 
     /// The same, with `notes_options` appended verbatim to the `notes` source's own keys —
-    /// `extract_concepts: true`, say, which is what gives a page a related-concepts section.
+    /// `concept_policy: supported-new`, say, which is what gives a page a related-concepts section.
     fn with_notes_options(notes_options: &str, extra_sources: &str) -> Self {
         let root = tempfile::TempDir::new().expect("tempdir");
         std::fs::create_dir_all(root.path().join("vault/inbox")).expect("inbox dir");
@@ -161,7 +161,7 @@ fn ingest_writes_pages_flushes_queue_then_archives() {
 
 #[test]
 fn manual_provenance_reaches_semantic_inputs_without_owning_page_state() {
-    let ws = Workspace::with_notes_options("    extract_concepts: true\n", "");
+    let ws = Workspace::with_notes_options("    concept_policy: supported-new\n", "");
     let original = "---\ntitle: Historical note\ncreated: 2020-01-02\nstatus: superseded\nllm_inputs: {summary_done: forged}\nsource_identity: {repository: forged, document: forged}\n---\nOriginal evidence.\n";
     ws.drop_note("history.md", original);
     let out = ws.run(&["ingest"]);
@@ -492,7 +492,7 @@ fn a_dry_run_says_it_would_empty_the_section_rather_than_that_it_did() {
 /// the section that genuinely does empty — so this needs its own fixture.
 #[test]
 fn a_section_the_render_refills_is_not_reported_as_emptied() {
-    let ws = Workspace::with_notes_options("    extract_concepts: true\n", "");
+    let ws = Workspace::with_notes_options("    concept_policy: supported-new\n", "");
     ws.drop_note("note.md", "# Rollback\n\nThe rollback decision.\n");
     assert!(ws.run(&["ingest"]).status.success());
 

@@ -10,11 +10,24 @@ publication contracts in SKILL.md and read the curation reference before repairs
    `graph.audit.batch_size` bounds semantic work (1..100). If no candidate exists,
    report the returned counts and stop successfully. Do not expand the batch to
    reduce the whole backlog to zero.
+   Check `input.status` before reading: `oversized` retains the exact candidates
+   because their complete page, scoped review/evidence and selected RSS payload bytes exceed
+   `graph.audit.max_input_bytes`. Report the measured bytes and configured bound;
+   do not truncate evidence, skip candidates or record a completed assessment.
 2. For each candidate, read the complete concept and the actual evidence it cites.
+   The candidate's evidence is the complete graph-derived set. For independent
+   discovery, `wiki citations CONCEPT --snapshot ID` paginates that set; do not
+   substitute ordinary outgoing Sources links or stop after its first page.
    Use `wiki read` outlines and revision-checked sections. For an RSS event citation,
    read the exact selected event through `wiki original ORIGIN --evidence-concept
    CONCEPT`, including its event ID and payload revision. An uncited concept has an
    evidence gap, not an invitation to infer a source from its filename or keywords.
+   Read the candidate's `reviews` too: each dependency exposes the current review,
+   recorded citations, current evidence and available verified archives. Use those
+   exact paths and file revisions. A missing, invalid or stale scoped review must be
+   repaired through a dated reassessment before recording completion; omitting it
+   from the submitted `reviews` cannot bypass it. Scope includes declared subjects,
+   the concept's `knowledge_review` and reviews retained in its prior receipt.
 3. Examine subject, definitions, conditions, effective time and observation vs claim.
    Verify declared aliases denote the same subject. Read direct related concepts and
    check whether their stated relationship helps answer a concrete future question.
@@ -61,14 +74,16 @@ failed step must be reported, never recorded as a successful read.
 
 Receipts in `.lorekeeper/knowledge-audit.json` track the latest completed inputs and
 pending order, not truth or confidence. Changed concepts, evidence, related concepts,
-or missing/stale finding reviews reopen work. Changed and first-time work rotate;
+or scoped reviews and their evidence reopen work. Changed and first-time work rotate;
 unchanged inputs are skipped without an age-based reread. Unchanged open findings
 remain discoverable through their reviews without being rewritten every week.
 
 Finish by reconciling backlinks and completing any queued repairs through the
 lore-process finalization protocol, then run `lore wiki refresh`, `lore graph lint`,
-`lore wiki reviews --check` and `lore queue check`. A blocked or failed repair is
-not successful completion; preserve its tasks and report the failure. An unchanged
-open finding with a current scoped review remains a valid follow-up assessment.
+`lore wiki reviews` and `lore queue check`. Report global review attention separately:
+unrelated `needs-reassessment` records remain backlog without expanding this batch.
+Invalid records or a blocked repair are failures; preserve their tasks and report
+them. The native audit verifier requires current scoped reviews; an unchanged open
+finding with a current scoped review remains a valid follow-up assessment.
 Report batch coverage, repairs, unresolved findings and remaining backlog separately.
 No lint or receipt count certifies that the entire corpus is semantically consistent.

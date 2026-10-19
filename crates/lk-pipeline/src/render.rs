@@ -283,7 +283,7 @@ pub struct DailyRenderContext<'a> {
     pub summary: &'a str,
     pub concepts: &'a [ConceptIdentity],
     /// Whether this source extracts concepts. Templates render the `## Related Concepts`
-    /// section only when true, so a source that opts out (`extract_concepts: false`,
+    /// section only when true, so a source that opts out (`concept_policy: disabled`,
     /// e.g. a personal work-log feed) doesn't carry a permanently-empty section.
     pub extract_concepts: bool,
     /// Config-declared highlight sections for this source: each surfaces events whose

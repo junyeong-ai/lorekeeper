@@ -266,12 +266,20 @@ read it again and regenerate the extraction; never copy a new revision onto an o
 The applier also requires a matching pending task, target and date. A lost task requires
 explicit recovery as described in `queue-format.md`; normal draining never opts into recovery.
 
+`input.concept_policy` controls admission. `existing-only` permits links to subjects
+already owned by a concept: resolve every name, read its scope, and omit unsupported
+or absent owners instead of creating a broader substitute. `supported-new` also permits
+new durable subjects with direct support and a useful future retrieval purpose. A
+disabled policy never produces an extraction task. This policy participates in the
+input hash and is enforced by the native applier, not inferred from source type.
+
 Write one file per task to `<vault>/.lorekeeper/queue/results/{task_id}.json`:
 
 ```json
 {
   "task_id": "<task.task_id>",
   "cache_hash": "<task.cache_hash>",
+  "concept_policy": "<task.input.concept_policy>",
   "target_revision": "<queue status target_revision captured before reading>",
   "target": <task.target verbatim>,
   "date": "<task.input.date>",
@@ -279,7 +287,7 @@ Write one file per task to `<vault>/.lorekeeper/queue/results/{task_id}.json`:
 }
 ```
 
-When `input.rss_original` is present under `concept-extraction-rss-v2`, discover the
+When `input.rss_original` is present under `concept-extraction-rss-v3`, discover the
 bound original and compare discovery `page_revision` to the captured target revision.
 Read each article you select through the pinned collection revision and full supporting
 context; return `rss_evidence: [{"event_id":"...","revision":"<payload revision>"}]`

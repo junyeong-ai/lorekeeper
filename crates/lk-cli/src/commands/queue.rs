@@ -582,7 +582,12 @@ async fn apply(
                 || task.target.kind != result.target.kind
                 || task.target.anchor != result.target.anchor
                 || task.input.get("date").and_then(|value| value.as_str())
-                    != Some(result.date.to_string().as_str()))
+                    != Some(result.date.to_string().as_str())
+                || task.input.get("concept_policy")
+                    != Some(
+                        &serde_json::to_value(result.concept_policy)
+                            .expect("concept policy serializes"),
+                    ))
         {
             fail("extraction result does not match its pending task".into());
             failed += 1;

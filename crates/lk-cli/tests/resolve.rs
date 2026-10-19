@@ -10,12 +10,19 @@ use std::process::{Command, Output};
 
 use tempfile::TempDir;
 
-fn lore() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_lore"))
+fn lore(root: &Path) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_lore"));
+    for (key, _) in std::env::vars().filter(|(key, _)| key.starts_with("LORE_")) {
+        command.env_remove(key);
+    }
+    command
+        .current_dir(root)
+        .env("XDG_CONFIG_HOME", root.join("config-home"));
+    command
 }
 
 fn run(root: &Path, name: &str) -> Output {
-    lore()
+    lore(root)
         .args(["resolve", "--root"])
         .arg(root)
         .arg(name)
@@ -112,7 +119,7 @@ fn a_name_two_pages_answer_to_names_both_and_the_one_a_citation_reaches() {
     assert!(stderr.contains("doc-hub"), "{stderr}");
     assert!(stderr.contains("docs-portal"), "{stderr}");
 
-    let out = lore()
+    let out = lore(dir.path())
         .args(["resolve", "--json", "--root"])
         .arg(dir.path())
         .arg("Doc Hub")
@@ -158,7 +165,7 @@ fn an_ambiguous_name_routes_the_same_way_the_pipeline_routes_it() {
     write_concept(dir.path(), "c-sharp", "C#", &["Language"]);
     write_concept(dir.path(), "c-plus-plus", "C++", &["Language"]);
 
-    let out = lore()
+    let out = lore(dir.path())
         .args(["resolve", "--json", "--root"])
         .arg(dir.path())
         .arg("Language")
@@ -185,7 +192,7 @@ fn batch_resolution_preserves_input_order_and_each_verdict() {
     let root = TempDir::new().unwrap();
     write_concept(root.path(), "one", "One", &["Shared"]);
     write_concept(root.path(), "two", "Two", &["Shared"]);
-    let result = lore()
+    let result = lore(root.path())
         .args(["resolve", "--root"])
         .arg(root.path())
         .args(["--json", "One", "Missing", "Shared"])
@@ -205,7 +212,7 @@ fn nested_owners_are_resolved_and_listed_at_their_existing_addresses() {
     let nested = root.path().join("wiki/concepts/group");
     std::fs::create_dir_all(&nested).unwrap();
     std::fs::write(nested.join("stored.md"), "---\ntype: concept\ntitle: Established\naliases: [Synonym]\nknowledge_status: retired\n---\nHistorical judgment.").unwrap();
-    let output = lore()
+    let output = lore(root.path())
         .args(["resolve", "--root"])
         .arg(root.path())
         .args(["--json", "Synonym"])
@@ -217,7 +224,7 @@ fn nested_owners_are_resolved_and_listed_at_their_existing_addresses() {
     assert_eq!(answer["path"], "wiki/concepts/group/stored.md");
     let config = root.path().join("config.yaml");
     std::fs::write(&config, format!("vault:\n  root: {}\nidentity:\n  name: Test\n  email: test@example.com\nsources:\n  notes:\n    type: manual\n    params:\n      inbox_dir: inbox\n", root.path().display())).unwrap();
-    let output = lore()
+    let output = lore(root.path())
         .arg("--config")
         .arg(&config)
         .args(["wiki", "concepts", "--json"])
@@ -234,7 +241,7 @@ fn nested_owners_are_resolved_and_listed_at_their_existing_addresses() {
     assert_eq!(inventory[0]["aliases"][0], "Synonym");
     std::fs::write(nested.join("broken.md"), "---\ntitle: [unclosed\n---\n").unwrap();
     assert_eq!(run(root.path(), "Missing").status.code(), Some(3));
-    let output = lore()
+    let output = lore(root.path())
         .arg("--config")
         .arg(&config)
         .args(["wiki", "concepts", "--json"])

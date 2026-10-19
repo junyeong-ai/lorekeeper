@@ -47,7 +47,7 @@ sources:                             # key = source id; document sources use wik
     highlights:                      # optional daily-page highlight sections (per category)
       - { category: action_required, label: "Action Required" }
     labels: [ ... ]
-    extract_concepts: true|false     # whether to run LLM concept extraction
+    concept_policy: supported-new  # disabled | existing-only | supported-new
 
 personal:                            # OPTIONAL personal-productivity module (work-log +
   tracked_sources: [<id>, ...]       # reviews + contribution taxonomy). OMIT for a pure
@@ -58,7 +58,7 @@ synthesis: {weekly: {...}}           # cross-source weekly themes (domain-neutra
 concepts:                            # LLM concept-page taxonomy
   categories: [{id: ..., label: ...}] # classifies concepts for metadata browsing
 graph:                               # link graph analysis and optional semantic maintenance
-  audit: {schedule: "0 7 * * 0", batch_size: 5} # uses the configured execution profile
+  audit: {schedule: "0 7 * * 0", batch_size: 5, max_input_bytes: 262144} # uses the configured execution profile
   scope: {dirs: [...]}               # defaults to vault.dirs.wiki
   metrics: {min_hub_degree: 5, orphan_exclude: []}
   cluster: {resolution: 1.0, min_community_size: 1, suggest_min_shared_neighbors: 2}
@@ -79,6 +79,13 @@ Semantic maintenance is optional and separate from weekly synthesis and retentio
 Enable `graph.audit.schedule` deliberately: each run uses the LLM to review at most
 `batch_size` changed/first-time concepts. `lore run knowledge` uses the configured
 execution profile; structural lint alone cannot perform the semantic read.
+For an explicitly requested initial campaign, `lore run knowledge --batches N`
+repeats bounded batches, releasing the lease between them and resuming from current
+receipts. A failed/cancelled batch stops the campaign and preserves unfinished work.
+`batch-limit` is a completed execution budget, not full-corpus semantic completion.
+`max_input_bytes` includes scoped reviews, their evidence and available prior archives;
+it bounds distinct source bytes rather than accumulated model usage. `review_health`
+reports global attention separately from the selected batch's completion.
 
 ## Initial setup
 

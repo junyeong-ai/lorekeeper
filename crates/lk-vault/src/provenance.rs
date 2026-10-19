@@ -85,6 +85,10 @@ pub(super) fn document_page(
         .filter(|value| !value.is_null())
         .map(|value| lk_core::source_identity::SourceIdentity::from_value(value.clone()));
     let mut issues = Vec::new();
+    let source_file = fm.source_file().unwrap_or_else(|issue| {
+        issues.push(issue);
+        None
+    });
     let identity = match &parsed_identity {
         Some(Ok(identity)) => Some(identity.key()),
         Some(Err(error)) => {
@@ -157,7 +161,7 @@ pub(super) fn document_page(
         "status_basis": "recorded-source-metadata-not-current-truth",
         "timestamp_basis": record.and_then(|r| r.get("timestamp_basis")),
         "source_url": fm.get("source_url"),
-        "source_file": fm.get("source_file")
+        "source_file": source_file
     });
     Ok(Document {
         path,

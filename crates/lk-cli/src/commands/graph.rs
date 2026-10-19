@@ -93,6 +93,15 @@ pub enum GraphCommand {
         /// Minimum community size for suggestions (overrides config)
         #[arg(long)]
         min_community_size: Option<usize>,
+        /// Maximum candidates to return (1..=100)
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        /// Skip this many candidates in ranked order
+        #[arg(long, default_value_t = 0)]
+        offset: usize,
+        /// Require the same candidate revision across pages
+        #[arg(long)]
+        revision: Option<String>,
     },
     /// Rewrite each concept page's `## <Sources>` section from the graph
     BacklinksSync {
@@ -239,6 +248,11 @@ async fn run_inner(
     json: bool,
     root_override: Option<PathBuf>,
 ) -> Result<bool, String> {
+    if let GraphCommand::SuggestLinks { limit, .. } = &cmd
+        && !(1..=100).contains(limit)
+    {
+        return Err("suggest-links requires a limit between 1 and 100".into());
+    }
     let mut rc = resolve_config_full(opts, root_override)?;
     let mutation = if matches!(
         &cmd,
@@ -477,7 +491,12 @@ async fn run_inner(
             }
             violated
         }
-        GraphCommand::SuggestLinks { min_community_size } => {
+        GraphCommand::SuggestLinks {
+            min_community_size,
+            limit,
+            offset,
+            revision,
+        } => {
             if let Some(size) = min_community_size {
                 rc.graph.cluster.min_community_size = size;
             }
@@ -487,10 +506,20 @@ async fn run_inner(
                 &clusters,
                 rc.graph.cluster.suggest_min_shared_neighbors,
             );
-            let count = result.pairs.len();
+            let serialized = serde_json::to_string(&result).map_err(|error| error.to_string())?;
+            let current = lk_core::concept::file_revision(&serialized);
+            if revision.is_some_and(|expected| expected != current) {
+                return Err("link candidates changed; restart candidate navigation".into());
+            }
+            let total = result.pairs.len();
+            let pairs: Vec<_> = result.pairs.into_iter().skip(offset).take(limit).collect();
+            let end = offset.saturating_add(pairs.len());
             let report = output::SuggestLinksReport {
-                pairs: result.pairs,
-                count,
+                pairs,
+                revision: current,
+                total,
+                offset,
+                next_offset: (end < total).then_some(end),
             };
             // An observation: a missing link is a suggestion, never a false claim.
             let violated = false;
@@ -509,13 +538,24 @@ async fn run_inner(
                 lk_core::config::LlmProvider::Queue => backlinks::SynthesisPolicy::Record,
                 lk_core::config::LlmProvider::Noop => backlinks::SynthesisPolicy::Skip,
             };
-            let sync = backlinks::sync_concept_backlinks(
-                &views.scanned,
-                &rc.root,
-                dry_run,
-                &rc.vault_dirs,
-                policy,
-            )
+            let sync = if dry_run {
+                backlinks::sync_concept_backlinks(
+                    &views.scanned,
+                    &rc.root,
+                    true,
+                    &rc.vault_dirs,
+                    policy,
+                )
+            } else {
+                backlinks::sync_concept_backlinks_in_session(
+                    &views.scanned,
+                    mutation
+                        .as_ref()
+                        .expect("mutation command holds the vault lock"),
+                    &rc.vault_dirs,
+                    policy,
+                )
+            }
             .map_err(|e| format!("{e}"))?;
             let changed = sync.updated.len();
             // Deriving a concept's evidence and writing the section that answers to it are

@@ -198,11 +198,18 @@ source_count: 2          # ← 두 문서가 이 한 개념을 인용
 pgvector를 선택했다. 이 결정의 조건과 첫 메모의 검색 품질 관찰은 별도로 유지한다.
 
 ## 출처
-- [프로덕션 벡터 DB 선택](../../wiki/documents/프로덕션-벡터-db-선택.md)
-- [RAG 파이프라인 낮은 recall 검색 고치기](../../wiki/documents/rag-파이프라인-낮은-recall-검색-고치기.md)
+<!-- lorekeeper:concept-sources:v1 -->
+
+전체 출처는 `lore wiki prepare`로 스냅샷 ID를 받은 다음 `lore wiki citations EXACT_CONCEPT_PATH --snapshot ID`로 조회합니다.
 ```
 
 > `Vector DB`라고 쓰든 `벡터 데이터베이스`라고 쓰든 **한 페이지**로 모입니다(alias로 등록). 같은 지식이 흩어지지 않는 것 — 이게 "복리로 쌓인다"의 핵심입니다.
+
+소스별 `concept_policy`로 개념 증가를 제어합니다. `disabled`는 원문·요약만 수집하고,
+`existing-only`는 기존 개념에만 연결하며, `supported-new`는 근거가 있는 새 개념도 허용합니다.
+생략하면 `disabled`입니다. `focus`는 관심 범위를 별도로 제한합니다. 예를 들어 반복 알림은
+`existing-only`, 재사용할 설계 지식이 있는 문서는 `supported-new`로 설정할 수 있습니다.
+이 정책은 작업 해시에 포함되고 Rust 적용 단계에서도 검사합니다.
 
 ### ✅ 결과 ③ — 필요한 만큼 펼쳐 보는 탐색
 
@@ -215,6 +222,7 @@ lore wiki search "인증정보" --spacing --snapshot <id> --json
 lore wiki browse --tag security --tag 인증정보 --snapshot <id> --json
 lore wiki read wiki/concepts/vector-database.md # 목차와 revision 확인 → 필요한 section 선택
 lore wiki links wiki/concepts/vector-database.md --limit 20
+lore wiki citations wiki/concepts/vector-database.md --snapshot <id> --limit 20
 lore wiki reviews        # 현재 미해결 판단을 별도로 확인
 ```
 
@@ -226,6 +234,14 @@ Markdown이 지식의 정본이고 `.lorekeeper/search.sqlite`는 재생성 가�
 HTML 표는 셀 순서와 빈 셀을 보존하며, 병합 셀·중첩 표는 HTML 구조로 유지합니다. 이 표의 텍스트도 같은 경계로 검색하고, 태그·링크 주소·스크립트·스타일은 검색 본문에서 제외합니다.
 태그는 주제별 AND 필터이며 보존된 수동 원문의 태그도 포함합니다. 별칭은 같은 대상의 이름이고 태그는 분류이므로 서로 대신하지 않습니다.
 검색 순위나 출처 수는 사실의 신뢰도 점수가 아닙니다.
+`wiki citations`는 그래프가 도출한 정확한 개념 근거를 SQLite에서 조회합니다. 일반 링크 목록과
+구분되며, RSS는 선택한 기사와 원본 판본을 보존합니다. `total`은 근거 항목 수이고
+`source_count`는 출처 페이지 수입니다. 같은 snapshot과 `next_offset`으로 전체를 이어서 읽습니다.
+현재 원문을 다시 읽지는 않으므로, 판본이 바뀌었으면 다시 준비하고 선택한 원문을 검증하세요.
+개념의 출처 절에는 고정된 조회 안내만 두어 원문 수가 늘어도 본문이 커지지 않습니다.
+안내의 `EXACT_CONCEPT_PATH`를 현재 개념 주소로 바꿔 조회합니다. 기존의 정확한 생성 목록만
+이 안내로 전환하며, 별도로 작성한 출처 설명은 보존하고 보고합니다. 전환으로 실제 본문
+판본이 바뀐 기존 검토는 다시 확인할 대상으로 남습니다. 이후 출처 증가는 안내 본문을 바꾸지 않습니다.
 
 기본 검색은 활성 지식만 보여 줍니다. `--knowledge-status retired|all`로 비활성 항목을 조회할 수 있으며,
 주소·본문·인용·판단 이력은 보존됩니다. 출처 하나나 오래된 날짜만으로 비활성화하지 않습니다.
@@ -352,12 +368,13 @@ lore wiki original wiki/documents/example.md # 보존된 수동 원본·첨부 �
 lore wiki original daily/tech-news/2026-10-18.md # RSS 수집 원문 목록·authority·revision
 lore wiki original daily/tech-news/2026-10-18.md --revision REV --event EVENT_ID --text-offset 0 --text-limit 4096
 lore wiki links wiki/concepts/example.md --limit 20 # 연결된 원문 행·설명·리비전 조회
+lore wiki citations wiki/concepts/example.md --snapshot <id> --limit 20 # 정확한 전체 근거를 페이지 단위로 조회
 lore wiki provenance wiki/documents/example.md --snapshot <id> # 정확한 문서 ID로 선언 관계·후속 문서 조회
-lore wiki curate --file plan.json --dry-run # 근거 판본·이름·검토 기록 검증; 옵션을 빼면 원자적으로 반영
+lore wiki curate --file plan.json --dry-run # 근거 판본·이름·분류·태그·검토 기록 검증; 옵션을 빼면 원자적으로 반영
 lore wiki concepts            # 개념 목록
 lore resolve <name>           # 어떤 개념 페이지가 그 이름을 갖는지 (0 소유 / 1 없음 / 2 중복)
 lore graph lint               # 구조 건강검진(고아·깨진링크·중복개념·…)
-lore graph suggest-links      # 개념 간 관계 후보(Adamic-Adar)
+lore graph suggest-links --limit 20 # 관계 후보; next_offset과 --revision으로 이어서 조회
 lore graph cluster            # 토픽 커뮤니티(Louvain)
 lore graph backlinks-sync     # 개념의 ## Sources·인용수·요약 입력 재도출(변한 요약은 큐로)
 lore graph merge <from> <into># 중복 개념 통합
@@ -580,13 +597,25 @@ graph:
   audit:
     schedule: "0 7 * * 0"
     batch_size: 5
+    max_input_bytes: 262144
 ```
 
 처음 보는 개념과 변경된 개념을 번갈아 검토하고, 동일 입력은 반복 검토하지 않습니다.
 `.lorekeeper/knowledge-audit.json`은 최신 검토 판본과 대기 순서를 보관하고 판단·상충 근거는
 Markdown 검토 문서에 남깁니다. 단일 출처나 인용 수만으로 병합·삭제하지 않습니다.
-배치 수와 세션 시간 제한은 전체 원문 크기나 비용의 상한을 보장하지 않으므로 실제 실행량에
-맞게 조정하세요. 검토 기록·lint·정상 종료만으로 전체 지식의 의미적 일관성을 보증하지 않습니다.
+초기 누적분은 `lore run knowledge --profile codex --batches 20 --json`처럼 등록된 프로필과
+실행할 최대 배치 수를 지정해 처리할 수 있습니다. 프로필 이름은 자신의 설정에 맞춥니다.
+각 배치 뒤에는 실행 잠금을 해제하며, 실패·취소 시 중단하고 검증된 검토 기록부터 재개합니다.
+`stop_reason: batch-limit`는 지정한 실행량에 도달했다는 뜻이고, `settled`는 현재 개념 검수
+계획에 대기 항목이 없다는 뜻입니다. 모든 원문 문서의 전수 검수 완료를 의미하지는 않습니다.
+`audit-plan`은 선택한 개념·출처·직접 관련 개념·검토 문서와 그 근거·선택한 RSS 원본의 중복을 제외한
+바이트 수를 보고합니다. `max_input_bytes`를 넘으면 후보를 그대로 보존하고 에이전트 실행과
+검토 완료 기록을 거부합니다. `input.status: oversized`이면 근거를 자르지 말고 배치 크기나
+명시적 입력 한도를 조정하세요. 이 한도는 읽을 근거의 범위이며 반복 호출의 누적 토큰이나
+요금 상한은 아닙니다. 검토 기록·lint·정상 종료만으로 전체 지식의 의미적 일관성을 보증하지 않습니다.
+선택한 개념의 검토가 누락·무효·재평가 필요 상태이면 완료를 거부합니다. 다른 대상의 재평가 대기는
+`run knowledge`의 `review_health` 건수에 남겨 보고하며 다음 배치를 막지 않습니다. 무효 기록이나
+검사 오류는 실행을 실패시킵니다. 전체 저장소 검사는 `wiki reviews --check`로 별도 수행합니다.
 
 리마인더는 OS 알림 명령이 성공한 뒤에만 소진합니다. 이는 OS의 접수이며 사람이 보았다는
 확인은 아닙니다. 접수 직후 저장 전에 중단되면 재전달될 수 있습니다. 실패한 알림은 다음 실행에 남습니다.

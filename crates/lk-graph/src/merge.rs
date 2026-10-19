@@ -157,7 +157,7 @@ fn plan_merge(
 
     // Gate BEFORE any mutation: a merge would discard `from`'s authored prose (links
     // are rewired, body is not). Refuse unless forced, so nothing is silently lost.
-    let from_authored = concept_has_authored_body(&vault_root.join(&from_rel))?;
+    let from_authored = concept_has_authored_body(vault_root, &from_rel)?;
     if from_authored && !force && !dry_run {
         return Err(GraphError::Io(format!(
             "'{from}' has authored body content that a merge would discard — salvage it \
@@ -392,40 +392,27 @@ fn rewrite_links(
     Ok((out, count))
 }
 
-/// True if a concept page has body content a human likely authored — any non-blank
-/// line outside the frontmatter that is neither a heading (`#…`) nor a machine-owned
-/// `## Sources` list item. Decides whether deletion needs `--force`.
-///
-/// Section-aware: a `- [title](dest)` bullet is machine-owned ONLY under the Sources
-/// heading, which `backlinks-sync` re-derives. The identical bullet under any other
-/// section — notably `## Related`, whose links are human-curated via `lore-wiki
-/// audit` — is authored knowledge the merge must never silently drop.
-fn concept_has_authored_body(abs: &Path) -> Result<bool, GraphError> {
-    let raw = std::fs::read_to_string(abs)
+/// Preserve every substantive body except a Sources projection recognized by the exact
+/// shared structural classifier. Related prose and custom Sources remain authored.
+fn concept_has_authored_body(root: &Path, path: &Path) -> Result<bool, GraphError> {
+    let abs = root.join(path);
+    let raw = std::fs::read_to_string(&abs)
         .map_err(|e| GraphError::Io(format!("read {}: {e}", abs.display())))?;
-    let body = lk_core::frontmatter::parse_page(&raw)
+    let mut body = lk_core::frontmatter::parse_page(&raw)
         .map(|p| p.body)
         .unwrap_or(raw);
 
-    let source_headings: Vec<&str> = lk_vault::section_headings(|s| s.concept_sources).collect();
-
-    let mut in_sources = false;
-    for line in body.lines() {
-        // Heading detection mirrors backlinks-sync's EXACT column-0 `## <heading>` match
-        // (`parse_existing_sources`): an indented or trailing-space variant is NOT the
-        // section backlinks-sync would rewrite, so we must not treat its bullets as
-        // machine-owned. Matching strictly here keeps the two paths in lockstep and errs
-        // toward "authored" on any deviation.
-        if let Some(rest) = line.strip_prefix("## ") {
-            in_sources = source_headings.contains(&rest);
-            continue;
+    for heading in lk_vault::section_headings(|s| s.concept_sources) {
+        if let Some(sources) = lk_vault::section_body(&body, heading)
+            && crate::sources::classify(sources, path) != crate::sources::SourcesBody::Authored
+        {
+            body = lk_vault::replace_section(&body, heading, "");
         }
+    }
+    for line in body.lines() {
         let t = line.trim();
         if t.is_empty() || t.starts_with('#') {
             continue;
-        }
-        if in_sources && t.starts_with("- [") && t.ends_with(')') && t.contains("](") {
-            continue; // a Sources list item — machine-owned, re-derived by backlinks-sync
         }
         return Ok(true);
     }
@@ -942,6 +929,42 @@ mod tests {
                 .from_authored,
             "indented Sources heading must not be mistaken for the machine-owned section"
         );
+    }
+
+    #[test]
+    fn compact_sources_are_managed_but_appended_authored_prose_still_blocks_merge() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        write(root, "wiki/concepts/b.md", "---\nid: b\n---\n# b\n");
+        let pages = vec![
+            page("wiki/concepts/a", "wiki/concepts/a.md", &[]),
+            page("wiki/concepts/b", "wiki/concepts/b.md", &[]),
+        ];
+        for locale in lk_core::i18n::Locale::ALL {
+            let generated = format!(
+                "---\nid: a\n---\n# a\n\n## {}\n\n{}\n",
+                locale.strings().concept_sources,
+                crate::sources::render(*locale)
+            );
+            write(root, "wiki/concepts/a.md", &generated);
+            assert!(
+                !merge_concepts(&pages, root, "wiki", "a", "b", true, false)
+                    .unwrap()
+                    .from_authored
+            );
+            write(
+                root,
+                "wiki/concepts/a.md",
+                &format!("{generated}\nAuthored explanation.\n"),
+            );
+            assert!(
+                merge_concepts(&pages, root, "wiki", "a", "b", true, false)
+                    .unwrap()
+                    .from_authored
+            );
+            assert!(merge_concepts(&pages, root, "wiki", "a", "b", false, false).is_err());
+            assert!(root.join("wiki/concepts/a.md").is_file());
+        }
     }
 
     #[test]

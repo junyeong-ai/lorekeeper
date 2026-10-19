@@ -5,7 +5,7 @@ description: Searches and maintains a Lorekeeper knowledge wiki. Use for grounde
   auditing knowledge and relationships. Repository-wide extraction uses lore-extract;
   ingest queue processing uses lore-process.
 metadata:
-  version: 0.67.3
+  version: 0.68.0
 ---
 
 # Lorekeeper wiki
@@ -21,7 +21,7 @@ Do not run the other modes as part of a lookup.
 | `capture [topic]` | Record an observed insight from the current conversation or work | [Capture](references/capture.md) |
 | `audit` | Examine structure, relationships, contradictions, coverage and concept identity | [Audit](references/audit.md) |
 | `maintain` | Process one bounded batch of changed and never-reviewed knowledge | [Maintenance](references/maintenance.md) |
-| `curate` | Apply authorized evidence-based name, lifecycle or review corrections | [Curation](references/curation.md) |
+| `curate` | Apply authorized evidence-based name, category, tag, lifecycle or review corrections | [Curation](references/curation.md) |
 | `status` | Report source currency, queue state and knowledge counts without writes | Commands below |
 | Imported identity migration | Verify legacy copies against a configured nodex source before assigning stable identity | [Add sources](references/add.md#imported-document-identity-migration) |
 
@@ -46,7 +46,9 @@ scope fits. Empty concept extraction is valid; a passing mention is insufficient
 Authored pages must be complete and omit `llm_inputs`. Keep factual observations,
 source declarations, proposals and verified outcomes distinct. Preserve source
 language and the vault's configured prose language as AGENTS.md specifies.
-Concept source lists and `source_count` belong to `backlinks-sync`. Existing
+Concept Sources projections and `source_count` belong to `backlinks-sync`. Discover
+complete citations through `wiki citations EXACT_CONCEPT_PATH --snapshot ID`,
+replacing the placeholder with the selected concept address. Existing
 concept synthesis and relations are integrated through the queue, not overwritten
 by an individual new source.
 

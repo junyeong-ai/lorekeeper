@@ -5,7 +5,7 @@ use crate::rss_original::{RssOriginalReference, is_valid_digest};
 
 pub const CONCEPT_EVIDENCE_FIELD: &str = "concept_evidence";
 pub const RSS_EVIDENCE_SCHEMA: &str = "rss-event-evidence-v1";
-pub const EXTRACTION_POLICY: &str = "concept-extraction-rss-v2";
+pub const EXTRACTION_POLICY: &str = "concept-extraction-rss-v3";
 pub const SYNTHESIS_POLICY: &str = "concept-synthesis-rss-v2";
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]

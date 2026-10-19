@@ -37,6 +37,7 @@ impl Fixture {
         let origin = PathBuf::from("daily/feed/2026-10-18.md");
         std::fs::create_dir_all(root.join(origin.parent().unwrap())).unwrap();
         let request = lk_queue::ExtractConceptsRequest {
+            concept_policy: lk_core::config::ConceptPolicy::SupportedNew,
             rss_original: Some(capture.manifest.clone()),
             text: "Two independent original articles".into(),
             source_id: "feed".into(),
@@ -65,6 +66,7 @@ impl Fixture {
         );
         std::fs::write(root.join(&origin), &raw).unwrap();
         let result = lk_queue::TaskResult {
+            concept_policy: lk_core::config::ConceptPolicy::SupportedNew,
             task_id: task.task_id.clone(),
             cache_hash: task.cache_hash.clone(),
             target_revision: file_revision(&raw),

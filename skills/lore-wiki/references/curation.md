@@ -29,6 +29,8 @@ The JSON contract is:
     "revision": "FULL_FILE_REVISION",
     "title": "Source-written qualified name",
     "aliases": ["Equivalent source form"],
+    "category": "CONFIGURED_CATEGORY_ID",
+    "tags": ["specific-theme"],
     "knowledge_status": "retired",
     "knowledge_review": "wiki/explorations/subject-review.md"
   }],
@@ -42,7 +44,12 @@ The JSON contract is:
 
 `evidence` is nonempty and guards the exact files read (`wiki read.file_revision`).
 Concept fields other than path/revision are optional; aliases replace the complete
-list, so retain valid existing forms. Status changes require a durable review listing the concept in `review.subjects`;
+list, so retain valid existing forms. Omit `category` to keep it, use a configured
+category ID to replace it, or `null` to clear it. `tags` replaces the complete list;
+`[]` clears it. Tags must be unique nonblank single lines. Assign only themes the
+concept itself supports; do not copy every source tag onto every extracted concept.
+Tags support filtering, while aliases assert equivalent subject identity.
+Status changes require a durable review listing the concept in `review.subjects`;
 appearance in `review.evidence` alone does not mean the review assesses that concept. `reviews` can create (`revision: null`, must be absent) or replace
 (`revision`: current full file hash) complete authored reviews without `llm_inputs`.
 An existing generated page or unrelated authored exploration cannot be converted by

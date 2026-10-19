@@ -69,8 +69,22 @@ pub enum WikiCommand {
         #[command(subcommand)]
         command: super::document_identity::IdentityCommand,
     },
-    /// Prepare a reusable lexical search snapshot from current pages (JSON)
+    /// Prepare a reusable search and exact concept-citation snapshot from current pages (JSON)
     Prepare,
+    /// Inspect complete citations captured for an exact concept (read-only JSON)
+    Citations {
+        /// Exact vault-relative concept Markdown address
+        path: PathBuf,
+        /// Snapshot returned by wiki prepare; current source files are not consulted
+        #[arg(long)]
+        snapshot: String,
+        /// Maximum complete citations (1..100); several RSS events can share one source page
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        /// Skip this many citations in deterministic captured order
+        #[arg(long, default_value_t = 0)]
+        offset: usize,
+    },
     /// Plan a bounded semantic audit of changed or never-reviewed concepts (read-only JSON)
     AuditPlan {
         /// Maximum concepts (1..100); defaults to graph.audit.batch_size
@@ -458,6 +472,7 @@ pub async fn run(opts: &super::GlobalOptions, cmd: WikiCommand) -> miette::Resul
                 &pages,
                 limit.unwrap_or(config.graph.audit.batch_size),
                 &paths,
+                config.graph.audit.max_input_bytes,
             )
             .map_err(|error| miette::miette!("{error}"))?;
             println!(
@@ -478,8 +493,14 @@ pub async fn run(opts: &super::GlobalOptions, cmd: WikiCommand) -> miette::Resul
                 .map_err(|error| miette::miette!("{error}"))?;
             let pages = lk_graph::scan::scan_vault(&root, config.graph.scope.follow_links)
                 .map_err(|error| miette::miette!("{error}"))?;
-            let recorded = lk_graph::audit::record(&session, &config.vault.dirs, &pages, results)
-                .map_err(|error| miette::miette!("{error}"))?;
+            let recorded = lk_graph::audit::record(
+                &session,
+                &config.vault.dirs,
+                &pages,
+                results,
+                config.graph.audit.max_input_bytes,
+            )
+            .map_err(|error| miette::miette!("{error}"))?;
             println!("{}", serde_json::json!({"recorded":recorded}));
             Ok(())
         }
@@ -490,11 +511,21 @@ pub async fn run(opts: &super::GlobalOptions, cmd: WikiCommand) -> miette::Resul
             )
             .map_err(|error| miette::miette!("{error}"))?;
             let report = if dry_run {
-                lk_vault::preview_curation(&config.vault.root_path(), &config.vault.dirs, request)
+                lk_vault::preview_curation(
+                    &config.vault.root_path(),
+                    &config.vault.dirs,
+                    &config.concepts.categories,
+                    request,
+                )
             } else {
                 let session = lk_vault::MutationSession::acquire(&config.vault.root_path())
                     .map_err(|error| miette::miette!("{error}"))?;
-                lk_vault::curate(&session, &config.vault.dirs, request)
+                lk_vault::curate(
+                    &session,
+                    &config.vault.dirs,
+                    &config.concepts.categories,
+                    request,
+                )
             }
             .map_err(|error| miette::miette!("{error}"))?;
             let mut output =
@@ -524,11 +555,39 @@ pub async fn run(opts: &super::GlobalOptions, cmd: WikiCommand) -> miette::Resul
             let config = load_config(&find_config(opts)?)?;
             let session = lk_vault::MutationSession::acquire(&config.vault.root_path())
                 .map_err(|error| miette::miette!("{error}"))?;
-            let snapshot = lk_vault::prepare_search(&session, &config.vault.dirs)
-                .map_err(|error| miette::miette!("{error}"))?;
+            let snapshot = prepare_discovery_snapshot(
+                &session,
+                &config.vault.dirs,
+                config.graph.scope.follow_links,
+            )?;
             println!(
                 "{}",
                 serde_json::to_string_pretty(&snapshot)
+                    .map_err(|error| miette::miette!("{error}"))?
+            );
+            Ok(())
+        }
+        WikiCommand::Citations {
+            path,
+            snapshot,
+            limit,
+            offset,
+        } => {
+            let config = load_config(&find_config(opts)?)?;
+            let report = lk_vault::inspect_concept_citations(
+                &config.vault.root_path(),
+                &config.vault.dirs,
+                &path,
+                &lk_vault::CitationOptions {
+                    snapshot: &snapshot,
+                    limit,
+                    offset,
+                },
+            )
+            .map_err(|error| miette::miette!("{error}"))?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&report)
                     .map_err(|error| miette::miette!("{error}"))?
             );
             Ok(())
@@ -913,14 +972,35 @@ pub async fn run_refresh(
         .map_err(|error| miette::miette!("vault mutation: {error}"))?;
     let plan = lk_vault::plan_navigation_entry(session.root(), locale, &dirs)
         .map_err(|error| miette::miette!("validate navigation entry: {error}"))?;
-    let snapshot = lk_vault::prepare_search(&session, &dirs)
-        .map_err(|error| miette::miette!("prepare navigation snapshot: {error}"))?;
+    let snapshot = prepare_discovery_snapshot(
+        &session,
+        &dirs,
+        config
+            .as_ref()
+            .is_some_and(|config| config.graph.scope.follow_links),
+    )?;
     eprintln!("Prepared navigation snapshot {}", snapshot.snapshot);
     session
         .apply(plan)
         .map_err(|error| miette::miette!("refresh navigation entry: {error}"))?;
     eprintln!("Updated SQLite navigation and entry guide");
     Ok(())
+}
+
+fn prepare_discovery_snapshot(
+    session: &lk_vault::MutationSession,
+    dirs: &lk_core::config::VaultDirs,
+    follow_links: bool,
+) -> miette::Result<lk_vault::SearchSnapshot> {
+    let captured =
+        lk_graph::backlinks::capture_concept_citations(session.root(), dirs, follow_links)
+            .map_err(|error| miette::miette!("capture concept citations: {error}"))?;
+    lk_vault::prepare_search_with_citations(session, dirs, captured.projection(), |selected| {
+        captured
+            .verify(selected)
+            .map_err(|error| std::io::Error::other(error.to_string()).into())
+    })
+    .map_err(|error| miette::miette!("prepare discovery snapshot: {error}"))
 }
 
 async fn run_concepts(opts: &super::GlobalOptions, json: bool) -> miette::Result<()> {

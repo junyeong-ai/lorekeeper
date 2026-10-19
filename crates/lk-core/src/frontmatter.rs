@@ -2,6 +2,16 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+/// Declared source locations or derivation references, never document ownership
+/// or a guarantee that an original is still readable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum SourceFile {
+    Single(String),
+    Multiple(Vec<String>),
+    Unknown,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum KnowledgeStatus {
@@ -72,6 +82,16 @@ pub struct Frontmatter {
 }
 
 impl Frontmatter {
+    pub fn source_file(&self) -> Result<Option<SourceFile>, String> {
+        self.get("source_file")
+            .map(|value| {
+                serde_json::from_value(value.clone()).map_err(|_| {
+                    "source_file must be a string, an array of strings, or null".to_owned()
+                })
+            })
+            .transpose()
+    }
+
     pub fn knowledge_status(&self) -> Result<KnowledgeStatus, String> {
         match self.get("knowledge_status") {
             None => Ok(KnowledgeStatus::Active),

@@ -23,7 +23,9 @@ resolve section headings before inspecting pages.
    "no violations" with "healthy".
 2. **Missing cross-references** — two kinds, and they are found differently.
 
-   Between concepts: run `lore graph --json suggest-links`. Inspect the pairs;
+   Between concepts: run `lore graph --json suggest-links --limit 20`. Inspect the pairs;
+   use `next_offset` and `--revision` to continue the same ranked candidate set.
+   A changed revision requires restarting; it pins candidates, not source content.
    candidates do not gate, but runtime failures must be reported. Clusters generate candidates; they do not establish a
    relation. Read the sources and propose a link only when its explanation states a
    useful, supported relationship, such as a component, prerequisite, alternative,

@@ -23,7 +23,7 @@ sources:
       # Originals are preserved; collected entries move to inbox/archived after queue flush.
       archive_after_ingest: true
     labels: [knowledge]
-    extract_concepts: true
+    concept_policy: supported-new
 
 llm:
   provider: queue

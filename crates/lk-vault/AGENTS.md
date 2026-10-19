@@ -49,6 +49,8 @@ canonical; SQLite navigation is derived.
 
 - `knowledge.rs` validates guarded metadata/review curation as one plan, archives prior
   authored states and validates evidence against proposed final pages. Preview is read-only.
+  Category changes use configured IDs; omitted values keep state, null clears category,
+  and an explicit empty tags list clears tags. Tags describe the concept, not all its sources.
   Retired concepts keep addresses and evidence; normal discovery excludes them. Curation
   never owns synthesis/related/source sections or completion markers.
 - Reviews are authored explorations: effective state is invalid on errors, needs

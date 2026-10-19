@@ -14,7 +14,7 @@ my-schedule:
   enabled: true
   params: {calendar_id: primary, lookback_hours: 24, lookahead_hours: 24}
   labels: [personal]
-  extract_concepts: false
+  concept_policy: disabled
   # add this source id to personal.tracked_sources to feed your work-log
 ```
 Event descriptions are converted HTML→Markdown automatically.
@@ -50,7 +50,7 @@ email-digest:
     - category: decisions
       keywords: ["승인", "결재 완료", "approved"]
   labels: [personal]
-  extract_concepts: true
+  concept_policy: supported-new
   # add this source id to personal.tracked_sources to feed your work-log
 ```
 

@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use lk_core::concept::{
     ConceptIdentity, ConceptRegistry, Resolution, file_revision, identity_key, source_revision,
 };
-use lk_core::config::VaultDirs;
+use lk_core::config::{ConceptCategory, VaultDirs};
 use lk_core::frontmatter::KnowledgeStatus;
 use serde::{Deserialize, Serialize};
 
@@ -34,8 +34,21 @@ pub struct ConceptCuration {
     pub revision: String,
     pub title: Option<String>,
     pub aliases: Option<Vec<String>>,
+    #[serde(default)]
+    pub category: CategoryUpdate,
+    pub tags: Option<Vec<String>>,
     pub knowledge_status: Option<KnowledgeStatus>,
     pub knowledge_review: Option<String>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(untagged)]
+pub enum CategoryUpdate {
+    Set(String),
+    Clear,
+    #[default]
+    #[serde(skip)]
+    Unchanged,
 }
 
 #[derive(Deserialize)]
@@ -123,9 +136,10 @@ fn set_title(text: &str, title: &str) -> Result<String, VaultError> {
 pub fn curate(
     session: &MutationSession,
     dirs: &VaultDirs,
+    categories: &[ConceptCategory],
     request: CurationPlan,
 ) -> Result<CurationResult, VaultError> {
-    let (plan, result) = build_curation(session.root(), dirs, request)?;
+    let (plan, result) = build_curation(session.root(), dirs, categories, request)?;
     session.apply(plan)?;
     Ok(result)
 }
@@ -133,14 +147,16 @@ pub fn curate(
 pub fn preview_curation(
     root: &Path,
     dirs: &VaultDirs,
+    categories: &[ConceptCategory],
     request: CurationPlan,
 ) -> Result<CurationResult, VaultError> {
-    build_curation(root, dirs, request).map(|(_, result)| result)
+    build_curation(root, dirs, categories, request).map(|(_, result)| result)
 }
 
 fn build_curation(
     root: &Path,
     dirs: &VaultDirs,
+    categories: &[ConceptCategory],
     request: CurationPlan,
 ) -> Result<(MutationPlan, CurationResult), VaultError> {
     if request.evidence.is_empty() || request.concepts.is_empty() && request.reviews.is_empty() {
@@ -187,6 +203,31 @@ fn build_curation(
                 return Err(invalid("concept aliases must not be blank"));
             }
             after = set(&after, "aliases", aliases)?;
+        }
+        match &change.category {
+            CategoryUpdate::Unchanged => {}
+            CategoryUpdate::Clear => after = set(&after, "category", &Option::<String>::None)?,
+            CategoryUpdate::Set(category) => {
+                if !categories
+                    .iter()
+                    .any(|configured| &configured.id == category)
+                {
+                    return Err(invalid(format!("unknown concept category: {category}")));
+                }
+                after = set(&after, "category", category)?;
+            }
+        }
+        if let Some(tags) = &change.tags {
+            let mut identities = BTreeSet::new();
+            for tag in tags {
+                let key = identity_key(tag)
+                    .filter(|_| !tag.contains(['\n', '\r']))
+                    .ok_or_else(|| invalid("concept tags must be nonblank single lines"))?;
+                if !identities.insert(key.to_lowercase()) {
+                    return Err(invalid("concept tags must be unique"));
+                }
+            }
+            after = set(&after, "tags", tags)?;
         }
         if let Some(status) = change.knowledge_status {
             let review = change
@@ -367,7 +408,7 @@ fn build_curation(
                     citation.path
                 )));
             }
-            let archive = crate::review::archive_path(&citation.revision)?;
+            let archive = crate::review::evidence_archive_path(&citation.revision)?;
             if archive_paths.insert(archive.clone()) {
                 match crate::load_archived_evidence(root, &citation.revision)? {
                     Some(page) => plan.require_unchanged(
@@ -386,7 +427,7 @@ fn build_curation(
                 continue;
             }
             let revision = source_revision(&crate::parse_page(before).map_err(invalid)?);
-            let archive = crate::review::archive_path(&revision)?;
+            let archive = crate::review::evidence_archive_path(&revision)?;
             if archive_paths.insert(archive.clone()) {
                 match crate::load_archived_evidence(root, &revision)? {
                     Some(page) => plan.require_unchanged(
@@ -424,6 +465,133 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn metadata_curation_validates_vocabulary_and_preserves_semantic_sections() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let path = "wiki/concepts/subject.md";
+        let before = "---\ntype: concept\ntitle: Subject\ncategory: old\ntags: [old]\nllm_inputs: {synthesis_done: prior}\n---\n## Synthesis\nScoped judgment.\n\n## Sources\nRetained evidence.\n";
+        crate::VaultWriter::new(root.path())
+            .write_page_sync(Path::new(path), before)
+            .unwrap();
+        let categories = [ConceptCategory {
+            id: "engineering".into(),
+            label: "Engineering".into(),
+        }];
+        let request = |raw: &str, fields: serde_json::Value| {
+            let mut change = json!({"path":path,"revision":file_revision(raw)});
+            change
+                .as_object_mut()
+                .unwrap()
+                .extend(fields.as_object().unwrap().clone());
+            serde_json::from_value::<CurationPlan>(json!({
+                "evidence":[{"path":path,"revision":file_revision(raw)}],
+                "concepts":[change]
+            }))
+            .unwrap()
+        };
+        for fields in [
+            json!({"category":"missing"}),
+            json!({"tags":[" "]}),
+            json!({"tags":["line\nbreak"]}),
+            json!({"tags":["API","api"]}),
+        ] {
+            assert!(
+                preview_curation(root.path(), &dirs, &categories, request(before, fields)).is_err()
+            );
+            assert_eq!(
+                std::fs::read_to_string(root.path().join(path)).unwrap(),
+                before
+            );
+            assert!(!root.path().join(".lorekeeper/evidence").exists());
+        }
+        let fields = json!({"category":"engineering","tags":["검색","knowledge graph"]});
+        preview_curation(
+            root.path(),
+            &dirs,
+            &categories,
+            request(before, fields.clone()),
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.path().join(path)).unwrap(),
+            before
+        );
+        let session = MutationSession::acquire(root.path()).unwrap();
+        curate(&session, &dirs, &categories, request(before, fields)).unwrap();
+        let updated = std::fs::read_to_string(root.path().join(path)).unwrap();
+        let page = crate::parse_page(&updated).unwrap();
+        assert_eq!(
+            page.frontmatter.get("category"),
+            Some(&json!("engineering"))
+        );
+        assert_eq!(
+            page.frontmatter.get("tags"),
+            Some(&json!(["검색", "knowledge graph"]))
+        );
+        assert_eq!(page.body, crate::parse_page(before).unwrap().body);
+        assert_eq!(
+            page.frontmatter.get("llm_inputs"),
+            crate::parse_page(before)
+                .unwrap()
+                .frontmatter
+                .get("llm_inputs")
+        );
+        assert!(
+            curate(
+                &session,
+                &dirs,
+                &categories,
+                request(before, json!({"tags":[]}))
+            )
+            .is_err()
+        );
+        curate(
+            &session,
+            &dirs,
+            &categories,
+            request(&updated, json!({"aliases":[]})),
+        )
+        .unwrap();
+        let kept = std::fs::read_to_string(root.path().join(path)).unwrap();
+        assert_eq!(
+            crate::parse_page(&kept)
+                .unwrap()
+                .frontmatter
+                .get("category"),
+            Some(&json!("engineering"))
+        );
+        curate(
+            &session,
+            &dirs,
+            &categories,
+            request(&kept, json!({"category":null,"tags":[]})),
+        )
+        .unwrap();
+        let cleared =
+            crate::parse_page(&std::fs::read_to_string(root.path().join(path)).unwrap()).unwrap();
+        assert_eq!(
+            cleared.frontmatter.get("category"),
+            Some(&serde_json::Value::Null)
+        );
+        assert_eq!(cleared.frontmatter.get("tags"), Some(&json!([])));
+        let snapshot = crate::prepare_search(&session, &dirs).unwrap();
+        assert_eq!(
+            crate::search(
+                root.path(),
+                &dirs,
+                &crate::SearchOptions {
+                    snapshot: Some(&snapshot.snapshot),
+                    ..Default::default()
+                }
+            )
+            .unwrap()
+            .hits[0]
+                .tags,
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
     fn retirement_and_review_publish_atomically_without_changing_generated_evidence() {
         let root = tempfile::tempdir().unwrap();
         let session = MutationSession::acquire(root.path()).unwrap();
@@ -443,7 +611,7 @@ mod tests {
         let request:CurationPlan=serde_json::from_value(json!({"evidence":[{"path":path,"revision":file_revision(before)}],"concepts":[{"path":path,"revision":file_revision(before),"knowledge_status":"retired","knowledge_review":review_path}],"reviews":[{"path":review_path,"revision":null,"content":review}]})).unwrap();
         let preview:CurationPlan=serde_json::from_value(json!({"evidence":[{"path":path,"revision":file_revision(before)}],"concepts":[{"path":path,"revision":file_revision(before),"knowledge_status":"retired","knowledge_review":review_path}],"reviews":[{"path":review_path,"revision":null,"content":review}]})).unwrap();
         assert_eq!(
-            preview_curation(root.path(), &VaultDirs::default(), preview)
+            preview_curation(root.path(), &VaultDirs::default(), &[], preview)
                 .unwrap()
                 .concepts,
             [path]
@@ -454,7 +622,7 @@ mod tests {
         );
         assert!(!root.path().join(".lorekeeper/evidence").exists());
         assert!(!root.path().join(review_path).exists());
-        let result = curate(&session, &VaultDirs::default(), request).unwrap();
+        let result = curate(&session, &VaultDirs::default(), &[], request).unwrap();
         assert_eq!(result.concepts, [path]);
         let after = std::fs::read_to_string(root.path().join(path)).unwrap();
         let parsed = crate::parse_page(&after).unwrap();
@@ -534,7 +702,7 @@ mod tests {
             std::fs::write(root.path().join(target), &before).unwrap();
             let request = serde_json::from_value::<CurationPlan>(json!({"evidence":[{"path":source,"revision":file_revision(evidence)}],"concepts":[],"reviews":[{"path":target,"revision":file_revision(&before),"content":content}]})).unwrap();
             assert!(
-                preview_curation(root.path(), &dirs, request)
+                preview_curation(root.path(), &dirs, &[], request)
                     .err()
                     .unwrap()
                     .to_string()
@@ -570,7 +738,7 @@ mod tests {
         );
         let request = serde_json::from_value::<CurationPlan>(json!({"evidence":[{"path":concept,"revision":file_revision(before)}],"concepts":[{"path":concept,"revision":file_revision(before),"knowledge_status":"retired","knowledge_review":review}],"reviews":[{"path":review,"revision":null,"content":content}]})).unwrap();
         assert!(
-            preview_curation(root.path(), &VaultDirs::default(), request)
+            preview_curation(root.path(), &VaultDirs::default(), &[], request)
                 .err()
                 .unwrap()
                 .to_string()
@@ -590,7 +758,7 @@ mod tests {
         let evidence = "wiki/documents/deleted.md";
         let raw = "---\ntype: document\ntitle: Deleted source\n---\n## Summary\nThe historical observation.\n";
         let revision = source_revision(&crate::parse_page(raw).unwrap());
-        let archive = crate::review::archive_path(&revision).unwrap();
+        let archive = crate::review::evidence_archive_path(&revision).unwrap();
         crate::VaultWriter::new(root.path())
             .write_page_sync(&archive, raw)
             .unwrap();
@@ -602,15 +770,15 @@ mod tests {
         let request = || {
             serde_json::from_value::<CurationPlan>(json!({"evidence":[{"path":archive.to_str().unwrap(),"revision":file_revision(raw)}],"concepts":[],"reviews":[{"path":review,"revision":null,"content":content}]})).unwrap()
         };
-        preview_curation(root.path(), &dirs, request()).unwrap();
+        preview_curation(root.path(), &dirs, &[], request()).unwrap();
         crate::VaultWriter::new(root.path())
             .write_page_sync(Path::new(evidence), &raw.replace("historical", "changed"))
             .unwrap();
-        assert!(preview_curation(root.path(), &dirs, request()).is_err());
+        assert!(preview_curation(root.path(), &dirs, &[], request()).is_err());
         assert!(!root.path().join(review).exists());
         std::fs::remove_file(root.path().join(evidence)).unwrap();
         let session = MutationSession::acquire(root.path()).unwrap();
-        curate(&session, &dirs, request()).unwrap();
+        curate(&session, &dirs, &[], request()).unwrap();
         let reviews = crate::list_reviews(root.path(), &dirs).unwrap();
         assert_eq!(
             reviews[0].effective_state,
@@ -637,7 +805,7 @@ mod tests {
             (file_revision(first), vec!["Second"]),
         ] {
             let request:CurationPlan=serde_json::from_value(json!({"evidence":[{"path":"wiki/concepts/first.md","revision":evidence_revision}],"concepts":[{"path":"wiki/concepts/first.md","revision":file_revision(first),"aliases":aliases}]})).unwrap();
-            assert!(curate(&session, &VaultDirs::default(), request).is_err());
+            assert!(curate(&session, &VaultDirs::default(), &[], request).is_err());
             assert_eq!(
                 std::fs::read_to_string(root.path().join("wiki/concepts/first.md")).unwrap(),
                 first
@@ -645,7 +813,7 @@ mod tests {
             assert!(!root.path().join(".lorekeeper/evidence").exists());
         }
         let request:CurationPlan=serde_json::from_value(json!({"evidence":[{"path":"wiki/concepts/first.md","revision":file_revision(first)}],"concepts":[{"path":"wiki/concepts/first.md","revision":file_revision(first),"title":"Renamed","aliases":["First"]}]})).unwrap();
-        curate(&session, &VaultDirs::default(), request).unwrap();
+        curate(&session, &VaultDirs::default(), &[], request).unwrap();
         let after = std::fs::read_to_string(root.path().join("wiki/concepts/first.md")).unwrap();
         assert!(after.contains("# Renamed\n"));
         assert!(after.contains("First meaning."));

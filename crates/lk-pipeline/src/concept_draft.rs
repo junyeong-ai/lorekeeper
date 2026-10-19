@@ -4,7 +4,7 @@ use lk_core::concept::{
     Citation, ConceptIdentity, ConceptRegistry, ExtractedConcept, Resolution, citation_digest,
     slugify,
 };
-use lk_core::config::VaultDirs;
+use lk_core::config::{ConceptPolicy, VaultDirs};
 use lk_core::frontmatter::field;
 use lk_core::i18n::Locale;
 use lk_core::vault_path::VaultPath;
@@ -98,6 +98,7 @@ pub struct StagedConcept {
     concept: ExtractedConcept,
     identity: ConceptIdentity,
     existing: Option<lk_core::frontmatter::VaultPage>,
+    category: ConceptCategory,
     grounding: Option<GroundedSynthesis>,
     /// The extraction's aliases this vault can actually adopt, decided in [`ConceptDrafts::stage`]
     /// and already registered there.
@@ -121,7 +122,7 @@ struct ConceptDraft {
     original: Option<String>,
     slug: String,
     name: String,
-    category: Option<String>,
+    category: ConceptCategory,
     first_seen: jiff::civil::Date,
     last_seen: jiff::civil::Date,
     /// Last `source_count` written to the page, preserved verbatim across this
@@ -164,6 +165,42 @@ struct ConceptDraft {
     aliases: Vec<String>,
 }
 
+#[derive(Default)]
+enum ConceptCategory {
+    #[default]
+    Unassigned,
+    Uncategorized,
+    Assigned(String),
+}
+
+impl ConceptCategory {
+    fn from_field(value: Option<&serde_json::Value>) -> Result<Self, PipelineError> {
+        match value {
+            None => Ok(Self::Unassigned),
+            Some(serde_json::Value::Null) => Ok(Self::Uncategorized),
+            Some(serde_json::Value::String(value)) => Ok(Self::Assigned(value.clone())),
+            Some(_) => Err(PipelineError::Render(
+                "concept category must be a string or null".into(),
+            )),
+        }
+    }
+
+    fn as_deref(&self) -> Option<&str> {
+        match self {
+            Self::Assigned(value) => Some(value),
+            Self::Unassigned | Self::Uncategorized => None,
+        }
+    }
+
+    fn observe(&mut self, incoming: Option<&str>) {
+        if matches!(self, Self::Unassigned)
+            && let Some(value) = incoming
+        {
+            *self = Self::Assigned(value.into());
+        }
+    }
+}
+
 impl ConceptDrafts {
     /// Resolve a declared name, refusing ambiguous ownership before staging any writes.
     pub async fn resolve_identity(
@@ -171,13 +208,31 @@ impl ConceptDrafts {
         name: &str,
         reader: &dyn VaultStore,
         dirs: &VaultDirs,
+        policy: ConceptPolicy,
     ) -> Result<ConceptIdentity, PipelineError> {
+        if !policy.is_enabled() {
+            return Err(PipelineError::Render(
+                "concept extraction is disabled".into(),
+            ));
+        }
         let registry = match &mut self.registry {
             Some(registry) => registry,
             slot => slot.insert(lk_vault::load_concept_registry(reader, dirs).await?),
         };
         match registry.resolve(name) {
-            Resolution::Owned(identity) => Ok(identity),
+            Resolution::Owned(identity) => {
+                if policy == ConceptPolicy::ExistingOnly
+                    && reader
+                        .read_page(VaultPath::concept(dirs, &identity.slug).as_ref())
+                        .await?
+                        .is_none()
+                {
+                    return Err(PipelineError::Render(format!(
+                        "existing-only concept policy requires a published owner for `{name}`"
+                    )));
+                }
+                Ok(identity)
+            }
             Resolution::Ambiguous { claimants, .. } => Err(PipelineError::Render(format!(
                 "ambiguous concept `{name}`: {}",
                 claimants
@@ -187,6 +242,11 @@ impl ConceptDrafts {
                     .join(", ")
             ))),
             Resolution::Absent => {
+                if policy == ConceptPolicy::ExistingOnly {
+                    return Err(PipelineError::Render(format!(
+                        "existing-only concept policy refuses new concept `{name}`"
+                    )));
+                }
                 let slug = registry.available_slug(name).ok_or_else(|| {
                     PipelineError::Render(format!("no unoccupied concept address for `{name}`"))
                 })?;
@@ -241,9 +301,11 @@ impl ConceptDrafts {
         concept: &ExtractedConcept,
         reader: &dyn VaultStore,
         dirs: &VaultDirs,
+        policy: ConceptPolicy,
     ) -> Result<StagedConcept, PipelineError> {
-        let identity = self.resolve_identity(&concept.name, reader, dirs).await?;
-        let (aliases, refused) = self.adopt_aliases(&identity, &concept.aliases);
+        let identity = self
+            .resolve_identity(&concept.name, reader, dirs, policy)
+            .await?;
         // A slug already staged this run needs no read: the draft in hand is newer than the
         // page on disk, and `commit` folds into it.
         let existing = if self.drafts.contains_key(&identity.slug) {
@@ -266,6 +328,12 @@ impl ConceptDrafts {
                 .knowledge_status()
                 .map_err(PipelineError::Render)?;
         }
+        let category = ConceptCategory::from_field(
+            existing
+                .as_ref()
+                .and_then(|page| page.frontmatter.get("category")),
+        )?;
+        let (aliases, refused) = self.adopt_aliases(&identity, &concept.aliases);
         if existing.is_some() {
             self.established.insert(identity.slug.clone());
         }
@@ -273,6 +341,7 @@ impl ConceptDrafts {
             concept: concept.clone(),
             identity,
             existing,
+            category,
             grounding: None,
             aliases,
             refused,
@@ -359,6 +428,7 @@ impl ConceptDrafts {
             concept,
             identity,
             existing,
+            mut category,
             grounding,
             aliases,
             refused,
@@ -390,9 +460,7 @@ impl ConceptDrafts {
                 draft.category.as_deref(),
                 concept.category.as_deref(),
             );
-            if draft.category.is_none() {
-                draft.category = concept.category.clone();
-            }
+            draft.category.observe(concept.category.as_deref());
             return ConceptIdentity {
                 slug: safe_slug,
                 title: draft.name.clone(),
@@ -429,18 +497,12 @@ impl ConceptDrafts {
                     .and_then(|v| v.as_str())
                     .map(String::from)
                     .unwrap_or_else(|| concept.name.clone());
-                let existing_category = page
-                    .frontmatter
-                    .get("category")
-                    .and_then(|v| v.as_str())
-                    .filter(|s| !s.is_empty())
-                    .map(String::from);
                 warn_category_conflict(
                     &safe_slug,
-                    existing_category.as_deref(),
+                    category.as_deref(),
                     concept.category.as_deref(),
                 );
-                let category = existing_category.or_else(|| concept.category.clone());
+                category.observe(concept.category.as_deref());
                 let source_count = page.frontmatter.source_count().unwrap_or(0);
                 // Keep every alias except the title seed (`render` re-adds the title first),
                 // so a synonym a human/audit registered survives this re-render.
@@ -496,7 +558,10 @@ impl ConceptDrafts {
                 original,
                 slug: safe_slug.clone(),
                 name: concept.name.clone(),
-                category: concept.category.clone(),
+                category: {
+                    category.observe(concept.category.as_deref());
+                    category
+                },
                 first_seen: date,
                 last_seen: date,
                 source_count: 0,
@@ -679,6 +744,18 @@ impl ConceptDraft {
             .render("concept.md.jinja", &context)
             .map_err(|e| PipelineError::Render(e.to_string()))?;
 
+        let declared_category = match &self.category {
+            ConceptCategory::Unassigned => None,
+            ConceptCategory::Uncategorized => Some(serde_json::Value::Null),
+            ConceptCategory::Assigned(value) => Some(serde_json::json!(value)),
+        };
+        if let Some(value) = declared_category {
+            content = lk_vault::set_frontmatter_field(&content, "category", &value.to_string())
+                .ok_or_else(|| {
+                    PipelineError::Render("concept template requires frontmatter".into())
+                })?;
+        }
+
         for (key, value) in &self.preserved_metadata {
             let value = serde_json::to_string(value)
                 .map_err(|error| PipelineError::Render(error.to_string()))?;
@@ -775,6 +852,7 @@ mod tests {
                 },
                 &reader,
                 &dirs,
+                ConceptPolicy::SupportedNew,
             )
             .await
             .unwrap();
@@ -801,7 +879,12 @@ mod tests {
         assert!(rendered.body.contains("Preserved historical judgment."));
         assert_eq!(
             drafts
-                .resolve_identity("Additional Alias", &reader, &dirs)
+                .resolve_identity(
+                    "Additional Alias",
+                    &reader,
+                    &dirs,
+                    ConceptPolicy::SupportedNew
+                )
                 .await
                 .unwrap()
                 .slug,
@@ -879,7 +962,7 @@ mod tests {
         let unparseable = OneBadPage(lk_vault::VaultError::Frontmatter("bad".into()));
         assert!(
             ConceptDrafts::new()
-                .resolve_identity("VectorDB", &unparseable, &dirs)
+                .resolve_identity("VectorDB", &unparseable, &dirs, ConceptPolicy::SupportedNew)
                 .await
                 .is_err()
         );
@@ -893,6 +976,7 @@ mod tests {
                     },
                     &unparseable,
                     &dirs,
+                    ConceptPolicy::SupportedNew,
                 )
                 .await
                 .is_err(),
@@ -902,7 +986,7 @@ mod tests {
         let unreadable = OneBadPage(lk_vault::VaultError::Io(std::io::Error::other("x")));
         assert!(
             ConceptDrafts::new()
-                .resolve_identity("VectorDB", &unreadable, &dirs)
+                .resolve_identity("VectorDB", &unreadable, &dirs, ConceptPolicy::SupportedNew)
                 .await
                 .is_err(),
             "a page nothing could read is not a page with no names"
@@ -933,13 +1017,19 @@ mod tests {
                 },
                 &empty,
                 &dirs,
+                ConceptPolicy::SupportedNew,
             )
             .await
             .expect("an empty vault stages cleanly");
         drafts.commit(staged, date);
 
         let by_alias = drafts
-            .resolve_identity("에이전트 호출 가능 애플리케이션 단위", &empty, &dirs)
+            .resolve_identity(
+                "에이전트 호출 가능 애플리케이션 단위",
+                &empty,
+                &dirs,
+                ConceptPolicy::SupportedNew,
+            )
             .await
             .expect("resolving a registered alias reads nothing new");
         assert_eq!(
@@ -956,6 +1046,7 @@ mod tests {
                 },
                 &empty,
                 &dirs,
+                ConceptPolicy::SupportedNew,
             )
             .await
             .expect("an empty vault stages cleanly");
@@ -966,7 +1057,12 @@ mod tests {
         drafts.commit(staged, date);
         assert_eq!(
             drafts
-                .resolve_identity("Agent Capability", &empty, &dirs)
+                .resolve_identity(
+                    "Agent Capability",
+                    &empty,
+                    &dirs,
+                    ConceptPolicy::SupportedNew
+                )
                 .await
                 .expect("resolving reads nothing new")
                 .slug,
@@ -1030,6 +1126,7 @@ mod tests {
                     },
                     &empty,
                     &dirs,
+                    ConceptPolicy::SupportedNew,
                 )
                 .await
                 .expect("an empty vault stages cleanly");
@@ -1075,6 +1172,7 @@ mod tests {
                 },
                 &FailsOn("nothing"),
                 &dirs,
+                ConceptPolicy::SupportedNew,
             )
             .await
             .expect("stages cleanly");
@@ -1089,6 +1187,7 @@ mod tests {
                 },
                 &FailsOn("nothing"),
                 &dirs,
+                ConceptPolicy::SupportedNew,
             )
             .await
             .expect("stages cleanly");
@@ -1152,6 +1251,7 @@ mod tests {
                 },
                 &OnDisk,
                 &dirs,
+                ConceptPolicy::SupportedNew,
             )
             .await
             .expect("the established page reads cleanly");
@@ -1166,6 +1266,7 @@ mod tests {
                 },
                 &OnDisk,
                 &dirs,
+                ConceptPolicy::SupportedNew,
             )
             .await
             .expect("the rival stages cleanly");
@@ -1208,6 +1309,7 @@ mod tests {
                 },
                 &FailsOn("agent-capability"),
                 &dirs,
+                ConceptPolicy::SupportedNew,
             )
             .await;
         assert!(
@@ -1224,6 +1326,7 @@ mod tests {
                 },
                 &FailsOn("agent-capability"),
                 &dirs,
+                ConceptPolicy::SupportedNew,
             )
             .await
             .expect("the later batch stages cleanly");
@@ -1296,6 +1399,7 @@ mod tests {
                 },
                 &FailsOn("nothing"),
                 &dirs,
+                ConceptPolicy::SupportedNew,
             )
             .await
             .expect("stages cleanly");
@@ -1312,6 +1416,7 @@ mod tests {
                 },
                 &Holds("rag"),
                 &dirs,
+                ConceptPolicy::SupportedNew,
             )
             .await
             .expect("stages cleanly");
@@ -1322,6 +1427,114 @@ mod tests {
             "an established page is not a rival this run minted: {:?}",
             drafts.refused_aliases()
         );
+    }
+
+    #[tokio::test]
+    async fn reingest_preserves_declared_category_and_only_fills_absence() {
+        for (stored, first, second, expected) in [
+            ("category: null\n", None, None, serde_json::json!(null)),
+            (
+                "category: null\n",
+                Some("ai-ml"),
+                Some("tools"),
+                serde_json::json!(null),
+            ),
+            (
+                "category: \"\"\n",
+                Some("ai-ml"),
+                None,
+                serde_json::json!(""),
+            ),
+            (
+                "category: security\n",
+                Some("ai-ml"),
+                Some("tools"),
+                serde_json::json!("security"),
+            ),
+            ("", Some("ai-ml"), Some("tools"), serde_json::json!("ai-ml")),
+            ("", None, Some("tools"), serde_json::json!("tools")),
+        ] {
+            let original = format!(
+                "---\ntype: concept\ntitle: Stored\n{stored}---\n# Stored\n\n## Synthesis\n\n## Sources\n\n## Related\n"
+            );
+            let reader =
+                lk_vault::InMemoryVault::new().with_page("wiki/concepts/stored.md", &original);
+            let dirs = VaultDirs::default();
+            let mut drafts = ConceptDrafts::new();
+            for category in [first, second] {
+                let staged = drafts
+                    .stage(
+                        &ExtractedConcept {
+                            name: "Stored".into(),
+                            aliases: vec![],
+                            category: category.map(String::from),
+                        },
+                        &reader,
+                        &dirs,
+                        ConceptPolicy::SupportedNew,
+                    )
+                    .await
+                    .unwrap();
+                drafts.commit(staged, jiff::civil::date(2026, 10, 19));
+            }
+            let rendered = drafts
+                .render_pages(&TemplateEngine::build(None).unwrap(), &dirs, Locale::En)
+                .unwrap();
+            let page = lk_core::frontmatter::parse_page(&rendered[0].content).unwrap();
+            assert_eq!(
+                page.frontmatter.get("category"),
+                Some(&expected),
+                "stored={stored:?}, first={first:?}, second={second:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_declared_category_refuses_staging() {
+        let reader = lk_vault::InMemoryVault::new().with_page(
+            "wiki/concepts/stored.md",
+            "---\ntype: concept\ntitle: Stored\ncategory: [security]\n---\n# Stored\n",
+        );
+        let mut drafts = ConceptDrafts::new();
+        let result = drafts
+            .stage(
+                &ExtractedConcept {
+                    name: "Stored".into(),
+                    aliases: vec!["Unclaimed".into()],
+                    category: None,
+                },
+                &reader,
+                &VaultDirs::default(),
+                ConceptPolicy::SupportedNew,
+            )
+            .await;
+        assert!(
+            matches!(result, Err(PipelineError::Render(message)) if message.contains("category must be a string or null"))
+        );
+        assert!(
+            drafts
+                .render_pages(
+                    &TemplateEngine::build(None).unwrap(),
+                    &VaultDirs::default(),
+                    Locale::En
+                )
+                .unwrap()
+                .is_empty()
+        );
+        let valid = drafts
+            .stage(
+                &ExtractedConcept {
+                    name: "Unclaimed".into(),
+                    aliases: vec![],
+                    category: None,
+                },
+                &reader,
+                &VaultDirs::default(),
+                ConceptPolicy::SupportedNew,
+            )
+            .await
+            .unwrap();
+        assert_eq!(valid.identity().slug, "unclaimed");
     }
 
     #[tokio::test]
@@ -1340,6 +1553,7 @@ mod tests {
                 },
                 &reader,
                 &dirs,
+                ConceptPolicy::SupportedNew,
             )
             .await
             .unwrap();
@@ -1395,11 +1609,26 @@ mod tests {
             category: None,
             aliases: Vec::new(),
         };
-        let staged = drafts.stage(&first, &reader, &dirs).await.unwrap();
-        assert!(drafts.stage(&second, &reader, &dirs).await.is_err());
+        let staged = drafts
+            .stage(&first, &reader, &dirs, ConceptPolicy::SupportedNew)
+            .await
+            .unwrap();
+        assert!(
+            drafts
+                .stage(&second, &reader, &dirs, ConceptPolicy::SupportedNew)
+                .await
+                .is_err()
+        );
         assert!(
             drafts.drafts.is_empty(),
             "staging alone must fold nothing, so the batch can be abandoned whole"
+        );
+        assert!(
+            drafts
+                .stage(&first, &reader, &dirs, ConceptPolicy::ExistingOnly)
+                .await
+                .is_err(),
+            "a reserved name from an abandoned batch is not a published owner"
         );
 
         let date = jiff::civil::date(2026, 5, 23);
@@ -1441,7 +1670,7 @@ mod tests {
             original: None,
             slug: "rag".into(),
             name: "RAG".into(),
-            category: None,
+            category: ConceptCategory::Unassigned,
             first_seen: jiff::civil::date(2026, 5, 1),
             last_seen: jiff::civil::date(2026, 5, 1),
             source_count: 2,
@@ -1475,7 +1704,7 @@ mod tests {
             original: None,
             slug: "rag".into(),
             name: r#"RAG: "Retrieval" Augmented"#.into(),
-            category: Some("ai-ml".into()),
+            category: ConceptCategory::Assigned("ai-ml".into()),
             first_seen: jiff::civil::date(2026, 5, 1),
             last_seen: jiff::civil::date(2026, 5, 1),
             source_count: 0,
@@ -1512,7 +1741,7 @@ mod tests {
             original: None,
             slug: "rag".into(),
             name: "RAG".into(),
-            category: Some("ai-ml".into()),
+            category: ConceptCategory::Assigned("ai-ml".into()),
             first_seen: jiff::civil::date(2026, 5, 1),
             last_seen: jiff::civil::date(2026, 5, 1),
             source_count: 3,
@@ -1563,7 +1792,7 @@ mod tests {
             original: None,
             slug: "test".into(),
             name: "Test".into(),
-            category: None,
+            category: ConceptCategory::Unassigned,
             first_seen: jiff::civil::date(2026, 5, 1),
             last_seen: jiff::civil::date(2026, 5, 1),
             source_count: 0,
@@ -1600,7 +1829,7 @@ mod tests {
             original: None,
             slug: "retrieval-augmented-generation".into(),
             name: "Retrieval Augmented Generation".into(),
-            category: None,
+            category: ConceptCategory::Unassigned,
             first_seen: jiff::civil::date(2026, 5, 1),
             last_seen: jiff::civil::date(2026, 5, 1),
             source_count: 0,

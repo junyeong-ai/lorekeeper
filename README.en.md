@@ -200,13 +200,20 @@ PostgreSQL environment to reduce the cost of operating a separate system. Keep t
 conditions of that decision separate from the first note's retrieval-quality observation.
 
 ## Sources
-- [Choosing a Vector Database for Production](../../wiki/documents/choosing-a-vector-database-for-production.md)
-- [RAG Pipeline: Fixing Low-Recall Retrieval](../../wiki/documents/rag-pipeline-fixing-low-recall-retrieval.md)
+<!-- lorekeeper:concept-sources:v1 -->
+
+Run `lore wiki prepare` for a snapshot ID, then `lore wiki citations EXACT_CONCEPT_PATH --snapshot ID` for complete source citations.
 ```
 
 > Whether you write `Vector DB` or `Vector Database`, it lands on **one page** (registered as an alias). Knowledge not fragmenting — that *is* the "compounds over time" promise.
 
 ### ✅ Result ③ — disclose detail as needed
+
+Each source's `concept_policy` controls admission. `disabled` collects documents and
+summaries without extracting concepts; `existing-only` links published owners;
+`supported-new` also permits supported new subjects. Omission means `disabled`.
+`focus` separately limits subject scope. The policy enters task identity and is
+enforced by native publication, rather than by prompts alone.
 
 ```bash
 lore wiki prepare                           # create a reusable SQLite snapshot
@@ -214,6 +221,7 @@ lore wiki search "Vector DB" --snapshot <id> --limit 10 --json
 lore wiki browse --type concept --category ai-ml --limit 20 --json
 lore wiki read wiki/concepts/vector-database.md # outline/revision → select a section
 lore wiki links wiki/concepts/vector-database.md --limit 20
+lore wiki citations wiki/concepts/vector-database.md --snapshot <id> --limit 20
 lore wiki reviews        # inspect unresolved judgments separately
 ```
 
@@ -349,7 +357,7 @@ lore wiki provenance wiki/documents/example.md # Follow declared relations by ex
 lore wiki concepts            # list concepts
 lore resolve <name>           # which concept page owns a name (0 owned / 1 absent / 2 ambiguous)
 lore graph lint               # structural health (orphans, broken links, duplicate concepts, …)
-lore graph suggest-links      # concept-relationship candidates (Adamic-Adar)
+lore graph suggest-links --limit 20 # topology candidates; continue with next_offset and --revision
 lore graph cluster            # topic communities (Louvain)
 lore graph backlinks-sync     # re-derive each concept's ## Sources, citation count and synthesis input
 lore graph merge <from> <into># fold a duplicate concept into the canonical one
@@ -370,6 +378,24 @@ lore schema                   # generate wiki/AGENTS.md (the page-format schema)
 ```
 
 `lore wiki refresh` refreshes the SQLite navigation snapshot and a small `index.md` entry guide. Use `wiki browse/search/links` for page inventories, date ordering and relationship traversal. An existing entry file without a generation marker is preserved and reported as a collision. For each retrieval session, prepare once and repeat `wiki browse/search/links --snapshot ID` (links supports `--direction incoming|both`), then verify originals with `wiki read --revision REV`. Refresh prints the prepared ID too.
+
+`wiki citations PATH --snapshot ID` reads complete graph-derived concept evidence
+from that captured SQLite snapshot, separately from ordinary link occurrences.
+Follow `next_offset` with the same snapshot. `total` counts citation entries;
+`source_count` counts origin pages, so selected RSS events may share one origin.
+These captured citations do not certify current source bytes or factual confidence.
+Concept Sources sections hold a fixed discovery instruction instead of growing lists.
+Replace `EXACT_CONCEPT_PATH` with the selected concept address. Only exact generated
+lists migrate; custom Sources prose is preserved and reported. The initial body
+change reopens affected revision-guarded assessments; later citation growth leaves
+the compact body unchanged.
+
+`source_file` preserves a declared string, list of derivation references, or null;
+it does not establish document ownership or readable historical originals.
+Guarded `wiki curate` accepts configured concept categories and complete tag lists.
+Omitted category retains the declaration, null explicitly clears it, and extraction
+preserves that choice. Omitted tags retain them; [] clears them. Tags describe the
+concept and are not inherited automatically from source documents.
 
 For date-based discovery, use `lore wiki browse --snapshot ID --sort created --from 2026-01-01 --to 2026-12-31 --json`. `created` may be the original authoring date rather than the ingestion date. Missing or invalid dates retain an explicit status and are excluded by date filters. Date order is newest first, with unknown dates last when no date filter is applied.
 
@@ -588,15 +614,28 @@ graph:
   audit:
     schedule: "0 7 * * 0"
     batch_size: 5
+    max_input_bytes: 262144
 ```
 
 Changed and first-time concepts rotate fairly; unchanged inputs are not repeatedly
 audited. `.lorekeeper/knowledge-audit.json` stores current assessments and pending
 order; judgments and conflicting evidence remain in Markdown reviews. Single-source
 status or citation count alone does not justify merging or deleting a concept.
-Batch count and session deadlines do not bound total source bytes or cost. Size the
-schedule against observed execution and backlog. Current receipts, clean lint and
+Run an initial resumable campaign with `lore run knowledge --profile codex --batches 20
+--json`, choosing a registered profile. Each batch releases its workflow lease;
+failures preserve pending work and completed receipts. `batch-limit` means the
+requested batch count was reached; `settled` means the current concept plan is
+empty, not that every source document has been semantically audited.
+Audit plans measure distinct complete concept, evidence, direct related-page and
+scoped review/evidence bytes plus selected RSS payloads. Exceeding `max_input_bytes` retains the exact
+candidates and refuses agent execution and completed receipts. Adjust the batch
+size or explicit bound; never truncate evidence to claim completion. This bounds
+source scope, not aggregate model tokens or cost. Current receipts, clean lint and
 normal termination do not establish semantic consistency of the entire corpus.
+Missing, invalid or stale scoped reviews prevent completion. Unrelated reassessment
+backlog remains visible in `run knowledge`'s bounded `review_health` counts without
+stopping the next batch. Invalid records or inspection errors fail the job.
+Use `wiki reviews --check` separately for a strict whole-vault health check.
 
 Reminders retire only after the OS notifier accepts them. Acceptance does not prove
 the user saw the notification. A crash between acceptance and retirement may cause

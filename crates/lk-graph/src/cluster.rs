@@ -324,10 +324,8 @@ pub struct LinkSuggestion {
     pub b: String,
     pub shared_neighbors: usize,
     /// Adamic–Adar index over the shared neighbours: Σ 1/ln(|N(z)|). A neighbour cited by
-    /// few pages is strong evidence of a real relationship; a hub cited by everything
-    /// contributes almost nothing — so two pages sharing only hub neighbours rank far
-    /// below two sharing a niche one, even at equal raw counts. This is what separates a
-    /// genuine relationship from "both happened to be linked from the same survey page".
+    /// few pages contributes more than a hub at equal raw counts. This ranks topology
+    /// candidates; it does not establish a semantic relationship or independent evidence.
     pub score: f64,
 }
 
@@ -340,8 +338,7 @@ pub struct SuggestResult {
 /// edge between them and share at least `min_shared_neighbors` neighbours, ranked by their
 /// Adamic–Adar index (descending). The count floor rejects the single-shared-neighbour case
 /// outright; the Adamic–Adar weighting then discounts shared neighbours that are high-degree
-/// hubs, so co-citation by one busy survey page can never outrank a real shared niche
-/// concept. Pure, deterministic, read-only — it reuses the community assignment passed in
+/// hubs. Pure, deterministic, read-only — it reuses the community assignment passed in
 /// and never touches the vault.
 pub fn suggest_links(
     graph: &WikiGraph,

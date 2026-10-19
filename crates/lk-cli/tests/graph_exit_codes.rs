@@ -272,6 +272,53 @@ fn neighbors_filter_declared_types_and_direction_before_pagination() {
 }
 
 #[test]
+fn link_candidates_are_bounded_revision_pinned_and_never_claim_semantic_edges() {
+    let ws = with_graph("  cluster:\n    resolution: 0.1\n    suggest_min_shared_neighbors: 1\n");
+    ws.write(
+        "wiki/concepts/center.md",
+        &concept(
+            "center",
+            "Center",
+            "[a](a.md) [b](b.md) [c](c.md) [d](d.md)",
+        ),
+    );
+    for name in ["a", "b", "c", "d"] {
+        ws.write(
+            &format!("wiki/concepts/{name}.md"),
+            &concept(name, name, "Scoped subject."),
+        );
+    }
+    let query = |extra: &[&str]| {
+        let mut args = vec!["graph", "--json", "suggest-links", "--limit", "2"];
+        args.extend_from_slice(extra);
+        let result = ws.run(&args);
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        serde_json::from_slice::<serde_json::Value>(&result.stdout).unwrap()["data"].clone()
+    };
+    let first = query(&[]);
+    assert_eq!(first["total"], 6);
+    assert_eq!(first["pairs"].as_array().unwrap().len(), 2);
+    assert_eq!(first["next_offset"], 2);
+    let revision = first["revision"].as_str().unwrap();
+    let second = query(&["--offset", "2", "--revision", revision]);
+    assert_eq!(second["revision"], revision);
+    assert_ne!(first["pairs"], second["pairs"]);
+    let last = query(&["--offset", "4", "--revision", revision]);
+    assert!(last["next_offset"].is_null());
+    assert_eq!(query(&["--offset", "6"])["pairs"], serde_json::json!([]));
+    assert_eq!(ws.code(&["graph", "suggest-links", "--limit", "0"]), 2);
+    assert_eq!(ws.code(&["graph", "suggest-links", "--limit", "101"]), 2);
+    ws.write("wiki/concepts/a.md", &concept("a", "a", "[b](b.md)"));
+    let stale = ws.run(&["graph", "suggest-links", "--revision", revision]);
+    assert_eq!(stale.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&stale.stderr).contains("link candidates changed"));
+}
+
+#[test]
 fn an_uncited_concept_and_an_open_conflict_are_reported_and_exit_zero() {
     let ws = sound_vault();
     let out = ws.run(&["graph", "lint"]);
@@ -788,11 +835,31 @@ fn a_citation_on_an_excluded_page_survives_the_sweeps_that_rewrite_the_vault() {
 
     assert_eq!(ws.code(&["graph", "backlinks-sync"]), 0);
     let page = ws.read("wiki/concepts/cited.md");
-    assert!(
-        page.contains("- [Notes](../../daily/notes/2026-05-23.md)"),
-        "the sweep deleted a citation its excluded citer justifies\n{page}"
-    );
     assert!(page.contains("source_count: 1"), "{page}");
+    let prepared = ws.run(&["wiki", "prepare"]);
+    assert!(prepared.status.success(), "{prepared:?}");
+    let prepared: serde_json::Value = serde_json::from_slice(&prepared.stdout).unwrap();
+    let captured = ws.run(&[
+        "wiki",
+        "citations",
+        "wiki/concepts/cited.md",
+        "--snapshot",
+        prepared["snapshot"].as_str().unwrap(),
+    ]);
+    assert!(captured.status.success(), "{captured:?}");
+    let captured: serde_json::Value = serde_json::from_slice(&captured.stdout).unwrap();
+    assert_eq!(captured["total"], 1);
+    assert_eq!(captured["source_count"], 1);
+    assert_eq!(
+        captured["citations"][0]["path"],
+        "daily/notes/2026-05-23.md"
+    );
+    assert_eq!(
+        captured["citations"][0]["revision"],
+        lk_core::concept::source_revision(
+            &lk_core::frontmatter::parse_page(&ws.read("daily/notes/2026-05-23.md")).unwrap()
+        )
+    );
 }
 
 /// Observation filters never suppress structural broken-link findings.

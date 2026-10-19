@@ -24,16 +24,17 @@ pub async fn run(
     opts: &super::GlobalOptions,
     operation: Operation,
     profile: Option<String>,
+    batches: usize,
     wait: bool,
     json: bool,
 ) -> miette::Result<()> {
     #[cfg(unix)]
     {
-        native::run(opts, operation, profile, wait, json).await
+        native::run(opts, operation, profile, batches, wait, json).await
     }
     #[cfg(not(unix))]
     {
-        let _ = (opts, operation, profile, wait, json);
+        let _ = (opts, operation, profile, batches, wait, json);
         Err(miette::miette!(
             "agent jobs require Unix workflow leases; Windows is unsupported"
         ))
@@ -73,6 +74,14 @@ mod native {
         requested_model: Option<String>,
     }
 
+    #[derive(Default, Serialize)]
+    struct ReviewHealth {
+        open: usize,
+        resolved: usize,
+        needs_reassessment: usize,
+        invalid: usize,
+    }
+
     #[derive(Serialize)]
     struct JobResult {
         operation: Operation,
@@ -81,6 +90,7 @@ mod native {
         execution: Option<ExecutionInfo>,
         workflow_id: Option<lk_core::execution::WorkflowId>,
         audit: Option<Vec<lk_graph::audit::AuditCompletion>>,
+        review_health: Option<ReviewHealth>,
         stages: Vec<StageResult>,
     }
 
@@ -91,7 +101,7 @@ mod native {
         configuration_failed: bool,
         root: PathBuf,
         profile: Option<String>,
-        supervisor: execution::Supervisor,
+        supervisor: &'a mut execution::Supervisor,
         lease: Option<workflow::WorkflowLease>,
         selected: Option<ExecutionProfile>,
         drain_blocked: bool,
@@ -332,7 +342,12 @@ mod native {
                     false
                 }
                 Ok(_) => {
-                    let completed = self.consumer("lore-process", "").await;
+                    let operation = if matches!(self.result.operation, Operation::Knowledge) {
+                        "Process current queue tasks as part of this bounded knowledge maintenance job. Report whole-vault review attention separately: unrelated needs-reassessment remains backlog, while invalid reviews or review inspection errors fail."
+                    } else {
+                        ""
+                    };
+                    let completed = self.consumer("lore-process", operation).await;
                     self.drain_blocked = !completed;
                     completed
                 }
@@ -414,6 +429,7 @@ mod native {
                 &pages,
                 self.config.graph.audit.batch_size,
                 paths,
+                self.config.graph.audit.max_input_bytes,
             )
             .map_err(|e| miette::miette!("{e}"))
         }
@@ -435,13 +451,57 @@ mod native {
                 &pages,
                 batch,
                 workflow.id(),
+                self.config.graph.audit.max_input_bytes,
             )
             .map_err(|e| miette::miette!("{e}"))
+        }
+
+        fn inspect_review_health(&mut self) -> bool {
+            if self.result.cancelled || !self.configuration_is_current() {
+                return false;
+            }
+            self.result.review_health = None;
+            let reports = match lk_vault::list_reviews(&self.root, &self.config.vault.dirs) {
+                Ok(reports) => reports,
+                Err(error) => return self.failure("knowledge review health", error),
+            };
+            if !self.configuration_is_current() {
+                return false;
+            }
+            let mut health = ReviewHealth::default();
+            for report in reports {
+                match report.effective_state {
+                    lk_vault::ReviewEffectiveState::Open => health.open += 1,
+                    lk_vault::ReviewEffectiveState::Resolved => health.resolved += 1,
+                    lk_vault::ReviewEffectiveState::NeedsReassessment => {
+                        health.needs_reassessment += 1;
+                    }
+                    lk_vault::ReviewEffectiveState::Invalid => health.invalid += 1,
+                }
+            }
+            let detail = format!(
+                "open={}, resolved={}, needs_reassessment={}, invalid={}; inspect `lore wiki reviews` for details",
+                health.open, health.resolved, health.needs_reassessment, health.invalid,
+            );
+            let valid = health.invalid == 0;
+            self.result.review_health = Some(health);
+            self.record(
+                "knowledge review health",
+                if valid {
+                    StageState::Completed
+                } else {
+                    StageState::Failed
+                },
+                Some(detail),
+            )
         }
 
         async fn knowledge(&mut self) {
             self.reconcile().await;
             if !self.result.ok || self.result.cancelled {
+                return;
+            }
+            if !self.inspect_review_health() {
                 return;
             }
             let plan = match self.audit_plan(&[]) {
@@ -451,6 +511,10 @@ mod native {
                     return;
                 }
             };
+            if let Err(error) = plan.input.ensure_ready() {
+                self.failure("audit input bound", error);
+                return;
+            }
             if plan.candidates.is_empty() {
                 self.result.audit = Some(Vec::new());
                 self.record(
@@ -468,9 +532,7 @@ mod native {
             let selection = serde_json::to_string(&paths).expect("string paths serialize");
             self.consumer("lore-wiki", &format!("maintain. The controller selected this exact batch: {selection}. Start with audit-plan --path for these addresses; do not select another batch.")).await;
             self.reconcile().await;
-            self.native("knowledge reviews", &["wiki", "reviews", "--check"])
-                .await;
-            if self.result.cancelled || self.configuration_failed {
+            if !self.inspect_review_health() {
                 return;
             }
             match self.verify_audit(&plan.candidates) {
@@ -489,9 +551,15 @@ mod native {
         opts: &GlobalOptions,
         operation: Operation,
         profile: Option<String>,
+        batches: usize,
         wait: bool,
         json: bool,
     ) -> miette::Result<()> {
+        if batches == 0 || batches != 1 && !matches!(operation, Operation::Knowledge) {
+            return Err(miette::miette!(
+                "multiple batches are only supported for knowledge jobs"
+            ));
+        }
         let config_path = crate::commands::find_config(opts)?;
         let (config, config_revision) = crate::commands::load_config_with_revision(&config_path)?;
         if let Some(name) = profile.as_deref() {
@@ -509,6 +577,67 @@ mod native {
                 .transpose()
                 .map_err(|e| miette::miette!("template path: {e}"))?,
         };
+        let mut supervisor = execution::Supervisor::new()?;
+        let mut outcomes = Vec::new();
+        let mut stop_reason = "batch-limit";
+        for _ in 0..batches {
+            let result = execute(
+                &options,
+                config.clone(),
+                config_revision.clone(),
+                operation,
+                profile.clone(),
+                wait,
+                &mut supervisor,
+            )
+            .await;
+            stop_reason = if result.cancelled {
+                "cancelled"
+            } else if !result.ok {
+                "failed"
+            } else if result.audit.as_ref().is_some_and(Vec::is_empty) {
+                "settled"
+            } else {
+                "batch-limit"
+            };
+            outcomes.push(result);
+            if stop_reason != "batch-limit" {
+                break;
+            }
+        }
+        let ok = outcomes.iter().all(|result| result.ok);
+        if json {
+            let value = if batches == 1 {
+                serde_json::to_value(&outcomes[0])
+            } else {
+                Ok(serde_json::json!({
+                    "operation":operation,"ok":ok,"requested_batches":batches,
+                    "stop_reason":stop_reason,"runs":outcomes,
+                }))
+            }
+            .map_err(|error| miette::miette!("{error}"))?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&value).map_err(|error| miette::miette!("{error}"))?
+            );
+        }
+        if !ok {
+            return Err(miette::miette!(
+                "job incomplete; inspect failed stages and retained work"
+            ));
+        }
+        Ok(())
+    }
+
+    async fn execute(
+        options: &GlobalOptions,
+        config: Config,
+        config_revision: String,
+        operation: Operation,
+        profile: Option<String>,
+        wait: bool,
+        supervisor: &mut execution::Supervisor,
+    ) -> JobResult {
         let board = config
             .personal
             .as_ref()
@@ -519,9 +648,9 @@ mod native {
             config,
             config_revision,
             configuration_failed: false,
-            opts: &options,
+            opts: options,
             profile,
-            supervisor: execution::Supervisor::new()?,
+            supervisor,
             lease: None,
             selected: None,
             drain_blocked: false,
@@ -532,9 +661,13 @@ mod native {
                 execution: None,
                 workflow_id: None,
                 audit: None,
+                review_health: None,
                 stages: Vec::new(),
             },
         };
+        if !runner.configuration_is_current() {
+            return runner.result;
+        }
         if matches!(operation, Operation::Daily) {
             if board {
                 runner
@@ -574,17 +707,6 @@ mod native {
         eprintln!(
             "Vault changes and Git staging remain available for explicit review; no automatic commit."
         );
-        if json {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&runner.result).map_err(|e| miette::miette!("{e}"))?
-            );
-        }
-        if !runner.result.ok {
-            return Err(miette::miette!(
-                "job incomplete; inspect failed stages and retained work"
-            ));
-        }
-        Ok(())
+        runner.result
     }
 }

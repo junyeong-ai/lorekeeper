@@ -68,6 +68,9 @@ continued factual support; explicit reviewed retraction is separate.
   ambiguity refuses staging. Register an allocated unoccupied address before the
   next concept. First established title/category/aliases win; warn category
   disagreement, widen dates only, preserve `source_count` (backlinks-sync owns it).
+  Source concept_policy controls admission: disabled enqueues no extraction, existing-only
+  refuses absent owners, and supported-new permits supported new subjects. Queue results
+  carry the task's exact policy; changing policy changes extraction input identity.
 - Resolve each proposed alias; accept only absent or same-owner names, including
   earlier decisions in this result. Never approximate. Keep established aliases.
   Result ordering determines first ownership; do not silently merge rival pages.

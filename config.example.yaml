@@ -49,6 +49,9 @@ ingest:
 # ─── Source definitions ───────────────────────────────────
 # key = stable source ID; daily sources use daily/<id>, document sources use wiki/documents.
 # You can define several sources of the same type.
+# concept_policy: disabled collects without concepts; existing-only links known
+# subjects; supported-new also admits directly supported durable new subjects.
+# focus narrows semantic relevance independently of the admission policy.
 sources:
 
   # ── Intelligence (external trends) ──
@@ -61,7 +64,7 @@ sources:
       # name_prefix: "briefing-"       # optional filename prefix, not a date or glob pattern
       # max_files: 200                 # a reached cap is a partial observation
     labels: [ai-industry]
-    extract_concepts: true
+    concept_policy: supported-new
 
   # ── Team (team observation) ──
   # The whole channel = team activity. Messages you authored are split into the work-log
@@ -80,7 +83,7 @@ sources:
       # max_messages_per_channel: 500 # (optional) per-run history cap; raise for very busy channels
       # max_thread_messages: 200      # (optional) per-thread fetch cap (root message + replies)
     labels: [team-ops]
-    extract_concepts: true
+    concept_policy: existing-only
 
   # ── Personal (my activity — collected directly) ──
   my-tasks:
@@ -103,7 +106,7 @@ sources:
       # max_issues: 200           # (optional) per-run cap; the fetch paginates the whole
                                   # JQL result and warns if this cap actually drops issues
     labels: [personal]
-    extract_concepts: true
+    concept_policy: existing-only
 
   # Wiki pages I wrote or edited that day. A Confluence page is a LIVING document, so the
   # page version is folded into the event identity: re-ingesting an unchanged page dedups
@@ -127,7 +130,7 @@ sources:
                                   # Set false to ingest those too (they stay is_self: false,
                                   # so they never reach the work-log).
     labels: [personal]
-    extract_concepts: true
+    concept_policy: supported-new
 
   my-schedule:
     type: google-calendar
@@ -140,7 +143,7 @@ sources:
       # max_events: 500           # (optional) per-run cap; the fetch paginates the whole
                                   # window and warns if this cap actually drops events
     labels: [personal]
-    extract_concepts: true
+    concept_policy: existing-only
 
   email-digest:
     type: gmail
@@ -173,7 +176,7 @@ sources:
     # highlights:
     #   - { category: knowledge_sharing, label: "지식 공유" }
     labels: [personal, team-ops]
-    extract_concepts: true
+    concept_policy: supported-new
 
   # ── Trends (trend analysis) ──
   slack-trends:
@@ -189,7 +192,7 @@ sources:
       # max_matches_per_query: 200 # (optional) per-query cap; the search paginates all
                                    # result pages and warns if this cap drops matches
     labels: [ai-internal, strategy]
-    extract_concepts: true
+    concept_policy: supported-new
 
   # ── Knowledge (knowledge accumulation) ──
   # Accumulate external AI/tech news into wiki/concepts as a growing knowledge graph.
@@ -234,7 +237,7 @@ sources:
         # - { id: latent-space,    url: "https://www.latent.space/feed" }
         # - { id: the-gradient,    url: "https://thegradient.pub/rss/" }
     labels: [ai-tech]
-    extract_concepts: true
+    concept_policy: supported-new
     focus: >
       AI/ML의 모델·학습·추론·데이터·에이전트·평가·안전성·거버넌스와 실제 엔지니어링의 기법·제약을 다룬다.
       개념은 본문이 정의·작동 방식·적용 조건을 설명하는 지속적인 탐색 주제로 추출한다.
@@ -261,7 +264,7 @@ sources:
         # - { id: hacker-news, url: "https://hnrss.org/frontpage?points=100", fetch_full_text: true }
         # - { id: geeknews,    url: "https://news.hada.io/rss/news", fetch_full_text: true }
     labels: [tech]
-    extract_concepts: true
+    concept_policy: supported-new
     focus: >
       소프트웨어 설계·개발 방법·시스템·데이터·보안·운영·개발 도구의 실제 기법과 트레이드오프를 다룬다.
       개념은 본문이 설명하는 지속적인 탐색 주제로 추출하고 일회성 홍보·인물 소식·생활·정치·일반 시사는 제외한다.
@@ -278,7 +281,7 @@ sources:
       include_queries:
         - "label:ai-news"
     labels: [ai-tech]
-    extract_concepts: true
+    concept_policy: supported-new
 
   # Optional repository adapter. nodex supplies declared document identity and lifecycle;
   # Lorekeeper keeps an evidence copy and synthesizes cross-project concepts.
@@ -311,7 +314,7 @@ sources:
       # that resolves nowhere but this machine.
       base_url: "https://github.com/org/repo/blob/main"
     labels: [project-knowledge]
-    extract_concepts: true
+    concept_policy: supported-new
     # The focus is what keeps the graph general. The repository already holds the
     # project-specific half, so only what a DIFFERENT project could cite earns a page.
     focus: >
@@ -335,7 +338,7 @@ sources:
       extensions: [md, txt, markdown, html, htm]
       archive_after_ingest: true  # auto-archive after processing (default true)
     labels: [knowledge]
-    extract_concepts: true
+    concept_policy: supported-new
 
   # Your own finished tasks. This is the other half of the task board below: closing a task
   # records it, and this reads that record so the day's work lands on a daily page like any
@@ -349,7 +352,7 @@ sources:
     type: tasks
     enabled: false
     labels: [personal]
-    extract_concepts: true
+    concept_policy: existing-only
 
 # ─── Personal module (OPTIONAL) ───────────────────────────
 # The personal-productivity module: the work-log + weekly/monthly/quarterly/annual personal
@@ -444,6 +447,7 @@ concepts:
 #   audit:
 #     schedule: "0 7 * * 0"         # weekly semantic maintenance, independent of synthesis
 #     batch_size: 5                # rotate changed and first-time concepts fairly (1..100)
+#     max_input_bytes: 262144      # complete selected pages + selected RSS payloads per batch; larger input is retained, not truncated
 #                                  # requires an explicit execution profile and deployed skills
 #   scope:
 #     dirs: [wiki]                   # vault-relative dirs to scan (default: vault.dirs.wiki)

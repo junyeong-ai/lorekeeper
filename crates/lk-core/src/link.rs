@@ -188,6 +188,20 @@ pub struct PageLink {
     pub dest: String,
 }
 
+/// Parse one complete internal inline link after the caller establishes its structural
+/// position. Unlike prose extraction, this does not scan code spans: an emitted display
+/// label may itself contain backticks. Surrounding prose, whitespace and code fences refuse.
+/// Callers recognizing generated content must also round-trip the parsed link through their
+/// renderer, since destination parsing strips anchors/titles and decodes addresses.
+pub fn parse_standalone_page_link(text: &str) -> Option<PageLink> {
+    let captures = MD_LINK_RE.captures(text)?;
+    let matched = captures.get(0)?;
+    if matched.start() != 0 || matched.end() != text.len() {
+        return None;
+    }
+    internal_page_link(&captures)
+}
+
 /// Extract every internal inline page link in `body`, in first-appearance order
 /// (duplicates preserved — callers dedup as needed). Skips links inside fenced code
 /// blocks and inline code spans, image embeds, external destinations, and anchor-only
@@ -571,6 +585,37 @@ Inline `[span](c.md)` and [live2](d.md).
             r"[RAG \[retrieval\]](rag.md)"
         );
         assert_eq!(md_link("plain", "a/b.md"), "[plain](a/b.md)");
+    }
+
+    #[test]
+    fn standalone_page_links_parse_emitted_code_labels_without_scanning_prose() {
+        for label in [
+            "Source `gate`",
+            "`MCP` [protocol] \\ details",
+            "``nested ` code``",
+        ] {
+            let emitted = md_link(label, "../a%20b.md");
+            let parsed = parse_standalone_page_link(&emitted).unwrap();
+            assert_eq!(parsed.text, label);
+            assert_eq!(parsed.dest, "../a b.md");
+            assert_eq!(md_link(&parsed.text, &encode_dest(&parsed.dest)), emitted);
+        }
+        for invalid in [
+            "prefix [Source](a.md)",
+            "[Source](a.md) suffix",
+            " [Source](a.md)",
+            "[Source](a.md)\n",
+            "[One](a.md)[Two](b.md)",
+            "`[Source](a.md)`",
+            "```markdown\n[Source](a.md)\n```",
+            "![Source](a.md)",
+            "[Source](https://example.test/a.md)",
+            "[Source](#heading)",
+        ] {
+            assert!(parse_standalone_page_link(invalid).is_none(), "{invalid}");
+        }
+        assert!(extract_page_links("`[Source](a.md)`").is_empty());
+        assert!(extract_page_links("```markdown\n[Source](a.md)\n```").is_empty());
     }
 
     #[test]

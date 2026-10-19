@@ -4,7 +4,7 @@ description: Processes pending Lorekeeper semantic queue tasks after ingestion o
   graph reconciliation. Stages typed summaries, concepts, synthesis and review narratives,
   then verifies publication and evidence consistency. Does not collect remote sources.
 metadata:
-  version: 0.67.3
+  version: 0.68.0
 ---
 
 # lore-process — Drain the Lorekeeper LLM queue
@@ -217,9 +217,10 @@ on the matching marker, never on whether a section looks filled.
 
 5. **Finalize (mandatory — do not skip).** The apply here covers whatever the last file
    left pending; `lore graph backlinks-sync` and `lore wiki refresh` are owed once, at the
-   end, over everything this run wrote. Concept `## Sources` sections and
+   end, over everything this run wrote. Bounded concept `## Sources` instructions and
    `source_count` are deliberately left empty during processing; they are
-   machine-owned and reconciled here from the link graph, then SQLite discovery and the entry guide
+   machine-owned and reconciled here from the link graph. Complete citations live in
+   rebuildable SQLite discovery rather than growing Sources lists. SQLite and the entry guide
    are refreshed. Confirm each command exits 0:
    ```bash
    lore queue apply            # materialize reported concepts into pages + links
@@ -234,8 +235,14 @@ on the matching marker, never on whether a section looks filled.
    lore queue check            # pending or blocked work and unpublished results
    lore wiki reviews --check   # evidence drift and invalid assessments; open is valid
    ```
+   When explicitly processing within bounded knowledge maintenance, use `lore wiki
+   reviews` for this review step and report unrelated `needs-reassessment` records
+   as backlog. Invalid reviews or inspection errors still fail. The maintenance
+   controller verifies current reviews for its selected concepts through audit
+   recording/completion. Keep the strict `--check` for standalone process and daily
+   runs; do not expand a bounded batch to repair every global finding.
    Run Finalize on every invocation that processed a task. Even when no current
-   task was found, run `lore queue check` and `lore wiki reviews --check` before
+   task was found, run `lore queue check` and the applicable review check before
    reporting completion: zero current tasks alone does not rule out blocked inputs,
    unpublished results, interrupted mutations or evidence drift. Skipping reconciliation
    after publication leaves new concepts with no `## Sources` and a stale

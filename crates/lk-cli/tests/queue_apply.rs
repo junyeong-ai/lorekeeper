@@ -11,6 +11,7 @@ use std::process::{Command, Output};
 
 fn extraction_request(seed: &str) -> lk_queue::ExtractConceptsRequest {
     lk_queue::ExtractConceptsRequest {
+        concept_policy: lk_core::config::ConceptPolicy::SupportedNew,
         rss_original: None,
         text: seed.into(),
         source_id: "notes".into(),
@@ -76,6 +77,7 @@ impl Workspace {
         synthesis: Option<&str>,
     ) {
         let result = lk_queue::TaskResult {
+            concept_policy: lk_core::config::ConceptPolicy::SupportedNew,
             target_revision: std::fs::read_to_string(self.vault().join(target))
                 .map(|content| blake3::hash(content.as_bytes()).to_hex().to_string())
                 .unwrap_or_default(),
@@ -242,6 +244,52 @@ fn two_results_for_one_page_both_land() {
     assert!(
         json_files(&results_dir(&ws)).is_empty(),
         "every applied result must be consumed"
+    );
+}
+
+#[test]
+fn existing_only_policy_refuses_new_nodes_and_retains_work_until_an_owner_exists() {
+    let ws = Workspace::new();
+    let mut request = extraction_request("policy-proof");
+    request.concept_policy = lk_core::config::ConceptPolicy::ExistingOnly;
+    let hash = request.cache_hash();
+    ws.write(
+        PAGE,
+        &daily_page("policy-proof")
+            .replace(&extraction_request("policy-proof").cache_hash(), &hash),
+    );
+    ws.drop_result("policy-proof", PAGE, "policy-proof", "Known alias");
+    let task_path = ".lorekeeper/queue/policy-proof.jsonl";
+    let mut task: lk_queue::QueueTask = serde_json::from_str(&ws.read(task_path)).unwrap();
+    task.input
+        .insert("concept_policy".into(), serde_json::json!("existing-only"));
+    task.cache_hash = hash.clone();
+    ws.write(task_path, &serde_json::to_string(&task).unwrap());
+    let result_path = ".lorekeeper/queue/results/policy-proof.json";
+    let mut result: lk_queue::TaskResult = serde_json::from_str(&ws.read(result_path)).unwrap();
+    result.concept_policy = lk_core::config::ConceptPolicy::ExistingOnly;
+    result.cache_hash = hash;
+    ws.write(result_path, &serde_json::to_string(&result).unwrap());
+
+    let before = ws.read(PAGE);
+    let rejected = ws.run(&["queue", "apply"]);
+    assert!(!rejected.status.success());
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr)
+            .contains("existing-only concept policy refuses new concept")
+    );
+    assert_eq!(ws.read(PAGE), before);
+    assert!(!ws.vault().join("wiki/concepts/known-alias.md").exists());
+    assert!(ws.vault().join(result_path).exists());
+    assert!(ws.vault().join(task_path).exists());
+
+    ws.write("wiki/concepts/stable-address.md", "---\ntype: concept\ntitle: Existing subject\naliases: [Known alias]\n---\n## Synthesis\nA stable scoped definition.\n\n## Sources\n\n## Related\n");
+    ws.apply_expecting(1, 0);
+    assert!(ws.read(PAGE).contains("wiki/concepts/stable-address.md"));
+    assert!(!ws.vault().join("wiki/concepts/known-alias.md").exists());
+    assert!(
+        ws.read("wiki/concepts/stable-address.md")
+            .contains("A stable scoped definition.")
     );
 }
 
