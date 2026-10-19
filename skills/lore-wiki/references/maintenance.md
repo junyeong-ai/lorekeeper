@@ -8,52 +8,70 @@ publication contracts in SKILL.md and read the curation reference before repairs
    use repeated `--path` for those addresses instead of choosing a new batch.
    Keep its candidate addresses as this run's scope.
    `graph.audit.batch_size` bounds semantic work (1..100). Automatic selection leaves
-   individually oversized concepts pending and selects later fitting work. `blocked_count`
+   individually oversized subjects pending and selects later fitting work. `blocked_count`
    counts blockers encountered during this selection; `blocked` supplies at most 100
    path/revision/size details, not a whole-corpus inventory. If no candidate exists,
    report the counts: stop successfully only when `blocked_count` is zero; otherwise
    report incomplete work. Do not expand the batch to reduce the whole backlog to zero.
+   Candidates identify `kind: concept` or `kind: document`; document subjects are
+   declared source documents under the configured wiki documents collection, including
+   nested addresses. Aggregate counts cover both kinds; `counts_by_kind` separates
+   their coverage. A document needs no corresponding concept to be selectable.
    Check `input.status` before reading: `oversized` retains the exact candidates
    because their complete page, scoped review/evidence and selected RSS payload bytes exceed
    `graph.audit.max_input_bytes`. Report the measured bytes and configured bound;
    do not truncate evidence, replace explicitly selected candidates or record a completed
    assessment. An execution profile changes the agent, not this configuration's input
    bound; select any explicitly authorized larger-scope config before the workflow starts.
-2. For each candidate, read the complete concept and the actual evidence it cites.
-   The candidate's evidence is the complete graph-derived set. For independent
+2. Read each complete selected subject according to its `kind`.
+   For a concept, the candidate's `evidence` is the complete graph-derived set.
+   Read that actual evidence. For independent
    discovery, `wiki citations CONCEPT --snapshot ID` paginates that set; do not
    substitute ordinary outgoing Sources links or stop after its first page.
    Use `wiki read` outlines and revision-checked sections. For an RSS event citation,
    read the exact selected event through `wiki original ORIGIN --evidence-concept
    CONCEPT`, including its event ID and payload revision. An uncited concept has an
    evidence gap, not an invitation to infer a source from its filename or keywords.
+   For a document, read the complete source page, including its declared ownership,
+   status, scope and attribution. The document is the subject, not evidence for
+   itself: an empty `evidence` list is expected. Read its explicit `related_pages`
+   as context, never as automatically supporting evidence or proof of causation.
+   Context links do not authorize a transitive audit or establish that provider
+   originals, preserved attachments or external destinations were read.
    Read the candidate's `reviews` too: each dependency exposes the current review,
    recorded citations, current evidence and available verified archives. Use those
    exact paths and file revisions. A missing, invalid or stale scoped review must be
    repaired through a dated reassessment before recording completion; omitting it
    from the submitted `reviews` cannot bypass it. Scope includes declared subjects,
-   the concept's `knowledge_review` and reviews retained in its prior receipt.
+   the subject's `knowledge_review` and reviews retained in its prior receipt.
 3. Examine subject, definitions, conditions, effective time and observation vs claim.
-   Verify declared aliases denote the same subject. Read direct related concepts and
+   For concepts, verify declared aliases denote the same subject. Read direct related
+   context and
    check whether their stated relationship helps answer a concrete future question.
    Similar words, co-citation, one source or a high degree do not decide these issues.
-4. Apply supported repairs through `wiki curate` for metadata/reviews and the typed
-   synthesis queue for synthesis/related prose. Use the curation and lore-process
+4. Apply supported repairs through `wiki curate` for concept metadata and authored
+   reviews, and the typed synthesis queue for concept synthesis/related prose. Use the curation and lore-process
    references; never overwrite owned sections or completion markers. Preserve prior
    judgments and evidence. Reuse an existing scoped review instead of adding a new
    report for each run. A useful subject with missing support deserves recovery or
    an open evidence-gap review, rather than automatic retirement.
+   Do not rewrite an imported source to make competing claims agree or manufacture
+   a concept to hold a document-only finding. A scoped review may assess document
+   paths directly and explicitly pin the actual sources supporting its judgment.
 5. Resolve tasks created by this batch through lore-process. Use `wiki audit-plan
-   --path CONCEPT` (repeat `--path` for surviving original addresses) to obtain their
-   final fingerprints without expanding the batch. After a verified merge, confirm
+   --path SUBJECT` (repeat `--path` for surviving original addresses) to obtain their
+   final fingerprints without expanding the batch. For concept subjects after a
+   verified merge, confirm
    the old address was retired by that exact merge and its evidence reached the
    survivor. Record the reviewed final survivor as the replacement subject for that
    original batch slot, using its current fingerprints. Reading this survivor does
    not authorize auditing unrelated additional subjects. The native merge records
    the retirement in the same journal; a direct deletion cannot complete a slot.
+   A document slot requires a current assessed document at its same exact address;
+   concept merge receipts cannot substitute for it.
    Do not substitute a new fingerprint
    without rereading changes. Record a completed assessment only
-   when the exact final concept, evidence and related context have been read.
+   when the exact final subject, evidence and related context have been read.
 
 Submit JSON via `lore wiki audit-record --file RESULTS.json`:
 
@@ -72,13 +90,13 @@ Submit JSON via `lore wiki audit-record --file RESULTS.json`:
 
 Use `reviewed` after checking supported scope and completing repairs, or `follow-up`
 for a documented unresolved finding. Follow-up requires a current durable review
-listing the concept in `review.subjects`; being supporting evidence alone does
-not make a concept the assessed subject. Keep its evidence, resolution conditions and any
+listing the selected concept or document in `review.subjects`; being supporting
+evidence alone does not make a page the assessed subject. Keep its evidence, resolution conditions and any
 contrary observations concrete. Open is a valid judgment; unreadable evidence or a
 failed step must be reported, never recorded as a successful read.
 
 Receipts in `.lorekeeper/knowledge-audit.json` track the latest completed inputs and
-pending order, not truth or confidence. Changed concepts, evidence, related concepts,
+pending order, not truth or confidence. Changed subjects, evidence, related context,
 or scoped reviews and their evidence reopen work. Changed and first-time work rotate;
 unchanged inputs are skipped without an age-based reread. Unchanged open findings
 remain discoverable through their reviews without being rewritten every week.
