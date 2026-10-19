@@ -24,7 +24,7 @@ Notes and wikis fail not because reading or thinking is hard, but because of the
 | 🧩 **Concepts as assets** | The same concept converges to one page (`Vector DB` = `vector-database`), categorized and related |
 | 🔗 **A connected knowledge graph** | Markdown links, backlinks, and clusters connect concepts |
 | 📈 **Compounding** | Weekly / monthly / quarterly / annual synthesis — value grows over time |
-| 🔑 **No API key** | Claude Code's own session does the LLM work (no separate LLM API integration) |
+| 🔑 **Reuse CLI login** | Uses existing Claude Code or Codex authentication; Lore needs no separate LLM API client |
 
 > 💡 Inspired by Andrej Karpathy's *"LLM-maintained wiki"*: **source material stays distinct from generated knowledge**, **the LLM writes and maintains the wiki**, and **the schema (config) defines the workflow**. You curate sources and ask questions; the LLM does the bookkeeping.
 
@@ -46,11 +46,11 @@ flowchart LR
     SRC --> L["⚙️ lore (Rust CLI)"]
     L --> P["collect · normalize · dedup<br/>classify · render · graph"]
     P --> V[("🗂️ Obsidian Vault<br/>daily · concepts · documents")]
-    L -. "LLM task queue" .-> CC["🤖 Claude Code<br/>/lore-process"]
-    CC -. "summaries · concepts · synthesis" .-> V
+    L -. "LLM task queue" .-> CC["🤖 Claude Code · Codex<br/>shared lore-process skill"]
+    CC -. "typed semantic results" .-> L
 ```
 
-`lore` (the deterministic Rust binary) builds the structure; `/lore-process` (a Claude Code skill) fills the parts that need *judgment* — summaries, concepts. It uses Claude Code's LLM session directly, with no API key.
+`lore` owns collection, execution ordering and guarded publication. Claude Code or Codex follows the shared `lore-process` skill to judge summaries, concepts and relationships. Markdown is authoritative; SQLite is a rebuildable search and navigation index.
 
 ---
 
@@ -58,14 +58,14 @@ flowchart LR
 
 > **Before you start, you'll need** — nothing exotic:
 > - 💻 **macOS or Linux** (Windows ships a PowerShell installer)
-> - 🤖 **Claude Code** — `/lore-process` fills in summaries & concepts (uses your Claude Code session)
+> - 🤖 **Claude Code or Codex** — uses existing CLI authentication for summaries, concepts and relationships
 > - 🔑 **Credentials only for the sources you enable** — e.g. Google sign-in for Gmail/Drive/Calendar, a token for Slack
 > - 🗂️ **(optional) Obsidian** — for pretty graph browsing. Without it, the output is still plain markdown
 >
-> 💡 The starter enables **one local note inbox without provider credentials**. Add RSS, work sources or personal tracking when needed. Summaries and concepts require an authenticated Claude Code session.
+> 💡 The starter enables **one local note inbox without provider credentials**. Add RSS, work sources or personal tracking when needed. Summaries and concepts require an authenticated agent CLI. Set `execution.profiles.primary.engine` in the copied `config.yaml` to `claude-code` or `codex`.
 
 ```bash
-# 1) Install — binary + templates + Claude Code skills in one go
+# 1) Install — binary + templates + skills for both hosts
 curl -fsSL https://raw.githubusercontent.com/junyeong-ai/lorekeeper/main/scripts/install.sh | bash
 
 # 2) First setup — preserve an existing config.yaml and edit it
@@ -85,11 +85,11 @@ your selected `vault.root`. The starter does not need the provider credential wi
 ```bash
 # 4) Check input access, then collect for real
 lore ingest --dry-run
-lore ingest
+lore run daily
 ```
 
-Next, run **`/lore-process`** in Claude Code to publish summaries, concepts and
-relationships. Collection alone does not complete knowledge processing. Then verify:
+`lore run daily` collects sources, runs the selected agent and verifies semantic
+publication. Collection alone does not complete knowledge processing. Then verify:
 
 ```bash
 lore queue check
@@ -97,7 +97,7 @@ lore wiki reviews --check
 lore wiki search "your note's topic" --json
 
 # 5) Optional automation: generate definitions, then register with the OS
-lore schedule --pipeline-dir ~/.local/share/lorekeeper/pipelines > lorekeeper.cron
+lore schedule > lorekeeper.cron
 #    review and merge with crontab -e; on macOS see "Scheduling" below
 ```
 
@@ -150,7 +150,7 @@ $ lore queue status
 queue: 2 current, 0 done, 0 stale, 0 missing-target, 0 unreadable across 2 task(s)
 ```
 
-Now, in a Claude Code session, run **`/lore-process`**. The skill drains that queue — writing each summary and extracting concepts — using Claude's own LLM (no API key). When it finishes, `lore queue status` reports `0 current` and the page is filled:
+Run **`lore run process`**. The configured Claude Code or Codex host follows the shared skill, while Rust checks source and target revisions before publication. After successful completion, `lore queue status` reports `0 current` and the page is filled:
 
 ### ✅ Result ① — the document page (summary + concept links filled in)
 
@@ -382,45 +382,59 @@ These are the ones you reach for day to day. `lore --help` lists the full surfac
 
 ---
 
-## Claude Code skills
+## Agent skills and execution profiles
 
-Skills that pair with the deterministic `lore` binary — the *judgment* parts run on Claude Code's LLM.
+Canonical skill bodies and references live under `skills/`. Claude metadata lives
+in `agents/claude.json`; Codex invocation policy uses `agents/openai.yaml` where
+needed. Deployment generates host entry files from those shared procedures.
 
-Use Claude Code 2.1.246 or later. Each skill declares a qualified name such as
-`/lore-process:lore-process`; the short commands below remain available as aliases.
-Scheduled runs explicitly load the selected skill from `LORE_SKILL_DIR` and invoke
-its qualified name.
-Knowledge maintenance loads both lore-wiki and lore-process to complete typed repairs.
-A missing required skill fails before the LLM session starts.
-
-Existing concepts may live at addresses such as `wiki/concepts/group/stored.md`.
-Resolution and concept inventory return `group/stored` as the `slug`, and later
-ingestion retains that address. Retired names remain reserved against duplicates;
-normal search and knowledge briefs exclude retired content.
-
-| Skill | What it does |
+| Skill | Responsibility |
 |---|---|
-| `/lore-process` | Drains the LLM queue after ingest — fills summaries, concepts, themes, reviews |
-| `/lore-setup` | Builds your config by inspecting your workspace — discovers Slack channel / Jira project / calendar IDs |
-| `/lore-wiki` | Evidence-based `query`, source `add`, current-work `capture`, `audit`, guarded `curate`, bounded `maintain` |
-| `/lore-extract` | Batch-extract transferable knowledge from a project repo (scan→run→audit) |
-| `/lore-ingest` | Wraps the `lore` CLI (ingest, synthesis, status, schedule) |
-| `/lore-day` | Daily agenda, knowledge briefing, reminders and closing the day |
+| `lore-process` | Queue summaries, concepts, synthesis and reviews; guarded publication |
+| `lore-setup` | Sources, configuration, authentication, first processing and scheduling |
+| `lore-wiki` | `query`, `add`, `capture`, `audit`, `curate`, `maintain`, `status` |
+| `lore-extract` | Repository knowledge extraction: scan → run → audit |
+| `lore-ingest` | Collection, period synthesis, status, scheduling and maintenance |
+| `lore-day` | Agenda, knowledge briefing, tasks, reminders and day closing |
 
-> e.g. `/lore-wiki query "how do I improve RAG retrieval quality?"` → answers by cross-citing the vault's concepts, and files a good answer back as a page under `wiki/explorations/`.
+In Claude Code use `/lore-wiki query ...`; in Codex use `$lore-wiki`.
+`lore self deploy --skills user --agent codex` deploys interactive skills to Codex.
+`--agent both` selects both hosts, and `--skills project` selects the current project.
+Claude discovers `.claude/skills`; Codex discovers `.agents/skills`.
+Unattended jobs use verified copies under `<data>/skills/<engine>/` independently
+of interactive deployment. Missing or modified required files refuse execution.
 
----
+The supported CLI contracts are Claude Code `>=2.1.259,<3` and Codex
+`>=0.163.0,<1`. Hosts use their existing authentication and policies. Their permission
+and sandbox models differ; Rust publication guards are not OS access controls.
 
-## LLM provider modes
+```yaml
+llm:
+  provider: queue
+execution:
+  default_profile: primary
+  profiles:
+    primary:
+      engine: claude-code
+      timeout_seconds: 3600
+    reviewer:
+      engine: codex
+      timeout_seconds: 3600
+  operations:
+    knowledge: reviewer
+```
 
-`llm.provider` in `config.yaml`:
+This selects `primary` for daily and queue processing, and `reviewer` for semantic
+audits. Selection is explicit `--profile`, operation profile, then default profile.
+An unavailable host never switches to another host. `timeout_seconds` is a session
+budget; unfinished work is preserved and reported as failure. Optional `executable`
+and `model` select the CLI and model. Relative executable paths and Claude
+`config_directory` resolve against the configuration file. Codex `profile` names a
+profile in that CLI. Changing models does not rewrite existing knowledge.
 
-| Mode | Default | Description |
-|---|:---:|---|
-| `queue` | ✓ | Queues JSONL tasks under `<vault>/.lorekeeper/queue/`; `/lore-process` drains them with Claude Code's session — **no separate LLM API integration** |
-| `noop` | | No LLM work — for development, CI, or template-only runs |
-
-Unattended operation is what `lore-daily.sh` is for. The drain runs as a `claude -p` session, and `-p` mode cannot ask — anything that would prompt is simply denied — so the tools the protocol spells must be named with `--allowedTools`; the script passes that list along with a preamble telling the session nobody is watching. A failing stage never skips the ones after it: one source failing to collect is no reason to leave the other sources' tasks unanswered.
+`llm.provider: queue` retains typed semantic requests separately from host selection.
+`noop` creates no LLM work. Search, navigation and deterministic collection do not
+require an installed agent.
 
 ---
 
@@ -437,7 +451,7 @@ irm https://raw.githubusercontent.com/junyeong-ai/lorekeeper/main/scripts/instal
 cargo build --release && ./target/release/lore --help
 ```
 
-Install flags: `--version`, `--install-dir`, `--data-dir`, `--skill {user,project,none}`, `--from-source`, `--force`, `--yes`, `--dry-run` (`--help` lists them all).
+Install flags: `--version`, `--install-dir`, `--data-dir`, `--skill {user,project,none}`, `--agent {claude-code,codex,both}`, `--from-source`, `--force`, `--yes`, `--dry-run` (`--help` lists them all).
 
 The installer deploys `config.starter.yaml` and `config.example.yaml` in the config
 directory and preserves your `config.yaml`. Beside them, `data-dir` records the
@@ -470,12 +484,12 @@ processing together. **What you did becomes evidence alongside what you read.**
 
 ```bash
 lore self status      # is every deployed copy still the one this binary carries (non-zero if not)
-lore self update      # replace the binary with a release, then redeploy skills, pipelines, templates, AGENTS.md
+lore self update      # replace the binary with a release, then redeploy interactive/runtime skills, templates and AGENTS.md
 lore self deploy      # redeploy only — the repair `self status` reports
 lore self uninstall   # remove what was installed; the vault is never touched
 ```
 
-The skills, pipeline scripts, templates and both config examples are **compiled into the binary**, and deployed copies can drift; `lore self status` checks them, while `lore self deploy` writes the copies. `lore self update` uses the same settlement check as `lore queue check`: pending work, unreadable or unparseable input, staged results and interrupted publication all block replacement. `--force` permits inspectable unfinished work but never bypasses configuration or storage inspection errors. Older releases are refused unless explicitly selected with `--version`.
+The interactive/runtime skills, templates and both config examples are **compiled into the binary**, and deployed copies can drift; `lore self status` checks them, while `lore self deploy` writes the copies. `lore self update` uses the same settlement check as `lore queue check`: pending work, unreadable or unparseable input, staged results and interrupted publication all block replacement. `--force` permits inspectable unfinished work but never bypasses configuration or storage inspection errors. Older releases are refused unless explicitly selected with `--version`.
 
 ---
 
@@ -517,57 +531,54 @@ and process the queued task. This works after the historical task has expired;
 ## Scheduling
 
 ```bash
-lore schedule --pipeline-dir ~/.local/share/lorekeeper/pipelines > lorekeeper.cron   # Linux: review, then merge with crontab -e
-lore schedule --format launchd --bin "$(command -v lore)" \
-              --pipeline-dir ~/.local/share/lorekeeper/pipelines               # macOS
+lore schedule > lorekeeper.cron   # Linux: review, then merge with crontab -e
+lore schedule --format launchd --bin "$(command -v lore)"   # macOS
 ```
 
-`lore schedule` prints definitions; it does not register them with the OS. On Linux,
-review `lorekeeper.cron` and merge it into existing jobs with `crontab -e`. Piping
-straight into `crontab -` replaces the entire existing crontab. On macOS, save each
-printed plist separately at its named `~/Library/LaunchAgents/` path, create the log
-directory, then register it with
-`launchctl bootstrap gui/$(id -u) <absolute-plist-path>`. Inspect
-`launchctl print gui/$(id -u)/com.lorekeeper.ingest` and an actual execution log.
+`lore schedule` prints definitions; it does not register OS jobs. Preserve existing
+cron entries. On macOS, save each plist at its named LaunchAgents path, create the
+log directory, then run `launchctl bootstrap gui/$(id -u) <absolute-plist-path>`.
+Inspect registration and an actual execution. After changes, boot out existing
+jobs before registering replacements; unload disabled jobs too. `self uninstall`
+does not unregister OS jobs.
 
-Changes to schedule times or executable paths require regenerated definitions and
-OS registration. For launchd, boot out the existing job before bootstrapping its new
-plist, and unload disabled or removed jobs. On Linux, edit only the Lorekeeper
-entries. `self uninstall` does not unregister OS jobs. Schedule times use the host's
-local timezone, independently of vault date calculations. Wake recovery does not
-backfill every missed collection date.
+Scheduled jobs execute native Rust commands:
 
-Period timers retain an exact closed period with `--defer`. After collection and
-semantic publication, the daily pipeline resumes base periods, quarters and years
-in order. Inspect `lore synthesis pending --status --json` for blocked dependencies
-and scope limits. An unobserved closing day needs an explicit backfill; retained
-pages do not establish complete historical collection. Use launchd `--namespace`
-and `--log-dir` to isolate test installations.
+| Schedule | Command |
+|---|---|
+| `ingest.schedule` | `lore run daily --wait` |
+| `graph.audit.schedule` | `lore run knowledge --wait` |
+| Weekly/monthly/quarterly/annual | `lore synthesis <period> --previous --defer --wait-for-vault` |
+| Maintenance | `lore maintenance --prune-queue --wait-for-vault` |
+| Reminders | `lore task remind notify` |
 
-Complete onboarding distinguishes config validation, source-access dry runs, first
-real ingestion and `/lore-process`, OS registration, and actual scheduled execution.
-`validate` does not verify credentials. Authentication in metadata-discovery helper
-CLIs does not authenticate Lore's adapters.
+The daily job collects all sources, reconciles the queue, backlinks and search
+index, then resumes base periods, quarters and years in order. A partial source
+failure still permits independent recovery. A failed dependent stage stops later
+periods. Collection and semantic completion have distinct outcomes. `--json`
+reserves stdout for the job report and sends child output to stderr.
 
-Scheduled headless LLM calls run through `lore workflow --wait -- COMMAND...`, holding a separate Unix advisory lease while the skill reads, judges and publishes. The scripts use `/bin/bash`; deterministic collection, period creation, maintenance and reminders retain their short writer locks. Monthly, quarterly and annual reviews retain their calendars and wait for exclusive vault access. Maintenance and queue pruning run sequentially in one job. When replacing an existing schedule, unload and remove the old `com.lorekeeper.queue-prune` LaunchAgent. Template overrides are carried into the scheduled environment.
+Rust holds the vault's cooperative Unix workflow lease through semantic reads and
+publication. Busy jobs refuse unless `--wait` is explicit. Cancellation and session
+deadlines terminate the foreground process group and preserve unfinished work.
+Short writer locks and target revision guards remain separate. Start a manual
+session before reading evidence with `lore workflow -- claude` or
+`lore workflow -- codex`. Do not reacquire inside a guarded session. Programs that
+close inherited descriptors or detach are outside the manual exec lease's lifetime
+guarantee. Workflow leases and native agent jobs require Unix.
 
-Start a manual author/review/publish session under the same lease, before reading its inputs:
+Definitions capture absolute configuration/data paths, anchored PATH entries and
+relevant existing `CLAUDE_CONFIG_DIR` or `CODEX_HOME` directories. Standard proxy
+variables preserve casing and empty values. Credentials and API keys are not copied
+into definitions. Regenerate and reload definitions after environment changes.
 
-```bash
-lore --config /absolute/config.yaml workflow -- claude
-# Explicitly wait rather than refuse a busy workflow:
-lore --config /absolute/config.yaml workflow --wait -- claude
-```
+Calendar triggers use host local time; page dates use the vault timezone. Launchd
+coalesces runs missed during sleep; cron skips them. Neither backfills every missed
+date. Inspect `lore synthesis pending --status --json` for blocked evidence and
+backfill source dates explicitly. Isolate tests with `--namespace org.example.lore-test`
+and `--log-dir /absolute/test/logs`.
 
-Manual contention refuses before starting the command unless `--wait` is explicit; scheduled LLM calls wait. Collection and period selection happen before that wait. Do not reacquire inside the session or pipeline: ordinary child `lore` commands keep their short writer locks. The lease follows Unix exec and inherited descriptors, with no PID file or expiry. A program that closes inherited descriptors or detaches work is outside this guarantee; Windows is unsupported. It does not block unwrapped commands or external editors. Existing sessions and running jobs are not adopted automatically: stop and verify old scheduled children have exited, deploy the updated pipeline scripts, then begin guarded work. Never delete the lock file to clear contention.
-
-`ingest.schedule` emits one job that collects **every source in one process**, using `lore-daily.sh` with `--pipeline-dir` and bare `lore ingest` otherwise. A source-filtered ingest skips the cross-source work-log. Each synthesis period (weekly/monthly/quarterly/annual) keeps its own calendar, and `maintenance.schedule` automates retention and queue pruning.
-
-For unattended operation the installer ships `lore-daily.sh` (daily ingest + queue drain + graph reconcile), `lore-weekly.sh` (weekly synthesis), `lore-knowledge.sh` (independent semantic maintenance), and separate monthly, quarterly, annual and maintenance entry scripts. A system scheduler (launchd or cron) fires them, so they run whether or not Claude Desktop is open.
-
-`--pipeline-dir` is what actually puts those scripts on the schedule. `lore ingest` and `lore synthesis weekly` are only a pipeline's FIRST stage — the queue drain and `queue apply` live in the scripts — so emitting without it ingests every morning and leaves summaries and concepts empty forever. A scheduler hands a job almost no environment, so the entry also carries the `PATH`, `lore`, `claude` and config path the scripts need, inherited from the session that ran the command rather than guessed. Prefer launchd on macOS: it coalesces missed calendar runs after sleep rather than replaying every missed date. Cron skips runs while asleep.
-
-Configure semantic maintenance independently from ingestion and period synthesis:
+Configure weekly semantic maintenance independently from collection and synthesis:
 
 ```yaml
 graph:
@@ -576,19 +587,17 @@ graph:
     batch_size: 5
 ```
 
-With `--pipeline-dir`, this runs `/lore-wiki maintain` over a bounded batch of
-changed and first-time concepts. Its persistent order prevents new arrivals from
-starving older work. Unchanged inputs are skipped; changed evidence or missing/stale
-finding reviews reopen work. `.lorekeeper/knowledge-audit.json` records completed
-input revisions and pending order, while the actual judgments remain in Markdown
-reviews. Omitting the schedule disables automatic semantic maintenance; inspect the
-backlog without writes through `wiki audit-plan`.
+Changed and first-time concepts rotate fairly; unchanged inputs are not repeatedly
+audited. `.lorekeeper/knowledge-audit.json` stores current assessments and pending
+order; judgments and conflicting evidence remain in Markdown reviews. Single-source
+status or citation count alone does not justify merging or deleting a concept.
+Batch count and session deadlines do not bound total source bytes or cost. Size the
+schedule against observed execution and backlog. Current receipts, clean lint and
+normal termination do not establish semantic consistency of the entire corpus.
 
-A batch limit bounds concept count, not source bytes or LLM cost. Choose cadence
-and batch size against measured run time and the backlog; an initial corpus review
-needs separate capacity. Completion requires settling repair tasks and checking
-reviews, structural integrity and the queue. A current receipt or clean lint does
-not certify that the entire corpus is semantically consistent.
+Reminders retire only after the OS notifier accepts them. Acceptance does not prove
+the user saw the notification. A crash between acceptance and retirement may cause
+redelivery; failed submissions remain pending.
 
 ---
 
