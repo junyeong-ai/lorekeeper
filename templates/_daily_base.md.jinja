@@ -1,10 +1,10 @@
 ---
-id: {{ source_id }}-{{ date }}
+id: {{ (source_id ~ "-" ~ date) | tojson }}
 type: daily
 title: "{% block title %}{{ i18n.summary }}{% endblock %} {{ date }}"
 created: {{ date }}
 labels: {{ labels | tojson }}
-source: {{ source_id }}
+source: {{ source_id | tojson }}
 event_count: {{ events | length }}
 llm_inputs:
   summary: {{ llm_inputs.summary | tojson }}

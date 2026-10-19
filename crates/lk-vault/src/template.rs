@@ -173,6 +173,87 @@ mod tests {
         "annual-review.md.jinja",
     ];
 
+    #[test]
+    fn concept_and_document_addresses_round_trip_through_native_frontmatter() {
+        let engine = TemplateEngine::build(None).unwrap();
+        let i18n = serde_json::to_value(lk_core::i18n::Locale::En.strings()).unwrap();
+        let title = "주제: \"인용\"\n둘째 줄";
+        for address in [
+            "AI: Agents/owner",
+            "지식/소유자",
+            "quoted \"folder\"/owner's [draft] #1",
+            "line\nbreak/owner",
+            "null",
+            "[draft]",
+        ] {
+            let context = serde_json::json!({
+                "slug": address,
+                "name": title,
+                "title": title,
+                "aliases": [title],
+                "category": "ai-ml",
+                "first_seen": "2026-10-19",
+                "last_seen": "2026-10-19",
+                "created": "2026-10-19",
+                "updated": "2026-10-19",
+                "source_count": 0,
+                "document_type": "markdown",
+                "tags": ["document"],
+                "summary": "Summary.",
+                "content": "Body.",
+                "concepts": [],
+                "extract_concepts": false,
+                "llm_inputs": {"summary": "hash"},
+                "i18n": i18n,
+            });
+            for template in ["concept.md.jinja", "document.md.jinja"] {
+                let output = engine.render(template, &context).unwrap();
+                let page = lk_core::frontmatter::parse_page(&output)
+                    .unwrap_or_else(|error| panic!("{template}, {address:?}: {error}\n{output}"));
+                assert_eq!(
+                    page.frontmatter.get("id").and_then(|value| value.as_str()),
+                    Some(address),
+                    "{template}: address must remain an exact string"
+                );
+                assert_eq!(
+                    page.frontmatter
+                        .get("title")
+                        .and_then(|value| value.as_str()),
+                    Some(title)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn daily_source_addresses_round_trip_through_native_frontmatter() {
+        let engine = TemplateEngine::build(None).unwrap();
+        let i18n = serde_json::to_value(lk_core::i18n::Locale::En.strings()).unwrap();
+        for source in [
+            "AI: Agents",
+            "수집 \"원본\"",
+            "line\nbreak",
+            "null",
+            "[draft]",
+        ] {
+            let mut context = daily_context(&i18n);
+            context["source_id"] = source.into();
+            let output = engine.render("rss.md.jinja", &context).unwrap();
+            let page = lk_core::frontmatter::parse_page(&output)
+                .unwrap_or_else(|error| panic!("{source:?}: {error}\n{output}"));
+            assert_eq!(
+                page.frontmatter.get("id").and_then(|value| value.as_str()),
+                Some(format!("{source}-2026-06-14").as_str())
+            );
+            assert_eq!(
+                page.frontmatter
+                    .get("source")
+                    .and_then(|value| value.as_str()),
+                Some(source)
+            );
+        }
+    }
+
     /// Every embedded template must be reachable by some renderer: a `SourceType` default, a
     /// `RENDERED_BY_NAME` entry, or a `_`-prefixed partial that daily templates extend. One
     /// that is reachable by none cannot be rendered at all, yet still reads as a machine
