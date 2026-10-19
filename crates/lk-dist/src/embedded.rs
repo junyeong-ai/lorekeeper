@@ -129,14 +129,14 @@ mod tests {
     }
 
     /// The generated manifest addresses a skill's files by a path whose first segment is the
-    /// skill. A file directly under `.claude/skills` would have no such segment and would be
+    /// skill. A file directly under `skills/` would have no such segment and would be
     /// silently deployed as a skill named after itself.
     #[test]
     fn every_embedded_skill_file_is_inside_a_skill() {
         for (path, _) in SKILL_FILES {
             assert!(
                 path.contains('/'),
-                "`{path}` sits directly under .claude/skills, which names no skill"
+                "`{path}` sits directly under skills/, which names no skill"
             );
         }
     }

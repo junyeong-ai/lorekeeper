@@ -6,7 +6,7 @@
 //! and `lore health` measures the freshness of ingested data, so a scheduled install could
 //! fall arbitrarily far behind while every check it had reported green.
 //!
-//! The skills, the pipelines and the templates are now compiled into the binary, so they
+//! The skills, the runtime skills and the templates are now compiled into the binary, so they
 //! cannot be a different version from it. What remains is whether the deployed COPIES still
 //! equal what this binary carries, which `lore self status` answers by comparing bytes and
 //! `lore self deploy` repairs.
@@ -25,7 +25,7 @@ pub enum SelfCommand {
         /// Emit the report as JSON
         #[arg(long)]
         json: bool,
-        /// Directory holding the templates and pipelines (default: the one the last deploy
+        /// Directory holding the templates and runtime skills (default: the one the last deploy
         /// recorded, else the installer's)
         #[arg(long)]
         data_dir: Option<PathBuf>,
@@ -39,7 +39,7 @@ pub enum SelfCommand {
         /// Agent receiving interactive skills; unattended skills are always carried locally
         #[arg(long, value_enum, default_value_t = AgentTarget::Both)]
         agent: AgentTarget,
-        /// Directory holding the templates and pipelines (default: the installer's data dir)
+        /// Directory holding the templates and runtime skills (default: the installer's data dir)
         #[arg(long)]
         data_dir: Option<PathBuf>,
     },
@@ -58,7 +58,7 @@ pub enum SelfCommand {
         /// Do not ask for confirmation
         #[arg(long, short = 'y')]
         yes: bool,
-        /// Directory holding the templates and pipelines (default: the one the last deploy
+        /// Directory holding the templates and runtime skills (default: the one the last deploy
         /// recorded, else the installer's)
         #[arg(long)]
         data_dir: Option<PathBuf>,
@@ -71,7 +71,7 @@ pub enum SelfCommand {
         /// Also remove the config directory, including `config.yaml`
         #[arg(long)]
         purge_config: bool,
-        /// Directory holding the templates and pipelines (default: the installer's data dir)
+        /// Directory holding the templates and runtime skills (default: the installer's data dir)
         #[arg(long)]
         data_dir: Option<PathBuf>,
     },

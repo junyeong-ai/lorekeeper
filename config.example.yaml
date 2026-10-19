@@ -40,7 +40,7 @@ identity:
 #   file: ~/.config/lorekeeper/credentials.json
 
 # ─── Ingestion schedule ───────────────────────────────────
-# A single daily run over ALL enabled sources. `lore schedule` emits ONE `lore ingest`
+# A single daily run over ALL enabled sources. `lore schedule` emits ONE `lore run daily`
 # crontab line from this. Ingestion is not scheduled per source: the work-log aggregates
 # personal events across every source for a day, so a single run keeps it complete.
 ingest:
@@ -444,7 +444,7 @@ concepts:
 #   audit:
 #     schedule: "0 7 * * 0"         # weekly semantic maintenance, independent of synthesis
 #     batch_size: 5                # rotate changed and first-time concepts fairly (1..100)
-#                                  # requires installed pipelines via --pipeline-dir
+#                                  # requires an explicit execution profile and deployed skills
 #   scope:
 #     dirs: [wiki]                   # vault-relative dirs to scan (default: vault.dirs.wiki)
 #     exclude: []                    # glob patterns to skip (e.g., ["wiki/log.md"])

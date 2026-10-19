@@ -42,8 +42,8 @@ Removes:
   - <install-dir>/lore                             (binary)
   - <data-dir>/templates                           (installed templates)
   - ~/.config/lorekeeper/config.example.yaml       (installed config template + deploy records)
-  - ~/.claude/skills/lore-*                        (user-level skills)
-  - ./.claude/skills/lore-*                        (project-level skills, if present)
+  - ~/{.claude,.agents}/skills/lore-*                        (user-level skills)
+  - ./{.claude,.agents}/skills/lore-*                        (project-level skills, if present)
   - <data-dir>/skills                              (packaged runtime skills)
   - ~/.claude/scheduled-tasks/lore-*-ingest        (superseded, pre-0.11)
 
@@ -137,7 +137,7 @@ for skill in "${SKILL_NAMES[@]}"; do
     fi
 
     # Only remove project-level skills if they are NOT inside a git repo's source tree.
-    # Deleting .claude/skills/ from within a cloned repo destroys source files.
+    # A checkout may own agent-specific files independently of this installation.
     if [ -d "$skill_project" ] && [ "$skill_project" != "$skill_user" ]; then
         if git -C "$(dirname "$skill_project")" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
             log_info "Skipping $skill_project (inside git repo — source file, not installed copy)"
