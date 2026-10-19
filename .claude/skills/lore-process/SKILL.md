@@ -1,6 +1,6 @@
 ---
 name: lore-process:lore-process
-version: 0.65.1
+version: 0.66.0
 description: Process pending Lorekeeper semantic queue tasks after ingestion or graph reconciliation. Stages typed summaries, concepts, synthesis and review narratives, then verifies publication and evidence consistency. Does not collect remote sources.
 when_to_use: |
   queue process, drain queue, fill summaries,
@@ -235,7 +235,7 @@ on the matching marker, never on whether a section looks filled.
    left pending; `lore graph backlinks-sync` and `lore wiki refresh` are owed once, at the
    end, over everything this run wrote. Concept `## Sources` sections and
    `source_count` are deliberately left empty during processing; they are
-   machine-owned and reconciled here from the link graph, then SQLite discovery and configured exports
+   machine-owned and reconciled here from the link graph, then SQLite discovery and the entry guide
    are refreshed. Confirm each command exits 0:
    ```bash
    lore queue apply            # materialize reported concepts into pages + links
@@ -246,7 +246,7 @@ on the matching marker, never on whether a section looks filled.
    current tasks; stop and report any blocked work or failed command. Refresh and
    check completion only after that drain:
    ```bash
-   lore wiki refresh           # refresh SQLite navigation and configured Markdown exports
+   lore wiki refresh           # refresh SQLite navigation and the entry guide
    lore queue check            # pending or blocked work and unpublished results
    lore wiki reviews --check   # evidence drift and invalid assessments; open is valid
    ```

@@ -57,9 +57,8 @@ In **queue mode** (the default), phases 1–5 leave summary/concept/work-log
 sections empty and emit JSONL tasks. They are NOT knowledge yet — run
 **`/lore-process`** afterward to drain the queue (fill summaries, create/merge
 concept pages, work-log topic synthesis). Its own Finalize step reconciles the
-graph and the generated wiki pages; that list lives there rather than being
-restated here, because a partial copy of it is how the knowledge timeline went
-stale. A daily run is `lore ingest` → `/lore-process`, not `lore ingest` alone.
+graph and SQLite discovery. Follow that skill's complete finalization protocol
+after publication. A daily run is `lore ingest` → `/lore-process`.
 
 ## Refetch and replay
 

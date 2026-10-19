@@ -5,15 +5,12 @@ use std::path::PathBuf;
 
 use lk_core::config::{ConceptCategory, GraphConfig, VaultDirs};
 use lk_core::i18n::Locale;
-use lk_graph::{
-    backlinks, cluster, concept_lint, export, graph, index_drift, merge, normalize, output, scan,
-};
+use lk_graph::{backlinks, cluster, concept_lint, export, graph, merge, normalize, output, scan};
 
 use super::GlobalOptions;
 
 struct ResolvedConfig {
     root: PathBuf,
-    markdown_exports: bool,
     graph: GraphConfig,
     locale: Locale,
     vault_dirs: VaultDirs,
@@ -85,12 +82,6 @@ pub enum GraphCommand {
         #[arg(long)]
         with_clusters: bool,
     },
-    /// Check index.md sync with disk pages
-    IndexSync {
-        /// Auto-fix: add missing pages to index.md
-        #[arg(long)]
-        fix: bool,
-    },
     /// Check slug normalization and optionally rename
     Normalize {
         /// Apply renames and repoint links
@@ -158,7 +149,7 @@ pub enum GraphCommand {
 /// 2 = runtime error.
 ///
 /// A non-zero exit is reserved for a claim that is FALSE and has a named repair: a link whose
-/// destination does not exist, a catalog that disagrees with the disk, a category outside the
+/// destination does not exist, a category outside the
 /// configured vocabulary, one name answering to two pages, a filename that disagrees with its
 /// own normalized slug, a derived count no sweep could write. What a vault in good standing
 /// legitimately carries is reported and exits 0 — the concepts nothing cites yet, the hubs, a
@@ -197,37 +188,18 @@ fn lint_report(
     g: &graph::WikiGraph,
     views: &scan::VaultViews,
 ) -> Result<output::LintReport, String> {
-    let mut errors = Vec::new();
-    let index = if !rc.markdown_exports {
-        None
-    } else {
-        match index_drift::diff(&rc.root, rc.locale, &rc.vault_dirs) {
-            Ok(drift) => Some(output::IndexSyncReport {
-                stale: !drift.is_in_sync(),
-                absent: drift.absent,
-                missing_from_index: drift.missing_from_index,
-                missing_from_disk: drift.missing_from_disk,
-                fixed: None,
-            }),
-            Err(error) => {
-                errors.push(format!("index: {error}"));
-                None
-            }
-        }
-    };
     // Read the concept pages once; the three concept lints are pure functions over the result
     // rather than each re-walking `{wiki}/concepts/`.
     let concept_pages = concept_lint::scan_concept_pages(&rc.root, &rc.vault_dirs.wiki)
         .map_err(|e| format!("{e}"))?;
 
     Ok(output::LintReport {
-        errors,
+        errors: Vec::new(),
         pages: g.node_count(),
         links: g.edge_count(),
         components: g.component_count(),
         violations: output::Violations {
             broken: graph::broken_links(&views.link_sources, &views.existence, &rc.vault_dirs),
-            index,
             invalid_categories: concept_lint::find_invalid_categories(
                 &concept_pages,
                 &rc.concept_categories,
@@ -254,7 +226,7 @@ pub(crate) fn lint(
     opts: &GlobalOptions,
     root_override: Option<PathBuf>,
 ) -> Result<output::LintReport, String> {
-    let rc = resolve_config_full(opts, root_override, false)?;
+    let rc = resolve_config_full(opts, root_override)?;
     let views = scan::VaultViews::resolve(&rc.root, &rc.graph, &rc.vault_dirs)
         .map_err(|e| format!("{e}"))?;
     let g = graph::WikiGraph::build_with_existence(&views.pages, &views.existence, &rc.vault_dirs);
@@ -267,11 +239,7 @@ async fn run_inner(
     json: bool,
     root_override: Option<PathBuf>,
 ) -> Result<bool, String> {
-    let mut rc = resolve_config_full(
-        opts,
-        root_override,
-        matches!(&cmd, GraphCommand::IndexSync { fix: true }),
-    )?;
+    let mut rc = resolve_config_full(opts, root_override)?;
     let mutation = if matches!(
         &cmd,
         GraphCommand::Normalize { fix: true }
@@ -279,7 +247,6 @@ async fn run_inner(
             | GraphCommand::BacklinksSync { dry_run: false }
             | GraphCommand::Resynthesize { dry_run: false, .. }
             | GraphCommand::RetractCitation { dry_run: false, .. }
-            | GraphCommand::IndexSync { fix: true }
     ) {
         Some(lk_vault::MutationSession::acquire(&rc.root).map_err(|e| e.to_string())?)
     } else {
@@ -474,39 +441,6 @@ async fn run_inner(
                 output::print_json(&graph_export, violated)?;
             } else {
                 output::print_export(&graph_export);
-            }
-            violated
-        }
-        GraphCommand::IndexSync { fix } => {
-            let drift = index_drift::diff(&rc.root, rc.locale, &rc.vault_dirs)
-                .map_err(|e| format!("{e}"))?;
-            let has = !drift.is_in_sync();
-            // The repair re-derives the whole catalog, so it resolves drift in both
-            // directions at once — there is no half it can leave behind.
-            let fixed = if fix && has {
-                Some(
-                    index_drift::fix(
-                        &drift,
-                        mutation.as_ref().expect("index fix session"),
-                        &rc.vault_dirs,
-                    )
-                    .map_err(|e| format!("{e}"))?,
-                )
-            } else {
-                None
-            };
-            let report = output::IndexSyncReport {
-                stale: has,
-                absent: drift.absent,
-                missing_from_index: drift.missing_from_index,
-                missing_from_disk: drift.missing_from_disk,
-                fixed,
-            };
-            let violated = has && fixed.is_none();
-            if json {
-                output::print_json(&report, violated)?;
-            } else {
-                output::print_index_sync(&report);
             }
             violated
         }
@@ -724,7 +658,6 @@ async fn enqueue_syntheses(
 fn resolve_config_full(
     opts: &GlobalOptions,
     root_override: Option<PathBuf>,
-    navigation_export: bool,
 ) -> Result<ResolvedConfig, String> {
     // Single override semantics (shared with `wiki`/`schema`): a present config drives
     // dirs/locale/graph/categories even under `--root` (only the root is overridden) — falling
@@ -732,13 +665,8 @@ fn resolve_config_full(
     // headings in the wrong locale. Defaults apply ONLY when no config file exists.
     let super::RootConfig { root, config } =
         super::resolve_root_config(opts, root_override).map_err(|e| format!("{e}"))?;
-    if navigation_export {
-        super::wiki::refuse_navigation_inbox_overlap(&root, config.as_ref())
-            .map_err(|error| error.to_string())?;
-    }
     match config {
         Some(config) => Ok(ResolvedConfig {
-            markdown_exports: config.vault.navigation.markdown_exports,
             root,
             locale: config.vault.locale(),
             vault_dirs: config.vault.dirs.clone(),
@@ -751,7 +679,6 @@ fn resolve_config_full(
             let mut graph = GraphConfig::default();
             graph.apply_vault_defaults(&vault_dirs);
             Ok(ResolvedConfig {
-                markdown_exports: false,
                 root,
                 graph,
                 locale: Locale::default(),

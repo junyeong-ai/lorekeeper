@@ -574,8 +574,6 @@ fn validate_cron_field(field: &str, min: u8, max: u8) -> Result<(), String> {
 pub struct VaultConfig {
     pub root: String,
     #[serde(default)]
-    pub navigation: NavigationConfig,
-    #[serde(default)]
     pub dirs: VaultDirs,
     #[serde(default)]
     pub timezone: Option<String>,
@@ -584,13 +582,6 @@ pub struct VaultConfig {
     /// an unrecognized tag is rejected at load (see `Config::validate`).
     #[serde(default)]
     pub locale: Option<String>,
-}
-
-/// Optional full Markdown exports; SQLite navigation remains the default.
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct NavigationConfig {
-    pub markdown_exports: bool,
 }
 
 impl VaultConfig {
@@ -1362,7 +1353,7 @@ impl Default for GraphAuditConfig {
     fn default() -> Self {
         Self {
             schedule: None,
-            batch_size: 50,
+            batch_size: 5,
         }
     }
 }
@@ -1380,7 +1371,7 @@ impl GraphConfig {
 pub struct GraphScopeConfig {
     /// Vault-relative directories for structural analysis
     /// (`hubs`/`cluster`/`suggest-links`). Derived from `vault.dirs.wiki` when
-    /// absent. Integrity checks (`broken`/`orphans`/`index-sync`) resolve against
+    /// absent. Integrity checks (`broken`/`orphans`) resolve against
     /// the full vault regardless.
     pub dirs: Vec<PathBuf>,
     /// Glob patterns (matched against vault-relative paths) narrowing the ANALYSIS: an excluded
@@ -1551,16 +1542,11 @@ mod observation_unit_tests {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn navigation_defaults_to_sqlite_and_rejects_misspelled_export_keys() {
-        let config: super::VaultConfig = crate::yaml::from_str("root: /tmp/vault\n").unwrap();
-        assert!(!config.navigation.markdown_exports);
-        let config: super::VaultConfig =
-            crate::yaml::from_str("root: /tmp/vault\nnavigation:\n  markdown_exports: true\n")
-                .unwrap();
-        assert!(config.navigation.markdown_exports);
+    fn navigation_has_no_markdown_export_setting() {
+        crate::yaml::from_str::<super::VaultConfig>("root: /tmp/vault\n").unwrap();
         assert!(
             crate::yaml::from_str::<super::VaultConfig>(
-                "root: /tmp/vault\nnavigation:\n  markdown_export: true\n"
+                "root: /tmp/vault\nnavigation:\n  markdown_exports: true\n"
             )
             .is_err()
         );
@@ -2277,7 +2263,7 @@ sources:
                     assert_eq!(config.validate().is_ok(), valid, "{settings}");
                     if settings.is_empty() {
                         assert!(config.graph.audit.schedule.is_none());
-                        assert_eq!(config.graph.audit.batch_size, 50);
+                        assert_eq!(config.graph.audit.batch_size, 5);
                     }
                 }
                 Err(_) => assert!(!valid, "{settings}"),

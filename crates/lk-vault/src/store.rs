@@ -482,10 +482,7 @@ mod tests {
         );
         assert!(read_page(root.path(), &concepts.join("page.md")).is_err());
         assert!(crate::search::markdown_files(root.path(), &concepts).is_err());
-        assert!(
-            crate::build_index(root.path(), lk_core::i18n::Locale::En, &Default::default())
-                .is_err()
-        );
+        assert!(crate::search::load_pages(root.path(), &Default::default(), false).is_err());
         std::fs::remove_file(&concepts).unwrap();
         std::fs::create_dir(root.path().join("pages")).unwrap();
         std::fs::write(root.path().join("pages/page.md"), "Internal page.").unwrap();
@@ -520,9 +517,7 @@ mod tests {
                 .len(),
             1
         );
-        assert!(
-            crate::build_index(root.path(), lk_core::i18n::Locale::En, &Default::default()).is_ok()
-        );
+        assert!(crate::search::load_pages(root.path(), &Default::default(), false).is_ok());
         assert!(
             vault
                 .read_page(Path::new("wiki/concepts/missing.md"))

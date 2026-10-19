@@ -115,8 +115,10 @@ Answer a question grounded in vault content, with compounding.
    Snapshot link pagination uses the same snapshot ID and offset; do not combine `--snapshot` with the live `--revision` flag. A full natural-language question may match nothing: search its subjects and claim terms,
    then inspect the sources. Report the queries and scope checked when evidence remains absent;
    absence in a bounded result set does not establish absence from the vault.
-2. Synthesize an answer grounded in vault content. Cite sources using
-   link format (AGENTS.md § Links).
+2. Synthesize an answer grounded in vault content. Link each material claim to its
+   source using Markdown, for example `[Retry policy](wiki/documents/retry-policy.md)`
+   with the actual vault-relative path (AGENTS.md § Links). Include the relevant
+   section or source lines in the surrounding text when useful.
 3. **Concept enrichment.** If the answer reveals connections between concepts
    that aren't currently linked in their Related sections (heading from
    AGENTS.md), note these as suggested edits (but do NOT auto-apply).
@@ -135,7 +137,7 @@ Answer a question grounded in vault content, with compounding.
      evidence that the answer is correct.
      Then **finalize** so the new page leaves the graph clean:
      `lore graph backlinks-sync` (its Grounding links are real citations that
-     raise each grounded concept's `source_count`), then `lore wiki refresh` (so SQLite discovery captures the exploration and configured exports are refreshed). Run `lore queue status --json` and report any
+     raise each grounded concept's `source_count`), then `lore wiki refresh` (so SQLite discovery captures the exploration). Run `lore queue status --json` and report any
      synthesis queued by reconciliation as pending. Use `/lore-process` when semantic
      completion is part of the request. Tell the user where the assessment landed.
    - **Ephemeral** (single-fact, navigational lookup) → do not file.

@@ -132,8 +132,8 @@ fn a_command_name_is_matched_whole_not_as_a_prefix() {
 /// The other direction is checked above — a command no skill names is one no agent reaches. This
 /// one is the failure the agent actually experiences: a skill step naming a command the binary
 /// does not accept stops the procedure mid-run, with an agent that has already written pages.
-/// `lore wiki index`/`log`/`map` were replaced by `lore wiki refresh` across four skills in one
-/// edit; nothing would have caught a fifth mention left behind.
+/// A stale navigation invocation left in one skill must fail this contract even when
+/// other skills already use the current SQLite refresh procedure.
 ///
 /// Each invocation is put to the BINARY rather than compared against parsed help text. A first
 /// version compared only the leading subcommand, so `lore wiki rebuild` passed on the strength of

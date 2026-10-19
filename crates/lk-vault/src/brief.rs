@@ -107,7 +107,7 @@ pub fn build_brief(
             source_count: page.frontmatter.source_count().unwrap_or(0),
             statement: introduced.then(|| {
                 crate::search::opening_statement(&link::strip_links(&page.body))
-                    .map(|s| crate::index::truncate_summary(&s))
+                    .map(|s| crate::summary::truncate_summary(&s))
                     .unwrap_or_default()
             }),
             id,

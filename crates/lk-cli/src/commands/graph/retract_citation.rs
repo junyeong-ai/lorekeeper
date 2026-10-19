@@ -57,7 +57,10 @@ pub(super) fn request_selected(
         .iter()
         .find(|page| page.path == origin)
         .ok_or("origin must be an exact scanned source path")?;
-    if !lk_graph::scan::is_citation_origin(source, &config.vault_dirs)
+    let existence =
+        lk_graph::scan::VaultExistence::build_at(&config.root, pages, &config.vault_dirs)
+            .map_err(|error| error.to_string())?;
+    if !lk_graph::scan::is_citation_origin(source, &config.vault_dirs, &existence)
         || source.format.as_deref() == Some("concept")
     {
         return Err("origin must be real citation evidence, not a concept or task board".into());
@@ -294,7 +297,6 @@ mod tests {
         std::fs::write(dir.path().join(ORIGIN), raw).unwrap();
         std::fs::write(dir.path().join(CONCEPT), "---\ntype: concept\nsource_count: 1\n---\n# Retry\n\n## Synthesis\n\nKeep the concept.\n\n## Sources\n\nKeep machine sources.\n").unwrap();
         let config = ResolvedConfig {
-            markdown_exports: false,
             root: dir.path().into(),
             graph: Default::default(),
             locale: lk_core::i18n::Locale::En,

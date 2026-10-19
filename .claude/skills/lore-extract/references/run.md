@@ -105,7 +105,7 @@ Extract knowledge using the manifest. Requires a prior scan.
    authoritative and health checks pass:
    ```bash
    lore graph backlinks-sync   # re-derive every concept's ## Sources + source_count
-   lore wiki refresh           # refresh SQLite navigation and configured Markdown exports
+   lore wiki refresh           # refresh SQLite navigation and the entry guide
    lore graph lint             # resolve every violation naming a page this run wrote; one elsewhere in the vault predates you — report it. Observations (orphans, open conflicts) never gate
    ```
 8. Run `lore queue status --json`; report created/merged/skipped counts and any

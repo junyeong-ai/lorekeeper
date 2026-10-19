@@ -40,9 +40,6 @@ fn all_page_writer_entrypoints_refuse_another_processes_vault_lease() {
         vec!["maintenance", "--prune-queue"],
         vec!["schema"],
         vec!["wiki", "refresh"],
-        vec!["wiki", "index"],
-        vec!["wiki", "log"],
-        vec!["wiki", "map"],
         vec!["wiki", "evidence", "wiki/concepts/example.md", "--archive"],
     ] {
         let out = run(dir.path(), &args);

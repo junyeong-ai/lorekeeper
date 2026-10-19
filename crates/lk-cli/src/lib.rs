@@ -199,7 +199,7 @@ pub enum Command {
         #[arg(long)]
         root: Option<PathBuf>,
     },
-    /// Wiki-level utilities (catalog generation, future maintenance ops)
+    /// SQLite knowledge discovery and wiki maintenance
     Wiki {
         #[command(subcommand)]
         cmd: commands::wiki::WikiCommand,

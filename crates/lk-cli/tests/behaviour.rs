@@ -88,6 +88,7 @@ const SWEEP: &[&[&str]] = &[
     &[
         "wiki", "browse", "--type", "concept", "--limit", "2", "--json",
     ],
+    // Removed exports stay swept as explicit Clap rejection contracts.
     &["wiki", "index"],
     &["wiki", "log"],
     // A name the corpus holds — spelled as neither its address nor its title, so the answer
@@ -349,7 +350,7 @@ fn corpus() -> PathBuf {
 }
 
 /// Copy the fixture into a fresh tempdir. Half the sweep writes into the vault
-/// — the catalog, the timeline, the map — so each observation needs its own
+/// — semantic results, schema and SQLite navigation — so each observation needs its own
 /// copy or it would be reading the previous one's output.
 fn stage() -> TempDir {
     let dir = TempDir::new().expect("tempdir");

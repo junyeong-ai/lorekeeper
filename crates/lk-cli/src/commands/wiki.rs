@@ -3,7 +3,6 @@
 
 use std::path::PathBuf;
 
-use lk_core::i18n::Locale;
 use lk_vault::VaultStore;
 
 use super::{find_config, load_config};
@@ -157,34 +156,11 @@ pub enum WikiCommand {
         #[arg(long)]
         revision: Option<String>,
     },
-    /// Generate `<vault>/<wiki>/index.md` — hierarchical catalog of every vault page
-    Index {
-        /// Vault root override (default: vault.root from config)
-        #[arg(long)]
-        root: Option<PathBuf>,
-    },
-    /// Generate `<vault>/<wiki>/log.md` — reverse-chronological knowledge timeline
-    /// (by declared `created` date, which may be the source's authored date)
-    Log {
-        /// Vault root override (default: vault.root from config)
-        #[arg(long)]
-        root: Option<PathBuf>,
-    },
-    /// Generate `<vault>/<wiki>/map.md` — a navigable knowledge map: concepts grouped by
-    /// citation cluster (Louvain), hub-first, for agent/human traversal without embeddings
-    Map {
-        /// Vault root override (default: vault.root from config)
-        #[arg(long)]
-        root: Option<PathBuf>,
-    },
-    /// Refresh SQLite navigation and entry guide; optionally export the full catalog, timeline and map
+    /// Refresh SQLite navigation and the small entry guide
     Refresh {
         /// Vault root override (default: vault.root from config)
         #[arg(long)]
         root: Option<PathBuf>,
-        /// Preserve and replace an unmarked root: repeat exact PATH=FILE_REVISION (SQLite mode only)
-        #[arg(long, value_name = "PATH=FILE_REVISION")]
-        archive_replace: Vec<String>,
     },
     /// List all concept pages in the vault
     Concepts {
@@ -677,13 +653,7 @@ pub async fn run(opts: &super::GlobalOptions, cmd: WikiCommand) -> miette::Resul
             );
             Ok(())
         }
-        WikiCommand::Index { root } => run_index(opts, root).await,
-        WikiCommand::Log { root } => run_log(opts, root).await,
-        WikiCommand::Map { root } => run_map(opts, root).await,
-        WikiCommand::Refresh {
-            root,
-            archive_replace,
-        } => run_refresh_with_archives(opts, root, archive_replace).await,
+        WikiCommand::Refresh { root } => run_refresh(opts, root).await,
         WikiCommand::Concepts { json } => run_concepts(opts, json).await,
         WikiCommand::Search {
             query,
@@ -922,41 +892,14 @@ pub(super) fn refuse_navigation_inbox_overlap(
     Ok(())
 }
 
-/// Refresh SQLite discovery first; optionally export full Markdown views.
-/// A failed capture never authorizes retirement of previously generated navigation.
+/// Refresh derived SQLite discovery and its small entry guide. A failed capture
+/// never publishes the guide, and refresh does not manage other Markdown files.
 pub async fn run_refresh(
     opts: &super::GlobalOptions,
     root_override: Option<PathBuf>,
 ) -> miette::Result<()> {
-    run_refresh_with_archives(opts, root_override, Vec::new()).await
-}
-
-async fn run_refresh_with_archives(
-    opts: &super::GlobalOptions,
-    root_override: Option<PathBuf>,
-    archive_replace: Vec<String>,
-) -> miette::Result<()> {
-    use lk_core::vault_path::{INDEX_FILE, MAP_FILE, TIMELINE_FILE};
-    let archive_replace = archive_replace
-        .into_iter()
-        .map(|value| {
-            let (path, revision) = value
-                .rsplit_once('=')
-                .ok_or_else(|| miette::miette!("archive-replace requires PATH=FILE_REVISION"))?;
-            Ok((PathBuf::from(path), revision.to_owned()))
-        })
-        .collect::<miette::Result<Vec<_>>>()?;
     let super::RootConfig { root, config } = super::resolve_root_config(opts, root_override)?;
     refuse_navigation_inbox_overlap(&root, config.as_ref())?;
-    let exports = config
-        .as_ref()
-        .is_some_and(|config| config.vault.navigation.markdown_exports);
-    if exports && !archive_replace.is_empty() {
-        return Err(miette::miette!(
-            "archive-replace requires vault.navigation.markdown_exports: false; migrate to SQLite navigation first, then re-enable exports"
-        ));
-    }
-    // Use the same config capture for input ownership checks and output addresses.
     let locale = config
         .as_ref()
         .map(|config| config.vault.locale())
@@ -965,189 +908,19 @@ async fn run_refresh_with_archives(
         .as_ref()
         .map(|config| config.vault.dirs.clone())
         .unwrap_or_default();
-    let mut graph = config
-        .as_ref()
-        .map(|config| config.graph.clone())
-        .unwrap_or_default();
-    graph.apply_vault_defaults(&dirs);
     std::fs::create_dir_all(&root).map_err(|error| miette::miette!("create vault: {error}"))?;
     let session = lk_vault::MutationSession::acquire(&root)
         .map_err(|error| miette::miette!("vault mutation: {error}"))?;
-    let entrypoint = if !exports {
-        Some(
-            lk_vault::NavigationCatalog::plan_entrypoint(
-                session.root(),
-                locale,
-                &dirs,
-                &archive_replace,
-            )
-            .map_err(|error| miette::miette!("validate navigation entry: {error}"))?,
-        )
-    } else {
-        None
-    };
+    let plan = lk_vault::plan_navigation_entry(session.root(), locale, &dirs)
+        .map_err(|error| miette::miette!("validate navigation entry: {error}"))?;
     let snapshot = lk_vault::prepare_search(&session, &dirs)
         .map_err(|error| miette::miette!("prepare navigation snapshot: {error}"))?;
     eprintln!("Prepared navigation snapshot {}", snapshot.snapshot);
-    if !exports {
-        let (plan, receipt) = entrypoint.expect("SQLite entrypoint plan validated");
-        session
-            .apply(plan)
-            .map_err(|error| miette::miette!("refresh navigation entry: {error}"))?;
-        if let Some(receipt) = receipt {
-            eprintln!(
-                "Preserved navigation originals; receipt {}",
-                receipt.display()
-            );
-        }
-        eprintln!("Updated SQLite navigation entry; full Markdown exports are optional");
-        return Ok(());
-    }
-    let mut failed: Vec<String> = Vec::new();
-    for (page, outcome) in [
-        (INDEX_FILE, write_index(&session, locale, &dirs).await),
-        (TIMELINE_FILE, write_log(&session, locale, &dirs).await),
-        (MAP_FILE, write_map(&session, locale, &dirs, &graph).await),
-    ] {
-        if let Err(error) = outcome {
-            eprintln!("✗ {page}: {error}");
-            failed.push(page.to_string());
-        }
-    }
-    if failed.is_empty() {
-        return Ok(());
-    }
-    Err(miette::miette!(
-        "{} of the vault's derived pages could not be written: {}",
-        failed.len(),
-        failed.join(", ")
-    ))
-}
-
-pub async fn run_map(
-    opts: &super::GlobalOptions,
-    root_override: Option<PathBuf>,
-) -> miette::Result<()> {
-    let (session, locale, dirs, graph) = resolve_wiki_writer(opts, root_override)?;
-    write_map(&session, locale, &dirs, &graph).await
-}
-
-async fn write_map(
-    session: &lk_vault::MutationSession,
-    locale: Locale,
-    dirs: &lk_core::config::VaultDirs,
-    graph_config: &lk_core::config::GraphConfig,
-) -> miette::Result<()> {
-    let vault_root = session.root();
-    tracing::info!(vault = %vault_root.display(), "building wiki knowledge map");
-
-    let views = lk_graph::scan::VaultViews::resolve(vault_root, graph_config, dirs)
-        .map_err(|e| miette::miette!("scan vault: {e}"))?;
-    let graph =
-        lk_graph::graph::WikiGraph::build_with_existence(&views.pages, &views.existence, dirs);
-    let catalog = lk_graph::map::build_map_catalog(&graph, graph_config, dirs, locale);
-    catalog
-        .publish(session)
-        .map_err(|error| miette::miette!("write map: {error}"))?;
-    let rel = std::path::Path::new(&dirs.wiki).join(lk_core::vault_path::MAP_FILE);
-
-    eprintln!("Wrote {}", vault_root.join(&rel).display());
+    session
+        .apply(plan)
+        .map_err(|error| miette::miette!("refresh navigation entry: {error}"))?;
+    eprintln!("Updated SQLite navigation and entry guide");
     Ok(())
-}
-
-pub async fn run_log(
-    opts: &super::GlobalOptions,
-    root_override: Option<PathBuf>,
-) -> miette::Result<()> {
-    let (session, locale, dirs, _graph) = resolve_wiki_writer(opts, root_override)?;
-    write_log(&session, locale, &dirs).await
-}
-
-async fn write_log(
-    session: &lk_vault::MutationSession,
-    locale: Locale,
-    dirs: &lk_core::config::VaultDirs,
-) -> miette::Result<()> {
-    tracing::info!(vault = %session.root().display(), "building wiki knowledge log");
-
-    let path = lk_vault::write_timeline(session, locale, dirs)
-        .map_err(|e| miette::miette!("write log.md: {e}"))?;
-
-    eprintln!("Wrote {}", path.display());
-    Ok(())
-}
-
-pub async fn run_index(
-    opts: &super::GlobalOptions,
-    root_override: Option<PathBuf>,
-) -> miette::Result<()> {
-    let (session, locale, dirs, _graph) = resolve_wiki_writer(opts, root_override)?;
-    write_index(&session, locale, &dirs).await
-}
-
-async fn write_index(
-    session: &lk_vault::MutationSession,
-    locale: Locale,
-    dirs: &lk_core::config::VaultDirs,
-) -> miette::Result<()> {
-    tracing::info!(vault = %session.root().display(), locale = ?locale, "building wiki index");
-
-    let path = lk_vault::write_index(session, locale, dirs)
-        .await
-        .map_err(|e| miette::miette!("write index.md: {e}"))?;
-
-    eprintln!("Wrote {}", path.display());
-    Ok(())
-}
-
-/// Acquire once for the whole read/derive/write operation, including a full refresh.
-fn resolve_wiki_writer(
-    opts: &super::GlobalOptions,
-    root_override: Option<PathBuf>,
-) -> miette::Result<(
-    lk_vault::MutationSession,
-    Locale,
-    lk_core::config::VaultDirs,
-    lk_core::config::GraphConfig,
-)> {
-    let (root, locale, dirs, graph) = resolve_wiki_context(opts, root_override)?;
-    std::fs::create_dir_all(&root).map_err(|e| miette::miette!("create vault: {e}"))?;
-    let session = lk_vault::MutationSession::acquire(&root)
-        .map_err(|e| miette::miette!("vault mutation: {e}"))?;
-    Ok((session, locale, dirs, graph))
-}
-
-/// Resolve the context every `lore wiki` page builder needs — vault root, locale, vault
-/// dirs, and the graph config (scope, with vault defaults applied). The single resolution
-/// path for `index`/`log`/`map`, so they behave identically: an explicit `--root` runs even
-/// without a config file (defaults fill in locale/dirs/graph), while the config-derived path
-/// surfaces a load error loudly.
-fn resolve_wiki_context(
-    opts: &super::GlobalOptions,
-    root_override: Option<PathBuf>,
-) -> miette::Result<(
-    PathBuf,
-    Locale,
-    lk_core::config::VaultDirs,
-    lk_core::config::GraphConfig,
-)> {
-    let super::RootConfig { root, config } = super::resolve_root_config(opts, root_override)?;
-    refuse_navigation_inbox_overlap(&root, config.as_ref())?;
-    match config {
-        Some(config) => Ok((
-            root,
-            config.vault.locale(),
-            config.vault.dirs.clone(),
-            config.graph.clone(),
-        )),
-        // No config file at all (binary-only use under `--root`): defaults fill in.
-        None => {
-            let dirs = lk_core::config::VaultDirs::default();
-            let mut graph = lk_core::config::GraphConfig::default();
-            graph.apply_vault_defaults(&dirs);
-            Ok((root, Locale::default(), dirs, graph))
-        }
-    }
 }
 
 async fn run_concepts(opts: &super::GlobalOptions, json: bool) -> miette::Result<()> {

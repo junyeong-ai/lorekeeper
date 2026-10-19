@@ -61,6 +61,10 @@ or missing/stale finding reviews reopen work. Changed and first-time work rotate
 unchanged inputs are skipped without an age-based reread. Unchanged open findings
 remain discoverable through their reviews without being rewritten every week.
 
-Finish with `lore wiki refresh`, `lore graph lint` and `lore wiki reviews --check`.
+Finish by reconciling backlinks and completing any queued repairs through the
+lore-process finalization protocol, then run `lore wiki refresh`, `lore graph lint`,
+`lore wiki reviews --check` and `lore queue check`. A blocked or failed repair is
+not successful completion; preserve its tasks and report the failure. An unchanged
+open finding with a current scoped review remains a valid follow-up assessment.
 Report batch coverage, repairs, unresolved findings and remaining backlog separately.
 No lint or receipt count certifies that the entire corpus is semantically consistent.

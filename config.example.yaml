@@ -15,8 +15,6 @@ vault:
   timezone: system          # IANA name (e.g., "Asia/Seoul") or "system"
   locale: ko                # output language for added labels/headers: ko | en
                             # (source content — mail/Slack/Jira bodies — is never translated)
-  navigation:
-    markdown_exports: false # refresh SQLite + a small entry guide; true also refreshes full index/log/map exports
   dirs:
     daily: daily
     weekly: weekly
@@ -445,7 +443,7 @@ concepts:
 # graph:
 #   audit:
 #     schedule: "0 7 * * 0"         # weekly semantic maintenance, independent of synthesis
-#     batch_size: 50               # rotate changed and first-time concepts fairly (1..100)
+#     batch_size: 5                # rotate changed and first-time concepts fairly (1..100)
 #                                  # requires installed pipelines via --pipeline-dir
 #   scope:
 #     dirs: [wiki]                   # vault-relative dirs to scan (default: vault.dirs.wiki)

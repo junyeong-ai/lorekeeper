@@ -3,8 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use lk_core::config::{GraphConfig, VaultDirs};
-use lk_core::i18n::Locale;
-use lk_graph::{cluster, export, graph, index_drift, normalize, output, scan};
+use lk_graph::{cluster, export, graph, normalize, output, scan};
 
 fn fixture_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/small")
@@ -119,75 +118,37 @@ fn broken_json_has_count() {
     assert!(json["broken"].is_array());
 }
 
-// --- Index sync ---
-
+// SQLite navigation is derived separately; live graph analysis never requires a catalog.
 #[test]
-fn index_sync_detects_drift() {
-    // The catalog's own builder decides which pages belong in it, so the vault is laid out the
-    // way it lays one out: a catalogued page absent from `index.md` is drift.
+fn live_graph_analysis_does_not_require_a_materialized_catalog() {
     let tmp = tempfile::tempdir().unwrap();
     let concepts = tmp.path().join("wiki/concepts");
     std::fs::create_dir_all(&concepts).unwrap();
     std::fs::write(
         concepts.join("alpha.md"),
-        "---\nid: alpha\ntype: concept\ntitle: \"Alpha\"\n---\n\n# Alpha\n",
+        "---\ntype: concept\ntitle: Alpha\n---\nSee [Beta](beta.md).\n",
     )
     .unwrap();
     std::fs::write(
         concepts.join("beta.md"),
-        "---\nid: beta\ntype: concept\ntitle: \"Beta\"\n---\n\n# Beta\n",
+        "---\ntype: concept\ntitle: Beta\n---\nSee [Alpha](alpha.md).\n",
     )
     .unwrap();
-    std::fs::write(
-        tmp.path().join("wiki/index.md"),
-        "# Index\n\n- [Alpha](concepts/alpha.md)\n",
-    )
-    .unwrap();
-
-    let drift = index_drift::diff(tmp.path(), Locale::default(), &VaultDirs::default()).unwrap();
-    assert_eq!(drift.missing_from_index, vec!["wiki/concepts/beta"]);
-    assert!(!drift.is_in_sync());
-}
-
-#[test]
-fn index_sync_fix_mutates_and_idempotent() {
-    let tmp = tempfile::tempdir().unwrap();
-    let concepts = tmp.path().join("wiki/concepts");
-    std::fs::create_dir_all(&concepts).unwrap();
-    std::fs::write(
-        concepts.join("alpha.md"),
-        "---\nid: alpha\ntype: concept\ntitle: \"Alpha\"\n---\n\n# Alpha\n",
-    )
-    .unwrap();
-    std::fs::write(
-        concepts.join("beta.md"),
-        "---\nid: beta\ntype: concept\ntitle: \"Beta\"\n---\n\n# Beta\n",
-    )
-    .unwrap();
-    std::fs::write(
-        tmp.path().join("wiki/index.md"),
-        "<!-- lorekeeper:catalog -->\n# Index\n\n- [Alpha](concepts/alpha.md)\n",
-    )
-    .unwrap();
-
-    let dirs = VaultDirs::default();
-    let drift = index_drift::diff(tmp.path(), Locale::default(), &dirs).unwrap();
-    assert!(!drift.is_in_sync());
-
+    let pages = fixture_pages(tmp.path(), &default_config());
+    let graph = graph::WikiGraph::build(&pages, &VaultDirs::default());
+    assert_eq!(graph.node_count(), 2);
+    assert_eq!(graph.edge_count(), 2);
+    assert!(fixture_broken_links(&pages).is_empty());
+    let clusters = cluster::detect_communities(&graph, &default_config());
     assert_eq!(
-        index_drift::fix(
-            &drift,
-            &lk_vault::MutationSession::acquire(tmp.path()).unwrap(),
-            &dirs
-        )
-        .unwrap(),
-        1
+        clusters
+            .communities
+            .iter()
+            .map(|c| c.members.len())
+            .sum::<usize>(),
+        2
     );
-    let content = std::fs::read_to_string(tmp.path().join("wiki/index.md")).unwrap();
-    assert!(content.contains("[Beta](concepts/beta.md)"), "{content}");
-
-    let after = index_drift::diff(tmp.path(), Locale::default(), &dirs).unwrap();
-    assert!(after.is_in_sync(), "{after:?}");
+    assert!(!tmp.path().join("wiki/index.md").exists());
 }
 
 // --- Normalize ---
@@ -277,7 +238,6 @@ fn lint_combined_report() {
     let hubs = g.hubs(10, config.metrics.min_hub_degree);
     let orphans = g.orphans(&config.metrics.orphan_exclude);
     let broken = fixture_broken_links(&pages);
-    let drift = index_drift::diff(&root, Locale::default(), &VaultDirs::default()).unwrap();
 
     let report = output::LintReport {
         errors: Vec::new(),
@@ -286,13 +246,6 @@ fn lint_combined_report() {
         components: g.component_count(),
         violations: output::Violations {
             broken,
-            index: Some(output::IndexSyncReport {
-                stale: false,
-                absent: drift.absent,
-                missing_from_index: drift.missing_from_index,
-                missing_from_disk: drift.missing_from_disk,
-                fixed: None,
-            }),
             invalid_categories: Vec::new(),
             duplicate_concepts: Vec::new(),
             address_collisions: Vec::new(),
@@ -315,7 +268,7 @@ fn lint_combined_report() {
     assert!(json["observations"]["orphans"].is_array());
     assert!(json["violations"]["broken"].is_array());
     assert!(json["violations"]["invalid_categories"].is_array());
-    assert!(json["violations"]["index"]["missing_from_index"].is_array());
+    assert!(json["violations"].get("index").is_none());
 }
 
 // --- Suggest links ---
