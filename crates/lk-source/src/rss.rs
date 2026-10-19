@@ -190,7 +190,8 @@ impl Source for RssSource {
                 // Counted here, where the entry is actually examined — the cap breaks out
                 // above without looking at one.
                 seen += 1;
-                let Some(mut item) = map_entry(&feed_cfg.id, &feed_title, entry) else {
+                let Some(mut item) = map_entry(&feed_cfg.id, &feed_title, entry, &mut partial)
+                else {
                     partial = true;
                     continue;
                 };
@@ -292,6 +293,7 @@ fn map_entry(
     feed_id: &str,
     feed_title: &Option<String>,
     entry: feed_rs::model::Entry,
+    incomplete: &mut bool,
 ) -> Option<RawItem> {
     let dt = entry.published.or(entry.updated)?;
     let ts = jiff::Timestamp::from_millisecond(dt.timestamp_millis()).ok()?;
@@ -301,16 +303,20 @@ fn map_entry(
         return None;
     }
 
-    let body_html = entry
+    let body = entry
         .content
-        .and_then(|c| c.body)
-        .or_else(|| entry.summary.map(|s| s.content))
+        .and_then(|content| {
+            content
+                .body
+                .as_deref()
+                .and_then(|body| feed_text(body, content.content_type.as_str(), incomplete))
+        })
+        .or_else(|| {
+            entry.summary.and_then(|summary| {
+                feed_text(&summary.content, summary.content_type.as_str(), incomplete)
+            })
+        })
         .unwrap_or_default();
-    let body = if body_html.is_empty() {
-        String::new()
-    } else {
-        crate::markdown::html_to_markdown(&body_html)
-    };
 
     let url = entry
         .links
@@ -357,9 +363,56 @@ fn map_entry(
     })
 }
 
+/// Feed parsers already decode Atom text constructs. Only declared HTML is markup;
+/// literal text must also stay literal when embedded in the Markdown daily page.
+fn feed_text(text: &str, content_type: &str, incomplete: &mut bool) -> Option<String> {
+    if text.trim().is_empty() {
+        return None;
+    }
+    let media = match content_type.parse::<mime::Mime>() {
+        Ok(media) => media,
+        Err(error) => {
+            *incomplete = true;
+            tracing::warn!(content_type, %error, "rss: invalid feed content type; trying summary");
+            return None;
+        }
+    };
+    match media.essence_str() {
+        // feed-rs represents Atom type="xhtml" as application/xhtml.
+        "text/html" | "application/xhtml" | "application/xhtml+xml" => {
+            Some(crate::markdown::html_to_markdown(text))
+        }
+        "text/markdown" | "text/x-markdown" => Some(text.to_owned()),
+        "text/plain" => match crate::fetch::literal_markdown(text) {
+            Ok(body) => Some(body),
+            Err(error) => {
+                *incomplete = true;
+                tracing::warn!(%error, "rss: could not project plain feed text as Markdown");
+                None
+            }
+        },
+        _ => {
+            *incomplete = true;
+            tracing::warn!(
+                content_type,
+                "rss: unsupported feed content type; trying summary"
+            );
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn map_entry(
+        feed_id: &str,
+        feed_title: &Option<String>,
+        entry: feed_rs::model::Entry,
+    ) -> Option<RawItem> {
+        super::map_entry(feed_id, feed_title, entry, &mut false)
+    }
 
     /// Per-feed isolation must not extend to a source that reached NOTHING. An empty
     /// success there is indistinguishable from a quiet day, and the ingest log records only
@@ -484,6 +537,30 @@ mod tests {
             source.observe(&params, &test_ctx()).await.unwrap().outcome,
             crate::ObservationOutcome::Partial
         );
+    }
+
+    #[tokio::test]
+    async fn unsupported_inline_content_keeps_summary_and_reports_partial() {
+        let server = tiny_feed_server(
+            r#"<feed xmlns="http://www.w3.org/2005/Atom">
+<entry><title>Attachment</title><id>a</id><updated>2026-05-23T01:00:00Z</updated>
+<content type="application/octet-stream">Ym9keQ==</content>
+<summary type="text">&lt;b&gt;literal fallback&lt;/b&gt;</summary></entry>
+</feed>"#,
+        )
+        .await;
+        let source = RssSource::new(loopback_client());
+        let params = serde_json::json!({"feeds": [{"id": "a", "url": format!("http://{}/f.xml", server.addr)}]});
+        let observation = source.observe(&params, &test_ctx()).await.unwrap();
+        assert_eq!(observation.items.len(), 1);
+        assert_eq!(observation.outcome, crate::ObservationOutcome::Partial);
+        let visible = pulldown_cmark::Parser::new(&observation.items[0].body)
+            .filter_map(|event| match event {
+                pulldown_cmark::Event::Text(text) => Some(text.into_string()),
+                _ => None,
+            })
+            .collect::<String>();
+        assert_eq!(visible, "<b>literal fallback</b>");
     }
 
     #[tokio::test]
@@ -673,6 +750,108 @@ mod tests {
         assert_eq!(item.url.as_deref(), Some("https://vendor.example/post/1"));
         assert!(item.body.contains("**big**")); // HTML → Markdown
         assert_eq!(item.timestamp.to_string(), "2026-05-21T08:00:00Z");
+    }
+
+    #[test]
+    fn atom_plain_content_and_summary_remain_literal_markdown() {
+        for element in [
+            "content type=\"text\"",
+            "content",
+            "summary type=\"text\"",
+            "summary",
+        ] {
+            let tag = element.split_whitespace().next().unwrap();
+            let xml = format!(
+                r#"<feed xmlns="http://www.w3.org/2005/Atom"><entry>
+<title>Literal syntax</title><id>literal</id><updated>2026-05-21T08:00:00Z</updated>
+<{element}>Use &lt;script&gt;safe literal&lt;/script&gt; and &lt;b&gt;literal tags&lt;/b&gt;.
+
+# Not a heading
+**not emphasis** [not a link](https://example.com) `not code`
+</{tag}></entry></feed>"#
+            );
+            let item = map_entry("fixture", &None, parse_one(&xml)).unwrap();
+            let events: Vec<_> = pulldown_cmark::Parser::new(&item.body).collect();
+            assert!(
+                events.iter().all(|event| matches!(
+                    event,
+                    pulldown_cmark::Event::Start(pulldown_cmark::Tag::Paragraph)
+                        | pulldown_cmark::Event::End(pulldown_cmark::TagEnd::Paragraph)
+                        | pulldown_cmark::Event::Text(_)
+                        | pulldown_cmark::Event::HardBreak
+                        | pulldown_cmark::Event::SoftBreak
+                )),
+                "{element}: {:?}",
+                events
+            );
+            let visible = events
+                .iter()
+                .filter_map(|event| match event {
+                    pulldown_cmark::Event::Text(text) => Some(text.as_ref()),
+                    _ => None,
+                })
+                .collect::<String>();
+            for literal in [
+                "<script>safe literal</script>",
+                "<b>literal tags</b>",
+                "# Not a heading",
+                "**not emphasis** [not a link](https://example.com) `not code`",
+            ] {
+                assert!(visible.contains(literal), "{element}: {visible}");
+            }
+        }
+    }
+
+    #[test]
+    fn atom_declared_html_and_xhtml_remain_markup() {
+        for markup in [
+            r#"<content type="html">&lt;p&gt;A &lt;b&gt;big&lt;/b&gt; release.&lt;/p&gt;</content>"#,
+            r#"<content type="xhtml"><div xmlns="http://www.w3.org/1999/xhtml"><p>A <b>big</b> release.</p></div></content>"#,
+            r#"<summary type="html">&lt;p&gt;A &lt;b&gt;big&lt;/b&gt; release.&lt;/p&gt;</summary>"#,
+            r#"<summary type="xhtml"><div xmlns="http://www.w3.org/1999/xhtml"><p>A <b>big</b> release.</p></div></summary>"#,
+        ] {
+            let xml = format!(
+                r#"<feed xmlns="http://www.w3.org/2005/Atom"><entry>
+<title>Markup</title><id>markup</id><updated>2026-05-21T08:00:00Z</updated>
+{markup}</entry></feed>"#
+            );
+            let item = map_entry("fixture", &None, parse_one(&xml)).unwrap();
+            assert!(
+                item.body.contains("A **big** release."),
+                "{markup}: {}",
+                item.body
+            );
+        }
+    }
+
+    #[test]
+    fn atom_unusable_content_falls_back_to_typed_summary() {
+        assert!(feed_text("", "text/plain", &mut false).is_none());
+        for content in [
+            r#"<content type="application/octet-stream">Ym9keQ==</content>"#,
+            r#"<content type="text/plain" src="https://example.com/body"/>"#,
+        ] {
+            let xml = format!(
+                r#"<feed xmlns="http://www.w3.org/2005/Atom"><entry>
+<title>Fallback</title><id>fallback</id><updated>2026-05-21T08:00:00Z</updated>
+{content}<summary type="text">&lt;b&gt;literal fallback&lt;/b&gt;</summary>
+</entry></feed>"#
+            );
+            let mut incomplete = false;
+            let item =
+                super::map_entry("fixture", &None, parse_one(&xml), &mut incomplete).unwrap();
+            let visible = pulldown_cmark::Parser::new(&item.body)
+                .filter_map(|event| match event {
+                    pulldown_cmark::Event::Text(text) => Some(text.into_string()),
+                    _ => None,
+                })
+                .collect::<String>();
+            assert!(
+                visible.contains("<b>literal fallback</b>"),
+                "{content}: {visible}"
+            );
+            assert_eq!(incomplete, content.contains("application/octet-stream"));
+        }
     }
 
     /// An entry outside the day window still MAPS — it is a good observation belonging to
