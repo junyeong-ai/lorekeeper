@@ -109,9 +109,12 @@ fn write_audit_concept(fixture: &Fixture, name: &str) {
 }
 
 fn write_review_attention(fixture: &Fixture, subject: &str, invalid: bool) {
+    write_review_attention_at(fixture, subject, invalid, "wiki/documents/reviewed.md");
+}
+
+fn write_review_attention_at(fixture: &Fixture, subject: &str, invalid: bool, evidence: &str) {
     let vault = fixture.root().join("vault");
-    let evidence = "wiki/documents/reviewed.md";
-    std::fs::create_dir_all(vault.join("wiki/documents")).unwrap();
+    std::fs::create_dir_all(vault.join(evidence).parent().unwrap()).unwrap();
     let prior = "---\ntype: document\ntitle: Evidence\n---\nOriginal evidence.\n";
     std::fs::write(vault.join(evidence), prior).unwrap();
     let revision = lk_core::concept::source_revision(&lk_vault::parse_page(prior).unwrap());
@@ -396,7 +399,7 @@ fn unrelated_review_drift_remains_visible_while_knowledge_campaign_progresses() 
 #[test]
 fn empty_knowledge_plan_still_reports_review_attention_without_launching_agent() {
     let fixture = Fixture::new("codex", 30, "exit 91");
-    write_review_attention(&fixture, "wiki/documents/reviewed.md", false);
+    write_review_attention_at(&fixture, "daily/reviewed.md", false, "daily/reviewed.md");
     let (output, result) = fixture.run("knowledge");
     assert!(
         output.status.success(),
@@ -459,7 +462,31 @@ fn selected_review_drift_blocks_audit_completion_without_becoming_a_global_healt
     assert!(plan.status.success());
     let plan: serde_json::Value = serde_json::from_slice(&plan.stdout).unwrap();
     assert_eq!(plan["reviewed_current"], 0);
-    assert_eq!(plan["candidates"].as_array().unwrap().len(), 1);
+    assert_eq!(plan["unreviewed"], 2);
+    assert_eq!(plan["candidates"].as_array().unwrap().len(), 2);
+    for kind in ["concept", "document"] {
+        assert_eq!(plan["counts_by_kind"][kind]["total"], 1);
+        assert_eq!(plan["counts_by_kind"][kind]["unreviewed"], 1);
+        assert_eq!(plan["counts_by_kind"][kind]["reviewed_current"], 0);
+    }
+    let subjects = plan["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|candidate| {
+            (
+                candidate["kind"].as_str().unwrap(),
+                candidate["path"].as_str().unwrap(),
+            )
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        subjects,
+        std::collections::BTreeSet::from([
+            ("concept", "wiki/concepts/a.md"),
+            ("document", "wiki/documents/reviewed.md"),
+        ])
+    );
 }
 
 const RECORD_BOUNDED_AUDIT: &str = r#"
