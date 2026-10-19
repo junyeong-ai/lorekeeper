@@ -184,6 +184,10 @@ const EXEMPT: &[(&[&str], &str)] = &[
         "snapshot identity includes the real vault path; SQLite capture/query/revision contracts are exercised in lk-vault",
     ),
     (
+        &["wiki", "citations"],
+        "requires a runtime snapshot identity containing the real vault path; wiki_citations tests configured paths, complete evidence, captured reads and superseded-snapshot refusal",
+    ),
+    (
         &["wiki", "reviews"],
         "durable review and evidence drift contracts are tested in lk-vault; this corpus holds no reviews",
     ),

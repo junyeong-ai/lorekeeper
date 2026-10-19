@@ -46,7 +46,9 @@ scope fits. Empty concept extraction is valid; a passing mention is insufficient
 Authored pages must be complete and omit `llm_inputs`. Keep factual observations,
 source declarations, proposals and verified outcomes distinct. Preserve source
 language and the vault's configured prose language as AGENTS.md specifies.
-Concept source lists and `source_count` belong to `backlinks-sync`. Existing
+Concept Sources projections and `source_count` belong to `backlinks-sync`. Discover
+complete citations through `wiki citations EXACT_CONCEPT_PATH --snapshot ID`,
+replacing the placeholder with the selected concept address. Existing
 concept synthesis and relations are integrated through the queue, not overwritten
 by an individual new source.
 

@@ -217,9 +217,10 @@ on the matching marker, never on whether a section looks filled.
 
 5. **Finalize (mandatory — do not skip).** The apply here covers whatever the last file
    left pending; `lore graph backlinks-sync` and `lore wiki refresh` are owed once, at the
-   end, over everything this run wrote. Concept `## Sources` sections and
+   end, over everything this run wrote. Bounded concept `## Sources` instructions and
    `source_count` are deliberately left empty during processing; they are
-   machine-owned and reconciled here from the link graph, then SQLite discovery and the entry guide
+   machine-owned and reconciled here from the link graph. Complete citations live in
+   rebuildable SQLite discovery rather than growing Sources lists. SQLite and the entry guide
    are refreshed. Confirm each command exits 0:
    ```bash
    lore queue apply            # materialize reported concepts into pages + links

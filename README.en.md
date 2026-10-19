@@ -200,8 +200,9 @@ PostgreSQL environment to reduce the cost of operating a separate system. Keep t
 conditions of that decision separate from the first note's retrieval-quality observation.
 
 ## Sources
-- [Choosing a Vector Database for Production](../../wiki/documents/choosing-a-vector-database-for-production.md)
-- [RAG Pipeline: Fixing Low-Recall Retrieval](../../wiki/documents/rag-pipeline-fixing-low-recall-retrieval.md)
+<!-- lorekeeper:concept-sources:v1 -->
+
+Run `lore wiki prepare` for a snapshot ID, then `lore wiki citations EXACT_CONCEPT_PATH --snapshot ID` for complete source citations.
 ```
 
 > Whether you write `Vector DB` or `Vector Database`, it lands on **one page** (registered as an alias). Knowledge not fragmenting — that *is* the "compounds over time" promise.
@@ -383,6 +384,11 @@ from that captured SQLite snapshot, separately from ordinary link occurrences.
 Follow `next_offset` with the same snapshot. `total` counts citation entries;
 `source_count` counts origin pages, so selected RSS events may share one origin.
 These captured citations do not certify current source bytes or factual confidence.
+Concept Sources sections hold a fixed discovery instruction instead of growing lists.
+Replace `EXACT_CONCEPT_PATH` with the selected concept address. Only exact generated
+lists migrate; custom Sources prose is preserved and reported. The initial body
+change reopens affected revision-guarded assessments; later citation growth leaves
+the compact body unchanged.
 
 `source_file` preserves a declared string, list of derivation references, or null;
 it does not establish document ownership or readable historical originals.

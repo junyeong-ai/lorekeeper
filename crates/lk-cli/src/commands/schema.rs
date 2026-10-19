@@ -515,11 +515,12 @@ fn convergence_body(language: &str, strings: &Strings) -> Vec<String> {
          EXISTING page leave both exactly as found. Record citations as forward \
          markdown links to the concept page on the ORIGIN page (its \
          `## {related_concepts_heading}` section, link form per `## Links` above); \
-         `lore graph backlinks-sync` re-derives every concept's \
-         `## {sources_heading}` + `source_count` from those forward links wholesale — \
-         an entry not backed by a forward link is wiped, and a concept cited by several \
-         pages in one batch is counted correctly where hand-written one-ref-per-item \
-         entries would undercount. Finish any batch that created concept pages OR \
+         `lore graph backlinks-sync` derives citations and `source_count` from source links, \
+         and writes a bounded discovery instruction under `## {sources_heading}`. \
+         Complete evidence is queried through `wiki prepare` then `wiki citations \
+         EXACT_CONCEPT_PATH --snapshot ID`; substitute the exact current concept address. \
+         Custom Sources prose is preserved and reported, never treated as the complete \
+         citation authority. Finish any batch that created concept pages OR \
          citations with `lore graph backlinks-sync`, then `lore wiki refresh`."
         ),
     ]
