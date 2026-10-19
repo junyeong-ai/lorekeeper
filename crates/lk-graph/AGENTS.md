@@ -44,14 +44,20 @@ and CLI discovery, not a second graph authority.
 
 ## Incremental semantic maintenance (`audit.rs`)
 
-- Derive inputs from actual concept/evidence/related-page revisions using the shared
-  backlink authority. Receipts describe completed reads, never factual confidence.
+- Audit candidates explicitly distinguish concepts from declared source documents
+  under the configured wiki documents collection, including nested addresses.
+  Concept evidence retains the shared backlink authority and existing input identity.
+  A document's own page is its subject input, never a fabricated self-citation;
+  direct concept/document links are revision-pinned context, not inferred evidence
+  or a transitive audit. Scoped reviews retain explicit evidence for either kind.
+  Receipts describe completed reads, never factual confidence or original/provider
+  evidence that was not actually read. Aggregate and per-kind counts retain this scope.
 - Preserve pending first-discovery order and rotate changed/first-time work. A bounded
   weekly batch must not starve old work or grow into an unbounded full-corpus audit.
   Individually oversized inputs remain visible pending blockers; they do not consume
   a class turn or prevent later fitting work. Combined batch capacity is distinct
   from an individual blocker. Exact selections retain their complete requested scope.
-- Scope reviews by their declared subjects, the concept's `knowledge_review` pointer,
+- Scope reviews by their declared subjects, the subject's `knowledge_review` pointer,
   and prior receipt review paths. Omitting result review paths cannot bypass a missing,
   invalid or stale scoped review. Valid open findings remain durable follow-up.
   Bind authored review/evidence revisions and guard exact read bytes when recording.
@@ -60,6 +66,8 @@ and CLI discovery, not a second graph authority.
 - Audit completion follows native merge receipts from the same workflow to a currently
   assessed survivor. Merge receipts join the page mutation journal and retain only
   the latest merging workflow. A correlation ID never authorizes a lease bypass.
+  Only concept slots can follow those merges; a document requires a current assessed
+  document at its exact selected address.
 
 ## Concept names and diagnostics (`concept_lint.rs`)
 
