@@ -136,6 +136,13 @@ impl Installation {
         &self.config_dir
     }
 
+    pub(crate) fn has_deployment_record(&self) -> bool {
+        !matches!(
+            std::fs::symlink_metadata(self.config_dir.join(DATA_DIR_RECORD)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound
+        )
+    }
+
     pub fn templates_dir(&self) -> PathBuf {
         self.data_dir.join("templates")
     }

@@ -293,7 +293,11 @@ ASSESS
 
 #[test]
 fn a_failed_base_stage_does_not_start_dependent_periods() {
-    let fixture = Fixture::new("codex", 30, "exit 23");
+    let fixture = Fixture::new(
+        "codex",
+        30,
+        "printf 'attempt\\n' >> \"$TEST_EXECUTION_ROOT/attempts\"\nexit 23",
+    );
     fixture.ingest();
     let (output, result) = fixture.run("daily");
     assert!(!output.status.success());
@@ -306,6 +310,40 @@ fn a_failed_base_stage_does_not_start_dependent_periods() {
     assert!(names.contains(&"period resume base"));
     assert!(!names.contains(&"period resume quarter"));
     assert!(!names.contains(&"period resume annual"));
+    assert_eq!(
+        std::fs::read_to_string(fixture.root().join("attempts")).unwrap(),
+        "attempt\n"
+    );
+}
+
+#[test]
+fn deadline_preserves_pending_work_and_releases_the_workflow() {
+    let fixture = Fixture::new("codex", 1, "while :; do sleep 1; done");
+    fixture.ingest();
+    let (output, result) = fixture.run("process");
+    assert!(!output.status.success());
+    assert_eq!(result["cancelled"], false);
+    assert!(result["stages"].as_array().unwrap().iter().any(|stage| {
+        stage["name"] == "lore-process"
+            && stage["state"] == "failed"
+            && stage["detail"] == "session deadline exceeded"
+    }));
+    assert!(
+        !fixture
+            .command()
+            .args(["queue", "check"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        fixture
+            .command()
+            .args(["workflow", "--", "/usr/bin/true"])
+            .status()
+            .unwrap()
+            .success()
+    );
 }
 
 #[test]

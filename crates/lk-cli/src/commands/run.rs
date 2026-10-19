@@ -92,6 +92,7 @@ mod native {
         supervisor: execution::Supervisor,
         lease: Option<workflow::WorkflowLease>,
         selected: Option<ExecutionProfile>,
+        drain_blocked: bool,
         result: JobResult,
     }
 
@@ -279,7 +280,19 @@ mod native {
                         "queue drain",
                         "semantic processing is disabled by llm.provider",
                     ),
-                Ok(_) => self.consumer("lore-process", "").await,
+                Ok(_) if self.drain_blocked => {
+                    self.record(
+                        "queue drain",
+                        StageState::Skipped,
+                        Some("previous consumer failed; pending work retained".into()),
+                    );
+                    false
+                }
+                Ok(_) => {
+                    let completed = self.consumer("lore-process", "").await;
+                    self.drain_blocked = !completed;
+                    completed
+                }
                 Err(error) => self.failure("queue inspection", error),
             }
         }
@@ -319,10 +332,10 @@ mod native {
                 {
                     return;
                 }
-                self.drain().await;
+                let drained = self.drain().await;
                 self.native(&format!("period apply {stage}"), &["queue", "apply"])
                     .await;
-                if self.failures() != before || self.result.cancelled {
+                if !drained || self.failures() != before || self.result.cancelled {
                     return;
                 }
                 if !self
@@ -466,6 +479,7 @@ mod native {
             supervisor: execution::Supervisor::new()?,
             lease: None,
             selected: None,
+            drain_blocked: false,
             result: JobResult {
                 operation,
                 ok: true,

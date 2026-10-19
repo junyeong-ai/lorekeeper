@@ -41,7 +41,7 @@ pub struct DeployedArtifact {
 /// A group of artifacts at one location, and whether that location holds a deployment at all.
 ///
 /// An absent group is absent, not stale: an install that deliberately took no skills, or a
-/// machine with no scheduler and therefore no pipelines, is coherent. Only a group that WAS
+/// machine that has never deployed runtime assets, is coherent. Only a group that WAS
 /// deployed can be behind, which is what keeps this check from reporting a defect against a
 /// choice the user made.
 #[derive(Debug, Clone, Serialize)]
@@ -218,7 +218,12 @@ impl InstallationReport {
                 skill_names().into_iter().map(move |name| {
                     (
                         format!("{}/{name}", engine.as_str()),
-                        group(&root.join(name), &skill_files_for(engine, name)),
+                        group_required(
+                            &root.join(name),
+                            &skill_files_for(engine, name),
+                            installation.has_deployment_record()
+                                || !matches!(root.try_exists(), Ok(false)),
+                        ),
                     )
                 })
             })
@@ -231,8 +236,16 @@ impl InstallationReport {
             self_replaceable: target.is_some_and(ReleaseTarget::is_self_replaceable),
             skills,
             runtime_skills,
-            templates: group(&installation.templates_dir(), &template_files()),
-            config: group(installation.config_dir(), &config_files()),
+            templates: group_required(
+                &installation.templates_dir(),
+                &template_files(),
+                installation.has_deployment_record(),
+            ),
+            config: group_required(
+                installation.config_dir(),
+                &config_files(),
+                installation.has_deployment_record(),
+            ),
             schema,
         }
     }
@@ -284,10 +297,14 @@ impl InstallationReport {
 ///
 /// Not when the DIRECTORY exists: the config directory exists because the user's own
 /// `config.yaml` lives in it, which says nothing about whether the example was ever deployed —
-/// so a coherent source build that never ran `self deploy` reported drift it could not have
-/// caused. The same rule makes an empty pipelines directory absent rather than wholly stale.
+/// so a source build that never ran `self deploy` has no expected deployment.
+#[cfg(test)]
 fn group(dir: &Path, files: &[EmbeddedFile]) -> DeployedGroup {
-    if !files.iter().any(|file| dir.join(file.relative).exists()) {
+    group_required(dir, files, false)
+}
+
+fn group_required(dir: &Path, files: &[EmbeddedFile], required: bool) -> DeployedGroup {
+    if !required && !files.iter().any(|file| dir.join(file.relative).exists()) {
         return DeployedGroup::absent(dir.to_path_buf());
     }
     DeployedGroup {
@@ -426,6 +443,42 @@ mod tests {
         let group = group(&tmp.path().join("config"), &config_files());
         assert!(!group.deployed);
         assert_eq!(group.stale().count(), 0);
+    }
+
+    #[test]
+    fn recorded_installation_requires_all_runtime_skills_even_after_directory_loss() {
+        let tmp = tempfile::tempdir().unwrap();
+        let installation = Installation::at(
+            tmp.path().join("bin/lore"),
+            tmp.path().join("data"),
+            tmp.path().join("config"),
+            None,
+            None,
+        );
+        for engine in [
+            lk_core::execution::AgentEngine::ClaudeCode,
+            lk_core::execution::AgentEngine::Codex,
+        ] {
+            installation
+                .for_engine(engine)
+                .deploy_runtime_skills()
+                .unwrap();
+        }
+        installation.remember().unwrap();
+        for path in [
+            installation.runtime_skills_dir().join("lore-process"),
+            installation.data_dir().join("skills"),
+        ] {
+            std::fs::remove_dir_all(path).unwrap();
+            let report = InstallationReport::build(&installation, SchemaState::Unconfigured);
+            let process = report
+                .runtime_skills
+                .iter()
+                .find(|(name, _)| name == "claude-code/lore-process")
+                .unwrap();
+            assert!(process.1.deployed);
+            assert!(process.1.stale().count() > 0);
+        }
     }
 
     #[test]
