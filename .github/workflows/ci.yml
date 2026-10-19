@@ -55,12 +55,12 @@ jobs:
           channel=$(awk -F'"' '/^[[:space:]]*channel[[:space:]]*=/ { print $2; exit }' rust-toolchain.toml)
           [ -n "$channel" ] || { echo "rust-toolchain.toml declares no channel" >&2; exit 1; }
           echo "channel=$channel" >> "$GITHUB_OUTPUT"
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master commit (2026-08-05)
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master commit (2026-10-16)
         with:
           toolchain: ${{ steps.toolchain.outputs.channel }}
           components: rustfmt
       # Tool versions are fixed; security audits still refresh their advisory database.
-      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: taplo@0.10.0
       - run: cargo fmt --all --check
@@ -85,7 +85,7 @@ jobs:
           channel=$(awk -F'"' '/^[[:space:]]*channel[[:space:]]*=/ { print $2; exit }' rust-toolchain.toml)
           [ -n "$channel" ] || { echo "rust-toolchain.toml declares no channel" >&2; exit 1; }
           echo "channel=$channel" >> "$GITHUB_OUTPUT"
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master commit (2026-08-05)
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master commit (2026-10-16)
         with:
           toolchain: ${{ steps.toolchain.outputs.channel }}
           components: clippy
@@ -113,13 +113,13 @@ jobs:
           channel=$(awk -F'"' '/^[[:space:]]*channel[[:space:]]*=/ { print $2; exit }' rust-toolchain.toml)
           [ -n "$channel" ] || { echo "rust-toolchain.toml declares no channel" >&2; exit 1; }
           echo "channel=$channel" >> "$GITHUB_OUTPUT"
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master commit (2026-08-05)
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master commit (2026-10-16)
         with:
           toolchain: ${{ steps.toolchain.outputs.channel }}
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: test
-      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: cargo-nextest@0.9.148
       # Pinned for the reason scripts/check.sh states: an inherited `always` turns every
@@ -161,7 +161,7 @@ jobs:
           channel=$(awk -F'"' '/^[[:space:]]*channel[[:space:]]*=/ { print $2; exit }' rust-toolchain.toml)
           [ -n "$channel" ] || { echo "rust-toolchain.toml declares no channel" >&2; exit 1; }
           echo "channel=$channel" >> "$GITHUB_OUTPUT"
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master commit (2026-08-05)
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master commit (2026-10-16)
         with:
           toolchain: ${{ steps.toolchain.outputs.channel }}
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -197,7 +197,7 @@ jobs:
       # `actionlint` answers whether a workflow is well formed; `zizmor` answers whether it is
       # safe — an input expanded into a `run:` block, a token left in a clone, a permission
       # wider than the job needs.
-      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: zizmor@1.31.0
       - run: zizmor .github/workflows/
@@ -219,7 +219,7 @@ jobs:
           channel=$(awk -F'"' '/^[[:space:]]*channel[[:space:]]*=/ { print $2; exit }' rust-toolchain.toml)
           [ -n "$channel" ] || { echo "rust-toolchain.toml declares no channel" >&2; exit 1; }
           echo "channel=$channel" >> "$GITHUB_OUTPUT"
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master commit (2026-08-05)
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master commit (2026-10-16)
         with:
           toolchain: ${{ steps.toolchain.outputs.channel }}
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -248,7 +248,7 @@ jobs:
           ' Cargo.toml)
           [ -n "$version" ] || { echo "Cargo.toml declares no rust-version" >&2; exit 1; }
           echo "version=$version" >> "$GITHUB_OUTPUT"
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master commit (2026-08-05)
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master commit (2026-10-16)
         with:
           toolchain: ${{ steps.msrv.outputs.version }}
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -276,10 +276,10 @@ jobs:
           channel=$(awk -F'"' '/^[[:space:]]*channel[[:space:]]*=/ { print $2; exit }' rust-toolchain.toml)
           [ -n "$channel" ] || { echo "rust-toolchain.toml declares no channel" >&2; exit 1; }
           echo "channel=$channel" >> "$GITHUB_OUTPUT"
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master commit (2026-08-05)
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master commit (2026-10-16)
         with:
           toolchain: ${{ steps.toolchain.outputs.channel }}
-      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: cargo-audit@0.22.2
       - run: cargo audit --deny warnings
@@ -299,10 +299,10 @@ jobs:
           channel=$(awk -F'"' '/^[[:space:]]*channel[[:space:]]*=/ { print $2; exit }' rust-toolchain.toml)
           [ -n "$channel" ] || { echo "rust-toolchain.toml declares no channel" >&2; exit 1; }
           echo "channel=$channel" >> "$GITHUB_OUTPUT"
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master commit (2026-08-05)
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master commit (2026-10-16)
         with:
           toolchain: ${{ steps.toolchain.outputs.channel }}
-      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: cargo-deny@0.20.2
       - run: cargo deny check
@@ -324,10 +324,10 @@ jobs:
           channel=$(awk -F'"' '/^[[:space:]]*channel[[:space:]]*=/ { print $2; exit }' rust-toolchain.toml)
           [ -n "$channel" ] || { echo "rust-toolchain.toml declares no channel" >&2; exit 1; }
           echo "channel=$channel" >> "$GITHUB_OUTPUT"
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master commit (2026-08-05)
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master commit (2026-10-16)
         with:
           toolchain: ${{ steps.toolchain.outputs.channel }}
-      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: cargo-machete@0.9.2
       - run: cargo machete
@@ -351,7 +351,7 @@ jobs:
           channel=$(awk -F'"' '/^[[:space:]]*channel[[:space:]]*=/ { print $2; exit }' rust-toolchain.toml)
           [ -n "$channel" ] || { echo "rust-toolchain.toml declares no channel" >&2; exit 1; }
           echo "channel=$channel" >> "$GITHUB_OUTPUT"
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master commit (2026-08-05)
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master commit (2026-10-16)
         with:
           toolchain: ${{ steps.toolchain.outputs.channel }}
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
