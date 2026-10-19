@@ -306,7 +306,6 @@ impl ConceptDrafts {
         let identity = self
             .resolve_identity(&concept.name, reader, dirs, policy)
             .await?;
-        let (aliases, refused) = self.adopt_aliases(&identity, &concept.aliases);
         // A slug already staged this run needs no read: the draft in hand is newer than the
         // page on disk, and `commit` folds into it.
         let existing = if self.drafts.contains_key(&identity.slug) {
@@ -334,6 +333,7 @@ impl ConceptDrafts {
                 .as_ref()
                 .and_then(|page| page.frontmatter.get("category")),
         )?;
+        let (aliases, refused) = self.adopt_aliases(&identity, &concept.aliases);
         if existing.is_some() {
             self.established.insert(identity.slug.clone());
         }
@@ -1500,7 +1500,7 @@ mod tests {
             .stage(
                 &ExtractedConcept {
                     name: "Stored".into(),
-                    aliases: vec![],
+                    aliases: vec!["Unclaimed".into()],
                     category: None,
                 },
                 &reader,
@@ -1521,6 +1521,20 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+        let valid = drafts
+            .stage(
+                &ExtractedConcept {
+                    name: "Unclaimed".into(),
+                    aliases: vec![],
+                    category: None,
+                },
+                &reader,
+                &VaultDirs::default(),
+                ConceptPolicy::SupportedNew,
+            )
+            .await
+            .unwrap();
+        assert_eq!(valid.identity().slug, "unclaimed");
     }
 
     #[tokio::test]
