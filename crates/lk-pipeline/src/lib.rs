@@ -927,7 +927,11 @@ impl Pipeline {
         event: &Event,
         identity: Option<&DocumentIdentity>,
     ) -> Result<Option<String>, PipelineError> {
-        let Some(DocumentIdentity::Repository(repository)) = identity else {
+        let Some(DocumentIdentity::Stable(lk_core::source_identity::SourceIdentity::Repository {
+            document,
+            ..
+        })) = identity
+        else {
             return Ok(None);
         };
         let legacy = DocumentIdentity::from_fields(
@@ -972,7 +976,7 @@ impl Pipeline {
                     .get("source_record")
                     .and_then(|record| record.get("id"))
                     .and_then(|id| id.as_str())
-                    == Some(repository.document.as_str())
+                    == Some(document.as_str())
             {
                 matches.push(address.clone());
             }
@@ -985,7 +989,7 @@ impl Pipeline {
         {
             return Err(PipelineError::Render(format!(
                 "ambiguous legacy document ownership for {}: {}",
-                repository.document,
+                document,
                 matches.join(", ")
             )));
         }
@@ -995,7 +999,7 @@ impl Pipeline {
         {
             return Err(PipelineError::Render(format!(
                 "legacy document {} is already planned",
-                repository.document
+                document
             )));
         }
         Ok(matches.pop())
