@@ -71,6 +71,14 @@ pub fn build_brief(
             Err(VaultError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => continue,
             Err(error) => return Err(error),
         };
+        if page
+            .frontmatter
+            .knowledge_status()
+            .map_err(VaultError::Frontmatter)?
+            == lk_core::frontmatter::KnowledgeStatus::Retired
+        {
+            continue;
+        }
         let introduced = page
             .frontmatter
             .get("created")
@@ -151,7 +159,7 @@ fn named_on(
             };
             if resolved.extension().is_some_and(|e| e == "md")
                 && let Some(actual) = resolver.resolve(&resolved)?
-                && actual.parent() == Some(concepts_rel.as_path())
+                && actual.starts_with(&concepts_rel)
             {
                 named.insert(actual);
             }
@@ -223,6 +231,35 @@ fn pages_of(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn brief_keeps_nested_active_knowledge_and_excludes_both_retired_groups() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let concepts = root.path().join(concepts_dir(&dirs));
+        concept(&concepts, "group/active", "2026-09-10", 1);
+        for (name, created) in [("retired-new", "2026-09-10"), ("retired-old", "2026-01-01")] {
+            write(
+                &concepts.join(format!("{name}.md")),
+                &format!(
+                    "---\ntype: concept\ntitle: {name}\ncreated: {created}\nknowledge_status: retired\n---\n## Synthesis\nHistorical unsupported claim.\n"
+                ),
+            );
+        }
+        write(
+            &root.path().join("daily/news/2026-09-10.md"),
+            "---\ntype: daily\n---\n[Active](../../wiki/concepts/group/active.md)\n[New](../../wiki/concepts/retired-new.md)\n[Old](../../wiki/concepts/retired-old.md)\n",
+        );
+        let brief = build_brief(root.path(), &dirs, jiff::civil::date(2026, 9, 10)).unwrap();
+        assert_eq!(brief.learned.len(), 1);
+        assert_eq!(brief.learned[0].path, "wiki/concepts/group/active.md");
+        assert!(brief.revisited.is_empty());
+        write(
+            &concepts.join("retired-new.md"),
+            "---\ntype: concept\nknowledge_status: [retired]\n---\nBody.",
+        );
+        assert!(build_brief(root.path(), &dirs, jiff::civil::date(2026, 9, 10)).is_err());
+    }
 
     fn write(path: &Path, content: &str) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
