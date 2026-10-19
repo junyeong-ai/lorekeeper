@@ -5,6 +5,12 @@ use lk_core::frontmatter::{self, VaultPage};
 
 use crate::VaultError;
 
+/// Distinct page owners and all validated occupied addresses from one collection scan.
+pub struct MarkdownInventory {
+    pub owners: Vec<PathBuf>,
+    pub addresses: Vec<PathBuf>,
+}
+
 pub(crate) fn read_page(root: &Path, path: &Path) -> Result<VaultPage, VaultError> {
     let relative = path.strip_prefix(root).map_err(std::io::Error::other)?;
     let checked = crate::page_path(root, relative)?;
@@ -36,6 +42,15 @@ pub trait VaultStore: Send + Sync {
     /// aliases share one owner, preferring its direct address; hard links stay distinct.
     /// Refuse directory aliases that cannot be traversed completely.
     async fn list_markdown_recursive(&self, rel_dir: &Path) -> Result<Vec<PathBuf>, VaultError>;
+
+    /// Name routing uses owners; allocation reserves every occupied address, including aliases.
+    async fn markdown_inventory(&self, rel_dir: &Path) -> Result<MarkdownInventory, VaultError> {
+        let owners = self.list_markdown_recursive(rel_dir).await?;
+        Ok(MarkdownInventory {
+            addresses: owners.clone(),
+            owners,
+        })
+    }
 }
 
 /// Load one complete name registry for all lookups in an operation.
@@ -46,7 +61,20 @@ pub async fn load_concept_registry(
     use lk_core::concept::{ConceptIdentity, ConceptRegistry};
     let mut registry = ConceptRegistry::new();
     let directory = lk_core::vault_path::concepts_dir(dirs);
-    for path in reader.list_markdown_recursive(&directory).await? {
+    let inventory = reader.markdown_inventory(&directory).await?;
+    for path in &inventory.addresses {
+        let address = path
+            .strip_prefix(&directory)
+            .map_err(std::io::Error::other)?
+            .with_extension("");
+        registry.reserve_address(
+            &address
+                .to_str()
+                .ok_or_else(|| std::io::Error::other("concept address is not UTF-8"))?
+                .replace(std::path::MAIN_SEPARATOR, "/"),
+        );
+    }
+    for path in inventory.owners {
         let stem = path
             .file_stem()
             .and_then(|stem| stem.to_str())
@@ -108,16 +136,26 @@ impl FsVault {
 #[async_trait]
 impl VaultStore for FsVault {
     async fn list_markdown_recursive(&self, rel_dir: &Path) -> Result<Vec<PathBuf>, VaultError> {
+        Ok(self.markdown_inventory(rel_dir).await?.owners)
+    }
+
+    async fn markdown_inventory(&self, rel_dir: &Path) -> Result<MarkdownInventory, VaultError> {
         let full = crate::page_path(&self.root, rel_dir)?;
         match std::fs::metadata(&full) {
             Ok(metadata) if metadata.is_dir() => {}
             Ok(_) => {
                 return Err(std::io::Error::other("vault collection is not a directory").into());
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(MarkdownInventory {
+                    owners: Vec::new(),
+                    addresses: Vec::new(),
+                });
+            }
             Err(error) => return Err(error.into()),
         }
         let mut owners = std::collections::BTreeMap::<PathBuf, (bool, PathBuf)>::new();
+        let mut addresses = Vec::new();
         for entry in walkdir::WalkDir::new(&full).follow_links(false) {
             let entry = entry.map_err(|error| std::io::Error::other(error.to_string()))?;
             if entry.depth() > 0
@@ -149,6 +187,7 @@ impl VaultStore for FsVault {
                 .into());
             }
             let canonical = checked.canonicalize()?;
+            addresses.push(relative.to_path_buf());
             let candidate = (entry.file_type().is_symlink(), relative.to_path_buf());
             owners
                 .entry(canonical)
@@ -164,7 +203,11 @@ impl VaultStore for FsVault {
             .map(|(_, path)| path)
             .collect::<Vec<_>>();
         paths.sort();
-        Ok(paths)
+        addresses.sort();
+        Ok(MarkdownInventory {
+            owners: paths,
+            addresses,
+        })
     }
 
     async fn read_page(&self, rel_path: &Path) -> Result<Option<VaultPage>, VaultError> {
@@ -305,6 +348,16 @@ mod tests {
         assert!(
             matches!(registry.resolve("Synonym"), Resolution::Owned(owner) if owner.slug == "group/owner")
         );
+        for name in ["A Alias", "Z Alias"] {
+            assert!(matches!(registry.resolve(name), Resolution::Absent));
+            assert_ne!(
+                registry.available_slug(name),
+                lk_core::concept::slugify(name)
+            );
+        }
+        let inventory = reader.markdown_inventory(directory).await.unwrap();
+        assert_eq!(inventory.owners.len(), 1);
+        assert_eq!(inventory.addresses.len(), 3);
 
         std::fs::hard_link(&owner, nested.join("independent.md")).unwrap();
         assert_eq!(

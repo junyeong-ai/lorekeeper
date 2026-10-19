@@ -81,7 +81,9 @@ pub use self::section::{
     PageSection, SectionKey, clear_llm_input, record_llm_input, replace_section, resolve_section,
     section_body, section_headings, set_frontmatter_field, set_llm_input,
 };
-pub use self::store::{FsVault, InMemoryVault, VaultStore, load_concept_registry};
+pub use self::store::{
+    FsVault, InMemoryVault, MarkdownInventory, VaultStore, load_concept_registry,
+};
 pub use self::template::{TemplateEngine, embedded_templates};
 pub use self::timeline::{build_timeline, build_timeline_catalog, write_timeline};
 pub use self::writer::VaultWriter;
