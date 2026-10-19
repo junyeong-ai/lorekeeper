@@ -25,6 +25,12 @@ uses validated params and context; do not add per-adapter output pipelines.
   rather than truncating. Timeout is not a memory cap. Decode the HTTP Content-Type
   charset once via encoding_rs; do not reinterpret an already decoded meta charset.
   Private redirect targets are intentionally supported for intranet sources.
+- Remote readable fetch requires a supported HTTP media type. HTML uses readability;
+  Markdown keeps its structure and rebases parsed Link/Image destinations against the
+  final response URL. A `text/plain` URL ending in `.md`/`.markdown` uses that file
+  format; other plain text is escaped as literal prose. Raw HTML inside Markdown stays
+  unchanged and is subject to manual capture's dependency checks. Unknown media/charset,
+  malformed text and oversized bodies are errors; RSS retains its feed content.
 - `is_self` uses structured identity: Gmail From email, Slack user ID, Jira assignee,
   Calendar organizer/attendee. Drive/RSS/manual are false; nodex's authored kind is
   not a Git author identity.

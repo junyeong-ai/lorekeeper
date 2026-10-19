@@ -60,10 +60,9 @@ pub enum Command {
         #[arg(long)]
         wait_for_vault: bool,
     },
-    /// Save a web page's article into the manual source's inbox, so a link someone sent
-    /// becomes vault knowledge on the next ingest
+    /// Save an HTML article, Markdown or text document into a manual source's inbox
     Fetch {
-        /// The page to read
+        /// The HTTP URL to read
         url: String,
         /// Which `manual` source's inbox to write into. Needed only when several are enabled
         #[arg(long)]

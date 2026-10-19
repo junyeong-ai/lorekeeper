@@ -380,6 +380,8 @@ lore config vault-root        # vault 절대경로만 출력(스크립트용)
 lore schema                   # wiki/AGENTS.md(페이지 포맷 스키마) 생성
 ```
 
+`lore fetch`는 HTTP `Content-Type`에 따라 HTML·Markdown·일반 텍스트를 읽습니다. `text/plain`으로 제공되는 `.md`·`.markdown` 파일도 Markdown으로 보존하며, 링크·이미지의 상대 주소는 최종 응답 URL을 기준으로 바꿉니다. 형식 선언이 없거나 지원하지 않는 응답, 잘못된 문자 인코딩과 16 MiB를 넘는 본문은 오류로 보고합니다. Markdown 안의 raw HTML 주소는 그대로 남아 수동 원본의 의존성 검사 대상이 됩니다.
+
 기본 `lore wiki refresh`는 SQLite 탐색 스냅샷과 작은 `index.md` 진입 안내를 갱신합니다. 전체 Markdown catalog/log/map 자동 내보내기는 `vault.navigation.markdown_exports: true`로 켭니다(기본 false). 명시 `wiki index/log/map`와 `graph index-sync`는 선택적 export 명령으로 유지됩니다. 기본 모드의 graph lint는 export 최신성을 요구하지 않습니다. 생성 마커가 없는 기존 파일은 자동으로 덮거나 삭제하지 않으며, 충돌은 명시적으로 보고합니다. 탐색 세션은 `wiki prepare` 한 번으로 ID를 확보한 뒤 `wiki browse/search/links --snapshot ID`를 반복하고(`links --direction incoming|both`), `wiki read --revision REV`로 현재 원문을 확인합니다. refresh도 준비한 ID를 출력합니다.
 
 프로젝트 문서의 `source_record.attributes`는 nodex 공개 응답의 원본 속성을 보존합니다. routine의 `prompt`처럼 본문 밖에 있는 지식도 요약·추출 입력에 포함하며, 속성은 현재 작업을 실행하라는 지시가 아닌 출처의 내용으로 읽습니다.

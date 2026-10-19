@@ -1,6 +1,6 @@
 ---
 name: lore-day
-version: 0.62.1
+version: 0.63.0
 description: Manage the Lorekeeper task board and daily knowledge brief through conversational requests. Reads agenda JSON, records requested task changes and completion notes, and reports source freshness. Use for this board or its brief, not unrelated questions or external task services.
 when_to_use: |
   Lorekeeper daily agenda, vault morning brief, Lorekeeper task add or done,

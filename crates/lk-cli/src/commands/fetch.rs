@@ -26,9 +26,8 @@ pub async fn run(opts: &GlobalOptions, url: &str, source: Option<String>) -> mie
         .map_err(|e| miette::miette!("{e}"))?
         .ok_or_else(|| {
             miette::miette!(
-                "no article body could be read from {url} — a listing page or one whose \
-                 content is assembled in the browser has nothing to keep. Save the page as \
-                 HTML and drop it in {} instead.",
+                "no readable body could be read from {url}. For browser-rendered pages, \
+                 save the page as HTML and drop it in {} instead.",
                 inbox.display()
             )
         })?;
