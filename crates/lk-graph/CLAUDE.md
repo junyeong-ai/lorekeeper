@@ -79,6 +79,8 @@ belong to exploration reviews, not a machine-persisted callout inferred by locat
 - This is the sole derivation of Sources, `source_count`, and synthesis input.
   Derive citations from actual source concept/related anchors with exact authored
   revisions. Update the three together; unreadable sources forbid publication.
+  Symlink spellings share one verified source owner; hard-link entries remain distinct.
+  Refuse differing alias-relative citation contexts rather than choosing or unioning them.
   Report discarded anchor sections rather than pretending their evidence remained.
 - Sources are managed non-concept content, excluding entry/schema guides and task boards. Do not
   revive a frontmatter `sources` array as authority. Validated RSS event dependencies
