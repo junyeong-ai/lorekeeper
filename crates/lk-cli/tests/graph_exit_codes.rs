@@ -8,17 +8,16 @@
 //! carry no information at all — at which point a link pointing at nothing is ignored along with
 //! them.
 
-use std::path::PathBuf;
 use std::process::{Command, Output};
 
 /// A shipped caller that discards the exit code makes every violation invisible again, so the
-/// property is checked by RUNNING the shipped script rather than by reading it.
+/// property is checked by RUNNING the native coordinator rather than by reading it.
 ///
 /// Reading it cannot establish this. A grep for `|| true` beside a `lore` call misses the same
 /// thing spelled without the space, `; true`, `|| log "…"`, a line continuation, a
 /// `soft() { "$@" || true; }` wrapper whose two halves are individually clean, a bare call that
 /// never goes through `run()`, and the literal moved to another file — while failing the build on
-/// a COMMENT containing the words. Executing `sync_graph` against a vault with one broken link is
+/// a COMMENT containing the words. Executing the native pipeline against a vault with one broken link is
 /// indifferent to spelling: every way of losing the code produces one visible symptom, a pipeline
 /// that reports success.
 #[cfg(unix)]
@@ -39,11 +38,14 @@ fn the_shipped_pipeline_fails_when_the_vault_contradicts_itself() {
         "a broken link must fail the pipeline, not just print\n{}",
         String::from_utf8_lossy(&clean.stdout)
     );
-    let log = String::from_utf8_lossy(&clean.stdout).to_string();
-    assert!(log.contains("✗ graph lint"), "stage not recorded\n{log}");
+    let report: serde_json::Value = serde_json::from_slice(&clean.stdout).unwrap();
+    assert_eq!(report["ok"], false);
     assert!(
-        log.contains("done with failures: graph lint"),
-        "failure not carried to the pipeline's own verdict\n{log}"
+        report["stages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|stage| stage["name"] == "graph lint" && stage["state"] == "failed")
     );
 }
 
@@ -61,8 +63,15 @@ fn the_shipped_pipeline_passes_on_a_vault_whose_findings_are_observations() {
         out.status.success(),
         "an uncited concept and an open conflict must not fail the pipeline\n{log}"
     );
-    assert!(log.contains("✓ graph lint"), "{log}");
-    assert!(log.contains("done — all stages ok"), "{log}");
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["ok"], true);
+    assert!(
+        report["stages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|stage| stage["name"] == "graph lint" && stage["state"] == "completed")
+    );
 }
 
 struct Workspace {
@@ -115,32 +124,18 @@ impl Workspace {
         String::from_utf8(self.run(args).stdout).expect("utf8")
     }
 
-    /// The SHIPPED `sync_graph`: the real `scripts/lore-pipeline.sh`, sourced the way the
-    /// scheduled jobs source it, so what is under test is the file that ships.
-    ///
-    /// Run under `llm.provider: noop`, which is what that provider is for — a run with no LLM
-    /// work. `sync_graph` drains the queue, and a drain spawns `claude` against installed
-    /// skills; under the default provider this test would pass or fail on whether the machine
-    /// running it has both, which is a property of the machine and not of the pipeline. Under
-    /// `noop` the sweep records no synthesis input, nothing is queued, and the drain is
-    /// skipped — leaving exactly the exit-code propagation this test exists to pin.
+    /// Exercise the shipped native coordinator without requiring an agent installation.
     #[cfg(unix)]
     fn run_pipeline(&self) -> Output {
-        let script =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../scripts/lore-pipeline.sh");
         let config = self.root.path().join("pipeline-config.yaml");
         let base = std::fs::read_to_string(self.root.path().join("config.yaml")).expect("config");
         std::fs::write(&config, format!("{base}llm:\n  provider: noop\n")).expect("write config");
-        Command::new("bash")
-            .arg("-c")
-            .arg(format!(
-                "source {}\npipeline_start\nsync_graph\npipeline_finish",
-                script.display()
-            ))
-            .env("LORE_BIN", env!("CARGO_BIN_EXE_lore"))
-            .env("LORE_CONFIG", config)
+        Command::new(env!("CARGO_BIN_EXE_lore"))
+            .arg("--config")
+            .arg(config)
+            .args(["run", "process", "--json"])
             .output()
-            .expect("spawn bash")
+            .expect("spawn native pipeline")
     }
 }
 

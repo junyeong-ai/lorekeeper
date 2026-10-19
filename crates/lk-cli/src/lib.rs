@@ -34,6 +34,7 @@ pub struct Cli {
 pub enum Command {
     /// Execute a complete job using the configured Claude Code or Codex profile
     Run {
+        /// Complete daily collection, queued processing, or one knowledge audit batch
         #[arg(value_enum)]
         operation: commands::run::Operation,
         /// Explicit execution profile; otherwise operation override then configured default
@@ -155,13 +156,6 @@ pub enum Command {
         /// sleep once the machine wakes, whereas cron drops it.
         #[arg(long, value_enum, default_value_t = commands::schedule::Format::Cron)]
         format: commands::schedule::Format,
-        /// Absolute directory holding the installed pipeline scripts (the installer's
-        /// `<data>/pipelines`). With it, the daily and weekly entries run those scripts —
-        /// ingest and weekly synthesis are only their FIRST stage, and the bare subcommands
-        /// never drain the LLM queue or apply its results. Without it, those two entries are
-        /// the bare subcommands and the drain must be scheduled some other way.
-        #[arg(long)]
-        pipeline_dir: Option<std::path::PathBuf>,
         /// launchd label prefix; use a distinct namespace for an isolated installation
         #[arg(long, default_value = "com.lorekeeper")]
         namespace: String,
@@ -315,20 +309,9 @@ pub async fn run() -> miette::Result<()> {
         Command::Schedule {
             bin,
             format,
-            pipeline_dir,
             namespace,
             log_dir,
-        } => {
-            commands::schedule::run(
-                &opts,
-                &bin,
-                format,
-                pipeline_dir.as_deref(),
-                &namespace,
-                log_dir.as_deref(),
-            )
-            .await
-        }
+        } => commands::schedule::run(&opts, &bin, format, &namespace, log_dir.as_deref()).await,
         Command::Maintenance {
             dry_run,
             wait_for_vault,

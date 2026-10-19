@@ -1,38 +1,27 @@
-//! Scheduled pipelines retain an explicitly selected skill installation.
-
+//! Scheduled jobs use configured execution profiles and captured, credential-free paths.
 use std::path::Path;
 use std::process::{Command, Output};
 
-fn schedule(root: &Path, format: &str, skill_dir: Option<&Path>) -> Output {
-    schedule_profile(root, format, skill_dir, None)
+fn workspace(engine: Option<&str>) -> tempfile::TempDir {
+    let directory = tempfile::tempdir().unwrap();
+    let mut config = "vault:\n  root: vault\nidentity:\n  name: Test\n  email: test@example.com\nsources:\n  notes:\n    type: manual\n    params: {inbox_dir: inbox}\ningest:\n  schedule: '0 9 * * *'\n".to_owned();
+    if let Some(engine) = engine {
+        config.push_str(&format!("execution:\n  default_profile: primary\n  profiles:\n    primary: {{engine: {engine}, timeout_seconds: 60}}\n"));
+    }
+    std::fs::write(directory.path().join("config.yaml"), config).unwrap();
+    directory
 }
 
-fn schedule_profile(
-    root: &Path,
-    format: &str,
-    skill_dir: Option<&Path>,
-    profile: Option<&Path>,
-) -> Output {
-    schedule_profile_on_path(root, format, skill_dir, profile, None)
-}
-
-fn schedule_profile_on_path(
-    root: &Path,
-    format: &str,
-    skill_dir: Option<&Path>,
-    profile: Option<&Path>,
-    path: Option<&std::ffi::OsStr>,
-) -> Output {
+fn render(root: &Path, format: &str, environment: &[(&str, &std::ffi::OsStr)]) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_lore"));
     for (key, _) in std::env::vars_os() {
         if key.to_string_lossy().starts_with("LORE_") {
             command.env_remove(key);
         }
     }
-    command.env_remove("CLAUDE_CONFIG_DIR");
-    if let Some(path) = path {
-        command.env("PATH", path);
-    }
+    command
+        .env_remove("CLAUDE_CONFIG_DIR")
+        .env_remove("CODEX_HOME");
     for key in [
         "HTTP_PROXY",
         "HTTPS_PROXY",
@@ -45,187 +34,99 @@ fn schedule_profile_on_path(
     ] {
         command.env_remove(key);
     }
-    command.env("ANTHROPIC_API_KEY", "fixture-key-must-not-be-exported");
-    if let Some(dir) = profile {
-        command.env("CLAUDE_CONFIG_DIR", dir);
-    }
-    if let Some(dir) = skill_dir {
-        command.env("LORE_SKILL_DIR", dir);
+    command.env("ANTHROPIC_API_KEY", "fixture-must-not-be-exported");
+    command.env("OPENAI_API_KEY", "fixture-must-not-be-exported");
+    command.env("LORE_INSTALL_DATA_DIR", root.join("runtime data"));
+    for (key, value) in environment {
+        command.env(key, value);
     }
     command
         .current_dir(root)
         .args(["schedule", "--format", format, "--bin"])
         .arg(env!("CARGO_BIN_EXE_lore"))
-        .arg("--pipeline-dir")
-        .arg(root.join("pipelines"))
         .output()
         .unwrap()
 }
 
-#[cfg(unix)]
 #[test]
-fn captured_claude_runs_after_chdir_without_pinning_a_symlink_target() {
-    use std::os::unix::{fs::PermissionsExt, fs::symlink};
+fn scheduled_semantic_work_requires_an_explicit_profile() {
+    let directory = workspace(None);
+    for format in ["cron", "launchd"] {
+        let output = render(directory.path(), format, &[]);
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("execution.default_profile"));
+        assert!(!directory.path().join("vault").exists());
+    }
+}
 
-    let root = workspace();
-    let cwd = root.path().canonicalize().unwrap();
-    let tools = cwd.join("tools");
-    let elsewhere = cwd.join("vault");
-    std::fs::create_dir(&tools).unwrap();
-    std::fs::create_dir(&elsewhere).unwrap();
-    let versions: Vec<_> = ["first", "second"]
-        .into_iter()
-        .map(|version| {
-            let file = root.path().join(format!("claude-{version}"));
-            std::fs::write(&file, format!("#!/bin/sh\nprintf '{version}\\n'\n")).unwrap();
-            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
-            file
-        })
-        .collect();
-    for (path_entry, captured) in [
-        (std::path::PathBuf::from("tools"), tools.join("claude")),
-        (std::path::PathBuf::new(), cwd.join("claude")),
-        (tools.clone(), tools.join("claude")),
+#[test]
+fn both_schedulers_capture_runtime_and_only_the_selected_hosts_existing_profile() {
+    for (engine, key, other) in [
+        ("claude-code", "CLAUDE_CONFIG_DIR", "CODEX_HOME"),
+        ("codex", "CODEX_HOME", "CLAUDE_CONFIG_DIR"),
     ] {
-        let path = std::env::join_paths([path_entry]).unwrap();
+        let directory = workspace(Some(engine));
+        let profile = directory.path().join("selected profile");
+        std::fs::create_dir(&profile).unwrap();
+        let missing = directory.path().join("not-selected-missing");
         for format in ["cron", "launchd"] {
-            let _ = std::fs::remove_file(&captured);
-            symlink(&versions[0], &captured).unwrap();
-            let output =
-                schedule_profile_on_path(root.path(), format, None, None, Some(path.as_os_str()));
+            let output = render(
+                directory.path(),
+                format,
+                &[
+                    (key, std::ffi::OsStr::new("selected profile")),
+                    (other, missing.as_os_str()),
+                ],
+            );
             assert!(
                 output.status.success(),
                 "{}",
                 String::from_utf8_lossy(&output.stderr)
             );
             let text = String::from_utf8(output.stdout).unwrap();
-            let expected = if format == "cron" {
-                format!("CLAUDE_BIN={}\n", captured.display())
-            } else {
-                format!(
-                    "<key>CLAUDE_BIN</key><string>{}</string>",
-                    captured.display()
-                )
-            };
-            assert!(text.contains(&expected), "{text}");
-            let run = || {
-                Command::new(&captured)
-                    .current_dir(&elsewhere)
-                    .output()
-                    .unwrap()
-            };
-            let first = run();
-            assert!(first.status.success());
-            assert_eq!(first.stdout, b"first\n");
-            // A normal CLI update moves the symlink; schedules must follow it.
-            std::fs::remove_file(&captured).unwrap();
-            symlink(&versions[1], &captured).unwrap();
-            let second = run();
-            assert!(second.status.success());
-            assert_eq!(second.stdout, b"second\n");
-        }
-    }
-}
-
-fn workspace() -> tempfile::TempDir {
-    let root = tempfile::tempdir().unwrap();
-    std::fs::write(
-        root.path().join("config.yaml"),
-        "vault:\n  root: vault\nidentity:\n  name: Test\n  email: test@example.invalid\n\
-         ingest:\n  schedule: '0 9 * * *'\n\
-         sources:\n  notes:\n    type: manual\n    params:\n      inbox_dir: inbox\n",
-    )
-    .unwrap();
-    root
-}
-
-#[test]
-fn both_schedulers_capture_the_absolute_explicit_skill_directory() {
-    let root = workspace();
-    let skills = root.path().join("project skills & tools");
-    std::fs::create_dir(&skills).unwrap();
-    let canonical = skills.canonicalize().unwrap();
-    for format in ["cron", "launchd"] {
-        let out = schedule(
-            root.path(),
-            format,
-            Some(Path::new("project skills & tools")),
-        );
-        assert!(
-            out.status.success(),
-            "{}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        let text = String::from_utf8(out.stdout).unwrap();
-        if format == "cron" {
-            assert!(text.contains(&format!("LORE_SKILL_DIR={}", canonical.display())));
-        } else {
-            assert!(text.contains("<key>LORE_SKILL_DIR</key>"));
-            assert!(text.contains(&format!(
-                "<string>{}</string>",
-                canonical.display().to_string().replace('&', "&amp;")
-            )));
+            assert!(text.contains(key));
+            assert!(text.contains(profile.canonicalize().unwrap().to_str().unwrap()));
+            assert!(text.contains("LORE_INSTALL_DATA_DIR"));
+            assert!(text.contains(directory.path().join("runtime data").to_str().unwrap()));
+            assert!(!text.contains(other));
+            assert!(!text.contains("fixture-must-not-be-exported"));
+            assert!(!directory.path().join("vault").exists());
         }
     }
 }
 
 #[test]
-fn absent_override_keeps_the_runtime_default_and_invalid_override_emits_no_schedule() {
-    let root = workspace();
-    let file = root.path().join("not-a-directory");
-    std::fs::write(&file, "not a skill directory").unwrap();
-    for format in ["cron", "launchd"] {
-        let default = schedule(root.path(), format, None);
-        assert!(default.status.success());
-        assert!(!String::from_utf8_lossy(&default.stdout).contains("LORE_SKILL_DIR"));
-        for invalid in [Path::new("missing"), file.as_path(), Path::new("")] {
-            let refused = schedule(root.path(), format, Some(invalid));
-            assert!(!refused.status.success());
-            assert!(refused.stdout.is_empty());
-            assert!(String::from_utf8_lossy(&refused.stderr).contains("LORE_SKILL_DIR"));
-        }
+fn an_explicit_missing_selected_profile_is_not_silently_replaced() {
+    let directory = workspace(Some("codex"));
+    for value in ["", "missing"] {
+        let output = render(
+            directory.path(),
+            "cron",
+            &[("CODEX_HOME", std::ffi::OsStr::new(value))],
+        );
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
     }
 }
 
 #[test]
-fn selected_claude_profile_is_canonicalized_without_exporting_secrets() {
-    let root = workspace();
-    let profile = root.path().join("Claude profile & settings");
-    std::fs::create_dir(&profile).unwrap();
-    let canonical = profile.canonicalize().unwrap();
-    let file = root.path().join("config.yaml");
+fn relative_and_empty_path_entries_are_anchored_before_the_worker_changes_directory() {
+    let directory = workspace(Some("codex"));
+    let path = std::env::join_paths([std::path::PathBuf::from("tools"), std::path::PathBuf::new()])
+        .unwrap();
     for format in ["cron", "launchd"] {
-        let output = schedule_profile(
-            root.path(),
-            format,
-            None,
-            Some(Path::new("Claude profile & settings")),
-        );
+        let output = render(directory.path(), format, &[("PATH", path.as_os_str())]);
         assert!(
             output.status.success(),
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
         let text = String::from_utf8(output.stdout).unwrap();
-        if format == "cron" {
-            assert!(text.contains(&format!("CLAUDE_CONFIG_DIR={}", canonical.display())));
-        } else {
-            assert!(text.contains("<key>CLAUDE_CONFIG_DIR</key>"));
-            assert!(text.contains(&format!(
-                "<string>{}</string>",
-                canonical.display().to_string().replace('&', "&amp;")
-            )));
-        }
-        assert!(!text.contains("ANTHROPIC_API_KEY"));
-        assert!(!text.contains("fixture-key-must-not-be-exported"));
-        let default = schedule_profile(root.path(), format, None, None);
-        assert!(default.status.success());
-        assert!(!String::from_utf8_lossy(&default.stdout).contains("CLAUDE_CONFIG_DIR"));
-        for invalid in [Path::new("missing-profile"), file.as_path(), Path::new("")] {
-            let refused = schedule_profile(root.path(), format, None, Some(invalid));
-            assert!(!refused.status.success());
-            assert!(refused.stdout.is_empty());
-            assert!(String::from_utf8_lossy(&refused.stderr).contains("CLAUDE_CONFIG_DIR"));
-        }
+        assert!(
+            text.contains(directory.path().join("tools").to_str().unwrap()),
+            "{text}"
+        );
+        assert!(text.contains("daily"));
     }
 }

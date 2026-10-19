@@ -235,6 +235,9 @@ mod native {
             if self.result.cancelled {
                 return false;
             }
+            if self.config.llm.provider == lk_core::config::LlmProvider::Noop {
+                return self.failure(skill, "semantic execution is disabled by llm.provider");
+            }
             if let Err(error) = self.prepare_agent().await {
                 return if self.result.cancelled {
                     self.record(skill, StageState::Cancelled, Some(error.to_string()))

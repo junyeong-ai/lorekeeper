@@ -93,6 +93,13 @@ fn empty_work_does_not_launch_or_require_an_agent() {
     );
     assert_eq!(result["ok"], true);
     assert!(result["execution"].is_null());
+    for path in [
+        "vault/wiki/AGENTS.md",
+        "vault/wiki/index.md",
+        "vault/.lorekeeper/search.sqlite",
+    ] {
+        assert!(fixture.root().join(path).is_file(), "missing {path}");
+    }
     assert!(!fixture.root().join("arguments").exists());
 }
 
@@ -177,7 +184,11 @@ fn audit_exit_zero_without_assessments_is_incomplete() {
     let fixture = Fixture::new("codex", 30, "exit 0");
     let concepts = fixture.root().join("vault/wiki/concepts");
     std::fs::create_dir_all(&concepts).unwrap();
-    std::fs::write(concepts.join("unverified.md"), include_str!("behaviour/corpus/small/vault/wiki/concepts/unlinked-note.md")).unwrap();
+    std::fs::write(
+        concepts.join("unverified.md"),
+        include_str!("behaviour/corpus/small/vault/wiki/concepts/unlinked-note.md"),
+    )
+    .unwrap();
     let (output, result) = fixture.run("knowledge");
     assert!(!output.status.success());
     assert_eq!(result["ok"], false);

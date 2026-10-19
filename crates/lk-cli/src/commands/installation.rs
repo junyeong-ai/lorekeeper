@@ -2,7 +2,7 @@
 //!
 //! Everything inside the vault declares what it is and what it was derived from, and a command
 //! checks those declarations. The installation had no such account of itself: the binary, the
-//! agent skills, the pipeline scripts and the templates were separately published artifacts,
+//! agent skills, the runtime skills and the templates were separately published artifacts,
 //! and `lore health` measures the freshness of ingested data, so a scheduled install could
 //! fall arbitrarily far behind while every check it had reported green.
 //!
@@ -30,7 +30,7 @@ pub enum SelfCommand {
         #[arg(long)]
         data_dir: Option<PathBuf>,
     },
-    /// Write the skills, pipelines and templates this binary carries
+    /// Write the skills and templates this binary carries
     Deploy {
         /// Where to write the agent skills. Omitted, they are rewritten wherever they already
         /// are and created nowhere — an install that took none must not acquire them.
@@ -197,7 +197,6 @@ fn print_report(report: &InstallationReport) {
     for (level, group) in report.skills.iter().chain(&report.runtime_skills) {
         print_group(&format!("skills ({level})"), group);
     }
-    print_group("pipelines", &report.pipelines);
     print_group("templates", &report.templates);
     print_group("config", &report.config);
 
@@ -270,17 +269,9 @@ async fn deploy(
             None => installation.deployed_skill_levels(),
         };
         for level in levels {
-            // A level with no directory is nothing to write, not a reason to abandon the rest: the
-            // checkout this binary was built from already HOLDS these skills — they are what it
-            // carries — so the requested state is satisfied, and failing here left an install with
-            // no pipelines, no templates and no config example.
-            let Some(root) = installation.skills_dir(level) else {
-                eprintln!(
-                    "Skills      skipped — {}",
-                    installation.skills_reason(level)
-                );
-                continue;
-            };
+            let root = installation
+                .skills_dir(level)
+                .ok_or_else(|| miette::miette!("{}", installation.skills_reason(level)))?;
             // The removals come back on BOTH paths, because the failure path is the one where the
             // user most needs them: a deploy that deleted a directory and then failed on a write
             // reported only "permission denied", which reads as "nothing happened".
@@ -318,7 +309,6 @@ async fn deploy(
     }
 
     for (label, outcome) in [
-        ("Pipelines  ", installation.deploy_pipelines()),
         ("Templates  ", installation.deploy_templates()),
         ("Config     ", installation.deploy_config_examples()),
     ] {
@@ -510,7 +500,7 @@ fn refuse_while_work_is_queued(opts: &GlobalOptions, force: bool) -> miette::Res
 
 /// Deploy through the NEW binary, never from here.
 ///
-/// This process carries the skills, pipelines and templates of the version being replaced, so
+/// This process carries the skills and templates of the version being replaced, so
 /// writing them from here would deploy the predecessor over the successor. Best-effort: the
 /// binary is already in place and working, so a data directory that cannot be written is a
 /// follow-up rather than a failed update.
@@ -542,7 +532,6 @@ fn uninstall(installation: &Installation, yes: bool, purge_config: bool) -> miet
         .collect::<Vec<_>>();
     eprintln!("This removes:");
     eprintln!("  {}", installation.binary().display());
-    eprintln!("  {}", installation.pipelines_dir().display());
     eprintln!("  {}", installation.templates_dir().display());
     for (view, level) in &deployments {
         if let Some(dir) = view.skills_dir(*level) {
@@ -569,7 +558,6 @@ fn uninstall(installation: &Installation, yes: bool, purge_config: bool) -> miet
             remove_dir(&root.join(name))?;
         }
     }
-    remove_dir(&installation.pipelines_dir())?;
     remove_dir(&installation.templates_dir())?;
     remove_dir(&installation.data_dir().join("skills"))?;
     // Only when it is now empty: a data directory holding something this tool did not put

@@ -90,7 +90,7 @@ Retyping an open proposal loses its original identity; move it.
 ## Reminders and scope
 
 Pass times in the agenda's timezone. For another day, derive the date from the
-agenda date rather than the machine clock. The scheduler's `lore-remind.sh` delivers
+agenda date rather than the machine clock. The scheduled `lore task remind notify` submits
 reminders; never call `lore task remind due` here because it consumes what it prints.
 
 Do not ingest, drain the semantic queue or run `lore task propose` during a board

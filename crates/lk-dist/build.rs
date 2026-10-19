@@ -1,4 +1,4 @@
-//! Enumerates the agent skills and the pipeline scripts so `embedded.rs` can `include_str!`
+//! Enumerates the agent skills and configuration examples so `embedded.rs` can `include_str!`
 //! each one.
 //!
 //! Generated rather than listed: the set is a directory tree, and a hand-written list is a
@@ -8,20 +8,6 @@
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-/// The scheduled pipelines, named because `scripts/` also holds the installers and the gate
-/// runner — files a user never receives through `lore`.
-const PIPELINES: [&str; 9] = [
-    "lore-pipeline.sh",
-    "lore-daily.sh",
-    "lore-weekly.sh",
-    "lore-knowledge.sh",
-    "lore-remind.sh",
-    "lore-maintenance.sh",
-    "lore-monthly.sh",
-    "lore-quarterly.sh",
-    "lore-annual.sh",
-];
-
 fn main() {
     let repo = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"))
         .join("../..");
@@ -30,14 +16,6 @@ fn main() {
     let mut out = String::new();
     emit(&mut out, "SKILL_FILES", collect(&skills, &skills));
     emit_claude_skills(&mut out, &skills);
-    emit(
-        &mut out,
-        "PIPELINE_FILES",
-        PIPELINES
-            .iter()
-            .map(|name| ((*name).to_string(), repo.join("scripts").join(name)))
-            .collect(),
-    );
     emit(
         &mut out,
         "CONFIG_FILES",

@@ -20,6 +20,7 @@
 | `lore task list [--state] [--json]` | The board, by section |
 | `lore task done <id> [--note]` | Close a task. The note becomes the archived page's body, and through it the concept extraction — which is how work performed compounds the way work read does |
 | `lore task drop <id>` · `move <id> <state>` · `wait <id> --until <date>` | Take it off the board, move it between sections, park it until a day |
+| `lore task remind notify` | Submit due reminders to the OS notifier and retire only accepted submissions |
 | `lore task propose` | Put what the sources say is still OPEN into the board's proposed section. An observation proposes and never creates: accept by dragging the line into another section, decline with `lore task drop`. Nothing is proposed twice — the board says what is open and the history says what was answered |
 | `lore task candidate --source <id> --summary <text> --url <URL>` | Name work read out of a page by JUDGMENT, for the next `propose` to offer. Refused for a source `personal.tasks.propose_from` does not name, because unlike a status field a reading of prose can be wrong |
 | `lore task sync` | Record what an editor did: adopt lines typed by hand, close lines ticked, wake what is due |
@@ -29,7 +30,7 @@
 | `lore health [--strict]` | Warn if any source is overdue vs `ingest.schedule` (2 missed fires; 48h fallback). `--strict` also fails when a source has NEVER ingested, which a first install has and a broken one looks identical to |
 | `lore performance` | Performance category distribution |
 | `lore doctor` | Audit materialized pages against the contracts they must satisfy — text cleanliness, a section whose input was recorded and never answered, and credentials in issuer-published forms. Non-zero on a defect or an unreadable page; a credential is REPORTED and does not gate, because its repair is at the issuer and editing the page would not undo the leak |
-| `lore schedule --format launchd --bin <abs> --pipeline-dir <dir>` | Print scheduled-task definitions. Both flags are required in practice — see the notes below; the bare form is rarely the one you want |
+| `lore schedule --format launchd --bin <abs>` | Print native scheduled-task definitions; review and register them explicitly |
 | `lore maintenance [--dry-run]` | Prune operational history (ingest log, drained queue files) past `maintenance.retention_days` (default 90d). Streaming event logs are permanent, and each source's latest log entry survives any horizon — it is the state `lore health` reads, not history |
 | `lore queue prune [--dry-run]` | Leave the queue holding only work that still needs an LLM session: drop dead tasks (stale / missing-target), retire a run whose every task is already answered |
 | `lore self status` | What this installation is, and whether every deployed copy — skills, pipelines, templates, config example, `AGENTS.md` — still matches the running binary. Non-zero when any differs |

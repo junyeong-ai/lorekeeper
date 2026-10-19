@@ -155,9 +155,10 @@ pub enum RemindCommand {
     },
     /// Print what is due now, and retire it
     ///
-    /// The half a timer runs. What turns a line into a notification is the platform's, not
-    /// this binary's — `lore-remind.sh` is the shipped one.
+    /// A print-and-consume interface for an explicit external consumer.
     Due,
+    /// Submit due reminders to the OS notifier, then retire each accepted notification
+    Notify,
 }
 
 pub async fn run(opts: &GlobalOptions, cmd: TaskCommand) -> miette::Result<()> {
@@ -293,7 +294,7 @@ pub async fn run(opts: &GlobalOptions, cmd: TaskCommand) -> miette::Result<()> {
             eprintln!("waiting until {until}  {title}");
             Ok(())
         }
-        TaskCommand::Remind { cmd } => remind(&plane, cmd),
+        TaskCommand::Remind { cmd } => remind(&plane, cmd).await,
         TaskCommand::Candidate {
             source,
             summary,
@@ -1203,7 +1204,7 @@ fn parse_id(text: &str) -> miette::Result<TaskId> {
 }
 
 /// `lore task remind` — the promises, and the half a timer fires.
-fn remind(plane: &IntentPlane, cmd: RemindCommand) -> miette::Result<()> {
+async fn remind(plane: &IntentPlane, cmd: RemindCommand) -> miette::Result<()> {
     let store = lk_task::Reminders::new(&plane.vault_root);
     match cmd {
         RemindCommand::Add { text, at, task } => {
@@ -1298,7 +1299,70 @@ fn remind(plane: &IntentPlane, cmd: RemindCommand) -> miette::Result<()> {
                 .answered(&answered)
                 .map_err(|e| miette::miette!("{e}"))
         }
+        RemindCommand::Notify => notify(plane).await,
     }
+}
+
+async fn notify(plane: &IntentPlane) -> miette::Result<()> {
+    #[cfg(unix)]
+    {
+        let mut supervisor = super::execution::Supervisor::new()?;
+        let store = lk_task::Reminders::new(&plane.vault_root);
+        notify_due(&store, plane.now, |reminder| plane.is_moot(reminder), async |text| {
+            let mut command;
+            #[cfg(target_os = "macos")]
+            {
+                command = tokio::process::Command::new("/usr/bin/osascript");
+                command.args(["-e", "on run argv\ndisplay notification (item 1 of argv) with title \"lore\"\nend run", "--", text]);
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                command = tokio::process::Command::new("notify-send");
+                command.args(["--app-name=lore", "--", "lore", text]);
+            }
+            let result = supervisor.run(command, Some(std::time::Duration::from_secs(10)), false).await?;
+            if !result.success {
+                return Err(miette::miette!("notification not accepted; reminder retained: {}", result.detail.unwrap_or_else(|| "notifier failed".into())));
+            }
+            Ok(())
+        }).await
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = plane;
+        Err(miette::miette!(
+            "OS notifications are supported on macOS and Linux"
+        ))
+    }
+}
+
+#[cfg(any(unix, test))]
+async fn notify_due(
+    store: &lk_task::Reminders,
+    now: jiff::Timestamp,
+    mut is_moot: impl FnMut(&lk_task::Reminder) -> Option<bool>,
+    mut deliver: impl AsyncFnMut(&str) -> miette::Result<()>,
+) -> miette::Result<()> {
+    let mut blocked = false;
+    for reminder in store.due(now).map_err(|e| miette::miette!("{e}"))? {
+        match is_moot(&reminder) {
+            Some(false) => deliver(&reminder.text).await?,
+            Some(true) => {}
+            None => {
+                blocked = true;
+                continue;
+            }
+        }
+        store
+            .answered(&[reminder.id])
+            .map_err(|e| miette::miette!("retire accepted reminder: {e}"))?;
+    }
+    if blocked {
+        return Err(miette::miette!(
+            "cannot establish some reminder task states; blocked reminders retained"
+        ));
+    }
+    Ok(())
 }
 
 /// A wall-clock moment in the VAULT's zone: `HH:MM` today, or `YYYY-MM-DDTHH:MM`.
@@ -1419,5 +1483,88 @@ fn report_reconcile(outcome: &lk_task::Reconciled) {
         if count > 0 {
             eprintln!("{count} {what}");
         }
+    }
+}
+
+#[cfg(test)]
+mod notification_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn transport_failure_preserves_unsent_reminders_and_retires_only_accepted_ones() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = lk_task::Reminders::new(tmp.path());
+        let now: jiff::Timestamp = "2026-10-19T00:00:00Z".parse().unwrap();
+        for id in ["7k2p", "3b8q"] {
+            store
+                .add(lk_task::Reminder {
+                    id: id.parse().unwrap(),
+                    at: now,
+                    text: id.into(),
+                    task: None,
+                })
+                .unwrap();
+        }
+        let mut delivered = 0;
+        let result = notify_due(
+            &store,
+            now,
+            |_| Some(false),
+            async |_| {
+                delivered += 1;
+                if delivered == 2 {
+                    Err(miette::miette!("notifier unavailable"))
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .await;
+        assert!(result.is_err());
+        assert_eq!(store.read().unwrap().len(), 1);
+        assert_eq!(delivered, 2);
+        notify_due(&store, now, |_| Some(false), async |_| Ok(()))
+            .await
+            .unwrap();
+        assert!(store.read().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn unknown_task_state_does_not_block_independent_notifications() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = lk_task::Reminders::new(tmp.path());
+        let now: jiff::Timestamp = "2026-10-19T00:00:00Z".parse().unwrap();
+        for (id, task) in [("3b8q", Some("7k2p".parse().unwrap())), ("7k2p", None)] {
+            store
+                .add(lk_task::Reminder {
+                    id: id.parse().unwrap(),
+                    at: now,
+                    text: "text".into(),
+                    task,
+                })
+                .unwrap();
+        }
+        let mut deliveries = 0;
+        let result = notify_due(
+            &store,
+            now,
+            |reminder| {
+                if reminder.task.is_some() {
+                    None
+                } else {
+                    Some(false)
+                }
+            },
+            async |_| {
+                deliveries += 1;
+                Ok(())
+            },
+        )
+        .await;
+        assert!(result.is_err());
+        assert_eq!(deliveries, 1);
+        let retained = store.read().unwrap();
+        assert_eq!(retained.len(), 1);
+        assert_eq!(retained[0].id.as_str(), "3b8q");
     }
 }

@@ -17,6 +17,7 @@ INSTALL_DIR="${LORE_INSTALL_DIR:-$HOME/.local/bin}"
 DATA_DIR="${LORE_INSTALL_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/lorekeeper}"
 LORE_INSTALL_VERSION="${LORE_INSTALL_VERSION:-}"
 LORE_INSTALL_SKILL_LEVEL="${LORE_INSTALL_SKILL_LEVEL:-}"
+LORE_INSTALL_AGENT_TARGET="${LORE_INSTALL_AGENT_TARGET:-}"
 LORE_INSTALL_FROM_SOURCE="${LORE_INSTALL_FROM_SOURCE:-0}"
 LORE_INSTALL_FORCE="${LORE_INSTALL_FORCE:-0}"
 # A default run asks NOTHING and every decision resolves to its safe answer, so the documented
@@ -324,35 +325,21 @@ deploy_artifacts() {
         log_warn "separate release assets. Install a newer version to deploy them from the binary."
         return 0
     fi
-    render_step "Deploying skills, pipelines and templates"
-    "$bin" self deploy --skills "$skill_level" --data-dir "$DATA_DIR" \
+    render_step "Deploying skills and templates"
+    local deploy_args=(self deploy --skills "$skill_level" --data-dir "$DATA_DIR")
+    if [ -n "$LORE_INSTALL_AGENT_TARGET" ]; then deploy_args+=(--agent "$LORE_INSTALL_AGENT_TARGET"); fi
+    "$bin" "${deploy_args[@]}" \
         || die "Deploy failed; the binary is installed — run: $bin self deploy"
 }
 
-# Print how to schedule what was just installed, with this machine's paths resolved.
-#
-# `--pipeline-dir` is what makes the daily and weekly entries run the installed scripts
-# rather than bare `lore ingest` / `lore synthesis weekly`. Those subcommands are only the
-# FIRST stage of their pipeline: the queue drain and `lore queue apply` live in the scripts,
-# so scheduling the bare commands ingests every morning and never fills a summary or
-# materializes a concept. Run interactively, `lore schedule` also picks up the PATH and the
-# `claude` binary the scripts need, which a scheduler does not provide on its own.
-print_pipeline_schedule() {
-    # The binary THIS run installed, not whatever `lore` PATH resolves to. A first install into
-    # a directory not yet on PATH — the case this script warns about a few lines later — would
-    # otherwise print an older `lore` found elsewhere, and the scheduled job would keep running
-    # that one. The plist needs an absolute path either way, and only one of them is knowable.
+# Schedules run the native CLI; registration remains an explicit OS operation.
+print_schedule() {
     local lore_bin="${INSTALL_DIR}/${BINARY_NAME}"
-
     if [ "$(uname -s)" = "Darwin" ]; then
-        printf '       %slore schedule --format launchd --bin %q \\\n' "$C_BOLD" "$lore_bin"
-        printf '            --pipeline-dir %q%s\n' "$DATA_DIR/pipelines" "$C_RESET"
-        printf '       Review the plists it prints, write them to ~/Library/LaunchAgents/,\n'
-        printf '       then load each with launchctl bootstrap (the output shows how).\n'
-        printf '       launchd runs a job missed during sleep; cron silently skips it.\n'
+        printf '       %slore schedule --format launchd --bin %q%s\n' "$C_BOLD" "$lore_bin" "$C_RESET"
+        printf '       Review the plists, create their log directory, then load them with launchctl bootstrap.\n'
     else
-        printf '       %slore schedule --pipeline-dir %q%s > lorekeeper.cron\n' \
-            "$C_BOLD" "$DATA_DIR/pipelines" "$C_RESET"
+        printf '       %slore schedule --bin %q%s > lorekeeper.cron\n' "$C_BOLD" "$lore_bin" "$C_RESET"
         printf '       Review and merge with crontab -e; preserve existing jobs.\n'
     fi
 }
@@ -389,6 +376,7 @@ Flags:
   --data-dir PATH            Install templates here
                              (default: $XDG_DATA_HOME/lorekeeper or $HOME/.local/share/lorekeeper)
   --skill user|project|none  Skill install level (default: user)
+  --agent claude-code|codex|both  Interactive skill targets (binary default: both)
   --from-source              Build from source instead of downloading prebuilt
   --force                    Overwrite existing install without prompting
   --interactive, -i          Ask before each decision instead of taking the defaults
@@ -403,7 +391,7 @@ even under `curl | bash`.
 
 Environment variables (flags win over env, env wins over defaults):
   LORE_INSTALL_DIR, LORE_INSTALL_DATA_DIR, LORE_INSTALL_VERSION,
-  LORE_INSTALL_SKILL_LEVEL, LORE_INSTALL_FROM_SOURCE, LORE_INSTALL_INTERACTIVE,
+  LORE_INSTALL_SKILL_LEVEL, LORE_INSTALL_AGENT_TARGET, LORE_INSTALL_FROM_SOURCE, LORE_INSTALL_INTERACTIVE,
   LORE_INSTALL_FORCE, LORE_INSTALL_DRY_RUN, NO_COLOR
 USAGE
 }
@@ -415,6 +403,7 @@ parse_args() {
             --install-dir)   INSTALL_DIR="$2"; EXPLICIT_INSTALL_DIR=1; shift 2 ;;
             --data-dir)      DATA_DIR="$2"; shift 2 ;;
             --skill)         LORE_INSTALL_SKILL_LEVEL="$2"; EXPLICIT_SKILL_LEVEL=1; shift 2 ;;
+            --agent)         LORE_INSTALL_AGENT_TARGET="$2"; shift 2 ;;
             --from-source)   LORE_INSTALL_FROM_SOURCE=1; EXPLICIT_FROM_SOURCE=1; shift ;;
             --force)         LORE_INSTALL_FORCE=1; shift ;;
             --interactive|-i) INTERACTIVE=1; shift ;;
@@ -448,11 +437,11 @@ render_review() {
     printf '  %sbinary%s    %s (v%s, %s)\n' "$C_DIM" "$C_RESET" "$bin_dest" "$version" "$method"
     printf '  %stemplates%s %s/templates\n' "$C_DIM" "$C_RESET" "$data_dest"
     case "$skill_level" in
-        user)    printf '  %sskills%s    ~/.claude/skills/lore-*\n' "$C_DIM" "$C_RESET" ;;
-        project) printf '  %sskills%s    ./.claude/skills/lore-*\n' "$C_DIM" "$C_RESET" ;;
+        user)    printf '  %sskills%s    user-level agent skills\n' "$C_DIM" "$C_RESET" ;;
+        project) printf '  %sskills%s    project-level agent skills\n' "$C_DIM" "$C_RESET" ;;
         none)    printf '  %sskill%s     (skipped)\n' "$C_DIM" "$C_RESET" ;;
     esac
-    printf '  %spipeline%s  %s/pipelines/lore-{daily,weekly}.sh\n' "$C_DIM" "$C_RESET" "$DATA_DIR"
+    printf '  %sagents%s    %s (runtime skills: %s/skills)\n' "$C_DIM" "$C_RESET" "${LORE_INSTALL_AGENT_TARGET:-binary default}" "$DATA_DIR"
 }
 
 check_path() {
@@ -543,9 +532,9 @@ main() {
         skill_level="user"
     else
         local pick
-        pick="$(prompt_choice "Claude Code skill" 1 \
-            "User-level            ~/.claude/skills/lore-*" \
-            "Project-level         ./.claude/skills/lore-*" \
+        pick="$(prompt_choice "Agent skill scope" 1 \
+            "User-level            agent skill directories" \
+            "Project-level         agent skill directories" \
             "Skip")"
         case "$pick" in
             User-level*)    skill_level="user" ;;
@@ -554,6 +543,9 @@ main() {
         esac
     fi
 
+    case "$LORE_INSTALL_AGENT_TARGET" in ""|claude-code|codex|both) ;;
+        *) die "Invalid agent target: $LORE_INSTALL_AGENT_TARGET" ;;
+    esac
     case "$skill_level" in user|project|none) ;;
         *) die "Invalid skill level: $skill_level (expected user|project|none)" ;;
     esac
@@ -629,16 +621,16 @@ main() {
     [ -f "$initial_config" ] || die "Installed binary did not deploy a configuration example"
     printf '       cp -n %q %q\n' "$initial_config" "$CONFIG_DIR/config.yaml"
     printf '       ${EDITOR:-vi} %q\n' "$CONFIG_DIR/config.yaml"
-    printf '       Set vault.root, timezone, locale and identity; put a note in its inbox/.\n'
+    printf '       Set vault.root, timezone, locale, identity and the execution profile; add a note in inbox/.\n'
     printf '       Select optional source/module blocks from config.example.yaml.\n'
     printf '       Provider credentials are needed only after selecting an authenticated source:\n'
     printf '       lore init credentials\n'
     printf '  %s2.%s lore validate && lore schema    Check config and generate the writing contract\n' "$C_BOLD" "$C_RESET"
     printf '  %s3.%s lore ingest --dry-run           Check selected source access\n' "$C_BOLD" "$C_RESET"
-    printf '  %s4.%s lore ingest                     Collect, then run /lore-process in Claude Code\n' "$C_BOLD" "$C_RESET"
+    printf '  %s4.%s lore run daily                  Collect and process with execution.default_profile\n' "$C_BOLD" "$C_RESET"
     printf '  %s5.%s lore queue check && lore wiki reviews --check\n' "$C_BOLD" "$C_RESET"
     printf '  %s6.%s Optional schedules: register definitions, then inspect an actual run:\n' "$C_BOLD" "$C_RESET"
-    print_pipeline_schedule
+    print_schedule
 }
 
 main "$@"

@@ -79,7 +79,7 @@ one source to infer that distinction.
   not a potentially changed refetch. Credentials are reported, never scrubbed from
   source text; rotation at the issuer is the repair.
 - **Installation and scheduling are explicit.** `lk-dist` owns embedded artifact
-  coherence. Scheduled scripts compose CLI stages and never auto-commit user edits.
+  coherence. Native jobs compose guarded CLI stages and never auto-commit user edits.
   Full-source ingest alone rewrites the cross-source work-log; filtered ingest
   cannot replace it with a subset. Navigation refresh updates SQLite discovery and a small entry guide.
 

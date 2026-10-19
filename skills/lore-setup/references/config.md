@@ -58,11 +58,15 @@ synthesis: {weekly: {...}}           # cross-source weekly themes (domain-neutra
 concepts:                            # LLM concept-page taxonomy
   categories: [{id: ..., label: ...}] # classifies concepts for metadata browsing
 graph:                               # link graph analysis and optional semantic maintenance
-  audit: {schedule: "0 7 * * 0", batch_size: 5} # requires installed --pipeline-dir
+  audit: {schedule: "0 7 * * 0", batch_size: 5} # uses the configured execution profile
   scope: {dirs: [...]}               # defaults to vault.dirs.wiki
   metrics: {min_hub_degree: 5, orphan_exclude: []}
   cluster: {resolution: 1.0, min_community_size: 1, suggest_min_shared_neighbors: 2}
 llm: {provider: queue}
+execution:
+  default_profile: primary
+  profiles:
+    primary: {engine: claude-code, timeout_seconds: 3600} # or engine: codex
 ```
 
 A Drive source uses the exact `folder_id` from its folder URL (or `root`), an
@@ -73,8 +77,8 @@ are partial coverage. Inventory absence does not authorize retiring existing pag
 
 Semantic maintenance is optional and separate from weekly synthesis and retention.
 Enable `graph.audit.schedule` deliberately: each run uses the LLM to review at most
-`batch_size` changed/first-time concepts. The scheduler requires `--pipeline-dir`
-for this job; structural lint alone cannot perform the semantic read.
+`batch_size` changed/first-time concepts. `lore run knowledge` uses the configured
+execution profile; structural lint alone cannot perform the semantic read.
 
 ## Initial setup
 
@@ -134,11 +138,12 @@ freshness; `self status` is installation coherence. Neither proves semantic qual
   or complete onboarding was requested; a config-only change reports these as untested.
 - If a config already exists, merge only the relevant source block — never overwrite the whole file.
 
-Scheduled pipeline environments capture the selected config path. For skills
-installed in a project, set `LORE_SKILL_DIR` to the skills directory when running
-`lore schedule --pipeline-dir ...`; an explicit directory is validated and captured
-as an absolute path. Without it, pipelines use `$HOME/.claude/skills`. Changing the
-selection requires regenerating and reloading the schedule.
+Scheduled jobs capture the selected config and runtime data directory. Interactive
+skill deployment is separate: Claude uses `.claude/skills`, Codex `.agents/skills`.
+Set `execution.default_profile` to the authenticated CLI. Optional operation
+profiles and explicit `--profile` override it. A session deadline preserves
+unfinished work rather than marking it complete. Regenerate and reload schedules
+after changing paths or relevant host/proxy environment.
 
 The optional `nodex` adapter requires a current index (`nodex build` after edits).
 `params.document_ids` selects exact source IDs within the configured kinds and date

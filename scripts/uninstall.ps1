@@ -83,9 +83,10 @@ if (-not $KeepData) {
 }
 
 # Skills (user-level and project-level for each installed skill name)
+foreach ($agentDir in @(".claude", ".agents")) {
 foreach ($skillName in $SkillNames) {
-    $skillUser = Join-Path $env:USERPROFILE ".claude\skills\$skillName"
-    $skillProject = Join-Path (Get-Location) ".claude\skills\$skillName"
+    $skillUser = Join-Path $env:USERPROFILE "$agentDir\skills\$skillName"
+    $skillProject = Join-Path (Get-Location) "$agentDir\skills\$skillName"
 
     if (Test-Path $skillUser) {
         if (Prompt-YesNo "Remove user-level skill $skillUser?") {
@@ -107,6 +108,16 @@ foreach ($skillName in $SkillNames) {
             Write-Ok "Project skill removed: $skillName"
             $removed++
         }
+    }
+}
+
+}
+
+if (-not $KeepData) {
+    $runtimeSkills = Join-Path $DataDir 'skills'
+    if ((Test-Path $runtimeSkills) -and (Prompt-YesNo "Remove runtime skills $runtimeSkills?")) {
+        Remove-Item -Recurse -Force $runtimeSkills
+        $removed++
     }
 }
 

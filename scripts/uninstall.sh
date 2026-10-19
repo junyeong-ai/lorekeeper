@@ -44,13 +44,13 @@ Removes:
   - ~/.config/lorekeeper/config.example.yaml       (installed config template + deploy records)
   - ~/.claude/skills/lore-*                        (user-level skills)
   - ./.claude/skills/lore-*                        (project-level skills, if present)
-  - <data-dir>/pipelines                           (scheduled pipeline scripts)
+  - <data-dir>/skills                              (packaged runtime skills)
   - ~/.claude/scheduled-tasks/lore-*-ingest        (superseded, pre-0.11)
 
 Flags:
   --install-dir PATH  Where the binary was installed
                       (default: $LORE_INSTALL_DIR, else $HOME/.local/bin)
-  --data-dir PATH     Where templates and pipelines were installed
+  --data-dir PATH     Where templates and runtime skills were installed
                       (default: $LORE_INSTALL_DATA_DIR, else
                        $XDG_DATA_HOME/lorekeeper or $HOME/.local/share/lorekeeper)
   --yes, -y           Skip all confirmations
@@ -122,9 +122,10 @@ if [ "$KEEP_DATA" != "1" ]; then
 fi
 
 # Skills (user-level and project-level for each installed skill name)
+for agent_dir in .claude .agents; do
 for skill in "${SKILL_NAMES[@]}"; do
-    skill_user="$HOME/.claude/skills/${skill}"
-    skill_project="$(pwd)/.claude/skills/${skill}"
+    skill_user="$HOME/$agent_dir/skills/${skill}"
+    skill_project="$(pwd)/$agent_dir/skills/${skill}"
 
     if [ -d "$skill_user" ]; then
         if prompt_yesno "Remove user-level skill $skill_user?"; then
@@ -149,15 +150,14 @@ for skill in "${SKILL_NAMES[@]}"; do
     fi
 done
 
-# The scheduled pipelines. Installed data like the templates beside them, so `--keep-data`
-# keeps them: it removed the scripts a scheduler was still firing while promising to "keep
-# templates and vault data", and the jobs then failed nightly with no file to point at.
-pipelines_dir="$DATA_DIR/pipelines"
-if [ "$KEEP_DATA" != "1" ] && [ -d "$pipelines_dir" ]; then
-    if prompt_yesno "Remove pipelines $pipelines_dir?"; then
-        render_step "Removing $pipelines_dir"
-        rm -rf "$pipelines_dir"
-        log_ok "Pipelines removed"
+done
+
+runtime_skills_dir="$DATA_DIR/skills"
+if [ "$KEEP_DATA" != "1" ] && [ -d "$runtime_skills_dir" ]; then
+    if prompt_yesno "Remove runtime skills $runtime_skills_dir?"; then
+        render_step "Removing $runtime_skills_dir"
+        rm -rf "$runtime_skills_dir"
+        log_ok "Runtime skills removed"
         removed=$((removed + 1))
     fi
 fi

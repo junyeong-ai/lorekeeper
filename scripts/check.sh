@@ -34,9 +34,7 @@ cargo test --locked --workspace --doc
 
 gate shell
 bash -n scripts/*.sh
-shellcheck --severity=warning scripts/*.sh scripts/tests/*.sh
-bash scripts/tests/pipeline-git.sh
-bash scripts/tests/pipeline-periods.sh
+shellcheck --severity=warning scripts/*.sh
 actionlint
 zizmor .github/workflows/
 

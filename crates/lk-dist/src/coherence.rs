@@ -2,9 +2,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use crate::embedded::{
-    EmbeddedFile, config_files, pipeline_files, skill_files_for, skill_names, template_files,
-};
+use crate::embedded::{EmbeddedFile, config_files, skill_files_for, skill_names, template_files};
 use crate::layout::{Installation, Prune, SkillLevel};
 use crate::target::ReleaseTarget;
 
@@ -146,7 +144,6 @@ pub struct InstallationReport {
     pub self_replaceable: bool,
     pub skills: Vec<(String, DeployedGroup)>,
     pub runtime_skills: Vec<(String, DeployedGroup)>,
-    pub pipelines: DeployedGroup,
     pub templates: DeployedGroup,
     pub config: DeployedGroup,
     pub schema: SchemaState,
@@ -234,7 +231,6 @@ impl InstallationReport {
             self_replaceable: target.is_some_and(ReleaseTarget::is_self_replaceable),
             skills,
             runtime_skills,
-            pipelines: group(&installation.pipelines_dir(), &pipeline_files()),
             templates: group(&installation.templates_dir(), &template_files()),
             config: group(installation.config_dir(), &config_files()),
             schema,
@@ -269,7 +265,6 @@ impl InstallationReport {
             self_replaceable: _,
             skills,
             runtime_skills,
-            pipelines,
             templates,
             config,
             schema,
@@ -279,7 +274,6 @@ impl InstallationReport {
             .chain(runtime_skills.iter())
             .map(|(_, group)| group.stale().count())
             .sum::<usize>()
-            + pipelines.stale().count()
             + templates.stale().count()
             + config.stale().count()
             + usize::from(!schema.is_current())
@@ -429,7 +423,7 @@ mod tests {
     #[test]
     fn a_directory_that_was_never_deployed_is_absent_not_stale() {
         let tmp = tempfile::tempdir().unwrap();
-        let group = group(&tmp.path().join("pipelines"), &pipeline_files());
+        let group = group(&tmp.path().join("config"), &config_files());
         assert!(!group.deployed);
         assert_eq!(group.stale().count(), 0);
     }

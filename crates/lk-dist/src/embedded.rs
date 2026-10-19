@@ -1,15 +1,5 @@
-//! The files this binary carries and writes out.
-//!
-//! An agent skill describes the commands this binary exposes and a pipeline script composes
-//! them into a scheduled run, so both are true only of the version they shipped with. Carrying
-//! them here rather than publishing them beside the binary is what makes "the deployed skill
-//! matches the binary" hold by construction instead of by remembering — the two cannot be
-//! different versions when they are one file.
-//!
-//! `include_str!` reaches the repository through a generated manifest (`build.rs`) rather than
-//! a list written here, because the set is a directory tree: a seventh skill added under
-//! `.claude/skills` is carried without anything being remembered, and editing one rebuilds the
-//! binary that carries it.
+//! Canonical skill/config bytes and host-specific entry metadata embedded in the binary.
+//! Templates are embedded by lk-vault and reused here for deployment.
 
 include!(concat!(env!("OUT_DIR"), "/embedded.rs"));
 
@@ -18,13 +8,11 @@ include!(concat!(env!("OUT_DIR"), "/embedded.rs"));
 pub struct EmbeddedFile {
     pub relative: &'static str,
     pub contents: &'static str,
-    /// Unix permissions. A pipeline is fired by a system scheduler, which executes it rather
-    /// than reading it, so its bit is part of the artifact and not of the writing.
+    /// Required Unix permission bits for the carried file.
     pub mode: u32,
 }
 
 const READ_ONLY: u32 = 0o644;
-const EXECUTABLE: u32 = 0o755;
 
 /// Every skill name this binary carries, sorted.
 pub fn skill_names() -> Vec<&'static str> {
@@ -59,18 +47,6 @@ pub fn skill_files_for(engine: lk_core::execution::AgentEngine, name: &str) -> V
         .collect()
 }
 
-/// The scheduled pipeline scripts, addressed relative to the pipelines directory.
-pub fn pipeline_files() -> Vec<EmbeddedFile> {
-    PIPELINE_FILES
-        .iter()
-        .map(|(relative, contents)| EmbeddedFile {
-            relative,
-            contents,
-            mode: EXECUTABLE,
-        })
-        .collect()
-}
-
 /// The rendering templates, addressed relative to the templates directory.
 ///
 /// Read from `lk-vault`, which embeds them to render with: the copy on disk exists so a
@@ -101,11 +77,6 @@ pub fn config_files() -> Vec<EmbeddedFile> {
             mode: READ_ONLY,
         })
         .collect()
-}
-
-/// Pipeline file names, in the order a deploy writes them.
-pub fn pipeline_names() -> Vec<&'static str> {
-    PIPELINE_FILES.iter().map(|(name, _)| *name).collect()
 }
 
 #[cfg(test)]
@@ -167,27 +138,6 @@ mod tests {
                 path.contains('/'),
                 "`{path}` sits directly under .claude/skills, which names no skill"
             );
-        }
-    }
-
-    #[test]
-    fn the_pipelines_are_executable_and_the_rest_is_not() {
-        assert!(pipeline_files().iter().all(|f| f.mode == EXECUTABLE));
-        assert!(
-            skill_files(skill_names()[0])
-                .iter()
-                .all(|f| f.mode == READ_ONLY)
-        );
-    }
-
-    /// The shared library is sourced by both entry scripts; publishing the entries without it
-    /// installs two scripts that abort on their first line under a scheduler nobody is watching.
-    #[test]
-    fn the_pipeline_entries_ship_with_the_library_they_source() {
-        let names = pipeline_names();
-        assert!(names.contains(&"lore-pipeline.sh"), "{names:?}");
-        for entry in ["lore-daily.sh", "lore-weekly.sh"] {
-            assert!(names.contains(&entry), "{names:?}");
         }
     }
 }

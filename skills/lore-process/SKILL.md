@@ -242,7 +242,7 @@ on the matching marker, never on whether a section looks filled.
    `source_count` until some later run happens to reconcile. If any command
    exits non-zero, treat the run as failed and surface the error in step 6
    instead of reporting success. `lore ingest` never runs these. (The
-   `lore-daily.sh` pipeline chains ingest → /lore-process → these.)
+   `lore run daily` chains ingestion → semantic processing → these checks.)
 
 6. **Report** to the user:
    - On full success: number of files processed and tasks completed, and confirm

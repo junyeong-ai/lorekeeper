@@ -1,9 +1,5 @@
-//! Pins the `version:` frontmatter of every shipped skill to the `lore` crate version.
-//! The field is not part of the Agent Skills frontmatter spec — it exists as release
-//! provenance for installed copies (an installed `~/.claude/skills/lore-*/SKILL.md`
-//! says which release it came from without hashing it against a download). A stamp
-//! that lags the release it ships in is worse than none, so the release version bump
-//! fails here until every skill is restamped to match.
+//! Canonical skills declare their packaged release in metadata.version.
+//! Host entry files inherit that provenance from the same source.
 
 use std::path::PathBuf;
 

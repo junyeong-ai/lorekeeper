@@ -22,15 +22,15 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
 - Child PATH starts with the selected executable's directory and LORE_BIN names
   that executable. Its canonical `lore` sibling must identify the same file; a
   renamed binary cannot silently delegate skill commands to another installation.
-- Scheduled coordination wraps only `claude_skill` in scripts/lore-pipeline.sh,
-  including its capture→LLM→apply lifetime. Do not wrap every scheduled writer:
-  period intent, reminders, and maintenance retain their own short-lock contracts.
-  Manual agents acquire once before reading inputs, not again inside a skill.
-- `commands/schedule.rs` emits one all-source ingest plus independent period and
-  maintenance jobs. Use absolute installed Bash scripts/executable mode and captured
-  PATH/LORE_BIN/LORE_CONFIG/CLAUDE_BIN and explicit LORE_SKILL_DIR. Preserve cron
-  versus launchd calendar/interval meaning; reject unsupported translation instead of approximating it. Reminder
-  scheduling may use a separate board/pipeline directory.
+- `commands/run.rs` owns daily/process/knowledge sequencing; `execution.rs` owns
+  host-specific invocation and supervised Unix process groups. The shared
+  WorkflowLease covers semantic reads through final publication. Collection precedes
+  that lease; independent recovery stages continue after source failure, while
+  dependent period stages stop on failure. Cancellation stops further stages.
+- `commands/schedule.rs` renders native jobs with stable scheduling-slot labels.
+  Queue-mode semantic jobs need explicit execution profiles. Capture selected
+  absolute config/data paths, anchored PATH and relevant existing host directories;
+  never capture credentials. Rendering never authenticates or registers jobs.
 - Launchd `--namespace` constructs labels and plist names (default `com.lorekeeper`);
   custom namespaces use separate default logs. `--log-dir` is an explicit absolute
   path. These options only render definitions: never register jobs or create log

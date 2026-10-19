@@ -224,7 +224,7 @@ pub(super) fn agent_command(
             }
             command
                 .arg("--allowedTools")
-                .args(claude_tools(dependencies));
+                .args(claude_tools(skill, dependencies)?);
         }
         ExecutionProfile::Codex { profile, .. } => {
             command.args([
@@ -254,26 +254,38 @@ pub(super) fn agent_command(
     Ok(command)
 }
 
-pub(super) fn claude_tools(dependencies: &[&str]) -> Vec<String> {
-    let mut tools: Vec<_> = [
-        "lore", "ls", "cat", "jq", "mkdir", "mv", "basename", "test", "[", "find", "wc", "head",
-        "date", "grep",
-    ]
-    .into_iter()
-    .map(|name| format!("Bash({name}:*)"))
-    .collect();
-    tools.extend(
-        ["Read", "Edit", "Write", "Glob", "Grep"]
-            .into_iter()
-            .map(str::to_owned),
-    );
+pub(super) fn claude_tools(skill: &str, dependencies: &[&str]) -> miette::Result<Vec<String>> {
+    let mut tools = std::collections::BTreeSet::new();
+    for name in std::iter::once(skill).chain(dependencies.iter().copied()) {
+        let files = lk_dist::skill_files_for(AgentEngine::ClaudeCode, name);
+        let entry = files
+            .iter()
+            .find(|file| file.relative == "SKILL.md")
+            .ok_or_else(|| miette::miette!("missing skill {name}"))?;
+        let page =
+            lk_core::frontmatter::parse_page(entry.contents).map_err(|e| miette::miette!("{e}"))?;
+        let declared = page
+            .frontmatter
+            .get("allowed-tools")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| {
+                miette::miette!("skill {name} has no declared Claude tool permissions")
+            })?;
+        tools.extend(
+            declared
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(str::to_owned),
+        );
+    }
     for name in dependencies {
         tools.extend([
             format!("Skill({name}:{name})"),
             format!("Skill({name}:{name} *)"),
         ]);
     }
-    tools
+    Ok(tools.into_iter().collect())
 }
 
 pub(super) fn verify_version(engine: AgentEngine, bytes: &[u8]) -> miette::Result<()> {
@@ -339,4 +351,32 @@ pub(super) fn executable_path(path: &Path) -> miette::Result<PathBuf> {
             )
         })?;
     std::path::absolute(found).map_err(|e| miette::miette!("resolve agent executable: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unsupported_or_ambiguous_cli_versions_are_refused() {
+        assert!(verify_version(AgentEngine::ClaudeCode, b"2.1.303 (Claude Code)\n").is_ok());
+        assert!(verify_version(AgentEngine::Codex, b"codex-cli 0.163.0\n").is_ok());
+        for (engine, text) in [
+            (AgentEngine::ClaudeCode, "2.1.246 (Claude Code)"),
+            (AgentEngine::Codex, "codex-cli 0.162.0"),
+            (AgentEngine::Codex, "codex-cli 1.0.0"),
+            (AgentEngine::Codex, "other 0.163.0"),
+        ] {
+            assert!(verify_version(engine, text.as_bytes()).is_err());
+        }
+    }
+
+    #[test]
+    fn dependency_permissions_cover_exact_and_argument_invocations() {
+        let single = claude_tools("lore-process", &[]).unwrap();
+        assert!(!single.iter().any(|tool| tool.starts_with("Skill(")));
+        let tools = claude_tools("lore-wiki", &["lore-process"]).unwrap();
+        assert!(tools.contains(&"Skill(lore-process:lore-process)".into()));
+        assert!(tools.contains(&"Skill(lore-process:lore-process *)".into()));
+    }
 }

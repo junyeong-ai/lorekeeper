@@ -1,5 +1,6 @@
 ---
 source: crates/lk-cli/tests/behaviour.rs
+assertion_line: 532
 expression: "observe(staged.path(), argv)"
 ---
 exit: 0
@@ -12,7 +13,12 @@ exit: 0
 # On macOS prefer `lore schedule --format launchd`: cron SKIPS a job whose time
 # passed while the machine was asleep, which silently drops a day's ingest.
 
-0 7 * * * cd <staged> && lore --config <staged>/corpus/config.yaml ingest
+# Environment for unattended jobs:
+LORE_BIN=lore
+LORE_CONFIG=<staged>/corpus/config.yaml
+LORE_INSTALL_DATA_DIR=<staged>/data/lorekeeper
+PATH=<staged>/tools
+
+0 7 * * * cd <staged> && lore --config <staged>/corpus/config.yaml run daily --wait
+*/5 * * * * cd <staged> && lore --config <staged>/corpus/config.yaml task remind notify
 --- stderr ---
-warning: without --pipeline-dir, scheduled collection has no semantic consumer and period jobs only retain deferred intents. Use the installed pipelines, or run /lore-process and `lore synthesis pending --wait-for-vault`, processing its queued results and resuming until the requested periods settle.
-warning: the task board is configured but --pipeline-dir was not given, so no reminder timer is scheduled and nothing will say a reminder out loud. Re-run with --pipeline-dir <where lore-remind.sh was installed>.
