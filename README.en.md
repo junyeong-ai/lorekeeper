@@ -226,11 +226,10 @@ A snapshot contains captured content. Prepare again after changes and verify evi
 using the returned revision. Follow `next_offset` for page/link inventories. Snapshot
 link pagination keeps the same snapshot; do not combine it with live `--revision`.
 
-The default `index.md` is a small entry guide. Explicitly enabling Markdown exports
-also generates `catalog/`, `log.md` and `map.md`, with at most 100 catalog entries
-per page. These are optional derived navigation, not duplicate knowledge or evidence.
-The log sorts declared creation dates, which are not collection history. `--snapshot` search,
-filters and pagination use SQLite; omitting it reads current Markdown; Obsidian still follows the original page links.
+`index.md` is a small entry guide. Page inventories, creation-date browsing and
+links/backlinks are queried through SQLite snapshots. Omitting `--snapshot` reads
+current Markdown. Declared creation dates are distinct from collection history.
+Obsidian follows the original knowledge-page links.
 
 A conflict requires incompatible claims under comparable conditions. A newer date
 or more citations cannot resolve it automatically. `wiki reviews` exposes current
@@ -349,7 +348,6 @@ lore wiki links wiki/concepts/example.md --limit 20 # Inspect link source lines,
 lore wiki provenance wiki/documents/example.md # Follow declared relations by exact repository + document ID
 lore wiki concepts            # list concepts
 lore resolve <name>           # which concept page owns a name (0 owned / 1 absent / 2 ambiguous)
-lore wiki index / log / map   # rebuild by-topic index / by-time timeline / citation-cluster map
 lore graph lint               # structural health (orphans, broken links, duplicate concepts, …)
 lore graph suggest-links      # concept-relationship candidates (Adamic-Adar)
 lore graph cluster            # topic communities (Louvain)
@@ -357,7 +355,6 @@ lore graph backlinks-sync     # re-derive each concept's ## Sources, citation co
 lore graph merge <from> <into># fold a duplicate concept into the canonical one
 lore graph retract-citation <origin.md> <concept.md> --revision <file_revision> --dry-run # Preview a reviewed citation correction
 lore graph normalize --fix    # normalize link spelling across the vault
-lore graph index-sync --fix   # repair missing/phantom entries in index.md
 lore doctor                   # page contracts: text cleanliness, unanswered sections, credentials
 lore extract status           # how far each project's knowledge extraction trails its repository
 lore maintenance              # prune ingest logs and drained queue files past retention
@@ -372,15 +369,13 @@ lore config vault-root        # the vault's absolute path, and nothing else (for
 lore schema                   # generate wiki/AGENTS.md (the page-format schema)
 ```
 
-By default, `lore wiki refresh` refreshes the SQLite navigation snapshot and a small `index.md` entry guide. Enable automatic full Markdown catalog/log/map exports with `vault.navigation.markdown_exports: true` (default false). Explicit `wiki index/log/map` and `graph index-sync` remain optional export commands. Graph lint does not require export currency in the default mode. Existing files without a generation marker are preserved; collisions fail explicitly. For each retrieval session, prepare once and repeat `wiki browse/search/links --snapshot ID` (links supports `--direction incoming|both`), then verify originals with `wiki read --revision REV`. Refresh prints the prepared ID too.
+`lore wiki refresh` refreshes the SQLite navigation snapshot and a small `index.md` entry guide. Use `wiki browse/search/links` for page inventories, date ordering and relationship traversal. An existing entry file without a generation marker is preserved and reported as a collision. For each retrieval session, prepare once and repeat `wiki browse/search/links --snapshot ID` (links supports `--direction incoming|both`), then verify originals with `wiki read --revision REV`. Refresh prints the prepared ID too.
 
 For date-based discovery, use `lore wiki browse --snapshot ID --sort created --from 2026-01-01 --to 2026-12-31 --json`. `created` may be the original authoring date rather than the ingestion date. Missing or invalid dates retain an explicit status and are excluded by date filters. Date order is newest first, with unknown dates last when no date filter is applied.
 
 For project documents, `source_record.attributes` preserves attributes from the verified public nodex response. Knowledge authored outside the body, such as a routine’s `prompt`, reaches summary and extraction inputs. Imported instructions are source content, not instructions for the current worker.
 
 New RSS ingests retain pre-classification collection text at immutable hash addresses under `.lorekeeper/evidence/rss/`, referenced by daily `source_record.rss_original`. These are adapter-acquired bodies, not provider HTTP/XML bytes. `event_timestamp` is the adapter’s published-or-updated timestamp, separate from unknown acquisition time (`captured_at: null`). `wiki original` returns metadata first; select an exact `event_id` with the returned `revision`, then paginate the title, blank line and body. New captures report `page_bound_collection`; read-only discovery of historical event logs reports `legacy_unbound`, which does not establish that a current daily was derived from those historical bytes. A summary is an interpretation, and omission does not prove absence from the collected text. Refetching a provider URL does not reproduce the collection. New bound RSS extraction may explicitly select event IDs and immutable payload revisions in `concept_evidence`. Only these selected article dependencies avoid resynthesis after unrelated daily edits; legacy pages and unbound links retain page guards. Use `wiki original ORIGIN --evidence-concept CONCEPT` to discover selections, then `--event ID --revision PAYLOAD_REV` to read that historical article even after its current manifest changes. A retained observation does not establish current truth or independent verification. Extraction omission never retracts a selection; `graph retract-citation --event ID --event-revision PAYLOAD_REV` explicitly removes it. `source_count` continues to count originating pages. Failed original publication prevents its page reference; dry-run stores nothing.
-
-Legacy entries without markers are never inferred to be generated. During upgrade, inspect the current `file_revision` with `lore wiki read wiki/index.md` (and log.md/map.md if present), then run `lore wiki refresh --archive-replace wiki/index.md=FULL_FILE_REVISION` in default SQLite mode. Repeat the option for each root to replace. Exact originals, including hand edits, are retained under `.lorekeeper/navigation-archives/`; the command reports an address/hash receipt. Read retained content with `wiki read <archive_path>`. Other paths, changed revisions, source/knowledge types and inbox collisions are refused. Disable automatic Markdown exports for this migration, then re-enable them if desired. This option has no dry-run.
 
 These are the ones you reach for day to day. `lore --help` lists the full surface;
 `lore <command> --help` has each command's flags.
@@ -576,7 +571,7 @@ For unattended operation the installer ships `lore-daily.sh` (daily ingest + que
 
 Keep a backup or a reviewed Git commit before substantial rewrites or merges. Pipelines never stage or commit automatically because they cannot distinguish concurrent user edits from their own output. A mutation journal resumes interrupted changes; it is not a historical backup.
 
-Exclude `.lorekeeper/`, credentials and any private local state from Git. Review `git status` and `git diff`, then stage only the intended files. Generated `index.md`, `catalog/`, `log.md` and `map.md` can be excluded under the configured wiki directory. Check the sharing scope before using a remote repository.
+Exclude `.lorekeeper/`, credentials and any private local state from Git. Review `git status` and `git diff`, then stage only the intended files. The small generated `index.md` entry guide can be excluded under the configured wiki directory. Check the sharing scope before using a remote repository.
 
 ---
 

@@ -83,20 +83,6 @@ impl Workspace {
         Self { root }
     }
 
-    fn enable_markdown_exports(&self) {
-        let path = self.root.path().join("config.yaml");
-        let config = std::fs::read_to_string(&path).expect("config");
-        std::fs::write(
-            path,
-            config.replacen(
-                "  root: vault\n",
-                "  root: vault\n  navigation:\n    markdown_exports: true\n",
-                1,
-            ),
-        )
-        .expect("config");
-    }
-
     fn write(&self, rel: &str, content: &str) {
         let path = self.root.path().join("vault").join(rel);
         std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
@@ -209,7 +195,7 @@ fn sound_vault() -> Workspace {
          created: 2026-05-23\nupdated: 2026-05-23\n---\n\n\
          ## Related concepts\n\n- [Cited](../../wiki/concepts/cited.md)\n",
     );
-    assert_eq!(ws.code(&["wiki", "index"]), 0, "index must be in sync");
+    assert_eq!(ws.code(&["wiki", "refresh"]), 0, "index must be in sync");
     ws
 }
 
@@ -347,7 +333,6 @@ fn a_link_to_a_page_that_does_not_exist_exits_one() {
 #[test]
 fn the_json_report_carries_every_channel_field_on_a_clean_vault() {
     let ws = Workspace::new();
-    ws.enable_markdown_exports();
     ws.write(
         "wiki/concepts/cited.md",
         &concept("cited", "Cited", "A concept, cited and uncontested."),
@@ -358,7 +343,7 @@ fn the_json_report_carries_every_channel_field_on_a_clean_vault() {
          created: 2026-05-23\nupdated: 2026-05-23\n---\n\n\
          ## Related concepts\n\n- [Cited](../../wiki/concepts/cited.md)\n",
     );
-    assert_eq!(ws.code(&["wiki", "index"]), 0);
+    assert_eq!(ws.code(&["wiki", "refresh"]), 0);
     assert_eq!(ws.code(&["graph", "lint"]), 0, "the fixture must be clean");
     let raw = ws.stdout(&["graph", "--json", "lint"]);
     let parsed: serde_json::Value = serde_json::from_str(&raw).expect("valid JSON");
@@ -370,8 +355,6 @@ fn the_json_report_carries_every_channel_field_on_a_clean_vault() {
         "violations.duplicate_concepts",
         "violations.address_collisions",
         "violations.unnormalized",
-        "violations.index.missing_from_index",
-        "violations.index.missing_from_disk",
         "observations.orphans",
         "observations.hubs",
         "observations.unresolved_conflicts",
@@ -424,7 +407,6 @@ fn a_broken_link_written_outside_the_analysis_scope_still_gates() {
 #[test]
 fn a_page_with_unparseable_frontmatter_still_reports_its_broken_link() {
     let ws = sound_vault();
-    ws.enable_markdown_exports();
     ws.write(
         "daily/notes/2026-05-24.md",
         "---\nid: notes-2026-05-24\ntype: daily\ntitle: Notes: today\n---\n\n\
@@ -433,15 +415,15 @@ fn a_page_with_unparseable_frontmatter_still_reports_its_broken_link() {
     );
 
     let output = ws.run(&["graph", "--json", "lint"]);
-    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(output.status.code(), Some(1));
     let raw = String::from_utf8(output.stdout).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&raw).expect("valid JSON");
     let broken = parsed["data"]["violations"]["broken"]
         .as_array()
         .expect("broken array");
     assert_eq!(parsed["ok"], false);
-    assert!(parsed["data"]["violations"]["index"].is_null());
-    assert!(!parsed["data"]["errors"].as_array().unwrap().is_empty());
+    assert!(parsed["data"]["violations"].get("index").is_none());
+    assert!(parsed["data"]["errors"].as_array().unwrap().is_empty());
     assert_eq!(
         broken.len(),
         1,
@@ -603,7 +585,7 @@ fn a_filename_that_is_not_its_own_slug_exits_one_from_lint_too() {
             "A page whose file is named otherwise.",
         ),
     );
-    assert_eq!(ws.code(&["wiki", "index"]), 0);
+    assert_eq!(ws.code(&["wiki", "refresh"]), 0);
 
     assert_eq!(
         ws.code(&["graph", "normalize"]),
@@ -652,7 +634,7 @@ fn the_configured_orphan_exclude_reaches_the_report() {
         "wiki/concepts/uncited.md",
         &concept("uncited", "Uncited", "Nothing points here yet."),
     );
-    assert_eq!(ws.code(&["wiki", "index"]), 0);
+    assert_eq!(ws.code(&["wiki", "refresh"]), 0);
 
     let raw = ws.stdout(&["graph", "--json", "lint"]);
     let parsed: serde_json::Value = serde_json::from_str(&raw).expect("valid JSON");
@@ -818,52 +800,43 @@ fn a_citation_on_an_excluded_page_survives_the_sweeps_that_rewrite_the_vault() {
     assert!(page.contains("source_count: 1"), "{page}");
 }
 
-/// An observation-tuning knob must not be able to silence a violation. `orphan_exclude` is
-/// documented as "page ids never reported as orphans"; a catalog that disagrees with the disk is
-/// a different question, and answering it through the same filter makes one config key decide
-/// both channels.
+/// Observation filters never suppress structural broken-link findings.
 #[test]
 fn an_observation_knob_cannot_silence_a_violation() {
     let ws = excluding_from_orphans("wiki/concepts/uncited");
     ws.write(
         "wiki/concepts/uncited.md",
-        &concept("uncited", "Uncited", "Nothing points here yet."),
+        &concept("uncited", "Uncited", "See [Ghost](ghost.md)."),
     );
-    ws.write("wiki/index.md", "# Index\n");
-
-    let out = ws.run(&["graph", "index-sync"]);
-    let stdout = String::from_utf8(out.stdout).expect("utf8");
+    let output = ws.run(&["graph", "--json", "lint"]);
+    assert_eq!(output.status.code(), Some(1));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(
-        out.status.code(),
-        Some(1),
-        "a page the catalog omits is drift whatever the orphan filter says\n{stdout}"
+        report["data"]["violations"]["broken"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
     );
-    assert!(stdout.contains("wiki/concepts/uncited"), "{stdout}");
+    assert!(
+        report["data"]["observations"]["orphans"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
 }
 
-/// Drift is the difference between the catalog on disk and the one its BUILDER produces, asked of
-/// the builder. A second opinion about what belongs in the catalog reports a page the builder
-/// does not carry: `--fix` appends it, the next `wiki index` (which the pipeline runs BEFORE
-/// `graph lint`) drops it again, and the vault stays contradicted by two repairs undoing each
-/// other — permanently red, with nothing a caller can do about it.
+/// Live structural checks do not depend on which pages a derived catalog carried.
 #[test]
-fn a_page_the_catalog_does_not_carry_is_not_drift() {
+fn adding_a_managed_page_never_creates_catalog_drift() {
     let ws = sound_vault();
     ws.write(
         "wiki/scratch/note.md",
-        "---\nid: note\ntype: document\ntitle: \"Note\"\ncreated: 2026-05-23\n---\n\n# Note\n",
+        "---\ntype: document\ntitle: Note\n---\n# Note\n",
     );
-
-    for pass in 0..2 {
-        let out = ws.run(&["graph", "index-sync"]);
-        let stdout = String::from_utf8(out.stdout).expect("utf8");
-        assert_eq!(
-            out.status.code(),
-            Some(0),
-            "pass {pass}: a page the builder never catalogs is not drift\n{stdout}"
-        );
-        assert_eq!(ws.code(&["wiki", "index"]), 0);
-    }
+    assert_eq!(ws.code(&["graph", "lint"]), 0);
+    assert_eq!(ws.code(&["wiki", "refresh"]), 0);
+    assert_eq!(ws.code(&["graph", "lint"]), 0);
 }
 
 /// `graph.scope.exclude` narrows the ANALYSIS, not the vault: an excluded page still exists, so
@@ -889,7 +862,7 @@ fn an_excluded_page_still_exists_but_is_not_analysed() {
         "wiki/concepts/excluded.md",
         &concept("excluded", "Excluded", "Out of the analysis."),
     );
-    assert_eq!(ws.code(&["wiki", "index"]), 0);
+    assert_eq!(ws.code(&["wiki", "refresh"]), 0);
 
     let raw = ws.stdout(&["graph", "--json", "lint"]);
     let parsed: serde_json::Value = serde_json::from_str(&raw).expect("valid JSON");
@@ -929,7 +902,7 @@ fn a_page_this_tool_does_not_manage_is_not_a_link_source() {
         "Archive/malformed.md",
         "---\nid: malformed\ntitle: unclosed\n",
     );
-    assert_eq!(ws.code(&["wiki", "index"]), 0);
+    assert_eq!(ws.code(&["wiki", "refresh"]), 0);
 
     let out = ws.run(&["graph", "lint"]);
     let stdout = String::from_utf8(out.stdout).expect("utf8");
@@ -976,26 +949,16 @@ fn a_category_outside_the_configured_vocabulary_exits_one() {
 }
 
 #[test]
-fn a_catalog_that_disagrees_with_the_disk_exits_one() {
+fn a_new_concept_does_not_require_a_catalog_repair() {
     let ws = sound_vault();
-    ws.enable_markdown_exports();
     ws.write(
-        "wiki/concepts/added-after-the-index.md",
-        &concept(
-            "added-after-the-index",
-            "Added",
-            "Written after `wiki index` ran.",
-        ),
+        "wiki/concepts/late.md",
+        &concept("late", "Late", "Written after SQLite capture."),
     );
-
-    let out = ws.run(&["graph", "lint"]);
-    let stdout = String::from_utf8(out.stdout).expect("utf8");
-    assert_eq!(
-        out.status.code(),
-        Some(1),
-        "index drift must gate\n{stdout}"
-    );
-    assert!(stdout.contains("+index"), "{stdout}");
+    let out = ws.run(&["graph", "--json", "lint"]);
+    assert!(out.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(report["data"]["violations"].get("index").is_none());
 }
 
 #[test]
@@ -1010,7 +973,7 @@ fn one_name_answering_to_two_pages_exits_one() {
         &concept("vectordb", "Vector DB", "The other."),
     );
     // Re-catalog first, so this fails for the name collision alone.
-    assert_eq!(ws.code(&["wiki", "index"]), 0);
+    assert_eq!(ws.code(&["wiki", "refresh"]), 0);
 
     let out = ws.run(&["graph", "lint"]);
     let stdout = String::from_utf8(out.stdout).expect("utf8");
@@ -1144,7 +1107,6 @@ fn the_json_envelope_agrees_with_the_exit_code() {
         &["broken"],
         &["cluster"],
         &["export"],
-        &["index-sync"],
         &["normalize"],
         &["suggest-links"],
         &["backlinks-sync", "--dry-run"],
@@ -1172,7 +1134,7 @@ fn the_json_envelope_agrees_with_the_exit_code() {
     let sound = sound_vault();
     check(&sound, "sound vault");
 
-    // A broken link and index drift: `lint`, `broken` and `index-sync` all exit 1 here.
+    // A broken link makes `lint` and `broken` exit 1 here.
     let contradicted = sound_vault();
     contradicted.write(
         "daily/notes/2026-05-24.md",

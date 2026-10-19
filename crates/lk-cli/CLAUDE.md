@@ -62,18 +62,13 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
 
 ## Canonical pages and derived discovery (`commands/wiki.rs`, `graph.rs`)
 
-- Markdown is canonical; SQLite is a prepared derived query snapshot. Refresh
-  prepares it first. Default navigation is a small marked guide; giant index/log/map
-  are opt-in exports. Explicit export/index-sync requests remain explicit even
-  when automatic exports are disabled.
+- Markdown is canonical; SQLite is the prepared derived query snapshot. Refresh
+  validates the small owned entry guide, prepares SQLite, then publishes that guide.
+  There are no Markdown catalog/log/map exporters, archive-replace migration, or
+  graph index-currency checks. Existing authored files are not retired by refresh.
 - Use captured config to refuse canonical manual-inbox overlap before capture or
-  navigation mutation at EVERY export entrypoint. Typed root, symlink, and marked
-  child guards remain in force. Never infer legacy ownership from filename/content.
-- Refresh's explicit repeated `--archive-replace PATH=FILE_REVISION` accepts exact
-  root paths only. Validate full revisions first; one MutationPlan preserves exact
-  original archives+receipt and replaces/retires roots plus marked children. Reused
-  archive/receipt bytes are guarded too. Authored children remain. Default is strict;
-  reject this migration with automatic exports enabled and explain the two steps.
+  navigation mutation. Guide ownership, symlink, nonregular-file and authored
+  collision guards remain strict; never infer ownership from an old export name.
 - Browse metadata with query=None; reject query-only/date-sort combinations in the
   library too. Created means declared authored date, not ingestion time. Preserve
   missing/invalid visibility, stable path ties, scope/filter/facet/pagination meaning.

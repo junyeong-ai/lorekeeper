@@ -235,9 +235,8 @@ HTML 표는 셀 순서와 빈 셀을 보존하며, 병합 셀·중첩 표는 HTM
 `--snapshot`은 준비 시점의 내용을 조회합니다. 변경 후 다시 준비하고, 근거를 읽을 때는 반환된 revision으로 확인합니다.
 페이지/링크 목록은 `next_offset`으로 이어서 읽습니다. 스냅샷 링크 조회에는 같은 snapshot을 사용하며 실시간 `--revision`을 함께 지정하지 않습니다.
 
-기본 `index.md`는 작은 진입 안내입니다. Markdown 내보내기를 명시적으로 켜면 `catalog/`·`log.md`·`map.md`를 생성합니다.
-이들은 원문과 의미 관계를 복제하는 저장소가 아니라 선택적 탐색용 파생물이며, 카탈로그 페이지는 최대 100개 항목으로 나뉩니다.
-`log.md`의 `created` 순서는 수집 이력과 다릅니다. `--snapshot` 탐색은 SQLite를 사용하고, 생략한 검색·목록 조회는 현재 Markdown을 읽습니다.
+`index.md`는 작은 진입 안내이며, 목록·작성일순 탐색·링크와 역링크는 SQLite 검색 스냅샷으로 조회합니다.
+`--snapshot`을 생략한 검색·목록 조회는 현재 Markdown을 읽습니다. 작성일순 조회의 `created`는 수집일과 다를 수 있습니다.
 Obsidian에서는 원래 지식 페이지의 링크와 검색을 그대로 사용합니다.
 
 충돌은 같은 조건에서 서로 양립할 수 없는 주장인지 근거를 읽고 판단합니다. 날짜가 최신이거나 출처가 많다는 이유로 자동 해결하지 않습니다.
@@ -357,7 +356,6 @@ lore wiki provenance wiki/documents/example.md --snapshot <id> # 정확한 문�
 lore wiki curate --file plan.json --dry-run # 근거 판본·이름·검토 기록 검증; 옵션을 빼면 원자적으로 반영
 lore wiki concepts            # 개념 목록
 lore resolve <name>           # 어떤 개념 페이지가 그 이름을 갖는지 (0 소유 / 1 없음 / 2 중복)
-lore wiki index / log / map   # 주제별 인덱스 / 시간순 타임라인 / 인용 클러스터 맵 재생성
 lore graph lint               # 구조 건강검진(고아·깨진링크·중복개념·…)
 lore graph suggest-links      # 개념 간 관계 후보(Adamic-Adar)
 lore graph cluster            # 토픽 커뮤니티(Louvain)
@@ -365,7 +363,6 @@ lore graph backlinks-sync     # 개념의 ## Sources·인용수·요약 입력 �
 lore graph merge <from> <into># 중복 개념 통합
 lore graph retract-citation <원문.md> <개념.md> --revision <file_revision> --dry-run # 검토한 오인용 철회 미리보기
 lore graph normalize --fix    # 링크 표기 정규화
-lore graph index-sync --fix   # index.md 누락/유령 항목 정정
 lore doctor                   # 페이지 계약 감사(텍스트 청결도·미답변 섹션·자격증명)
 lore extract status           # 프로젝트 지식 추출이 저장소보다 얼마나 뒤처졌는지
 lore maintenance              # 보관기한 지난 ingest 로그·드레인된 큐 파일 정리
@@ -382,15 +379,13 @@ lore schema                   # wiki/AGENTS.md(페이지 포맷 스키마) 생�
 
 `lore fetch`는 HTTP `Content-Type`에 따라 HTML·Markdown·일반 텍스트를 읽습니다. `text/plain`으로 제공되는 `.md`·`.markdown` 파일도 Markdown으로 보존하며, 링크·이미지의 상대 주소는 최종 응답 URL을 기준으로 바꿉니다. 형식 선언이 없거나 지원하지 않는 응답, 잘못된 문자 인코딩과 16 MiB를 넘는 본문은 오류로 보고합니다. Markdown 안의 raw HTML 주소는 그대로 남아 수동 원본의 의존성 검사 대상이 됩니다.
 
-기본 `lore wiki refresh`는 SQLite 탐색 스냅샷과 작은 `index.md` 진입 안내를 갱신합니다. 전체 Markdown catalog/log/map 자동 내보내기는 `vault.navigation.markdown_exports: true`로 켭니다(기본 false). 명시 `wiki index/log/map`와 `graph index-sync`는 선택적 export 명령으로 유지됩니다. 기본 모드의 graph lint는 export 최신성을 요구하지 않습니다. 생성 마커가 없는 기존 파일은 자동으로 덮거나 삭제하지 않으며, 충돌은 명시적으로 보고합니다. 탐색 세션은 `wiki prepare` 한 번으로 ID를 확보한 뒤 `wiki browse/search/links --snapshot ID`를 반복하고(`links --direction incoming|both`), `wiki read --revision REV`로 현재 원문을 확인합니다. refresh도 준비한 ID를 출력합니다.
+`lore wiki refresh`는 SQLite 탐색 스냅샷과 작은 `index.md` 진입 안내를 갱신합니다. 지식 목록·날짜순 조회·관계 탐색은 `wiki browse/search/links`로 수행합니다. 생성 마커가 없는 진입 파일은 보존하고 충돌을 보고합니다. 탐색 세션은 `wiki prepare` 한 번으로 ID를 확보한 뒤 `wiki browse/search/links --snapshot ID`를 반복하고(`links --direction incoming|both`), `wiki read --revision REV`로 현재 원문을 확인합니다. refresh도 준비한 ID를 출력합니다.
 
 프로젝트 문서의 `source_record.attributes`는 nodex 공개 응답의 원본 속성을 보존합니다. routine의 `prompt`처럼 본문 밖에 있는 지식도 요약·추출 입력에 포함하며, 속성은 현재 작업을 실행하라는 지시가 아닌 출처의 내용으로 읽습니다.
 
 새 RSS ingest는 분류 전 수집 텍스트를 `.lorekeeper/evidence/rss/`에 불변 해시 주소로 보존하고 daily의 `source_record.rss_original`로 연결합니다. 이는 공급자의 HTTP/XML 원본이 아니라 adapter가 취득한 본문이며, `event_timestamp`는 published 또는 updated에서 온 adapter 시각이며 취득 시각이 아닙니다(`captured_at: null`). `wiki original`은 목록을 먼저 반환하고, 반환된 `revision`과 정확한 `event_id`로 제목·빈 줄·본문을 문자 단위 페이지네이션합니다. 새 원문은 `page_bound_collection`, 과거 이벤트 로그의 읽기 전용 발견은 `legacy_unbound`입니다. 후자는 해당 daily의 과거 입력임을 증명하지 않습니다. 요약은 해석이며 원문의 부재를 증명하지 않습니다. 공급자 URL을 다시 읽은 내용도 당시 수집본과 같다고 볼 수 없습니다. 새 bound RSS 추출의 각 컨셉은 LLM이 명시적으로 선택한 `event_id`와 immutable payload revision을 `concept_evidence`에 저장해야 합니다. 기사 선택이 없으면 게시를 거부하고, 추출 결과가 빈 목록이면 정상 완료할 수 있습니다. 이 선택만 기사 단위 합성 근거가 되어 무관한 일일 요약 변경으로 재합성되지 않습니다. 과거 페이지와 귀속 없는 링크는 기존 페이지 guard를 유지합니다. `wiki original ORIGIN --evidence-concept CONCEPT`로 선택 목록을 읽고 `--event ID --revision PAYLOAD_REV`로 당시 기사를 확인합니다. 최신 manifest와 다른 과거 선택도 읽을 수 있으며, 현재 사실이나 독립 검증을 보장하지는 않습니다. 추출의 누락은 철회가 아니고, `graph retract-citation`의 `--event`/`--event-revision`으로 명시 철회합니다. `source_count`는 계속 원문 페이지 수입니다. 원문 저장 실패 시 페이지는 그 원문을 참조하지 않으며 dry-run은 보관하지 않습니다.
 
 날짜별 탐색은 `lore wiki browse --snapshot ID --sort created --from 2026-01-01 --to 2026-12-31 --json`을 사용합니다. `created`는 수집일이 아니라 원문 작성일일 수 있습니다. 날짜가 없거나 유효하지 않으면 상태를 표시하고 날짜 필터에서는 제외합니다. 날짜순은 최신부터이며, 필터가 없으면 날짜 미상 항목을 마지막에 둡니다.
-
-마커가 없는 기존 목록은 자동으로 생성물이라고 추정하지 않습니다. 업그레이드 시 `lore wiki read wiki/index.md`(필요하면 log.md/map.md도)에서 현재 `file_revision`을 확인하고, 기본 SQLite 모드에서 `lore wiki refresh --archive-replace wiki/index.md=FULL_FILE_REVISION`을 실행합니다. 교체할 각 root마다 옵션을 반복하세요. 정확한 원문(수동 수정 포함)은 `.lorekeeper/navigation-archives/`에 보존되고 주소·해시 receipt 경로가 출력됩니다. `wiki read <archive_path>`로 다시 읽을 수 있습니다. 다른 경로, 변경된 revision, source/knowledge 타입과 inbox 충돌은 거부합니다. 자동 Markdown export가 켜져 있다면 먼저 끄고 이관한 뒤 다시 켭니다. 이 옵션에는 dry-run이 없습니다.
 
 일상적으로 쓰는 것들만 추렸다. 전체 목록은 `lore --help`, 각 명령의 플래그는
 `lore <명령> --help`.
@@ -595,7 +590,7 @@ git diff
 # 공개해도 되는 파일만 선택해서 git add한 뒤 commit
 ```
 
-`.lorekeeper/`에는 운영 기록과 보관된 입력이 있으므로 이력에서 제외하십시오. 자격증명 파일도 별도로 제외되어 있는지 확인하십시오. `wiki/index.md`·`catalog/`·`log.md`·`map.md`는 재생성 가능한 파생물이며, 경로는 `vault.dirs.wiki` 설정에 맞춰 제외할 수 있습니다. 원격 저장소를 쓴다면 원문 데이터의 공유 범위를 먼저 확인하십시오.
+`.lorekeeper/`에는 운영 기록과 보관된 입력이 있으므로 이력에서 제외하십시오. 자격증명 파일도 별도로 제외되어 있는지 확인하십시오. 작은 진입 안내인 `wiki/index.md`는 재생성할 수 있으며, 경로는 `vault.dirs.wiki` 설정에 맞춰 제외할 수 있습니다. 원격 저장소를 쓴다면 원문 데이터의 공유 범위를 먼저 확인하십시오.
 
 ---
 

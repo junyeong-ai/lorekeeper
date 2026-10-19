@@ -41,7 +41,7 @@ each as an independent source, and report the aggregate results.
    is what `backlinks-sync` counts as the citation. A concept whose evidence later
    moves is rewritten by the queue, not here — `lore graph backlinks-sync` queues
    it once the citation lands.
-5. **Finalize**: `lore graph backlinks-sync`, then `lore wiki refresh` (refresh SQLite navigation and configured Markdown exports), then
+5. **Finalize**: `lore graph backlinks-sync`, then `lore wiki refresh` (refresh SQLite navigation and the entry guide), then
    `lore graph lint`. A non-zero exit is the vault contradicting itself somewhere, which
    is not the same as this add having caused it: a broken link or an unknown category
    elsewhere in the vault predates you. Resolve every violation naming a page this add

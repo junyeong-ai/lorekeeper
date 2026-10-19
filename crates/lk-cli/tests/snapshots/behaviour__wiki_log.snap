@@ -2,7 +2,11 @@
 source: crates/lk-cli/tests/behaviour.rs
 expression: "observe(staged.path(), argv)"
 ---
-exit: 0
+exit: 2
 --- stdout ---
 --- stderr ---
-Wrote <staged>/corpus/vault/wiki/log.md
+error: unrecognized subcommand 'log'
+
+Usage: lore wiki [OPTIONS] <COMMAND>
+
+For more information, try '--help'.

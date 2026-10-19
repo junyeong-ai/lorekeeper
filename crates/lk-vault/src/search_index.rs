@@ -8,7 +8,7 @@ use crate::search::{MatchProjection, Page, SearchOptions, SearchResult, fold_nam
 use crate::{MutationSession, VaultError};
 
 pub(super) const INDEX_PATH: &str = ".lorekeeper/search.sqlite";
-const VERSION: i32 = 9;
+const VERSION: i32 = 10;
 
 #[derive(Serialize)]
 pub struct SearchSnapshot {
@@ -881,6 +881,11 @@ mod tests {
             "knowledge/feed/catalog/a.md",
             "knowledge/feed/index.md",
             "personal/catalog/a.md",
+            "knowledge/map.md",
+            "knowledge/log.md",
+            "knowledge/catalog/index/0.md",
+            "knowledge/catalog/map/0.md",
+            "knowledge/catalog/log/0.md",
         ] {
             write(
                 root.path(),
@@ -888,15 +893,7 @@ mod tests {
                 "---\ntype: concept\ntitle: Needle\n---\n## Claim\nNeedle evidence.\n",
             );
         }
-        for path in [
-            "knowledge/index.md",
-            "knowledge/map.md",
-            "knowledge/log.md",
-            "knowledge/AGENTS.md",
-            "knowledge/catalog/index/0.md",
-            "knowledge/catalog/map/0.md",
-            "knowledge/catalog/log/0.md",
-        ] {
+        for path in ["knowledge/index.md", "knowledge/AGENTS.md"] {
             // Exclusion must happen before frontmatter parsing, not by generated type.
             write(
                 root.path(),
@@ -910,12 +907,14 @@ mod tests {
             ..Default::default()
         };
         let live = crate::search(root.path(), &dirs, &options).unwrap();
-        assert_eq!(live.total, 5);
-        assert!(
-            live.hits
-                .iter()
-                .all(|hit| !hit.path.starts_with("knowledge/catalog/"))
-        );
+        assert_eq!(live.total, 10);
+        for path in [
+            "knowledge/map.md",
+            "knowledge/log.md",
+            "knowledge/catalog/index/0.md",
+        ] {
+            assert!(live.hits.iter().any(|hit| hit.path == path));
+        }
         let body = crate::search_body(
             root.path(),
             &dirs,
@@ -929,10 +928,10 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(body.total, 5);
+        assert_eq!(body.total, 10);
         let session = MutationSession::acquire(root.path()).unwrap();
         let prepared = prepare_search(&session, &dirs).unwrap();
-        assert_eq!(prepared.pages, 5);
+        assert_eq!(prepared.pages, 10);
         options.snapshot = Some(&prepared.snapshot);
         let snapshot = crate::search(root.path(), &dirs, &options).unwrap();
         assert_eq!(snapshot.total, live.total);

@@ -1,10 +1,5 @@
-//! Vault search — the lookup a reader does before writing, and the one an agent does
-//! instead of reading the catalog.
-//!
-//! `index.md` is a catalog of every page and grows with the vault; past a few thousand pages
-//! reading it to locate one concept costs more than the answer is worth, and an agent has no
-//! way to read part of it. This answers the same question by query instead: which pages
-//! ANSWER to this, and which merely mention it.
+//! Lexical discovery of authoritative Markdown: which pages answer to a name,
+//! and which merely mention it. Prepared SQLite snapshots share these semantics.
 //!
 //! There is no score. A hit is ordered by WHERE it matched — the page's own names, then the
 //! line it opens with, then anywhere in its prose — and within that by the number of citing
@@ -43,7 +38,7 @@ pub enum MatchField {
     /// The subject is named in the page's declared title or aliases.
     Name,
     /// The subject is named in the page's opening statement — the first line of its first
-    /// section, which is what every format leads with and what the catalog shows.
+    /// section, which is what every format leads with.
     Summary,
     /// The subject is named somewhere in the page's prose. Link destinations are not prose: a
     /// concept page carries one per citation, so matching them would make every page in the
@@ -1001,7 +996,7 @@ pub(super) fn excerpt(
             .map(str::to_owned)
             .or_else(|| search_summary(body)),
     };
-    text.map(|t| crate::index::truncate_summary(&t))
+    text.map(|t| crate::summary::truncate_summary(&t))
         .unwrap_or_default()
 }
 
@@ -1027,7 +1022,7 @@ pub(super) fn excerpt_with_spacing(
                     .any(|name| contains_spacing_term(&text, name))
             }
         })
-        .map(crate::index::truncate_summary)
+        .map(crate::summary::truncate_summary)
         .unwrap_or_else(|| excerpt(body, matched, terms, spellings))
 }
 

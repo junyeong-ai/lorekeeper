@@ -1,7 +1,7 @@
 # lk-vault
 
 Vault page I/O, templates, evidence stores and read/navigation views. Markdown is
-canonical; SQLite and Markdown navigation exports are derived.
+canonical; SQLite navigation is derived.
 
 ## Pages, sections and templates
 
@@ -100,7 +100,7 @@ canonical; SQLite and Markdown navigation exports are derived.
   Learned concepts carry opening lines, revisited names only; resolver metadata
   verifies real addresses without reading every concept body.
 
-## Navigation (`search_index.rs`, `navigation.rs`, `index.rs`, `timeline.rs`)
+## Navigation (`search_index.rs`, `navigation.rs`)
 
 - `prepare_search` atomically commits a reconstructible FTS5 snapshot; failed reads
   preserve old snapshot. Explicit `--snapshot` pins captured corpus/config/paths/full
@@ -109,16 +109,14 @@ canonical; SQLite and Markdown navigation exports are derived.
   and declared relations avoid full vocabulary/collection reads; selected scalar rows use SQL
   filters/LIMIT/OFFSET. FTS narrows candidates only; shared matcher decides hits.
   Body search scans captured full scope without visible-text FTS omissions.
-- Default refresh journals the small entry guide and retires only exact marked
-  generated output after successful capture. Marker is first body line; unmarked
-  roots or marked knowledge/source files refuse the plan. Explicit migration needs
-  exact root path/full-file revisions, preserving originals and receipts first.
-- Optional catalog/log/map exports share navigation publisher and ≤100 rows/branches
-  per page. Preserve semantic groups/exact relative paths; each view removes only
-  its own marked children and refuses authored collisions. Every entry is reachable.
-  Timeline uses created only, not updated; missing optional dirs empty, read/parse
-  failures abort. Generated output isn't knowledge evidence; position IDs aren't
-  permanent knowledge IDs.
+- Refresh prepares SQLite and publishes only the small configured `index.md` guide.
+  `plan_navigation_entry` captures exact prior bytes/absence for the mutation journal;
+  apply it only after successful snapshot preparation. Its opaque ownership marker
+  must be the first body line. Unmarked files, authored frontmatter, malformed pages,
+  nonregular entries and leaf symlinks refuse publication.
+- Navigation never generates, discovers, retires or migrates other Markdown output.
+  Only the configured guide and schema entry addresses are reserved from source
+  searches. Similarly named authored files and directories remain ordinary content.
 
 ## Immutable originals (`manual_original.rs`, `rss_original.rs`, `rss_evidence.rs`)
 

@@ -3,7 +3,6 @@ use petgraph::graph::{DiGraph, NodeIndex};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::collections::HashSet;
-use std::path::Path;
 
 use lk_core::config::VaultDirs;
 
@@ -46,16 +45,16 @@ pub struct BrokenLink {
 /// point at them.
 ///
 /// Reserved meta-pages (`lk_core::vault_path::RESERVED_WIKI_FILES`) are skipped as SOURCES —
-/// they catalog every page they can see and are re-derived WHOLE, so a stale link in one is
+/// they are generated entry/schema guides, so a stale link in one is
 /// repaired by regenerating it, and `wiki refresh` runs before `graph lint` in the scheduled
-/// pipeline. They remain valid DESTINATIONS: they are files, and a page linking the catalog is
+/// pipeline. They remain valid DESTINATIONS: they are files, and a page linking a guide is
 /// linking something real.
 pub fn broken_links(
     pages: &[ScannedPage],
     existence: &VaultExistence,
-    dirs: &VaultDirs,
+    _dirs: &VaultDirs,
 ) -> Vec<BrokenLink> {
-    let is_reserved = crate::scan::reserved_page_predicate(Path::new(&dirs.wiki));
+    let is_reserved = |id: &str| existence.is_reserved(id);
     let mut broken: Vec<BrokenLink> = pages
         .iter()
         .filter(|page| !is_reserved(page.id.as_str()))
@@ -92,9 +91,9 @@ pub struct RespelledLink {
 pub fn respelled_links(
     pages: &[ScannedPage],
     existence: &VaultExistence,
-    dirs: &VaultDirs,
+    _dirs: &VaultDirs,
 ) -> Vec<RespelledLink> {
-    let is_reserved = crate::scan::reserved_page_predicate(Path::new(&dirs.wiki));
+    let is_reserved = |id: &str| existence.is_reserved(id);
     let mut found: Vec<RespelledLink> = pages
         .iter()
         .filter(|page| !is_reserved(page.id.as_str()))
@@ -176,17 +175,17 @@ impl WikiGraph {
     pub fn build_with_existence(
         pages: &[ScannedPage],
         existence: &VaultExistence,
-        dirs: &VaultDirs,
+        _dirs: &VaultDirs,
     ) -> Self {
         let mut graph = DiGraph::new();
         let mut id_to_node = HashMap::with_capacity(pages.len());
 
-        // Navigation/catalog meta-files (index.md, log.md, map.md, AGENTS.md) are generated
+        // Navigation/schema guides (index.md, AGENTS.md) are generated
         // artifacts, not knowledge nodes — keep them out of the analysis graph entirely
-        // (nodes AND edges). index.md/map.md link every member they catalog, so as nodes
+        // (nodes AND edges). Generated guide links do not describe knowledge, so as nodes
         // they would be spurious mega-hubs, merge otherwise-separate communities, and
         // (via inbound links) mask real orphans.
-        let is_reserved = crate::scan::reserved_page_predicate(Path::new(&dirs.wiki));
+        let is_reserved = |id: &str| existence.is_reserved(id);
 
         for page in pages {
             if is_reserved(page.id.as_str()) {
@@ -224,9 +223,8 @@ impl WikiGraph {
                 } else if existence.is_knowledge(target) {
                     // Resolves to a knowledge page outside the analysis scope: a vault-wide
                     // outbound connection for orphan purposes. No edge — the target node is not
-                    // in the scope graph. A generated catalog is deliberately not knowledge
-                    // here: `index.md` lists every page, so counting a link to it as a
-                    // connection would exempt the very pages orphan detection looks for.
+                    // in the scope graph. Generated guides are deliberately not knowledge;
+                    // navigation links must not exempt a concept from orphan detection.
                     cross_scope_connected.insert(page.id.clone());
                 }
             }
@@ -367,7 +365,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn neighbors_preserve_direction_and_include_source_pages_without_catalog_edges() {
+    fn neighbors_preserve_direction_and_include_source_pages_without_guide_edges() {
         let graph = WikiGraph::build(
             &[
                 build_page(
@@ -504,10 +502,10 @@ mod tests {
         );
     }
 
-    /// The generated catalogs are files, so a page linking one is linking something real —
+    /// Generated guides are files, so a page linking one is linking something real —
     /// their exclusion from the analysis graph is about NODES, not about existing.
     #[test]
-    fn a_link_to_the_generated_catalog_resolves() {
+    fn a_link_to_the_generated_guide_resolves() {
         let pages = vec![
             build_page("daily/notes/2026-05-23", &["wiki/index"]),
             build_page("wiki/index", &[]),
@@ -515,11 +513,10 @@ mod tests {
         assert!(broken(&pages).is_empty());
     }
 
-    /// …but reaching the catalog is not reaching anything, for orphan purposes: `index.md`
-    /// lists every page it catalogs, so counting a link to it as connectivity would exempt the
-    /// very pages orphan detection exists to find.
+    /// A guide link describes navigation rather than a relationship to knowledge.
+    /// It must not exempt a page from orphan detection.
     #[test]
-    fn linking_only_the_catalog_does_not_exempt_a_page_from_being_an_orphan() {
+    fn linking_only_the_guide_does_not_exempt_a_page_from_being_an_orphan() {
         let dirs = VaultDirs::default();
         let scope = vec![build_page("wiki/concepts/lonely", &["wiki/index"])];
         let full = vec![
@@ -533,9 +530,9 @@ mod tests {
     }
 
     #[test]
-    fn a_catalog_page_is_never_a_broken_link_source() {
-        // `index.md` lists every page it can see and is re-derived from the vault, so an entry
-        // for a page that is gone is index drift, reported by `index-sync` rather than twice.
+    fn a_generated_guide_is_never_a_broken_link_source() {
+        // The generated navigation guide is operational documentation, not a source
+        // of knowledge graph assertions; it stays outside structural link findings.
         let pages = vec![
             build_page("wiki/index", &["wiki/concepts/gone"]),
             build_page("wiki/concepts/here", &[]),

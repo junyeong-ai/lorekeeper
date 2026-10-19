@@ -47,7 +47,7 @@ personal:                            # OPTIONAL personal-productivity module (wo
   monthly:   {enabled: true, schedule: "..."}    # quarterly/annual likewise
 synthesis: {weekly: {...}}           # cross-source weekly themes (domain-neutral)
 concepts:                            # LLM concept-page taxonomy
-  categories: [{id: ..., label: ...}] # classifies concepts; labels optional Markdown exports
+  categories: [{id: ..., label: ...}] # classifies concepts for metadata browsing
 graph:                               # link graph analysis and optional semantic maintenance
   audit: {schedule: "0 7 * * 0", batch_size: 50} # requires installed --pipeline-dir
   scope: {dirs: [...]}               # defaults to vault.dirs.wiki

@@ -2,11 +2,11 @@
 source: crates/lk-cli/tests/behaviour.rs
 expression: "observe(staged.path(), argv)"
 ---
-exit: 1
+exit: 2
 --- stdout ---
-  +index  wiki/concepts/behaviour-snapshot
-  +index  wiki/concepts/deterministic-clock
-  +index  wiki/concepts/guard-population
-  +index  wiki/concepts/unlinked-note
-  repair: `lore wiki index` (or re-run with --fix)
 --- stderr ---
+error: unrecognized subcommand 'index-sync'
+
+Usage: lore graph [OPTIONS] <COMMAND>
+
+For more information, try '--help'.

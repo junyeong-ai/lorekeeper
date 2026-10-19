@@ -49,7 +49,7 @@ impl Format {
 /// A write proceeds only when the format it leaves behind is provably the format already there.
 /// The three licensed cases are: nothing is there yet; the page there declares no format, so
 /// there is none to contradict (which is what lets a page whose frontmatter was deleted be
-/// re-rendered, and what lets the untyped wiki catalog and timeline rewrite themselves); or both
+/// re-rendered, and what lets an untyped generated guide rewrite itself); or both
 /// sides name the same format. Everything else is refused — a typed page about to be replaced by
 /// an untyped one is replaced just as wholesale, and a target whose bytes cannot be read or
 /// parsed states no format to check, so overwriting on the strength of not knowing is the loss
@@ -61,19 +61,14 @@ impl Format {
 /// refusal names both causes and how to get back from either; a failure a user cannot clear is
 /// not an improvement on a silent loss.
 ///
-/// A generated page gets no exemption from that, though it was given one and had to be taken
-/// back. The argument for it — a page re-derived wholesale from config holds nothing a user wrote
-/// — is about the page this tool WRITES, not about whatever occupies the path; and when the bytes
-/// there cannot be read, telling those apart is precisely what is impossible. A hand-written
-/// `wiki/index.md` with one malformed frontmatter delimiter was destroyed by `lore wiki index`,
-/// exit 0. What the exemption bought was not having to move a damaged file aside by hand, which is
-/// what the refusal already says to do.
+/// Generated output has the same checks: knowing how to regenerate a page does not establish
+/// ownership of the bytes currently occupying its path. An unreadable destination requires
+/// explicit repair or preservation before replacement.
 ///
-/// Every page PUBLISHED into the vault goes through here — there is no second path to keep a
-/// list of. An in-place edit ([`VaultWriter::edit_page_sync`]) does not, and cannot be the write
-/// this refuses: its content is the page it read. Neither is the vault's operational state
-/// (`.lorekeeper/`: the queue, the event logs, the ingest log) or `credentials.json`, none of
-/// which is a page.
+/// `VaultWriter` publication goes through this check. An in-place edit
+/// ([`VaultWriter::edit_page_sync`]) instead edits the page it read; mutation-plan publishers
+/// enforce their own ownership and expected-byte guards. Operational files such as the
+/// queue, event logs, ingest log and `credentials.json` are not vault pages.
 ///
 /// Cooperating CLI mutations hold a `MutationSession` while deriving and publishing pages.
 /// External editors do not participate in that lock.
@@ -123,7 +118,7 @@ pub(crate) fn refuse_format_change(full: &Path, content: &str) -> Result<(), Vau
 ///
 /// Two contracts, because a page is replaced for two different reasons. [`Self::write_page`]
 /// and [`Self::write_page_sync`] PUBLISH a page rendered from somewhere else — a template, a
-/// catalog derivation — and cannot know what occupies the path, so they carry
+/// navigation guide — and cannot know what occupies the path, so they carry
 /// a format guard. [`Self::edit_page_sync`] rewrites a page from its own bytes, where
 /// that question has no meaning: the content IS that page, transformed.
 pub struct VaultWriter {
@@ -236,8 +231,8 @@ mod tests {
         writer
             .write_page_sync(rel, &page("daily", "## 요약"))
             .expect_err("the sync writer refuses too");
-        // A page declaring no format states none to contradict, so the untyped catalog and
-        // timeline rewrite themselves, and a page whose frontmatter was deleted is re-rendered.
+        // A page declaring no format states none to contradict, so an untyped guide
+        // can be replaced, and a page whose frontmatter was deleted is re-rendered.
         let plain = Path::new("wiki/index.md");
         writer.write_page(plain, "# Index\n").await.unwrap();
         writer.write_page(plain, "# Index v2\n").await.unwrap();
@@ -260,9 +255,9 @@ mod tests {
 
     /// The guard compares what each side of the write says its format is, so the cases where a
     /// side says nothing decide as much as the cases where it says something else. An untyped
-    /// write over a typed page replaces it just as wholesale — `lore wiki index` and `lore wiki
-    /// log` render no `type` at all, and reaching a concept page through a folded directory is
-    /// how they would arrive at one. A target that cannot be parsed says nothing to check, and
+    /// write over a typed page replaces it just as wholesale. A generated guide can reach a
+    /// concept page through configured directories that the filesystem folds together.
+    /// A target that cannot be parsed says nothing to check, and
     /// proceeding because the answer is unavailable is the same loss with an extra step.
     #[tokio::test]
     async fn a_write_is_refused_unless_the_format_it_leaves_is_the_one_already_there() {
@@ -274,7 +269,7 @@ mod tests {
         let err = writer
             .write_page(typed, "# Index\n")
             .await
-            .expect_err("an untyped catalog must not replace a concept page");
+            .expect_err("an untyped guide must not replace a concept page");
         assert!(format!("{err}").contains("no `type`"), "{err}");
         assert_eq!(
             std::fs::read_to_string(dir.path().join(typed)).unwrap(),
@@ -328,34 +323,37 @@ mod tests {
     /// The exemption's argument was that a generated page holds nothing a user wrote, which is
     /// about the page this tool WRITES, not about whatever occupies the path. A hand-written
     /// `wiki/index.md` with one malformed frontmatter delimiter parses as illegible exactly like a
-    /// truncated `AGENTS.md` does, and `lore wiki index` destroyed it, exit 0. Nothing in the bytes
+    /// truncated `AGENTS.md` does. Nothing in the bytes
     /// distinguishes the two, so the safe direction is the loud one — and the refusal already says
     /// to move the page aside, which is all the exemption saved.
     #[tokio::test]
     async fn a_generated_page_is_refused_over_bytes_whose_format_cannot_be_read() {
         let (dir, writer) = setup().await;
-        let catalog = Path::new("wiki/index.md");
+        let entry = Path::new("wiki/index.md");
         let authored = "---\ntype: concept\n\n# My hand-written index\n\nDo not erase this.\n";
         std::fs::create_dir_all(dir.path().join("wiki")).unwrap();
-        std::fs::write(dir.path().join(catalog), authored).unwrap();
+        std::fs::write(dir.path().join(entry), authored).unwrap();
 
         let err = writer
-            .write_page(catalog, "# The catalog\n")
+            .write_page(entry, "# Navigation guide\n")
             .await
             .expect_err("an unreadable format is not licence to replace the file");
         assert!(format!("{err}").contains("cannot be read"), "{err}");
         assert_eq!(
-            std::fs::read_to_string(dir.path().join(catalog)).unwrap(),
+            std::fs::read_to_string(dir.path().join(entry)).unwrap(),
             authored,
             "the hand-written page must survive"
         );
 
         // Moving it aside is the remedy the refusal names, and it works.
-        std::fs::remove_file(dir.path().join(catalog)).unwrap();
-        writer.write_page(catalog, "# The catalog\n").await.unwrap();
+        std::fs::remove_file(dir.path().join(entry)).unwrap();
+        writer
+            .write_page(entry, "# Navigation guide\n")
+            .await
+            .unwrap();
         assert_eq!(
-            std::fs::read_to_string(dir.path().join(catalog)).unwrap(),
-            "# The catalog\n"
+            std::fs::read_to_string(dir.path().join(entry)).unwrap(),
+            "# Navigation guide\n"
         );
     }
 

@@ -32,7 +32,7 @@ impl KnowledgeStatus {
 /// of a silent internal rename, so a constant would add no protection — only noise.
 pub mod field {
     /// A concept's incoming-citation count. Written by `graph backlinks-sync`; read by
-    /// the ingest concept merge and `wiki index`.
+    /// concept accumulation and discovery metadata.
     pub const SOURCE_COUNT: &str = "source_count";
     /// The map of LLM-task cache hashes that drives materialized-view completion
     /// detection. Written by the pipeline render/work-log/synthesis stages and by `graph

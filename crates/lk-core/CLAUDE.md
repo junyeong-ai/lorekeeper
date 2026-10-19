@@ -46,7 +46,7 @@ config loading and the shared filesystem primitives intentionally perform I/O.
 - `frontmatter::field` owns private cross-crate protocol keys and completion-key
   derivation. Standard published page keys (`title`, `id`, `aliases`, etc.) remain
   literal vocabulary. Do not introduce a competing marker spelling.
-- Concept categories are optional, validated IDs/labels. Catalog headings come from
+- Concept categories are optional, validated IDs/labels. Discovery metadata retains
   each page's actual category, not the configured display label. Unknown extracted
   categories are dropped observably by the pipeline.
 

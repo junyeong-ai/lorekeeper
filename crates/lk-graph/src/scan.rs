@@ -180,10 +180,10 @@ impl VaultViews {
     /// exists, so it still resolves a link and still has its own links repointed by a rename.
     pub fn resolve(root: &Path, graph: &GraphConfig, dirs: &VaultDirs) -> Result<Self, GraphError> {
         // A configured directory must name exactly one directory on disk. Absent is a typo —
-        // silently yielding nothing lets `wiki map` overwrite the map with an empty catalog and
+        // silently yielding nothing lets analysis report an empty graph and
         // exit 0, and every analysis command agree the vault has no pages. Two spellings
         // answering to it is a vault split in half: the pages under one would be analysed while
-        // `wiki index` writes its catalog under the other. Where the filesystem folds the
+        // navigation writes its guide under the other. Where the filesystem folds the
         // spellings, both names reach one directory and the vault genuinely works.
         for dir in &graph.scope.dirs {
             resolve_dir(root, dir)?;
@@ -236,8 +236,12 @@ pub(crate) fn states_intent(page: &ScannedPage) -> bool {
 
 /// Whether this scanned page is real citation evidence, rather than a concept or board.
 /// Shares the source eligibility used by backlink reconciliation.
-pub fn is_citation_origin(page: &ScannedPage, dirs: &VaultDirs) -> bool {
-    is_valid_source(&page.path, dirs) && !states_intent(page)
+pub fn is_citation_origin(
+    page: &ScannedPage,
+    dirs: &VaultDirs,
+    existence: &VaultExistence,
+) -> bool {
+    is_valid_source(&page.path, dirs) && !states_intent(page) && !existence.is_reserved(&page.id)
 }
 
 /// Whether a page id sits under a configured vault-relative directory.
@@ -281,7 +285,7 @@ fn resolve_dir(root: &Path, dir: &Path) -> Result<PathBuf, GraphError> {
         }
         // It does not resolve, so the analysis would be empty. A directory the FILESYSTEM would
         // call the same name is worth naming — that is a vault split in half, pages under one
-        // spelling and the catalog written under the other. Anything else is a typo.
+        // spelling and navigation written under the other. Anything else is a typo.
         let siblings: Vec<String> = std::fs::read_dir(&at)
             .into_iter()
             .flatten()
@@ -436,13 +440,17 @@ pub struct VaultExistence {
     /// Requested alias -> actual scanned address, verified on this filesystem.
     aliases: HashMap<String, String>,
     knowledge: HashSet<String>,
+    /// Exact guide IDs plus only aliases verified to reach the same runtime files.
+    reserved: HashSet<String>,
     linked: HashSet<String>,
 }
 
 impl VaultExistence {
     /// Pure construction establishes only exact addresses, never filesystem aliases.
     pub fn build(pages: &[ScannedPage], dirs: &VaultDirs) -> Self {
-        let is_reserved = reserved_page_predicate(Path::new(&dirs.wiki));
+        let reserved: HashSet<_> = reserved_page_ids(Path::new(&dirs.wiki))
+            .into_iter()
+            .collect();
         let mut existence = Self {
             exact_ids: pages
                 .iter()
@@ -452,12 +460,13 @@ impl VaultExistence {
             archives: HashSet::new(),
             knowledge: pages
                 .iter()
-                .filter(|page| !is_reserved(&page.id))
+                .filter(|page| !reserved.contains(&page.id))
                 .map(|page| page.id.clone())
                 .collect(),
             linked: HashSet::new(),
+            reserved,
         };
-        existence.refresh_linked(pages, dirs);
+        existence.refresh_linked(pages);
         existence
     }
 
@@ -472,6 +481,35 @@ impl VaultExistence {
         let mut resolver =
             lk_vault::ExistingPageResolver::new(root, pages.iter().map(|page| page.path.clone()))
                 .map_err(|error| GraphError::Io(error.to_string()))?;
+        // Guide names are addresses, not slugs. A differently named scanned page
+        // is reserved only when it actually reaches the configured guide file.
+        let mut guide_files = HashSet::new();
+        for name in lk_core::vault_path::RESERVED_WIKI_FILES {
+            let relative = Path::new(&dirs.wiki).join(name);
+            let full = lk_vault::page_path(root, &relative)
+                .map_err(|error| GraphError::Io(error.to_string()))?;
+            match full.canonicalize() {
+                Ok(actual) => {
+                    guide_files.insert(actual);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(GraphError::Io(error.to_string())),
+            }
+        }
+        if !guide_files.is_empty() {
+            for page in pages {
+                let actual = root
+                    .join(&page.path)
+                    .canonicalize()
+                    .map_err(|error| GraphError::Io(error.to_string()))?;
+                if guide_files.contains(&actual) {
+                    existence.reserved.insert(page.id.clone());
+                }
+            }
+            existence
+                .knowledge
+                .retain(|id| !existence.reserved.contains(id));
+        }
         let destinations: HashSet<_> = pages
             .iter()
             .flat_map(|page| page.outgoing.iter())
@@ -497,15 +535,14 @@ impl VaultExistence {
                 existence.aliases.insert(dest.to_string(), address(&actual));
             }
         }
-        existence.refresh_linked(pages, dirs);
+        existence.refresh_linked(pages);
         Ok(existence)
     }
 
-    fn refresh_linked(&mut self, pages: &[ScannedPage], dirs: &VaultDirs) {
-        let is_reserved = reserved_page_predicate(Path::new(&dirs.wiki));
+    fn refresh_linked(&mut self, pages: &[ScannedPage]) {
         self.linked = pages
             .iter()
-            .filter(|page| !is_reserved(&page.id))
+            .filter(|page| !self.is_reserved(&page.id))
             .flat_map(|page| {
                 page.outgoing.iter().filter_map(|link| {
                     let id = self.reached(link)?;
@@ -513,6 +550,10 @@ impl VaultExistence {
                 })
             })
             .collect();
+    }
+
+    pub fn is_reserved(&self, id: &str) -> bool {
+        self.reserved.contains(id)
     }
 
     pub fn is_resolvable(&self, dest: &str) -> bool {
@@ -541,7 +582,7 @@ impl VaultExistence {
     }
 
     /// Whether a resolved link target addresses a KNOWLEDGE page — the question orphan
-    /// connectivity asks, where reaching a generated catalog is not reaching anything.
+    /// connectivity asks, where reaching a generated guide is not knowledge connectivity.
     pub fn is_knowledge(&self, target: &str) -> bool {
         self.knowledge.contains(target)
     }
@@ -582,37 +623,14 @@ pub(crate) fn is_valid_source(path: &Path, dirs: &VaultDirs) -> bool {
     .any(|dir| under(&id, dir))
 }
 
-/// Page ids of Lorekeeper's reserved wiki meta files (the index catalog, the time log,
-/// the navigation map, and the AGENTS.md schema doc) under `wiki_dir`, e.g. `wiki/index`,
-/// `wiki/log`, `wiki/map`, `wiki/agents`.
-/// Single-sourced from [`lk_core::vault_path::RESERVED_WIKI_FILES`] so the graph's
-/// orphan / index-drift checks exclude exactly what the index builder skips.
-pub fn reserved_page_ids(wiki_dir: &Path) -> Vec<String> {
+/// Page ids of the generated entry/schema guides under `wiki_dir`, e.g.
+/// `wiki/index` and `wiki/AGENTS`. Graph analysis follows the same reserved
+/// addresses as [`lk_core::vault_path::RESERVED_WIKI_FILES`].
+fn reserved_page_ids(wiki_dir: &Path) -> Vec<String> {
     lk_core::vault_path::RESERVED_WIKI_FILES
         .iter()
-        .map(|name| {
-            let stem = Path::new(name)
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or(name);
-            path_slug(&wiki_dir.join(stem))
-        })
+        .map(|name| page_id(&wiki_dir.join(name)))
         .collect()
-}
-
-/// Returns a predicate matching any reserved navigation/catalog meta page
-/// (`index.md`/`log.md`/`map.md`/`AGENTS.md`) that must stay out of the analysis graph
-/// (nodes AND edges): they link every page, so as nodes they would be spurious mega-hubs
-/// that merge separate communities and mask real orphans.
-pub fn reserved_page_predicate(wiki_dir: &Path) -> impl Fn(&str) -> bool {
-    let ids: HashSet<String> = reserved_page_ids(wiki_dir).into_iter().collect();
-    let catalog = format!(
-        "{}/",
-        dir_slug(&wiki_dir.join(lk_core::vault_path::CATALOG_SUBDIR))
-    );
-    move |id: &str| {
-        ids.contains(&path_slug(Path::new(id))) || dir_slug(Path::new(id)).starts_with(&catalog)
-    }
 }
 
 /// A lossless textual page key. Slug normalization is deliberately not identity.
@@ -931,14 +949,19 @@ mod tests {
     }
 
     #[test]
-    fn reserved_predicate_excludes_only_meta_files() {
-        let is_reserved = reserved_page_predicate(Path::new("wiki"));
+    fn pure_existence_reserves_only_exact_guide_addresses() {
+        let existence = VaultExistence::build(&[], &VaultDirs::default());
+        let is_reserved = |id: &str| existence.is_reserved(id);
         assert!(is_reserved("wiki/index"));
-        assert!(is_reserved("wiki/log"));
-        assert!(is_reserved("wiki/map"));
-        assert!(is_reserved("wiki/catalog/0-0"));
+        assert!(!is_reserved("wiki/log"));
+        assert!(!is_reserved("wiki/map"));
+        assert!(!is_reserved("wiki/catalog/0-0"));
         assert!(!is_reserved("wiki/catalogue/topic"));
-        assert!(is_reserved("wiki/agents"));
+        assert!(is_reserved("wiki/AGENTS"));
+        assert!(!is_reserved("wiki/agents"));
+        assert!(!is_reserved("wiki/index!"));
+        assert!(!is_reserved("wiki/AGENTS!"));
+        assert!(!is_reserved("wiki/index.v2"));
         // Real knowledge nodes are NOT reserved.
         assert!(!is_reserved("wiki/concepts/rag"));
         assert!(!is_reserved("wiki/documents/report"));
@@ -1141,7 +1164,7 @@ mod tests {
 
     #[test]
     fn a_configured_scope_directory_that_is_not_there_is_an_error() {
-        // Not an empty analysis: `wiki map` would overwrite the map with an empty catalog and
+        // Not an empty analysis: structural checks would report a clean empty graph and
         // exit 0, and every analysis command would agree the vault has no pages.
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join("wiki")).unwrap();

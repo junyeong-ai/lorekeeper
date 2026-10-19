@@ -81,8 +81,7 @@ one source to infer that distinction.
 - **Installation and scheduling are explicit.** `lk-dist` owns embedded artifact
   coherence. Scheduled scripts compose CLI stages and never auto-commit user edits.
   Full-source ingest alone rewrites the cross-source work-log; filtered ingest
-  cannot replace it with a subset. Navigation refresh defaults to SQLite plus an
-  entry guide; Markdown catalog/log/map exports are optional derived output.
+  cannot replace it with a subset. Navigation refresh updates SQLite discovery and a small entry guide.
 
 ## Naming
 

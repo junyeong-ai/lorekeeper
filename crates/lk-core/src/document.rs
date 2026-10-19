@@ -3,8 +3,7 @@
 //! schema` lists the same slate in AGENTS.md, so the wiki skills that author document
 //! pages by hand emit identical values. A document's subject-matter character (ADR,
 //! troubleshooting, project-knowledge, …) belongs in `tags`, never here — keeping
-//! `document_type` a small closed format set is what lets `lore wiki index` group
-//! documents cleanly.
+//! `document_type` a small closed format set keeps metadata filtering consistent.
 
 /// The closed `document_type` slate.
 pub const DOCUMENT_TYPES: &[&str] = &["note", "report", "data"];

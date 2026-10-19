@@ -26,7 +26,7 @@ use serde::Serialize;
 
 use crate::GraphError;
 use crate::scan::page_id;
-use crate::scan::{ScannedPage, VaultExistence, is_concept_page, is_valid_source};
+use crate::scan::{ScannedPage, VaultExistence, is_concept_page};
 
 /// Outcome of one concept page's reconciliation.
 #[derive(Debug, Clone, Serialize)]
@@ -171,13 +171,11 @@ pub enum SynthesisPolicy {
 
 fn incoming_citations(
     pages: &[ScannedPage],
-    vault_root: &Path,
     dirs: &VaultDirs,
+    existence: &VaultExistence,
 ) -> Result<BTreeMap<String, BTreeSet<String>>, GraphError> {
     if let Some(page) = pages.iter().find(|page| {
-        is_valid_source(&page.path, dirs)
-            && !crate::scan::states_intent(page)
-            && page.revision.is_none()
+        crate::scan::is_citation_origin(page, dirs, existence) && page.revision.is_none()
     }) {
         return Err(GraphError::UnreadableSource(page.path.clone()));
     }
@@ -189,7 +187,6 @@ fn incoming_citations(
     // `## Related`, and navigation pages aren't sources. BTreeMap/BTreeSet keep the
     // rendered body deterministic.
     // `pages` here is a full-vault scan of every page dir, so it IS the vault.
-    let existence = VaultExistence::build_at(vault_root, pages, dirs)?;
     let mut incoming: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for page in pages {
         // A page that states intent is not evidence: the board is forward-looking and it
@@ -198,7 +195,7 @@ fn incoming_citations(
         // finished — and queue a synthesis rewrite on each move. This sweep reads the whole
         // vault rather than the analysis scope, because a citation lives wherever it was
         // written, so the exclusion has to be asked here too.
-        if !crate::scan::is_citation_origin(page, dirs) {
+        if !crate::scan::is_citation_origin(page, dirs, existence) {
             continue;
         }
         for target in page
@@ -224,11 +221,12 @@ fn rss_evidence(
     pages: &[ScannedPage],
     root: &Path,
     dirs: &VaultDirs,
+    existence: &VaultExistence,
 ) -> Result<BTreeMap<String, BTreeMap<String, Vec<Citation>>>, GraphError> {
     let mut result = BTreeMap::new();
     for source in pages
         .iter()
-        .filter(|p| p.rss_evidence && crate::scan::is_citation_origin(p, dirs))
+        .filter(|p| p.rss_evidence && crate::scan::is_citation_origin(p, dirs, existence))
     {
         let raw = std::fs::read_to_string(
             lk_vault::page_path(root, &source.path).map_err(|e| GraphError::Io(e.to_string()))?,
@@ -310,8 +308,9 @@ pub fn concept_evidence(
     root: &Path,
     dirs: &VaultDirs,
 ) -> Result<BTreeMap<PathBuf, Vec<Citation>>, GraphError> {
-    let incoming = incoming_citations(pages, root, dirs)?;
-    let rss = rss_evidence(pages, root, dirs)?;
+    let existence = VaultExistence::build_at(root, pages, dirs)?;
+    let incoming = incoming_citations(pages, dirs, &existence)?;
+    let rss = rss_evidence(pages, root, dirs, &existence)?;
     let by_id: HashMap<&str, &ScannedPage> =
         pages.iter().map(|page| (page.id.as_str(), page)).collect();
     Ok(pages
@@ -347,8 +346,9 @@ pub fn concept_resynthesis(
         .find(|p| p.path == path)
         .filter(|p| is_concept_page(&p.path, dirs) && p.format.as_deref() == Some("concept"))
         .ok_or_else(|| fail("expected an exact existing concept Markdown path"))?;
-    let incoming = incoming_citations(pages, vault_root, dirs)?;
-    let rss = rss_evidence(pages, vault_root, dirs)?;
+    let existence = VaultExistence::build_at(vault_root, pages, dirs)?;
+    let incoming = incoming_citations(pages, dirs, &existence)?;
+    let rss = rss_evidence(pages, vault_root, dirs, &existence)?;
     let sources = incoming
         .get(&page.id)
         .ok_or_else(|| fail("concept has no current citations"))?;
@@ -398,8 +398,9 @@ pub fn sync_concept_backlinks(
     dirs: &VaultDirs,
     synthesis: SynthesisPolicy,
 ) -> Result<BacklinksSyncResult, GraphError> {
-    let incoming = incoming_citations(pages, vault_root, dirs)?;
-    let rss = rss_evidence(pages, vault_root, dirs)?;
+    let existence = VaultExistence::build_at(vault_root, pages, dirs)?;
+    let incoming = incoming_citations(pages, dirs, &existence)?;
+    let rss = rss_evidence(pages, vault_root, dirs, &existence)?;
     let by_id: HashMap<&str, &ScannedPage> = pages.iter().map(|p| (p.id.as_str(), p)).collect();
 
     let writer = VaultWriter::new(vault_root);

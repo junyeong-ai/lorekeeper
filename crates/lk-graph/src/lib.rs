@@ -1,9 +1,9 @@
 //! Link graph analysis for Obsidian vaults: hubs, orphans, community clustering,
-//! index-sync, slug normalization, and the JSON graph export.
+//! slug normalization, and the JSON graph export.
 //!
 //! Pure domain logic (slugify, frontmatter parsing, link extraction) is delegated to
 //! `lk-core`; this crate owns only the graph structure and I/O (walkdir/rayon vault scan,
-//! index-file fixup, file rename).
+//! file rename).
 
 pub mod audit;
 pub mod backlinks;
@@ -11,8 +11,6 @@ pub mod cluster;
 pub mod concept_lint;
 pub mod export;
 pub mod graph;
-pub mod index_drift;
-pub mod map;
 pub mod merge;
 pub mod normalize;
 pub mod output;
@@ -30,8 +28,8 @@ pub enum GraphError {
     InvalidExclude(String, String),
     #[error(
         "vault directory '{configured}' is spelled '{on_disk}' on disk, and this filesystem \
-         keeps the two apart — the pages under one and the catalog written to the other would \
-         be different directories. Rename it, or point the config at '{on_disk}'"
+         keeps the two apart — reading one and writing the other would address \
+         different directories. Rename it, or point the config at '{on_disk}'"
     )]
     DirSpelling {
         configured: PathBuf,

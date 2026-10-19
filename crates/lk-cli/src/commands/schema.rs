@@ -689,9 +689,8 @@ pub fn render_agents_md(
          support or contradiction; read its context."
     )
     .unwrap();
-    writeln!(out, "- `{}/index.md` — a small permanent navigation guide after default `lore wiki refresh`. The refresh captures SQLite discovery first and prints its snapshot ID. Start a retrieval session with `lore wiki prepare`, then reuse its ID with browse/search/links `--snapshot ID` (links supports `--direction incoming|both`). Confirm current originals with wiki read and the captured file_revision as `--revision`. Markdown knowledge pages remain the source of truth.", dirs.wiki).unwrap();
-    writeln!(out, "- Full Markdown catalog/timeline/cluster-map exports are optional: request `lore wiki index`, `lore wiki log`, or `lore wiki map`, or enable `vault.navigation.markdown_exports: true` for automatic refresh (default false). Each exported page has at most 100 entries, with details under `catalog/`; these are generated navigation positions, not evidence. Timeline dates are declared `created`, not collection times, and cluster membership does not assert semantic relationships.").unwrap();
-    writeln!(out, "Run `lore wiki refresh` after knowledge changes. It refreshes SQLite navigation and configured exports; only marked generated navigation is retired when exports are disabled. Unmarked existing files are preserved and collisions fail. Default graph lint does not require optional export currency; `lore graph index-sync` explicitly checks the catalog export.").unwrap();
+    writeln!(out, "- `{}/index.md` — a small permanent navigation guide after `lore wiki refresh`. The refresh captures SQLite discovery first and prints its snapshot ID. Start a retrieval session with `lore wiki prepare`, then reuse its ID with browse/search/links `--snapshot ID` (links supports `--direction incoming|both`). Confirm current originals with wiki read and the captured file_revision as `--revision`. Markdown knowledge pages remain the source of truth.", dirs.wiki).unwrap();
+    writeln!(out, "Run `lore wiki refresh` after knowledge changes to capture SQLite discovery and update the entry guide. Search/browse/links expose the prepared corpus without generated catalog, timeline or map files. An unmarked entry file is preserved and reported as a collision. Structural graph lint checks the knowledge pages and links.").unwrap();
 
     for schema in &schemas {
         writeln!(out).unwrap();
@@ -1165,12 +1164,7 @@ mod tests {
         assert!(checked > 0, "no schema frontmatter keys were compared");
     }
 
-    /// `PAGE_FORMATS` is what `holds_managed_pages` asks when deciding whether a directory holds
-    /// Lorekeeper's output, and it lived in `lk-core` with nothing tying it to the registry those
-    /// formats are actually defined by. A `"document"` renamed to `"bogus"` in the array left all
-    /// 812 tests passing, because the schema tests assert their own literals. This is the join:
-    /// the formats this tool writes are the registry's, plus the two generated meta-pages, whose
-    /// `type` values are named in `vault_path` beside the array so the render sites cannot drift.
+    /// Managed formats match the published page registry plus the generated schema guide.
     #[test]
     fn every_page_format_is_a_format_the_schema_registry_defines() {
         let mut declared: Vec<&str> = page_schemas(
@@ -1180,10 +1174,7 @@ mod tests {
         )
         .iter()
         .map(|schema| schema.type_name)
-        .chain([
-            lk_core::vault_path::MAP_FORMAT,
-            lk_core::vault_path::SCHEMA_FORMAT,
-        ])
+        .chain([lk_core::vault_path::SCHEMA_FORMAT])
         .collect();
         declared.sort_unstable();
         let mut admitted = lk_core::vault_path::PAGE_FORMATS.to_vec();

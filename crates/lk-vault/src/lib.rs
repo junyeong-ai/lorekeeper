@@ -2,7 +2,6 @@ mod address;
 mod body_search;
 mod brief;
 mod document;
-mod index;
 mod indexed_links;
 mod knowledge;
 mod links;
@@ -20,8 +19,8 @@ mod search;
 mod search_index;
 mod section;
 mod store;
+mod summary;
 mod template;
-mod timeline;
 mod writer;
 
 // Frontmatter parsing is pure and lives in lk-core; re-exported so the vault crate's
@@ -36,7 +35,6 @@ pub use self::brief::{Brief, BriefEntry, build_brief};
 pub use self::document::{
     DocumentContent, DocumentOptions, DocumentSection, DocumentView, inspect_document,
 };
-pub use self::index::{IndexCatalog, build_catalog, build_index, write_index};
 pub use self::indexed_links::{
     IndexedLink, IndexedLinkOptions, IndexedLinks, LinkDirection, inspect_indexed_links,
 };
@@ -50,9 +48,7 @@ pub use self::manual_original::{
     OriginalOptions, OriginalView, inspect_original, is_manual_original, publish_manual_original,
 };
 pub use self::mutation::{MutationPlan, MutationSession};
-pub use self::navigation::{
-    NAVIGATION_PAGE_ENTRIES, NavigationCatalog, NavigationKind, NavigationRow,
-};
+pub use self::navigation::{NAVIGATION_ENTRY_MARKER, plan_navigation_entry};
 pub use self::provenance::{
     ProvenanceDirection, ProvenanceOptions, ProvenanceReport, inspect_provenance,
 };
@@ -85,7 +81,6 @@ pub use self::store::{
     FsVault, InMemoryVault, MarkdownInventory, VaultStore, load_concept_registry,
 };
 pub use self::template::{TemplateEngine, embedded_templates};
-pub use self::timeline::{build_timeline, build_timeline_catalog, write_timeline};
 pub use self::writer::VaultWriter;
 
 use thiserror::Error;

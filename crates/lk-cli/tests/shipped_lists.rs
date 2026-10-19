@@ -463,92 +463,51 @@ fn glob_skill_markdown() -> Vec<PathBuf> {
     found
 }
 
-/// A page derived wholesale is only true while something re-derives it, and everything that adds
-/// pages to the vault has to re-derive ALL of them.
-///
-/// Listing the commands at each call site is what left `log.md` refreshed by nothing while the
-/// catalog and the map were refreshed by five separate places. `lore wiki refresh` re-derives the
-/// whole set in one call, so a caller cannot name a subset and a page added to the set reaches
-/// every caller without any of them changing — which is why this checks for one command rather
-/// than comparing lists. `lore schema` stays separate and per-page, because `AGENTS.md` derives
-/// from config rather than from the vault.
+/// Scheduled and semantic consumers refresh SQLite discovery and its small entry guide,
+/// never request the removed Markdown corpus lists.
 #[test]
-fn everything_that_writes_pages_refreshes_the_pages_derived_from_the_vault() {
-    use lk_core::vault_path::Derivation;
-
-    let vault_derived: Vec<&str> = lk_core::vault_path::GENERATED_WIKI_PAGES
-        .iter()
-        .filter(|(_, _, derivation)| *derivation == Derivation::VaultContents)
-        .map(|(page, _, _)| *page)
-        .collect();
-    assert!(
-        vault_derived.len() > 1,
-        "one command for a single page would be indirection, not a contract"
-    );
-
+fn knowledge_finalization_refreshes_sqlite_and_the_declared_guides() {
     let pipeline = read(&repo_root().join("scripts/lore-pipeline.sh"));
-    assert!(
-        pipeline.contains("lore_cmd wiki refresh"),
-        "scripts/lore-pipeline.sh never refreshes the vault-derived pages: {vault_derived:?}"
-    );
-    for (page, command, derivation) in lk_core::vault_path::GENERATED_WIKI_PAGES {
-        if derivation == Derivation::Config {
-            assert!(
-                pipeline.contains(&format!("lore_cmd {command}")),
-                "scripts/lore-pipeline.sh never runs `lore {command}`, so {page} is never \
-                 refreshed on a schedule"
-            );
-        }
+    for (page, command) in lk_core::vault_path::GENERATED_WIKI_PAGES {
+        assert!(
+            pipeline.contains(&format!("lore_cmd {command}")),
+            "{page} has no scheduled owner"
+        );
     }
-
-    // Finalization calls refresh rather than a subset of per-page exports. The generated
-    // procedure may separately document explicit optional exports, provided it states both
-    // the opt-in configuration and default; that is not a replacement finalization sequence.
     let mut refreshing = 0;
     for skill in glob_skill_markdown()
         .into_iter()
         .chain([repo_root().join("crates/lk-cli/src/commands/schema.rs")])
     {
         let body = read(&skill);
-        if body.contains("lore wiki refresh") {
-            refreshing += 1;
-        }
-        for (page, command, derivation) in lk_core::vault_path::GENERATED_WIKI_PAGES {
-            if derivation != Derivation::VaultContents {
-                continue;
-            }
-            // The full invocation only. `index`, `log` and `map` are also ordinary English
-            // words, so banning the bare form fails the build on "write the reason to the run
-            // `log`" — a check that cannot tell prose from a command list is worse than the
-            // drift it looks for.
-            let named = format!("lore {command}");
+        refreshing += usize::from(body.contains("lore wiki refresh"));
+        for removed in [
+            "lore wiki index",
+            "lore wiki log",
+            "lore wiki map",
+            "lore graph index-sync",
+        ] {
             assert!(
-                !body.lines().any(|line| {
-                    line.contains(&named)
-                        && !(line.contains(
-                            "Full Markdown catalog/timeline/cluster-map exports are optional:",
-                        ) && line.contains("vault.navigation.markdown_exports: true")
-                            && line.contains("default false"))
-                }),
-                "{} names `{named}` for {page} — say `lore wiki refresh` so no caller can \
-                 refresh or report on a subset",
+                !body.contains(removed),
+                "{} still invokes removed {removed}",
                 skill.display()
             );
         }
     }
-    assert!(refreshing > 0, "no skill refreshes the vault-derived pages");
-
-    // And the two lists describe the same set of files.
-    let mut named: Vec<&str> = lk_core::vault_path::GENERATED_WIKI_PAGES
+    assert!(
+        refreshing > 0,
+        "no skill refreshes SQLite knowledge discovery"
+    );
+    let mut named: Vec<_> = lk_core::vault_path::GENERATED_WIKI_PAGES
         .iter()
-        .map(|(page, _, _)| *page)
+        .map(|(page, _)| *page)
         .collect();
     named.sort_unstable();
     let mut reserved = lk_core::vault_path::RESERVED_WIKI_FILES.to_vec();
     reserved.sort_unstable();
     assert_eq!(
         named, reserved,
-        "every reserved wiki filename must name the command that generates it"
+        "each reserved guide declares its generating command"
     );
 }
 

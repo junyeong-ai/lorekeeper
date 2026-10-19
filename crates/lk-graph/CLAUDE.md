@@ -18,7 +18,7 @@ and CLI discovery, not a second graph authority.
 - Hidden directories are skipped except the exact verified evidence archive path:
   an archive is resolvable only through its existing hash validator. It is NOT a
   knowledge node, citation source, connectivity participant, or repoint target.
-- `is_resolvable` is broader than `is_knowledge`. Reserved catalogs are valid link
+- `is_resolvable` is broader than `is_knowledge`. Reserved entry/schema guides are valid link
   destinations but not knowledge/source nodes. Declared task boards likewise exist
   as destinations while excluded from graph analysis/source and broken-link scans.
 - Standalone broken-link checks inspect the full scanned source universe except
@@ -26,14 +26,12 @@ and CLI discovery, not a second graph authority.
 
 ## Derived navigation and diagnostics
 
-- Markdown remains canonical; navigation exports are optional derived views.
-  `index_drift.rs` compares the complete expected tree from the same builder used
-  to publish it. CLI lint checks export drift only when exports are enabled;
-  explicit `graph index-sync` still checks its requested export.
-- `map.rs` communities are co-citation groupings, not a taxonomy or semantic
-  equivalence. Preserve original destinations and bounded tree pagination (100-row
-  leaves/branches); pack whole small groups rather than creating one file per group.
-  Document/exploration nodes are not a substitute for the concept map's scope.
+- Markdown remains canonical; SQLite discovery belongs to lk-vault. This crate
+  computes live topology and structural checks, without Markdown catalog/map exports
+  or a catalog-currency check. Only entry/schema guides are reserved meta pages;
+  ordinary `log.md`, `map.md` or `catalog/` addresses are not implicitly generated.
+- Community clustering is topology, not taxonomy or semantic equivalence. Preserve
+  original destinations; suggestions guide judgment rather than establish relations.
 - Exit codes distinguish clean (0), structural violations (1), and execution errors
   (2, taking priority). Error JSON has unavailable checks as null, not reassuring
   zeroes. Destructure check counts exhaustively so new checks cannot disappear.
@@ -82,7 +80,7 @@ belong to exploration reviews, not a machine-persisted callout inferred by locat
   Derive citations from actual source concept/related anchors with exact authored
   revisions. Update the three together; unreadable sources forbid publication.
   Report discarded anchor sections rather than pretending their evidence remained.
-- Sources are managed non-concept content, excluding catalogs/task boards. Do not
+- Sources are managed non-concept content, excluding entry/schema guides and task boards. Do not
   revive a frontmatter `sources` array as authority. Validated RSS event dependencies
   contribute selected event digests; `source_count` still counts origin pages.
 - Authored concepts with substantive prose but no input may be adopted. Headings
