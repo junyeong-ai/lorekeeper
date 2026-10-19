@@ -212,6 +212,86 @@ fn audit_exit_zero_without_assessments_is_incomplete() {
 }
 
 #[test]
+fn audit_completion_requires_this_workflows_native_merge_and_current_survivor() {
+    for (action, expected) in [
+        (
+            "\"$LORE_BIN\" graph merge a-duplicate z-canonical --force || exit 31",
+            true,
+        ),
+        (
+            "\"$LORE_BIN\" graph merge a-duplicate m-intermediate --force || exit 31\n\"$LORE_BIN\" graph merge m-intermediate z-canonical --force || exit 31",
+            true,
+        ),
+        (
+            "rm \"$TEST_EXECUTION_ROOT/vault/wiki/concepts/a-duplicate.md\"",
+            false,
+        ),
+        (
+            "LORE_WORKFLOW_ID=ffffffffffffffffffffffffffffffff \"$LORE_BIN\" graph merge a-duplicate z-canonical --force || exit 31",
+            false,
+        ),
+    ] {
+        let behavior = format!(
+            "{action}\n{}",
+            r#"
+"$LORE_BIN" graph backlinks-sync || exit 32
+"$LORE_BIN" wiki audit-plan --path wiki/concepts/z-canonical.md > "$TEST_EXECUTION_ROOT/plan.json" || exit 33
+python3 - <<'ASSESS'
+import json, os
+from pathlib import Path
+root=Path(os.environ['TEST_EXECUTION_ROOT'])
+candidate=json.loads((root/'plan.json').read_text())['candidates'][0]
+assessment={key:candidate[key] for key in ['path','file_revision','input_revision']}
+assessment.update(disposition='reviewed', reason='The final survivor and its evidence were reviewed.', reviews=[])
+(root/'assessment.json').write_text(json.dumps({'assessments':[assessment]}))
+ASSESS
+"$LORE_BIN" wiki audit-record --file "$TEST_EXECUTION_ROOT/assessment.json"
+"#
+        );
+        let fixture = Fixture::new("codex", 30, &behavior);
+        let config = std::fs::read_to_string(&fixture.config).unwrap()
+            + "graph:\n  audit:\n    batch_size: 1\n";
+        std::fs::write(&fixture.config, config).unwrap();
+        let concepts = fixture.root().join("vault/wiki/concepts");
+        std::fs::create_dir_all(&concepts).unwrap();
+        let template = include_str!("behaviour/corpus/small/vault/wiki/concepts/unlinked-note.md");
+        for (path, title) in [
+            ("a-duplicate", "A duplicate"),
+            ("m-intermediate", "M intermediate"),
+            ("z-canonical", "Z canonical"),
+        ] {
+            std::fs::write(
+                concepts.join(format!("{path}.md")),
+                template
+                    .replace("Unlinked note", title)
+                    .replace("unlinked-note", path),
+            )
+            .unwrap();
+        }
+        let (output, result) = fixture.run("knowledge");
+        assert_eq!(
+            output.status.success(),
+            expected,
+            "{action}\n{result}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(result["ok"], expected);
+        if expected {
+            assert_eq!(
+                result["audit"][0]["requested_path"],
+                "wiki/concepts/a-duplicate.md"
+            );
+            assert_eq!(
+                result["audit"][0]["assessed_path"],
+                "wiki/concepts/z-canonical.md"
+            );
+        }
+        assert!(!concepts.join("a-duplicate.md").exists());
+        assert!(concepts.join("z-canonical.md").exists());
+    }
+}
+
+#[test]
 fn a_failed_base_stage_does_not_start_dependent_periods() {
     let fixture = Fixture::new("codex", 30, "exit 23");
     fixture.ingest();

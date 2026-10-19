@@ -2,6 +2,7 @@
 
 #[cfg(unix)]
 pub(super) struct WorkflowLease {
+    id: lk_core::execution::WorkflowId,
     lock: std::fs::File,
     config_path: std::path::PathBuf,
     executable: std::path::PathBuf,
@@ -79,7 +80,10 @@ impl WorkflowLease {
             .map(|path| path.canonicalize())
             .transpose()
             .map_err(|e| miette::miette!("resolve workflow template directory: {e}"))?;
+        let mut identity = [0; 16];
+        rand::fill(&mut identity);
         Ok(Self {
+            id: lk_core::execution::WorkflowId::from_bytes(identity),
             lock,
             config_path,
             executable,
@@ -92,7 +96,12 @@ impl WorkflowLease {
         self.lock.try_lock()
     }
 
+    pub fn id(&self) -> &lk_core::execution::WorkflowId {
+        &self.id
+    }
+
     pub fn configure(&self, command: &mut std::process::Command) {
+        command.env("LORE_WORKFLOW_ID", self.id.as_str());
         command
             .env("LORE_CONFIG", &self.config_path)
             .env("LORE_BIN", &self.executable)

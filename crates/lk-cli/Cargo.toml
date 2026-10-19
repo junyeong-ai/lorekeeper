@@ -42,6 +42,7 @@ strum = { workspace = true }
 walkdir = { workspace = true }
 url = { workspace = true }
 semver = { workspace = true }
+rand = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 rustix = { workspace = true, features = ["process"] }

@@ -79,6 +79,8 @@ mod native {
         ok: bool,
         cancelled: bool,
         execution: Option<ExecutionInfo>,
+        workflow_id: Option<lk_core::execution::WorkflowId>,
+        audit: Option<Vec<lk_graph::audit::AuditCompletion>>,
         stages: Vec<StageResult>,
     }
 
@@ -164,6 +166,7 @@ mod native {
         async fn acquire(&mut self, wait: bool) -> bool {
             match self.supervisor.acquire(self.opts, wait).await {
                 Ok(Some(lease)) => {
+                    self.result.workflow_id = Some(lease.id().clone());
                     self.lease = Some(lease);
                     true
                 }
@@ -359,6 +362,27 @@ mod native {
             .map_err(|e| miette::miette!("{e}"))
         }
 
+        fn verify_audit(
+            &self,
+            batch: &[lk_graph::audit::AuditCandidate],
+        ) -> miette::Result<Vec<lk_graph::audit::AuditCompletion>> {
+            let pages =
+                lk_graph::scan::scan_vault(&self.root, self.config.graph.scope.follow_links)
+                    .map_err(|e| miette::miette!("{e}"))?;
+            let workflow = self
+                .lease
+                .as_ref()
+                .ok_or_else(|| miette::miette!("audit has no workflow lease"))?;
+            lk_graph::audit::verify_batch(
+                &self.root,
+                &self.config.vault.dirs,
+                &pages,
+                batch,
+                workflow.id(),
+            )
+            .map_err(|e| miette::miette!("{e}"))
+        }
+
         async fn knowledge(&mut self) {
             self.reconcile().await;
             if !self.result.ok || self.result.cancelled {
@@ -372,6 +396,7 @@ mod native {
                 }
             };
             if plan.candidates.is_empty() {
+                self.result.audit = Some(Vec::new());
                 self.record(
                     "knowledge audit",
                     StageState::Skipped,
@@ -381,8 +406,8 @@ mod native {
             }
             let paths = plan
                 .candidates
-                .into_iter()
-                .map(|candidate| candidate.path)
+                .iter()
+                .map(|candidate| candidate.path.clone())
                 .collect::<Vec<_>>();
             let selection = serde_json::to_string(&paths).expect("string paths serialize");
             self.consumer("lore-wiki", &format!("maintain. The controller selected this exact batch: {selection}. Start with audit-plan --path for these addresses; do not select another batch.")).await;
@@ -392,20 +417,10 @@ mod native {
             if self.result.cancelled {
                 return;
             }
-            match self.audit_plan(&paths) {
-                Ok(plan)
-                    if plan
-                        .candidates
-                        .iter()
-                        .all(|candidate| candidate.reason == "current") =>
-                {
+            match self.verify_audit(&plan.candidates) {
+                Ok(completed) => {
+                    self.result.audit = Some(completed);
                     self.record("audit completion", StageState::Completed, None);
-                }
-                Ok(_) => {
-                    self.failure(
-                        "audit completion",
-                        "selected concepts lack current semantic assessments",
-                    );
                 }
                 Err(error) => {
                     self.failure("audit completion", error);
@@ -456,6 +471,8 @@ mod native {
                 ok: true,
                 cancelled: false,
                 execution: None,
+                workflow_id: None,
+                audit: None,
                 stages: Vec::new(),
             },
         };

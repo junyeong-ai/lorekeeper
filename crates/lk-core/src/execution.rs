@@ -6,6 +6,36 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::ConfigError;
 
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct WorkflowId(String);
+
+impl WorkflowId {
+    pub fn from_bytes(bytes: [u8; 16]) -> Self {
+        Self(format!("{:032x}", u128::from_be_bytes(bytes)))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for WorkflowId {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        if value.len() != 32 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err("workflow ID must contain exactly 32 hexadecimal digits".into());
+        }
+        Ok(Self(value.to_ascii_lowercase()))
+    }
+}
+
+impl From<WorkflowId> for String {
+    fn from(value: WorkflowId) -> Self {
+        value.0
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum AgentEngine {
@@ -203,6 +233,17 @@ impl ExecutionProfile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workflow_context_is_validated_and_roundtrips_without_changing_identity() {
+        let id = WorkflowId::from_bytes([0xab; 16]);
+        let json = serde_json::to_string(&id).unwrap();
+        assert_eq!(serde_json::from_str::<WorkflowId>(&json).unwrap(), id);
+        assert_eq!(WorkflowId::try_from("AB".repeat(16)).unwrap(), id);
+        for value in ["", "short", "gggggggggggggggggggggggggggggggg"] {
+            assert!(WorkflowId::try_from(value.to_owned()).is_err());
+        }
+    }
 
     fn config() -> ExecutionConfig {
         crate::yaml::from_str("default_profile: main\nprofiles:\n  main: {engine: claude-code, timeout_seconds: 3600}\n  review: {engine: codex, timeout_seconds: 1800}\noperations: {knowledge: review}\n").unwrap()

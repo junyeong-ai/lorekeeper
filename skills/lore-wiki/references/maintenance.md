@@ -29,9 +29,11 @@ publication contracts in SKILL.md and read the curation reference before repairs
    --path CONCEPT` (repeat `--path` for surviving original addresses) to obtain their
    final fingerprints without expanding the batch. After a verified merge, confirm
    the old address was retired by that exact merge and its evidence reached the
-   survivor; omit the removed address from receipt submission. Reading a survivor
-   outside the original batch is required merge verification, not permission to
-   enlarge the remaining audit batch. Do not substitute a new fingerprint
+   survivor. Record the reviewed final survivor as the replacement subject for that
+   original batch slot, using its current fingerprints. Reading this survivor does
+   not authorize auditing unrelated additional subjects. The native merge records
+   the retirement in the same journal; a direct deletion cannot complete a slot.
+   Do not substitute a new fingerprint
    without rereading changes. Record a completed assessment only
    when the exact final concept, evidence and related context have been read.
 

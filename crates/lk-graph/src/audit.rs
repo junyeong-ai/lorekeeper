@@ -48,6 +48,131 @@ struct Receipts {
     entries: BTreeMap<String, ConceptAssessment>,
     pending: Vec<String>,
     next_class: AuditClass,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_merges: Option<WorkflowMerges>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct WorkflowMerges {
+    workflow_id: lk_core::execution::WorkflowId,
+    concepts: BTreeMap<String, ConceptRetirement>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ConceptRetirement {
+    into: String,
+    from_revision: String,
+}
+
+#[derive(Serialize)]
+pub struct AuditCompletion {
+    pub requested_path: String,
+    pub assessed_path: String,
+    pub disposition: AuditDisposition,
+}
+
+pub(crate) fn record_merge(
+    plan: &mut MutationPlan,
+    root: &Path,
+    workflow_id: &lk_core::execution::WorkflowId,
+    from: &Path,
+    original: &str,
+    into: &Path,
+) -> Result<(), GraphError> {
+    let (before, mut receipts) = load(root)?;
+    if receipts
+        .last_merges
+        .as_ref()
+        .is_none_or(|merges| merges.workflow_id != *workflow_id)
+    {
+        receipts.last_merges = Some(WorkflowMerges {
+            workflow_id: workflow_id.clone(),
+            concepts: BTreeMap::new(),
+        });
+    }
+    receipts
+        .last_merges
+        .as_mut()
+        .expect("initialized merge context")
+        .concepts
+        .insert(
+            from.to_string_lossy().into_owned(),
+            ConceptRetirement {
+                into: into.to_string_lossy().into_owned(),
+                from_revision: file_revision(original),
+            },
+        );
+    let after = serde_json::to_string_pretty(&receipts).map_err(error)? + "\n";
+    plan.publish_expected(root, STATE, before, after)
+        .map_err(error)
+}
+
+/// Verify original batch slots through current assessments or native guarded merges.
+/// The operation identifier correlates receipts; it never authorizes a lock bypass.
+pub fn verify_batch(
+    root: &Path,
+    dirs: &VaultDirs,
+    pages: &[ScannedPage],
+    batch: &[AuditCandidate],
+    workflow_id: &lk_core::execution::WorkflowId,
+) -> Result<Vec<AuditCompletion>, GraphError> {
+    let (_, receipts) = load(root)?;
+    let candidates = inputs(root, dirs, pages)?
+        .into_iter()
+        .map(|candidate| (candidate.path.clone(), candidate))
+        .collect::<BTreeMap<_, _>>();
+    let reviews = lk_vault::list_reviews(root, dirs).map_err(error)?;
+    let merges = receipts
+        .last_merges
+        .as_ref()
+        .filter(|merges| merges.workflow_id == *workflow_id);
+    let mut verified = Vec::new();
+    for original in batch {
+        let mut path = original.path.as_str();
+        let mut visited = BTreeSet::new();
+        loop {
+            if !visited.insert(path) {
+                return Err(error("audit merge chain contains a cycle"));
+            }
+            if let Some(candidate) = candidates.get(path) {
+                let receipt = receipts
+                    .entries
+                    .get(path)
+                    .filter(|receipt| receipt_is_current(receipt, candidate, &reviews))
+                    .ok_or_else(|| {
+                        error(format!("audit concept lacks a current assessment: {path}"))
+                    })?;
+                verified.push(AuditCompletion {
+                    requested_path: original.path.clone(),
+                    assessed_path: path.into(),
+                    disposition: receipt.disposition,
+                });
+                break;
+            }
+            match std::fs::symlink_metadata(
+                lk_vault::page_path(root, Path::new(path)).map_err(error)?,
+            ) {
+                Ok(_) => {
+                    return Err(error(format!(
+                        "audit concept is no longer a valid concept: {path}"
+                    )));
+                }
+                Err(failure) if failure.kind() == std::io::ErrorKind::NotFound => {}
+                Err(failure) => return Err(error(failure)),
+            }
+            let retirement = merges
+                .and_then(|merges| merges.concepts.get(path))
+                .ok_or_else(|| {
+                    error(format!(
+                        "audit concept disappeared without this workflow's guarded merge: {path}"
+                    ))
+                })?;
+            path = &retirement.into;
+        }
+    }
+    Ok(verified)
 }
 
 #[derive(Clone, Copy, Default, Deserialize, Serialize)]

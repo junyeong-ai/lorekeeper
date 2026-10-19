@@ -549,6 +549,13 @@ async fn run_inner(
             force,
         } => {
             let result = if let Some(session) = mutation.as_ref() {
+                let workflow_id = match std::env::var("LORE_WORKFLOW_ID") {
+                    Ok(value) => Some(lk_core::execution::WorkflowId::try_from(value)?),
+                    Err(std::env::VarError::NotPresent) => None,
+                    Err(std::env::VarError::NotUnicode(_)) => {
+                        return Err("LORE_WORKFLOW_ID must be UTF-8".into());
+                    }
+                };
                 merge::merge_in_session(
                     &views.scanned,
                     session,
@@ -556,6 +563,7 @@ async fn run_inner(
                     from,
                     into,
                     force,
+                    workflow_id.as_ref(),
                 )
             } else {
                 merge::merge_concepts(

@@ -50,6 +50,9 @@ and CLI discovery, not a second graph authority.
   weekly batch must not starve old work or grow into an unbounded full-corpus audit.
 - A missing, invalid or stale scoped review reopens its receipt. Valid open findings
   remain durable without weekly prose rewrites. Record only after guarded final reads.
+- Audit completion follows native merge receipts from the same workflow to a currently
+  assessed survivor. Merge receipts join the page mutation journal and retain only
+  the latest merging workflow. A correlation ID never authorizes a lease bypass.
 
 ## Concept names and diagnostics (`concept_lint.rs`)
 

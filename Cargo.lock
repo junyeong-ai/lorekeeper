@@ -1717,6 +1717,7 @@ dependencies = [
  "lk-task",
  "lk-vault",
  "miette",
+ "rand",
  "rustix",
  "same-file",
  "semver",
