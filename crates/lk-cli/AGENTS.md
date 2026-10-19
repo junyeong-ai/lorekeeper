@@ -30,6 +30,8 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   WorkflowLease covers semantic reads through final publication. Collection precedes
   that lease; independent recovery stages continue after source failure, while
   dependent period stages stop on failure. Cancellation stops further stages.
+  Preserve observed cancellation through cleanup errors and report those errors;
+  send group SIGKILL once before reaping a forced foreground child.
 - `commands/schedule.rs` renders native jobs with stable scheduling-slot labels.
   Queue-mode semantic jobs need explicit execution profiles. Capture selected
   absolute config/data paths, anchored PATH and relevant existing host directories;

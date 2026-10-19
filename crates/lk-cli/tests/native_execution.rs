@@ -377,11 +377,17 @@ fn deadline_preserves_pending_work_and_releases_the_workflow() {
     let (output, result) = fixture.run("process");
     assert!(!output.status.success());
     assert_eq!(result["cancelled"], false);
-    assert!(result["stages"].as_array().unwrap().iter().any(|stage| {
-        stage["name"] == "lore-process"
-            && stage["state"] == "failed"
-            && stage["detail"] == "session deadline exceeded"
-    }));
+    assert!(
+        result["stages"].as_array().unwrap().iter().any(|stage| {
+            stage["name"] == "lore-process"
+                && stage["state"] == "failed"
+                && stage["detail"]
+                    .as_str()
+                    .is_some_and(|detail| detail.starts_with("session deadline exceeded"))
+        }),
+        "result: {result}\nstderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(
         !fixture
             .command()
@@ -551,4 +557,85 @@ fn cancellation_kills_foreground_children_and_preserves_cross_host_exclusion() {
         );
         std::thread::sleep(Duration::from_millis(20));
     }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn cancellation_stops_further_stages_when_zombie_group_cleanup_returns_eperm() {
+    use rustix::process::{Pid, Signal, WaitId, WaitIdOptions, kill_process, waitid};
+    use std::os::unix::process::CommandExt;
+
+    let fixture = Fixture::new(
+        "codex",
+        30,
+        "printf '%s\\n' \"$$\" > \"$TEST_EXECUTION_ROOT/started\"\nexec sleep 30",
+    );
+    fixture.ingest();
+    let mut controller = fixture
+        .command()
+        .args(["run", "process", "--json"])
+        .stdout(std::fs::File::create(fixture.root().join("result.json")).unwrap())
+        .stderr(std::fs::File::create(fixture.root().join("stderr.log")).unwrap())
+        .stdin(Stdio::null())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let agent = loop {
+        if let Ok(body) = std::fs::read_to_string(fixture.root().join("started"))
+            && let Ok(pid) = body.trim().parse::<i32>()
+        {
+            break pid;
+        }
+        assert!(Instant::now() < deadline, "agent never started");
+        assert!(controller.try_wait().unwrap().is_none());
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    // Keep an exited member in the owned group: macOS killpg returns EPERM for zombies alone.
+    let mut zombie = Command::new("/usr/bin/true")
+        .process_group(agent)
+        .spawn()
+        .unwrap();
+    waitid(
+        WaitId::Pid(Pid::from_raw(i32::try_from(zombie.id()).unwrap()).unwrap()),
+        WaitIdOptions::EXITED | WaitIdOptions::NOWAIT,
+    )
+    .unwrap();
+    kill_process(
+        Pid::from_raw(i32::try_from(controller.id()).unwrap()).unwrap(),
+        Signal::TERM,
+    )
+    .unwrap();
+    while controller.try_wait().unwrap().is_none() {
+        assert!(
+            Instant::now() < deadline,
+            "cancelled controller did not stop"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    zombie.wait().unwrap();
+    let result: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(fixture.root().join("result.json")).unwrap())
+            .unwrap();
+    let stages = result["stages"].as_array().unwrap();
+    assert_eq!(result["ok"], false, "{result}");
+    assert_eq!(result["cancelled"], true, "{result}");
+    assert_eq!(stages.last().unwrap()["name"], "lore-process", "{result}");
+    assert_eq!(stages.last().unwrap()["state"], "cancelled", "{result}");
+    assert!(
+        stages.last().unwrap()["detail"]
+            .as_str()
+            .unwrap()
+            .contains("signal child group:"),
+        "{result}"
+    );
+    let queued = fixture.command().args(["queue", "count"]).output().unwrap();
+    assert_eq!(String::from_utf8(queued.stdout).unwrap().trim(), "2");
+    assert!(
+        fixture
+            .command()
+            .args(["workflow", "--", "/usr/bin/true"])
+            .status()
+            .unwrap()
+            .success()
+    );
 }
