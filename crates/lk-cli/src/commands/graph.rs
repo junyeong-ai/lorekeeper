@@ -538,13 +538,24 @@ async fn run_inner(
                 lk_core::config::LlmProvider::Queue => backlinks::SynthesisPolicy::Record,
                 lk_core::config::LlmProvider::Noop => backlinks::SynthesisPolicy::Skip,
             };
-            let sync = backlinks::sync_concept_backlinks(
-                &views.scanned,
-                &rc.root,
-                dry_run,
-                &rc.vault_dirs,
-                policy,
-            )
+            let sync = if dry_run {
+                backlinks::sync_concept_backlinks(
+                    &views.scanned,
+                    &rc.root,
+                    true,
+                    &rc.vault_dirs,
+                    policy,
+                )
+            } else {
+                backlinks::sync_concept_backlinks_in_session(
+                    &views.scanned,
+                    mutation
+                        .as_ref()
+                        .expect("mutation command holds the vault lock"),
+                    &rc.vault_dirs,
+                    policy,
+                )
+            }
             .map_err(|e| format!("{e}"))?;
             let changed = sync.updated.len();
             // Deriving a concept's evidence and writing the section that answers to it are
