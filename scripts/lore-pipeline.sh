@@ -82,6 +82,10 @@ and nobody can answer a question mid-run, so asking one blocks the work rather t
 clarifying it. Proceed on reversible actions that follow from the task; stop only if you
 need something no one but the user can supply.
 
+The caller started this session under the vault workflow lease. The lease survives exec
+as an inherited descriptor, so no separate lore workflow process is expected. Do not
+reacquire the lease or infer its ownership from process names or PIDs.
+
 Before ending your turn, read your last paragraph. If it is a plan, a question, a list of
 next steps, or a promise about work you have not done, do that work now instead of ending.
 How long the run has taken is not a reason to stop. While work remains and nothing has
