@@ -84,6 +84,7 @@ pub use self::section::{
 };
 pub use self::store::{
     FsVault, InMemoryVault, MarkdownInventory, VaultStore, load_concept_registry,
+    load_markdown_inventory,
 };
 pub use self::template::{TemplateEngine, embedded_templates};
 pub use self::writer::VaultWriter;
