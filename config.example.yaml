@@ -446,8 +446,8 @@ concepts:
 # graph:
 #   audit:
 #     schedule: "0 7 * * 0"         # weekly semantic maintenance, independent of synthesis
-#     batch_size: 5                # rotate changed and first-time concepts fairly (1..100)
-#     max_input_bytes: 262144      # complete selected pages + selected RSS payloads per batch; larger input is retained, not truncated
+#     batch_size: 5                # rotate changed and first-time concepts/documents fairly (1..100)
+#     max_input_bytes: 262144      # whole distinct audit footprint; oversized subjects require completed bounded work
 #                                  # requires an explicit execution profile and deployed skills
 #   scope:
 #     dirs: [wiki]                   # vault-relative dirs to scan (default: vault.dirs.wiki)
@@ -481,6 +481,12 @@ llm:
 # timeout_seconds is an explicit per-session wall-clock budget.
 execution:
   default_profile: primary
+  # Bounded worker requests/results are compact JSON bytes, not model tokens or cost.
+  # Native execution splits evidence and reduces observations in fresh sessions.
+  work:
+    max_input_bytes: 262144        # >=4096; includes the selected worker context
+    max_result_bytes: 32768        # >=1024 and <=max_input_bytes/4
+    max_calls: 64                  # per daily/process run, or per knowledge batch; >0
   profiles:
     primary:
       engine: claude-code

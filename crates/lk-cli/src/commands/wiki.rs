@@ -85,18 +85,18 @@ pub enum WikiCommand {
         #[arg(long, default_value_t = 0)]
         offset: usize,
     },
-    /// Plan a bounded semantic audit of changed or never-reviewed concepts (read-only JSON)
+    /// Plan semantic audit work for changed or never-reviewed concepts/documents (read-only JSON)
     AuditPlan {
-        /// Maximum concepts (1..100); defaults to graph.audit.batch_size
+        /// Maximum subjects (1..100); defaults to graph.audit.batch_size
         #[arg(long)]
         limit: Option<usize>,
         /// Re-read exact original batch members after repairs; repeat for each address
         #[arg(long = "path")]
         paths: Vec<String>,
     },
-    /// Record completed semantic reads with current concept and dependency guards (JSON)
+    /// Record completed semantic reads with current subject and dependency guards (JSON)
     AuditRecord {
-        /// JSON assessments with exact concept and semantic input revisions
+        /// JSON assessments with exact subject and semantic input revisions
         #[arg(long)]
         file: PathBuf,
     },
@@ -466,7 +466,7 @@ pub async fn run(opts: &super::GlobalOptions, cmd: WikiCommand) -> miette::Resul
             let root = config.vault.root_path();
             let pages = lk_graph::scan::scan_vault(&root, config.graph.scope.follow_links)
                 .map_err(|error| miette::miette!("{error}"))?;
-            let result = lk_graph::audit::plan_selected(
+            let result = lk_graph::audit::plan_selected_partitioned(
                 &root,
                 &config.vault.dirs,
                 &pages,
@@ -483,7 +483,7 @@ pub async fn run(opts: &super::GlobalOptions, cmd: WikiCommand) -> miette::Resul
             Ok(())
         }
         WikiCommand::AuditRecord { file } => {
-            let config = load_config(&find_config(opts)?)?;
+            let (config, config_revision) = super::load_config_with_revision(&find_config(opts)?)?;
             let results: lk_graph::audit::AuditResults = serde_json::from_slice(
                 &std::fs::read(file).map_err(|error| miette::miette!("{error}"))?,
             )
@@ -493,12 +493,23 @@ pub async fn run(opts: &super::GlobalOptions, cmd: WikiCommand) -> miette::Resul
                 .map_err(|error| miette::miette!("{error}"))?;
             let pages = lk_graph::scan::scan_vault(&root, config.graph.scope.follow_links)
                 .map_err(|error| miette::miette!("{error}"))?;
-            let recorded = lk_graph::audit::record(
+            let recorded = lk_graph::audit::record_with_guard(
                 &session,
                 &config.vault.dirs,
                 &pages,
                 results,
                 config.graph.audit.max_input_bytes,
+                |assessment, plan| {
+                    super::work::guard_audit(&root, &config, &config_revision, assessment, plan)
+                        .map(|completed| {
+                            if completed {
+                                lk_graph::audit::AuditReadCoverage::CompletedWork
+                            } else {
+                                lk_graph::audit::AuditReadCoverage::WholeInput
+                            }
+                        })
+                        .map_err(|error| lk_graph::GraphError::Io(error.to_string()))
+                },
             )
             .map_err(|error| miette::miette!("{error}"))?;
             println!("{}", serde_json::json!({"recorded":recorded}));

@@ -68,6 +68,16 @@ config loading and the shared filesystem primitives intentionally perform I/O.
   grammar is better than false coverage. Another scanner's threshold is not proof.
 - Use `text::collapse_blank_lines` for shared CR/blank-line normalization.
 
+## Semantic ranges (`semantic.rs`)
+
+- Plans bind exact resources, semantic purpose revision and serialized request/result
+  bounds. Ranges are half-open Unicode scalar offsets, with Markdown block boundaries
+  preferred and oversized blocks explicitly continued. Coverage is not a truth verdict.
+- Keep subject, context, retained input, cited pages, immutable events and reviews
+  distinguishable. Parts are execution units, never canonical knowledge nodes.
+- Reuse requires identical assigned evidence and purpose; changed revisions invalidate
+  dependent reductions. Never infer read coverage from an exit code or lexical match.
+
 ## Durable files (`fs.rs`)
 
 - `write_atomic` replaces a destination: unique same-directory temp, fsync,

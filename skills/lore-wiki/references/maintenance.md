@@ -7,12 +7,10 @@ publication contracts in SKILL.md and read the curation reference before repairs
 1. Run `lore wiki audit-plan` once. When the caller supplies exact batch addresses,
    use repeated `--path` for those addresses instead of choosing a new batch.
    Keep its candidate addresses as this run's scope.
-   `graph.audit.batch_size` bounds semantic work (1..100). Automatic selection leaves
-   individually oversized subjects pending and selects later fitting work. `blocked_count`
-   counts blockers encountered during this selection; `blocked` supplies at most 100
-   path/revision/size details, not a whole-corpus inventory. If no candidate exists,
-   report the counts: stop successfully only when `blocked_count` is zero; otherwise
-   report incomplete work. Do not expand the batch to reduce the whole backlog to zero.
+   `graph.audit.batch_size` bounds subject count (1..100). Selection preserves fair
+   pending order, including oversized subjects. Do not expand the batch to reduce
+   the whole backlog to zero. An empty candidate list reports current coverage;
+   it is not a guarantee that all statements are true.
    Candidates identify `kind: concept` or `kind: document`; document subjects are
    declared source documents under the configured wiki documents collection, including
    nested addresses. Aggregate counts cover both kinds; `counts_by_kind` separates
@@ -20,9 +18,12 @@ publication contracts in SKILL.md and read the curation reference before repairs
    Check `input.status` before reading: `oversized` retains the exact candidates
    because their complete page, scoped review/evidence and selected RSS payload bytes exceed
    `graph.audit.max_input_bytes`. Report the measured bytes and configured bound;
-   do not truncate evidence, replace explicitly selected candidates or record a completed
-   assessment. An execution profile changes the agent, not this configuration's input
-   bound; select any explicitly authorized larger-scope config before the workflow starts.
+   do not truncate evidence or replace selected subjects. Use `lore work plan --path
+   SUBJECT` and the bounded-work protocol linked from SKILL.md. The native controller
+   uses fresh configured agent sessions per node and verifies complete reduction
+   before accepting an assessment. The whole-input bound remains visible; it is
+   distinct from `execution.work` request/result bounds. An execution profile changes
+   the agent, not these bounds.
 2. Read each complete selected subject according to its `kind`.
    For a concept, the candidate's `evidence` is the complete graph-derived set.
    Read that actual evidence. For independent
@@ -89,7 +90,7 @@ Submit JSON via `lore wiki audit-record --file RESULTS.json`:
 ```
 
 Use `reviewed` after checking supported scope and completing repairs, or `follow-up`
-for a documented unresolved finding. Follow-up requires a current durable review
+for a documented unresolved finding. Follow-up requires a current durable open review
 listing the selected concept or document in `review.subjects`; being supporting
 evidence alone does not make a page the assessed subject. Keep its evidence, resolution conditions and any
 contrary observations concrete. Open is a valid judgment; unreadable evidence or a

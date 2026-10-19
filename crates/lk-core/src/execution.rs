@@ -73,6 +73,25 @@ pub struct ExecutionConfig {
     pub default_profile: Option<String>,
     pub profiles: BTreeMap<String, ExecutionProfile>,
     pub operations: BTreeMap<ExecutionOperation, String>,
+    pub work: SemanticWorkConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SemanticWorkConfig {
+    pub max_input_bytes: usize,
+    pub max_result_bytes: usize,
+    pub max_calls: usize,
+}
+
+impl Default for SemanticWorkConfig {
+    fn default() -> Self {
+        Self {
+            max_input_bytes: 262_144,
+            max_result_bytes: 32_768,
+            max_calls: 64,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -128,6 +147,15 @@ impl ExecutionConfig {
     }
 
     pub(crate) fn validate(&self) -> Result<(), ConfigError> {
+        if self.work.max_input_bytes < 4096
+            || self.work.max_result_bytes < 1024
+            || self.work.max_result_bytes > self.work.max_input_bytes / 4
+            || self.work.max_calls == 0
+        {
+            return Err(ConfigError::Validation(
+                "execution.work requires max_input_bytes >= 4096, max_result_bytes >= 1024 and <= max_input_bytes / 4, and max_calls > 0".into(),
+            ));
+        }
         for name in self.profiles.keys() {
             validate_text("execution profile name", name)?;
         }
@@ -247,6 +275,69 @@ mod tests {
 
     fn config() -> ExecutionConfig {
         crate::yaml::from_str("default_profile: main\nprofiles:\n  main: {engine: claude-code, timeout_seconds: 3600}\n  review: {engine: codex, timeout_seconds: 1800}\noperations: {knowledge: review}\n").unwrap()
+    }
+
+    #[test]
+    fn semantic_work_defaults_and_valid_boundaries_are_explicit() {
+        for body in ["{}", "work: {}", "work: null"] {
+            let config: ExecutionConfig = crate::yaml::from_str(body).unwrap();
+            config.validate().unwrap();
+            assert_eq!(config.work.max_input_bytes, 262_144);
+            assert_eq!(config.work.max_result_bytes, 32_768);
+            assert_eq!(config.work.max_calls, 64);
+        }
+        for (input, result, calls) in [
+            (4096, 1024, 1),
+            (4099, 1024, 1),
+            (8192, 2048, 64),
+            (131_072, 32_768, 1),
+            (262_144, 32_768, 64),
+        ] {
+            let body = format!(
+                "work: {{max_input_bytes: {input}, max_result_bytes: {result}, max_calls: {calls}}}"
+            );
+            let config: ExecutionConfig = crate::yaml::from_str(&body).unwrap();
+            config.validate().unwrap();
+        }
+    }
+
+    #[test]
+    fn semantic_work_rejects_unbounded_and_inconsistent_limits() {
+        for (input, result, calls) in [
+            (0, 1024, 1),
+            (4095, 1024, 1),
+            (4096, 0, 1),
+            (4096, 1023, 1),
+            (4096, 1025, 1),
+            (8191, 2048, 1),
+            (4096, 1024, 0),
+        ] {
+            let body = format!(
+                "work: {{max_input_bytes: {input}, max_result_bytes: {result}, max_calls: {calls}}}"
+            );
+            let config: ExecutionConfig = crate::yaml::from_str(&body).unwrap();
+            assert!(
+                matches!(config.validate(), Err(ConfigError::Validation(_))),
+                "{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn semantic_work_rejects_unknown_fields_and_invalid_scalar_types() {
+        for body in [
+            "work: {max_input_byte: 262144}",
+            "work: {max_calls: 64, unknown: true}",
+            "work: {max_calls: -1}",
+            "work: {max_calls: 1.5}",
+            "work: {max_input_bytes: true}",
+            "work: {max_result_bytes: many}",
+        ] {
+            assert!(
+                crate::yaml::from_str::<ExecutionConfig>(body).is_err(),
+                "{body}"
+            );
+        }
     }
 
     #[test]

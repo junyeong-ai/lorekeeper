@@ -84,3 +84,10 @@ is legacy/unknown; it does not make existing answers stale or trigger a global r
 Unknown requested policy versions require a compatible processor. Policy provenance
 is separate from the unchanged data cache hash. Explicit regeneration records a
 policy request for this input so an old legacy task cannot satisfy the new request.
+
+Explicit `queue apply --recover-extraction TASK` is a separate operator recovery
+for a staged extraction whose retained task is unavailable. It retains the exact
+current-page and publication guards, but cannot establish original retained-input
+or partitioned-read coverage. The complete current page must fit the configured
+work input bound; an oversized orphan requires restoring its retained task.
+Never use this option to bypass missing or incomplete bounded work.

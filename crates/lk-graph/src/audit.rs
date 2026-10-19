@@ -32,6 +32,14 @@ pub enum AuditSubjectKind {
     Document,
 }
 
+/// A caller may authorize partitioned reads only after validating completed work
+/// for this exact assessment and attaching its resource/result guards to the plan.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AuditReadCoverage {
+    WholeInput,
+    CompletedWork,
+}
+
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct AuditAssessment {
@@ -128,6 +136,28 @@ pub fn verify_batch(
     workflow_id: &lk_core::execution::WorkflowId,
     max_input_bytes: u64,
 ) -> Result<Vec<AuditCompletion>, GraphError> {
+    verify_batch_with_guard(
+        root,
+        dirs,
+        pages,
+        batch,
+        workflow_id,
+        max_input_bytes,
+        |_, _| Ok(AuditReadCoverage::WholeInput),
+    )
+}
+
+/// Verify current receipts with per-assessment completed-work checks. The scratch
+/// plan collects read guards without publishing or recovering any mutation.
+pub fn verify_batch_with_guard(
+    root: &Path,
+    dirs: &VaultDirs,
+    pages: &[ScannedPage],
+    batch: &[AuditCandidate],
+    workflow_id: &lk_core::execution::WorkflowId,
+    max_input_bytes: u64,
+    mut guard: impl FnMut(&AuditAssessment, &mut MutationPlan) -> Result<AuditReadCoverage, GraphError>,
+) -> Result<Vec<AuditCompletion>, GraphError> {
     let (_, receipts) = load(root)?;
     let candidates = inputs(root, dirs, pages, &receipts)?
         .into_iter()
@@ -163,7 +193,7 @@ pub fn verify_batch(
                     assessed_path: path.into(),
                     disposition: receipt.disposition,
                 });
-                assessed.insert(candidate.path.clone(), candidate.clone());
+                assessed.insert(candidate.path.clone(), (candidate.clone(), receipt.clone()));
                 break;
             }
             if original.kind != AuditSubjectKind::Concept {
@@ -192,7 +222,23 @@ pub fn verify_batch(
             path = &retirement.into;
         }
     }
-    measure_inputs(root, assessed.values(), max_input_bytes)?.ensure_ready()?;
+    let complete = measure_inputs(
+        root,
+        assessed.values().map(|(candidate, _)| candidate),
+        max_input_bytes,
+    )?;
+    let mut scratch = MutationPlan::default();
+    let mut whole_inputs = Vec::new();
+    for (candidate, receipt) in assessed.values() {
+        if guard(receipt, &mut scratch)? == AuditReadCoverage::WholeInput {
+            whole_inputs.push(candidate);
+        }
+    }
+    if whole_inputs.len() == assessed.len() {
+        complete.ensure_ready()?;
+    } else {
+        measure_inputs(root, whole_inputs, max_input_bytes)?.ensure_ready()?;
+    }
     Ok(verified)
 }
 
@@ -890,7 +936,11 @@ fn receipt_is_current(receipt: &AuditAssessment, candidate: &AuditCandidate) -> 
             .reviews
             .iter()
             .all(|review| review.state.is_current())
-        && (receipt.disposition != AuditDisposition::FollowUp || !candidate.reviews.is_empty())
+        && (receipt.disposition != AuditDisposition::FollowUp
+            || candidate
+                .reviews
+                .iter()
+                .any(|review| review.state == AuditReviewState::Open))
         && receipt.reviews.iter().all(|path| {
             candidate
                 .reviews
@@ -963,6 +1013,41 @@ pub fn plan_selected(
     selection: &[String],
     max_input_bytes: u64,
 ) -> Result<AuditPlan, GraphError> {
+    plan_selected_inner(root, dirs, pages, limit, selection, max_input_bytes, false)
+}
+
+/// Select fair work for bounded partitioned execution. Complete footprint/status
+/// remain explicit; this selection neither approves reads nor records completion.
+pub fn plan_partitioned(
+    root: &Path,
+    dirs: &VaultDirs,
+    pages: &[ScannedPage],
+    limit: usize,
+    max_input_bytes: u64,
+) -> Result<AuditPlan, GraphError> {
+    plan_selected_partitioned(root, dirs, pages, limit, &[], max_input_bytes)
+}
+
+pub fn plan_selected_partitioned(
+    root: &Path,
+    dirs: &VaultDirs,
+    pages: &[ScannedPage],
+    limit: usize,
+    selection: &[String],
+    max_input_bytes: u64,
+) -> Result<AuditPlan, GraphError> {
+    plan_selected_inner(root, dirs, pages, limit, selection, max_input_bytes, true)
+}
+
+fn plan_selected_inner(
+    root: &Path,
+    dirs: &VaultDirs,
+    pages: &[ScannedPage],
+    limit: usize,
+    selection: &[String],
+    max_input_bytes: u64,
+    partitioned: bool,
+) -> Result<AuditPlan, GraphError> {
     if !(1..=100).contains(&limit) {
         return Err(error("audit limit must be 1..100"));
     }
@@ -1022,7 +1107,7 @@ pub fn plan_selected(
         let mut prospective = resources.clone();
         prospective.include_candidate(root, &candidate)?;
         let combined = prospective.bound(max_input_bytes)?;
-        if combined.status == AuditInputStatus::Ready {
+        if partitioned || combined.status == AuditInputStatus::Ready {
             next_class = if candidate.reason == "changed" {
                 AuditClass::Unreviewed
             } else {
@@ -1126,6 +1211,22 @@ pub fn record(
     results: AuditResults,
     max_input_bytes: u64,
 ) -> Result<Vec<String>, GraphError> {
+    record_with_guard(session, dirs, pages, results, max_input_bytes, |_, _| {
+        Ok(AuditReadCoverage::WholeInput)
+    })
+}
+
+/// Record exact assessments and completed-work guards in one canonical mutation.
+/// Whole-input reads retain their complete distinct-union bound independently of
+/// any other assessments authorized by the caller's completed-work verifier.
+pub fn record_with_guard(
+    session: &MutationSession,
+    dirs: &VaultDirs,
+    pages: &[ScannedPage],
+    results: AuditResults,
+    max_input_bytes: u64,
+    mut guard: impl FnMut(&AuditAssessment, &mut MutationPlan) -> Result<AuditReadCoverage, GraphError>,
+) -> Result<Vec<String>, GraphError> {
     if results.assessments.is_empty() {
         return Err(error("audit results must contain assessments"));
     }
@@ -1156,8 +1257,9 @@ pub fn record(
             Ok(candidate)
         })
         .collect::<Result<Vec<_>, _>>()?;
-    measure_inputs(root, selected, max_input_bytes)?.ensure_ready()?;
+    let complete = measure_inputs(root, selected.iter().copied(), max_input_bytes)?;
     let mut plan = MutationPlan::default();
+    let mut whole_inputs = Vec::new();
     let mut recorded = BTreeSet::new();
     for mut assessment in results.assessments {
         if !recorded.insert(assessment.path.clone()) || assessment.reason.trim().is_empty() {
@@ -1178,8 +1280,15 @@ pub fn record(
                 review.path, review.state
             )));
         }
-        if assessment.disposition == AuditDisposition::FollowUp && candidate.reviews.is_empty() {
-            return Err(error("audit follow-up requires a durable scoped review"));
+        if assessment.disposition == AuditDisposition::FollowUp
+            && !candidate
+                .reviews
+                .iter()
+                .any(|review| review.state == AuditReviewState::Open)
+        {
+            return Err(error(
+                "audit follow-up requires a current open scoped review",
+            ));
         }
         for path in &assessment.reviews {
             if !candidate
@@ -1195,6 +1304,9 @@ pub fn record(
             .iter()
             .map(|review| review.path.clone())
             .collect();
+        if guard(&assessment, &mut plan)? == AuditReadCoverage::WholeInput {
+            whole_inputs.push(candidate);
+        }
         for review in &candidate.reviews {
             guard_review_dependency(&mut plan, root, review)?;
         }
@@ -1230,6 +1342,11 @@ pub fn record(
         };
         receipts.entries.insert(assessment.path.clone(), assessment);
     }
+    if whole_inputs.len() == selected.len() {
+        complete.ensure_ready()?;
+    } else {
+        measure_inputs(root, whole_inputs, max_input_bytes)?.ensure_ready()?;
+    }
     receipts
         .entries
         .retain(|path, _| candidates.contains_key(path));
@@ -1263,6 +1380,159 @@ mod tests {
             "---\ntype: exploration\nupdated: 2026-01-01\nreview: {}\n---\n## Judgment\nThe claim needs a documented follow-up.\n",
             json!({"status":"open","subjects":[subject],"evidence":[{"path":evidence,"revision":revision}],"resolution":null})
         )
+    }
+
+    #[test]
+    fn partitioned_selection_keeps_fair_scope_and_honest_complete_input_status() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let path = "wiki/documents/a.md";
+        let body = "---\ntype: document\n---\nComplete source.\n";
+        write(
+            root.path(),
+            path,
+            &format!("{body}{}", "Long input.\n".repeat(50)),
+        );
+        write(root.path(), "wiki/documents/b.md", body);
+        let pages = scan(root.path());
+        let bounded = plan(root.path(), &dirs, &pages, 1, body.len() as u64).unwrap();
+        assert_eq!(bounded.candidates[0].path, "wiki/documents/b.md");
+        assert_eq!(bounded.blocked_count, 1);
+        let partitioned =
+            plan_partitioned(root.path(), &dirs, &pages, 1, body.len() as u64).unwrap();
+        assert_eq!(partitioned.candidates[0].path, path);
+        assert_eq!(partitioned.input.status, AuditInputStatus::Oversized);
+        assert!(partitioned.blocked.is_empty());
+        assert!(!root.path().join(STATE).exists());
+        let selection = ["wiki/documents/b.md".into(), path.into()];
+        let exact =
+            plan_selected_partitioned(root.path(), &dirs, &pages, 2, &selection, body.len() as u64)
+                .unwrap();
+        assert_eq!(
+            exact
+                .candidates
+                .iter()
+                .map(|candidate| candidate.path.clone())
+                .collect::<Vec<_>>(),
+            selection
+        );
+        assert_eq!(exact.input.status, AuditInputStatus::Oversized);
+    }
+
+    #[test]
+    fn completed_work_is_per_assessment_and_shares_the_receipt_mutation() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let large = "wiki/documents/a.md";
+        let small = "---\ntype: document\n---\nA complete source.\n";
+        write(
+            root.path(),
+            large,
+            &format!("{small}{}", "Long input.\n".repeat(50)),
+        );
+        for path in ["wiki/documents/b.md", "wiki/documents/c.md"] {
+            write(root.path(), path, small);
+        }
+        let proof = ".lorekeeper/work/proof.json";
+        write(root.path(), proof, "Completed work bytes.");
+        let pages = scan(root.path());
+        let selected = plan_partitioned(root.path(), &dirs, &pages, 3, small.len() as u64).unwrap();
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let results = || AuditResults {
+            assessments: selected.candidates.iter().map(assessment).collect(),
+        };
+        let coverage = |assessment: &AuditAssessment, plan: &mut MutationPlan| {
+            if assessment.path == large {
+                plan.require_unchanged(proof, "Completed work bytes.".into());
+                Ok(AuditReadCoverage::CompletedWork)
+            } else {
+                Ok(AuditReadCoverage::WholeInput)
+            }
+        };
+        let failure = record_with_guard(
+            &session,
+            &dirs,
+            &pages,
+            results(),
+            small.len() as u64,
+            coverage,
+        )
+        .unwrap_err();
+        assert!(
+            failure.to_string().contains("oversized"),
+            "uncovered ordinary reads must retain their union bound"
+        );
+        assert!(!root.path().join(STATE).exists());
+        let pair = [
+            selected.candidates[0].clone(),
+            selected.candidates[1].clone(),
+        ];
+        let results = || AuditResults {
+            assessments: pair.iter().map(assessment).collect(),
+        };
+        let rejected = record_with_guard(
+            &session,
+            &dirs,
+            &pages,
+            results(),
+            small.len() as u64,
+            |assessment, plan| {
+                if assessment.path == large {
+                    plan.require_unchanged(proof, "Wrong completed work bytes.".into());
+                    Ok(AuditReadCoverage::CompletedWork)
+                } else {
+                    Ok(AuditReadCoverage::WholeInput)
+                }
+            },
+        );
+        assert!(
+            rejected.is_err(),
+            "proof guards must be applied with the canonical receipt"
+        );
+        assert!(!root.path().join(STATE).exists());
+        record_with_guard(
+            &session,
+            &dirs,
+            &pages,
+            results(),
+            small.len() as u64,
+            coverage,
+        )
+        .unwrap();
+        let workflow = lk_core::execution::WorkflowId::from_bytes([9; 16]);
+        assert!(
+            verify_batch(
+                root.path(),
+                &dirs,
+                &pages,
+                &pair,
+                &workflow,
+                small.len() as u64
+            )
+            .is_err()
+        );
+        verify_batch_with_guard(
+            root.path(),
+            &dirs,
+            &pages,
+            &pair,
+            &workflow,
+            small.len() as u64,
+            coverage,
+        )
+        .unwrap();
+        assert!(
+            verify_batch_with_guard(
+                root.path(),
+                &dirs,
+                &pages,
+                &pair,
+                &workflow,
+                small.len() as u64,
+                |_, _| Err(error("incomplete work"))
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -2805,6 +3075,132 @@ mod tests {
                 .path,
             "wiki/concepts/aa.md"
         );
+    }
+
+    #[test]
+    fn follow_up_requires_an_open_review_for_concept_and_document_subjects() {
+        for (path, format) in [
+            ("wiki/concepts/subject.md", "concept"),
+            ("wiki/documents/subject.md", "document"),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let dirs = VaultDirs::default();
+            let body = format!(
+                "---\ntype: {format}\n---\nThe source declares a policy; deployment is unverified.\n"
+            );
+            let source = "wiki/documents/evidence.md";
+            let evidence = "---\ntype: document\n---\nService X proposes the policy. Deployment is not reported.\n";
+            let review = "wiki/explorations/scope-review.md";
+            write(root.path(), path, &body);
+            write(root.path(), source, evidence);
+            let metadata = json!({
+                "status": "resolved", "subjects": [path],
+                "evidence": [{"path": source, "revision": source_revision(&lk_vault::parse_page(evidence).unwrap())}],
+                "resolution": "The source's declared policy scope is confirmed; deployment was not assessed.",
+            });
+            write(
+                root.path(),
+                review,
+                &format!(
+                    "---\ntype: exploration\nreview: {metadata}\n---\nThe narrower source-scope question is settled. This judgment does not establish deployment.\n"
+                ),
+            );
+            let selected = plan_selected(
+                root.path(),
+                &dirs,
+                &scan(root.path()),
+                1,
+                &[path.into()],
+                u64::MAX,
+            )
+            .unwrap();
+            assert_eq!(
+                selected.candidates[0].reviews[0].state,
+                AuditReviewState::Resolved
+            );
+            let session = MutationSession::acquire(root.path()).unwrap();
+            record(
+                &session,
+                &dirs,
+                &scan(root.path()),
+                AuditResults {
+                    assessments: vec![assessment(&selected.candidates[0])],
+                },
+                u64::MAX,
+            )
+            .unwrap();
+            let before = std::fs::read(root.path().join(STATE)).unwrap();
+            let mut result = assessment(&selected.candidates[0]);
+            result.disposition = AuditDisposition::FollowUp;
+            result.reason = "Whether the declared policy was deployed remains unresolved.".into();
+            let rejected = record(
+                &session,
+                &dirs,
+                &scan(root.path()),
+                AuditResults {
+                    assessments: vec![result.clone()],
+                },
+                u64::MAX,
+            );
+            assert!(
+                rejected.is_err(),
+                "resolved scope review cannot satisfy a new unresolved deployment finding for {path}"
+            );
+            assert_eq!(std::fs::read(root.path().join(STATE)).unwrap(), before);
+            let mut receipts: Receipts = serde_json::from_slice(&before).unwrap();
+            result.reviews = vec![review.into()];
+            receipts.entries.insert(path.into(), result);
+            write(
+                root.path(),
+                STATE,
+                &serde_json::to_string(&receipts).unwrap(),
+            );
+            let reopened = plan_selected(
+                root.path(),
+                &dirs,
+                &scan(root.path()),
+                1,
+                &[path.into()],
+                u64::MAX,
+            )
+            .unwrap();
+            assert_eq!(
+                reopened.candidates[0].reason, "changed",
+                "prior follow-up without an open review cannot remain current"
+            );
+            let mut open = metadata;
+            open["status"] = json!("open");
+            open["resolution"] = serde_json::Value::Null;
+            write(
+                root.path(),
+                review,
+                &format!(
+                    "---\ntype: exploration\nreview: {}\n---\nDeployment remains unresolved; an observed deployment record would settle it.\n",
+                    open
+                ),
+            );
+            let selected = plan_selected(
+                root.path(),
+                &dirs,
+                &scan(root.path()),
+                1,
+                &[path.into()],
+                u64::MAX,
+            )
+            .unwrap();
+            let mut result = assessment(&selected.candidates[0]);
+            result.disposition = AuditDisposition::FollowUp;
+            record(
+                &session,
+                &dirs,
+                &scan(root.path()),
+                AuditResults {
+                    assessments: vec![result],
+                },
+                u64::MAX,
+            )
+            .unwrap();
+        }
     }
 
     #[test]

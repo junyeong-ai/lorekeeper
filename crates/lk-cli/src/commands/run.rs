@@ -107,6 +107,7 @@ mod native {
         lease: Option<workflow::WorkflowLease>,
         selected: Option<ExecutionProfile>,
         drain_blocked: bool,
+        calls: usize,
         result: JobResult,
     }
 
@@ -291,6 +292,9 @@ mod native {
             if self.config.llm.provider == lk_core::config::LlmProvider::Noop {
                 return self.failure(skill, "semantic execution is disabled by llm.provider");
             }
+            if self.calls >= self.config.execution.work.max_calls {
+                return self.failure("semantic call budget", "configured execution.work.max_calls exhausted; unfinished work is retained for the next run");
+            }
             if let Err(error) = self.prepare_agent().await {
                 return if self.result.cancelled {
                     self.record(skill, StageState::Cancelled, Some(error.to_string()))
@@ -313,11 +317,109 @@ mod native {
                 });
             match command {
                 Ok(mut command) => {
+                    self.calls += 1;
                     command.current_dir(&self.root);
                     self.child(skill, command, Some(timeout)).await
                 }
                 Err(error) => self.failure(skill, error),
             }
+        }
+
+        async fn bounded_work(&mut self, id: &str, skill: &str) -> bool {
+            loop {
+                let before = match crate::commands::work::current_progress(
+                    &self.root,
+                    &self.config,
+                    &self.config_revision,
+                    id,
+                ) {
+                    Ok(status) => status,
+                    Err(error) => return self.failure("bounded work progress", error),
+                };
+                if before.complete {
+                    break;
+                }
+                let Some(node) = before.ready.first() else {
+                    return self
+                        .failure("bounded work progress", "incomplete work has no ready node");
+                };
+                let operation = format!(
+                    "bounded inspect {id} {node}. Read the bounded-work reference, then only this exact work node with lore work read. Inspect all assigned ranges or child observations, preserve scope/time/attribution and unresolved concerns, and submit one typed observation with lore work record. Do not execute the ordinary queue drain/maintenance protocol, edit pages, publish reviews, or process another node. The native controller starts a fresh session for each node and owns final publication checks."
+                );
+                if !self.consumer(skill, &operation).await {
+                    return false;
+                }
+                match crate::commands::work::current_progress(&self.root, &self.config, &self.config_revision, id) {
+                    Ok(after) if after.completed > before.completed && !after.ready.contains(node) => {}
+                    Ok(_) => return self.failure("bounded work receipt", "worker exited without completing its selected node; unfinished work retained"),
+                    Err(error) => return self.failure("bounded work receipt", error),
+                }
+            }
+            match crate::commands::work::is_finished(
+                &self.root,
+                &self.config,
+                &self.config_revision,
+                id,
+            ) {
+                Ok(true) => {
+                    return self.record(
+                        "bounded work completion",
+                        StageState::Skipped,
+                        Some("verified sealed result already staged".into()),
+                    );
+                }
+                Ok(false) => {}
+                Err(error) => return self.failure("bounded work completion", error),
+            }
+            let operation = format!(
+                "bounded finish {id}. Read the bounded-work reference and lore work result for this exact work. Produce the normal typed final result using its completed root observation and selected generation specification. Submit with lore work finish. Do not read the whole corpus or drain other tasks. Leave the staged queue result or audit assessment for native controller publication. The controller owns global checks. Source uncertainty stays attributed; unresolved work concerns cannot be silently removed or marked reviewed."
+            );
+            if !self.consumer(skill, &operation).await {
+                return false;
+            }
+            match crate::commands::work::verify_finished(
+                &self.root,
+                &self.config,
+                &self.config_revision,
+                id,
+            ) {
+                Ok(()) => self.record(
+                    "bounded work completion",
+                    StageState::Completed,
+                    Some(id.into()),
+                ),
+                Err(error) => self.failure("bounded work completion", error),
+            }
+        }
+
+        async fn bounded_queue(&mut self) -> bool {
+            let tasks = match crate::commands::queue::current_tasks(&self.root) {
+                Ok(tasks) => tasks,
+                Err(error) => return self.failure("bounded queue discovery", error),
+            };
+            for task in tasks {
+                let work = match crate::commands::work::prepare_task(
+                    &self.root,
+                    &self.config,
+                    &self.config_revision,
+                    &task.task_id,
+                ) {
+                    Ok(work) => work,
+                    Err(error) => return self.failure("bounded queue planning", error),
+                };
+                if let Some(id) = work {
+                    if !self.bounded_work(&id, "lore-process").await {
+                        return false;
+                    }
+                    if !self
+                        .native("bounded queue apply", &["queue", "apply"])
+                        .await
+                    {
+                        return false;
+                    }
+                }
+            }
+            true
         }
 
         async fn drain(&mut self) -> bool {
@@ -344,6 +446,15 @@ mod native {
                     false
                 }
                 Ok(_) => {
+                    if !self.bounded_queue().await {
+                        self.drain_blocked = true;
+                        return false;
+                    }
+                    match crate::commands::queue::check::inspect(&self.root) {
+                        Ok(state) if state.current == 0 => return true,
+                        Ok(_) => {}
+                        Err(error) => return self.failure("queue inspection", error),
+                    }
                     let operation = if matches!(self.result.operation, Operation::Knowledge) {
                         "Process current queue tasks as part of this bounded knowledge maintenance job. Read the selected work's review dependencies. The native controller inspects and reports global review health after this session; do not enumerate unrelated reviews or expand the batch to repair them."
                     } else {
@@ -425,7 +536,7 @@ mod native {
             let pages =
                 lk_graph::scan::scan_vault(&self.root, self.config.graph.scope.follow_links)
                     .map_err(|e| miette::miette!("{e}"))?;
-            lk_graph::audit::plan_selected(
+            lk_graph::audit::plan_selected_partitioned(
                 &self.root,
                 &self.config.vault.dirs,
                 &pages,
@@ -447,13 +558,30 @@ mod native {
                 .lease
                 .as_ref()
                 .ok_or_else(|| miette::miette!("audit has no workflow lease"))?;
-            lk_graph::audit::verify_batch(
+            lk_graph::audit::verify_batch_with_guard(
                 &self.root,
                 &self.config.vault.dirs,
                 &pages,
                 batch,
                 workflow.id(),
                 self.config.graph.audit.max_input_bytes,
+                |assessment, mutation| {
+                    crate::commands::work::guard_audit(
+                        &self.root,
+                        &self.config,
+                        &self.config_revision,
+                        assessment,
+                        mutation,
+                    )
+                    .map(|completed| {
+                        if completed {
+                            lk_graph::audit::AuditReadCoverage::CompletedWork
+                        } else {
+                            lk_graph::audit::AuditReadCoverage::WholeInput
+                        }
+                    })
+                    .map_err(|error| lk_graph::GraphError::Io(error.to_string()))
+                },
             )
             .map_err(|e| miette::miette!("{e}"))
         }
@@ -513,10 +641,6 @@ mod native {
                     return;
                 }
             };
-            if let Err(error) = plan.input.ensure_ready() {
-                self.failure("audit input bound", error);
-                return;
-            }
             self.result.audit_blocked = plan.blocked;
             self.result.audit_blocked_count = plan.blocked_count;
             if plan.blocked_count > 0 {
@@ -552,7 +676,66 @@ mod native {
                 .map(|candidate| candidate.path.clone())
                 .collect::<Vec<_>>();
             let selection = serde_json::to_string(&paths).expect("string paths serialize");
-            self.consumer("lore-wiki", &format!("maintain. The controller selected this exact batch: {selection}. Start with audit-plan --path for these addresses; do not select another batch.")).await;
+            let mut bounded = plan.input.ensure_ready().is_err();
+            for path in &paths {
+                match crate::commands::work::audit_needs_work(
+                    &self.root,
+                    &self.config,
+                    &self.config_revision,
+                    path,
+                ) {
+                    Ok(required) => bounded |= required,
+                    Err(error) => {
+                        self.failure("audit request planning", error);
+                        return;
+                    }
+                }
+            }
+            if bounded {
+                for path in &paths {
+                    let work = match crate::commands::work::prepare_audit(
+                        &self.root,
+                        &self.config,
+                        &self.config_revision,
+                        path,
+                    ) {
+                        Ok(id) => id,
+                        Err(error) => {
+                            self.failure("bounded audit planning", error);
+                            return;
+                        }
+                    };
+                    if !self.bounded_work(&work, "lore-wiki").await {
+                        return;
+                    }
+                    let assessment = self
+                        .root
+                        .join(".lorekeeper/work")
+                        .join(&work)
+                        .join("assessment.json");
+                    let assessment = match assessment.to_str() {
+                        Some(path) => path.to_owned(),
+                        None => {
+                            self.failure(
+                                "bounded audit publication",
+                                "assessment path is not UTF-8",
+                            );
+                            return;
+                        }
+                    };
+                    if !self
+                        .native(
+                            "bounded audit publication",
+                            &["wiki", "audit-record", "--file", &assessment],
+                        )
+                        .await
+                    {
+                        return;
+                    }
+                }
+            } else {
+                self.consumer("lore-wiki", &format!("maintain. The controller selected this exact batch: {selection}. Start with audit-plan --path for these addresses; do not select another batch. Use bounded work for any subject whose work envelope requires partitioning.")).await;
+            }
             self.reconcile().await;
             if !self.inspect_review_health() {
                 return;
@@ -680,6 +863,7 @@ mod native {
             lease: None,
             selected: None,
             drain_blocked: false,
+            calls: 0,
             result: JobResult {
                 operation,
                 ok: true,

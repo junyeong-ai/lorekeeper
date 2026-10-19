@@ -226,6 +226,11 @@ pub enum Command {
         #[command(subcommand)]
         command: commands::queue::QueueCommand,
     },
+    /// Resumable bounded evidence inspections and reductions
+    Work {
+        #[command(subcommand)]
+        command: commands::work::WorkCommand,
+    },
 }
 
 #[derive(clap::Subcommand)]
@@ -325,5 +330,6 @@ pub async fn run() -> miette::Result<()> {
         Command::Wiki { cmd } => commands::wiki::run(&opts, cmd).await,
         Command::Installation { cmd } => commands::installation::run(&opts, cmd).await,
         Command::Queue { command } => commands::queue::run(&opts, command).await,
+        Command::Work { command } => commands::work::run(&opts, command).await,
     }
 }
