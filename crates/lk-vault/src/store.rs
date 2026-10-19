@@ -11,6 +11,82 @@ pub struct MarkdownInventory {
     pub addresses: Vec<PathBuf>,
 }
 
+/// Load distinct Markdown owners and validated occupied addresses from a collection.
+/// Filesystem aliases share one owner, preferring its direct address; hard links stay
+/// distinct. An incomplete traversal or an address outside the vault is an error.
+pub fn load_markdown_inventory(
+    root: &Path,
+    rel_dir: &Path,
+) -> Result<MarkdownInventory, VaultError> {
+    let full = crate::page_path(root, rel_dir)?;
+    match std::fs::metadata(&full) {
+        Ok(metadata) if metadata.is_dir() => {}
+        Ok(_) => {
+            return Err(std::io::Error::other("vault collection is not a directory").into());
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(MarkdownInventory {
+                owners: Vec::new(),
+                addresses: Vec::new(),
+            });
+        }
+        Err(error) => return Err(error.into()),
+    }
+    let mut owners = std::collections::BTreeMap::<PathBuf, (bool, PathBuf)>::new();
+    let mut addresses = Vec::new();
+    for entry in walkdir::WalkDir::new(&full).follow_links(false) {
+        let entry = entry.map_err(|error| std::io::Error::other(error.to_string()))?;
+        if entry.depth() > 0
+            && entry.file_type().is_symlink()
+            && std::fs::metadata(entry.path())?.is_dir()
+        {
+            return Err(std::io::Error::other(
+                "vault collection contains an untraversed directory alias",
+            )
+            .into());
+        }
+        if entry.file_type().is_dir()
+            || entry
+                .path()
+                .extension()
+                .is_none_or(|extension| extension != "md")
+        {
+            continue;
+        }
+        let relative = entry
+            .path()
+            .strip_prefix(root)
+            .map_err(std::io::Error::other)?;
+        let checked = crate::page_path(root, relative)?;
+        if !std::fs::metadata(&checked)?.is_file() {
+            return Err(
+                std::io::Error::other("Markdown collection entry is not a regular file").into(),
+            );
+        }
+        let canonical = checked.canonicalize()?;
+        addresses.push(relative.to_path_buf());
+        let candidate = (entry.file_type().is_symlink(), relative.to_path_buf());
+        owners
+            .entry(canonical)
+            .and_modify(|owner| {
+                if candidate < *owner {
+                    *owner = candidate.clone();
+                }
+            })
+            .or_insert(candidate);
+    }
+    let mut paths = owners
+        .into_values()
+        .map(|(_, path)| path)
+        .collect::<Vec<_>>();
+    paths.sort();
+    addresses.sort();
+    Ok(MarkdownInventory {
+        owners: paths,
+        addresses,
+    })
+}
+
 pub(crate) fn read_page(root: &Path, path: &Path) -> Result<VaultPage, VaultError> {
     let relative = path.strip_prefix(root).map_err(std::io::Error::other)?;
     let checked = crate::page_path(root, relative)?;
@@ -140,74 +216,7 @@ impl VaultStore for FsVault {
     }
 
     async fn markdown_inventory(&self, rel_dir: &Path) -> Result<MarkdownInventory, VaultError> {
-        let full = crate::page_path(&self.root, rel_dir)?;
-        match std::fs::metadata(&full) {
-            Ok(metadata) if metadata.is_dir() => {}
-            Ok(_) => {
-                return Err(std::io::Error::other("vault collection is not a directory").into());
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(MarkdownInventory {
-                    owners: Vec::new(),
-                    addresses: Vec::new(),
-                });
-            }
-            Err(error) => return Err(error.into()),
-        }
-        let mut owners = std::collections::BTreeMap::<PathBuf, (bool, PathBuf)>::new();
-        let mut addresses = Vec::new();
-        for entry in walkdir::WalkDir::new(&full).follow_links(false) {
-            let entry = entry.map_err(|error| std::io::Error::other(error.to_string()))?;
-            if entry.depth() > 0
-                && entry.file_type().is_symlink()
-                && std::fs::metadata(entry.path())?.is_dir()
-            {
-                return Err(std::io::Error::other(
-                    "vault collection contains an untraversed directory alias",
-                )
-                .into());
-            }
-            if entry.file_type().is_dir()
-                || entry
-                    .path()
-                    .extension()
-                    .is_none_or(|extension| extension != "md")
-            {
-                continue;
-            }
-            let relative = entry
-                .path()
-                .strip_prefix(&self.root)
-                .map_err(std::io::Error::other)?;
-            let checked = crate::page_path(&self.root, relative)?;
-            if !std::fs::metadata(&checked)?.is_file() {
-                return Err(std::io::Error::other(
-                    "Markdown collection entry is not a regular file",
-                )
-                .into());
-            }
-            let canonical = checked.canonicalize()?;
-            addresses.push(relative.to_path_buf());
-            let candidate = (entry.file_type().is_symlink(), relative.to_path_buf());
-            owners
-                .entry(canonical)
-                .and_modify(|owner| {
-                    if candidate < *owner {
-                        *owner = candidate.clone();
-                    }
-                })
-                .or_insert(candidate);
-        }
-        let mut paths = owners
-            .into_values()
-            .map(|(_, path)| path)
-            .collect::<Vec<_>>();
-        paths.sort();
-        addresses.sort();
-        Ok(MarkdownInventory {
-            owners: paths,
-            addresses,
-        })
+        load_markdown_inventory(&self.root, rel_dir)
     }
 
     async fn read_page(&self, rel_path: &Path) -> Result<Option<VaultPage>, VaultError> {

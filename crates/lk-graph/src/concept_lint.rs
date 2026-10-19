@@ -1,17 +1,7 @@
-//! Structural lints for `{wiki}/concepts/*.md` pages.
+//! Structural lints for concept pages.
 //!
-//! Concept pages are the one page kind an LLM creates directly: the queue-mode path
-//! defers creation to `/lore-process`, which writes frontmatter and body itself rather
-//! than through a template. So the defects this module looks for are the ones a
-//! generated page can carry past every earlier gate — a `category` outside the
-//! configured slate, a name that already belongs to another page, a contradiction a
-//! human has yet to resolve.
-//!
-//! Every check here is DECIDABLE from the pages themselves: it reports a fact about
-//! the vault, never a guess about whether two ideas match. That is why `graph lint`
-//! exiting non-zero can stay meaningful — a check that fires on judgment calls trains
-//! its reader to ignore it. All three lints are pure functions over the single
-//! `scan_concept_pages` pass; they report, they never repair.
+//! One scan supplies declared names, categories and explicit conflict callouts.
+//! These checks report recorded structure, not semantic equivalence or factual truth.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -37,8 +27,7 @@ const CONFLICT_CALLOUT: &str = "conflict";
 pub struct InvalidCategoryConcept {
     /// Vault-relative path of the offending concept page.
     pub path: PathBuf,
-    /// The slug that identifies the concept — the file stem (the graph's canonical
-    /// page identity), so the lint can locate the page even when frontmatter is broken.
+    /// Collection-relative address without `.md`, including nested directories.
     pub slug: String,
     /// The `category` value as found on disk — the thing that fails to match
     /// any configured id.
@@ -50,55 +39,36 @@ pub struct InvalidCategoryConcept {
 /// walked a single time per `graph lint` rather than once per check.
 #[derive(Debug, Clone)]
 pub struct ConceptPage {
-    /// Canonical identity = the file stem, matching how the link graph identifies
-    /// every page (`scan::ScannedPage.id` is path-derived). Concepts are written as
-    /// `{slug}.md`, so the stem IS the slug — independent of frontmatter, so it holds
-    /// even when frontmatter is absent or malformed.
+    /// Collection-relative address without `.md`, independent of declared names.
     pub slug: String,
     /// Vault-relative path, for lint output.
     pub path: PathBuf,
-    /// `category` frontmatter value, if present.
-    pub category: Option<String>,
-    /// Every name this page answers to: its slug, its `title`, and each `aliases`
-    /// entry. `aliases` is the registry the pipeline's dedup resolves incoming concept
-    /// names against, so this is the page's full claim on the name space — what
-    /// `find_duplicate_concepts` compares. A page with unreadable frontmatter still
-    /// contributes its slug, which it holds by owning the file.
+    /// `category` frontmatter value, if present, retaining its declared type.
+    pub category: Option<serde_json::Value>,
+    /// Declared title and aliases, with the file stem as the title fallback.
+    /// An address does not itself claim a name. Malformed frontmatter declares none.
     pub names: Vec<String>,
     /// Page body (frontmatter stripped), for conflict-callout scanning.
     pub body: String,
 }
 
-/// Read `{wiki}/concepts/*.md` once into [`ConceptPage`]s, sorted by slug (so every
+/// Read Markdown owners beneath `{wiki}/concepts/` into [`ConceptPage`]s, sorted by slug (so every
 /// lint's output is deterministic without re-sorting). The single disk pass behind
-/// the concept lints. A page with malformed frontmatter still yields a page — slug
-/// from the file stem, no category, empty body — so slug-only checks still see it
-/// while content checks naturally skip it. A missing concepts dir is not an error.
+/// the concept lints uses the same validated inventory as name routing. A page with
+/// malformed frontmatter retains its address, with no category, names or body.
+/// A missing concepts dir is not an error.
 pub fn scan_concept_pages(
     vault_root: &Path,
     wiki_dir: &str,
 ) -> Result<Vec<ConceptPage>, GraphError> {
-    let concepts_dir = vault_root
-        .join(wiki_dir)
-        .join(lk_core::vault_path::CONCEPTS_SUBDIR);
-    let entries = match std::fs::read_dir(&concepts_dir) {
-        Ok(e) => e,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => {
-            return Err(GraphError::Io(format!(
-                "read {}: {e}",
-                concepts_dir.display()
-            )));
-        }
-    };
+    let concepts_dir = Path::new(wiki_dir).join(lk_core::vault_path::CONCEPTS_SUBDIR);
+    let inventory = lk_vault::load_markdown_inventory(vault_root, &concepts_dir)
+        .map_err(|error| GraphError::Io(format!("walk concepts: {error}")))?;
 
     let mut pages = Vec::new();
-    for entry in entries {
-        let entry = entry.map_err(|e| GraphError::Io(format!("walk concepts: {e}")))?;
-        let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) != Some("md") {
-            continue;
-        }
+    for rel_path in inventory.owners {
+        let path = lk_vault::page_path(vault_root, &rel_path)
+            .map_err(|error| GraphError::Io(format!("read concept: {error}")))?;
         let raw = match std::fs::read_to_string(&path) {
             Ok(s) => s,
             Err(e) => return Err(GraphError::Io(format!("read {}: {e}", path.display()))),
@@ -108,20 +78,17 @@ pub fn scan_concept_pages(
             .and_then(|s| s.to_str())
             .unwrap_or_default()
             .to_owned();
-        let rel_path = path.strip_prefix(vault_root).unwrap_or(&path).to_path_buf();
-        // Slug is always the file stem (the graph's canonical page identity); only
-        // category, names and body come from parsing, and a malformed page degrades to
-        // none/slug-only/empty.
+        let slug = rel_path
+            .strip_prefix(&concepts_dir)
+            .map_err(|error| GraphError::Io(error.to_string()))?
+            .with_extension("")
+            .to_str()
+            .ok_or_else(|| GraphError::Io("concept address is not UTF-8".into()))?
+            .replace(std::path::MAIN_SEPARATOR, "/");
         let mut names = Vec::new();
         let (category, body) = match frontmatter::parse_page(&raw) {
             Ok(page) => {
-                // A PRESENT field is reported as written, whatever its YAML type: a value that
-                // can match no configured id is exactly what this check is for, and reading only
-                // strings would make `category: 123` indistinguishable from no category.
-                let category = page.frontmatter.get("category").map(|v| match v.as_str() {
-                    Some(s) => s.to_owned(),
-                    None => v.to_string(),
-                });
+                let category = page.frontmatter.get("category").cloned();
                 names.extend(
                     page.frontmatter
                         .get("title")
@@ -143,7 +110,7 @@ pub fn scan_concept_pages(
             Err(_) => (None, String::new()),
         };
         pages.push(ConceptPage {
-            slug: file_stem,
+            slug,
             path: rel_path,
             category,
             names,
@@ -155,8 +122,7 @@ pub fn scan_concept_pages(
 }
 
 /// Concept pages whose `category` frontmatter is set to a value not in `configured`.
-/// Pages without a `category` field are not flagged — leaving the field unset is the
-/// documented way to mark a concept as uncategorised. When `configured` is empty, the
+/// Missing, null or empty categories are uncategorised. When `configured` is empty, the
 /// categorisation feature is off and nothing is flagged.
 pub fn find_invalid_categories(
     pages: &[ConceptPage],
@@ -171,24 +137,27 @@ pub fn find_invalid_categories(
     pages
         .iter()
         .filter_map(|page| {
-            // An EMPTY value is the uncategorised state, not an invalid category — the reading
-            // the rest of the vault already takes: `templates/concept.md.jinja` renders the field
-            // under `{% if category %}`, and `wiki concepts` filters it out of the registry.
-            let category = page.category.as_deref().filter(|c| !c.is_empty())?;
-            if valid_ids.contains(category) {
-                return None;
-            }
+            let value = page.category.as_ref()?;
+            let category = match value {
+                serde_json::Value::Null => return None,
+                serde_json::Value::String(category)
+                    if category.is_empty() || valid_ids.contains(category.as_str()) =>
+                {
+                    return None;
+                }
+                serde_json::Value::String(category) => category.clone(),
+                _ => value.to_string(),
+            };
             Some(InvalidCategoryConcept {
                 path: page.path.clone(),
                 slug: page.slug.clone(),
-                category: category.to_owned(),
+                category,
             })
         })
         .collect()
 }
 
-/// Two concept pages that answer to the SAME name — one page's slug, `title` or alias
-/// reduces to the same identity as one of the other's (`doc-hub` / `docs-hub`).
+/// Two concept pages that declare names with the same identity.
 #[derive(Debug, Clone, Serialize)]
 pub struct DuplicateConcept {
     /// The two concept slugs, ordered lexicographically for deterministic output.
@@ -201,10 +170,10 @@ pub struct DuplicateConcept {
     pub b_name: String,
 }
 
-/// Concept page pairs whose NAME SETS intersect: some name — a slug, a `title`, an alias —
+/// Concept page pairs whose NAME SETS intersect: a title or alias (with a file-stem title fallback)
 /// belongs to both pages at once. That is a defect about the vault, not a guess about the
 /// ideas: one name reaching two pages fragments its citations by spelling, and the
-/// pipeline's alias index has to pick one of them. Read-only; `lore graph merge` is the
+/// pipeline's name resolver reports ambiguity. Read-only; `lore graph merge` is the
 /// remedy a human triggers — or, when the pages are genuinely different things that happen
 /// to share a name, renaming one of them is.
 ///
@@ -254,7 +223,7 @@ pub fn find_duplicate_concepts(pages: &[ConceptPage]) -> Vec<DuplicateConcept> {
 pub struct UnresolvedConflict {
     /// Vault-relative path of the concept page.
     pub path: PathBuf,
-    /// The concept slug (frontmatter `id`, falling back to the file stem).
+    /// Collection-relative address without `.md`, including nested directories.
     pub slug: String,
     /// The callout title (text after `[!conflict]`), empty when the marker has none.
     pub note: String,
@@ -473,9 +442,10 @@ mod tests {
 
     fn write_concept(root: &Path, slug: &str, frontmatter_body: &str) {
         let dir = root.join("wiki").join(lk_core::vault_path::CONCEPTS_SUBDIR);
-        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("{slug}.md"));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let content = format!("---\n{frontmatter_body}\n---\n\n# {slug}\n");
-        std::fs::write(dir.join(format!("{slug}.md")), content).unwrap();
+        std::fs::write(path, content).unwrap();
     }
 
     fn cats(ids: &[&str]) -> Vec<ConceptCategory> {
@@ -503,11 +473,11 @@ mod tests {
         let pages = scan(tmp.path());
         assert_eq!(pages.len(), 1);
         assert_eq!(pages[0].slug, "rag");
-        assert_eq!(pages[0].category.as_deref(), Some("ai-ml"));
+        assert_eq!(pages[0].category, Some(serde_json::json!("ai-ml")));
         assert_eq!(
             pages[0].names,
             vec!["RAG", "RAG", "Retrieval-Augmented Generation"],
-            "the name set is slug + title + every alias, verbatim"
+            "the name set is title + every alias, verbatim"
         );
         assert!(pages[0].body.contains("# rag"));
     }
@@ -515,8 +485,7 @@ mod tests {
     #[test]
     fn scan_is_resilient_to_malformed_frontmatter() {
         // An unclosed frontmatter block fails to parse; the page must still surface by
-        // its file stem (so slug-only lints see it) with no category, slug-only names
-        // and empty body.
+        // its address with no category, declared names or body.
         let tmp = TempDir::new().unwrap();
         let dir = tmp
             .path()
@@ -534,6 +503,108 @@ mod tests {
         assert!(pages[0].category.is_none());
         assert_eq!(pages[0].names, Vec::<String>::new());
         assert!(pages[0].body.is_empty());
+    }
+
+    #[test]
+    fn nested_concepts_participate_in_each_lint_with_complete_addresses() {
+        let tmp = TempDir::new().unwrap();
+        write_concept(
+            tmp.path(),
+            "first/entry",
+            "title: First\ncategory: unknown\naliases: [Shared]",
+        );
+        write_concept(
+            tmp.path(),
+            "second/entry",
+            "title: Second\ncategory: ai-ml\naliases: [Shared]",
+        );
+        let first = PathBuf::from("wiki/concepts/first/entry.md");
+        let mut content = std::fs::read_to_string(tmp.path().join(&first)).unwrap();
+        content.push_str("\n> [!conflict] Sources disagree\n");
+        std::fs::write(tmp.path().join(&first), content).unwrap();
+
+        let pages = scan(tmp.path());
+        assert_eq!(pages.len(), 2);
+        let categories = find_invalid_categories(&pages, &cats(&["ai-ml"]));
+        assert_eq!(categories.len(), 1);
+        assert_eq!(categories[0].slug, "first/entry");
+        assert_eq!(categories[0].path, first);
+        let duplicates = find_duplicate_concepts(&pages);
+        assert_eq!(duplicates.len(), 1);
+        assert_eq!(duplicates[0].a, "first/entry");
+        assert_eq!(duplicates[0].b, "second/entry");
+        assert_eq!(duplicates[0].a_name, "Shared");
+        assert_eq!(duplicates[0].b_name, "Shared");
+        let conflicts = find_unresolved_conflicts(&pages);
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(conflicts[0].slug, "first/entry");
+        assert_eq!(conflicts[0].path, first);
+        assert_eq!(conflicts[0].note, "Sources disagree");
+    }
+
+    #[test]
+    fn nested_addresses_are_not_names_and_missing_titles_use_the_basename() {
+        let tmp = TempDir::new().unwrap();
+        write_concept(tmp.path(), "first/entry", "title: First");
+        write_concept(tmp.path(), "second/entry", "title: Second");
+        write_concept(tmp.path(), "address-name", "title: first/entry");
+        write_concept(tmp.path(), "nested/fallback", "category: ai-ml");
+        let pages = scan(tmp.path());
+        assert_eq!(pages.len(), 4);
+        assert!(find_duplicate_concepts(&pages).is_empty());
+        let fallback = pages
+            .iter()
+            .find(|page| page.slug == "nested/fallback")
+            .unwrap();
+        assert_eq!(fallback.names, vec!["fallback"]);
+
+        write_concept(
+            tmp.path(),
+            "explicit-alias",
+            "title: Explicit\naliases: [First]",
+        );
+        let duplicates = find_duplicate_concepts(&scan(tmp.path()));
+        assert_eq!(duplicates.len(), 1);
+        assert_eq!(duplicates[0].a, "explicit-alias");
+        assert_eq!(duplicates[0].b, "first/entry");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn concept_scan_uses_distinct_inventory_owners_and_preserves_hard_links() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = TempDir::new().unwrap();
+        write_concept(tmp.path(), "nested/owner", "title: Shared");
+        let directory = tmp.path().join("wiki/concepts");
+        symlink("nested/owner.md", directory.join("alias.md")).unwrap();
+        let pages = scan(tmp.path());
+        assert_eq!(pages.len(), 1);
+        assert_eq!(pages[0].slug, "nested/owner");
+        assert!(find_duplicate_concepts(&pages).is_empty());
+
+        std::fs::hard_link(directory.join("nested/owner.md"), directory.join("hard.md")).unwrap();
+        let pages = scan(tmp.path());
+        assert_eq!(pages.len(), 2);
+        let duplicates = find_duplicate_concepts(&pages);
+        assert_eq!(duplicates.len(), 1);
+        assert_eq!(duplicates[0].a, "hard");
+        assert_eq!(duplicates[0].b, "nested/owner");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn concept_scan_propagates_incomplete_nested_inventory_errors() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = TempDir::new().unwrap();
+        write_concept(tmp.path(), "nested/owner", "title: Owner");
+        symlink(
+            "missing.md",
+            tmp.path().join("wiki/concepts/nested/dangling.md"),
+        )
+        .unwrap();
+        assert!(scan_concept_pages(tmp.path(), "wiki").is_err());
     }
 
     #[test]
@@ -576,6 +647,26 @@ mod tests {
     }
 
     #[test]
+    fn null_category_is_uncategorised() {
+        for value in ["null", "~", ""] {
+            let tmp = TempDir::new().unwrap();
+            write_concept(tmp.path(), "x", &format!("id: x\ncategory: {value}"));
+            assert!(find_invalid_categories(&scan(tmp.path()), &cats(&["ai-ml"])).is_empty());
+        }
+    }
+
+    #[test]
+    fn quoted_null_category_requires_a_configured_id() {
+        let tmp = TempDir::new().unwrap();
+        write_concept(tmp.path(), "x", "id: x\ncategory: \"null\"");
+        let pages = scan(tmp.path());
+        let findings = find_invalid_categories(&pages, &cats(&["ai-ml"]));
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].category, "null");
+        assert!(find_invalid_categories(&pages, &cats(&["null"])).is_empty());
+    }
+
+    #[test]
     fn a_category_that_is_not_a_string_is_still_a_category() {
         // A value that can match no configured id is what this check is for, whatever its type.
         let tmp = TempDir::new().unwrap();
@@ -586,6 +677,21 @@ mod tests {
             found[0].category, "123",
             "the finding shows what is on disk"
         );
+    }
+
+    #[test]
+    fn non_string_categories_cannot_match_configured_ids() {
+        for value in ["123", "true"] {
+            let tmp = TempDir::new().unwrap();
+            let configured = cats(&[value]);
+            write_concept(tmp.path(), "x", &format!("category: {value}"));
+            assert_eq!(
+                find_invalid_categories(&scan(tmp.path()), &configured).len(),
+                1
+            );
+            write_concept(tmp.path(), "x", &format!("category: \"{value}\""));
+            assert!(find_invalid_categories(&scan(tmp.path()), &configured).is_empty());
+        }
     }
 
     #[test]
