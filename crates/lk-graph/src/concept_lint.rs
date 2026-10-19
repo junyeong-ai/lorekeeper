@@ -1,17 +1,7 @@
-//! Structural lints for `{wiki}/concepts/*.md` pages.
+//! Structural lints for concept pages.
 //!
-//! Concept pages are the one page kind an LLM creates directly: the queue-mode path
-//! defers creation to `/lore-process`, which writes frontmatter and body itself rather
-//! than through a template. So the defects this module looks for are the ones a
-//! generated page can carry past every earlier gate — a `category` outside the
-//! configured slate, a name that already belongs to another page, a contradiction a
-//! human has yet to resolve.
-//!
-//! Every check here is DECIDABLE from the pages themselves: it reports a fact about
-//! the vault, never a guess about whether two ideas match. That is why `graph lint`
-//! exiting non-zero can stay meaningful — a check that fires on judgment calls trains
-//! its reader to ignore it. All three lints are pure functions over the single
-//! `scan_concept_pages` pass; they report, they never repair.
+//! One scan supplies declared names, categories and explicit conflict callouts.
+//! These checks report recorded structure, not semantic equivalence or factual truth.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -115,13 +105,15 @@ pub fn scan_concept_pages(
         let mut names = Vec::new();
         let (category, body) = match frontmatter::parse_page(&raw) {
             Ok(page) => {
-                // A PRESENT field is reported as written, whatever its YAML type: a value that
-                // can match no configured id is exactly what this check is for, and reading only
-                // strings would make `category: 123` indistinguishable from no category.
-                let category = page.frontmatter.get("category").map(|v| match v.as_str() {
-                    Some(s) => s.to_owned(),
-                    None => v.to_string(),
-                });
+                // Preserve malformed non-null values for category diagnostics.
+                let category = page
+                    .frontmatter
+                    .get("category")
+                    .filter(|value| !value.is_null())
+                    .map(|value| match value.as_str() {
+                        Some(category) => category.to_owned(),
+                        None => value.to_string(),
+                    });
                 names.extend(
                     page.frontmatter
                         .get("title")
@@ -155,8 +147,7 @@ pub fn scan_concept_pages(
 }
 
 /// Concept pages whose `category` frontmatter is set to a value not in `configured`.
-/// Pages without a `category` field are not flagged — leaving the field unset is the
-/// documented way to mark a concept as uncategorised. When `configured` is empty, the
+/// Missing, null or empty categories are uncategorised. When `configured` is empty, the
 /// categorisation feature is off and nothing is flagged.
 pub fn find_invalid_categories(
     pages: &[ConceptPage],
@@ -573,6 +564,26 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         write_concept(tmp.path(), "x", "id: x");
         assert!(find_invalid_categories(&scan(tmp.path()), &cats(&["ai-ml"])).is_empty());
+    }
+
+    #[test]
+    fn null_category_is_uncategorised() {
+        for value in ["null", "~", ""] {
+            let tmp = TempDir::new().unwrap();
+            write_concept(tmp.path(), "x", &format!("id: x\ncategory: {value}"));
+            assert!(find_invalid_categories(&scan(tmp.path()), &cats(&["ai-ml"])).is_empty());
+        }
+    }
+
+    #[test]
+    fn quoted_null_category_requires_a_configured_id() {
+        let tmp = TempDir::new().unwrap();
+        write_concept(tmp.path(), "x", "id: x\ncategory: \"null\"");
+        let pages = scan(tmp.path());
+        let findings = find_invalid_categories(&pages, &cats(&["ai-ml"]));
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].category, "null");
+        assert!(find_invalid_categories(&pages, &cats(&["null"])).is_empty());
     }
 
     #[test]

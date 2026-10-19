@@ -65,7 +65,7 @@ not an additional implicit filename alias. Duplicate declared names report ambig
 they never authorize an automatic merge. A malformed frontmatter page retains its
 file address for address-only diagnostics, not invented parsed metadata/body.
 
-An empty category configuration disables that check; missing/empty category is
+An empty category configuration disables that check; missing/null/empty category is
 uncategorized, while a present invalidly typed value remains diagnosable. Conflict
 callouts are fence-aware informational content. Durable open/resolved judgments
 belong to exploration reviews, not a machine-persisted callout inferred by location.
