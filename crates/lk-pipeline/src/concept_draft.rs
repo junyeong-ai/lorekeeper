@@ -138,6 +138,7 @@ struct ConceptDraft {
     /// run touched and, once answered again, freeze the page against an input nothing
     /// recorded.
     preserved_llm_inputs: BTreeMap<String, String>,
+    preserved_metadata: BTreeMap<String, serde_json::Value>,
     /// Bodies of LLM-authored or graph-maintained sections, captured from the existing
     /// concept page so a re-render can splice them back. Each has a writer of its own —
     /// `/lore-process` for `## Synthesis`, `lore graph backlinks-sync` for `## Sources`,
@@ -259,6 +260,11 @@ impl ConceptDrafts {
             return Err(PipelineError::Render(
                 "concept reader omitted its original input snapshot".into(),
             ));
+        }
+        if let Some(page) = &existing {
+            page.frontmatter
+                .knowledge_status()
+                .map_err(PipelineError::Render)?;
         }
         if existing.is_some() {
             self.established.insert(identity.slug.clone());
@@ -460,6 +466,25 @@ impl ConceptDrafts {
                     last_seen,
                     source_count,
                     preserved_llm_inputs: capture_llm_inputs(page),
+                    preserved_metadata: page
+                        .frontmatter
+                        .fields
+                        .iter()
+                        .filter(|(key, _)| {
+                            !matches!(
+                                key.as_str(),
+                                "id" | "type"
+                                    | "title"
+                                    | "aliases"
+                                    | "created"
+                                    | "updated"
+                                    | "category"
+                                    | "source_count"
+                                    | "llm_inputs"
+                            )
+                        })
+                        .map(|(key, value)| (key.clone(), value.clone()))
+                        .collect(),
                     preserved_synthesis: capture_section(&page.body, |s| s.concept_synthesis),
                     synthesis_evidence: None,
                     preserved_sources: capture_section(&page.body, |s| s.concept_sources),
@@ -476,6 +501,7 @@ impl ConceptDrafts {
                 last_seen: date,
                 source_count: 0,
                 preserved_llm_inputs: BTreeMap::new(),
+                preserved_metadata: BTreeMap::new(),
                 preserved_synthesis: None,
                 synthesis_evidence: None,
                 preserved_sources: None,
@@ -652,6 +678,14 @@ impl ConceptDraft {
         let mut content = engine
             .render("concept.md.jinja", &context)
             .map_err(|e| PipelineError::Render(e.to_string()))?;
+
+        for (key, value) in &self.preserved_metadata {
+            let value = serde_json::to_string(value)
+                .map_err(|error| PipelineError::Render(error.to_string()))?;
+            content = lk_vault::set_frontmatter_field(&content, key, &value).ok_or_else(|| {
+                PipelineError::Render("concept template requires frontmatter".into())
+            })?;
+        }
 
         // Splice the previously-captured bodies back into the freshly rendered
         // page. These sections are owned by other writers (`/lore-process` for
@@ -1240,6 +1274,56 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn reingest_preserves_retirement_review_tags_and_authored_metadata() {
+        let path = "wiki/concepts/stored.md";
+        let original = "---\ntype: concept\ntitle: Stored\naliases: [Stored]\nknowledge_status: retired\nknowledge_review: wiki/explorations/gap.md\ntags: [security, 인증정보]\nscope: {environment: production}\nsource_count: 1\n---\n# Stored\n\n## Synthesis\nOriginal judgment.\n\n## Sources\n\n## Related\n";
+        let reader = lk_vault::InMemoryVault::new().with_page(path, original);
+        let dirs = VaultDirs::default();
+        let mut drafts = ConceptDrafts::new();
+        let staged = drafts
+            .stage(
+                &ExtractedConcept {
+                    name: "Stored".into(),
+                    aliases: vec!["New form".into()],
+                    category: None,
+                },
+                &reader,
+                &dirs,
+            )
+            .await
+            .unwrap();
+        drafts.commit(staged, jiff::civil::date(2026, 10, 19));
+        let rendered = drafts
+            .render_pages(&TemplateEngine::build(None).unwrap(), &dirs, Locale::En)
+            .unwrap();
+        let page = lk_core::frontmatter::parse_page(&rendered[0].content).unwrap();
+        let before = lk_core::frontmatter::parse_page(original).unwrap();
+        for key in [
+            "knowledge_status",
+            "knowledge_review",
+            "tags",
+            "scope",
+            "source_count",
+        ] {
+            assert_eq!(
+                page.frontmatter.get(key),
+                before.frontmatter.get(key),
+                "{key}"
+            );
+        }
+        assert_eq!(rendered[0].expected_original, Some(Some(original.into())));
+        assert!(page.body.contains("Original judgment."));
+        assert!(
+            page.frontmatter
+                .get("aliases")
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("New form"))
+        );
+    }
+
     /// The property every caller that stages a batch before folding it relies on — and the
     /// reason `Pipeline::plan`, `plan_documents` and `apply_concept_result` all read every
     /// concept before committing any. `render_pages` emits the accumulator unconditionally,
@@ -1312,6 +1396,7 @@ mod tests {
             last_seen: jiff::civil::date(2026, 5, 1),
             source_count: 2,
             preserved_llm_inputs: BTreeMap::from([("synthesis".into(), "recorded".into())]),
+            preserved_metadata: BTreeMap::new(),
             preserved_synthesis: Some("A sentence one source grounded.".into()),
             synthesis_evidence: Some("grounded".into()),
             preserved_sources: None,
@@ -1345,6 +1430,7 @@ mod tests {
             last_seen: jiff::civil::date(2026, 5, 1),
             source_count: 0,
             preserved_llm_inputs: BTreeMap::new(),
+            preserved_metadata: BTreeMap::new(),
             preserved_synthesis: None,
             synthesis_evidence: None,
             preserved_sources: None,
@@ -1381,6 +1467,7 @@ mod tests {
             last_seen: jiff::civil::date(2026, 5, 1),
             source_count: 3,
             preserved_llm_inputs: BTreeMap::new(),
+            preserved_metadata: BTreeMap::new(),
             preserved_synthesis: Some(
                 "Retrieval-Augmented Generation enriches an LLM prompt with retrieved context."
                     .into(),
@@ -1431,6 +1518,7 @@ mod tests {
             last_seen: jiff::civil::date(2026, 5, 1),
             source_count: 0,
             preserved_llm_inputs: BTreeMap::new(),
+            preserved_metadata: BTreeMap::new(),
             preserved_synthesis: None,
             synthesis_evidence: None,
             preserved_sources: None,
@@ -1467,6 +1555,7 @@ mod tests {
             last_seen: jiff::civil::date(2026, 5, 1),
             source_count: 0,
             preserved_llm_inputs: BTreeMap::new(),
+            preserved_metadata: BTreeMap::new(),
             preserved_synthesis: None,
             synthesis_evidence: None,
             preserved_sources: None,
