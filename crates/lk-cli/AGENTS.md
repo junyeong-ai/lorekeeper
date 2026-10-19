@@ -36,6 +36,9 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   workflow lease, while configuration revision and cancellation supervision remain pinned
   across the campaign. Stop on failure/cancellation or an empty plan; batch-limit success
   does not establish full-corpus coverage. Existing receipts resume verified work.
+  Native consumers own selected semantic reads and guarded publication; the controller
+  owns final global reconciliation/checks. Keep this boundary explicit in the host
+  instruction and shared skills; standalone skills still perform their own final checks.
 - `commands/schedule.rs` renders native jobs with stable scheduling-slot labels.
   Queue-mode semantic jobs need explicit execution profiles. Capture selected
   absolute config/data paths, anchored PATH and relevant existing host directories;

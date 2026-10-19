@@ -4,7 +4,7 @@ description: Processes pending Lorekeeper semantic queue tasks after ingestion o
   graph reconciliation. Stages typed summaries, concepts, synthesis and review narratives,
   then verifies publication and evidence consistency. Does not collect remote sources.
 metadata:
-  version: 0.69.0
+  version: 0.69.1
 ---
 
 # lore-process — Drain the Lorekeeper LLM queue
@@ -215,45 +215,53 @@ on the matching marker, never on whether a section looks filled.
    deciding further names. Quarantined results require diagnosis and correction, not
    blind retry.
 
-5. **Finalize (mandatory — do not skip).** The apply here covers whatever the last file
-   left pending; `lore graph backlinks-sync` and `lore wiki refresh` are owed once, at the
-   end, over everything this run wrote. Bounded concept `## Sources` instructions and
-   `source_count` are deliberately left empty during processing; they are
+5. **Finalize publication and checks.** Apply whatever the last file left pending
+   and reconcile backlinks over everything this run wrote. Bounded concept
+   `## Sources` instructions and `source_count` are deliberately left empty during
+   processing; they are
    machine-owned and reconciled here from the link graph. Complete citations live in
-   rebuildable SQLite discovery rather than growing Sources lists. SQLite and the entry guide
-   are refreshed. Confirm each command exits 0:
+   rebuildable SQLite discovery rather than growing Sources lists. Confirm each
+   publication command exits 0:
    ```bash
    lore queue apply            # materialize reported concepts into pages + links
    lore graph backlinks-sync   # re-derive every concept's ## Sources + source_count
    ```
    If reconciliation queues current synthesis tasks, resume steps 2–4 for that work,
    then repeat apply and backlinks-sync. Continue until reconciliation leaves no
-   current tasks; stop and report any blocked work or failed command. Refresh and
-   check completion only after that drain:
+   current tasks; stop and report any blocked work or failed command.
+   A native `lore run` caller that explicitly owns finalization performs navigation
+   refresh and the operation's final graph, queue and review checks after this
+   semantic session. Return after publication, reconciliation and task retirement;
+   report retained work and failures without repeating global checks or listing
+   unrelated reviews. This delegation never skips selected source/review reads or
+   guards, and only the controller determines the complete job outcome.
+   Standalone sessions refresh and check completion after the drain:
    ```bash
    lore wiki refresh           # refresh SQLite navigation and the entry guide
    lore queue check            # pending or blocked work and unpublished results
    lore wiki reviews --check   # evidence drift and invalid assessments; open is valid
    ```
-   When explicitly processing within bounded knowledge maintenance, use `lore wiki
-   reviews` for this review step and report unrelated `needs-reassessment` records
+   Within standalone bounded knowledge maintenance, use `lore wiki reviews` for
+   this review step and report unrelated `needs-reassessment` records
    as backlog. Invalid reviews or inspection errors still fail. The maintenance
    controller verifies current reviews for its selected concepts through audit
    recording/completion. Keep the strict `--check` for standalone process and daily
    runs; do not expand a bounded batch to repair every global finding.
    Run Finalize on every invocation that processed a task. Even when no current
-   task was found, run `lore queue check` and the applicable review check before
-   reporting completion: zero current tasks alone does not rule out blocked inputs,
-   unpublished results, interrupted mutations or evidence drift. Skipping reconciliation
-   after publication leaves new concepts with no `## Sources` and a stale
+   task was found, standalone sessions run `lore queue check` and the applicable
+   review check before reporting completion: zero current tasks alone does not rule
+   out blocked inputs, unpublished results, interrupted mutations or evidence drift.
+   Skipping reconciliation after publication leaves new concepts with no `## Sources` and a stale
    `source_count` until some later run happens to reconcile. If any command
    exits non-zero, treat the run as failed and surface the error in step 6
    instead of reporting success. `lore ingest` never runs these. (The
    `lore run daily` chains ingestion → semantic processing → these checks.)
 
 6. **Report** to the user:
-   - On full success: number of files processed and tasks completed, and confirm
-     the step-5 Finalize ran (every command listed there, all exited 0).
+   - Report files processed, tasks completed and the publication commands you ran.
+     Standalone sessions confirm their applicable final checks exited 0. In a native
+     job, state that controller final checks remain its responsibility; do not claim
+     they already ran or that the complete job succeeded.
    - On any failure (including a non-zero Finalize command): which file was left
      in place and the failed `task_id`s (or the failed command) with their error
      messages, then stop — leave remaining files for the next run.

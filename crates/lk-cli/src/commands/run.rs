@@ -345,7 +345,7 @@ mod native {
                 }
                 Ok(_) => {
                     let operation = if matches!(self.result.operation, Operation::Knowledge) {
-                        "Process current queue tasks as part of this bounded knowledge maintenance job. Report whole-vault review attention separately: unrelated needs-reassessment remains backlog, while invalid reviews or review inspection errors fail."
+                        "Process current queue tasks as part of this bounded knowledge maintenance job. Read the selected work's review dependencies. The native controller inspects and reports global review health after this session; do not enumerate unrelated reviews or expand the batch to repair them."
                     } else {
                         ""
                     };
