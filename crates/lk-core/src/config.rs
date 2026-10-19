@@ -65,6 +65,11 @@ pub struct Config {
 
 impl Config {
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
+        Self::load_with_revision(path).map(|(config, _)| config)
+    }
+
+    /// Load configuration and its byte revision from the same file read.
+    pub fn load_with_revision(path: &Path) -> Result<(Self, String), ConfigError> {
         let content = std::fs::read_to_string(path)?;
         let mut config: Self = crate::yaml::from_str(&content)?;
         config.validate()?;
@@ -76,7 +81,7 @@ impl Config {
                 *file = resolve_vault_root(&file.to_string_lossy(), parent);
             }
         }
-        Ok(config)
+        Ok((config, crate::concept::file_revision(&content)))
     }
 
     pub fn credentials_path(&self) -> PathBuf {

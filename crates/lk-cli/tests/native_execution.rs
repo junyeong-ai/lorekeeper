@@ -180,6 +180,60 @@ fn missing_packaged_dependency_refuses_before_launch() {
 }
 
 #[test]
+fn configuration_drift_cannot_switch_vaults_or_report_the_original_queue_complete() {
+    let fixture = Fixture::new(
+        "codex",
+        30,
+        r#"
+python3 - <<'EDIT'
+import os
+from pathlib import Path
+p=Path(os.environ['LORE_CONFIG'])
+p.write_text(p.read_text().replace('root: vault\n', 'root: other-vault\n', 1))
+EDIT
+"$LORE_BIN" schema > "$TEST_EXECUTION_ROOT/child-out" 2> "$TEST_EXECUTION_ROOT/child-error"
+printf '%s' "$?" > "$TEST_EXECUTION_ROOT/child-status"
+exit 0
+"#,
+    );
+    fixture.ingest();
+    let original = std::fs::read_to_string(&fixture.config).unwrap();
+    std::fs::create_dir_all(fixture.root().join("other-vault/wiki")).unwrap();
+    let (output, result) = fixture.run("process");
+    assert!(!output.status.success(), "{result}");
+    assert_eq!(result["ok"], false);
+    assert!(
+        result["stages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|stage| stage["name"] == "configuration" && stage["state"] == "failed")
+    );
+    assert_ne!(
+        std::fs::read_to_string(fixture.root().join("child-status")).unwrap(),
+        "0"
+    );
+    assert!(
+        std::fs::read_to_string(fixture.root().join("child-error"))
+            .unwrap()
+            .contains("configuration changed")
+    );
+    assert!(!fixture.root().join("other-vault/wiki/AGENTS.md").exists());
+    assert!(!fixture.root().join("other-vault/wiki/index.md").exists());
+    std::fs::write(&fixture.config, original).unwrap();
+    let pending = fixture.command().args(["queue", "count"]).output().unwrap();
+    assert_eq!(String::from_utf8(pending.stdout).unwrap().trim(), "2");
+    assert!(
+        fixture
+            .command()
+            .args(["workflow", "--", "/usr/bin/true"])
+            .status()
+            .unwrap()
+            .success()
+    );
+}
+
+#[test]
 fn audit_exit_zero_without_assessments_is_incomplete() {
     let fixture = Fixture::new("codex", 30, "exit 0");
     let concepts = fixture.root().join("vault/wiki/concepts");

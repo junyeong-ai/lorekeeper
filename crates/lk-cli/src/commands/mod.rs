@@ -98,7 +98,31 @@ fn xdg_config_path() -> Option<PathBuf> {
 }
 
 pub fn load_config(path: &Path) -> miette::Result<lk_core::config::Config> {
-    lk_core::config::Config::load(path).map_err(|e| miette::miette!("{e}"))
+    load_config_with_revision(path).map(|(config, _)| config)
+}
+
+pub(super) const CONFIG_REVISION_ENV: &str = "LORE_CONFIG_REVISION";
+
+pub(super) fn load_config_with_revision(
+    path: &Path,
+) -> miette::Result<(lk_core::config::Config, String)> {
+    let loaded =
+        lk_core::config::Config::load_with_revision(path).map_err(|e| miette::miette!("{e}"))?;
+    match std::env::var(CONFIG_REVISION_ENV) {
+        Ok(expected) => {
+            let selected = std::env::var_os("LORE_CONFIG").map(PathBuf::from);
+            if loaded.1 != expected || selected.as_deref() != Some(path) {
+                return Err(miette::miette!(
+                    "selected configuration changed during the workflow; unfinished work is retained; start a new workflow with the intended configuration"
+                ));
+            }
+        }
+        Err(std::env::VarError::NotPresent) => {}
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err(miette::miette!("invalid workflow configuration revision"));
+        }
+    }
+    Ok(loaded)
 }
 
 /// A resolved vault root plus the config that governs it — the single source for every

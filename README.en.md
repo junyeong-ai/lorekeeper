@@ -557,6 +557,9 @@ index, then resumes base periods, quarters and years in order. A partial source
 failure still permits independent recovery. A failed dependent stage stops later
 periods. Collection and semantic completion have distinct outcomes. `--json`
 reserves stdout for the job report and sends child output to stderr.
+Jobs pin the selected configuration path and file revision. An edit stops the job
+as incomplete instead of redirecting remaining work to another vault. Start a new
+workflow with the intended configuration.
 
 Rust holds the vault's cooperative Unix workflow lease through semantic reads and
 publication. Busy jobs refuse unless `--wait` is explicit. Cancellation and session

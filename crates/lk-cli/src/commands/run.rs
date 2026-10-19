@@ -43,7 +43,7 @@ pub async fn run(
 #[cfg(unix)]
 mod native {
     use super::*;
-    use crate::commands::{GlobalOptions, execution, workflow};
+    use crate::commands::{CONFIG_REVISION_ENV, GlobalOptions, execution, workflow};
     use lk_core::config::Config;
     use lk_core::execution::ExecutionProfile;
     use std::path::PathBuf;
@@ -87,6 +87,8 @@ mod native {
     struct Runner<'a> {
         opts: &'a GlobalOptions,
         config: Config,
+        config_revision: String,
+        configuration_failed: bool,
         root: PathBuf,
         profile: Option<String>,
         supervisor: execution::Supervisor,
@@ -126,19 +128,46 @@ mod native {
             self.record(name, StageState::Failed, Some(error.to_string()))
         }
 
+        fn configuration_is_current(&mut self) -> bool {
+            if self.configuration_failed {
+                return false;
+            }
+            let path = self.opts.config.as_ref().expect("resolved config");
+            let current = path.canonicalize().and_then(|selected| {
+                if selected != *path {
+                    return Err(std::io::Error::other("selected configuration path changed"));
+                }
+                std::fs::read_to_string(path).map(|body| lk_core::concept::file_revision(&body))
+            });
+            let failure = match current {
+                Ok(revision) if revision == self.config_revision => return true,
+                Ok(_) => {
+                    "selected configuration changed during the job; unfinished work is retained"
+                        .into()
+                }
+                Err(error) => format!("selected configuration is unavailable: {error}"),
+            };
+            self.configuration_failed = true;
+            self.failure("configuration", failure)
+        }
+
         async fn child(
             &mut self,
             name: &str,
             mut command: tokio::process::Command,
             timeout: Option<Duration>,
         ) -> bool {
-            if self.result.cancelled {
+            if self.result.cancelled || !self.configuration_is_current() {
                 return false;
             }
             if let Some(lease) = &self.lease {
                 lease.configure(command.as_std_mut());
             }
-            match self.supervisor.run(command, timeout, false).await {
+            command.env(CONFIG_REVISION_ENV, &self.config_revision).env(
+                "LORE_CONFIG",
+                self.opts.config.as_ref().expect("resolved config"),
+            );
+            let completed = match self.supervisor.run(command, timeout, false).await {
                 Ok(result) => self.record(
                     name,
                     if result.cancelled {
@@ -151,11 +180,12 @@ mod native {
                     result.detail,
                 ),
                 Err(error) => self.failure(name, error),
-            }
+            };
+            self.configuration_is_current() && completed
         }
 
         async fn native(&mut self, name: &str, args: &[&str]) -> bool {
-            if self.result.cancelled {
+            if self.result.cancelled || !self.configuration_is_current() {
                 return false;
             }
             match execution::lore_command(self.opts, args) {
@@ -165,11 +195,18 @@ mod native {
         }
 
         async fn acquire(&mut self, wait: bool) -> bool {
-            match self.supervisor.acquire(self.opts, wait).await {
+            if !self.configuration_is_current() {
+                return false;
+            }
+            match self
+                .supervisor
+                .acquire(self.opts, &self.config, &self.config_revision, wait)
+                .await
+            {
                 Ok(Some(lease)) => {
                     self.result.workflow_id = Some(lease.id().clone());
                     self.lease = Some(lease);
-                    true
+                    self.configuration_is_current()
                 }
                 Ok(None) => self.record(
                     "workflow lease",
@@ -236,7 +273,7 @@ mod native {
         }
 
         async fn consumer(&mut self, skill: &str, operation: &str) -> bool {
-            if self.result.cancelled {
+            if self.result.cancelled || !self.configuration_is_current() {
                 return false;
             }
             if self.config.llm.provider == lk_core::config::LlmProvider::Noop {
@@ -433,7 +470,7 @@ mod native {
             self.reconcile().await;
             self.native("knowledge reviews", &["wiki", "reviews", "--check"])
                 .await;
-            if self.result.cancelled {
+            if self.result.cancelled || self.configuration_failed {
                 return;
             }
             match self.verify_audit(&plan.candidates) {
@@ -456,7 +493,7 @@ mod native {
         json: bool,
     ) -> miette::Result<()> {
         let config_path = crate::commands::find_config(opts)?;
-        let config = crate::commands::load_config(&config_path)?;
+        let (config, config_revision) = crate::commands::load_config_with_revision(&config_path)?;
         if let Some(name) = profile.as_deref() {
             config
                 .execution
@@ -480,6 +517,8 @@ mod native {
         let mut runner = Runner {
             root: config.vault.root_path(),
             config,
+            config_revision,
+            configuration_failed: false,
             opts: &options,
             profile,
             supervisor: execution::Supervisor::new()?,
@@ -531,6 +570,7 @@ mod native {
                 Operation::Knowledge => runner.knowledge().await,
             }
         }
+        runner.configuration_is_current();
         eprintln!(
             "Vault changes and Git staging remain available for explicit review; no automatic commit."
         );

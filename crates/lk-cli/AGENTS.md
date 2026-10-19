@@ -9,6 +9,9 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
 - `commands/mod.rs` resolves flag/environment config, working-directory config,
   then XDG config; never silently use config.example.yaml. Resolve the selected
   config absolutely; relative vault roots are relative to that config.
+- Workflow configuration is loaded and revisioned from one read. Pass its selected
+  path and `LORE_CONFIG_REVISION` to children; every CLI config load rejects changed
+  bytes or another path. Native jobs stop after drift and retain unfinished work.
 - `commands/workflow.rs` is a Unix foreground coordinator for long LLM consumers,
   not a vault mutation lock. It locks canonical-vault `.lorekeeper/workflow.lock`,
   clears only FD_CLOEXEC, and `exec`s literal argv. Busy defaults to nonzero with no
