@@ -83,6 +83,9 @@ For an explicitly requested initial campaign, `lore run knowledge --batches N`
 repeats bounded batches, releasing the lease between them and resuming from current
 receipts. A failed/cancelled batch stops the campaign and preserves unfinished work.
 `batch-limit` is a completed execution budget, not full-corpus semantic completion.
+`max_input_bytes` includes scoped reviews, their evidence and available prior archives;
+it bounds distinct source bytes rather than accumulated model usage. `review_health`
+reports global attention separately from the selected batch's completion.
 
 ## Initial setup
 

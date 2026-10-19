@@ -626,12 +626,16 @@ Run an initial resumable campaign with `lore run knowledge --profile codex --bat
 failures preserve pending work and completed receipts. `batch-limit` means the
 requested batch count was reached; `settled` means the current concept plan is
 empty, not that every source document has been semantically audited.
-Audit plans measure distinct complete concept, evidence and direct related-page
-bytes plus selected RSS payloads. Exceeding `max_input_bytes` retains the exact
+Audit plans measure distinct complete concept, evidence, direct related-page and
+scoped review/evidence bytes plus selected RSS payloads. Exceeding `max_input_bytes` retains the exact
 candidates and refuses agent execution and completed receipts. Adjust the batch
 size or explicit bound; never truncate evidence to claim completion. This bounds
 source scope, not aggregate model tokens or cost. Current receipts, clean lint and
 normal termination do not establish semantic consistency of the entire corpus.
+Missing, invalid or stale scoped reviews prevent completion. Unrelated reassessment
+backlog remains visible in `run knowledge`'s bounded `review_health` counts without
+stopping the next batch. Invalid records or inspection errors fail the job.
+Use `wiki reviews --check` separately for a strict whole-vault health check.
 
 Reminders retire only after the OS notifier accepts them. Acceptance does not prove
 the user saw the notification. A crash between acceptance and retirement may cause
