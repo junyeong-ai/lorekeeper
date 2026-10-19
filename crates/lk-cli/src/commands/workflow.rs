@@ -5,6 +5,7 @@ pub(super) struct WorkflowLease {
     id: lk_core::execution::WorkflowId,
     lock: std::fs::File,
     config_path: std::path::PathBuf,
+    config_revision: String,
     executable: std::path::PathBuf,
     path: std::ffi::OsString,
     template: Option<std::path::PathBuf>,
@@ -13,10 +14,19 @@ pub(super) struct WorkflowLease {
 #[cfg(unix)]
 impl WorkflowLease {
     pub fn prepare(opts: &super::GlobalOptions) -> miette::Result<Self> {
+        let config_path = super::find_config(opts)?;
+        let (config, revision) = super::load_config_with_revision(&config_path)?;
+        Self::prepare_selected(opts, &config, config_path, revision)
+    }
+
+    pub fn prepare_selected(
+        opts: &super::GlobalOptions,
+        config: &lk_core::config::Config,
+        config_path: std::path::PathBuf,
+        config_revision: String,
+    ) -> miette::Result<Self> {
         use rustix::fs::{Mode, OFlags};
         use rustix::io::{FdFlags, fcntl_getfd, fcntl_setfd};
-        let config_path = super::find_config(opts)?;
-        let config = super::load_config(&config_path)?;
         let executable = std::env::current_exe()
             .map_err(|e| miette::miette!("resolve workflow executable: {e}"))?;
         let binary_dir = executable
@@ -86,6 +96,7 @@ impl WorkflowLease {
             id: lk_core::execution::WorkflowId::from_bytes(identity),
             lock,
             config_path,
+            config_revision,
             executable,
             path,
             template,
@@ -102,6 +113,7 @@ impl WorkflowLease {
 
     pub fn configure(&self, command: &mut std::process::Command) {
         command.env("LORE_WORKFLOW_ID", self.id.as_str());
+        command.env(super::CONFIG_REVISION_ENV, &self.config_revision);
         command
             .env("LORE_CONFIG", &self.config_path)
             .env("LORE_BIN", &self.executable)

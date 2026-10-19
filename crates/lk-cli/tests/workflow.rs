@@ -90,6 +90,36 @@ fn contention_runs_no_child_and_release_allows_short_writer() {
 }
 
 #[test]
+fn a_workflow_pins_the_selected_configuration_revision() {
+    let (directory, config) = fixture();
+    let output = workflow(&config)
+        .args(["/bin/sh", "-c", "printf '\\n# edited during the session\\n' >> \"$LORE_CONFIG\"; \"$LORE_BIN\" config vault-root"])
+        .output().unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("configuration changed"));
+    assert!(
+        workflow(&config)
+            .arg("/usr/bin/true")
+            .status()
+            .unwrap()
+            .success()
+    );
+    let other = directory.path().join("other");
+    std::fs::create_dir_all(other.join("vault")).unwrap();
+    std::fs::copy(&config, other.join("config.yaml")).unwrap();
+    let redirected = workflow(&config)
+        .arg(env!("CARGO_BIN_EXE_lore"))
+        .arg("--config")
+        .arg(other.join("config.yaml"))
+        .arg("schema")
+        .output()
+        .unwrap();
+    assert!(!redirected.status.success());
+    assert!(String::from_utf8_lossy(&redirected.stderr).contains("configuration changed"));
+    assert!(!other.join("vault/wiki/AGENTS.md").exists());
+}
+
+#[test]
 fn literal_arguments_exit_status_and_failed_exec_release() {
     let (_dir, config) = fixture();
     let output = workflow(&config)

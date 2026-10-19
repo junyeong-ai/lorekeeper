@@ -69,6 +69,9 @@ one source to infer that distinction.
   publication; short mutation/queue locks remain inside commands, never across an
   LLM session. Default contention refuses; waiting is explicit. Closing inherited
   descriptors/detaching work breaks the guarantee. No PID/TTL bypass or Windows support.
+  Workflow children pin the selected configuration path and byte revision; edits
+  invalidate the session rather than redirecting remaining work. This is a content
+  guard, never lease ownership or a reentrancy bypass.
 - **Preserve observations.** Dates use configured vault timezone. Future events do
   not materialize. Each adapter decides ownership from its structured identity rules, not
   free-text mentions; Calendar includes matching organizers or attendees. Optional `personal` gates personal pages, not weekly knowledge

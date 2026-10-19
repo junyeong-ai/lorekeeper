@@ -13,71 +13,41 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// Write `contents` to `path` atomically and durably:
-/// 1. write to a **per-writer-unique** temp in the same directory — `pid` plus a
-///    process-global sequence, so two writers targeting the same `path` (e.g. two
-///    concurrent processes, or two calls in one process) never share and truncate
-///    one temp;
-/// 2. fsync the temp so its bytes are on stable storage;
-/// 3. optionally `chmod` it (Unix) before publishing — a secret file is restricted
-///    while still private, never briefly world-readable;
-/// 4. rename onto `path` (atomic on POSIX);
-/// 5. fsync the parent directory (Unix) so the rename itself survives a power loss.
+/// Replace `path` with complete, durable bytes. Exclusively create a same-directory
+/// temporary with the requested Unix mode before writing, then fsync, rename and
+/// sync the parent directory. Occupied temporary names are preserved; only this
+/// call's created temporary is cleaned up on failure.
 ///
-/// The temp keeps `path`'s extension before `.tmp` (`<stem>.<pid>.<seq>.<ext>.tmp`),
-/// so suffix-based sweeps that reap stranded temps (e.g. the ingest queue sweep on
-/// `.jsonl.tmp`) still match. On any failure the temp is removed and the error
-/// returned, so a partial write never lingers as a real file.
+/// The temporary keeps the destination extension before `.tmp`, preserving suffix
+/// sweeps such as `.jsonl.tmp`. Without an explicit mode, creation follows the
+/// platform default and process umask.
 pub fn write_atomic(path: &Path, contents: &[u8], mode: Option<u32>) -> io::Result<()> {
-    static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
-    let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
-    let pid = std::process::id();
-    let tmp = match path.extension().and_then(|e| e.to_str()) {
-        Some(ext) if !ext.is_empty() => path.with_extension(format!("{pid}.{seq}.{ext}.tmp")),
-        _ => path.with_extension(format!("{pid}.{seq}.tmp")),
-    };
-
-    let result = write_to_temp_then_rename(path, &tmp, contents, mode);
-    if result.is_err() {
-        // Best-effort: the write/rename error is the one the caller needs to see.
-        let _ = std::fs::remove_file(&tmp);
+    let (temporary, mut file) = create_temporary_file(|| atomic_name(path), mode.unwrap_or(0o666))?;
+    #[cfg(unix)]
+    if let Some(mode) = mode {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(mode))?;
     }
-    result
-}
-
-fn write_to_temp_then_rename(
-    path: &Path,
-    tmp: &Path,
-    contents: &[u8],
-    mode: Option<u32>,
-) -> io::Result<()> {
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(tmp)?;
+    #[cfg(not(unix))]
+    let _ = mode;
     file.write_all(contents)?;
     file.flush()?;
     file.sync_all()?;
     drop(file);
+    std::fs::rename(&temporary.0, path)?;
+    sync_parent(path)
+}
 
-    #[cfg(unix)]
-    if let Some(m) = mode {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(tmp, std::fs::Permissions::from_mode(m))?;
+fn atomic_name(path: &Path) -> PathBuf {
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let pid = std::process::id();
+    match path.extension().and_then(|extension| extension.to_str()) {
+        Some(extension) if !extension.is_empty() => {
+            path.with_extension(format!("{pid}.{sequence}.{extension}.tmp"))
+        }
+        _ => path.with_extension(format!("{pid}.{sequence}.tmp")),
     }
-    #[cfg(not(unix))]
-    let _ = mode;
-
-    std::fs::rename(tmp, path)?;
-
-    // The bytes are fsynced, but the directory entry needs its own fsync or a power
-    // loss can roll the rename back. Unix-only — Windows can't fsync a dir via std.
-    #[cfg(unix)]
-    if let Some(dir) = path.parent() {
-        std::fs::File::open(dir)?.sync_all()?;
-    }
-    Ok(())
 }
 
 /// Result of preserving a file at an exact address without replacing any entry.
@@ -147,9 +117,9 @@ pub fn publish_exclusive(
     ))
 }
 
-struct TemporaryPublication(PathBuf);
+struct TemporaryFile(PathBuf);
 
-impl Drop for TemporaryPublication {
+impl Drop for TemporaryFile {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.0);
     }
@@ -164,18 +134,27 @@ fn publication_name(path: &Path) -> PathBuf {
     ))
 }
 
-fn publication_temp(path: &Path) -> io::Result<(TemporaryPublication, std::fs::File)> {
+fn publication_temp(path: &Path) -> io::Result<(TemporaryFile, std::fs::File)> {
+    create_temporary_file(|| publication_name(path), 0o600)
+}
+
+fn create_temporary_file(
+    mut name: impl FnMut() -> PathBuf,
+    mode: u32,
+) -> io::Result<(TemporaryFile, std::fs::File)> {
+    #[cfg(not(unix))]
+    let _ = mode;
     loop {
-        let temporary = publication_name(path);
+        let temporary = name();
         let mut options = std::fs::OpenOptions::new();
         options.write(true).create_new(true);
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
+            options.mode(mode);
         }
         match options.open(&temporary) {
-            Ok(file) => return Ok((TemporaryPublication(temporary), file)),
+            Ok(file) => return Ok((TemporaryFile(temporary), file)),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(error) => return Err(error),
         }
@@ -198,7 +177,7 @@ fn compare_existing(path: &Path, contents: &[u8]) -> io::Result<Option<bool>> {
     let pin = loop {
         let pin = publication_name(path);
         match std::fs::hard_link(path, &pin) {
-            Ok(()) => break TemporaryPublication(pin),
+            Ok(()) => break TemporaryFile(pin),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error),
@@ -527,14 +506,39 @@ mod tests {
 
     #[test]
     fn temp_keeps_extension_suffix_for_sweeps() {
-        // A `.jsonl` target must produce a `<...>.jsonl.tmp` temp so a sweep filtering
-        // `.jsonl.tmp` still reaps it. We can't observe the temp after a successful
-        // write, so assert the naming rule directly via a second call's determinism:
-        // the suffix is `.{ext}.tmp`.
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("run.jsonl");
-        write_atomic(&path, b"x\n", None).unwrap();
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "x\n");
+        let (temporary, _file) = create_temporary_file(|| atomic_name(&path), 0o600).unwrap();
+        assert!(
+            temporary
+                .0
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .ends_with(".jsonl.tmp")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn temporary_creation_preserves_occupied_symlinks_and_restricts_access_before_writes() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let dir = TempDir::new().unwrap();
+        let victim = dir.path().join("untouched");
+        std::fs::write(&victim, b"original bytes").unwrap();
+        let occupied = dir.path().join("occupied.tmp");
+        symlink(&victim, &occupied).unwrap();
+        let available = dir.path().join("available.tmp");
+        let mut names = [occupied.clone(), available.clone()].into_iter();
+        let (temporary, file) = create_temporary_file(|| names.next().unwrap(), 0o600).unwrap();
+        assert_eq!(temporary.0, available);
+        assert_eq!(file.metadata().unwrap().permissions().mode() & 0o077, 0);
+        assert_eq!(file.metadata().unwrap().len(), 0);
+        assert_eq!(std::fs::read(&victim).unwrap(), b"original bytes");
+        drop(file);
+        drop(temporary);
+        assert!(std::fs::symlink_metadata(occupied).unwrap().is_symlink());
+        assert!(!available.exists());
     }
 
     #[test]

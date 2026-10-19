@@ -9,6 +9,9 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
 - `commands/mod.rs` resolves flag/environment config, working-directory config,
   then XDG config; never silently use config.example.yaml. Resolve the selected
   config absolutely; relative vault roots are relative to that config.
+- Workflow configuration is loaded and revisioned from one read. Pass its selected
+  path and `LORE_CONFIG_REVISION` to children; every CLI config load rejects changed
+  bytes or another path. Native jobs stop after drift and retain unfinished work.
 - `commands/workflow.rs` is a Unix foreground coordinator for long LLM consumers,
   not a vault mutation lock. It locks canonical-vault `.lorekeeper/workflow.lock`,
   clears only FD_CLOEXEC, and `exec`s literal argv. Busy defaults to nonzero with no
@@ -27,6 +30,8 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   WorkflowLease covers semantic reads through final publication. Collection precedes
   that lease; independent recovery stages continue after source failure, while
   dependent period stages stop on failure. Cancellation stops further stages.
+  Preserve observed cancellation through cleanup errors and report those errors;
+  send group SIGKILL once before reaping a forced foreground child.
 - `commands/schedule.rs` renders native jobs with stable scheduling-slot labels.
   Queue-mode semantic jobs need explicit execution profiles. Capture selected
   absolute config/data paths, anchored PATH and relevant existing host directories;

@@ -298,7 +298,7 @@ Each day's ingest grows the concept graph; synthesis summarizes it at ever-highe
 | `google-calendar` | Schedule + meeting notes (auto-extracted from Drive links) | Google OAuth |
 | `google-drive` | Curated docs in a Drive folder | Google OAuth |
 | `rss` | Vendor blogs / news → concepts (no auth, multi-feed) | none |
-| `nodex` | A project repository's own decision and learning records → concepts (needs `nodex.toml` and nodex `>=0.60,<0.61`; see [binary selection and evidence versions](.claude/skills/lore-setup/references/config.md#nodex-binary-selection)) | none |
+| `nodex` | A project repository's own decision and learning records → concepts (needs `nodex.toml` and nodex `>=0.60,<0.61`; see [binary selection and evidence versions](skills/lore-setup/references/config.md#nodex-binary-selection)) | none |
 | `manual` | Markdown, text, and HTML files dropped in `inbox/` | none |
 | `tasks` | Your own finished tasks — what `lore task` closed becomes the day's page | none |
 
@@ -557,6 +557,9 @@ index, then resumes base periods, quarters and years in order. A partial source
 failure still permits independent recovery. A failed dependent stage stops later
 periods. Collection and semantic completion have distinct outcomes. `--json`
 reserves stdout for the job report and sends child output to stderr.
+Jobs pin the selected configuration path and file revision. An edit stops the job
+as incomplete instead of redirecting remaining work to another vault. Start a new
+workflow with the intended configuration.
 
 Rust holds the vault's cooperative Unix workflow lease through semantic reads and
 publication. Busy jobs refuse unless `--wait` is explicit. Cancellation and session
