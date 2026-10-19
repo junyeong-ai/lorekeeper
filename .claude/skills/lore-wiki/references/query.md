@@ -35,7 +35,9 @@ Answer a question grounded in vault content, with compounding.
    different spacing is `name-variant`: a retrieval candidate, not exact registry ownership. Query the question's terms
    separately when it spans several. A query naming one concept matches its declared
    names and aliases as phrases; other queries require every term. Markdown formatting
-   and soft line breaks preserve a phrase; separate blocks and separate aliases do not
+   and soft line breaks preserve a phrase; parsed HTML text is searchable too, with
+   table cells and blocks kept separate. Markup, destinations, scripts and styles
+   do not contribute text. Separate blocks and separate aliases do not
    combine into one. Use `--phrase` when separate words are too broad (for example
    `"API 토큰"`). Use `--spacing` to ignore whitespace within a visible block (for example
    `"인증정보"`); combine both for a compound phrase. These are explicit lexical operators,

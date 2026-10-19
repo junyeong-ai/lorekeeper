@@ -8,7 +8,7 @@ use crate::search::{MatchProjection, Page, SearchOptions, SearchResult, fold_nam
 use crate::{MutationSession, VaultError};
 
 pub(super) const INDEX_PATH: &str = ".lorekeeper/search.sqlite";
-const VERSION: i32 = 8;
+const VERSION: i32 = 9;
 
 #[derive(Serialize)]
 pub struct SearchSnapshot {
@@ -543,6 +543,44 @@ pub(super) fn visit_body_pages(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn visible_html_search_matches_live_and_indexed_without_crossing_cells() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        write(
+            root.path(),
+            "wiki/documents/table.md",
+            "---\ntype: document\ntitle: Result\n---\n## Summary\nObserved table.\n\n<table><tr><td rowspan=\"2\">검색 <strong>품질</strong></td><td>별도 셀</td></tr><tr><td>추가</td></tr></table>\n",
+        );
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let snapshot = prepare_search(&session, &dirs).unwrap();
+        for (query, spacing, total) in [
+            ("검색 품질", false, 1),
+            ("검색품질", true, 1),
+            ("품질 별도", false, 0),
+            ("품질별도", true, 0),
+        ] {
+            let mut options = SearchOptions {
+                query: Some(query),
+                phrase: true,
+                spacing,
+                ..Default::default()
+            };
+            let live = crate::search(root.path(), &dirs, &options).unwrap();
+            options.snapshot = Some(&snapshot.snapshot);
+            let indexed = crate::search(root.path(), &dirs, &options).unwrap();
+            assert_eq!(live.total, total, "{query}");
+            assert_eq!(
+                serde_json::to_value(&live.hits).unwrap(),
+                serde_json::to_value(&indexed.hits).unwrap(),
+                "{query}"
+            );
+            if total > 0 {
+                assert_eq!(live.hits[0].excerpt, "검색 품질");
+            }
+        }
+    }
 
     #[test]
     fn spacing_preserves_original_ascii_word_edges_in_sentences() {

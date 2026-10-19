@@ -74,7 +74,11 @@ canonical; SQLite and Markdown navigation exports are derived.
   never task boards. Resolve aliases across scope before metadata filtering;
   ambiguity doesn't expand. Declared names match phrases, other queries every term.
 - Matching/excerpts share CommonMark visible-text projection: formatting/soft breaks
-  preserve phrases; blocks/list items/table cells separate; destinations/HTML excluded.
+  preserve phrases; blocks/list items/table cells separate; link destinations and
+  markup are excluded. Raw HTML contributes parsed text with the same block boundaries;
+  scripts, styles, head metadata, templates and embedded-content fallback containers
+  (`noscript`, `iframe`, `noembed`, `noframes`) do not contribute text. Form choices
+  and legends remain separate text blocks; this projection does not evaluate CSS.
   ASCII-alphanumeric term edges require boundaries, CJK allows attached particles.
 - Browse filters/facets/pagination have distinct counts: facets before metadata/date
   filters, total after, pagination last. Created-date sort is browse-only, exact-path

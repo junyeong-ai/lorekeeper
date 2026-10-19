@@ -1,6 +1,6 @@
 ---
 name: lore-wiki
-version: 0.62.0
+version: 0.62.1
 description: Searches and maintains a Lorekeeper knowledge wiki. Use for grounded questions, adding source documents, capturing discoveries from current work, or auditing knowledge and relationships. Repository-wide extraction uses lore-extract; ingest queue processing uses lore-process.
 when_to_use: |
   query wiki, search vault, add to wiki, capture this discovery, record insight,
