@@ -442,6 +442,11 @@ impl Config {
                 "graph.audit.batch_size must be 1..100".into(),
             ));
         }
+        if self.graph.audit.max_input_bytes == 0 {
+            return Err(ConfigError::Validation(
+                "graph.audit.max_input_bytes must be positive".into(),
+            ));
+        }
         if let Some(schedule) = &self.graph.audit.schedule {
             validate_cron(schedule).map_err(|error| {
                 ConfigError::Validation(format!("graph.audit.schedule: {error}"))
@@ -1369,6 +1374,8 @@ pub struct GraphConfig {
 pub struct GraphAuditConfig {
     pub schedule: Option<String>,
     pub batch_size: usize,
+    /// Complete distinct source bytes in one audit batch, not model tokens or usage.
+    pub max_input_bytes: u64,
 }
 
 impl Default for GraphAuditConfig {
@@ -1376,6 +1383,7 @@ impl Default for GraphAuditConfig {
         Self {
             schedule: None,
             batch_size: 5,
+            max_input_bytes: 262_144,
         }
     }
 }
@@ -2295,6 +2303,9 @@ sources:
                 true,
             ),
             ("graph:\n  audit:\n    batch_size: 100\n", true),
+            ("graph:\n  audit:\n    max_input_bytes: 1\n", true),
+            ("graph:\n  audit:\n    max_input_bytes: 0\n", false),
+            ("graph:\n  audit:\n    max_input_bytes: -1\n", false),
             ("graph:\n  audit:\n    batch_size: 0\n", false),
             ("graph:\n  audit:\n    batch_size: 101\n", false),
             ("graph:\n  audit:\n    schedule: 'not a schedule'\n", false),
@@ -2307,6 +2318,7 @@ sources:
                     if settings.is_empty() {
                         assert!(config.graph.audit.schedule.is_none());
                         assert_eq!(config.graph.audit.batch_size, 5);
+                        assert_eq!(config.graph.audit.max_input_bytes, 262_144);
                     }
                 }
                 Err(_) => assert!(!valid, "{settings}"),

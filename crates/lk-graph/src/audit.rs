@@ -1,6 +1,6 @@
 //! Incremental semantic-review receipts. They track work, never establish factual truth.
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use lk_core::concept::{Citation, file_revision, source_revision};
 use lk_core::config::VaultDirs;
@@ -117,6 +117,7 @@ pub fn verify_batch(
     pages: &[ScannedPage],
     batch: &[AuditCandidate],
     workflow_id: &lk_core::execution::WorkflowId,
+    max_input_bytes: u64,
 ) -> Result<Vec<AuditCompletion>, GraphError> {
     let (_, receipts) = load(root)?;
     let candidates = inputs(root, dirs, pages)?
@@ -129,6 +130,7 @@ pub fn verify_batch(
         .as_ref()
         .filter(|merges| merges.workflow_id == *workflow_id);
     let mut verified = Vec::new();
+    let mut assessed = BTreeMap::new();
     for original in batch {
         let mut path = original.path.as_str();
         let mut visited = BTreeSet::new();
@@ -149,6 +151,7 @@ pub fn verify_batch(
                     assessed_path: path.into(),
                     disposition: receipt.disposition,
                 });
+                assessed.insert(candidate.path.clone(), candidate.clone());
                 break;
             }
             match std::fs::symlink_metadata(
@@ -172,6 +175,7 @@ pub fn verify_batch(
             path = &retirement.into;
         }
     }
+    measure_inputs(root, assessed.values(), max_input_bytes)?.ensure_ready()?;
     Ok(verified)
 }
 
@@ -204,6 +208,143 @@ pub struct AuditPlan {
     pub unreviewed: usize,
     pub changed: usize,
     pub limit: usize,
+    pub input: AuditInputBound,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AuditInputStatus {
+    Ready,
+    Oversized,
+}
+
+/// Complete distinct source footprint, not a bound on model tokens, calls or cost.
+/// Pages include the selected concepts, direct evidence and directly related concepts;
+/// RSS payloads include the exact immutable selected JSON, in addition to origin pages.
+#[derive(Serialize)]
+pub struct AuditInputBound {
+    pub status: AuditInputStatus,
+    pub bytes: u64,
+    pub max_bytes: u64,
+    pub pages: usize,
+    pub rss_payloads: usize,
+}
+
+impl AuditInputBound {
+    pub fn ensure_ready(&self) -> Result<(), GraphError> {
+        if self.status == AuditInputStatus::Oversized {
+            return Err(error(format!(
+                "audit input is oversized: {} source bytes exceeds graph.audit.max_input_bytes {}; selected work remains pending",
+                self.bytes, self.max_bytes,
+            )));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct InputResources {
+    pages: BTreeMap<PathBuf, (String, u64)>,
+    rss_payloads: BTreeMap<(String, String), u64>,
+}
+
+impl InputResources {
+    fn page(
+        &mut self,
+        root: &Path,
+        path: &str,
+        expected_file: Option<&str>,
+        expected_source: Option<&str>,
+    ) -> Result<(), GraphError> {
+        let absolute = lk_vault::page_path(root, Path::new(path)).map_err(error)?;
+        let canonical = absolute.canonicalize().map_err(error)?;
+        let raw = std::fs::read_to_string(&absolute).map_err(error)?;
+        let revision = file_revision(&raw);
+        let source_matches = match expected_source {
+            Some(expected) => {
+                source_revision(&lk_vault::parse_page(&raw).map_err(error)?) == expected
+            }
+            None => true,
+        };
+        if expected_file.is_some_and(|expected| expected != revision)
+            || !source_matches
+            || self
+                .pages
+                .get(&canonical)
+                .is_some_and(|(prior, _)| prior != &revision)
+        {
+            return Err(error(format!(
+                "audit dependency changed during input measurement: {path}"
+            )));
+        }
+        self.pages.insert(canonical, (revision, raw.len() as u64));
+        Ok(())
+    }
+
+    fn rss_payload(
+        &mut self,
+        root: &Path,
+        concept: &str,
+        citation: &Citation,
+    ) -> Result<(), GraphError> {
+        lk_vault::validate_rss_citation(root, Path::new(concept), citation).map_err(error)?;
+        let selector = citation.rss_event.as_ref().expect("validated RSS citation");
+        let relative = format!(
+            "{}/events/{}.json",
+            lk_core::rss_original::RSS_ORIGINAL_STORE,
+            citation.revision,
+        );
+        let bytes = std::fs::read(lk_vault::page_path(root, Path::new(&relative)).map_err(error)?)
+            .map_err(error)?;
+        if lk_core::rss_original::digest(&bytes) != citation.revision {
+            return Err(error("RSS payload changed during audit input measurement"));
+        }
+        self.rss_payloads.insert(
+            (selector.event_id.clone(), citation.revision.clone()),
+            bytes.len() as u64,
+        );
+        Ok(())
+    }
+}
+
+fn measure_inputs<'a>(
+    root: &Path,
+    candidates: impl IntoIterator<Item = &'a AuditCandidate>,
+    max_input_bytes: u64,
+) -> Result<AuditInputBound, GraphError> {
+    if max_input_bytes == 0 {
+        return Err(error("audit max_input_bytes must be positive"));
+    }
+    let mut resources = InputResources::default();
+    for candidate in candidates {
+        resources.page(root, &candidate.path, Some(&candidate.file_revision), None)?;
+        for citation in candidate.evidence.iter().chain(&candidate.related_pages) {
+            if citation.rss_event.is_some() {
+                resources.page(root, &citation.path, None, None)?;
+                resources.rss_payload(root, &candidate.path, citation)?;
+            } else {
+                resources.page(root, &citation.path, None, Some(&citation.revision))?;
+            }
+        }
+    }
+    let bytes = resources
+        .pages
+        .values()
+        .map(|(_, bytes)| *bytes)
+        .chain(resources.rss_payloads.values().copied())
+        .try_fold(0u64, |total, bytes| total.checked_add(bytes))
+        .ok_or_else(|| error("audit input byte count overflow"))?;
+    Ok(AuditInputBound {
+        status: if bytes > max_input_bytes {
+            AuditInputStatus::Oversized
+        } else {
+            AuditInputStatus::Ready
+        },
+        bytes,
+        max_bytes: max_input_bytes,
+        pages: resources.pages.len(),
+        rss_payloads: resources.rss_payloads.len(),
+    })
 }
 
 fn load(root: &Path) -> Result<(Option<String>, Receipts), GraphError> {
@@ -344,8 +485,9 @@ pub fn plan(
     dirs: &VaultDirs,
     pages: &[ScannedPage],
     limit: usize,
+    max_input_bytes: u64,
 ) -> Result<AuditPlan, GraphError> {
-    plan_selected(root, dirs, pages, limit, &[])
+    plan_selected(root, dirs, pages, limit, &[], max_input_bytes)
 }
 
 /// Re-read exact batch members after repairs without expanding semantic work scope.
@@ -355,6 +497,7 @@ pub fn plan_selected(
     pages: &[ScannedPage],
     limit: usize,
     selection: &[String],
+    max_input_bytes: u64,
 ) -> Result<AuditPlan, GraphError> {
     if !(1..=100).contains(&limit) {
         return Err(error("audit limit must be 1..100"));
@@ -407,6 +550,7 @@ pub fn plan_selected(
     if !selection.is_empty() {
         candidates = selected;
     }
+    let input = measure_inputs(root, &candidates, max_input_bytes)?;
     Ok(AuditPlan {
         candidates,
         total,
@@ -415,6 +559,7 @@ pub fn plan_selected(
         unreviewed: unreviewed_count,
         changed: changed_count,
         limit,
+        input,
     })
 }
 
@@ -425,6 +570,7 @@ pub fn record(
     dirs: &VaultDirs,
     pages: &[ScannedPage],
     results: AuditResults,
+    max_input_bytes: u64,
 ) -> Result<Vec<String>, GraphError> {
     if results.assessments.is_empty() {
         return Err(error("audit results must contain assessments"));
@@ -439,6 +585,25 @@ pub fn record(
         .into_iter()
         .map(|candidate| (candidate.path.clone(), candidate))
         .collect();
+    let selected = results
+        .assessments
+        .iter()
+        .map(|assessment| {
+            let candidate = candidates
+                .get(&assessment.path)
+                .ok_or_else(|| error("audit target is not an exact concept address"))?;
+            if candidate.file_revision != assessment.file_revision
+                || candidate.input_revision != assessment.input_revision
+            {
+                return Err(error(format!(
+                    "audit inputs changed: {}; reread before recording",
+                    assessment.path
+                )));
+            }
+            Ok(candidate)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    measure_inputs(root, selected, max_input_bytes)?.ensure_ready()?;
     let mut plan = MutationPlan::default();
     let mut recorded = BTreeSet::new();
     for assessment in results.assessments {
@@ -450,14 +615,6 @@ pub fn record(
         let candidate = candidates
             .get(&assessment.path)
             .ok_or_else(|| error("audit target is not an exact concept address"))?;
-        if candidate.file_revision != assessment.file_revision
-            || candidate.input_revision != assessment.input_revision
-        {
-            return Err(error(format!(
-                "audit inputs changed: {}; reread before recording",
-                assessment.path
-            )));
-        }
         if assessment.disposition == AuditDisposition::FollowUp && assessment.reviews.is_empty() {
             return Err(error("audit follow-up requires a durable scoped review"));
         }
@@ -535,6 +692,188 @@ mod tests {
     }
 
     #[test]
+    fn input_bound_counts_complete_distinct_pages_and_blocks_without_advancing_receipts() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let source = "---\ntype: document\ntitle: 근거\n---\nComplete source body.\n## Related Concepts\n- [A](../concepts/a.md)\n- [B](../concepts/b.md)\n";
+        let concept =
+            "---\ntype: concept\ntitle: A\n---\n## Synthesis\nA claim.\n## Related\n- [B](b.md)\n";
+        let related = "---\ntype: concept\ntitle: B\n---\n## Synthesis\nRelated claim.\n";
+        write(root.path(), "wiki/documents/source.md", source);
+        write(root.path(), "wiki/concepts/a.md", concept);
+        write(root.path(), "wiki/concepts/b.md", related);
+        let pages = scan(root.path());
+        let expected = (source.len() + concept.len() + related.len()) as u64;
+        let ready = plan(root.path(), &dirs, &pages, 2, expected).unwrap();
+        assert_eq!(ready.input.bytes, expected);
+        assert_eq!(ready.input.pages, 3);
+        assert_eq!(ready.input.rss_payloads, 0);
+        assert_eq!(ready.input.status, AuditInputStatus::Ready);
+        ready.input.ensure_ready().unwrap();
+        let oversized = plan(root.path(), &dirs, &pages, 2, expected - 1).unwrap();
+        assert_eq!(oversized.input.status, AuditInputStatus::Oversized);
+        assert!(oversized.input.ensure_ready().is_err());
+        assert_eq!(oversized.candidates.len(), 2);
+        assert_eq!(
+            oversized
+                .candidates
+                .iter()
+                .map(|value| &value.path)
+                .collect::<Vec<_>>(),
+            ready
+                .candidates
+                .iter()
+                .map(|value| &value.path)
+                .collect::<Vec<_>>(),
+        );
+        assert_eq!(
+            oversized.candidates[0].input_revision, ready.candidates[0].input_revision,
+            "changing the resource bound must not invalidate completed semantic receipts",
+        );
+        let selected = [
+            "wiki/concepts/b.md".to_string(),
+            "wiki/concepts/a.md".to_string(),
+        ];
+        let exact = plan_selected(root.path(), &dirs, &pages, 2, &selected, 1).unwrap();
+        assert_eq!(exact.candidates[0].path, selected[0]);
+        assert_eq!(exact.candidates[1].path, selected[1]);
+        assert_eq!(exact.input.bytes, expected);
+        assert_eq!(exact.input.status, AuditInputStatus::Oversized);
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let results = || AuditResults {
+            assessments: ready.candidates.iter().map(assessment).collect(),
+        };
+        let rejected = record(&session, &dirs, &pages, results(), expected - 1).unwrap_err();
+        assert!(rejected.to_string().contains("oversized"));
+        assert!(!root.path().join(STATE).exists());
+        record(&session, &dirs, &pages, results(), expected).unwrap();
+        let before = std::fs::read(root.path().join(STATE)).unwrap();
+        assert!(record(&session, &dirs, &pages, results(), 1).is_err());
+        assert_eq!(std::fs::read(root.path().join(STATE)).unwrap(), before);
+        let workflow = lk_core::execution::WorkflowId::from_bytes([1; 16]);
+        assert!(verify_batch(root.path(), &dirs, &pages, &ready.candidates, &workflow, 1).is_err());
+        verify_batch(
+            root.path(),
+            &dirs,
+            &pages,
+            &ready.candidates,
+            &workflow,
+            expected,
+        )
+        .unwrap();
+        assert!(plan(root.path(), &dirs, &pages, 2, 0).is_err());
+    }
+
+    #[test]
+    fn input_measurement_refuses_changed_and_missing_dependencies() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let source =
+            "---\ntype: document\n---\nSource.\n## Related Concepts\n[A](../concepts/a.md)\n";
+        let concept = "---\ntype: concept\ntitle: A\n---\n## Synthesis\nA claim.\n";
+        write(root.path(), "wiki/documents/source.md", source);
+        write(root.path(), "wiki/concepts/a.md", concept);
+        let candidates = inputs(root.path(), &dirs, &scan(root.path())).unwrap();
+        write(
+            root.path(),
+            "wiki/documents/source.md",
+            &source.replace("Source.", "Changed."),
+        );
+        assert!(measure_inputs(root.path(), &candidates, u64::MAX).is_err());
+        std::fs::remove_file(root.path().join("wiki/documents/source.md")).unwrap();
+        assert!(measure_inputs(root.path(), &candidates, u64::MAX).is_err());
+        write(root.path(), "wiki/documents/source.md", source);
+        write(
+            root.path(),
+            "wiki/concepts/a.md",
+            &concept.replace("A claim.", "Changed."),
+        );
+        assert!(measure_inputs(root.path(), &candidates, u64::MAX).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn input_resources_share_canonical_aliases_but_keep_hard_link_owners_distinct() {
+        let root = tempfile::tempdir().unwrap();
+        let text = "---\ntype: document\n---\nComplete evidence.\n";
+        write(root.path(), "source.md", text);
+        std::os::unix::fs::symlink("source.md", root.path().join("alias.md")).unwrap();
+        std::fs::hard_link(root.path().join("source.md"), root.path().join("hard.md")).unwrap();
+        let mut resources = InputResources::default();
+        for path in ["source.md", "alias.md", "hard.md"] {
+            resources
+                .page(root.path(), path, Some(&file_revision(text)), None)
+                .unwrap();
+        }
+        assert_eq!(resources.pages.len(), 2);
+        assert_eq!(
+            resources
+                .pages
+                .values()
+                .map(|(_, bytes)| bytes)
+                .sum::<u64>(),
+            2 * text.len() as u64
+        );
+    }
+
+    #[test]
+    fn input_bound_includes_exact_rss_payloads_once_and_rejects_corruption() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let event: lk_core::event::Event = serde_json::from_value(json!({
+            "id":"rss:2026-10-18:0000000000000001", "source_id":"rss", "source_type":"rss",
+            "timestamp":"2026-10-18T00:00:00Z", "date":"2026-10-18", "title":"보도", "body":"Complete original report.",
+            "url":"https://example.test/report", "author":null, "labels":[], "category":null,
+            "performance_category":null, "is_self":false, "is_personal":false, "metadata":{}
+        })).unwrap();
+        let capture = lk_core::rss_original::RssOriginalCapture::from_events(&[&event]).unwrap();
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let reference = lk_vault::publish_rss_original(&session, &capture).unwrap();
+        let selected = &capture.manifest.events[0];
+        let paths = ["wiki/concepts/a.md", "wiki/concepts/b.md"];
+        let binding = paths
+            .iter()
+            .map(|concept| {
+                json!({
+                    "schema":lk_core::rss_evidence::RSS_EVIDENCE_SCHEMA,
+                    "concept":concept, "manifest":reference,
+                    "events":[{"event_id":selected.event_id, "revision":selected.revision}]
+                })
+            })
+            .collect::<Vec<_>>();
+        let source = format!(
+            "---\ntype: daily\ntitle: Report\nsource: rss\ncreated: 2026-10-18\nsource_record: {}\nconcept_evidence: {}\n---\n## Related Concepts\n- [A](../wiki/concepts/a.md)\n- [B](../wiki/concepts/b.md)\n",
+            json!({"rss_original":reference}),
+            json!(binding)
+        );
+        write(root.path(), "daily/report.md", &source);
+        let concept = "---\ntype: concept\ntitle: Subject\n---\n## Synthesis\nScoped claim.\n";
+        for path in paths {
+            write(root.path(), path, concept);
+        }
+        let expected = (source.len() + 2 * concept.len() + capture.payloads[0].len()) as u64;
+        let input = plan(root.path(), &dirs, &scan(root.path()), 2, expected).unwrap();
+        assert_eq!(input.input.status, AuditInputStatus::Ready);
+        assert_eq!(input.input.bytes, expected);
+        assert_eq!(input.input.pages, 3);
+        assert_eq!(input.input.rss_payloads, 1);
+        assert!(
+            input
+                .candidates
+                .iter()
+                .all(|candidate| candidate.evidence[0].rss_event.is_some())
+        );
+        let payload_path = root.path().join(format!(
+            "{}/events/{}.json",
+            lk_core::rss_original::RSS_ORIGINAL_STORE,
+            selected.revision
+        ));
+        std::fs::write(payload_path, "corrupt").unwrap();
+        assert!(measure_inputs(root.path(), &input.candidates, u64::MAX).is_err());
+        assert!(!root.path().join(STATE).exists());
+    }
+
+    #[test]
     fn receipts_skip_unchanged_inputs_and_track_evidence_and_related_scope() {
         let root = tempfile::tempdir().unwrap();
         let dirs = VaultDirs::default();
@@ -545,7 +884,7 @@ mod tests {
         write(root.path(), "wiki/documents/source.md", source);
         write(root.path(), "wiki/concepts/a.md", concept);
         write(root.path(), "wiki/concepts/b.md", related);
-        let first = plan(root.path(), &dirs, &scan(root.path()), 1).unwrap();
+        let first = plan(root.path(), &dirs, &scan(root.path()), 1, 262_144).unwrap();
         assert_eq!(first.total, 2);
         assert_eq!(first.unreviewed, 2);
         assert_eq!(first.candidates.len(), 1);
@@ -560,9 +899,10 @@ mod tests {
             AuditResults {
                 assessments: vec![assessment(&first.candidates[0])],
             },
+            262_144,
         )
         .unwrap();
-        let next = plan(root.path(), &dirs, &scan(root.path()), 1).unwrap();
+        let next = plan(root.path(), &dirs, &scan(root.path()), 1, 262_144).unwrap();
         assert_eq!(next.reviewed_current, 1);
         assert_eq!(next.candidates[0].path, "wiki/concepts/b.md");
         write(
@@ -573,7 +913,7 @@ mod tests {
                 .replace("source_count: 1", "source_count: 2"),
         );
         assert_eq!(
-            plan(root.path(), &dirs, &scan(root.path()), 1)
+            plan(root.path(), &dirs, &scan(root.path()), 1, 262_144)
                 .unwrap()
                 .reviewed_current,
             1
@@ -591,7 +931,7 @@ mod tests {
             ),
         ] {
             write(root.path(), path, &changed);
-            let stale = plan(root.path(), &dirs, &scan(root.path()), 1).unwrap();
+            let stale = plan(root.path(), &dirs, &scan(root.path()), 1, 262_144).unwrap();
             assert_eq!(stale.changed, 1);
             assert_eq!(stale.candidates[0].reason, "changed");
             assert_eq!(stale.candidates[0].path, "wiki/concepts/a.md");
@@ -603,7 +943,8 @@ mod tests {
                     &scan(root.path()),
                     AuditResults {
                         assessments: vec![assessment(&first.candidates[0])]
-                    }
+                    },
+                    262_144,
                 )
                 .is_err()
             );
@@ -630,27 +971,28 @@ mod tests {
                 AuditResults {
                     assessments: vec![assessment(candidate)],
                 },
+                262_144,
             )
             .unwrap();
         };
-        let first = plan(root.path(), &dirs, &scan(root.path()), 1).unwrap();
+        let first = plan(root.path(), &dirs, &scan(root.path()), 1, 262_144).unwrap();
         complete(&first.candidates[0]);
         write(root.path(), a, &concept.replace("Scoped", "Changed"));
         write(root.path(), "wiki/concepts/aa.md", concept);
-        let changed = plan(root.path(), &dirs, &scan(root.path()), 1).unwrap();
+        let changed = plan(root.path(), &dirs, &scan(root.path()), 1, 262_144).unwrap();
         assert_eq!(changed.candidates[0].path, a);
         complete(&changed.candidates[0]);
         write(root.path(), a, &concept.replace("Scoped", "Changed again"));
         write(root.path(), "wiki/concepts/ab.md", concept);
-        let waiting = plan(root.path(), &dirs, &scan(root.path()), 1).unwrap();
+        let waiting = plan(root.path(), &dirs, &scan(root.path()), 1, 262_144).unwrap();
         assert_eq!(waiting.candidates[0].path, z);
         complete(&waiting.candidates[0]);
-        let changed = plan(root.path(), &dirs, &scan(root.path()), 1).unwrap();
+        let changed = plan(root.path(), &dirs, &scan(root.path()), 1, 262_144).unwrap();
         assert_eq!(changed.candidates[0].path, a);
         complete(&changed.candidates[0]);
         write(root.path(), "wiki/concepts/aaa.md", concept);
         assert_eq!(
-            plan(root.path(), &dirs, &scan(root.path()), 1)
+            plan(root.path(), &dirs, &scan(root.path()), 1, 262_144)
                 .unwrap()
                 .candidates[0]
                 .path,
@@ -665,7 +1007,7 @@ mod tests {
         let path = "wiki/concepts/a.md";
         let body = "---\ntype: concept\ntitle: A\n---\n## Synthesis\nAn unsupported definition.\n";
         write(root.path(), path, body);
-        let input = plan(root.path(), &dirs, &scan(root.path()), 1).unwrap();
+        let input = plan(root.path(), &dirs, &scan(root.path()), 1, 262_144).unwrap();
         let mut result = assessment(&input.candidates[0]);
         result.disposition = AuditDisposition::FollowUp;
         let session = MutationSession::acquire(root.path()).unwrap();
@@ -680,7 +1022,8 @@ mod tests {
                 &scan(root.path()),
                 AuditResults {
                     assessments: vec![copy(&result)]
-                }
+                },
+                262_144,
             )
             .is_err()
         );
@@ -708,7 +1051,8 @@ mod tests {
                 &scan(root.path()),
                 AuditResults {
                     assessments: vec![copy(&result)]
-                }
+                },
+                262_144,
             )
             .is_err()
         );
@@ -721,14 +1065,15 @@ mod tests {
             AuditResults {
                 assessments: vec![result],
             },
+            262_144,
         )
         .unwrap();
-        let current = plan(root.path(), &dirs, &scan(root.path()), 1).unwrap();
+        let current = plan(root.path(), &dirs, &scan(root.path()), 1, 262_144).unwrap();
         assert_eq!(current.reviewed_current, 1);
         assert_eq!(current.follow_up_current, 1);
         assert!(current.candidates.is_empty());
         std::fs::remove_file(root.path().join(review)).unwrap();
-        let missing = plan(root.path(), &dirs, &scan(root.path()), 1).unwrap();
+        let missing = plan(root.path(), &dirs, &scan(root.path()), 1, 262_144).unwrap();
         assert_eq!(missing.reviewed_current, 0);
         assert_eq!(missing.changed, 1);
         assert_eq!(missing.candidates[0].path, path);
@@ -738,19 +1083,19 @@ mod tests {
             &content.replace(&revision, &"0".repeat(32)),
         );
         assert_eq!(
-            plan(root.path(), &dirs, &scan(root.path()), 1)
+            plan(root.path(), &dirs, &scan(root.path()), 1, 262_144)
                 .unwrap()
                 .changed,
             1
         );
         write(root.path(), review, &content);
         assert_eq!(
-            plan(root.path(), &dirs, &scan(root.path()), 1)
+            plan(root.path(), &dirs, &scan(root.path()), 1, 262_144)
                 .unwrap()
                 .reviewed_current,
             1
         );
         std::fs::write(root.path().join(STATE), "{invalid").unwrap();
-        assert!(plan(root.path(), &dirs, &scan(root.path()), 1).is_err());
+        assert!(plan(root.path(), &dirs, &scan(root.path()), 1, 262_144).is_err());
     }
 }
