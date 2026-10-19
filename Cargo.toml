@@ -52,9 +52,9 @@ semver = "1"
 tar = "0.4"
 flate2 = "1"
 htmd = "0.5"
-# Pinned to the rcdom instance htmd itself resolves — `htmd::Node` IS this crate's
-# `Node`, so a second copy would make the two types incompatible rather than merely
-# duplicated. A different version here is a loud compile error, never a silent drift.
+# Match htmd's public DOM types and serializer traits. Upgrade this parser family
+# together when htmd's published dependency requirements change.
+html5ever = "0.38"
 markup5ever_rcdom = "0.38"
 feed-rs = "3"
 dom_smoothie = "0.18"
@@ -67,7 +67,6 @@ unicode-normalization = "0.1"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 pulldown-cmark = { version = "0.13.4", default-features = false }
 pulldown-cmark-to-cmark = "23.0.0"
-html5ever = "0.38"
 petgraph = "0.8"
 rayon = "1"
 same-file = "1"

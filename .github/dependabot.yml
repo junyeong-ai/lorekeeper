@@ -9,10 +9,12 @@ updates:
       timezone: Asia/Seoul
     open-pull-requests-limit: 10
     ignore:
-      # `htmd::Node` IS this crate's `Node`, so the two have to resolve to one copy and the
-      # version is htmd's to choose. It moves when htmd moves; a bump proposed on its own is
-      # a type mismatch, which is why every such PR has been unmergeable.
+      # htmd's public DOM and serializer traits require this parser family to move together.
+      # Compatible 0.38 patches remain eligible; change the boundary with htmd's requirements.
+      - dependency-name: html5ever
+        versions: [">=0.39.0"]
       - dependency-name: markup5ever_rcdom
+        versions: [">=0.39.0"]
     groups:
       patch-and-minor:
         update-types: [patch, minor]
