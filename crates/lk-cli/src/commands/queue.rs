@@ -1,4 +1,4 @@
-mod check;
+pub(super) mod check;
 mod packet;
 mod regenerate;
 mod synthesis;

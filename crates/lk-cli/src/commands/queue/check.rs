@@ -1,13 +1,30 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use super::{queue_load, resolve_vault_root};
 
-pub(super) fn run(
-    opts: &crate::commands::GlobalOptions,
-    root: Option<PathBuf>,
-) -> miette::Result<()> {
-    let root = resolve_vault_root(opts, root)?;
-    let load = queue_load(&root)?;
+/// Shared read-only update/check boundary. Inspecting never recovers a journal or
+/// removes a result, including when a caller explicitly permits outstanding work.
+#[derive(serde::Serialize)]
+pub(crate) struct QueueSettlement {
+    pub current: usize,
+    pub unreadable: usize,
+    pub unparseable_lines: usize,
+    pub staged_results: Vec<String>,
+    pub pending_mutation: bool,
+}
+
+impl QueueSettlement {
+    pub fn is_settled(&self) -> bool {
+        self.current == 0
+            && self.unreadable == 0
+            && self.unparseable_lines == 0
+            && self.staged_results.is_empty()
+            && !self.pending_mutation
+    }
+}
+
+pub(crate) fn inspect(root: &Path) -> miette::Result<QueueSettlement> {
+    let load = queue_load(root)?;
     let results = root
         .join(".lorekeeper/queue")
         .join(lk_queue::RESULTS_SUBDIR);
@@ -33,20 +50,25 @@ pub(super) fn run(
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
             Err(error) => return Err(miette::miette!("inspect mutation journal: {error}")),
         };
-    let ok = load.work == 0
-        && load.unreadable == 0
-        && load.unparseable == 0
-        && staged.is_empty()
-        && !pending_mutation;
+    Ok(QueueSettlement {
+        current: load.work,
+        unreadable: load.unreadable,
+        unparseable_lines: load.unparseable,
+        staged_results: staged,
+        pending_mutation,
+    })
+}
+
+pub(super) fn run(
+    opts: &crate::commands::GlobalOptions,
+    root: Option<PathBuf>,
+) -> miette::Result<()> {
+    let root = resolve_vault_root(opts, root)?;
+    let state = inspect(&root)?;
+    let ok = state.is_settled();
     let report = serde_json::json!({
         "ok": ok,
-        "data": {
-            "current": load.work,
-            "unreadable": load.unreadable,
-            "unparseable_lines": load.unparseable,
-            "staged_results": staged,
-            "pending_mutation": pending_mutation,
-        }
+        "data": state,
     });
     println!(
         "{}",
