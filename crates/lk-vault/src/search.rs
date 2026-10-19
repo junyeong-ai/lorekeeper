@@ -273,17 +273,14 @@ fn source_file_preview(
     page: &crate::VaultPage,
     issues: &mut Vec<String>,
 ) -> Option<serde_json::Value> {
-    let value = page.frontmatter.get("source_file")?;
-    if value.is_null()
-        || value.is_string()
-        || value
-            .as_array()
-            .is_some_and(|items| items.iter().all(serde_json::Value::is_string))
-    {
-        Some(value.clone())
-    } else {
-        issues.push("source_file must be a string, an array of strings, or null".into());
-        None
+    match page.frontmatter.source_file() {
+        Ok(value) => {
+            value.map(|value| serde_json::to_value(value).expect("source file serializes"))
+        }
+        Err(issue) => {
+            issues.push(issue);
+            None
+        }
     }
 }
 

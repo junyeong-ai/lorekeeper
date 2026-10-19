@@ -39,7 +39,9 @@ pub struct DocumentView {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub source_file: Option<String>,
+    pub source_file: Option<lk_core::frontmatter::SourceFile>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub metadata_issues: Vec<String>,
     pub total_sections: usize,
     pub offset: usize,
     pub next_offset: Option<usize>,
@@ -121,6 +123,11 @@ pub fn inspect_document(
         let end = options.offset.saturating_add(sections.len());
         (end < total_sections).then_some(end)
     };
+    let mut metadata_issues = Vec::new();
+    let source_file = page.frontmatter.source_file().unwrap_or_else(|issue| {
+        metadata_issues.push(issue);
+        None
+    });
     Ok(DocumentView {
         path: path.to_string_lossy().into_owned(),
         title: page
@@ -146,11 +153,8 @@ pub fn inspect_document(
             .get("source_url")
             .and_then(|value| value.as_str())
             .map(String::from),
-        source_file: page
-            .frontmatter
-            .get("source_file")
-            .and_then(|value| value.as_str())
-            .map(String::from),
+        source_file,
+        metadata_issues,
         total_sections,
         offset: options.offset,
         next_offset,
@@ -211,6 +215,56 @@ fn outline(body: &str) -> Vec<DocumentSection> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn document_reads_preserve_single_and_composite_source_references() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = lk_core::config::VaultDirs::default();
+        let path = lk_core::vault_path::documents_dir(&dirs).join("page.md");
+        std::fs::create_dir_all(root.path().join(path.parent().unwrap())).unwrap();
+        let options = DocumentOptions {
+            section: None,
+            offset: 0,
+            limit: 10,
+            revision: None,
+        };
+        for source in [
+            serde_json::json!("docs/decision.md"),
+            serde_json::json!(["docs/decision.md", "git:abc123"]),
+            serde_json::Value::Null,
+        ] {
+            let raw = format!("---\ntype: document\nsource_file: {source}\n---\nEvidence\n");
+            std::fs::write(root.path().join(&path), &raw).unwrap();
+            let view = inspect_document(root.path(), &path, &options).unwrap();
+            let value = serde_json::to_value(view).unwrap();
+            assert_eq!(value.get("source_file"), Some(&source));
+            let search =
+                crate::search(root.path(), &dirs, &crate::SearchOptions::default()).unwrap();
+            assert_eq!(search.hits[0].source_file.as_ref(), Some(&source));
+            let provenance = crate::provenance::document_page(
+                path.to_string_lossy().into_owned(),
+                &crate::parse_page(&raw).unwrap(),
+                file_revision(&raw),
+            )
+            .unwrap();
+            assert_eq!(provenance.metadata["source_file"], source);
+            assert!(provenance.issues.is_empty());
+        }
+        let raw = "---\ntype: document\nsource_file: [valid.md, 7]\n---\nEvidence\n";
+        std::fs::write(root.path().join(&path), raw).unwrap();
+        let read = inspect_document(root.path(), &path, &options).unwrap();
+        let search = crate::search(root.path(), &dirs, &crate::SearchOptions::default()).unwrap();
+        let provenance = crate::provenance::document_page(
+            path.to_string_lossy().into_owned(),
+            &crate::parse_page(raw).unwrap(),
+            file_revision(raw),
+        )
+        .unwrap();
+        assert!(read.source_file.is_none());
+        assert_eq!(read.metadata_issues.len(), 1);
+        assert_eq!(read.metadata_issues, search.hits[0].metadata_issues);
+        assert_eq!(read.metadata_issues, provenance.issues);
+    }
 
     #[test]
     fn outline_and_unicode_pagination_preserve_context_and_reject_revision_drift() {
