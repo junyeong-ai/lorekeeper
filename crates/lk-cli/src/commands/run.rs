@@ -721,6 +721,10 @@ mod native {
                         .native("knowledge reviews", &["wiki", "reviews", "--check"])
                         .await;
                     runner.resume_periods().await;
+                    runner.reconcile().await;
+                    runner
+                        .native("knowledge reviews", &["wiki", "reviews", "--check"])
+                        .await;
                 }
                 Operation::Process => {
                     runner.reconcile().await;

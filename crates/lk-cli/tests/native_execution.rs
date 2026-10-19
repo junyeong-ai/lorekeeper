@@ -752,6 +752,172 @@ ASSESS
     }
 }
 
+fn assert_daily_period_finalization(with_review: bool) {
+    let fixture = Fixture::new(
+        "codex",
+        30,
+        r#"python3 - <<'PROCESS'
+import json, os, subprocess
+from pathlib import Path
+root = Path(os.environ['TEST_EXECUTION_ROOT'])
+vault = root / 'vault'
+queue = vault / '.lorekeeper/queue'
+lore = os.environ['LORE_BIN']
+while True:
+    status = json.loads(subprocess.check_output([lore, 'queue', 'status', '--json']))
+    current = [row for row in status['data']['tasks'] if row['status'] == 'current']
+    if not current:
+        break
+    row = current[0]
+    tasks = [json.loads(line) for path in queue.glob('*.jsonl') for line in path.read_text().splitlines()]
+    task = next(task for task in tasks if task['task_id'] == row['task_id'])
+    assert task['kind'] in ['summarize', 'identify-themes', 'refine-events'], task
+    if task['kind'] == 'refine-events':
+        page = (vault / task['target']['vault_path']).read_text()
+        body = page.split(task['target']['anchor'] + '\n', 1)[1].split('\n## ', 1)[0].strip()
+    elif task['kind'] == 'identify-themes':
+        body = ('### Evidence review\nThe evidence review task was completed.'
+                if (root / 'resume-period').exists()
+                else '### Evidence review\nCompleted the evidence review task.')
+    else:
+        body = 'Completed the evidence review task and checked retained source evidence.'
+    result = {key: task[key] for key in ['task_id', 'cache_hash']}
+    result.update(target_revision=row['target_revision'], body=body)
+    results = queue / 'results'
+    results.mkdir(exist_ok=True)
+    (results / (task['task_id'] + '.section.json')).write_text(json.dumps(result))
+    subprocess.run([lore, 'queue', 'apply'], check=True)
+subprocess.run([lore, 'queue', 'prune', '--json'], check=True)
+PROCESS"#,
+    );
+    let config = std::fs::read_to_string(&fixture.config).unwrap();
+    std::fs::write(
+        &fixture.config,
+        config
+            .replace(
+                "sources:\n  notes:\n    type: manual\n    params: {inbox_dir: inbox}\n    labels: [knowledge]\n    concept_policy: supported-new\n",
+                "sources:\n  completed:\n    type: tasks\n    concept_policy: disabled\npersonal:\n  tasks: {}\n  tracked_sources: [completed]\nsynthesis:\n  weekly:\n    include_sources: [completed]\n",
+            )
+            .replace("  root: vault\n", "  root: vault\n  timezone: UTC\n"),
+    )
+    .unwrap();
+    let vault = fixture.root().join("vault");
+    lk_task::TransitionLog::new(&vault)
+        .record(
+            &[lk_task::Transition::new(
+                "7k2p".parse().unwrap(),
+                lk_task::TransitionKind::Done,
+                "Review evidence",
+                "2020-01-05T12:00:00Z".parse().unwrap(),
+            )
+            .with_note(Some("Checked retained source evidence.".into()))],
+            &jiff::tz::TimeZone::UTC,
+        )
+        .unwrap();
+    for args in [
+        vec!["ingest", "--date", "2020-01-05"],
+        vec!["run", "process"],
+        vec!["synthesis", "weekly", "--date", "2020-01-05"],
+        vec!["run", "process"],
+    ] {
+        let output = fixture.command().args(&args).output().unwrap();
+        assert!(
+            output.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let target = "synthesis/weekly/2020-W01.md";
+    let before = std::fs::read_to_string(vault.join(target)).unwrap();
+    if with_review {
+        let revision = lk_core::concept::source_revision(&lk_vault::parse_page(&before).unwrap());
+        lk_vault::archive_evidence(&vault, &[target.into()]).unwrap();
+        std::fs::create_dir_all(vault.join("wiki/explorations")).unwrap();
+        let review = serde_json::json!({
+            "status": "resolved",
+            "evidence": [{"path": target, "revision": revision}],
+            "resolution": "The weekly narrative records the completed evidence review task.",
+        });
+        std::fs::write(
+            vault.join("wiki/explorations/weekly-evidence-review.md"),
+            format!("---\ntype: exploration\ntitle: Weekly evidence review\nreview: {review}\n---\nThe retained weekly narrative supports this assessment.\n"),
+        )
+        .unwrap();
+    }
+    for args in [
+        vec!["wiki", "reviews", "--check"],
+        vec!["synthesis", "weekly", "--date", "2020-01-05", "--defer"],
+    ] {
+        let output = fixture.command().args(&args).output().unwrap();
+        assert!(
+            output.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    std::fs::write(fixture.root().join("resume-period"), "").unwrap();
+    let (output, result) = fixture.run("daily");
+    let stages = result["stages"].as_array().unwrap();
+    let initial_review = stages
+        .iter()
+        .position(|stage| stage["name"] == "knowledge reviews" && stage["state"] == "completed")
+        .unwrap();
+    let period_settled = stages
+        .iter()
+        .position(|stage| stage["name"] == "period settle base" && stage["state"] == "completed")
+        .unwrap();
+    assert!(initial_review < period_settled);
+    assert_ne!(std::fs::read_to_string(vault.join(target)).unwrap(), before);
+    let reviews = lk_vault::list_reviews(&vault, &Default::default()).unwrap();
+    if with_review {
+        assert_eq!(reviews.len(), 1);
+        assert_eq!(reviews[0].changed_evidence, vec![target]);
+    } else {
+        assert!(reviews.is_empty());
+    }
+    let queue = fixture.command().args(["queue", "check"]).output().unwrap();
+    assert!(
+        queue.status.success(),
+        "{}",
+        String::from_utf8_lossy(&queue.stderr)
+    );
+    assert_eq!(
+        output.status.success(),
+        !with_review,
+        "Daily must validate reviews after late period publication: {result}"
+    );
+    assert_eq!(result["ok"], !with_review);
+    let final_stages = &stages[period_settled + 1..];
+    for name in ["graph lint", "queue completion"] {
+        assert!(
+            final_stages
+                .iter()
+                .any(|stage| { stage["name"] == name && stage["state"] == "completed" }),
+            "Missing final {name} after period publication: {result}"
+        );
+    }
+    let expected_review_state = if with_review { "failed" } else { "completed" };
+    assert!(
+        final_stages.iter().any(|stage| {
+            stage["name"]
+                .as_str()
+                .is_some_and(|name| name.contains("reviews"))
+                && stage["state"] == expected_review_state
+        }),
+        "Final strict review validation must reflect the published period evidence: {result}"
+    );
+}
+
+#[test]
+fn daily_rechecks_reviews_after_late_period_publication() {
+    assert_daily_period_finalization(true);
+}
+
+#[test]
+fn daily_finishes_clean_late_period_publication() {
+    assert_daily_period_finalization(false);
+}
+
 #[test]
 fn a_failed_base_stage_does_not_start_dependent_periods() {
     let fixture = Fixture::new(
@@ -771,6 +937,36 @@ fn a_failed_base_stage_does_not_start_dependent_periods() {
     assert!(names.contains(&"period resume base"));
     assert!(!names.contains(&"period resume quarter"));
     assert!(!names.contains(&"period resume annual"));
+    let period_resume = names
+        .iter()
+        .position(|name| *name == "period resume base")
+        .unwrap();
+    let final_stages = &result["stages"].as_array().unwrap()[period_resume + 1..];
+    assert!(
+        final_stages
+            .iter()
+            .any(|stage| { stage["name"] == "queue completion" && stage["state"] == "failed" }),
+        "Final queue check must preserve refusal after period failure: {result}"
+    );
+    assert!(
+        final_stages.iter().any(|stage| {
+            stage["name"]
+                .as_str()
+                .is_some_and(|name| name.contains("reviews"))
+                && stage["state"] == "completed"
+        }),
+        "Final reviews must still be inspected after period failure: {result}"
+    );
+    let pending = fixture.command().args(["queue", "count"]).output().unwrap();
+    assert!(pending.status.success());
+    assert!(
+        String::from_utf8(pending.stdout)
+            .unwrap()
+            .trim()
+            .parse::<usize>()
+            .unwrap()
+            > 0
+    );
     assert_eq!(
         std::fs::read_to_string(fixture.root().join("attempts")).unwrap(),
         "attempt\n"
