@@ -472,6 +472,7 @@ pub async fn run(opts: &super::GlobalOptions, cmd: WikiCommand) -> miette::Resul
                 &pages,
                 limit.unwrap_or(config.graph.audit.batch_size),
                 &paths,
+                config.graph.audit.max_input_bytes,
             )
             .map_err(|error| miette::miette!("{error}"))?;
             println!(
@@ -492,8 +493,14 @@ pub async fn run(opts: &super::GlobalOptions, cmd: WikiCommand) -> miette::Resul
                 .map_err(|error| miette::miette!("{error}"))?;
             let pages = lk_graph::scan::scan_vault(&root, config.graph.scope.follow_links)
                 .map_err(|error| miette::miette!("{error}"))?;
-            let recorded = lk_graph::audit::record(&session, &config.vault.dirs, &pages, results)
-                .map_err(|error| miette::miette!("{error}"))?;
+            let recorded = lk_graph::audit::record(
+                &session,
+                &config.vault.dirs,
+                &pages,
+                results,
+                config.graph.audit.max_input_bytes,
+            )
+            .map_err(|error| miette::miette!("{error}"))?;
             println!("{}", serde_json::json!({"recorded":recorded}));
             Ok(())
         }

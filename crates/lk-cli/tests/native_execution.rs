@@ -266,6 +266,57 @@ fn audit_exit_zero_without_assessments_is_incomplete() {
 }
 
 #[test]
+fn oversized_audit_input_retains_work_without_launching_an_agent() {
+    let fixture = Fixture::new("codex", 30, "exit 0");
+    let config = std::fs::read_to_string(&fixture.config).unwrap()
+        + "graph:\n  audit:\n    batch_size: 1\n    max_input_bytes: 1\n";
+    std::fs::write(&fixture.config, config).unwrap();
+    let concepts = fixture.root().join("vault/wiki/concepts");
+    std::fs::create_dir_all(&concepts).unwrap();
+    std::fs::write(
+        concepts.join("unverified.md"),
+        include_str!("behaviour/corpus/small/vault/wiki/concepts/unlinked-note.md"),
+    )
+    .unwrap();
+    let (output, result) = fixture.run("knowledge");
+    assert!(!output.status.success());
+    assert_eq!(result["ok"], false);
+    assert!(result["execution"].is_null());
+    assert!(
+        result["stages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|stage| stage["name"] == "audit input bound" && stage["state"] == "failed")
+    );
+    assert!(!fixture.root().join("arguments").exists());
+    assert!(
+        !fixture
+            .root()
+            .join("vault/.lorekeeper/knowledge-audit.json")
+            .exists()
+    );
+    let plan = fixture
+        .command()
+        .args(["wiki", "audit-plan"])
+        .output()
+        .unwrap();
+    assert!(plan.status.success());
+    let plan: serde_json::Value = serde_json::from_slice(&plan.stdout).unwrap();
+    assert_eq!(plan["candidates"].as_array().unwrap().len(), 1);
+    assert_eq!(plan["unreviewed"], 1);
+    assert_eq!(plan["input"]["status"], "oversized");
+    assert!(
+        fixture
+            .command()
+            .args(["workflow", "--", "/usr/bin/true"])
+            .status()
+            .unwrap()
+            .success()
+    );
+}
+
+#[test]
 fn knowledge_campaign_releases_each_lease_and_stops_on_failure_without_losing_progress() {
     for fail_second in [false, true] {
         let behavior = format!(

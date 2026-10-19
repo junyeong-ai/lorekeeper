@@ -415,6 +415,7 @@ mod native {
                 &pages,
                 self.config.graph.audit.batch_size,
                 paths,
+                self.config.graph.audit.max_input_bytes,
             )
             .map_err(|e| miette::miette!("{e}"))
         }
@@ -436,6 +437,7 @@ mod native {
                 &pages,
                 batch,
                 workflow.id(),
+                self.config.graph.audit.max_input_bytes,
             )
             .map_err(|e| miette::miette!("{e}"))
         }
@@ -452,6 +454,10 @@ mod native {
                     return;
                 }
             };
+            if let Err(error) = plan.input.ensure_ready() {
+                self.failure("audit input bound", error);
+                return;
+            }
             if plan.candidates.is_empty() {
                 self.result.audit = Some(Vec::new());
                 self.record(
