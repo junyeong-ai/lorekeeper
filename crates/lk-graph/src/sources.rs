@@ -27,7 +27,8 @@ pub(crate) fn render(locale: Locale) -> &'static str {
 /// Permit the empty scaffold and known compact bodies. A legacy body must round-trip
 /// every complete line through the shared link parser and exact old renderer grammar,
 /// including relative-address encoding, escaped labels and sorted unique addresses.
-/// Mixed prose, code, indentation, link titles and anchors are authored content.
+/// Mixed prose, code-wrapped links, indentation, link titles and anchors are authored
+/// content; inline-code text inside an emitted link's label remains part of that label.
 pub(crate) fn classify(body: &str, concept: &Path) -> SourcesBody {
     if body.trim().is_empty() {
         return SourcesBody::Legacy(Vec::new());
@@ -48,8 +49,10 @@ pub(crate) fn classify(body: &str, concept: &Path) -> SourcesBody {
     }
     let mut sources = Vec::new();
     for line in lines {
-        let links = link::extract_page_links(line);
-        let [value] = links.as_slice() else {
+        let Some(value) = line
+            .strip_prefix("- ")
+            .and_then(link::parse_standalone_page_link)
+        else {
             return SourcesBody::Authored;
         };
         let Some(path) = link::resolve_dest(concept, &value.dest)
@@ -73,6 +76,33 @@ pub(crate) fn classify(body: &str, concept: &Path) -> SourcesBody {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_generated_labels_can_contain_inline_code_without_claiming_code_blocks() {
+        let concept = Path::new("wiki/concepts/topic.md");
+        for label in [
+            "MCP `JSON-RPC` transport",
+            "`gate` [validation]",
+            "``nested ` code``",
+        ] {
+            let generated = format!("- {}", link::md_link(label, "../../daily/report.md"));
+            assert_eq!(
+                classify(&generated, concept),
+                SourcesBody::Legacy(vec!["daily/report".into()])
+            );
+            for authored in [
+                format!("{generated}\nAuthored explanation."),
+                format!("```markdown\n{generated}\n```"),
+                format!("- `{}`", link::md_link(label, "../../daily/report.md")),
+            ] {
+                assert_eq!(
+                    classify(&authored, concept),
+                    SourcesBody::Authored,
+                    "{authored}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn ownership_requires_exact_generated_structure_in_every_locale() {
