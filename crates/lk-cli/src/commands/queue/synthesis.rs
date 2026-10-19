@@ -21,6 +21,8 @@ pub(super) struct ApplyResult {
 pub(super) fn apply(
     root: &Path,
     queue: &Path,
+    config: &lk_core::config::Config,
+    config_revision: &str,
     dry_run: bool,
     session: Option<&lk_vault::MutationSession>,
 ) -> miette::Result<ApplyResult> {
@@ -137,6 +139,26 @@ pub(super) fn apply(
                     "target changed; read the current page and regenerate this result"
                 ));
             }
+            let mut plan = lk_vault::MutationPlan::default();
+            let value = if section {
+                serde_json::to_value(SectionResult {
+                    task_id: result.task_id.clone(),
+                    cache_hash: result.cache_hash.clone(),
+                    target_revision: result.target_revision.clone(),
+                    body: result.synthesis.clone(),
+                })
+            } else {
+                serde_json::to_value(&result)
+            }
+            .map_err(|e| miette::miette!("{e}"))?;
+            super::super::work::guard_queue(
+                root,
+                config,
+                config_revision,
+                &result.task_id,
+                value,
+                &mut plan,
+            )?;
             if !section && result.synthesis.trim().is_empty() {
                 return Err(miette::miette!(
                     "synthesis must state the evidence or its limits"
@@ -208,7 +230,6 @@ pub(super) fn apply(
                 if let Some(body) = &result.related {
                     validate_links(root, &target, body)?;
                 }
-                let mut plan = lk_vault::MutationPlan::default();
                 let citations: Vec<lk_core::concept::Citation> = task
                     .input
                     .get("citations")

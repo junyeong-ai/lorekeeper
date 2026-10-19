@@ -462,123 +462,255 @@ fn selected_review_drift_blocks_audit_completion_without_becoming_a_global_healt
     assert_eq!(plan["candidates"].as_array().unwrap().len(), 1);
 }
 
-#[test]
-fn oversized_audit_input_retains_work_without_launching_an_agent() {
-    let fixture = Fixture::new("codex", 30, "exit 0");
-    let config = std::fs::read_to_string(&fixture.config).unwrap()
-        + "graph:\n  audit:\n    batch_size: 1\n    max_input_bytes: 1\n";
+const RECORD_BOUNDED_AUDIT: &str = r#"
+exec python3 - "$@" <<'BOUNDED'
+import json, os, re, subprocess, sys
+from pathlib import Path
+root=Path(os.environ['TEST_EXECUTION_ROOT'])
+match=re.search(r'bounded (inspect|finish) ([0-9a-f]{64})(?: ([0-9a-f]{64}))?', '\n'.join(sys.argv[1:]))
+if match is None:
+    raise SystemExit('expected an exact bounded native request')
+action, work_id, node_id=match.groups()
+def cli(*args):
+    result=subprocess.run([os.environ['LORE_BIN'], *args], capture_output=True, text=True)
+    if result.returncode:
+        print(result.stdout, file=sys.stderr)
+        print(result.stderr, file=sys.stderr)
+        raise SystemExit(result.returncode)
+    return json.loads(result.stdout)
+if action=='inspect':
+    request=cli('work', 'read', work_id, node_id)
+    row={'action':action, 'work_id':work_id, 'node_id':node_id,
+         'kind':request['kind'], 'pid':os.getpid(), 'input_bytes':len(json.dumps(request, ensure_ascii=False, separators=(',', ':')).encode())}
+    if request['kind']=='inspect':
+        assert all('text' in item for item in request['input']['ranges'])
+    else:
+        assert len(request['children'])==2
+    unresolved=[concern for child in request.get('children', []) for concern in child['output']['unresolved']]
+    output={'work_id':work_id, 'node_id':node_id, 'input_revision':request['input_revision'],
+            'summary':'Fixture observation of this exact request; structural coverage is not factual verification.',
+            'findings':[], 'unresolved':unresolved, 'resolutions':[]}
+    path=root/'observation.json'
+    path.write_text(json.dumps(output))
+    cli('work', 'record', '--file', str(path))
+else:
+    request=cli('work', 'result', work_id)
+    subject=request['context']['subject']
+    assert subject['kind']=='audit'
+    assessment={key:subject[key] for key in ['path','file_revision','input_revision']}
+    assessment.update(disposition='reviewed', reason='Fixture completes guarded structural coverage; no semantic truth assertion.', reviews=[])
+    path=root/'assessment.json'
+    path.write_text(json.dumps({'assessments':[assessment]}))
+    cli('work', 'finish', work_id, '--file', str(path))
+    cli('wiki', 'audit-record', '--file', str(path))
+    row={'action':action, 'work_id':work_id, 'pid':os.getpid()}
+with (root/'bounded-calls.jsonl').open('a') as stream:
+    stream.write(json.dumps(row)+'\n')
+BOUNDED
+"#;
+
+fn bounded_audit_fixture(engine: &str, max_calls: usize, behavior: &str) -> Fixture {
+    let fixture = Fixture::new(engine, 30, behavior);
+    let config = std::fs::read_to_string(&fixture.config).unwrap().replace(
+        "  default_profile: primary\n",
+        &format!("  default_profile: primary\n  work: {{max_input_bytes: 8192, max_result_bytes: 1024, max_calls: {max_calls}}}\n"),
+    ) + "graph:\n  audit:\n    batch_size: 1\n    max_input_bytes: 4096\n";
     std::fs::write(&fixture.config, config).unwrap();
-    let concepts = fixture.root().join("vault/wiki/concepts");
-    std::fs::create_dir_all(&concepts).unwrap();
-    std::fs::write(
-        concepts.join("unverified.md"),
-        include_str!("behaviour/corpus/small/vault/wiki/concepts/unlinked-note.md"),
-    )
-    .unwrap();
-    let (output, result) = fixture.run("knowledge");
-    assert!(!output.status.success());
-    assert_eq!(result["ok"], false);
-    assert!(result["execution"].is_null());
-    assert!(
-        result["stages"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|stage| stage["name"] == "audit input bound" && stage["state"] == "failed")
-    );
-    assert!(!fixture.root().join("arguments").exists());
-    assert!(
-        !fixture
-            .root()
-            .join("vault/.lorekeeper/knowledge-audit.json")
-            .exists()
-    );
-    let plan = fixture
+    write_audit_concept(&fixture, "large");
+    let path = fixture.root().join("vault/wiki/concepts/large.md");
+    let body = std::fs::read_to_string(&path).unwrap()
+        + &"\nEvidence clause with Unicode 한🙂 remains source scoped.\n".repeat(180);
+    std::fs::write(path, body).unwrap();
+    fixture
+}
+
+fn bounded_calls(fixture: &Fixture) -> Vec<serde_json::Value> {
+    let path = fixture.root().join("bounded-calls.jsonl");
+    if !path.exists() {
+        return Vec::new();
+    }
+    std::fs::read_to_string(path)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+fn explicit_large_audit(fixture: &Fixture) -> serde_json::Value {
+    let output = fixture
         .command()
-        .args(["wiki", "audit-plan"])
+        .args(["wiki", "audit-plan", "--path", "wiki/concepts/large.md"])
         .output()
         .unwrap();
-    assert!(plan.status.success());
-    let plan: serde_json::Value = serde_json::from_slice(&plan.stdout).unwrap();
-    assert_eq!(plan["candidates"], serde_json::json!([]));
-    assert_eq!(plan["unreviewed"], 1);
-    assert_eq!(plan["blocked_count"], 1);
-    assert_eq!(plan["blocked"][0]["path"], "wiki/concepts/unverified.md");
-    assert_eq!(plan["blocked"][0]["input"]["status"], "oversized");
-    assert_eq!(result["audit"], serde_json::json!([]));
-    assert_eq!(result["audit_blocked_count"], 1);
-    assert_eq!(result["audit_blocked"], plan["blocked"]);
     assert!(
-        fixture
-            .command()
-            .args(["workflow", "--", "/usr/bin/true"])
-            .status()
-            .unwrap()
-            .success()
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
     );
+    serde_json::from_slice(&output.stdout).unwrap()
 }
 
 #[test]
-fn oversized_concept_remains_pending_while_later_work_completes() {
-    let fixture = Fixture::new("codex", 30, RECORD_FIRST_AUDIT);
-    let config = std::fs::read_to_string(&fixture.config).unwrap()
-        + "graph:\n  audit:\n    batch_size: 1\n    max_input_bytes: 4096\n";
-    std::fs::write(&fixture.config, config).unwrap();
-    for name in ["a-large", "b-small"] {
-        write_audit_concept(&fixture, name);
+fn oversized_audit_completes_through_fresh_bounded_workers_on_both_hosts() {
+    for engine in ["claude-code", "codex"] {
+        let fixture = bounded_audit_fixture(engine, 64, RECORD_BOUNDED_AUDIT);
+        let before = explicit_large_audit(&fixture);
+        assert_eq!(before["input"]["status"], "oversized");
+        let (output, result) = fixture.run("knowledge");
+        assert!(
+            output.status.success(),
+            "{result}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(result["ok"], true);
+        assert_eq!(result["execution"]["engine"], engine);
+        assert_eq!(
+            result["audit"][0]["assessed_path"],
+            "wiki/concepts/large.md"
+        );
+        let calls = bounded_calls(&fixture);
+        assert!(calls.len() > 3);
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|call| call["action"] == "finish")
+                .count(),
+            1
+        );
+        let work = calls[0]["work_id"].as_str().unwrap();
+        assert!(calls.iter().all(|call| call["work_id"] == work));
+        let pids = calls
+            .iter()
+            .map(|call| call["pid"].as_u64().unwrap())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            pids.len(),
+            calls.len(),
+            "each node/finalizer needs a fresh worker process"
+        );
+        let inspected = calls
+            .iter()
+            .filter(|call| call["action"] == "inspect")
+            .collect::<Vec<_>>();
+        assert!(inspected.iter().any(|call| call["kind"] == "reduce"));
+        assert!(
+            inspected
+                .iter()
+                .all(|call| call["input_bytes"].as_u64().unwrap() <= 8192)
+        );
+        let status = fixture
+            .command()
+            .args(["work", "status", work])
+            .output()
+            .unwrap();
+        assert!(status.status.success());
+        let status: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
+        assert_eq!(status["complete"], true);
+        assert_eq!(
+            status["completed"].as_u64().unwrap() as usize,
+            inspected.len()
+        );
+        assert!(status["parts"].as_u64().unwrap() > 1);
+        assert_eq!(
+            explicit_large_audit(&fixture)["input"]["status"],
+            "oversized"
+        );
+        let plan = fixture
+            .command()
+            .args(["wiki", "audit-plan"])
+            .output()
+            .unwrap();
+        assert!(plan.status.success());
+        let plan: serde_json::Value = serde_json::from_slice(&plan.stdout).unwrap();
+        assert_eq!(plan["reviewed_current"], 1);
+        assert_eq!(plan["unreviewed"], 0);
     }
-    let large = fixture.root().join("vault/wiki/concepts/a-large.md");
-    let original = std::fs::read_to_string(&large).unwrap();
-    std::fs::write(
-        &large,
-        original + &"\nLarge retained evidence.\n".repeat(300),
-    )
-    .unwrap();
-    let output = fixture
-        .command()
-        .args(["run", "knowledge", "--batches", "4", "--json"])
-        .output()
-        .unwrap();
-    assert!(!output.status.success());
-    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(result["ok"], false);
-    assert_eq!(result["stop_reason"], "blocked");
-    let runs = result["runs"].as_array().unwrap();
-    assert_eq!(runs.len(), 2);
-    assert_eq!(runs[0]["ok"], true);
-    assert_eq!(
-        runs[0]["audit"][0]["assessed_path"],
-        "wiki/concepts/b-small.md"
-    );
-    assert_eq!(runs[0]["audit_blocked_count"], 1);
-    assert_eq!(runs[1]["audit"], serde_json::json!([]));
-    assert_eq!(runs[1]["audit_blocked_count"], 1);
-    assert!(runs[1]["execution"].is_null());
-    let state: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(
-            fixture
+}
+
+#[test]
+fn bounded_audit_resumes_call_budgets_and_exit_zero_cannot_forge_a_receipt() {
+    for engine in ["claude-code", "codex"] {
+        let no_receipt = bounded_audit_fixture(engine, 1, "exit 0");
+        let (output, result) = no_receipt.run("knowledge");
+        assert!(!output.status.success());
+        assert!(result["stages"].as_array().unwrap().iter().any(|stage| {
+            stage["name"] == "bounded work receipt" && stage["state"] == "failed"
+        }));
+        assert!(
+            !no_receipt
                 .root()
-                .join("vault/.lorekeeper/knowledge-audit.json"),
-        )
-        .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(state["entries"].as_object().unwrap().len(), 1);
-    assert!(state["entries"]["wiki/concepts/a-large.md"].is_null());
-    assert!(std::fs::read_to_string(&large).unwrap().len() > 4096);
-    let explicit = fixture
-        .command()
-        .args(["wiki", "audit-plan", "--path", "wiki/concepts/a-large.md"])
-        .output()
-        .unwrap();
-    assert!(explicit.status.success());
-    let explicit: serde_json::Value = serde_json::from_slice(&explicit.stdout).unwrap();
-    assert_eq!(
-        explicit["candidates"][0]["path"],
-        "wiki/concepts/a-large.md"
-    );
-    assert_eq!(explicit["input"]["status"], "oversized");
-    assert_eq!(explicit["blocked_count"], 0);
+                .join("vault/.lorekeeper/knowledge-audit.json")
+                .exists()
+        );
+        assert!(bounded_calls(&no_receipt).is_empty());
+        let manifests = std::fs::read_dir(no_receipt.root().join("vault/.lorekeeper/work"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect::<Vec<_>>();
+        assert_eq!(manifests.len(), 1);
+        let work_id = manifests[0].file_name().unwrap().to_str().unwrap();
+        let status = no_receipt
+            .command()
+            .args(["work", "status", work_id])
+            .output()
+            .unwrap();
+        assert!(status.status.success());
+        let status: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
+        assert_eq!(status["completed"], 0);
+        assert_eq!(status["complete"], false);
+        let fixture = bounded_audit_fixture(engine, 1, RECORD_BOUNDED_AUDIT);
+        let mut completed = false;
+        for attempt in 0..24 {
+            let previous = bounded_calls(&fixture);
+            let (output, result) = fixture.run("knowledge");
+            let calls = bounded_calls(&fixture);
+            assert_eq!(
+                calls.len(),
+                previous.len() + 1,
+                "one configured call per invocation: {result}"
+            );
+            assert!(
+                calls
+                    .iter()
+                    .all(|call| call["work_id"] == calls[0]["work_id"])
+            );
+            if output.status.success() {
+                assert!(attempt > 0);
+                assert_eq!(calls.last().unwrap()["action"], "finish");
+                assert_eq!(
+                    result["audit"][0]["assessed_path"],
+                    "wiki/concepts/large.md"
+                );
+                completed = true;
+                break;
+            }
+            assert_eq!(result["ok"], false);
+            assert!(
+                result["stages"].as_array().unwrap().iter().any(|stage| {
+                    stage["name"] == "semantic call budget" && stage["state"] == "failed"
+                }),
+                "{result}"
+            );
+            assert!(
+                !fixture
+                    .root()
+                    .join("vault/.lorekeeper/knowledge-audit.json")
+                    .exists()
+            );
+        }
+        assert!(completed, "bounded native work should resume to completion");
+        let calls = bounded_calls(&fixture);
+        let nodes = calls
+            .iter()
+            .filter_map(|call| call.get("node_id").and_then(serde_json::Value::as_str))
+            .collect::<Vec<_>>();
+        let unique = nodes.iter().collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            nodes.len(),
+            unique.len(),
+            "resume must not replay completed exact nodes"
+        );
+    }
 }
 
 #[test]

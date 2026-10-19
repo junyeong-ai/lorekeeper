@@ -70,6 +70,11 @@ impl Progress {
 }
 
 impl MutationPlan {
+    /// Append a validated publication/dependency group, preserving its step order.
+    pub fn extend(&mut self, other: MutationPlan) {
+        self.steps.extend(other.steps);
+    }
+
     pub fn require_absent(&mut self, path: impl Into<PathBuf>) {
         self.steps.push(Step::RequireAbsent { path: path.into() });
     }

@@ -32,6 +32,11 @@ llm:
 # To use Codex instead, change engine to codex and authenticate its CLI.
 execution:
   default_profile: primary
+  # JSON byte limits for bounded workers; calls reset per run/knowledge batch.
+  work:
+    max_input_bytes: 262144
+    max_result_bytes: 32768
+    max_calls: 64
   profiles:
     primary:
       engine: claude-code

@@ -144,6 +144,34 @@ const SWEEP: &[&[&str]] = &[
 /// rather than an omission.
 const EXEMPT: &[(&[&str], &str)] = &[
     (
+        &["work", "plan"],
+        "captures exact retained input/audit revisions; native_execution tests real partitioned plans and queue_apply tests publication guards",
+    ),
+    (
+        &["work", "read"],
+        "requires a runtime work/node identity; native_execution tests bounded inspect/reduce requests and work state tests stale/bound refusals",
+    ),
+    (
+        &["work", "result"],
+        "requires a completed runtime reduction; native_execution tests the bounded finalizer and work state tests incomplete/oversized refusal",
+    ),
+    (
+        &["work", "record"],
+        "requires exact runtime input revisions; native_execution records real nodes and work state tests range, concern and revision validation",
+    ),
+    (
+        &["work", "status"],
+        "depends on resumable runtime nodes; native_execution tests budget exhaustion and same-plan resumption without replay",
+    ),
+    (
+        &["work", "reuse"],
+        "requires prior and current exact runtime plans; work state tests evidence/purpose matching, remapping and explicit reuse provenance",
+    ),
+    (
+        &["work", "finish"],
+        "requires a sealed complete runtime reduction and typed result; native_execution and queue_apply test final publication and stale refusal",
+    ),
+    (
         &["run"],
         "native_execution exercises real job orchestration, agent refusals, cancellation and Git preservation",
     ),

@@ -598,6 +598,10 @@ fn a_result_file_with_no_task_behind_it_recovers_a_lost_section() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
+    assert!(
+        String::from_utf8_lossy(&out.stderr)
+            .contains("original retained-input and part coverage cannot be established")
+    );
 
     let page = ws.read(PAGE);
     assert!(
@@ -611,6 +615,180 @@ fn a_result_file_with_no_task_behind_it_recovers_a_lost_section() {
         )),
         "the applier stamps the marker it owns\n{page}"
     );
+}
+
+fn bounded_config(ws: &Workspace) {
+    let path = ws.root.path().join("config.yaml");
+    let mut config = std::fs::read_to_string(&path).unwrap();
+    config.push_str(
+        "execution:\n  work: {max_input_bytes: 8192, max_result_bytes: 1024, max_calls: 100}\n",
+    );
+    std::fs::write(path, config).unwrap();
+}
+
+fn work_json(ws: &Workspace, args: &[&str]) -> serde_json::Value {
+    let output = ws.run(args);
+    assert!(
+        output.status.success(),
+        "{args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+
+#[test]
+fn multipart_extraction_requires_completed_work_without_poisoning_valid_results() {
+    for prepared in [false, true] {
+        let ws = Workspace::new();
+        bounded_config(&ws);
+        let large = "Complete retained evidence.\n\n".repeat(2000);
+        ws.write(PAGE, &daily_page(&large));
+        ws.drop_result("a-large", PAGE, &large, "Blocked Subject");
+        let small = "daily/notes/small.md";
+        ws.write(small, &daily_page("small"));
+        ws.drop_result("z-small", small, "small", "Published Subject");
+        let original = ws.read(PAGE);
+        if prepared {
+            let plan = work_json(&ws, &["work", "plan", "--task-id", "a-large"]);
+            assert!(plan["parts"].as_u64().unwrap() > 1);
+            assert_eq!(plan["completed"], 0);
+        }
+        let output = ws.run(&["queue", "apply"]);
+        assert!(!output.status.success());
+        let diagnostic = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            diagnostic.contains(if prepared {
+                "work reduction is incomplete"
+            } else {
+                "bounded evidence work is required"
+            }),
+            "{diagnostic}"
+        );
+        assert_eq!(ws.read(PAGE), original);
+        assert!(!ws.vault().join("wiki/concepts/blocked-subject.md").exists());
+        assert!(
+            ws.vault()
+                .join("wiki/concepts/published-subject.md")
+                .exists()
+        );
+        assert!(ws.read(small).contains("concepts_done:"));
+        assert!(results_dir(&ws).join("a-large.json").exists());
+        assert!(!results_dir(&ws).join("z-small.json").exists());
+    }
+}
+
+#[test]
+fn oversized_orphan_recovery_preserves_source_and_requires_retained_task() {
+    let ws = Workspace::new();
+    bounded_config(&ws);
+    let source = format!(
+        "{}\n{}",
+        daily_page("orphan"),
+        "Full source evidence.\n".repeat(1000)
+    );
+    ws.write(PAGE, &source);
+    ws.drop_result("orphan", PAGE, "orphan", "Unpublished Subject");
+    std::fs::remove_file(ws.vault().join(".lorekeeper/queue/orphan.jsonl")).unwrap();
+    let output = ws.run(&["queue", "apply", "--recover-extraction", "orphan"]);
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("restore the retained task before bounded processing")
+    );
+    assert_eq!(ws.read(PAGE), source);
+    assert!(
+        !ws.vault()
+            .join("wiki/concepts/unpublished-subject.md")
+            .exists()
+    );
+    assert!(results_dir(&ws).join("orphan.json").exists());
+    assert!(!ws.vault().join(".lorekeeper/work").exists());
+}
+
+#[test]
+fn sealed_synthesis_requires_exact_read_source_bytes_even_when_authored_revision_is_unchanged() {
+    let ws = Workspace::new();
+    bounded_config(&ws);
+    let source_path = "wiki/documents/source.md";
+    let source = format!(
+        "---\ntype: document\nupdated: 2026-01-01\n---\n{}",
+        "Complete source evidence.\n\n".repeat(1000)
+    );
+    ws.write(source_path, &source);
+    let parsed = lk_core::frontmatter::parse_page(&source).unwrap();
+    let citation = lk_core::concept::Citation::new(Path::new(source_path), &parsed);
+    let hash = lk_core::concept::citation_digest(std::slice::from_ref(&citation));
+    let target = "wiki/concepts/topic.md";
+    let body = format!(
+        "---\ntype: concept\nllm_inputs:\n  synthesis: {hash}\n---\n## Synthesis\nPrior claim.\n\n## Related\n"
+    );
+    ws.write(target, &body);
+    let task = serde_json::json!({"task_id":"syn-large", "kind":"synthesize-concept", "created_at":"2026-10-16T00:00:00Z", "cache_hash":hash,
+        "input":{"locale":"en","citations":[citation],"related_anchor":"## Related"}, "target":{"vault_path":target,"kind":"concept-synthesis","anchor":"## Synthesis"}});
+    ws.write(".lorekeeper/queue/syn-large.jsonl", &task.to_string());
+    let planned = work_json(&ws, &["work", "plan", "--task-id", "syn-large"]);
+    assert!(planned["parts"].as_u64().unwrap() > 1);
+    let work_id = planned["work_id"].as_str().unwrap();
+    loop {
+        let progress = work_json(&ws, &["work", "status", work_id]);
+        if progress["complete"] == true {
+            break;
+        }
+        let nodes = progress["ready"].as_array().unwrap();
+        assert!(!nodes.is_empty());
+        for node in nodes {
+            let node_id = node.as_str().unwrap();
+            let input = work_json(&ws, &["work", "read", work_id, node_id]);
+            let observation = serde_json::json!({"work_id":work_id,"node_id":node_id,
+                "input_revision":input["input_revision"],"summary":"Deterministic fixture observation for the complete selected ranges.",
+                "findings":[],"unresolved":[],"resolutions":[]});
+            ws.write(
+                ".lorekeeper/fixture-observation.json",
+                &observation.to_string(),
+            );
+            let file = ws.vault().join(".lorekeeper/fixture-observation.json");
+            work_json(&ws, &["work", "record", "--file", file.to_str().unwrap()]);
+        }
+    }
+    let result = serde_json::json!({"task_id":"syn-large","cache_hash":hash,
+        "target_revision":blake3::hash(body.as_bytes()).to_hex().to_string(),
+        "synthesis":"The retained source supports the scoped claim.","related":""});
+    ws.write(".lorekeeper/fixture-final.json", &result.to_string());
+    let file = ws.vault().join(".lorekeeper/fixture-final.json");
+    work_json(
+        &ws,
+        &["work", "finish", work_id, "--file", file.to_str().unwrap()],
+    );
+    let preview = ws.run(&["queue", "apply", "--dry-run"]);
+    assert!(
+        preview.status.success(),
+        "{}",
+        String::from_utf8_lossy(&preview.stderr)
+    );
+    let changed = source.replace("updated: 2026-01-01", "updated: 2026-01-02");
+    assert_eq!(
+        lk_core::concept::source_revision(&parsed),
+        lk_core::concept::source_revision(&lk_core::frontmatter::parse_page(&changed).unwrap())
+    );
+    ws.write(source_path, &changed);
+    let output = ws.run(&["queue", "apply"]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("bounded evidence work is required"));
+    assert_eq!(ws.read(target), body);
+    assert!(!json_files(&results_dir(&ws)).is_empty());
+    ws.write(source_path, &source);
+    let applied = ws.run(&["queue", "apply"]);
+    assert!(
+        applied.status.success(),
+        "{}",
+        String::from_utf8_lossy(&applied.stderr)
+    );
+    assert!(
+        ws.read(target)
+            .contains("The retained source supports the scoped claim.")
+    );
+    assert!(ws.read(target).contains("synthesis_done:"));
+    assert!(json_files(&results_dir(&ws)).is_empty());
 }
 
 /// `queue prune`'s `--json` envelope carries the same verdict as its exit code.

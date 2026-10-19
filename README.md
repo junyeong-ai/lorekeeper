@@ -390,6 +390,10 @@ lore wiki reviews --check     # 증거 변경·잘못된 검토 검사(미해결
 lore queue packet --task-id ID # 병렬 작업용 출처·revision 묶음 (본문은 --include-content)
 lore queue regenerate --task-id ID --dry-run # 보관 입력 재합성 미리보기
 lore queue count              # current 작업 수만 정수로 출력(스크립트용)
+lore work plan --task-id ID    # 대용량 보관 입력의 구간 처리 계획 (감사는 --path)
+lore work status WORK_ID      # 완료 구간·재개할 작업 확인
+lore work read WORK_ID NODE_ID # 해당 구간 또는 두 하위 결과만 읽기
+lore work result WORK_ID      # 완료된 통합 결과를 최종 게시용으로 조회
 lore config vault-root        # vault 절대경로만 출력(스크립트용)
 lore schema                   # wiki/AGENTS.md(페이지 포맷 스키마) 생성
 ```
@@ -440,6 +444,10 @@ llm:
   provider: queue
 execution:
   default_profile: primary
+  work:
+    max_input_bytes: 262144
+    max_result_bytes: 32768
+    max_calls: 64
   profiles:
     primary:
       engine: claude-code
@@ -454,6 +462,13 @@ execution:
 이 예에서는 일일 처리·큐 처리는 `primary`, 의미 감사는 `reviewer`를 사용합니다.
 `--profile` 지정 → 작업별 설정 → 기본 프로필 순서로 선택하며 다른 실행기로 자동 전환하지 않습니다.
 `timeout_seconds`는 세션별 실행 예산입니다. 미완료 작업은 보존하고 실패로 보고합니다.
+`execution.work`는 작업자 요청 JSON과 관찰 결과 JSON의 바이트 수, 실행당 의미 처리 세션
+호출 수를 제한합니다. 큰 입력은 판본이 고정된 조각으로 나누어 새 세션에서 읽고, 관찰 결과도
+새 세션에서 단계적으로 종합합니다. `max_calls`는 일일·큐 처리 실행마다, 지식 감사에서는
+각 배치마다 적용합니다. 예산이 소진되면 미완료로 중단하고 검증된 작업을 다음 실행에 남깁니다.
+모델의 전체 문맥·토큰 수나 요금 한도를 뜻하지는 않습니다. 입력은 최소 4096바이트,
+결과는 최소 1024바이트이면서 입력 한도의 1/4 이하여야 하며 호출 수는 양수입니다.
+수동 재개·분할 결과 형식은 [분할 근거 처리 절차](skills/lore-process/references/bounded-work.md)를 참고하세요.
 실행 파일은 `executable`, 모델은 `model`로 필요한 프로필에만 지정합니다.
 상대 실행 파일 경로와 Claude의 `config_directory`는 설정 파일 기준입니다.
 Codex의 `profile`은 해당 CLI의 명명된 프로필입니다. 모델 변경만으로 기존 지식을 다시 쓰지 않습니다.
@@ -610,29 +625,30 @@ graph:
     max_input_bytes: 262144
 ```
 
-처음 보는 개념과 변경된 개념을 번갈아 검토하고, 동일 입력은 반복 검토하지 않습니다.
+처음 보는 대상과 변경된 대상을 번갈아 검토하고, 동일 입력은 반복 검토하지 않습니다.
+대상은 설정된 위키의 개념과 출처 문서(`type: document`)이며, 문서만 있는 주제도
+개념을 만들지 않고 검토합니다.
+`kind`는 대상 종류를, `counts_by_kind`는 종류별 전체·현재 검토·대기 건수를 구분합니다.
+합계는 두 종류를 모두 포함합니다. 문서의 링크는 문맥이며 자동으로 뒷받침 근거가 되지 않습니다.
 `.lorekeeper/knowledge-audit.json`은 최신 검토 판본과 대기 순서를 보관하고 판단·상충 근거는
 Markdown 검토 문서에 남깁니다. 단일 출처나 인용 수만으로 병합·삭제하지 않습니다.
 초기 누적분은 `lore run knowledge --profile codex --batches 20 --json`처럼 등록된 프로필과
 실행할 최대 배치 수를 지정해 처리할 수 있습니다. 프로필 이름은 자신의 설정에 맞춥니다.
 각 배치 뒤에는 실행 잠금을 해제하며, 실패·취소 시 중단하고 검증된 검토 기록부터 재개합니다.
-`stop_reason: batch-limit`는 지정한 실행량에 도달했다는 뜻이고, `settled`는 현재 개념 검수
-계획에 대기 항목이 없다는 뜻입니다. `blocked`는 한도를 넘는 항목만 남아 완료하지 못했다는
-뜻이며 종료 코드는 실패입니다. 모든 원문 문서의 전수 검수 완료를 의미하지는 않습니다.
-`audit-plan`은 선택한 개념·출처·직접 관련 개념·검토 문서와 그 근거·선택한 RSS 원본의 중복을 제외한
-바이트 수를 보고합니다. 자동 선택은 한 개념의 전체 입력이 `max_input_bytes`를 넘으면
-대기 상태로 보존하고 뒤의 처리 가능한 개념을 선택합니다. 여러 개념의 합계가 한도를 넘으면
-다음 배치로 나눕니다. `blocked_count`와 `blocked`는 이번 선택에서 만난 한도 초과 항목이며
-전체 저장소 집계가 아닙니다. 상세 경로·판본·크기는 최대 100개를 보고합니다.
-`run knowledge`에도 `audit_blocked_count`와 `audit_blocked`로 남습니다.
-명시적 `audit-plan --path`는 지정한 범위를 그대로 보고합니다. `input.status: oversized`이면
-근거를 자르거나 완료 처리하지 말고 전체 범위를 읽을 수 있는 별도 검토를 계획하세요.
-입력 한도는 선택한 설정의 `graph.audit.max_input_bytes`이며 `--profile`만으로 바뀌지 않습니다.
-이 한도는 읽을 근거의 범위이며 반복 호출의 누적 토큰이나
-요금 상한은 아닙니다. 검토 기록·lint·정상 종료만으로 전체 지식의 의미적 일관성을 보증하지 않습니다.
-선택한 개념의 검토가 누락·무효·재평가 필요 상태이면 완료를 거부합니다. 다른 대상의 재평가 대기는
+`stop_reason: batch-limit`는 지정한 실행량에 도달했다는 뜻이고, `settled`는 현재 감사 대상
+계획에 대기 항목이 없다는 뜻입니다. 이 집계가 외부 원본·첨부까지 모두 읽었다거나 전체 지식의
+의미적 일관성을 검증했다는 뜻은 아닙니다.
+`audit-plan`은 선택한 대상·근거·직접 관련 문맥·검토 문서와 그 근거·선택한 RSS 원본의 중복을
+제외한 전체 바이트 수를 보고합니다. `graph.audit.max_input_bytes`는 이 전체 입력의 한도로,
+이를 넘으면 `input.status: oversized`를 그대로 표시합니다. 자동 선택도 큰 대상을 건너뛰지
+않으며 `--path`는 지정한 범위를 유지합니다. Rust 실행기는 `execution.work` 한도에 맞춰
+빠짐없이 나누어 읽고 종합하도록 처리합니다. 전체 입력 한도를 넘는 완료 기록에는 현재 입력에
+대한 분할 작업·종합 결과의 완료 증명이 필요합니다. 근거를 자르거나 일부 읽기만으로 완료하지
+않으며, 중단된 작업은 보존합니다. `--profile`만으로 어느 바이트 한도도 바뀌지 않습니다.
+선택한 대상의 검토가 누락·무효·재평가 필요 상태이면 완료를 거부합니다. 다른 대상의 재평가 대기는
 `run knowledge`의 `review_health` 건수에 남겨 보고하며 다음 배치를 막지 않습니다. 무효 기록이나
 검사 오류는 실행을 실패시킵니다. 전체 저장소 검사는 `wiki reviews --check`로 별도 수행합니다.
+미해결 판단을 남기는 `follow-up`에는 해당 대상을 선언한 현재 `open` 검토가 필요합니다.
 
 리마인더는 OS 알림 명령이 성공한 뒤에만 소진합니다. 이는 OS의 접수이며 사람이 보았다는
 확인은 아닙니다. 접수 직후 저장 전에 중단되면 재전달될 수 있습니다. 실패한 알림은 다음 실행에 남습니다.

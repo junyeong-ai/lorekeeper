@@ -15,6 +15,7 @@ pub mod math;
 pub mod origin;
 pub mod rss_evidence;
 pub mod rss_original;
+pub mod semantic;
 pub mod source_identity;
 pub mod text;
 pub mod vault_path;

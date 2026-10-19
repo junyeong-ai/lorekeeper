@@ -39,6 +39,14 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   Native consumers own selected semantic reads and guarded publication; the controller
   owns final global reconciliation/checks. Keep this boundary explicit in the host
   instruction and shared skills; standalone skills still perform their own final checks.
+  `commands/work.rs` binds retained input and audit dependencies to resumable derived
+  work. Oversized requests use a fresh configured agent per inspection/reduction and
+  a bounded finalizer; small requests retain ordinary batching. `execution.work` limits
+  serialized request/result bytes and agent calls per native run, resetting per knowledge
+  batch. Exhaustion retains unfinished work and fails explicitly, without clipping evidence.
+  Completion requires exact sealed typed results and source/work guards in the canonical
+  publication journal. Keep the queue target's guard in its publication edit: a separate
+  unchanged guard for the same target would reject the journal's own recovery.
 - `commands/schedule.rs` renders native jobs with stable scheduling-slot labels.
   Queue-mode semantic jobs need explicit execution profiles. Capture selected
   absolute config/data paths, anchored PATH and relevant existing host directories;
