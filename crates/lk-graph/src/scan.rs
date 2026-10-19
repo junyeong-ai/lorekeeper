@@ -5,7 +5,7 @@
 //! `link`). This module keeps only the I/O concerns: filesystem walking (walkdir +
 //! rayon) and assembling [`ScannedPage`]s.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 
 use globset::{Glob, GlobSet, GlobSetBuilder};
@@ -81,6 +81,20 @@ impl Link {
 /// that had already dropped a page cannot tell "not there" from "not looked at", in whichever
 /// direction a caller happens to resolve it.
 pub fn scan_vault(root: &Path, follow_links: bool) -> Result<Vec<ScannedPage>, GraphError> {
+    Ok(scan_vault_with_revisions(root, follow_links)?.pages)
+}
+
+/// Exact input revisions accompany the same bytes used to parse the graph. An unreadable
+/// entry remains in the existence universe, with no invented content revision.
+pub(crate) struct ScannedVault {
+    pub pages: Vec<ScannedPage>,
+    pub file_revisions: BTreeMap<PathBuf, Option<String>>,
+}
+
+pub(crate) fn scan_vault_with_revisions(
+    root: &Path,
+    follow_links: bool,
+) -> Result<ScannedVault, GraphError> {
     if !root.exists() {
         return Err(GraphError::ScanDirNotFound(root.to_path_buf()));
     }
@@ -132,31 +146,40 @@ pub fn scan_vault(root: &Path, follow_links: bool) -> Result<Vec<ScannedPage>, G
     // anything inside it — so it yields a page with no title and no links rather than vanishing.
     // Dropping it would make a link to a real file on disk read as broken, and leave it out of
     // every count of what the vault holds.
-    let mut pages: Vec<ScannedPage> = file_paths
+    let captured: Vec<_> = file_paths
         .par_iter()
         .map(|path| {
-            parse_file(path, root).unwrap_or_else(|e| {
-                tracing::warn!(path = %path.display(), error = %e, "unreadable page: id only");
-                let rel = path.strip_prefix(root).unwrap_or(path);
-                ScannedPage {
-                    rss_evidence: false,
-                    revision: None,
-                    id: page_id(rel),
-                    path: rel.to_path_buf(),
-                    format: None,
-                    title: path
-                        .file_stem()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("untitled")
-                        .to_owned(),
-                    outgoing: Vec::new(),
+            let rel = path.strip_prefix(root).unwrap_or(path);
+            let (page, revision) = match std::fs::read_to_string(path) {
+                Ok(raw) => (
+                    parse_content(path, root, &raw),
+                    Some(lk_core::concept::file_revision(&raw)),
+                ),
+                Err(error) => {
+                    tracing::warn!(path = %path.display(), error = %error, "unreadable page: id only");
+                    (
+                        ScannedPage {
+                            rss_evidence: false,
+                            revision: None,
+                            id: page_id(rel),
+                            path: rel.to_path_buf(),
+                            format: None,
+                            title: path.file_stem().and_then(|s| s.to_str()).unwrap_or("untitled").to_owned(),
+                            outgoing: Vec::new(),
+                        },
+                        None,
+                    )
                 }
-            })
+            };
+            (page, (rel.to_path_buf(), revision))
         })
         .collect();
-
+    let (mut pages, revisions): (Vec<_>, Vec<_>) = captured.into_iter().unzip();
     pages.sort_by(|a, b| a.id.cmp(&b.id));
-    Ok(pages)
+    Ok(ScannedVault {
+        pages,
+        file_revisions: revisions.into_iter().collect(),
+    })
 }
 
 /// ONE scan of the vault, partitioned into the three views that answer three different
@@ -346,17 +369,21 @@ fn page_dirs(dirs: &VaultDirs) -> Vec<PathBuf> {
         .collect()
 }
 
+#[cfg(test)]
 fn parse_file(path: &Path, root: &Path) -> Result<ScannedPage, String> {
     let raw = std::fs::read_to_string(path)
         .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+    Ok(parse_content(path, root, &raw))
+}
 
+fn parse_content(path: &Path, root: &Path, raw: &str) -> ScannedPage {
     // A page's links live in its BODY, so the body comes from the page's own delimiters and a
     // frontmatter that does not parse costs only the title. Taking the whole page as unreadable
     // instead loses every link it wrote: a broken one goes unreported, and each page it cited
     // reads as an orphan. That the frontmatter is unparseable is a defect in its own right, and
     // `lore doctor` is what reports it — the scan's question is what the page points at.
-    let parts = frontmatter::split_page(&raw);
-    let parsed = frontmatter::parse_page(&raw).ok();
+    let parts = frontmatter::split_page(raw);
+    let parsed = frontmatter::parse_page(raw).ok();
     let format = parsed
         .as_ref()
         .and_then(|page| page.frontmatter.get("type"))
@@ -396,7 +423,7 @@ fn parse_file(path: &Path, root: &Path) -> Result<ScannedPage, String> {
         }
     }
 
-    Ok(ScannedPage {
+    ScannedPage {
         rss_evidence: parsed.as_ref().is_some_and(|p| {
             p.frontmatter
                 .get(lk_core::rss_evidence::CONCEPT_EVIDENCE_FIELD)
@@ -408,7 +435,7 @@ fn parse_file(path: &Path, root: &Path) -> Result<ScannedPage, String> {
         format,
         title,
         outgoing,
-    })
+    }
 }
 
 fn frontmatter_title(fm: &Frontmatter) -> Option<String> {

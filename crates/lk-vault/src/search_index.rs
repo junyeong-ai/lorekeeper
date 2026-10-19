@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use lk_core::config::VaultDirs;
 use rusqlite::{Connection, OpenFlags, params};
@@ -8,12 +8,13 @@ use crate::search::{MatchProjection, Page, SearchOptions, SearchResult, fold_nam
 use crate::{MutationSession, VaultError};
 
 pub(super) const INDEX_PATH: &str = ".lorekeeper/search.sqlite";
-const VERSION: i32 = 11;
+const VERSION: i32 = 12;
 
 #[derive(Serialize)]
 pub struct SearchSnapshot {
     pub snapshot: String,
     pub pages: usize,
+    pub citations_available: bool,
 }
 
 fn context(root: &Path, dirs: &VaultDirs) -> Result<String, VaultError> {
@@ -31,9 +32,31 @@ fn invalid(message: impl Into<String>) -> VaultError {
 
 /// Replace a reconstructible search snapshot in one SQLite transaction. The source
 /// files are read under the cooperating writer lock; external editors are not frozen.
+/// This lexical-only entry point captures no graph evidence; citation queries refuse it.
 pub fn prepare_search(
     session: &MutationSession,
     dirs: &VaultDirs,
+) -> Result<SearchSnapshot, VaultError> {
+    prepare_search_inner(session, dirs, None, |_| Ok(()))
+}
+
+/// Include graph-authoritative citations in the same snapshot transaction. The provider's
+/// verifier checks both its complete captured graph inputs and the selected search file
+/// revisions immediately before commit, including when the snapshot can be reused.
+pub fn prepare_search_with_citations(
+    session: &MutationSession,
+    dirs: &VaultDirs,
+    citations: &crate::ConceptCitationProjection,
+    verify: impl FnOnce(&[(PathBuf, String)]) -> Result<(), VaultError>,
+) -> Result<SearchSnapshot, VaultError> {
+    prepare_search_inner(session, dirs, Some(citations), verify)
+}
+
+fn prepare_search_inner(
+    session: &MutationSession,
+    dirs: &VaultDirs,
+    citations: Option<&crate::ConceptCitationProjection>,
+    verify: impl FnOnce(&[(PathBuf, String)]) -> Result<(), VaultError>,
 ) -> Result<SearchSnapshot, VaultError> {
     let root = session.root();
     let mut pages = super::search::load_pages(root, dirs, true)?;
@@ -52,7 +75,11 @@ pub fn prepare_search(
         .iter()
         .map(|page| (&page.rel_path, &page.file_revision, &page.reviews))
         .collect::<Vec<_>>();
-    let identity = serde_json::to_string(&(VERSION, &context, manifest, &provenance))
+    let selected_revisions = pages
+        .iter()
+        .map(|page| (page.rel_path.clone(), page.file_revision.clone()))
+        .collect::<Vec<_>>();
+    let identity = serde_json::to_string(&(VERSION, &context, manifest, &provenance, citations))
         .map_err(|error| VaultError::Serialization(error.to_string()))?;
     let snapshot = lk_core::concept::file_revision(&identity);
     let path = crate::writable_page_path(root, Path::new(INDEX_PATH))?;
@@ -63,9 +90,14 @@ pub fn prepare_search(
                 Ok((row.get(0)?, row.get(1)?, row.get(2)?))
             })?;
         if current == (snapshot.clone(), context.clone(), VERSION) {
+            if citations.is_some() {
+                verify_selected_capture(root, dirs, &selected_revisions)?;
+            }
+            verify(&selected_revisions)?;
             return Ok(SearchSnapshot {
                 snapshot,
                 pages: pages.len(),
+                citations_available: citations.is_some(),
             });
         }
     }
@@ -76,7 +108,8 @@ pub fn prepare_search(
         DROP TABLE IF EXISTS tags;
         DROP TABLE IF EXISTS pages;
         DROP TABLE IF EXISTS snapshot;
-        CREATE TABLE snapshot (id TEXT NOT NULL, context TEXT NOT NULL, version INTEGER NOT NULL);
+        CREATE TABLE snapshot (id TEXT NOT NULL, context TEXT NOT NULL, version INTEGER NOT NULL,
+            citations_available INTEGER NOT NULL);
         CREATE TABLE pages (id INTEGER PRIMARY KEY, path TEXT NOT NULL UNIQUE, title TEXT NOT NULL,
             aliases TEXT NOT NULL, concept INTEGER NOT NULL, knowledge INTEGER NOT NULL, body TEXT NOT NULL, metadata TEXT NOT NULL, intro TEXT NOT NULL,
             category TEXT NOT NULL, format TEXT NOT NULL, source_status TEXT NOT NULL, created_date TEXT, path_rank INTEGER NOT NULL,
@@ -233,15 +266,46 @@ pub fn prepare_search(
         }
     }
     transaction.execute(
-        "INSERT INTO snapshot VALUES (?1, ?2, ?3)",
-        params![snapshot, context, VERSION],
+        "INSERT INTO snapshot VALUES (?1, ?2, ?3, ?4)",
+        params![snapshot, context, VERSION, citations.is_some()],
     )?;
     crate::provenance_index::write(&transaction, &provenance)?;
+    crate::citations::write(&transaction, citations)?;
+    if citations.is_some() {
+        verify_selected_capture(root, dirs, &selected_revisions)?;
+    }
+    verify(&selected_revisions)?;
     transaction.commit()?;
     Ok(SearchSnapshot {
         snapshot,
         pages: pages.len(),
+        citations_available: citations.is_some(),
     })
+}
+
+/// Search and graph have deliberately different inventories. Guard the selected search
+/// collection itself, including additions invisible to graph policy, without adopting that
+/// collection as the graph's existence or citation-source universe.
+fn verify_selected_capture(
+    root: &Path,
+    dirs: &VaultDirs,
+    selected: &[(PathBuf, String)],
+) -> Result<(), VaultError> {
+    let expected = selected
+        .iter()
+        .cloned()
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let mut current = std::collections::BTreeMap::new();
+    super::search::visit_pages(root, dirs, true, |page, _| {
+        current.insert(page.rel_path, page.file_revision);
+        Ok(())
+    })?;
+    if current != expected {
+        return Err(invalid(
+            "selected search inputs changed during citation snapshot",
+        ));
+    }
+    Ok(())
 }
 
 pub(super) fn search(
@@ -543,6 +607,21 @@ pub(super) fn visit_body_pages(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn citation_capture_guards_the_selected_search_inventory_separately() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        verify_selected_capture(root.path(), &dirs, &[]).unwrap();
+        let path = PathBuf::from("wiki/documents/.drafts/hidden.md");
+        let raw = "---\ntype: document\n---\nSearchable hidden draft.\n";
+        write(root.path(), path.to_str().unwrap(), raw);
+        assert!(verify_selected_capture(root.path(), &dirs, &[]).is_err());
+        let selected = vec![(path.clone(), lk_core::concept::file_revision(raw))];
+        verify_selected_capture(root.path(), &dirs, &selected).unwrap();
+        std::fs::write(root.path().join(&path), raw.replace("draft", "revision")).unwrap();
+        assert!(verify_selected_capture(root.path(), &dirs, &selected).is_err());
+    }
 
     #[test]
     fn visible_html_search_matches_live_and_indexed_without_crossing_cells() {

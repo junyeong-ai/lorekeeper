@@ -393,34 +393,173 @@ fn citations_for(
         .collect()
 }
 
+/// The shared derivation used by reconciliation, resynthesis, audit and prepared discovery.
+struct CitationGraph<'a> {
+    incoming: BTreeMap<String, BTreeSet<String>>,
+    rss: BTreeMap<String, BTreeMap<String, Vec<Citation>>>,
+    by_id: HashMap<&'a str, &'a ScannedPage>,
+}
+
+impl<'a> CitationGraph<'a> {
+    fn build(pages: &'a [ScannedPage], root: &Path, dirs: &VaultDirs) -> Result<Self, GraphError> {
+        let existence = VaultExistence::build_at(root, pages, dirs)?;
+        let sources = citation_sources(pages, root, dirs, &existence)?;
+        Ok(Self {
+            incoming: incoming_citations(&sources, &existence),
+            rss: rss_evidence(pages, &sources, root, dirs)?,
+            by_id: pages.iter().map(|page| (page.id.as_str(), page)).collect(),
+        })
+    }
+
+    fn sources_for(&self, page: &ScannedPage) -> Vec<String> {
+        self.incoming
+            .get(&page.id)
+            .map(|sources| sources.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    fn citations_for(&self, page: &ScannedPage, sources: &[String]) -> Vec<Citation> {
+        let mut citations = citations_for(sources, &page.path, &self.by_id, &self.rss);
+        citations.sort();
+        citations.dedup();
+        citations
+    }
+
+    fn concepts(
+        &self,
+        pages: &[ScannedPage],
+        dirs: &VaultDirs,
+    ) -> Vec<lk_vault::ConceptCitationSet> {
+        pages
+            .iter()
+            .filter(|page| {
+                is_concept_page(&page.path, dirs) && page.format.as_deref() == Some("concept")
+            })
+            .map(|page| {
+                let sources = self.sources_for(page);
+                lk_vault::ConceptCitationSet {
+                    path: page.path.clone(),
+                    source_count: sources.len(),
+                    citations: self.citations_for(page, &sources),
+                }
+            })
+            .collect()
+    }
+}
+
 /// Derive the current evidence for all concepts in one graph pass, including empty sets.
 pub fn concept_evidence(
     pages: &[ScannedPage],
     root: &Path,
     dirs: &VaultDirs,
 ) -> Result<BTreeMap<PathBuf, Vec<Citation>>, GraphError> {
-    let existence = VaultExistence::build_at(root, pages, dirs)?;
-    let sources = citation_sources(pages, root, dirs, &existence)?;
-    let incoming = incoming_citations(&sources, &existence);
-    let rss = rss_evidence(pages, &sources, root, dirs)?;
-    let by_id: HashMap<&str, &ScannedPage> =
-        pages.iter().map(|page| (page.id.as_str(), page)).collect();
-    Ok(pages
-        .iter()
-        .filter(|page| {
-            is_concept_page(&page.path, dirs) && page.format.as_deref() == Some("concept")
-        })
-        .map(|page| {
-            let sources = incoming
-                .get(&page.id)
-                .map(|sources| sources.iter().cloned().collect::<Vec<_>>())
-                .unwrap_or_default();
-            (
-                page.path.clone(),
-                citations_for(&sources, &page.path, &by_id, &rss),
-            )
-        })
+    Ok(CitationGraph::build(pages, root, dirs)?
+        .concepts(pages, dirs)
+        .into_iter()
+        .map(|concept| (concept.path, concept.citations))
         .collect())
+}
+
+/// Graph captures its whole existence universe independently of selected search scope.
+/// Exact file revisions bind the bytes parsed by scan; canonical destinations bind the
+/// filesystem resolution used by citation authority, including currently missing targets.
+pub struct CapturedConceptCitations {
+    root: PathBuf,
+    dirs: VaultDirs,
+    follow_links: bool,
+    file_revisions: BTreeMap<PathBuf, Option<String>>,
+    projection: lk_vault::ConceptCitationProjection,
+}
+
+impl CapturedConceptCitations {
+    pub fn projection(&self) -> &lk_vault::ConceptCitationProjection {
+        &self.projection
+    }
+
+    /// Revalidate graph inputs and their overlapping selected search bytes before SQLite
+    /// publication. Search separately guards its own inventory, which can include addresses
+    /// excluded by graph scan policy (for example hidden descendants).
+    /// This detects drift; it does not freeze external editors after the final check.
+    pub fn verify(&self, selected: &[(PathBuf, String)]) -> Result<(), GraphError> {
+        for (path, revision) in selected {
+            if let Some(captured) = self.file_revisions.get(path)
+                && captured.as_ref() != Some(revision)
+            {
+                return Err(GraphError::Io(format!(
+                    "search page differs from captured graph input: {}",
+                    path.display()
+                )));
+            }
+        }
+        let current = capture_concept_citations(&self.root, &self.dirs, self.follow_links)?;
+        if current.projection != self.projection {
+            return Err(GraphError::Io(
+                "graph evidence inputs or filesystem resolution changed during snapshot".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Capture the complete graph-derived projection without publishing or recovering anything.
+pub fn capture_concept_citations(
+    root: &Path,
+    dirs: &VaultDirs,
+    follow_links: bool,
+) -> Result<CapturedConceptCitations, GraphError> {
+    let root = root
+        .canonicalize()
+        .map_err(|error| GraphError::Io(error.to_string()))?;
+    let scanned = crate::scan::scan_vault_with_revisions(&root, follow_links)?;
+    let concepts =
+        CitationGraph::build(&scanned.pages, &root, dirs)?.concepts(&scanned.pages, dirs);
+    let mut addresses = BTreeSet::new();
+    for page in &scanned.pages {
+        addresses.insert(page.path.clone());
+        addresses.extend(
+            page.outgoing
+                .iter()
+                .filter(|link| link.id.is_some())
+                .map(|link| PathBuf::from(&link.dest)),
+        );
+    }
+    addresses.extend(
+        lk_core::vault_path::RESERVED_WIKI_FILES
+            .iter()
+            .map(|name| Path::new(&dirs.wiki).join(name)),
+    );
+    let resolutions = addresses
+        .into_iter()
+        .map(|path| {
+            let full = lk_vault::page_path(&root, &path)
+                .map_err(|error| GraphError::Io(error.to_string()))?;
+            let canonical = match full.canonicalize() {
+                Ok(canonical) => Some(canonical),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => return Err(GraphError::Io(error.to_string())),
+            };
+            Ok((path, canonical))
+        })
+        .collect::<Result<BTreeMap<_, _>, GraphError>>()?;
+    let identity = serde_json::to_string(&(
+        &root,
+        dirs,
+        follow_links,
+        &scanned.file_revisions,
+        resolutions,
+        &concepts,
+    ))
+    .map_err(|error| GraphError::Io(error.to_string()))?;
+    Ok(CapturedConceptCitations {
+        root,
+        dirs: dirs.clone(),
+        follow_links,
+        file_revisions: scanned.file_revisions,
+        projection: lk_vault::ConceptCitationProjection {
+            input_revision: lk_core::concept::file_revision(&identity),
+            concepts,
+        },
+    })
 }
 
 /// Derive one exact concept's current evidence and replacement sections without writes.
@@ -438,17 +577,11 @@ pub fn concept_resynthesis(
         .find(|p| p.path == path)
         .filter(|p| is_concept_page(&p.path, dirs) && p.format.as_deref() == Some("concept"))
         .ok_or_else(|| fail("expected an exact existing concept Markdown path"))?;
-    let existence = VaultExistence::build_at(vault_root, pages, dirs)?;
-    let sources = citation_sources(pages, vault_root, dirs, &existence)?;
-    let incoming = incoming_citations(&sources, &existence);
-    let rss = rss_evidence(pages, &sources, vault_root, dirs)?;
-    let sources = incoming
-        .get(&page.id)
-        .ok_or_else(|| fail("concept has no current citations"))?;
+    let evidence = CitationGraph::build(pages, vault_root, dirs)?;
+    let sources = evidence.sources_for(page);
     if sources.is_empty() {
         return Err(fail("concept has no current citations"));
     }
-    let by_id: HashMap<&str, &ScannedPage> = pages.iter().map(|p| (p.id.as_str(), p)).collect();
     let raw = std::fs::read_to_string(
         lk_vault::page_path(vault_root, path).map_err(|e| fail(&e.to_string()))?,
     )
@@ -464,12 +597,7 @@ pub fn concept_resynthesis(
         path: path.to_path_buf(),
         anchor: format!("## {}", section.heading),
         related_anchor: related.as_ref().map(|s| format!("## {}", s.heading)),
-        citations: citations_for(
-            &sources.iter().cloned().collect::<Vec<_>>(),
-            path,
-            &by_id,
-            &rss,
-        ),
+        citations: evidence.citations_for(page, &sources),
         discarding: [Some(&section), related.as_ref()]
             .into_iter()
             .flatten()
@@ -491,11 +619,8 @@ pub fn sync_concept_backlinks(
     dirs: &VaultDirs,
     synthesis: SynthesisPolicy,
 ) -> Result<BacklinksSyncResult, GraphError> {
-    let existence = VaultExistence::build_at(vault_root, pages, dirs)?;
-    let sources = citation_sources(pages, vault_root, dirs, &existence)?;
-    let incoming = incoming_citations(&sources, &existence);
-    let rss = rss_evidence(pages, &sources, vault_root, dirs)?;
-    let by_id: HashMap<&str, &ScannedPage> = pages.iter().map(|p| (p.id.as_str(), p)).collect();
+    let evidence = CitationGraph::build(pages, vault_root, dirs)?;
+    let by_id = &evidence.by_id;
 
     let writer = VaultWriter::new(vault_root);
     let mut report = BacklinksSyncResult {
@@ -513,13 +638,9 @@ pub fn sync_concept_backlinks(
         }
 
         // Sources for this concept = every page that links it.
-        let mut sources: Vec<String> = incoming
-            .get(&page.id)
-            .map(|set| set.iter().cloned().collect())
-            .unwrap_or_default();
-        sources.sort();
+        let sources = evidence.sources_for(page);
 
-        let citations = citations_for(&sources, &page.path, &by_id, &rss);
+        let citations = evidence.citations_for(page, &sources);
 
         let full_path = vault_root.join(&page.path);
         let raw = std::fs::read_to_string(&full_path)
@@ -672,7 +793,7 @@ pub fn sync_concept_backlinks(
         // the command still exits non-zero — including for the synthesis it can no longer be
         // owed, since a task naming a page that cannot receive the result would fail every
         // drain forever.
-        let new_body = render_sources_body(&sources, &page.path, &by_id);
+        let new_body = render_sources_body(&sources, &page.path, by_id);
         let Some(updated_content) = set_source_count(
             &replace_section(&raw, sources_section.heading, &new_body),
             desired_count,
@@ -876,6 +997,164 @@ mod tests {
         path
     }
 
+    #[test]
+    fn captured_citations_share_authority_and_reject_input_or_inventory_drift() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let concept = write_owner_test_concept(root.path());
+        std::fs::create_dir_all(root.path().join("daily")).unwrap();
+        let source = root.path().join("daily/report.md");
+        let raw = "---\ntype: daily\ntitle: Report\nupdated: 2026-10-18\n---\n[Topic](../wiki/concepts/topic.md)\n[Again](../wiki/concepts/topic.md)\n";
+        std::fs::write(&source, raw).unwrap();
+        std::fs::write(
+            root.path().join("daily/board.md"),
+            "---\ntype: task-board\n---\n[Topic](../wiki/concepts/topic.md)\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.path().join("wiki/concepts/other.md"),
+            "---\ntype: concept\n---\n[Topic](topic.md)\n",
+        )
+        .unwrap();
+        // Search includes hidden descendants, while graph policy intentionally does not.
+        std::fs::create_dir_all(root.path().join("wiki/documents/.drafts")).unwrap();
+        std::fs::write(
+            root.path().join("wiki/documents/.drafts/hidden.md"),
+            "---\ntype: document\ntitle: Hidden draft\n---\n[Topic](../../concepts/topic.md)\n",
+        )
+        .unwrap();
+        let captured = capture_concept_citations(root.path(), &dirs, false).unwrap();
+        let projected = captured
+            .projection()
+            .concepts
+            .iter()
+            .find(|entry| entry.path == concept)
+            .unwrap();
+        assert_eq!(projected.source_count, 1);
+        assert_eq!(projected.citations.len(), 1);
+        assert!(
+            captured
+                .projection()
+                .concepts
+                .iter()
+                .any(|entry| entry.path.ends_with("other.md") && entry.citations.is_empty())
+        );
+        let pages = crate::scan::scan_vault(root.path(), false).unwrap();
+        assert_eq!(
+            projected.citations,
+            concept_evidence(&pages, root.path(), &dirs).unwrap()[&concept]
+        );
+        assert_eq!(
+            projected.citations,
+            concept_resynthesis(&pages, root.path(), &dirs, &concept)
+                .unwrap()
+                .citations
+        );
+        assert_eq!(
+            projected.citations,
+            sync_concept_backlinks(&pages, root.path(), true, &dirs, SynthesisPolicy::Record)
+                .unwrap()
+                .resynthesize[0]
+                .citations
+        );
+
+        let session = lk_vault::MutationSession::acquire(root.path()).unwrap();
+        let prepare = |captured: &CapturedConceptCitations| {
+            lk_vault::prepare_search_with_citations(
+                &session,
+                &dirs,
+                captured.projection(),
+                |selected| {
+                    captured
+                        .verify(selected)
+                        .map_err(|error| std::io::Error::other(error.to_string()).into())
+                },
+            )
+        };
+        let snapshot = prepare(&captured).unwrap();
+        let before = std::fs::read(root.path().join(".lorekeeper/search.sqlite")).unwrap();
+        let options = lk_vault::CitationOptions {
+            snapshot: &snapshot.snapshot,
+            limit: 1,
+            offset: 0,
+        };
+        assert_eq!(
+            lk_vault::inspect_concept_citations(root.path(), &dirs, &concept, &options)
+                .unwrap()
+                .citations,
+            projected.citations
+        );
+        let empty = lk_vault::inspect_concept_citations(
+            root.path(),
+            &dirs,
+            Path::new("wiki/concepts/other.md"),
+            &options,
+        )
+        .unwrap();
+        assert_eq!(empty.source_count, 0);
+        assert_eq!(empty.total, 0);
+        assert!(empty.citations.is_empty());
+
+        // Bookkeeping does not change source_revision, but snapshot bytes must still agree.
+        std::fs::write(&source, raw.replace("2026-10-18", "2026-10-19")).unwrap();
+        assert!(prepare(&captured).is_err());
+        assert_eq!(
+            std::fs::read(root.path().join(".lorekeeper/search.sqlite")).unwrap(),
+            before
+        );
+        std::fs::write(&source, raw).unwrap();
+        captured.verify(&[]).unwrap();
+        // This page is outside search scope, but remains part of graph existence capture.
+        std::fs::create_dir_all(root.path().join("authored")).unwrap();
+        std::fs::write(root.path().join("authored/note.md"), "# Unmanaged\n").unwrap();
+        assert!(prepare(&captured).is_err());
+        assert_eq!(
+            std::fs::read(root.path().join(".lorekeeper/search.sqlite")).unwrap(),
+            before
+        );
+        assert_eq!(
+            lk_vault::inspect_concept_citations(root.path(), &dirs, &concept, &options)
+                .unwrap()
+                .citations,
+            projected.citations
+        );
+        std::fs::remove_file(root.path().join("authored/note.md")).unwrap();
+        captured.verify(&[]).unwrap();
+        std::fs::write(
+            root.path().join("daily/broken.md"),
+            "---\ninvalid: [\n---\n",
+        )
+        .unwrap();
+        assert!(capture_concept_citations(root.path(), &dirs, false).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn captured_citations_pin_resolution_of_untraversed_directory_aliases() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        write_owner_test_concept(root.path());
+        std::fs::create_dir_all(root.path().join("alternatives/concepts")).unwrap();
+        std::fs::copy(
+            root.path().join("wiki/concepts/topic.md"),
+            root.path().join("alternatives/concepts/topic.md"),
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.path().join("daily")).unwrap();
+        std::fs::write(
+            root.path().join("daily/report.md"),
+            "---\ntype: daily\n---\n[Topic](../route/concepts/topic.md)\n",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink("wiki", root.path().join("route")).unwrap();
+        let captured = capture_concept_citations(root.path(), &dirs, false).unwrap();
+        assert_eq!(captured.projection().concepts[0].source_count, 1);
+        captured.verify(&[]).unwrap();
+        std::fs::remove_file(root.path().join("route")).unwrap();
+        std::os::unix::fs::symlink("alternatives", root.path().join("route")).unwrap();
+        assert!(captured.verify(&[]).is_err());
+    }
+
     #[cfg(unix)]
     #[test]
     fn directory_and_leaf_source_aliases_share_evidence_but_hard_links_remain_distinct() {
@@ -923,6 +1202,9 @@ mod tests {
             concept_evidence(&aliased, root.path(), &dirs).unwrap()[&concept],
             expected
         );
+        let captured = capture_concept_citations(root.path(), &dirs, true).unwrap();
+        assert_eq!(captured.projection().concepts[0].source_count, 1);
+        assert_eq!(captured.projection().concepts[0].citations, expected);
         assert_eq!(
             concept_resynthesis(&aliased, root.path(), &dirs, &concept)
                 .unwrap()
@@ -944,6 +1226,12 @@ mod tests {
         let evidence = concept_evidence(&distinct, root.path(), &dirs).unwrap();
         assert_eq!(evidence[&concept].len(), 2);
         assert_eq!(evidence[&concept][1].path, "daily/shared/second.md");
+        let captured = capture_concept_citations(root.path(), &dirs, true).unwrap();
+        assert_eq!(captured.projection().concepts[0].source_count, 2);
+        assert_eq!(
+            captured.projection().concepts[0].citations,
+            evidence[&concept]
+        );
         let updated = sync_concept_backlinks(
             &distinct,
             root.path(),
@@ -1087,6 +1375,12 @@ mod tests {
             citation.rss_event.as_ref().unwrap().event_id,
             selected.event_id
         );
+        let captured = capture_concept_citations(root.path(), &dirs, true).unwrap();
+        assert_eq!(captured.projection().concepts[0].source_count, 1);
+        assert_eq!(
+            captured.projection().concepts[0].citations,
+            evidence[&concept]
+        );
         assert_eq!(
             concept_resynthesis(&pages, root.path(), &dirs, &concept)
                 .unwrap()
@@ -1125,6 +1419,7 @@ mod tests {
         assert!(session.apply(plan).is_err());
         assert!(!root.path().join("published.md").exists());
         assert!(concept_evidence(&pages, root.path(), &dirs).is_err());
+        assert!(captured.verify(&[]).is_err());
     }
 
     /// A concept page as the template renders one: every section the sweep reads, and the
