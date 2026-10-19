@@ -4276,6 +4276,122 @@ async fn document_identity_ambiguity_refuses_to_choose_a_page() {
     }
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn manual_inbox_alias_reuses_the_existing_nested_document_after_retirement() {
+    for archived in [false, true] {
+        let dir = TempDir::new().unwrap();
+        let vault = dir.path();
+        let inbox = vault.join("inbox");
+        let alias = vault.join("inbox-alias");
+        std::fs::create_dir(&inbox).unwrap();
+        std::os::unix::fs::symlink(&inbox, &alias).unwrap();
+        let entry = inbox.join("report.md");
+        std::fs::write(&entry, "observed report").unwrap();
+        let old_location = alias.join("report.md");
+        let existing = vault.join("wiki/documents/nested/kept.md");
+        std::fs::create_dir_all(existing.parent().unwrap()).unwrap();
+        std::fs::write(
+            &existing,
+            format!(
+                "---\ntype: document\ntitle: Original report\ncreated: 2026-05-20\nsource_file: {}\n---\nOriginal content\n",
+                serde_json::to_string(old_location.to_str().unwrap()).unwrap()
+            ),
+        )
+        .unwrap();
+        // Retirement removes the leaf, not the inbox that verifies its prior location.
+        if archived {
+            std::fs::remove_file(&entry).unwrap();
+        }
+        let mut config = base_config(vault);
+        config.sources.get_mut("test-source").unwrap().source_type = SourceType::Manual;
+        let source = config.sources.get("test-source").unwrap().clone();
+        let mut item = raw_item(
+            "Renamed report",
+            "observed report",
+            "manual:report.md:revision",
+            "2026-05-24T12:00:00Z".parse().unwrap(),
+        );
+        item.url = None;
+        item.metadata = serde_json::json!({"source_file": entry});
+        let result = Pipeline::new(vault, build_ctx(&config, Arc::new(NoopLlmClient)))
+            .plan(
+                "test-source",
+                &source,
+                vec![item],
+                &IngestOptions {
+                    target_date: Some(jiff::civil::date(2026, 5, 24)),
+                    today: far_future(),
+                    dry_run: false,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            result.events.len(),
+            1,
+            "the observation must pass the date window"
+        );
+        assert_eq!(result.document_pages.len(), 1);
+        let page = &result.document_pages[0];
+        assert_eq!(page.path.as_ref(), "wiki/documents/nested/kept.md");
+        let parsed = lk_core::frontmatter::parse_page(&page.content).unwrap();
+        assert_eq!(parsed.frontmatter.get("created").unwrap(), "2026-05-20");
+        assert_eq!(parsed.frontmatter.get("title").unwrap(), "Renamed report");
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn manual_inbox_alias_duplicate_owners_refuse_to_choose_a_document() {
+    let dir = TempDir::new().unwrap();
+    let vault = dir.path();
+    let inbox = vault.join("inbox");
+    let alias = vault.join("inbox-alias");
+    std::fs::create_dir(&inbox).unwrap();
+    std::os::unix::fs::symlink(&inbox, &alias).unwrap();
+    std::fs::write(inbox.join("report.md"), "report").unwrap();
+    let docs = vault.join("wiki/documents");
+    std::fs::create_dir_all(&docs).unwrap();
+    for (name, root) in [("first", &inbox), ("second", &alias)] {
+        std::fs::write(
+            docs.join(format!("{name}.md")),
+            format!(
+                "---\ntitle: {name}\nsource_file: {}\n---\nOriginal\n",
+                serde_json::to_string(root.join("report.md").to_str().unwrap()).unwrap()
+            ),
+        )
+        .unwrap();
+    }
+    let mut config = base_config(vault);
+    config.sources.get_mut("test-source").unwrap().source_type = SourceType::Manual;
+    let source = config.sources.get("test-source").unwrap().clone();
+    let mut item = raw_item(
+        "Report",
+        "report",
+        "report",
+        "2026-05-24T12:00:00Z".parse().unwrap(),
+    );
+    item.url = None;
+    item.metadata = serde_json::json!({"source_file": inbox.join("report.md")});
+    let result = Pipeline::new(vault, build_ctx(&config, Arc::new(NoopLlmClient)))
+        .plan(
+            "test-source",
+            &source,
+            vec![item],
+            &IngestOptions {
+                target_date: None,
+                today: far_future(),
+                dry_run: false,
+            },
+        )
+        .await;
+    assert!(
+        matches!(result, Err(lk_pipeline::PipelineError::Render(message)) if message.contains("claimed by multiple pages") && message.contains("first") && message.contains("second"))
+    );
+    assert_eq!(std::fs::read_dir(docs).unwrap().count(), 2);
+}
+
 #[tokio::test]
 async fn symbol_distinct_names_keep_separate_pages_and_resolve_after_reload() {
     let dir = TempDir::new().unwrap();

@@ -182,7 +182,10 @@ fn resolve_inbox_dir(
             )));
         }
     }
-    Ok(resolved)
+    // Use the same verified location for capture, ownership and retirement, even
+    // when the configured inbox (or an existing ancestor) is a directory alias.
+    // canonical_prefix also leaves a first-run inbox available for creation.
+    Ok(resolved_real)
 }
 
 impl ManualSource {
@@ -728,6 +731,112 @@ mod tests {
         let mut items = ManualSource::new().extract(&params, &ctx).await.unwrap();
         assert_eq!(items.len(), 1);
         items.remove(0)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inbox_alias_capture_keeps_one_owner_and_preserves_originals_on_retirement() {
+        for archive in [false, true] {
+            let tmp = TempDir::new().unwrap();
+            let vault = tmp.path().join("vault");
+            let inbox = vault.join("inbox");
+            let alias = vault.join("inbox-alias");
+            std::fs::create_dir_all(&inbox).unwrap();
+            std::os::unix::fs::symlink(&inbox, &alias).unwrap();
+            let entry = inbox.join("report.md");
+            let raw = "---\ntitle: Report\nsource_file: authored-location\ncreated: 2001-01-01\n---\nCapacity is two.\n";
+            write(&entry, raw);
+            let timestamp: jiff::Timestamp = "2026-05-24T12:00:00Z".parse().unwrap();
+            std::fs::File::open(&entry)
+                .unwrap()
+                .set_modified(
+                    std::time::UNIX_EPOCH
+                        + std::time::Duration::from_secs(timestamp.as_second() as u64),
+                )
+                .unwrap();
+            let ctx = ExtractContext {
+                target_date: jiff::civil::date(2026, 5, 24),
+                timezone: jiff::tz::TimeZone::UTC,
+                locale: Default::default(),
+                identity: Default::default(),
+                vault_root: vault,
+                vault_dirs: Default::default(),
+            };
+            let direct_params =
+                serde_json::json!({"inbox_dir": "inbox", "archive_after_ingest": archive});
+            let alias_params =
+                serde_json::json!({"inbox_dir": "inbox-alias", "archive_after_ingest": archive});
+            let direct = capture_manual(&direct_params, &ctx).unwrap();
+            let through_alias = capture_manual(&alias_params, &ctx).unwrap();
+            assert_eq!(
+                direct.items.len(),
+                1,
+                "an actual eligible entry must be read"
+            );
+            assert_eq!(through_alias.items.len(), 1);
+            let item = &through_alias.items[0];
+            assert_eq!(item.timestamp, timestamp);
+            assert_eq!(item.metadata, direct.items[0].metadata);
+            assert_eq!(
+                item.metadata["source_file"],
+                entry.canonicalize().unwrap().to_str().unwrap()
+            );
+            assert_eq!(
+                item.metadata["source_record"]["manual_frontmatter"]["source_file"],
+                "authored-location"
+            );
+            assert_eq!(
+                through_alias.originals[0].manifest,
+                direct.originals[0].manifest
+            );
+            assert_eq!(std::fs::read(&entry).unwrap(), raw.as_bytes());
+            let event = lk_core::event::Event {
+                id: lk_core::event::EventId::new("manual", ctx.target_date, &item.title),
+                source_id: "manual".into(),
+                source_type: lk_core::config::SourceType::Manual,
+                timestamp: item.timestamp,
+                date: ctx.target_date,
+                title: item.title.clone(),
+                body: item.body.clone(),
+                url: None,
+                author: None,
+                labels: vec![],
+                category: None,
+                performance_category: None,
+                is_self: false,
+                is_personal: false,
+                metadata: item.metadata.clone(),
+            };
+            archive_manual_originals(&alias_params, &[event], &through_alias.originals, &ctx)
+                .unwrap();
+            assert_eq!(entry.exists(), !archive);
+            let retained = if archive {
+                inbox.join("archived/2026-05-24/report.md")
+            } else {
+                entry
+            };
+            assert_eq!(std::fs::read(retained).unwrap(), raw.as_bytes());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn missing_inbox_bootstraps_below_a_verified_alias_parent() {
+        let tmp = TempDir::new().unwrap();
+        let real = tmp.path().join("real");
+        let alias = tmp.path().join("alias");
+        std::fs::create_dir(&real).unwrap();
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        let vault = alias.join("new-vault");
+        let params = serde_json::json!({"inbox_dir": "new/inbox"});
+        let resolved = inbox_dir(&params, &vault, &Default::default()).unwrap();
+        assert_eq!(
+            resolved,
+            real.canonicalize().unwrap().join("new-vault/new/inbox")
+        );
+        assert!(!resolved.exists(), "resolution must not create the inbox");
+        std::fs::create_dir_all(&resolved).unwrap();
+        assert_eq!(resolved.canonicalize().unwrap(), resolved);
     }
 
     #[test]
