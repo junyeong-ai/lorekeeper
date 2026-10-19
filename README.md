@@ -556,6 +556,13 @@ lore schedule --format launchd --bin "$(command -v lore)"   # macOS
 설정 변경 후에는 기존 작업을 `bootout`하고 새 정의를 등록하며, 비활성화한 작업도 해제합니다.
 `self uninstall`은 OS 예약을 해제하지 않습니다.
 
+macOS의 문서·데스크탑·다운로드 같은 보호 폴더에 볼트가 있으면 예약 작업의 `lore`에도
+해당 폴더 접근 승인이 필요합니다. 터미널 앱의 승인이 launchd 실행까지 보장하지는 않습니다.
+작업을 실제로 시작해 표시되는 macOS 권한 요청을 승인하고, 로그와 종료 상태를 확인하세요.
+서명 식별자가 달라지는 바이너리 업데이트 후에는 재승인이 필요할 수 있습니다.
+파일 권한 `0600`은 이 OS 승인을 대신하지 않습니다.
+자세한 권한 동작은 [Apple 문서](https://developer.apple.com/documentation/bundleresources/information-property-list/nsdocumentsfolderusagedescription)를 참고하세요.
+
 예약 작업은 Rust 명령을 직접 실행합니다.
 
 | 예약 | 실행 |
