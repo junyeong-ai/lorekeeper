@@ -523,9 +523,10 @@ fn deadline_preserves_pending_work_and_releases_the_workflow() {
         result["stages"].as_array().unwrap().iter().any(|stage| {
             stage["name"] == "lore-process"
                 && stage["state"] == "failed"
-                && stage["detail"]
-                    .as_str()
-                    .is_some_and(|detail| detail.starts_with("session deadline exceeded"))
+                && stage["detail"].as_str().is_some_and(|detail| {
+                    detail.starts_with("session deadline exceeded")
+                        || detail.starts_with("agent preflight failed: session deadline exceeded")
+                })
         }),
         "result: {result}\nstderr: {}",
         String::from_utf8_lossy(&output.stderr)
