@@ -391,6 +391,11 @@ These are the ones you reach for day to day. `lore --help` lists the full surfac
 
 Skills that pair with the deterministic `lore` binary — the *judgment* parts run on Claude Code's LLM.
 
+Use Claude Code 2.1.246 or later. Each skill declares a qualified name such as
+`/lore-process:lore-process`; the short commands below remain available as aliases.
+Scheduled runs explicitly load the selected skill from `LORE_SKILL_DIR` and invoke
+its qualified name.
+
 | Skill | What it does |
 |---|---|
 | `/lore-process` | Drains the LLM queue after ingest — fills summaries, concepts, themes, reviews |

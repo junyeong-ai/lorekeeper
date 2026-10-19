@@ -401,6 +401,10 @@ lore schema                   # wiki/AGENTS.md(페이지 포맷 스키마) 생�
 
 `lore` 바이너리(결정론)와 짝을 이루는 스킬 — *판단이 필요한* 부분을 Claude Code의 LLM이 담당합니다.
 
+Claude Code 2.1.246 이상을 사용하세요. 각 스킬은 `/lore-process:lore-process`처럼
+플러그인 접두어를 포함한 이름을 선언하며, 아래 짧은 명령도 사용할 수 있습니다.
+스케줄러는 `LORE_SKILL_DIR`에서 선택한 스킬을 명시적으로 불러와 전체 이름으로 호출합니다.
+
 | 스킬 | 하는 일 |
 |---|---|
 | `/lore-process` | 수집 후 LLM 큐를 비움 — 요약·개념·테마·리뷰 채우기 |
