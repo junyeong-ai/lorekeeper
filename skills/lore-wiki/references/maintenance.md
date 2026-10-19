@@ -84,9 +84,13 @@ unchanged inputs are skipped without an age-based reread. Unchanged open finding
 remain discoverable through their reviews without being rewritten every week.
 
 Finish by reconciling backlinks and completing any queued repairs through the
-lore-process finalization protocol, then run `lore wiki refresh`, `lore graph lint`,
-`lore wiki reviews` and `lore queue check`. Report global review attention separately:
-unrelated `needs-reassessment` records remain backlog without expanding this batch.
+lore-process publication protocol; read that skill only when repairs need queue
+processing. Standalone sessions then run `lore wiki refresh`, `lore graph lint`,
+`lore wiki reviews` and `lore queue check`. In `lore run knowledge`, the native
+controller owns final global checks and reports review health after the semantic
+session. Do not repeat these checks or inventory unrelated reviews; all selected
+review dependencies still require complete reads and guarded assessment.
+Unrelated `needs-reassessment` records remain backlog without expanding this batch.
 Invalid records or a blocked repair are failures; preserve their tasks and report
 them. The native audit verifier requires current scoped reviews; an unchanged open
 finding with a current scoped review remains a valid follow-up assessment.

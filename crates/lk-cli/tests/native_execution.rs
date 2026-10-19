@@ -199,8 +199,16 @@ fn knowledge_queue_consumer_receives_bounded_maintenance_context() {
     assert_eq!(result["ok"], false);
     let arguments = std::fs::read_to_string(fixture.root().join("arguments")).unwrap();
     assert!(arguments.contains("bounded knowledge maintenance job"));
-    assert!(arguments.contains("unrelated needs-reassessment remains backlog"));
-    assert!(arguments.contains("invalid reviews or review inspection errors fail"));
+    assert!(arguments.contains("Read the selected work's review dependencies"));
+    assert!(arguments.contains("native controller owns final reconciliation"));
+    assert!(
+        result["stages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|stage| stage["name"] == "queue completion" && stage["state"] == "failed"),
+        "native finalization must reject the mock's unpublished work: {result}"
+    );
 }
 
 #[test]

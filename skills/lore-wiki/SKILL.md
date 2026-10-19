@@ -5,7 +5,7 @@ description: Searches and maintains a Lorekeeper knowledge wiki. Use for grounde
   auditing knowledge and relationships. Repository-wide extraction uses lore-extract;
   ingest queue processing uses lore-process.
 metadata:
-  version: 0.69.0
+  version: 0.69.1
 ---
 
 # Lorekeeper wiki
@@ -67,11 +67,16 @@ reassessment and record direct evidence revisions. Preserve an unresolved findin
 with its scope and what would settle it. Never manufacture a resolution from
 keywords, chronology or a structural lint result.
 
-After authored writes, run `lore graph backlinks-sync`, `lore wiki refresh` and
-`lore graph lint`. Repair violations caused by this operation and report unrelated
-ones. Report pending synthesis separately; use `/lore-process` when semantic
-completion is authorized. Reuse the process skill's completion protocol rather
-than duplicating it here. Refresh retrieval snapshots after publication.
+After authored writes, reconcile backlinks and report pending synthesis. Complete
+queued repairs for the selected work through lore-process when authorized.
+Standalone sessions finish with `lore wiki refresh`, `lore graph lint` and the
+process skill's completion checks.
+When a native `lore run` caller explicitly owns finalization, it performs the final
+global checks; do not repeat them or enumerate unrelated reviews in the semantic
+session. Selected evidence and review reads, guarded publication and final-input
+assessment remain required. Report pending work and failures; in a native job,
+only the controller determines the complete job outcome. Refresh retrieval snapshots
+before querying newly published content.
 
 ## Status
 
