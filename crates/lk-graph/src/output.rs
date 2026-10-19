@@ -463,6 +463,16 @@ pub fn print_backlinks(r: &BacklinksSyncReport) {
         println!("Unchanged: {} concept page(s)", r.sync.unchanged);
     }
 
+    if !r.sync.preserved_sources.is_empty() {
+        println!(
+            "\nCustom Sources preserved: {} concept page(s)",
+            r.sync.preserved_sources.len()
+        );
+        for path in &r.sync.preserved_sources {
+            println!("  {}", path.display());
+        }
+    }
+
     if !r.sync.resynthesize.is_empty() {
         // The count comes from what was ACTUALLY queued when that differs from what is owed:
         // a task already waiting for the same input is not queued again, and a line that
@@ -631,12 +641,15 @@ fn normalization_note(rename: &RenameSuggestion) -> &'static str {
 }
 
 fn format_diff(update: &ConceptUpdate) -> String {
+    let (Some(added), Some(removed)) = (&update.added, &update.removed) else {
+        return "  (previous complete source set unavailable)".into();
+    };
     let mut parts = Vec::new();
-    if !update.added.is_empty() {
-        parts.push(format!("+{} source(s)", update.added.len()));
+    if !added.is_empty() {
+        parts.push(format!("+{} source(s)", added.len()));
     }
-    if !update.removed.is_empty() {
-        parts.push(format!("-{} source(s)", update.removed.len()));
+    if !removed.is_empty() {
+        parts.push(format!("-{} source(s)", removed.len()));
     }
     if parts.is_empty() {
         String::new()
@@ -648,6 +661,22 @@ fn format_diff(update: &ConceptUpdate) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unavailable_source_deltas_are_explicit_in_json_and_terminal_output() {
+        let mut update = ConceptUpdate {
+            path: "wiki/concepts/topic.md".into(),
+            added: None,
+            removed: None,
+        };
+        assert!(format_diff(&update).contains("unavailable"));
+        let json = serde_json::to_value(&update).unwrap();
+        assert!(json["added"].is_null());
+        assert!(json["removed"].is_null());
+        update.added = Some(vec!["daily/new".into()]);
+        update.removed = Some(Vec::new());
+        assert_eq!(format_diff(&update), "  (+1 source(s))");
+    }
 
     /// How many entries a serialized channel actually lists: every array, counted where it
     /// sits, without descending into the entries themselves — one finding is one entry in one

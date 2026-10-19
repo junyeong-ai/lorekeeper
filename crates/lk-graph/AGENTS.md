@@ -80,11 +80,18 @@ belong to exploration reviews, not a machine-persisted callout inferred by locat
 ## Backlinks and synthesis requests (`backlinks.rs`)
 
 - This is the sole derivation of Sources, `source_count`, and synthesis input.
-  Derive citations from actual source concept/related anchors with exact authored
+  Derive citations from actual eligible source body links with exact authored
   revisions. Update the three together; unreadable sources forbid publication.
   Symlink spellings share one verified source owner; hard-link entries remain distinct.
   Refuse differing alias-relative citation contexts rather than choosing or unioning them.
   Report discarded anchor sections rather than pretending their evidence remained.
+- Generated Sources is a bounded, stable discovery instruction; complete citations
+  live in the rebuildable prepared SQLite view. Migrate only exact legacy generated
+  lists recognized by the shared structural classifier; retain/report custom Sources
+  prose. Compact/custom bodies have no prior complete set: added/removed deltas are
+  null, never invented empty lists. Merge uses the same ownership classifier.
+  `source_revision` remains exact: the one-time body migration reopens affected audit
+  receipts, preserving judgments and evidence guards rather than relabeling them.
 - Sources are managed non-concept content, excluding entry/schema guides and task boards. Do not
   revive a frontmatter `sources` array as authority. Validated RSS event dependencies
   contribute selected event digests; `source_count` still counts origin pages.
