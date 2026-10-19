@@ -533,7 +533,7 @@ mod tests {
         let cases = [
             (
                 SourceType::GoogleDrive,
-                serde_json::json!({"folder": "f", "file_pattern": "p-{date}.md"}),
+                serde_json::json!({"folder_id": "f"}),
             ),
             (SourceType::GoogleCalendar, serde_json::json!({})),
             (

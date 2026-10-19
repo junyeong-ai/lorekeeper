@@ -56,6 +56,12 @@ graph:                               # link graph analysis and optional semantic
 llm: {provider: queue}
 ```
 
+A Drive source uses the exact `folder_id` from its folder URL (or `root`), an
+optional `name_prefix`, and `max_files` (default 200). It queries actual modification
+time and imports independent documents. A folder name, date filename or glob is not
+a selector. Google Docs and Slides have explicit text exports; unsupported formats
+are partial coverage. Inventory absence does not authorize retiring existing pages.
+
 Semantic maintenance is optional and separate from weekly synthesis and retention.
 Enable `graph.audit.schedule` deliberately: each run uses the LLM to review at most
 `batch_size` changed/first-time concepts. The scheduler requires `--pipeline-dir`

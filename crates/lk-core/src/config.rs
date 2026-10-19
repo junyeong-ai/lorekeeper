@@ -975,10 +975,10 @@ impl SourceType {
         match self {
             SourceType::GoogleDrive => SourceDescriptor {
                 streaming: false,
-                default_template: "google-drive.md.jinja",
+                default_template: "document.md.jinja",
                 scheduled: false,
                 item_kind: ItemKind::Event,
-                unit: ObservationUnit::Day,
+                unit: ObservationUnit::Document,
             },
             SourceType::Gmail => SourceDescriptor {
                 streaming: false,

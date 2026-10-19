@@ -52,8 +52,17 @@ uses validated params and context; do not add per-adapter output pipelines.
   semantics, thread/bot filters, and user-token search remain explicit. Split only
   headings, not code, mentions, or URLs.
 - `calendar.rs`: construct URL path segments safely. All-day civil dates use the
-  vault timezone; skip invalid timestamps diagnostically. `drive.rs` query literals
-  escape both backslash and apostrophe.
+  vault timezone; skip invalid timestamps diagnostically.
+- `drive.rs`: select direct children by explicit `folder_id`, never a folder name.
+  Query the actual modified-time day window; `name_prefix` uses Drive's literal
+  prefix matching, not a date template, glob or arbitrary substring. Files use
+  provider identity independent of folder/title and become document pages.
+  Recheck selected metadata/version
+  after bounded, strictly decoded text capture; changed or unsupported files stay
+  unobserved. Report provider gaps, unfinished pagination and per-file failures as
+  partial reach. Docs use Markdown export, Slides plain-text export; neither claims
+  embedded media, comments or revision-history preservation. A received-byte digest
+  identifies the captured text payload, not an archived provider original.
 - `rss.rs`: prefer HTML content then summary; use published/updated dates, never
   acquisition-now as publication. Require a title. Author falls back to feed title
   then feed ID. Full-text fallback keeps the summary if extraction is absent/shorter.
