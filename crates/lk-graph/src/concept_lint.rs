@@ -43,8 +43,8 @@ pub struct ConceptPage {
     pub slug: String,
     /// Vault-relative path, for lint output.
     pub path: PathBuf,
-    /// `category` frontmatter value, if present.
-    pub category: Option<String>,
+    /// `category` frontmatter value, if present, retaining its declared type.
+    pub category: Option<serde_json::Value>,
     /// Declared title and aliases, with the file stem as the title fallback.
     /// An address does not itself claim a name. Malformed frontmatter declares none.
     pub names: Vec<String>,
@@ -88,15 +88,7 @@ pub fn scan_concept_pages(
         let mut names = Vec::new();
         let (category, body) = match frontmatter::parse_page(&raw) {
             Ok(page) => {
-                // Preserve malformed non-null values for category diagnostics.
-                let category = page
-                    .frontmatter
-                    .get("category")
-                    .filter(|value| !value.is_null())
-                    .map(|value| match value.as_str() {
-                        Some(category) => category.to_owned(),
-                        None => value.to_string(),
-                    });
+                let category = page.frontmatter.get("category").cloned();
                 names.extend(
                     page.frontmatter
                         .get("title")
@@ -145,17 +137,21 @@ pub fn find_invalid_categories(
     pages
         .iter()
         .filter_map(|page| {
-            // An EMPTY value is the uncategorised state, not an invalid category — the reading
-            // the rest of the vault already takes: `templates/concept.md.jinja` renders the field
-            // under `{% if category %}`, and `wiki concepts` filters it out of the registry.
-            let category = page.category.as_deref().filter(|c| !c.is_empty())?;
-            if valid_ids.contains(category) {
-                return None;
-            }
+            let value = page.category.as_ref()?;
+            let category = match value {
+                serde_json::Value::Null => return None,
+                serde_json::Value::String(category)
+                    if category.is_empty() || valid_ids.contains(category.as_str()) =>
+                {
+                    return None;
+                }
+                serde_json::Value::String(category) => category.clone(),
+                _ => value.to_string(),
+            };
             Some(InvalidCategoryConcept {
                 path: page.path.clone(),
                 slug: page.slug.clone(),
-                category: category.to_owned(),
+                category,
             })
         })
         .collect()
@@ -477,7 +473,7 @@ mod tests {
         let pages = scan(tmp.path());
         assert_eq!(pages.len(), 1);
         assert_eq!(pages[0].slug, "rag");
-        assert_eq!(pages[0].category.as_deref(), Some("ai-ml"));
+        assert_eq!(pages[0].category, Some(serde_json::json!("ai-ml")));
         assert_eq!(
             pages[0].names,
             vec!["RAG", "RAG", "Retrieval-Augmented Generation"],
@@ -681,6 +677,21 @@ mod tests {
             found[0].category, "123",
             "the finding shows what is on disk"
         );
+    }
+
+    #[test]
+    fn non_string_categories_cannot_match_configured_ids() {
+        for value in ["123", "true"] {
+            let tmp = TempDir::new().unwrap();
+            let configured = cats(&[value]);
+            write_concept(tmp.path(), "x", &format!("category: {value}"));
+            assert_eq!(
+                find_invalid_categories(&scan(tmp.path()), &configured).len(),
+                1
+            );
+            write_concept(tmp.path(), "x", &format!("category: \"{value}\""));
+            assert!(find_invalid_categories(&scan(tmp.path()), &configured).is_empty());
+        }
     }
 
     #[test]
