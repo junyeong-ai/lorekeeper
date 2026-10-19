@@ -241,10 +241,15 @@ page authored-revision contract. Mixed page/event citations require both kinds o
    `lore queue apply` publishes them and stamps `synthesis_done`; never edit the
    concept sections or completion marker directly.
 
-A concept with no citations left keeps whatever the page says: stage its existing
-synthesis and related bodies unchanged, with the captured target revision, and let
-apply publish the completion marker. Missing citations do not establish why the
-evidence is absent or invalidate existing authored knowledge.
+A concept with no citations needs an evidence judgment before normal publication.
+Report its exact target revision and available history to the coordinator. Recover
+supporting evidence for a useful durable subject; a missing captured definition does
+not establish falsehood. Otherwise publish a scoped evidence-gap review and retire
+normal discovery through guarded `wiki curate` (see lore-wiki's curation reference).
+Preserve its address and prior prose. Once that reviewed lifecycle decision is current,
+stage the existing semantic bodies unchanged if there is no supported rewrite, with
+the captured target revision; only apply records completion. Never mark unsupported
+prose as verified merely to empty the queue.
 
 ## `kind: extract-concepts`
 
@@ -328,8 +333,8 @@ what counts as a concept (per-type scoping: see
 [source-types.md](source-types.md)). Never invent it from the path.
 
 **Concept dedup** follows the **Concept convergence** section of the vault's
-`AGENTS.md`: `lore resolve` for EVERY form the text writes — a hit on any of them is the
-owner — plus the created-this-run set, plus `lore wiki search` on two or three distinguishing
+`AGENTS.md`: `lore resolve` for EVERY form the text writes, read the lexical owner's
+complete scope before reuse (an owned homonym can name a different subject), plus the created-this-run set, plus `lore wiki search` on two or three distinguishing
 terms of each form for the equivalences no rule about spelling can see. The queue task carries
 no concept registry of its own. Reuse the resolved canonical title in `name` and keep the
 source's equivalent spelling in `aliases`; a spelling difference alone does not justify a

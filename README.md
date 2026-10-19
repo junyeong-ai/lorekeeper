@@ -210,6 +210,9 @@ pgvector를 선택했다. 이 결정의 조건과 첫 메모의 검색 품질 �
 lore wiki prepare                           # 재사용할 SQLite 검색 판본 생성
 lore wiki search "Vector DB" --snapshot <id> --limit 10 --json
 lore wiki browse --type concept --category ai-ml --limit 20 --json
+lore wiki search "API 토큰" --phrase --snapshot <id> --json
+lore wiki search "인증정보" --spacing --snapshot <id> --json
+lore wiki browse --tag security --tag 인증정보 --snapshot <id> --json
 lore wiki read wiki/concepts/vector-database.md # 목차와 revision 확인 → 필요한 section 선택
 lore wiki links wiki/concepts/vector-database.md --limit 20
 lore wiki reviews        # 현재 미해결 판단을 별도로 확인
@@ -218,7 +221,15 @@ lore wiki reviews        # 현재 미해결 판단을 별도로 확인
 Markdown이 지식의 정본이고 `.lorekeeper/search.sqlite`는 재생성 가능한 탐색 계층입니다.
 처음에는 이름·별칭·짧은 본문·출처 식별 정보로 후보를 좁히고, 선택한 페이지의 절·관계·근거·보존 원본을 차례로 읽습니다.
 본문의 정확한 문자열과 정규식은 `wiki search --body`와 `--regex`로 찾습니다.
+등록된 이름의 띄어쓰기 차이는 `name-variant` 후보로 찾으며 정확한 이름 소유권은 바꾸지 않습니다.
+`--phrase`는 연속 구절을, `--spacing`은 같은 본문 블록 안의 띄어쓰기 차이를 검색합니다. 별도 문단·목록 항목·표 셀을 이어 붙이지 않습니다.
+태그는 주제별 AND 필터이며 보존된 수동 원문의 태그도 포함합니다. 별칭은 같은 대상의 이름이고 태그는 분류이므로 서로 대신하지 않습니다.
 검색 순위나 출처 수는 사실의 신뢰도 점수가 아닙니다.
+
+기본 검색은 활성 지식만 보여 줍니다. `--knowledge-status retired|all`로 비활성 항목을 조회할 수 있으며,
+주소·본문·인용·판단 이력은 보존됩니다. 출처 하나나 오래된 날짜만으로 비활성화하지 않습니다.
+결과의 `reviews`는 해당 지식을 평가하는 검토와 그 근거 판본의 변경 여부를 보여 줍니다.
+검토 주제를 지정하는 `review.subjects`는 인용이나 독립 증거 수를 늘리지 않습니다.
 
 `--snapshot`은 준비 시점의 내용을 조회합니다. 변경 후 다시 준비하고, 근거를 읽을 때는 반환된 revision으로 확인합니다.
 페이지/링크 목록은 `next_offset`으로 이어서 읽습니다. 스냅샷 링크 조회에는 같은 snapshot을 사용하며 실시간 `--revision`을 함께 지정하지 않습니다.
@@ -341,7 +352,8 @@ lore wiki original wiki/documents/example.md # 보존된 수동 원본·첨부 �
 lore wiki original daily/tech-news/2026-10-18.md # RSS 수집 원문 목록·authority·revision
 lore wiki original daily/tech-news/2026-10-18.md --revision REV --event EVENT_ID --text-offset 0 --text-limit 4096
 lore wiki links wiki/concepts/example.md --limit 20 # 연결된 원문 행·설명·리비전 조회
-lore wiki provenance wiki/documents/example.md # 동일 저장소의 정확한 문서 ID로 선언 관계·후속 문서 조회
+lore wiki provenance wiki/documents/example.md --snapshot <id> # 정확한 문서 ID로 선언 관계·후속 문서 조회
+lore wiki curate --file plan.json --dry-run # 근거 판본·이름·검토 기록 검증; 옵션을 빼면 원자적으로 반영
 lore wiki concepts            # 개념 목록
 lore resolve <name>           # 어떤 개념 페이지가 그 이름을 갖는지 (0 소유 / 1 없음 / 2 중복)
 lore wiki index / log / map   # 주제별 인덱스 / 시간순 타임라인 / 인용 클러스터 맵 재생성
@@ -371,7 +383,7 @@ lore schema                   # wiki/AGENTS.md(페이지 포맷 스키마) 생�
 
 프로젝트 문서의 `source_record.attributes`는 nodex 공개 응답의 원본 속성을 보존합니다. routine의 `prompt`처럼 본문 밖에 있는 지식도 요약·추출 입력에 포함하며, 속성은 현재 작업을 실행하라는 지시가 아닌 출처의 내용으로 읽습니다.
 
-새 RSS ingest는 분류 전 수집 텍스트를 `.lorekeeper/evidence/rss/`에 불변 해시 주소로 보존하고 daily의 `source_record.rss_original`로 연결합니다. 이는 공급자의 HTTP/XML 원본이 아니라 adapter가 취득한 본문이며, `event_timestamp`는 published 또는 updated에서 온 adapter 시각이며 취득 시각이 아닙니다(`captured_at: null`). `wiki original`은 목록을 먼저 반환하고, 반환된 `revision`과 정확한 `event_id`로 제목·빈 줄·본문을 문자 단위 페이지네이션합니다. 새 원문은 `page_bound_collection`, 과거 이벤트 로그의 읽기 전용 발견은 `legacy_unbound`입니다. 후자는 해당 daily의 과거 입력임을 증명하지 않습니다. 요약은 해석이며 원문의 부재를 증명하지 않습니다. 공급자 URL을 다시 읽은 내용도 당시 수집본과 같다고 볼 수 없습니다. 새 bound RSS 추출은 LLM이 명시적으로 선택한 `event_id`와 immutable payload revision을 `concept_evidence`에 저장할 수 있습니다. 이 선택만 기사 단위 합성 근거가 되어 무관한 일일 요약 변경으로 재합성되지 않습니다. 과거 페이지와 귀속 없는 링크는 기존 페이지 guard를 유지합니다. `wiki original ORIGIN --evidence-concept CONCEPT`로 선택 목록을 읽고 `--event ID --revision PAYLOAD_REV`로 당시 기사를 확인합니다. 최신 manifest와 다른 과거 선택도 읽을 수 있으며, 현재 사실이나 독립 검증을 보장하지는 않습니다. 추출의 누락은 철회가 아니고, `graph retract-citation`의 `--event`/`--event-revision`으로 명시 철회합니다. `source_count`는 계속 원문 페이지 수입니다. 원문 저장 실패 시 페이지는 그 원문을 참조하지 않으며 dry-run은 보관하지 않습니다.
+새 RSS ingest는 분류 전 수집 텍스트를 `.lorekeeper/evidence/rss/`에 불변 해시 주소로 보존하고 daily의 `source_record.rss_original`로 연결합니다. 이는 공급자의 HTTP/XML 원본이 아니라 adapter가 취득한 본문이며, `event_timestamp`는 published 또는 updated에서 온 adapter 시각이며 취득 시각이 아닙니다(`captured_at: null`). `wiki original`은 목록을 먼저 반환하고, 반환된 `revision`과 정확한 `event_id`로 제목·빈 줄·본문을 문자 단위 페이지네이션합니다. 새 원문은 `page_bound_collection`, 과거 이벤트 로그의 읽기 전용 발견은 `legacy_unbound`입니다. 후자는 해당 daily의 과거 입력임을 증명하지 않습니다. 요약은 해석이며 원문의 부재를 증명하지 않습니다. 공급자 URL을 다시 읽은 내용도 당시 수집본과 같다고 볼 수 없습니다. 새 bound RSS 추출의 각 컨셉은 LLM이 명시적으로 선택한 `event_id`와 immutable payload revision을 `concept_evidence`에 저장해야 합니다. 기사 선택이 없으면 게시를 거부하고, 추출 결과가 빈 목록이면 정상 완료할 수 있습니다. 이 선택만 기사 단위 합성 근거가 되어 무관한 일일 요약 변경으로 재합성되지 않습니다. 과거 페이지와 귀속 없는 링크는 기존 페이지 guard를 유지합니다. `wiki original ORIGIN --evidence-concept CONCEPT`로 선택 목록을 읽고 `--event ID --revision PAYLOAD_REV`로 당시 기사를 확인합니다. 최신 manifest와 다른 과거 선택도 읽을 수 있으며, 현재 사실이나 독립 검증을 보장하지는 않습니다. 추출의 누락은 철회가 아니고, `graph retract-citation`의 `--event`/`--event-revision`으로 명시 철회합니다. `source_count`는 계속 원문 페이지 수입니다. 원문 저장 실패 시 페이지는 그 원문을 참조하지 않으며 dry-run은 보관하지 않습니다.
 
 날짜별 탐색은 `lore wiki browse --snapshot ID --sort created --from 2026-01-01 --to 2026-12-31 --json`을 사용합니다. `created`는 수집일이 아니라 원문 작성일일 수 있습니다. 날짜가 없거나 유효하지 않으면 상태를 표시하고 날짜 필터에서는 제외합니다. 날짜순은 최신부터이며, 필터가 없으면 날짜 미상 항목을 마지막에 둡니다.
 
@@ -390,7 +402,7 @@ lore schema                   # wiki/AGENTS.md(페이지 포맷 스키마) 생�
 |---|---|
 | `/lore-process` | 수집 후 LLM 큐를 비움 — 요약·개념·테마·리뷰 채우기 |
 | `/lore-setup` | 워크스페이스를 들여다보며 config 작성 — Slack 채널·Jira 프로젝트·캘린더 ID 자동 발견 |
-| `/lore-wiki` | `query` 근거 기반 질의 · `add` 소스 추가 · `capture` 작업 중 발견 기록 · `audit` 구조/의미 감사 |
+| `/lore-wiki` | `query` 근거 기반 질의 · `add` 소스 추가 · `capture` 작업 중 발견 기록 · `audit` 구조/의미 감사 · `curate` 검토 반영 |
 | `/lore-extract` | 프로젝트 repo의 전이가능한 지식을 일괄 추출 (scan→run→audit) |
 | `/lore-ingest` | `lore` CLI 래퍼 (수집·합성·상태·스케줄) |
 | `/lore-day` | 오늘의 할 일·지식 브리핑·리마인더·마감 |

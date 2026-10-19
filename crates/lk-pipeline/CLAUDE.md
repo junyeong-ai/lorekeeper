@@ -74,6 +74,9 @@ continued factual support; explicit reviewed retraction is separate.
 - Refused aliases that created a rival must reach the writer on the last materialized
   page while both owners exist. Report, don't auto-merge: semantic equivalence is a
   judgment. Preserve this record across partial-write/retry behavior.
+- Preserve all non-structural frontmatter, including authored lifecycle/review/tags,
+  across rerenders. A new citation never reactivates retired knowledge. Reject invalid
+  lifecycle values before staging. Structural fields retain their existing owners.
 - Carry existing synthesis input/completion markers unchanged. A newly created
   single-grounding page records its completed origin revision and shared citation
   digest as input/done, so backlinks cannot adopt one sentence as a synthesis of

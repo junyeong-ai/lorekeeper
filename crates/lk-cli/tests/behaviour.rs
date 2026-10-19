@@ -30,6 +30,12 @@ use tempfile::TempDir;
 /// Every entry was measured byte-identical across repeated runs before being
 /// admitted: a snapshot of an unstable command is a flake, not a pin.
 const SWEEP: &[&[&str]] = &[
+    &[
+        "wiki",
+        "fingerprint",
+        "--file",
+        "corpus/vault/wiki/concepts/behaviour-snapshot.md",
+    ],
     &["wiki", "original", "wiki/concepts/behaviour-snapshot.md"],
     &[
         "wiki",
@@ -155,6 +161,10 @@ const EXEMPT: &[(&[&str], &str)] = &[
     (
         &["wiki", "document-identity", "apply"],
         "publishes verified identity metadata; document_identity tests archival, guarded journal publication, blocked entries and replay",
+    ),
+    (
+        &["wiki", "curate"],
+        "requires a revision-guarded evidence/review plan; wiki_curation tests preview, atomic publication, lifecycle discovery and stale refusal",
     ),
     (
         &["wiki", "prepare"],

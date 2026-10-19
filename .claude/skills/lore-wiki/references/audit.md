@@ -163,8 +163,10 @@ resolve section headings before inspecting pages.
      a concept-creating skill that confidently recognizes the synonym registers the alias
      directly. Confidence comes from context; a context-free registry match doesn't have it.)
 
-A page's age or citation recency is never an audit signal: reference knowledge does
-not expire by going unmentioned, so "old and uncited" identifies nothing actionable.
-What makes a concept due for review is a CHANGE in its evidence — which `lore graph
-backlinks-sync` detects and queues, keyed on source paths and authored revisions — or a defect in its
-structure (layer 1).
+Age or one citation alone does not justify retirement. For an uncited concept, read
+its authored history and available evidence before deciding whether it is established
+knowledge, needs primary-source recovery, or should be retired with an evidence-gap
+review. A durable subject with a missing captured definition is not a disposable episode.
+Review evidence changes and demonstrated scope/identity defects as well as structure.
+After separately authorized repairs, use [curation](curation.md) for guarded metadata
+and review publication; semantic sections still use the typed synthesis queue.

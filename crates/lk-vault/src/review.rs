@@ -29,6 +29,8 @@ pub enum ReviewStatus {
 #[serde(deny_unknown_fields)]
 pub struct KnowledgeReview {
     pub status: ReviewStatus,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub subjects: Vec<String>,
     #[serde(deserialize_with = "deserialize_page_evidence")]
     pub evidence: Vec<Citation>,
     pub resolution: Option<String>,
@@ -50,6 +52,60 @@ fn deserialize_page_evidence<'de, D: serde::Deserializer<'de>>(
 }
 
 impl KnowledgeReview {
+    pub(crate) fn validation_errors(&self, path: &Path, page: &crate::VaultPage) -> Vec<String> {
+        let mut errors = Vec::new();
+        if page
+            .frontmatter
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            != Some("exploration")
+            || page.frontmatter.get("llm_inputs").is_some()
+        {
+            errors.push("knowledge reviews require complete authored exploration pages".into());
+        }
+        let valid_address = |address: &str| {
+            lk_core::link::resolve_dest(Path::new(""), address).is_some_and(|resolved| {
+                resolved.to_string_lossy() == address
+                    && resolved
+                        .extension()
+                        .is_some_and(|extension| extension == "md")
+            })
+        };
+        let mut subjects = std::collections::BTreeSet::new();
+        for subject in &self.subjects {
+            if !valid_address(subject) || !subjects.insert(subject) {
+                errors.push(format!("invalid or duplicate review subject: {subject}"));
+            }
+        }
+        if self.evidence.is_empty() {
+            errors.push("review requires evidence".into());
+        }
+        if self.status == ReviewStatus::Resolved
+            && self
+                .resolution
+                .as_deref()
+                .is_none_or(|resolution| resolution.trim().is_empty())
+        {
+            errors.push("resolved review requires a resolution".into());
+        }
+        let mut evidence = std::collections::BTreeSet::new();
+        for citation in &self.evidence {
+            if !valid_address(&citation.path) || !evidence.insert(&citation.path) {
+                errors.push(format!(
+                    "invalid or duplicate review evidence: {}",
+                    citation.path
+                ));
+            }
+            if Path::new(&citation.path) == path {
+                errors.push("a review cannot serve as its own evidence".into());
+            }
+            if let Err(error) = archive_path(&citation.revision) {
+                errors.push(error.to_string());
+            }
+        }
+        errors
+    }
+
     /// Refuse removing historical evidence unless its exact recorded revision is
     /// verified in the archive. A surviving concept cannot substitute for it.
     pub fn ensure_evidence_paths_preserved(
@@ -102,13 +158,51 @@ impl KnowledgeReview {
 }
 
 /// Current usability of an authored judgment; never rewrites its historical status.
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum ReviewEffectiveState {
     Open,
     Resolved,
     NeedsReassessment,
     Invalid,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReviewPreview {
+    pub path: String,
+    pub effective_state: ReviewEffectiveState,
+    pub relation: String,
+}
+
+pub(crate) fn review_previews(
+    root: &Path,
+    dirs: &VaultDirs,
+) -> Result<BTreeMap<String, Vec<ReviewPreview>>, VaultError> {
+    let mut result: BTreeMap<String, Vec<ReviewPreview>> = BTreeMap::new();
+    for report in list_reviews(root, dirs)? {
+        let Some(review) = &report.review else {
+            continue;
+        };
+        let subjects: std::collections::BTreeSet<_> = review.subjects.iter().cloned().collect();
+        let evidence: std::collections::BTreeSet<_> = review
+            .evidence
+            .iter()
+            .map(|citation| citation.path.clone())
+            .collect();
+        for path in subjects.union(&evidence) {
+            result.entry(path.clone()).or_default().push(ReviewPreview {
+                path: report.path.clone(),
+                effective_state: report.effective_state,
+                relation: if subjects.contains(path) {
+                    "subject"
+                } else {
+                    "evidence"
+                }
+                .into(),
+            });
+        }
+    }
+    Ok(result)
 }
 
 impl ReviewEffectiveState {
@@ -168,7 +262,7 @@ fn read_source(root: &Path, path: &str) -> Result<crate::VaultPage, VaultError> 
     read_source_snapshot(root, path).map(|(_, page)| page)
 }
 
-fn archive_path(revision: &str) -> Result<std::path::PathBuf, VaultError> {
+pub(crate) fn archive_path(revision: &str) -> Result<std::path::PathBuf, VaultError> {
     if revision.len() != 32
         || !revision
             .bytes()
@@ -468,24 +562,10 @@ pub fn list_reviews(root: &Path, dirs: &VaultDirs) -> Result<Vec<ReviewReport>, 
         match serde_json::from_value::<KnowledgeReview>(value.clone()) {
             Err(error) => report.errors.push(error.to_string()),
             Ok(review) => {
-                if review.evidence.is_empty() {
-                    report.errors.push("review requires evidence".into());
-                }
-                if review.status == ReviewStatus::Resolved
-                    && review
-                        .resolution
-                        .as_deref()
-                        .is_none_or(|s| s.trim().is_empty())
-                {
-                    report
-                        .errors
-                        .push("resolved review requires a resolution".into());
-                }
-                if page.frontmatter.get("type").and_then(|v| v.as_str()) != Some("exploration") {
-                    report
-                        .errors
-                        .push("knowledge reviews belong on exploration pages".into());
-                }
+                report.errors.extend(review.validation_errors(
+                    path.strip_prefix(root).expect("review belongs to vault"),
+                    &page,
+                ));
                 for citation in &review.evidence {
                     if lk_core::link::resolve_dest(Path::new(""), &citation.path).as_deref()
                         == path.strip_prefix(root).ok()

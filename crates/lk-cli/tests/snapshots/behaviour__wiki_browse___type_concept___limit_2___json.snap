@@ -24,9 +24,14 @@ exit: 0
       "file_revision": "0910fa9895a91558fab7f71b70e16552d191c6bd23e0e7c1eb4dcf08020b735a",
       "format": "concept",
       "id": "behaviour-snapshot",
+      "knowledge_status": "active",
       "matched": "catalog",
       "path": "wiki/concepts/behaviour-snapshot.md",
+      "phrase_match": false,
+      "reviews": [],
       "source_count": 3,
+      "spacing_match": false,
+      "tags": [],
       "title": "Behaviour snapshot"
     },
     {
@@ -40,21 +45,34 @@ exit: 0
       "file_revision": "5ff21ff52d4ae9fcb3a3dfb3c04024bc9477e438e96b78a1d3fd63e8f4b77385",
       "format": "concept",
       "id": "deterministic-clock",
+      "knowledge_status": "active",
       "matched": "catalog",
       "path": "wiki/concepts/deterministic-clock.md",
+      "phrase_match": false,
+      "reviews": [],
       "source_count": 2,
+      "spacing_match": false,
+      "tags": [],
       "title": "Deterministic clock"
     }
   ],
   "include_sources": false,
+  "knowledge_status": "active",
+  "knowledge_statuses": {
+    "active": 4
+  },
   "next_offset": 2,
   "offset": 0,
+  "phrase": false,
   "query": null,
   "sort": "title",
   "source_status": null,
   "source_statuses": {
     "": 4
   },
+  "spacing": false,
+  "tag_filters": [],
+  "tags": {},
   "to": null,
   "total": 4,
   "type": "concept"

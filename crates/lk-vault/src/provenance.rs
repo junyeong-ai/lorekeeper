@@ -4,7 +4,7 @@ use lk_core::{
     concept::{file_revision, source_revision},
     config::VaultDirs,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, path::Path};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,6 +20,7 @@ pub struct ProvenanceOptions<'a> {
     pub limit: usize,
     pub offset: usize,
     pub revision: Option<&'a str>,
+    pub snapshot: Option<&'a str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -34,17 +35,19 @@ pub struct ProvenanceReport {
     pub next_offset: Option<usize>,
 }
 
-struct Document {
-    path: String,
-    metadata: Value,
-    identity: Option<(String, String)>,
-    declarations: Vec<Declaration>,
-    issues: Vec<String>,
+#[derive(Clone, Serialize, Deserialize)]
+pub(super) struct Document {
+    pub(super) path: String,
+    pub(super) metadata: Value,
+    pub(super) identity: Option<(String, String)>,
+    pub(super) declarations: Vec<Declaration>,
+    pub(super) issues: Vec<String>,
 }
-struct Declaration {
-    relation: String,
-    target: String,
-    fields: Vec<String>,
+#[derive(Clone, Serialize, Deserialize)]
+pub(super) struct Declaration {
+    pub(super) relation: String,
+    pub(super) target: String,
+    pub(super) fields: Vec<String>,
 }
 fn invalid(message: &str) -> VaultError {
     VaultError::Io(std::io::Error::new(
@@ -57,20 +60,39 @@ fn nonblank(value: Option<&Value>) -> Option<&str> {
         .and_then(Value::as_str)
         .filter(|s| !s.trim().is_empty())
 }
-fn document(path: String, raw: &str) -> Result<Document, VaultError> {
-    let page = parse_page(raw).map_err(VaultError::Frontmatter)?;
+pub(super) fn read_document(path: &Path, full: &Path) -> Result<Option<Document>, VaultError> {
+    let raw = std::fs::read_to_string(full)?;
+    let page = parse_page(&raw).map_err(VaultError::Frontmatter)?;
+    if page.frontmatter.get("type").and_then(Value::as_str) != Some("document") {
+        return Ok(None);
+    }
+    document_page(
+        path.to_string_lossy().into_owned(),
+        &page,
+        file_revision(&raw),
+    )
+    .map(Some)
+}
+
+pub(super) fn document_page(
+    path: String,
+    page: &crate::VaultPage,
+    revision: String,
+) -> Result<Document, VaultError> {
     let fm = &page.frontmatter;
     let identity_value = fm.get("source_identity");
-    let identity = identity_value.and_then(|id| {
-        Some((
-            nonblank(id.get("repository"))?.to_owned(),
-            nonblank(id.get("document"))?.to_owned(),
-        ))
-    });
+    let parsed_identity = identity_value
+        .filter(|value| !value.is_null())
+        .map(|value| lk_core::source_identity::SourceIdentity::from_value(value.clone()));
     let mut issues = Vec::new();
-    if identity.is_none() && identity_value.is_some_and(|v| !v.is_null()) {
-        issues.push("invalid source_identity.repository/document".into());
-    }
+    let identity = match &parsed_identity {
+        Some(Ok(identity)) => Some(identity.key()),
+        Some(Err(error)) => {
+            issues.push(error.clone());
+            None
+        }
+        None => None,
+    };
     let record = fm.get("source_record");
     if record.is_some_and(|r| !r.is_null() && !r.is_object()) {
         issues.push("source_record must be an object or null".into());
@@ -126,11 +148,9 @@ fn document(path: String, raw: &str) -> Result<Document, VaultError> {
     let metadata = json!({
         "path": path,
         "title": fm.get("title"),
-        "file_revision": file_revision(raw),
-        "source_revision": source_revision(&page),
-        "source_identity": identity.as_ref().map(|(repository, document)| {
-            json!({"repository": repository, "document": document})
-        }),
+        "file_revision": revision,
+        "source_revision": source_revision(page),
+        "source_identity": parsed_identity.as_ref().and_then(|identity|identity.as_ref().ok()),
         "identity_status": identity_status,
         "metadata_issue_count": issues.len(),
         "source_status": record.and_then(|r| r.get("status")),
@@ -155,7 +175,96 @@ fn document(path: String, raw: &str) -> Result<Document, VaultError> {
     })
 }
 
-/// Scan the configured document collection. Exact repository/document strings are the only
+#[derive(Default)]
+pub(super) struct DocumentCollection {
+    pub(super) documents: Vec<Document>,
+    pub(super) addresses: Vec<(String, String)>,
+    pub(super) revisions: Vec<(String, Value, std::path::PathBuf)>,
+}
+
+pub(super) fn collect_documents(
+    root: &Path,
+    dirs: &VaultDirs,
+    mut load: impl FnMut(&Path, &Path, &Path) -> Result<Option<Document>, VaultError>,
+) -> Result<DocumentCollection, VaultError> {
+    let directory = lk_core::vault_path::documents_dir(dirs);
+    let full = page_path(root, &directory)?;
+    match std::fs::metadata(&full) {
+        Ok(metadata) if metadata.is_dir() => {}
+        Ok(_) => return Err(invalid("document collection is not a directory")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(DocumentCollection::default());
+        }
+        Err(error) => return Err(error.into()),
+    }
+    let mut owners: BTreeMap<std::path::PathBuf, (Document, bool)> = BTreeMap::new();
+    let mut addresses = Vec::new();
+    let mut revisions = Vec::new();
+    for entry in walkdir::WalkDir::new(full).follow_links(false) {
+        let entry = entry.map_err(|error| VaultError::Io(std::io::Error::other(error)))?;
+        if entry.file_type().is_symlink() && std::fs::metadata(entry.path())?.is_dir() {
+            return Err(invalid(
+                "document collection contains an untraversed directory alias",
+            ));
+        }
+        if entry
+            .path()
+            .extension()
+            .is_none_or(|extension| extension != "md")
+            || entry.file_type().is_dir()
+        {
+            continue;
+        }
+        let relative = entry
+            .path()
+            .strip_prefix(root)
+            .map_err(|_| invalid("document escaped vault"))?;
+        let checked = page_path(root, relative)?;
+        let metadata = std::fs::metadata(&checked)?;
+        if !metadata.is_file() {
+            return Err(invalid("document address is not a regular file"));
+        }
+        let canonical = checked.canonicalize()?;
+        let Some(document) = load(relative, &checked, &canonical)? else {
+            continue;
+        };
+        let path = document.path.clone();
+        addresses.push((path.clone(), canonical.clone()));
+        revisions.push((
+            path,
+            document.metadata["file_revision"].clone(),
+            canonical.clone(),
+        ));
+        let alias = entry.file_type().is_symlink();
+        match owners.entry(canonical) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert((document, alias));
+            }
+            std::collections::btree_map::Entry::Occupied(mut entry) if !alias => {
+                entry.insert((document, alias));
+            }
+            _ => {}
+        }
+    }
+    addresses.sort();
+    revisions.sort_by(|a, b| a.0.cmp(&b.0));
+    let addresses = addresses
+        .into_iter()
+        .map(|(path, canonical)| (path, owners[&canonical].0.path.clone()))
+        .collect();
+    let mut documents = owners
+        .into_values()
+        .map(|(document, _)| document)
+        .collect::<Vec<_>>();
+    documents.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(DocumentCollection {
+        documents,
+        addresses,
+        revisions,
+    })
+}
+
+/// Scan the configured document collection. Exact typed namespace/document keys are the only
 /// resolution keys. The collection revision pins additions and ambiguity as well as source edits.
 /// This is a read-only observation, not an atomic filesystem snapshot against external editors.
 pub fn inspect_provenance(
@@ -169,65 +278,14 @@ pub fn inspect_provenance(
             "provenance requires a Markdown document and --limit in 1..100",
         ));
     }
-    let collection = lk_core::vault_path::documents_dir(dirs);
+    if let Some(snapshot) = options.snapshot {
+        return crate::provenance_index::inspect(root, dirs, path, options, snapshot);
+    }
     let center_full = page_path(root, path)?;
-    let mut documents = Vec::new();
-    let collection_full = page_path(root, &collection)?;
-    for entry in walkdir::WalkDir::new(collection_full).follow_links(false) {
-        let entry = entry.map_err(|e| VaultError::Io(std::io::Error::other(e)))?;
-        if entry.file_type().is_symlink() && std::fs::metadata(entry.path())?.is_dir() {
-            return Err(invalid(
-                "document collection contains an untraversed directory alias",
-            ));
-        }
-        if entry.path().extension().is_none_or(|e| e != "md") || entry.file_type().is_dir() {
-            continue;
-        }
-        let relative = entry
-            .path()
-            .strip_prefix(root)
-            .map_err(|_| invalid("document escaped vault"))?;
-        let checked = page_path(root, relative)?;
-        let raw = std::fs::read_to_string(checked)?;
-        let parsed = parse_page(&raw).map_err(VaultError::Frontmatter)?;
-        if parsed.frontmatter.get("type").and_then(Value::as_str) != Some("document") {
-            continue;
-        }
-        documents.push(document(relative.to_string_lossy().into_owned(), &raw)?);
-    }
-    documents.sort_by(|a, b| a.path.cmp(&b.path));
-    // Canonical filesystem destinations collapse symlink spellings, never hard links or
-    // distinct files with the same declared ID. Keep all scanned addresses in the revision.
-    let collection_revisions: Vec<_> = documents
-        .iter()
-        .map(|d| {
-            Ok((
-                d.path.clone(),
-                d.metadata["file_revision"].clone(),
-                std::fs::canonicalize(root.join(&d.path))?,
-            ))
-        })
-        .collect::<Result<Vec<_>, std::io::Error>>()?;
-    let scanned_documents = documents.len();
-    let mut owners: BTreeMap<std::path::PathBuf, Document> = BTreeMap::new();
-    for document in documents {
-        let full = root.join(&document.path);
-        let canonical = std::fs::canonicalize(&full)?;
-        let alias = std::fs::symlink_metadata(&full)?.file_type().is_symlink();
-        match owners.entry(canonical) {
-            std::collections::btree_map::Entry::Vacant(entry) => {
-                entry.insert(document);
-            }
-            std::collections::btree_map::Entry::Occupied(mut entry) => {
-                // Prefer the direct file address when it is in the configured collection.
-                if !alias {
-                    entry.insert(document);
-                }
-            }
-        }
-    }
-    let mut documents: Vec<_> = owners.into_values().collect();
-    documents.sort_by(|a, b| a.path.cmp(&b.path));
+    let collection = collect_documents(root, dirs, |relative, checked, _| {
+        read_document(relative, checked)
+    })?;
+    let documents = collection.documents;
     let center_canonical = std::fs::canonicalize(center_full)?;
     let center = documents
         .iter()
@@ -238,21 +296,42 @@ pub fn inspect_provenance(
     let revision = file_revision(
         &serde_json::to_string(&json!({"version":1,"path":path,
             "direction":format!("{:?}",options.direction),"relation":options.relation,
-            "collection":collection_revisions
+            "collection":collection.revisions
         }))
         .map_err(|e| VaultError::Serialization(e.to_string()))?,
     );
     if options.revision.is_some_and(|r| r != revision) {
         return Err(invalid("provenance collection changed; restart pagination"));
     }
+    let coverage = json!({
+        "documents":documents.len(),
+        "scanned_document_addresses":collection.addresses.len(),
+        "filesystem_aliases":collection.addresses.len() - documents.len(),
+        "identities_unavailable":documents.iter().filter(|d|d.metadata["identity_status"]=="unavailable").count(),
+        "identities_invalid":documents.iter().filter(|d|d.metadata["identity_status"]=="invalid").count(),
+        "documents_with_invalid_metadata":documents.iter().filter(|d|!d.issues.is_empty()).count(),
+        "invalid_metadata_issues":documents.iter().map(|d|d.issues.len()).sum::<usize>(),
+        "scope":"configured document collection; unavailable identities cannot resolve or contribute incoming matches; malformed declarations are not guessed",
+        "snapshot":"read-only live scan; external editors are not locked"
+    });
+    build_report(center, &documents, options, revision, coverage)
+}
+
+pub(super) fn build_report(
+    center: &Document,
+    documents: &[Document],
+    options: &ProvenanceOptions<'_>,
+    revision: String,
+    coverage: Value,
+) -> Result<ProvenanceReport, VaultError> {
     let mut registry: BTreeMap<&(String, String), Vec<&Document>> = BTreeMap::new();
-    for d in &documents {
+    for d in documents {
         if let Some(id) = &d.identity {
             registry.entry(id).or_default().push(d);
         }
     }
     let mut rows = Vec::new();
-    for d in &documents {
+    for d in documents {
         let is_center = d.path == center.path;
         // Unrelated malformed metadata is disclosed by coverage counts, not navigation rows.
         if is_center {
@@ -294,7 +373,7 @@ pub fn inspect_provenance(
             };
             // Owners are separately paginated to bound ambiguous results without dropping names.
             rows.push(json!({"kind":"declared-relation", "declaring":d.metadata,
-                "relation":declaration.relation,"fields":declaration.fields,"target_identity":target_identity.as_ref().map(|(r,id)|json!({"repository":r,"document":id})),
+                "relation":declaration.relation,"fields":declaration.fields,"target_identity": d.metadata.get("source_identity").filter(|value|!value.is_null()).and_then(|value|lk_core::source_identity::SourceIdentity::from_value(value.clone()).ok()).map(|identity|identity.with_document(&declaration.target)),
                 "target_id":declaration.target,"incoming":incoming,"outgoing":outgoing,
                 "resolution":status,"candidate_total":owners.len()}));
             for owner in owners {
@@ -314,17 +393,7 @@ pub fn inspect_provenance(
         path: center.path.clone(),
         revision,
         origin: center.metadata.clone(),
-        coverage: json!({
-            "documents":documents.len(),
-            "scanned_document_addresses":scanned_documents,
-            "filesystem_aliases":scanned_documents - documents.len(),
-            "identities_unavailable":documents.iter().filter(|d|d.metadata["identity_status"]=="unavailable").count(),
-            "identities_invalid":documents.iter().filter(|d|d.metadata["identity_status"]=="invalid").count(),
-            "documents_with_invalid_metadata":documents.iter().filter(|d|!d.issues.is_empty()).count(),
-            "invalid_metadata_issues":documents.iter().map(|d|d.issues.len()).sum::<usize>(),
-            "scope":"configured document collection; unavailable identities cannot resolve or contribute incoming matches; malformed declarations are not guessed",
-            "snapshot":"read-only live scan; external editors are not locked"
-        }),
+        coverage,
         entries,
         total,
         offset: options.offset,
@@ -347,6 +416,7 @@ mod tests {
             limit: 100,
             offset: 0,
             revision: None,
+            snapshot: None,
         }
     }
     #[test]
@@ -515,6 +585,7 @@ mod tests {
             limit: 100,
             offset: 0,
             revision: None,
+            snapshot: None,
         };
         let report = inspect_provenance(root, &VaultDirs::default(), path, &options).unwrap();
         assert_eq!(report.origin["identity_status"], "unavailable");
