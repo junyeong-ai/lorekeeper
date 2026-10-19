@@ -246,7 +246,10 @@ fn citation_sources<'a>(
         let canonical = lk_vault::page_path(root, &page.path)
             .and_then(std::fs::canonicalize)
             .map_err(|e| GraphError::Io(e.to_string()))?;
-        if concept_owners.contains(&canonical) {
+        let owner = canonical
+            .strip_prefix(&canonical_root)
+            .map_err(|error| GraphError::Io(error.to_string()))?;
+        if is_concept_page(owner, dirs) || concept_owners.contains(&canonical) {
             continue;
         }
         if page.revision.is_none() {
@@ -680,7 +683,7 @@ pub fn sync_concept_backlinks_in_session(
 }
 
 /// Derive a complete before/after plan without writing, locking or recovering journals.
-/// Used sources retain their scanned authored revisions and canonical direct owners.
+/// All eligible sources retain their scanned authored revisions and canonical direct owners.
 pub fn plan_concept_backlinks(
     pages: &[ScannedPage],
     vault_root: &Path,
@@ -692,7 +695,6 @@ pub fn plan_concept_backlinks(
         .canonicalize()
         .map_err(|error| GraphError::Io(error.to_string()))?;
     let mut targets = BTreeMap::<PathBuf, (String, String)>::new();
-    let mut used_sources = BTreeSet::new();
     let mut report = BacklinksSyncResult::default();
 
     for page in pages {
@@ -907,7 +909,6 @@ pub fn plan_concept_backlinks(
             continue;
         };
 
-        used_sources.extend(sources.iter().cloned());
         // The complete derived page includes projection ownership and evidence revisions.
         if updated_content == raw {
             report.unchanged += 1;
@@ -952,13 +953,12 @@ pub fn plan_concept_backlinks(
     }
 
     let mut plan = MutationPlan::default();
-    guard_backlink_sources(
-        &mut plan,
-        vault_root,
-        &canonical_root,
-        &evidence,
-        &used_sources,
-    )?;
+    guard_backlink_sources(&mut plan, vault_root, &canonical_root, &evidence)?;
+    if targets.is_empty() {
+        // Validation still detects stale scans, but an unchanged projection has nothing
+        // to publish and needs no dependency-only journal or per-source fsyncs.
+        return Ok((MutationPlan::default(), report));
+    }
     for (path, (before, after)) in targets {
         plan.edit(path, before, after);
     }
@@ -970,10 +970,10 @@ fn guard_backlink_sources(
     root: &Path,
     canonical_root: &Path,
     evidence: &CitationGraph<'_>,
-    used: &BTreeSet<String>,
 ) -> Result<(), GraphError> {
-    for id in used {
-        let source = &evidence.sources[id.as_str()];
+    // Sources with no old incoming links are negative dependencies too: adding a
+    // citation after scanning must not publish a stale empty set or source count.
+    for source in evidence.sources.values() {
         let raw = std::fs::read_to_string(&source.owner)
             .map_err(|error| GraphError::Io(error.to_string()))?;
         let page = frontmatter::parse_page(&raw)
@@ -1174,6 +1174,83 @@ mod tests {
     }
 
     #[test]
+    fn zero_link_source_changes_are_guarded_before_planning_and_publication() {
+        for after_plan in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let dirs = VaultDirs::default();
+            let target = write_owner_test_concept(root.path());
+            let before = std::fs::read_to_string(root.path().join(&target)).unwrap();
+            std::fs::create_dir_all(root.path().join("daily")).unwrap();
+            let source = root.path().join("daily/quiet.md");
+            std::fs::write(&source, "---\ntype: daily\n---\nNo citations yet.\n").unwrap();
+            let pages = crate::scan::scan_vault(root.path(), false).unwrap();
+            let external = "---\ntype: daily\n---\n[Topic](../wiki/concepts/topic.md)\n";
+            if after_plan {
+                let session = MutationSession::acquire(root.path()).unwrap();
+                let (plan, report) =
+                    plan_concept_backlinks(&pages, root.path(), &dirs, SynthesisPolicy::Record)
+                        .unwrap();
+                assert_eq!(report.updated.len(), 1);
+                std::fs::write(&source, external).unwrap();
+                let error = session.apply(plan).unwrap_err();
+                assert!(error.to_string().contains("mutation conflict"), "{error}");
+                assert!(
+                    !root
+                        .path()
+                        .join(".lorekeeper/mutation/pending.json")
+                        .exists()
+                );
+            } else {
+                std::fs::write(&source, external).unwrap();
+                let error =
+                    plan_concept_backlinks(&pages, root.path(), &dirs, SynthesisPolicy::Record)
+                        .err()
+                        .unwrap();
+                assert!(
+                    error.to_string().contains("source changed since scan"),
+                    "{error}"
+                );
+                assert!(!root.path().join(".lorekeeper").exists());
+            }
+            assert_eq!(
+                std::fs::read_to_string(root.path().join(&target)).unwrap(),
+                before
+            );
+            assert_eq!(std::fs::read_to_string(&source).unwrap(), external);
+        }
+    }
+
+    #[test]
+    fn unchanged_backlink_plans_validate_all_sources_without_publication_steps() {
+        let (root, dirs, pages) = build_guarded_fixture();
+        sync_concept_backlinks(&pages, root.path(), false, &dirs, SynthesisPolicy::Record).unwrap();
+        let source = root.path().join("daily/quiet.md");
+        std::fs::write(&source, "---\ntype: daily\n---\nNo citations yet.\n").unwrap();
+        let pages = crate::scan::scan_vault(root.path(), false).unwrap();
+        let (plan, report) =
+            plan_concept_backlinks(&pages, root.path(), &dirs, SynthesisPolicy::Record).unwrap();
+        assert_eq!(report.unchanged, 2);
+        assert!(
+            serde_json::to_value(plan).unwrap()["steps"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        std::fs::write(
+            &source,
+            "---\ntype: daily\n---\n[Topic](../wiki/concepts/topic.md)\n",
+        )
+        .unwrap();
+        let error = plan_concept_backlinks(&pages, root.path(), &dirs, SynthesisPolicy::Record)
+            .err()
+            .unwrap();
+        assert!(
+            error.to_string().contains("source changed since scan"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn backlink_planning_refuses_a_newer_source_baseline_and_preview_never_recovers() {
         let (root, dirs, pages) = build_guarded_fixture();
         let target = root.path().join("wiki/concepts/topic.md");
@@ -1301,6 +1378,38 @@ mod tests {
                 .file_type()
                 .is_symlink()
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hidden_legacy_concept_owner_cannot_become_source_through_visible_alias() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let concept = write_owner_test_concept(root.path());
+        std::fs::create_dir_all(root.path().join("wiki/concepts/.hidden")).unwrap();
+        std::fs::write(
+            root.path().join("wiki/concepts/.hidden/legacy.md"),
+            "---\ntitle: Legacy\n---\n[Topic](/wiki/concepts/topic.md)\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.path().join("daily")).unwrap();
+        std::os::unix::fs::symlink(
+            "../wiki/concepts/.hidden/legacy.md",
+            root.path().join("daily/legacy.md"),
+        )
+        .unwrap();
+        let pages = crate::scan::scan_vault(root.path(), false).unwrap();
+        assert!(
+            pages
+                .iter()
+                .any(|page| page.path == Path::new("daily/legacy.md"))
+        );
+        assert!(
+            !pages
+                .iter()
+                .any(|page| page.path == Path::new("wiki/concepts/.hidden/legacy.md"))
+        );
+        assert!(concept_evidence(&pages, root.path(), &dirs).unwrap()[&concept].is_empty());
     }
 
     #[test]
