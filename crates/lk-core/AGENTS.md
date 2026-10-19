@@ -73,6 +73,8 @@ config loading and the shared filesystem primitives intentionally perform I/O.
 - `write_atomic` replaces a destination: unique same-directory temp, fsync,
   optional permissions, rename, parent fsync, cleanup on error. Keep the extension
   before `.tmp` for existing suffix sweeps. Use this shared implementation.
+  Create temporaries exclusively with requested Unix permissions before writing;
+  preserve occupied names and clean up only the temporary this call created.
 - `publish_exclusive` preserves originals: private short-name temp then exclusive
   hard-link publication. `Created`/`Reused` succeed; `Occupied` means different bytes
   or a non-regular/symlink entry. Other I/O errors propagate. Every suffix candidate
