@@ -4,7 +4,9 @@ This operation is a complete run of one batch, not a request to audit the entire
 The scheduled session already holds the workflow lease. Follow the shared page and
 publication contracts in SKILL.md and read the curation reference before repairs.
 
-1. Run `lore wiki audit-plan` once. Keep its candidate addresses as this run's scope.
+1. Run `lore wiki audit-plan` once. When the caller supplies exact batch addresses,
+   use repeated `--path` for those addresses instead of choosing a new batch.
+   Keep its candidate addresses as this run's scope.
    `graph.audit.batch_size` bounds semantic work (1..100). If no candidate exists,
    report the returned counts and stop successfully. Do not expand the batch to
    reduce the whole backlog to zero.

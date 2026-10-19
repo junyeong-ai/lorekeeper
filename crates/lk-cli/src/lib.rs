@@ -32,6 +32,20 @@ pub struct Cli {
 
 #[derive(clap::Subcommand)]
 pub enum Command {
+    /// Execute a complete job using the configured Claude Code or Codex profile
+    Run {
+        #[arg(value_enum)]
+        operation: commands::run::Operation,
+        /// Explicit execution profile; otherwise operation override then configured default
+        #[arg(long)]
+        profile: Option<String>,
+        /// Wait for the semantic workflow lease; default contention starts no semantic work
+        #[arg(long)]
+        wait: bool,
+        /// Emit the structured job outcome; stage output goes to stderr
+        #[arg(long)]
+        json: bool,
+    },
     /// Hold a Unix workflow lease across a foreground command and its inherited children
     Workflow {
         /// Wait for another workflow; by default contention refuses without starting COMMAND
@@ -265,6 +279,12 @@ pub async fn run() -> miette::Result<()> {
     }
 
     match cli.command {
+        Command::Run {
+            operation,
+            profile,
+            wait,
+            json,
+        } => commands::run::run(&opts, operation, profile, wait, json).await,
         Command::Workflow { wait, command } => commands::workflow::run(&opts, wait, command),
         Command::Init { target } => match target {
             InitTarget::Credentials { vault } => commands::init::credentials(&opts, vault).await,

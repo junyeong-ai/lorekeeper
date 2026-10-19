@@ -3,6 +3,9 @@
 | Command | Purpose |
 |---------|---------|
 | `lore validate` | Parse + validate config, print summary |
+| `lore run daily [--profile NAME] [--wait] [--json]` | Complete collection, semantic processing, graph reconciliation and retained periods using the configured agent |
+| `lore run process [--profile NAME]` | Process queued semantic work and verify native publication |
+| `lore run knowledge [--profile NAME]` | Review one configured semantic audit batch and verify its completion |
 | `lore ingest` | Collect ALL enabled sources, write pages; render the cross-source work-log when a `personal:` module is configured |
 | `lore ingest <source>` | Refresh one source's pages only — never rewrites the work-log (it sees a subset) |
 | `lore ingest --dry-run` | Preview without vault writes |

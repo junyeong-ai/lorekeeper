@@ -291,7 +291,8 @@ fn every_command_a_skill_spells_is_one_it_permits() {
     {
         let skill = dir.file_name().to_string_lossy().into_owned();
         let manifest = read(&dir.path().join("SKILL.md"));
-        let metadata: serde_json::Value = serde_json::from_str(&read(&dir.path().join("agents/claude.json"))).unwrap();
+        let metadata: serde_json::Value =
+            serde_json::from_str(&read(&dir.path().join("agents/claude.json"))).unwrap();
         let permitted = permitted_tools(metadata["allowed-tools"].as_str().expect("Claude tools"));
         if permitted.is_empty() {
             continue;

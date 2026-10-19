@@ -6,6 +6,8 @@ pub mod brief;
 pub mod config;
 pub mod doctor;
 pub mod document_identity;
+#[cfg(unix)]
+mod execution;
 pub mod extract;
 pub mod fetch;
 pub mod graph;
@@ -17,6 +19,7 @@ pub mod maintenance;
 pub mod performance;
 pub mod queue;
 pub mod resolve;
+pub mod run;
 pub mod schedule;
 pub mod schema;
 pub mod status;

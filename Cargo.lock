@@ -1719,6 +1719,7 @@ dependencies = [
  "miette",
  "rustix",
  "same-file",
+ "semver",
  "serde",
  "serde_json",
  "strum",

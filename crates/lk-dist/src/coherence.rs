@@ -167,7 +167,7 @@ impl InstallationReport {
             .into_iter()
             .flat_map(|engine| {
                 let installation = installation.for_engine(engine);
-                let groups = installation
+                installation
                     .deployed_skill_levels()
                     .into_iter()
                     .filter_map(|level: SkillLevel| {
@@ -211,8 +211,7 @@ impl InstallationReport {
                             },
                         ))
                     })
-                    .collect::<Vec<_>>();
-                groups
+                    .collect::<Vec<_>>()
             })
             .collect();
         let runtime_skills = engines
