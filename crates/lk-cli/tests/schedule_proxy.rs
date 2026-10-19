@@ -23,7 +23,7 @@ fn generate_with_extra(
 ) -> std::process::Output {
     let root = tempfile::tempdir().unwrap();
     std::fs::write(root.path().join("config.yaml"),
-        "vault:\n  root: vault\nidentity:\n  name: Test\n  email: test@example.invalid\ningest:\n  schedule: '0 9 * * *'\nsources:\n  notes:\n    type: manual\n    params:\n      inbox_dir: inbox\n").unwrap();
+        "execution:\n  default_profile: primary\n  profiles:\n    primary: {engine: claude-code, timeout_seconds: 60}\nvault:\n  root: vault\nidentity:\n  name: Test\n  email: test@example.invalid\ningest:\n  schedule: '0 9 * * *'\nsources:\n  notes:\n    type: manual\n    params:\n      inbox_dir: inbox\n").unwrap();
     if !extra.is_empty() {
         let config = root.path().join("config.yaml");
         let mut body = std::fs::read_to_string(&config).unwrap();
@@ -126,7 +126,11 @@ fn explicit_proxy_values_keep_case_empty_and_escape_in_both_formats() {
                     .map(|(key, value)| (key.to_string(), value.to_string()))
                     .collect();
                 assert_eq!(
-                    actual, expected,
+                    actual
+                        .into_iter()
+                        .filter(|(key, _)| KEYS.contains(&key.as_str()))
+                        .collect::<std::collections::BTreeMap<_, _>>(),
+                    expected,
                     "direct job retains exactly all eight raw values"
                 );
                 documents += 1;

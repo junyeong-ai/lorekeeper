@@ -25,7 +25,7 @@ Gmail·Slack·Jira·캘린더·RSS·메모를 매일 모아 중복을 없애고,
 | 🔗 **연결되는 지식 그래프** | 마크다운 링크·역링크·클러스터로 개념이 서로 이어짐 |
 | ✅ **할 일 → 기록** | 완료한 할 일과 메모를 보존하고, 설정된 tasks 소스의 수집·의미 처리를 거쳐 데일리·개념·성과 리뷰에 활용 |
 | 📈 **복리** | 주간·월간·분기·연간 합성으로 시간이 갈수록 가치↑ |
-| 🔑 **API 키 불필요** | Claude Code 세션이 직접 LLM 작업 수행 (별도 LLM API 연동 불필요) |
+| 🔑 **CLI 로그인 재사용** | Claude Code·Codex의 기존 인증 사용; Lore의 별도 LLM API 클라이언트 불필요 |
 
 > 💡 영감: Andrej Karpathy의 *"LLM이 관리하는 위키"* — **출처와 생성된 지식을 구분**, **위키는 LLM이 작성·유지**, **스키마(config)가 워크플로를 정의**. 사람은 소스를 고르고 질문하고, LLM은 부기를 한다.
 
@@ -47,11 +47,11 @@ flowchart LR
     SRC --> L["⚙️ lore (Rust CLI)"]
     L --> P["수집 · 정규화 · 중복제거<br/>분류 · 렌더 · 그래프"]
     P --> V[("🗂️ Obsidian Vault<br/>daily · concepts · documents")]
-    L -. "LLM 작업 큐" .-> CC["🤖 Claude Code<br/>/lore-process"]
+    L -. "LLM 작업 큐" .-> CC["🤖 Claude Code · Codex<br/>공통 lore-process 스킬"]
     CC -. "요약 · 개념 · 합성" .-> V
 ```
 
-`lore`(결정론적 Rust 바이너리)가 구조를 만들고, `/lore-process`(Claude Code 스킬)가 요약·개념 같은 *판단이 필요한 부분*을 채웁니다. API 키 없이 Claude Code의 LLM 세션을 그대로 씁니다.
+`lore`가 수집·실행 순서·게시 검증을 맡고, 공통 `lore-process` 스킬을 실행하는 Claude Code 또는 Codex가 요약·개념·관계를 판단합니다. Markdown이 지식 원본이며 SQLite는 다시 만들 수 있는 검색·탐색 인덱스입니다.
 
 ---
 
@@ -59,14 +59,14 @@ flowchart LR
 
 > **시작하기 전에 준비물** — 어렵지 않습니다:
 > - 💻 **macOS 또는 Linux** (Windows는 PowerShell 설치 스크립트 제공)
-> - 🤖 **Claude Code** — `/lore-process`가 요약·개념을 채워줍니다 (Claude Code 세션 사용)
+> - 🤖 **Claude Code 또는 Codex** — 기존 CLI 로그인으로 요약·개념·관계를 처리합니다
 > - 🔑 **쓰려는 소스의 자격증명만** — 예: Gmail/Drive/Calendar는 Google 로그인, Slack은 토큰
 > - 🗂️ **(선택) Obsidian** — 그래프를 예쁘게 탐색용. 없어도 결과물은 평범한 마크다운입니다
 >
-> 💡 기본 시작 설정은 **인증이 필요 없는 메모 inbox 하나**입니다. RSS·업무 소스·개인 활동 추적은 필요할 때 추가합니다. 요약·개념 생성에는 로그인된 Claude Code가 필요합니다.
+> 💡 기본 시작 설정은 **인증이 필요 없는 메모 inbox 하나**입니다. RSS·업무 소스·개인 활동 추적은 필요할 때 추가합니다. 요약·개념 생성에는 선택한 CLI의 로그인이 필요합니다. `config.starter.yaml`의 `execution.profiles.primary.engine`을 `claude-code` 또는 `codex`로 설정하세요.
 
 ```bash
-# 1) 설치 — 바이너리 + 템플릿 + Claude Code 스킬을 한 번에
+# 1) 설치 — 바이너리 + 템플릿 + 두 호스트의 스킬을 한 번에
 curl -fsSL https://raw.githubusercontent.com/junyeong-ai/lorekeeper/main/scripts/install.sh | bash
 
 # 2) 처음 설정 — 기존 config.yaml이 있으면 보존하고 편집
@@ -86,10 +86,10 @@ vault의 `inbox/`에 메모 파일 하나를 넣은 뒤 수집합니다. `inbox_
 ```bash
 # 4) 입력 접근을 확인한 뒤 실제 수집
 lore ingest --dry-run
-lore ingest
+lore run daily
 ```
 
-이어서 Claude Code에서 **`/lore-process`**를 실행해 요약·개념·관계를 게시합니다.
+`lore run daily`는 수집 후 선택한 실행기로 요약·개념·관계를 처리하고 게시를 검증합니다.
 수집만 끝난 상태는 지식화 완료가 아닙니다. 처리가 끝나면 다음을 확인합니다.
 
 ```bash
@@ -98,7 +98,7 @@ lore wiki reviews --check
 lore wiki search "메모의 주제" --json
 
 # 5) 자동화가 필요하면 예약 정의 생성 후 OS에 등록
-lore schedule --pipeline-dir ~/.local/share/lorekeeper/pipelines > lorekeeper.cron
+lore schedule > lorekeeper.cron
 # 기존 예약을 보존하며 병합하고 실제 실행 확인. macOS는 아래 스케줄링 절 참고
 ```
 
@@ -150,7 +150,7 @@ $ lore queue status
 queue: 2 current, 0 done, 0 stale, 0 missing-target, 0 unreadable across 2 task(s)
 ```
 
-이제 Claude Code 세션에서 **`/lore-process`** 를 실행합니다. 이 스킬이 큐를 비우며 — 각 요약을 쓰고 개념을 추출해 — Claude 자체 LLM으로 처리합니다(API 키 없음). 끝나면 `lore queue status`는 `0 current`가 되고 페이지가 채워집니다:
+이제 **`lore run process`**를 실행합니다. 설정된 Claude Code·Codex 실행기가 공통 스킬로 큐를 처리하고, Rust가 출처와 판본을 검사해 게시합니다. 끝나면 `lore queue status`는 `0 current`가 되고 페이지가 채워집니다:
 
 ### ✅ 결과 ① — 문서 페이지 (요약 + 개념 링크가 채워짐)
 
@@ -303,7 +303,7 @@ flowchart LR
 | `google-calendar` | 일정 + 회의록(Drive 링크 자동 추출) | Google OAuth |
 | `google-drive` | Drive 폴더의 큐레이션 문서 | Google OAuth |
 | `rss` | 벤더 블로그·뉴스 → 개념 (인증 불필요, 다중 피드) | 없음 |
-| `nodex` | 프로젝트 저장소가 직접 쓴 결정·학습 기록 → 개념 (`nodex.toml`과 nodex `>=0.60,<0.61` 필요; [실행 파일·근거 버전 설정](.claude/skills/lore-setup/references/config.md#nodex-binary-selection)) | 없음 |
+| `nodex` | 프로젝트 저장소가 직접 쓴 결정·학습 기록 → 개념 (`nodex.toml`과 nodex `>=0.60,<0.61` 필요; [실행 파일·근거 버전 설정](skills/lore-setup/references/config.md#nodex-binary-selection)) | 없음 |
 | `manual` | `inbox/`에 드롭한 마크다운·텍스트·HTML 파일 | 없음 |
 | `tasks` | 내가 끝낸 작업 — `lore task`로 닫은 항목이 그날의 페이지가 됨 | 없음 |
 
@@ -392,43 +392,57 @@ lore schema                   # wiki/AGENTS.md(페이지 포맷 스키마) 생�
 
 ---
 
-## Claude Code 스킬
+## 에이전트 스킬과 실행 설정
 
-`lore` 바이너리(결정론)와 짝을 이루는 스킬 — *판단이 필요한* 부분을 Claude Code의 LLM이 담당합니다.
-
-Claude Code 2.1.246 이상을 사용하세요. 각 스킬은 `/lore-process:lore-process`처럼
-플러그인 접두어를 포함한 이름을 선언하며, 아래 짧은 명령도 사용할 수 있습니다.
-스케줄러는 `LORE_SKILL_DIR`에서 선택한 스킬을 명시적으로 불러와 전체 이름으로 호출합니다.
-지식 점검은 `lore-wiki`와 수선 작업을 처리하는 `lore-process`를 함께 불러옵니다.
-필수 스킬이 없으면 LLM 세션을 시작하기 전에 실패합니다.
-
-기존 개념은 `wiki/concepts/group/stored.md`처럼 하위 폴더에 둘 수 있습니다.
-`resolve`와 개념 목록의 `slug`는 `group/stored`이며, 재수집에서도 이 주소를 유지합니다.
-퇴역 개념의 이름은 중복 생성 방지를 위해 보존하고, 일반 검색과 지식 브리핑에서는 제외합니다.
+스킬 본문과 참고 자료의 원본은 `skills/`입니다. Claude 전용 메타데이터는
+`agents/claude.json`, Codex 호출 정책은 필요한 스킬의 `agents/openai.yaml`에 둡니다.
+배포할 때 호스트별 진입 파일을 만들며, 공통 절차를 따로 편집하지 않습니다.
 
 | 스킬 | 하는 일 |
 |---|---|
-| `/lore-process` | 수집 후 LLM 큐를 비움 — 요약·개념·테마·리뷰 채우기 |
-| `/lore-setup` | 워크스페이스를 들여다보며 config 작성 — Slack 채널·Jira 프로젝트·캘린더 ID 자동 발견 |
-| `/lore-wiki` | `query` 근거 기반 질의 · `add` 소스 추가 · `capture` 작업 중 발견 기록 · `audit` 구조/의미 감사 · `curate` 검토 반영 · `maintain` 분할 점검 |
-| `/lore-extract` | 프로젝트 repo의 전이가능한 지식을 일괄 추출 (scan→run→audit) |
-| `/lore-ingest` | `lore` CLI 래퍼 (수집·합성·상태·스케줄) |
-| `/lore-day` | 오늘의 할 일·지식 브리핑·리마인더·마감 |
+| `lore-process` | 큐의 요약·개념·합성·검토 결과 처리와 게시 검증 |
+| `lore-setup` | 소스·설정·인증·최초 실행·예약 등록 안내 |
+| `lore-wiki` | `query`, `add`, `capture`, `audit`, `curate`, `maintain`, `status` |
+| `lore-extract` | 저장소 지식 추출: scan → run → audit |
+| `lore-ingest` | 수집·합성·상태·스케줄 CLI 작업 |
+| `lore-day` | 할 일·브리핑·리마인더·마감 |
 
-> 예: `/lore-wiki query "RAG 검색 품질을 어떻게 올리지?"` → vault의 개념들을 교차 인용해 답하고, 좋은 답은 `wiki/explorations/`에 페이지로 환류합니다.
+Claude Code에서는 `/lore-wiki query ...`, Codex에서는 `$lore-wiki`로 사용합니다.
+`lore self deploy --skills user --agent codex`는 Codex에만 대화형 스킬을 설치합니다.
+`--agent both`는 두 호스트에 설치하며, `--skills project`는 현재 프로젝트 범위입니다.
+Claude 경로는 `.claude/skills`, Codex 경로는 `.agents/skills`입니다.
+무인 실행은 `<data>/skills/<engine>/`의 검증된 배포본을 사용합니다.
+누락·변조된 필수 파일은 세션 시작 전에 거부합니다.
 
----
+실행기 지원 범위는 Claude Code `>=2.1.259,<3`, Codex CLI `>=0.163.0,<1`입니다.
+호스트의 기존 인증과 정책을 사용합니다. 두 제품의 권한·샌드박스는 서로 다르며,
+Rust의 게시 검증을 OS 접근 통제와 같은 보장으로 취급하지 않습니다.
 
-## LLM 제공자 모드
+```yaml
+llm:
+  provider: queue
+execution:
+  default_profile: primary
+  profiles:
+    primary:
+      engine: claude-code
+      timeout_seconds: 3600
+    reviewer:
+      engine: codex
+      timeout_seconds: 3600
+  operations:
+    knowledge: reviewer
+```
 
-`config.yaml`의 `llm.provider`:
+이 예에서는 일일 처리·큐 처리는 `primary`, 의미 감사는 `reviewer`를 사용합니다.
+`--profile` 지정 → 작업별 설정 → 기본 프로필 순서로 선택하며 다른 실행기로 자동 전환하지 않습니다.
+`timeout_seconds`는 세션별 실행 예산입니다. 미완료 작업은 보존하고 실패로 보고합니다.
+실행 파일은 `executable`, 모델은 `model`로 필요한 프로필에만 지정합니다.
+상대 실행 파일 경로와 Claude의 `config_directory`는 설정 파일 기준입니다.
+Codex의 `profile`은 해당 CLI의 명명된 프로필입니다. 모델 변경만으로 기존 지식을 다시 쓰지 않습니다.
 
-| 모드 | 기본 | 설명 |
-|---|:---:|---|
-| `queue` | ✓ | `<vault>/.lorekeeper/queue/`에 JSONL 작업을 쌓고, `/lore-process`가 Claude Code 세션으로 처리 — **별도 LLM API 연동 불필요** |
-| `noop` | | LLM 작업 없음 — 개발·CI·템플릿만 필요할 때 |
-
-무인 운영은 `lore-daily.sh`가 맡습니다. 드레인은 `claude -p` 세션으로 도는데, `-p` 모드는 물어볼 수 없어 프롬프트가 필요한 동작은 그냥 거부되므로 프로토콜이 쓰는 도구를 `--allowedTools`로 명시해야 합니다 — 스크립트가 그 목록과 무인 실행임을 알리는 프리앰블을 함께 넘깁니다. 스크립트는 단계 하나가 실패해도 다음 단계를 건너뛰지 않습니다: 한 소스의 수집 실패는 나머지 소스의 큐를 처리하지 않을 이유가 되지 않기 때문입니다.
+`llm.provider: queue`는 타입이 있는 의미 작업을 보관하는 모드이며 실행기 선택과 별개입니다.
+`noop`는 LLM 작업을 만들지 않는 모드입니다. 검색·탐색과 결정적 수집은 에이전트 설치 없이도 사용할 수 있습니다.
 
 ---
 
@@ -515,53 +529,49 @@ lore init credentials   # 대화형 마법사 — Google 토큰은 브라우저 
 ## 스케줄링
 
 ```bash
-lore schedule --pipeline-dir ~/.local/share/lorekeeper/pipelines > lorekeeper.cron   # Linux: 검토 후 crontab -e에 병합
-lore schedule --format launchd --bin "$(command -v lore)" \
-              --pipeline-dir ~/.local/share/lorekeeper/pipelines               # macOS
+lore schedule > lorekeeper.cron   # Linux: 검토 후 crontab -e에 병합
+lore schedule --format launchd --bin "$(command -v lore)"   # macOS
 ```
 
-`lore schedule`은 예약 정의를 출력하며 OS에 등록하지 않습니다. Linux에서는 생성한
-`lorekeeper.cron`을 검토해 `crontab -e`에서 기존 예약과 병합하세요. `crontab -`에 바로
-파이프하면 기존 예약 전체가 교체됩니다. macOS에서는 출력의 각 plist를 표시된
-`~/Library/LaunchAgents/` 경로에 따로 저장하고, 로그 디렉터리를 만든 뒤
-`launchctl bootstrap gui/$(id -u) <plist의 절대 경로>`로 등록합니다.
-`launchctl print gui/$(id -u)/com.lorekeeper.ingest`와 실제 실행 로그로 상태를 확인하세요.
+`lore schedule`은 예약 정의를 출력하며 OS에 등록하지 않습니다. Linux에서는 기존 예약을
+보존하며 병합하세요. macOS에서는 각 plist를 표시된 LaunchAgents 경로에 저장하고 로그
+디렉터리를 만든 뒤 `launchctl bootstrap gui/$(id -u) <plist 절대 경로>`로 등록합니다.
+설정 변경 후에는 기존 작업을 `bootout`하고 새 정의를 등록하며, 비활성화한 작업도 해제합니다.
+`self uninstall`은 OS 예약을 해제하지 않습니다.
 
-설정의 예약 시각·실행 경로를 바꾸면 정의를 다시 생성해 등록해야 합니다. 기존 launchd
-작업은 해당 plist로 `bootout`한 뒤 새 정의를 `bootstrap`하고, 비활성화·삭제된 작업도
-별도로 해제하세요. Linux는 Lorekeeper 항목만 수정합니다. `self uninstall`은 OS 예약을
-해제하지 않습니다. 예약 시각은 호스트의 현지 시간이며 vault 날짜 계산과 구분됩니다.
-잠자기 후 launchd 실행은 놓친 모든 날짜의 수집을 재생하지 않습니다.
+예약 작업은 Rust 명령을 직접 실행합니다.
 
-기간별 예약은 정확한 종료 기간을 `--defer`로 기록합니다. 일일 파이프라인은 수집과
-지식화 후 기본 기간 → 분기 → 연간 순서로 재개합니다. 소스 실패나 미완료 의미 처리는
-`lore synthesis pending --status --json`에 이유와 함께 남습니다. 마지막 날을 수집하지
-않았다면 명시적으로 backfill해야 하며, 기존 문서만으로 과거 전체 수집을 증명하지 않습니다.
-별도 환경을 시험할 때는 launchd의 `--namespace`와 `--log-dir`로 예약과 로그를 분리하세요.
+| 예약 | 실행 |
+|---|---|
+| `ingest.schedule` | `lore run daily --wait` |
+| `graph.audit.schedule` | `lore run knowledge --wait` |
+| 주간·월간·분기·연간 | `lore synthesis <기간> --previous --defer --wait-for-vault` |
+| 유지보수 | `lore maintenance --prune-queue --wait-for-vault` |
+| 리마인더 | `lore task remind notify` |
 
-초기 설정은 설정 검증 → 인증이 필요한 소스의 dry-run → 최초 실제 수집과 `/lore-process`
-→ OS 등록 → 실제 예약 실행 확인 순서로 완료를 판단합니다. `validate`는 인증을
-검증하지 않고, ID를 찾는 외부 CLI의 로그인도 Lore 인증을 대신하지 않습니다.
+일일 작업은 전체 소스를 수집하고, 큐·역링크·검색 인덱스를 정리한 뒤 기본 기간 → 분기 →
+연간 순서로 재개합니다. 일부 소스 실패 후에도 가능한 정리는 진행하며 의존 단계 실패는
+그 이후 기간 처리를 중단합니다. 원본 수집과 의미 처리의 성공을 구분해 보고합니다.
+`--json`은 단계별 결과를 stdout에, 하위 명령 로그는 stderr에 출력합니다.
 
-예약된 headless LLM 호출은 `lore workflow --wait -- COMMAND...`를 거쳐 스킬의 읽기·판단·게시 동안 별도 Unix advisory lease를 유지합니다. 스크립트는 `/bin/bash`를 사용하며 결정적 수집·기간 생성·유지보수·알림은 기존의 짧은 writer lock을 유지합니다. 월간·분기·연간 검토는 각 주기를 유지하며 저장소 쓰기 잠금을 기다립니다. 유지보수와 큐 정리는 한 작업으로 순차 실행됩니다. 기존 예약을 교체할 때는 `com.lorekeeper.queue-prune` LaunchAgent도 해제·제거하세요. `--template-dir` 지정은 예약 환경에도 전달됩니다.
+의미 처리 동안 Rust 실행기가 볼트의 Unix workflow lease를 유지합니다. 기본 경합은
+실패하고 `--wait`는 취소 가능한 대기를 선택합니다. 종료 신호·시간 제한 시 자식 프로세스
+그룹을 종료하고 작업을 보존합니다. 짧은 문서·큐 쓰기 잠금과 외부 편집기에 대한 리비전
+검증은 별도로 유지합니다. 수동 세션은 입력을 읽기 전에 `lore workflow -- claude` 또는
+`lore workflow -- codex`로 시작하세요. descriptor를 닫거나 분리 실행한 작업은 수동 exec
+lease의 보장 범위 밖이며, workflow와 무인 실행은 Windows를 지원하지 않습니다.
 
-수동 저작·검토·게시 세션도 입력을 읽기 전에 같은 lease 안에서 시작합니다.
+스케줄러는 설정·런타임 자료의 절대 경로, 고정된 PATH와 필요한 기존 인증 디렉터리를
+담습니다. 선택한 호스트의 `CLAUDE_CONFIG_DIR` 또는 `CODEX_HOME`이 명시돼 있으면
+유효한 디렉터리인지 확인합니다. 표준 proxy 변수는 대소문자·빈 값을 유지하고,
+비밀 값이나 API 키는 예약 정의에 복사하지 않습니다. 환경을 바꾸면 정의를 다시 등록하세요.
 
-```bash
-lore --config /absolute/config.yaml workflow -- claude
-# 다른 workflow가 끝날 때까지 명시적으로 기다리려면:
-lore --config /absolute/config.yaml workflow --wait -- claude
-```
+예약 시각은 호스트 현지 시간, 문서 날짜는 볼트 시간대입니다. launchd는 잠자기 중 놓친
+실행을 깨어난 뒤 한 번 수행하지만 모든 날짜를 backfill하지 않습니다. cron은 놓친 실행을
+건너뜁니다. `lore synthesis pending --status --json`으로 수집 범위·의미 처리의 미완료 사유를 확인하세요.
+시험 환경은 `--namespace org.example.lore-test --log-dir /absolute/test/logs`로 분리할 수 있습니다.
 
-수동 실행은 `--wait`를 명시하지 않으면 경합 시 자식 명령을 시작하지 않고 실패하고, 예약 LLM 호출은 기다립니다. 수집과 기간 선택은 이 대기 전에 실행됩니다. 세션이나 pipeline 내부에서 lease를 다시 잡지 마세요. 자식 `lore` 명령은 기존의 짧은 writer lock을 사용합니다. lease는 Unix exec와 상속된 descriptor를 따르며 PID 파일이나 만료 시간이 없습니다. descriptor를 닫거나 작업을 분리 실행하는 프로그램은 보장 범위 밖이고 Windows는 지원하지 않습니다. wrapper 밖 명령과 외부 편집기는 막지 않습니다. 기존 세션·실행 중인 작업은 자동 편입되지 않으므로 옛 예약 자식의 종료를 확인하고 갱신된 pipeline 스크립트를 배포한 뒤 보호된 작업을 시작하세요. 경합을 풀려고 lock 파일을 삭제하면 안 됩니다.
-
-`ingest.schedule`은 **전체 소스를 한 번에** 수집하는 작업 하나를 발행합니다. `--pipeline-dir`가 있으면 `lore-daily.sh`, 없으면 `lore ingest`를 실행합니다. 소스를 지정한 수집은 전체 소스의 일일 집계인 work-log를 건너뜁니다. 각 합성 주기(weekly/monthly/quarterly/annual)는 독립된 일정을 유지하며, `maintenance.schedule`은 보존 기간 정리와 큐 정리를 자동화합니다.
-
-무인 운영용으로 `lore-daily.sh`(일일 수집+큐 처리+그래프 정합), `lore-weekly.sh`(주간 합성), `lore-knowledge.sh`(독립 지식 점검)와 월간·분기·연간·유지보수용 진입 스크립트가 함께 설치됩니다. 시스템 스케줄러(launchd/cron)가 이를 실행하므로 Claude 데스크탑이 떠 있지 않아도 동작합니다.
-
-`--pipeline-dir`가 그 스크립트를 **실제로 스케줄에 태우는** 플래그입니다. `lore ingest`와 `lore synthesis weekly`는 파이프라인의 첫 단계일 뿐이고 큐 드레인과 `queue apply`는 스크립트에만 있으므로, 이 플래그 없이 발행하면 매일 수집만 하고 요약·개념은 영원히 비어 있게 됩니다. 스케줄러는 환경을 거의 물려주지 않으므로 스크립트가 필요로 하는 `PATH`/`lore`/`claude`/config 경로도 함께 실립니다 — 추측이 아니라 이 명령을 실행한 세션에서 그대로 상속합니다. macOS는 launchd를 권합니다: 잠든 사이 놓친 실행은 깨어나면 한 번 실행되지만 모든 누락 날짜를 backfill하지는 않습니다. cron은 잠든 동안의 실행을 건너뜁니다.
-
-지식 점검은 수집·기간 합성과 별도 일정으로 설정합니다. 예를 들어 매주 일요일 최대 5개를 검토하려면:
+주간 의미 감사는 수집·기간 합성과 독립적으로 설정합니다.
 
 ```yaml
 graph:
@@ -570,13 +580,14 @@ graph:
     batch_size: 5
 ```
 
-`--pipeline-dir`로 등록하면 `/lore-wiki maintain`이 실제 원문·개념·관계의 의미를 검토합니다.
-처음 보는 개념과 근거가 바뀐 개념을 번갈아 처리하고, 대기 순서를 보존해 새 문서에 계속 밀리지 않게 합니다.
-변하지 않은 입력은 반복 검토하지 않습니다. 검토 문서가 사라지거나 그 근거가 바뀌면 다시 점검합니다.
-`.lorekeeper/knowledge-audit.json`은 최신 작업 판본과 대기 순서만 보관하며, 실제 판단·상충 근거는 Markdown 검토 문서에 남깁니다.
-설정을 생략하면 자동 의미 점검은 실행하지 않으며, `wiki audit-plan`으로 쓰기 없이 대상을 확인할 수 있습니다.
-미해결 판단은 보존하고, 단일 출처나 인용 수만으로 병합·삭제하지 않습니다.
-배치 제한은 개념 수를 제한하며 원문 크기나 LLM 비용을 제한하지 않습니다. 실제 실행 시간과 대기량을 보고 주기·배치 크기를 정하고, 기존 전체 지식의 첫 검토에는 별도 처리 용량을 확보해야 합니다. 감사 후 생긴 수선 작업까지 처리하고 검토 문서·구조·큐를 확인해야 실행이 완료됩니다. 최신 검토 기록이나 깨끗한 lint가 전체 지식의 의미적 일관성을 보증하지는 않습니다.
+처음 보는 개념과 변경된 개념을 번갈아 검토하고, 동일 입력은 반복 검토하지 않습니다.
+`.lorekeeper/knowledge-audit.json`은 최신 검토 판본과 대기 순서를 보관하고 판단·상충 근거는
+Markdown 검토 문서에 남깁니다. 단일 출처나 인용 수만으로 병합·삭제하지 않습니다.
+배치 수와 세션 시간 제한은 전체 원문 크기나 비용의 상한을 보장하지 않으므로 실제 실행량에
+맞게 조정하세요. 검토 기록·lint·정상 종료만으로 전체 지식의 의미적 일관성을 보증하지 않습니다.
+
+리마인더는 OS 알림 명령이 성공한 뒤에만 소진합니다. 이는 OS의 접수이며 사람이 보았다는
+확인은 아닙니다. 접수 직후 저장 전에 중단되면 재전달될 수 있습니다. 실패한 알림은 다음 실행에 남습니다.
 
 ### 볼트를 git으로 관리하기 (선택)
 

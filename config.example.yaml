@@ -40,7 +40,7 @@ identity:
 #   file: ~/.config/lorekeeper/credentials.json
 
 # ─── Ingestion schedule ───────────────────────────────────
-# A single daily run over ALL enabled sources. `lore schedule` emits ONE `lore ingest`
+# A single daily run over ALL enabled sources. `lore schedule` emits ONE `lore run daily`
 # crontab line from this. Ingestion is not scheduled per source: the work-log aggregates
 # personal events across every source for a day, so a single run keeps it complete.
 ingest:
@@ -444,7 +444,7 @@ concepts:
 #   audit:
 #     schedule: "0 7 * * 0"         # weekly semantic maintenance, independent of synthesis
 #     batch_size: 5                # rotate changed and first-time concepts fairly (1..100)
-#                                  # requires installed pipelines via --pipeline-dir
+#                                  # requires an explicit execution profile and deployed skills
 #   scope:
 #     dirs: [wiki]                   # vault-relative dirs to scan (default: vault.dirs.wiki)
 #     exclude: []                    # glob patterns to skip (e.g., ["wiki/log.md"])
@@ -468,18 +468,26 @@ concepts:
 #   schedule: "0 6 * * 0"            # cron for `lore schedule` to emit unattended
 #                                    # `lore maintenance --prune-queue --wait-for-vault`
 
-# ─── LLM ──────────────────────────────────────────────────
-# provider:
-#   queue     — (default) emit JSONL tasks under <vault>/.lorekeeper/queue/.
-#               A Claude Code skill (/lore-process) drains the queue using Claude
-#               Code's native LLM session — no API key, no separate billing.
-#               Workflow: `lore ingest` writes structural pages + queue; then run
-#               `/lore-process` in Claude Code to fill summaries and concepts.
-#               For unattended runs, use the installed lore-daily.sh pipeline via
-#               `lore schedule --pipeline-dir /absolute/path/to/pipelines`.
-#               (`;` not `&&`: a partial source failure exits non-zero, and the
-#               healthy sources' queued tasks should still drain)
-#   noop      — no LLM work; daily pages render without summary/concept content.
-#               Useful for development, CI, or vault-only sources.
+# Semantic work storage is independent of the agent that consumes it.
+# queue preserves typed requests; noop performs no LLM work.
 llm:
   provider: queue
+
+# Choose an authenticated CLI. No credentials belong in this configuration.
+# timeout_seconds is an explicit per-session wall-clock budget.
+execution:
+  default_profile: primary
+  profiles:
+    primary:
+      engine: claude-code
+      timeout_seconds: 3600
+      # executable: /absolute/path/to/claude
+      # model: <model available to this CLI account>
+      # config_directory: /existing/claude/profile
+    # reviewer:
+    #   engine: codex
+    #   timeout_seconds: 3600
+    #   executable: /absolute/path/to/codex
+    #   profile: <existing Codex profile name>
+  # operations:
+  #   knowledge: reviewer

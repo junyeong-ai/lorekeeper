@@ -1,0 +1,5 @@
+{
+  "argument-hint": "scan|run|audit <repo-path> [--domain <name>] [--transferability T1|T2|T3] [--include-git] [--full]",
+  "allowed-tools": "Bash(lore *)\nBash(ls *)\nBash(cat *)\nBash(head *)\nBash(find *)\nBash(grep *)\nBash(git *)\nBash(wc *)\nBash(jq *)\nBash(date *)\nBash(mkdir *)\nBash(python3 *)\nBash(cargo metadata *)\nRead\nEdit\nWrite\n",
+  "name": "lore-extract:lore-extract"
+}

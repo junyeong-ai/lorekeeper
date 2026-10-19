@@ -144,6 +144,10 @@ const SWEEP: &[&[&str]] = &[
 /// rather than an omission.
 const EXEMPT: &[(&[&str], &str)] = &[
     (
+        &["run"],
+        "native_execution exercises real job orchestration, agent refusals, cancellation and Git preservation",
+    ),
+    (
         &["workflow"],
         "executes an external foreground command on Unix; workflow integration tests contention, descriptor inheritance, child config, literal arguments, exit status and lease release",
     ),
@@ -243,6 +247,10 @@ const EXEMPT: &[(&[&str], &str)] = &[
         "promises to say something at a time, which is a write",
     ),
     (&["task", "remind", "drop"], "takes a promise back"),
+    (
+        &["task", "remind", "notify"],
+        "OS notification has external effects; notification_tests checks acknowledgement and retained failures",
+    ),
     (
         &["task", "remind", "due"],
         "prints what is due and RETIRES it, so observing it would consume a reminder nobody saw",
@@ -395,6 +403,9 @@ fn observe(staged: &Path, argv: &[&str]) -> String {
         .env("HOME", staged)
         .env("XDG_CONFIG_HOME", staged.join("config"))
         .env("XDG_DATA_HOME", staged.join("data"))
+        .env("PATH", staged.join("tools"))
+        .env_remove("CLAUDE_CONFIG_DIR")
+        .env_remove("CODEX_HOME")
         .env_remove("USERPROFILE")
         .env_remove("LOCALAPPDATA")
         .env_remove("LORE_INSTALL_DATA_DIR")
@@ -703,33 +714,24 @@ fn a_root_override_is_spelled_like_a_configured_one() {
     );
 }
 
-/// `lore schedule --pipeline-dir` names scripts that are not there.
-///
-/// Its output is piped straight into `crontab -`, so a missing script becomes a job that fails
-/// every night into mail nobody reads. The installer's own next step names that directory, and a
-/// release whose pipeline assets cannot be verified now leaves it empty — so this is the one
-/// moment the answer is knowable. Reported, not refused: generating a schedule for another
-/// machine is legitimate, and the schedule is still the one that was asked for.
 #[test]
-fn scheduling_a_pipeline_dir_that_holds_nothing_says_so() {
+fn scheduling_uses_native_commands_without_installed_scripts() {
     let staged = stage();
     let out = Command::cargo_bin("lore")
         .expect("lore binary")
         .current_dir(staged.path())
         .arg("--config")
         .arg(staged.path().join("corpus/config.yaml"))
-        .args(["schedule", "--pipeline-dir", "/nonexistent/pipelines"])
+        .env("LORE_INSTALL_DATA_DIR", staged.path().join("absent-data"))
+        .arg("schedule")
         .output()
-        .expect("command ran");
-
-    let stderr = String::from_utf8_lossy(&out.stderr);
+        .unwrap();
     assert!(
-        stderr.contains("/nonexistent/pipelines/lore-daily.sh"),
-        "the missing script must be named\n{stderr}"
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
     );
-    assert!(
-        String::from_utf8_lossy(&out.stdout).contains("/nonexistent/pipelines/lore-daily.sh"),
-        "and the schedule is still emitted"
-    );
-    assert!(out.status.success(), "reported, not refused");
+    assert!(!String::from_utf8_lossy(&out.stderr).contains("missing"));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("task remind notify"));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("run daily --wait"));
 }

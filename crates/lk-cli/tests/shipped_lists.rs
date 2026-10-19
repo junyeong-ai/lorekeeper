@@ -1,7 +1,7 @@
 //! Pins the hand-written lists in the shipped installers to what the repository actually holds.
 //!
 //! Both are lists a human must remember to update, in files no compiler reads. A seventh skill
-//! added under `.claude/skills` passed every gate and was then never packaged, never published
+//! added under `skills` passed every gate and was then never packaged, never published
 //! and never installed, because the name had to be added to `install.sh` and `install.ps1`
 //! separately. The MSRV is the same shape: one `rust-version` and several restatements of it,
 //! with nothing comparing them.
@@ -16,10 +16,10 @@ fn read(path: &Path) -> String {
     std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
 }
 
-/// Every directory under `.claude/skills`, which is what the release workflow packages (it
+/// Every directory under `skills`, which is what the release workflow packages (it
 /// enumerates the directory) and therefore what a release ships.
 fn shipped_skills() -> Vec<String> {
-    let dir = repo_root().join(".claude/skills");
+    let dir = repo_root().join("skills");
     let mut names: Vec<String> = std::fs::read_dir(&dir)
         .unwrap_or_else(|e| panic!("read {}: {e}", dir.display()))
         .flatten()
@@ -65,7 +65,7 @@ fn the_uninstall_scripts_list_every_skill() {
         assert_eq!(
             declared_skills(script, anchor),
             skills,
-            "{script}'s skill list must be exactly the directories under .claude/skills"
+            "{script}'s skill list must be exactly the directories under skills"
         );
     }
 }
@@ -284,14 +284,16 @@ fn a_spelled_command_is_read_the_way_a_shell_would() {
 #[test]
 fn every_command_a_skill_spells_is_one_it_permits() {
     let mut denied: Vec<String> = Vec::new();
-    for dir in std::fs::read_dir(repo_root().join(".claude/skills"))
+    for dir in std::fs::read_dir(repo_root().join("skills"))
         .expect("skills dir")
         .flatten()
         .filter(|entry| entry.path().is_dir())
     {
         let skill = dir.file_name().to_string_lossy().into_owned();
         let manifest = read(&dir.path().join("SKILL.md"));
-        let permitted = permitted_tools(manifest.split("---").nth(1).expect("skill frontmatter"));
+        let metadata: serde_json::Value =
+            serde_json::from_str(&read(&dir.path().join("agents/claude.json"))).unwrap();
+        let permitted = permitted_tools(metadata["allowed-tools"].as_str().expect("Claude tools"));
         if permitted.is_empty() {
             continue;
         }
@@ -324,50 +326,6 @@ fn every_command_a_skill_spells_is_one_it_permits() {
          `allowed-tools`, or spell the step as a command that is:\n  {}",
         denied.join("\n  ")
     );
-}
-
-/// The pipeline's `--allowedTools` covers every command the skills it runs declare needing.
-///
-/// Same denial, one layer out: the pipeline hands `claude -p` its own allowlist, so a tool the
-/// skill declares and the pipeline omits is refused every night, for work the drain may already
-/// have committed.
-#[test]
-fn the_pipeline_permits_every_tool_the_skills_it_runs_declare() {
-    let pipeline = read(&repo_root().join("scripts/lore-pipeline.sh"));
-    let weekly = read(&repo_root().join("scripts/lore-weekly.sh"));
-    let allowed: Vec<String> = pipeline
-        .split('"')
-        .filter_map(|token| token.strip_prefix("Bash("))
-        .filter_map(|token| token.strip_suffix(":*)"))
-        .map(str::to_owned)
-        .collect();
-    assert!(!allowed.is_empty(), "the pipeline permits no Bash command");
-
-    // The skills the pipelines invoke, read off the scripts rather than listed again here.
-    let invoked: Vec<String> = format!("{pipeline}{weekly}")
-        .split('"')
-        .filter_map(|token| token.strip_prefix("$SKILL_DIR/"))
-        .map(str::to_owned)
-        .collect();
-    assert!(
-        !invoked.is_empty(),
-        "no skill invocation found in the pipeline scripts"
-    );
-
-    for skill in invoked {
-        let manifest = read(
-            &repo_root()
-                .join(".claude/skills")
-                .join(&skill)
-                .join("SKILL.md"),
-        );
-        for tool in permitted_tools(manifest.split("---").nth(1).expect("skill frontmatter")) {
-            assert!(
-                allowed.contains(&tool),
-                "{skill} declares it runs `{tool}`, which the pipeline's --allowedTools denies"
-            );
-        }
-    }
 }
 
 /// The two scripts agree about where an install lives.
@@ -442,10 +400,10 @@ fn names_word(text: &str, word: &str) -> bool {
     })
 }
 
-/// Every `.md` under `.claude/skills`, SKILL.md and `references/` alike.
+/// Every `.md` under `skills`, SKILL.md and `references/` alike.
 fn glob_skill_markdown() -> Vec<PathBuf> {
     let mut found = Vec::new();
-    let mut stack = vec![repo_root().join(".claude/skills")];
+    let mut stack = vec![repo_root().join("skills")];
     while let Some(dir) = stack.pop() {
         for entry in std::fs::read_dir(&dir)
             .unwrap_or_else(|e| panic!("read {}: {e}", dir.display()))
@@ -467,13 +425,6 @@ fn glob_skill_markdown() -> Vec<PathBuf> {
 /// never request the removed Markdown corpus lists.
 #[test]
 fn knowledge_finalization_refreshes_sqlite_and_the_declared_guides() {
-    let pipeline = read(&repo_root().join("scripts/lore-pipeline.sh"));
-    for (page, command) in lk_core::vault_path::GENERATED_WIKI_PAGES {
-        assert!(
-            pipeline.contains(&format!("lore_cmd {command}")),
-            "{page} has no scheduled owner"
-        );
-    }
     let mut refreshing = 0;
     for skill in glob_skill_markdown()
         .into_iter()
@@ -547,7 +498,7 @@ fn every_source_type_is_documented_and_exemplified() {
     // a new adapter; stated as a list, it silently does. The gate is that it stays a rule: no
     // adapter name beside the path template it routes to.
     const DAILY_TEMPLATE: &str = "`<daily>/{source-id}/DATE.md`";
-    let enumerated: Vec<String> = read(&root.join(".claude/skills/lore-ingest/SKILL.md"))
+    let enumerated: Vec<String> = read(&root.join("skills/lore-ingest/SKILL.md"))
         .lines()
         .filter(|line| line.contains(DAILY_TEMPLATE))
         .flat_map(|line| {

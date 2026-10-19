@@ -50,3 +50,8 @@ personal:
   tasks:
     board: tasks.md
     carry_warn_after: 3
+
+execution:
+  default_profile: primary
+  profiles:
+    primary: {engine: claude-code, timeout_seconds: 60}

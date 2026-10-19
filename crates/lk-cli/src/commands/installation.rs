@@ -2,11 +2,11 @@
 //!
 //! Everything inside the vault declares what it is and what it was derived from, and a command
 //! checks those declarations. The installation had no such account of itself: the binary, the
-//! agent skills, the pipeline scripts and the templates were separately published artifacts,
+//! agent skills, the runtime skills and the templates were separately published artifacts,
 //! and `lore health` measures the freshness of ingested data, so a scheduled install could
 //! fall arbitrarily far behind while every check it had reported green.
 //!
-//! The skills, the pipelines and the templates are now compiled into the binary, so they
+//! The skills, the runtime skills and the templates are now compiled into the binary, so they
 //! cannot be a different version from it. What remains is whether the deployed COPIES still
 //! equal what this binary carries, which `lore self status` answers by comparing bytes and
 //! `lore self deploy` repairs.
@@ -25,18 +25,21 @@ pub enum SelfCommand {
         /// Emit the report as JSON
         #[arg(long)]
         json: bool,
-        /// Directory holding the templates and pipelines (default: the one the last deploy
+        /// Directory holding the templates and runtime skills (default: the one the last deploy
         /// recorded, else the installer's)
         #[arg(long)]
         data_dir: Option<PathBuf>,
     },
-    /// Write the skills, pipelines and templates this binary carries
+    /// Write the skills and templates this binary carries
     Deploy {
         /// Where to write the agent skills. Omitted, they are rewritten wherever they already
         /// are and created nowhere — an install that took none must not acquire them.
         #[arg(long, value_enum)]
         skills: Option<SkillScope>,
-        /// Directory holding the templates and pipelines (default: the installer's data dir)
+        /// Agent receiving interactive skills; unattended skills are always carried locally
+        #[arg(long, value_enum, default_value_t = AgentTarget::Both)]
+        agent: AgentTarget,
+        /// Directory holding the templates and runtime skills (default: the installer's data dir)
         #[arg(long)]
         data_dir: Option<PathBuf>,
     },
@@ -55,7 +58,7 @@ pub enum SelfCommand {
         /// Do not ask for confirmation
         #[arg(long, short = 'y')]
         yes: bool,
-        /// Directory holding the templates and pipelines (default: the one the last deploy
+        /// Directory holding the templates and runtime skills (default: the one the last deploy
         /// recorded, else the installer's)
         #[arg(long)]
         data_dir: Option<PathBuf>,
@@ -68,7 +71,7 @@ pub enum SelfCommand {
         /// Also remove the config directory, including `config.yaml`
         #[arg(long)]
         purge_config: bool,
-        /// Directory holding the templates and pipelines (default: the installer's data dir)
+        /// Directory holding the templates and runtime skills (default: the installer's data dir)
         #[arg(long)]
         data_dir: Option<PathBuf>,
     },
@@ -79,6 +82,25 @@ pub enum SkillScope {
     User,
     Project,
     None,
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, Default)]
+pub enum AgentTarget {
+    ClaudeCode,
+    Codex,
+    #[default]
+    Both,
+}
+
+impl AgentTarget {
+    fn engines(self) -> &'static [lk_core::execution::AgentEngine] {
+        use lk_core::execution::AgentEngine::{ClaudeCode, Codex};
+        match self {
+            Self::ClaudeCode => &[ClaudeCode],
+            Self::Codex => &[Codex],
+            Self::Both => &[ClaudeCode, Codex],
+        }
+    }
 }
 
 impl SkillScope {
@@ -94,9 +116,11 @@ impl SkillScope {
 pub async fn run(opts: &GlobalOptions, cmd: SelfCommand) -> miette::Result<()> {
     match cmd {
         SelfCommand::Status { json, data_dir } => status(opts, json, data_dir),
-        SelfCommand::Deploy { skills, data_dir } => {
-            deploy(opts, &installation(data_dir)?, skills).await
-        }
+        SelfCommand::Deploy {
+            skills,
+            agent,
+            data_dir,
+        } => deploy(opts, &installation(data_dir)?, skills, agent).await,
         SelfCommand::Update {
             version,
             force,
@@ -170,10 +194,9 @@ fn print_report(report: &InstallationReport) {
     if report.skills.is_empty() {
         row("skills", "not deployed", None);
     }
-    for (level, group) in &report.skills {
+    for (level, group) in report.skills.iter().chain(&report.runtime_skills) {
         print_group(&format!("skills ({level})"), group);
     }
-    print_group("pipelines", &report.pipelines);
     print_group("templates", &report.templates);
     print_group("config", &report.config);
 
@@ -236,52 +259,56 @@ async fn deploy(
     opts: &GlobalOptions,
     installation: &Installation,
     skills: Option<SkillScope>,
+    agent: AgentTarget,
 ) -> miette::Result<()> {
-    let levels: Vec<SkillLevel> = match skills {
-        Some(scope) => scope.level().into_iter().collect(),
-        None => installation.deployed_skill_levels(),
-    };
-    for level in levels {
-        // A level with no directory is nothing to write, not a reason to abandon the rest: the
-        // checkout this binary was built from already HOLDS these skills — they are what it
-        // carries — so the requested state is satisfied, and failing here left an install with
-        // no pipelines, no templates and no config example.
-        let Some(root) = installation.skills_dir(level) else {
-            eprintln!(
-                "Skills      skipped — {}",
-                installation.skills_reason(level)
-            );
-            continue;
+    for engine in agent.engines() {
+        let selected = installation.for_engine(*engine);
+        let installation = &selected;
+        let levels: Vec<SkillLevel> = match skills {
+            Some(scope) => scope.level().into_iter().collect(),
+            None => installation.deployed_skill_levels(),
         };
-        // The removals come back on BOTH paths, because the failure path is the one where the
-        // user most needs them: a deploy that deleted a directory and then failed on a write
-        // reported only "permission denied", which reads as "nothing happened".
-        let (outcome, failure) = match installation.deploy_skills(level) {
-            Ok(outcome) => (outcome, None),
-            Err(lk_dist::DeployFailure { done, error }) => (done, Some(error)),
-        };
-        for removed in &outcome.removed {
+        for level in levels {
+            let root = installation
+                .skills_dir(level)
+                .ok_or_else(|| miette::miette!("{}", installation.skills_reason(level)))?;
+            // The removals come back on BOTH paths, because the failure path is the one where the
+            // user most needs them: a deploy that deleted a directory and then failed on a write
+            // reported only "permission denied", which reads as "nothing happened".
+            let (outcome, failure) = match installation.deploy_skills(level) {
+                Ok(outcome) => (outcome, None),
+                Err(lk_dist::DeployFailure { done, error }) => (done, Some(error)),
+            };
+            for removed in &outcome.removed {
+                eprintln!(
+                    "            removed {} — this build no longer carries it",
+                    removed.display()
+                );
+            }
+            if let Some(error) = failure {
+                return Err(miette::miette!("{error}"));
+            }
+            eprintln!("Skills      {} → {}", outcome.written.len(), root.display());
             eprintln!(
-                "            removed {} — this build no longer carries it",
-                removed.display()
+                "            {}",
+                lk_dist::skill_names()
+                    .iter()
+                    .map(|name| format!("/{name}"))
+                    .collect::<Vec<_>>()
+                    .join("  ")
             );
         }
-        if let Some(error) = failure {
-            return Err(miette::miette!("{error}"));
-        }
-        eprintln!("Skills      {} → {}", outcome.written.len(), root.display());
-        eprintln!(
-            "            {}",
-            lk_dist::skill_names()
-                .iter()
-                .map(|name| format!("/{name}"))
-                .collect::<Vec<_>>()
-                .join("  ")
-        );
+    }
+
+    for engine in AgentTarget::Both.engines() {
+        let root = installation
+            .for_engine(*engine)
+            .deploy_runtime_skills()
+            .map_err(|e| miette::miette!("{e}"))?;
+        eprintln!("Agent skills {} → {}", engine.as_str(), root.display());
     }
 
     for (label, outcome) in [
-        ("Pipelines  ", installation.deploy_pipelines()),
         ("Templates  ", installation.deploy_templates()),
         ("Config     ", installation.deploy_config_examples()),
     ] {
@@ -473,7 +500,7 @@ fn refuse_while_work_is_queued(opts: &GlobalOptions, force: bool) -> miette::Res
 
 /// Deploy through the NEW binary, never from here.
 ///
-/// This process carries the skills, pipelines and templates of the version being replaced, so
+/// This process carries the skills and templates of the version being replaced, so
 /// writing them from here would deploy the predecessor over the successor. Best-effort: the
 /// binary is already in place and working, so a data directory that cannot be written is a
 /// follow-up rather than a failed update.
@@ -493,13 +520,21 @@ fn redeploy_through(binary: &std::path::Path, opts: &GlobalOptions, data_dir: &s
 }
 
 fn uninstall(installation: &Installation, yes: bool, purge_config: bool) -> miette::Result<()> {
-    let levels = installation.deployed_skill_levels();
+    let deployments = AgentTarget::Both
+        .engines()
+        .iter()
+        .flat_map(|engine| {
+            let view = installation.for_engine(*engine);
+            view.deployed_skill_levels()
+                .into_iter()
+                .map(move |level| (view.clone(), level))
+        })
+        .collect::<Vec<_>>();
     eprintln!("This removes:");
     eprintln!("  {}", installation.binary().display());
-    eprintln!("  {}", installation.pipelines_dir().display());
     eprintln!("  {}", installation.templates_dir().display());
-    for level in &levels {
-        if let Some(dir) = installation.skills_dir(*level) {
+    for (view, level) in &deployments {
+        if let Some(dir) = view.skills_dir(*level) {
             eprintln!("  {}/lore-*", dir.display());
         }
     }
@@ -515,16 +550,16 @@ fn uninstall(installation: &Installation, yes: bool, purge_config: bool) -> miet
         return Ok(());
     }
 
-    for level in levels {
-        let Some(root) = installation.skills_dir(level) else {
+    for (view, level) in deployments {
+        let Some(root) = view.skills_dir(level) else {
             continue;
         };
         for name in lk_dist::skill_names() {
             remove_dir(&root.join(name))?;
         }
     }
-    remove_dir(&installation.pipelines_dir())?;
     remove_dir(&installation.templates_dir())?;
+    remove_dir(&installation.data_dir().join("skills"))?;
     // Only when it is now empty: a data directory holding something this tool did not put
     // there is not this tool's to delete.
     let _ = std::fs::remove_dir(installation.data_dir());

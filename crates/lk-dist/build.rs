@@ -1,4 +1,4 @@
-//! Enumerates the agent skills and the pipeline scripts so `embedded.rs` can `include_str!`
+//! Enumerates the agent skills and configuration examples so `embedded.rs` can `include_str!`
 //! each one.
 //!
 //! Generated rather than listed: the set is a directory tree, and a hand-written list is a
@@ -8,35 +8,14 @@
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-/// The scheduled pipelines, named because `scripts/` also holds the installers and the gate
-/// runner — files a user never receives through `lore`.
-const PIPELINES: [&str; 9] = [
-    "lore-pipeline.sh",
-    "lore-daily.sh",
-    "lore-weekly.sh",
-    "lore-knowledge.sh",
-    "lore-remind.sh",
-    "lore-maintenance.sh",
-    "lore-monthly.sh",
-    "lore-quarterly.sh",
-    "lore-annual.sh",
-];
-
 fn main() {
     let repo = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"))
         .join("../..");
-    let skills = repo.join(".claude/skills");
+    let skills = repo.join("skills");
 
     let mut out = String::new();
     emit(&mut out, "SKILL_FILES", collect(&skills, &skills));
-    emit(
-        &mut out,
-        "PIPELINE_FILES",
-        PIPELINES
-            .iter()
-            .map(|name| ((*name).to_string(), repo.join("scripts").join(name)))
-            .collect(),
-    );
+    emit_claude_skills(&mut out, &skills);
     emit(
         &mut out,
         "CONFIG_FILES",
@@ -48,6 +27,36 @@ fn main() {
 
     let dest = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR")).join("embedded.rs");
     std::fs::write(&dest, out).unwrap_or_else(|e| panic!("write {}: {e}", dest.display()));
+}
+
+fn emit_claude_skills(out: &mut String, root: &Path) {
+    writeln!(out, "pub const CLAUDE_SKILL_FILES: &[(&str, &str)] = &[").unwrap();
+    let mut files = collect(root, root);
+    files.sort();
+    for (relative, path) in files {
+        if path.file_name().is_some_and(|name| name == "SKILL.md") {
+            let source = std::fs::read_to_string(&path).expect("read skill");
+            let mut page =
+                lk_core::frontmatter::parse_page(&source).expect("parse skill frontmatter");
+            let host = path.parent().unwrap().join("agents/claude.json");
+            let fields: std::collections::BTreeMap<String, serde_json::Value> =
+                serde_json::from_str(&std::fs::read_to_string(host).expect("read Claude metadata"))
+                    .expect("parse Claude metadata");
+            page.frontmatter.fields.extend(fields);
+            let header = page
+                .frontmatter
+                .fields
+                .iter()
+                .map(|(key, value)| format!("{key}: {value}\n"))
+                .collect::<String>();
+            let contents = format!("---\n{header}---\n{}", page.body);
+            writeln!(out, "    ({relative:?}, {contents:?}),").unwrap();
+        } else {
+            let absolute = path.canonicalize().expect("canonical skill path");
+            writeln!(out, "    ({relative:?}, include_str!({absolute:?})),").unwrap();
+        }
+    }
+    writeln!(out, "];").unwrap();
 }
 
 fn collect(dir: &Path, base: &Path) -> Vec<(String, PathBuf)> {

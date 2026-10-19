@@ -6,6 +6,7 @@ param(
     [string]$InstallDir,
     [string]$DataDir,
     [ValidateSet('user', 'project', 'none')] [string]$Skill = 'user',
+    [ValidateSet('claude-code', 'codex', 'both')] [string]$Agent,
     [switch]$FromSource,
     # A default run asks nothing and every decision resolves to its safe answer, so the
     # documented one-liner is one command rather than one command and a question. -Interactive
@@ -125,9 +126,8 @@ function Get-ConfigDir {
 #
 # The skills, the rendering templates and the config example are compiled into `lore`, so the
 # version that deploys them is the version that carries them; there is no second artifact to
-# fetch, verify, or find a stale copy of. The pipeline scripts are POSIX shell fired by a
-# system scheduler, so `self deploy` writes them and Windows simply has no scheduler to point
-# at them. This is also what a later `lore self update` runs.
+# fetch, verify, or find a stale copy of. Native unattended jobs require Unix leases.
+# This is also what a later `lore self update` runs.
 function Deploy-Artifacts($bin, $level) {
     Write-Step 'Deploying skills, templates and the config example'
     # `lore` reports progress on stderr, and under `$ErrorActionPreference = 'Stop'` Windows
@@ -144,7 +144,9 @@ function Deploy-Artifacts($bin, $level) {
     $ErrorActionPreference = 'Continue'
     $exit = 1
     try {
-        & $bin self deploy --skills $level --data-dir $DataDir
+        $deployArgs = @('self', 'deploy', '--skills', $level, '--data-dir', $DataDir)
+        if ($Agent) { $deployArgs += @('--agent', $Agent) }
+        & $bin @deployArgs
         $exit = $LASTEXITCODE
     } catch {
         Write-Warn $_.Exception.Message
@@ -214,8 +216,8 @@ Write-Host 'Review' -ForegroundColor White
 Write-Host "  binary    $(Join-Path $InstallDir "$BinaryName.exe") (v$version, $method)"
 Write-Host "  templates $(Join-Path $DataDir 'templates')"
 switch ($Skill) {
-    'user'    { Write-Host "  skills    $env:USERPROFILE\.claude\skills\lore-*" }
-    'project' { Write-Host "  skills    .\.claude\skills\lore-*" }
+    'user'    { Write-Host '  skills    user-level agent skills' }
+    'project' { Write-Host '  skills    project-level agent skills' }
     'none'    { Write-Host '  skills    (skipped)' }
 }
 if ($Skill -ne 'none') {
@@ -295,6 +297,6 @@ Write-Host '       Add selected source/module blocks from config.example.yaml, t
 Write-Host "       Authenticated sources only: $BinaryName init credentials"
 Write-Host "  2. $BinaryName validate; $BinaryName schema    Check config and generate the writing contract"
 Write-Host "  3. $BinaryName ingest --dry-run               Check selected source access"
-Write-Host "  4. $BinaryName ingest                         Then run /lore-process in Claude Code"
+Write-Host "  4. $BinaryName ingest                         Then use lore-process in Claude Code or Codex"
 Write-Host "  5. $BinaryName queue check; $BinaryName wiki reviews --check"
 Write-Host '       Unattended scheduled pipelines require macOS or Linux.'

@@ -78,7 +78,7 @@ pub fn merge_concepts(
     }
     let session = lk_vault::MutationSession::acquire(vault_root)
         .map_err(|e| GraphError::Io(e.to_string()))?;
-    merge_in_session(pages, &session, wiki_dir, from_slug, into_slug, force)
+    merge_in_session(pages, &session, wiki_dir, from_slug, into_slug, force, None)
 }
 
 pub fn merge_in_session(
@@ -88,8 +88,9 @@ pub fn merge_in_session(
     from_slug: &str,
     into_slug: &str,
     force: bool,
+    workflow_id: Option<&lk_core::execution::WorkflowId>,
 ) -> Result<MergeResult, GraphError> {
-    let (result, plan) = plan_merge(
+    let (result, mut plan) = plan_merge(
         pages,
         session.root(),
         wiki_dir,
@@ -98,6 +99,21 @@ pub fn merge_in_session(
         false,
         force,
     )?;
+    if let Some(workflow_id) = workflow_id {
+        let concepts = Path::new(wiki_dir).join(lk_core::vault_path::CONCEPTS_SUBDIR);
+        let from = concepts.join(format!("{}.md", result.from_slug));
+        let into = concepts.join(format!("{}.md", result.into_slug));
+        let original = std::fs::read_to_string(session.root().join(&from))
+            .map_err(|e| GraphError::Io(e.to_string()))?;
+        crate::audit::record_merge(
+            &mut plan,
+            session.root(),
+            workflow_id,
+            &from,
+            &original,
+            &into,
+        )?;
+    }
     session
         .apply(plan)
         .map_err(|e| GraphError::Io(e.to_string()))?;

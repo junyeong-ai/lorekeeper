@@ -4,12 +4,12 @@
 //! The vault runs on one discipline: every page declares its format and what it was derived
 //! from, a command checks those declarations, and another repairs what the check reports.
 //! Nothing is inferred from how a body looks. That discipline used to stop at the vault
-//! boundary — the binary, the agent skills, the pipeline scripts and the templates were four
+//! boundary — the binary, the agent skills, the runtime skills and the templates were four
 //! separately published artifacts that declared nothing, so a scheduled install could fall a
 //! year behind while `lore health` reported green, because freshness of ingested data is the
 //! only thing that declared itself.
 //!
-//! The answer here is one step stronger than declaring: the skills, the pipelines and the
+//! The answer here is one step stronger than declaring: the skills, the runtime skills and the
 //! templates are COMPILED INTO the binary, so they cannot be a different version from it —
 //! there is one artifact, and the deploy methods on [`Installation`] write the copies. What
 //! is left to check is only whether a deployed copy still equals what this binary carries,
@@ -30,8 +30,7 @@ pub use coherence::{
     ArtifactState, DeployedArtifact, DeployedGroup, InstallationReport, SchemaState,
 };
 pub use embedded::{
-    EmbeddedFile, config_files, pipeline_files, pipeline_names, skill_files, skill_names,
-    template_files,
+    EmbeddedFile, config_files, skill_files, skill_files_for, skill_names, template_files,
 };
 pub use layout::{DeployFailure, Deployed, Installation, Prune, SkillLevel};
 pub use release::{Latest, Provenance, REPO, ReleaseClient, archive_name, asset_url, parse_tag};

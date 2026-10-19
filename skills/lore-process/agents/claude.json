@@ -1,0 +1,4 @@
+{
+  "allowed-tools": "Bash(ls *)\nBash(cat *)\nBash(jq *)\nBash(wc *)\nBash(head *)\nBash(mkdir *)\nBash(mv *)\nBash(lore *)\nBash(date *)\nBash([ *)\nBash(basename *)\nRead\nEdit\nWrite\nGlob\n",
+  "name": "lore-process:lore-process"
+}

@@ -2,9 +2,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use crate::embedded::{
-    EmbeddedFile, config_files, pipeline_files, skill_files, skill_names, template_files,
-};
+use crate::embedded::{EmbeddedFile, config_files, skill_files_for, skill_names, template_files};
 use crate::layout::{Installation, Prune, SkillLevel};
 use crate::target::ReleaseTarget;
 
@@ -43,7 +41,7 @@ pub struct DeployedArtifact {
 /// A group of artifacts at one location, and whether that location holds a deployment at all.
 ///
 /// An absent group is absent, not stale: an install that deliberately took no skills, or a
-/// machine with no scheduler and therefore no pipelines, is coherent. Only a group that WAS
+/// machine that has never deployed runtime assets, is coherent. Only a group that WAS
 /// deployed can be behind, which is what keeps this check from reporting a defect against a
 /// choice the user made.
 #[derive(Debug, Clone, Serialize)]
@@ -145,7 +143,7 @@ pub struct InstallationReport {
     pub target: Option<String>,
     pub self_replaceable: bool,
     pub skills: Vec<(String, DeployedGroup)>,
-    pub pipelines: DeployedGroup,
+    pub runtime_skills: Vec<(String, DeployedGroup)>,
     pub templates: DeployedGroup,
     pub config: DeployedGroup,
     pub schema: SchemaState,
@@ -158,45 +156,76 @@ impl InstallationReport {
     /// the vault the config names, and this crate knows nothing about vaults.
     pub fn build(installation: &Installation, schema: SchemaState) -> Self {
         let target = ReleaseTarget::current();
-        let skills = installation
-            .deployed_skill_levels()
+        let engines = [
+            lk_core::execution::AgentEngine::ClaudeCode,
+            lk_core::execution::AgentEngine::Codex,
+        ];
+        let skills = engines
             .into_iter()
-            .filter_map(|level: SkillLevel| {
-                let root = installation.skills_dir(level)?;
-                let prune = Prune::for_level(level);
-                let mut artifacts: Vec<DeployedArtifact> = skill_names()
+            .flat_map(|engine| {
+                let installation = installation.for_engine(engine);
+                installation
+                    .deployed_skill_levels()
                     .into_iter()
-                    .map(|name| {
-                        let path = root.join(name);
-                        DeployedArtifact {
-                            state: compare_tree(&path, &skill_files(name), prune),
-                            name: name.to_string(),
-                            path,
-                        }
+                    .filter_map(|level: SkillLevel| {
+                        let root = installation.skills_dir(level)?;
+                        let prune = Prune::for_level(level);
+                        let mut artifacts: Vec<DeployedArtifact> = skill_names()
+                            .into_iter()
+                            .map(|name| {
+                                let path = root.join(name);
+                                DeployedArtifact {
+                                    state: compare_tree(
+                                        &path,
+                                        &skill_files_for(engine, name),
+                                        prune,
+                                    ),
+                                    name: name.to_string(),
+                                    path,
+                                }
+                            })
+                            .collect();
+                        artifacts.extend(
+                            installation
+                                .retired_skills(level)
+                                .into_iter()
+                                .filter(|_| prune.sweeps())
+                                .map(|path| DeployedArtifact {
+                                    name: path
+                                        .file_name()
+                                        .map(|name| name.to_string_lossy().into_owned())
+                                        .unwrap_or_default(),
+                                    path,
+                                    state: ArtifactState::Retired,
+                                }),
+                        );
+                        Some((
+                            format!("{}/{}", engine.as_str(), level.as_str()),
+                            DeployedGroup {
+                                location: root,
+                                deployed: true,
+                                artifacts,
+                            },
+                        ))
                     })
-                    .collect();
-                artifacts.extend(
-                    installation
-                        .retired_skills(level)
-                        .into_iter()
-                        .filter(|_| prune.sweeps())
-                        .map(|path| DeployedArtifact {
-                            name: path
-                                .file_name()
-                                .map(|name| name.to_string_lossy().into_owned())
-                                .unwrap_or_default(),
-                            path,
-                            state: ArtifactState::Retired,
-                        }),
-                );
-                Some((
-                    level.as_str().to_string(),
-                    DeployedGroup {
-                        location: root,
-                        deployed: true,
-                        artifacts,
-                    },
-                ))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        let runtime_skills = engines
+            .into_iter()
+            .flat_map(|engine| {
+                let root = installation.for_engine(engine).runtime_skills_dir();
+                skill_names().into_iter().map(move |name| {
+                    (
+                        format!("{}/{name}", engine.as_str()),
+                        group_required(
+                            &root.join(name),
+                            &skill_files_for(engine, name),
+                            installation.has_deployment_record()
+                                || !matches!(root.try_exists(), Ok(false)),
+                        ),
+                    )
+                })
             })
             .collect();
 
@@ -206,9 +235,17 @@ impl InstallationReport {
             target: target.map(|t| t.triple.to_string()),
             self_replaceable: target.is_some_and(ReleaseTarget::is_self_replaceable),
             skills,
-            pipelines: group(&installation.pipelines_dir(), &pipeline_files()),
-            templates: group(&installation.templates_dir(), &template_files()),
-            config: group(installation.config_dir(), &config_files()),
+            runtime_skills,
+            templates: group_required(
+                &installation.templates_dir(),
+                &template_files(),
+                installation.has_deployment_record(),
+            ),
+            config: group_required(
+                installation.config_dir(),
+                &config_files(),
+                installation.has_deployment_record(),
+            ),
             schema,
         }
     }
@@ -240,16 +277,16 @@ impl InstallationReport {
             target: _,
             self_replaceable: _,
             skills,
-            pipelines,
+            runtime_skills,
             templates,
             config,
             schema,
         } = self;
         skills
             .iter()
+            .chain(runtime_skills.iter())
             .map(|(_, group)| group.stale().count())
             .sum::<usize>()
-            + pipelines.stale().count()
             + templates.stale().count()
             + config.stale().count()
             + usize::from(!schema.is_current())
@@ -260,10 +297,14 @@ impl InstallationReport {
 ///
 /// Not when the DIRECTORY exists: the config directory exists because the user's own
 /// `config.yaml` lives in it, which says nothing about whether the example was ever deployed —
-/// so a coherent source build that never ran `self deploy` reported drift it could not have
-/// caused. The same rule makes an empty pipelines directory absent rather than wholly stale.
+/// so a source build that never ran `self deploy` has no expected deployment.
+#[cfg(test)]
 fn group(dir: &Path, files: &[EmbeddedFile]) -> DeployedGroup {
-    if !files.iter().any(|file| dir.join(file.relative).exists()) {
+    group_required(dir, files, false)
+}
+
+fn group_required(dir: &Path, files: &[EmbeddedFile], required: bool) -> DeployedGroup {
+    if !required && !files.iter().any(|file| dir.join(file.relative).exists()) {
         return DeployedGroup::absent(dir.to_path_buf());
     }
     DeployedGroup {
@@ -399,9 +440,45 @@ mod tests {
     #[test]
     fn a_directory_that_was_never_deployed_is_absent_not_stale() {
         let tmp = tempfile::tempdir().unwrap();
-        let group = group(&tmp.path().join("pipelines"), &pipeline_files());
+        let group = group(&tmp.path().join("config"), &config_files());
         assert!(!group.deployed);
         assert_eq!(group.stale().count(), 0);
+    }
+
+    #[test]
+    fn recorded_installation_requires_all_runtime_skills_even_after_directory_loss() {
+        let tmp = tempfile::tempdir().unwrap();
+        let installation = Installation::at(
+            tmp.path().join("bin/lore"),
+            tmp.path().join("data"),
+            tmp.path().join("config"),
+            None,
+            None,
+        );
+        for engine in [
+            lk_core::execution::AgentEngine::ClaudeCode,
+            lk_core::execution::AgentEngine::Codex,
+        ] {
+            installation
+                .for_engine(engine)
+                .deploy_runtime_skills()
+                .unwrap();
+        }
+        installation.remember().unwrap();
+        for path in [
+            installation.runtime_skills_dir().join("lore-process"),
+            installation.data_dir().join("skills"),
+        ] {
+            std::fs::remove_dir_all(path).unwrap();
+            let report = InstallationReport::build(&installation, SchemaState::Unconfigured);
+            let process = report
+                .runtime_skills
+                .iter()
+                .find(|(name, _)| name == "claude-code/lore-process")
+                .unwrap();
+            assert!(process.1.deployed);
+            assert!(process.1.stale().count() > 0);
+        }
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! Holds what the binary carries to what the repository holds, and the release-target table to
 //! the two places outside Rust that name a target.
 //!
-//! The skills, pipelines, templates and config example are compiled in, so they cannot be a
+//! The skills, templates and config example are compiled in, so they cannot be a
 //! different version from the binary — but they can be the wrong FILES if the manifest that
 //! collects them stops matching the tree. That is what these read.
 
@@ -49,7 +49,7 @@ fn tree(dir: &Path) -> Vec<String> {
 /// manifest that collects it to the directory it collects from.
 #[test]
 fn the_binary_carries_every_skill_the_repository_holds() {
-    let root = repo_root().join(".claude/skills");
+    let root = repo_root().join("skills");
     let mut on_disk: Vec<String> = std::fs::read_dir(&root)
         .unwrap_or_else(|e| panic!("read {}: {e}", root.display()))
         .flatten()
@@ -78,21 +78,6 @@ fn the_binary_carries_every_skill_the_repository_holds() {
             );
         }
     }
-}
-
-#[test]
-fn the_binary_carries_the_pipeline_scripts_the_repository_holds() {
-    for file in lk_dist::pipeline_files() {
-        let path = repo_root().join("scripts").join(file.relative);
-        assert_eq!(file.contents, read(&path), "{} drifted", path.display());
-    }
-    let mut expected: Vec<_> = std::fs::read_dir(repo_root().join("scripts"))
-        .unwrap()
-        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
-        .filter(|name| name.starts_with("lore-") && name.ends_with(".sh"))
-        .collect();
-    expected.sort();
-    assert_eq!(lk_dist::pipeline_names(), expected);
 }
 
 #[test]

@@ -1,9 +1,8 @@
+use lk_core::execution::AgentEngine;
 use std::path::{Path, PathBuf};
 
 use crate::DistError;
-use crate::embedded::{
-    EmbeddedFile, config_files, pipeline_files, skill_files, skill_names, template_files,
-};
+use crate::embedded::{EmbeddedFile, config_files, skill_files_for, skill_names, template_files};
 
 /// Where a set of agent skills is deployed.
 ///
@@ -37,6 +36,7 @@ pub struct Installation {
     config_dir: PathBuf,
     home: Option<PathBuf>,
     project: Option<PathBuf>,
+    engine: AgentEngine,
 }
 
 impl Installation {
@@ -54,6 +54,7 @@ impl Installation {
             project: std::env::current_dir().ok(),
             home,
             binary,
+            engine: AgentEngine::ClaudeCode,
         })
     }
 
@@ -82,7 +83,31 @@ impl Installation {
             config_dir,
             home,
             project,
+            engine: AgentEngine::ClaudeCode,
         }
+    }
+
+    pub fn for_engine(&self, engine: AgentEngine) -> Self {
+        Self {
+            engine,
+            ..self.clone()
+        }
+    }
+
+    pub fn engine(&self) -> AgentEngine {
+        self.engine
+    }
+
+    pub fn runtime_skills_dir(&self) -> PathBuf {
+        self.data_dir.join("skills").join(self.engine.as_str())
+    }
+
+    pub fn deploy_runtime_skills(&self) -> Result<PathBuf, DistError> {
+        let root = self.runtime_skills_dir();
+        for name in skill_names() {
+            write_tree(&root.join(name), &skill_files_for(self.engine, name))?;
+        }
+        Ok(root)
     }
 
     /// Write down which data directory this installation uses.
@@ -111,32 +136,24 @@ impl Installation {
         &self.config_dir
     }
 
+    pub(crate) fn has_deployment_record(&self) -> bool {
+        !matches!(
+            std::fs::symlink_metadata(self.config_dir.join(DATA_DIR_RECORD)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound
+        )
+    }
+
     pub fn templates_dir(&self) -> PathBuf {
         self.data_dir.join("templates")
     }
 
-    pub fn pipelines_dir(&self) -> PathBuf {
-        self.data_dir.join("pipelines")
-    }
-
-    /// Where a level's skills live, or `None` where this installation has no such level.
-    ///
-    /// A project level inside the checkout this binary was BUILT from is not a level: the
-    /// `.claude/skills` there is the source of the skills it carries, so deploying into it
-    /// would overwrite an in-progress edit with the last build's copy, and reporting it as a
-    /// deployment would describe the repository as an installation of itself.
+    /// Host discovery location for an explicitly selected installation scope.
     pub fn skills_dir(&self, level: SkillLevel) -> Option<PathBuf> {
         let base = match level {
             SkillLevel::User => self.home.as_deref()?,
-            SkillLevel::Project => {
-                let project = self.project.as_deref()?;
-                if is_inside(project, source_checkout().as_deref()) {
-                    return None;
-                }
-                project
-            }
+            SkillLevel::Project => self.project.as_deref()?,
         };
-        Some(base.join(".claude").join("skills"))
+        Some(base.join(self.engine.skills_directory()).join("skills"))
     }
 
     /// The levels that already hold a deployment of any skill.
@@ -200,7 +217,7 @@ impl Installation {
     /// not provenance" argument one step in. An installation with no record for a level prunes
     /// nothing there, which is the right answer for one this tool has not written to.
     fn deployed_record(&self, level: SkillLevel) -> Vec<String> {
-        let prefix = format!("{}:", level.as_str());
+        let prefix = format!("{}/{}:", self.engine.as_str(), level.as_str());
         std::fs::read_to_string(self.config_dir.join(DEPLOYED_SKILLS_RECORD))
             .map(|body| {
                 body.lines()
@@ -215,7 +232,7 @@ impl Installation {
     /// Replace this level's entries, leaving every other level's alone.
     fn record_deployed(&self, level: SkillLevel, names: &[&str]) -> Result<(), DistError> {
         let path = self.config_dir.join(DEPLOYED_SKILLS_RECORD);
-        let prefix = format!("{}:", level.as_str());
+        let prefix = format!("{}/{}:", self.engine.as_str(), level.as_str());
         let mut lines: Vec<String> = std::fs::read_to_string(&path)
             .map(|body| {
                 body.lines()
@@ -267,7 +284,7 @@ impl Installation {
         let mut written = Vec::new();
         for name in skill_names() {
             let dir = root.join(name);
-            if let Err(error) = write_tree_with(&dir, &skill_files(name), prune) {
+            if let Err(error) = write_tree_with(&dir, &skill_files_for(self.engine, name), prune) {
                 return Err(DeployFailure {
                     done: Deployed { written, removed },
                     error,
@@ -288,33 +305,13 @@ impl Installation {
         Ok(Deployed { written, removed })
     }
 
-    /// Why a level has no directory, which is two different answers: there is no base to build
-    /// one from, or the base is the checkout this binary was built from — where the skills are
-    /// the source rather than a deployment, and a caller told only "no directory" would go
-    /// looking for one to create.
+    /// Why an installation scope cannot be resolved.
     pub fn skills_reason(&self, level: SkillLevel) -> String {
         self.no_such_level(level)
     }
 
     fn no_such_level(&self, level: SkillLevel) -> String {
-        match (level, self.project.as_deref()) {
-            (SkillLevel::Project, Some(project))
-                if is_inside(project, source_checkout().as_deref()) =>
-            {
-                format!(
-                    "{} is the checkout this binary was built from — the skills under it are \
-                     what this binary carries, not a deployment of them",
-                    project.display()
-                )
-            }
-            _ => format!("no {} directory to deploy skills into", level.as_str()),
-        }
-    }
-
-    pub fn deploy_pipelines(&self) -> Result<PathBuf, DistError> {
-        let dir = self.pipelines_dir();
-        write_tree(&dir, &pipeline_files())?;
-        Ok(dir)
+        format!("no {} directory to deploy skills into", level.as_str())
     }
 
     pub fn deploy_templates(&self) -> Result<PathBuf, DistError> {
@@ -455,30 +452,6 @@ fn write_tree_with(dir: &Path, files: &[EmbeddedFile], prune: Prune) -> Result<(
         }
     }
     Ok(())
-}
-
-/// The repository this binary was compiled from, where it is still on this machine.
-///
-/// The path is baked in at compile time, so a released binary names a build directory that does
-/// not exist on the machine running it and this answers `None` — the guard fires only for a
-/// build run from its own checkout, which is exactly the case it exists for.
-fn source_checkout() -> Option<PathBuf> {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent()?.parent()?;
-    root.join("Cargo.toml")
-        .is_file()
-        .then(|| root.to_path_buf())
-}
-
-/// Whether `path` is `base` or sits under it, compared through the filesystem's own answer so a
-/// symlinked or differently spelled checkout is still recognised.
-fn is_inside(path: &Path, base: Option<&Path>) -> bool {
-    let Some(base) = base else {
-        return false;
-    };
-    match (path.canonicalize(), base.canonicalize()) {
-        (Ok(path), Ok(base)) => path.starts_with(base),
-        _ => path.starts_with(base),
-    }
 }
 
 /// What the filesystem thinks a path names, so two spellings of one file compare equal.
@@ -782,32 +755,59 @@ mod tests {
         assert_eq!(installation.deployed_skill_levels(), [SkillLevel::User]);
     }
 
-    /// The checkout is where the skills come FROM. A build run inside it would otherwise write
-    /// the last build's copies over an edit in progress, and report the repository as an
-    /// installation of itself.
     #[test]
-    fn the_checkout_this_was_built_from_is_not_a_deployment_of_it() {
-        let source = source_checkout().expect("the suite runs from the checkout");
+    fn agent_deployments_and_ownership_are_independent() {
         let tmp = tempfile::tempdir().unwrap();
         let installation = Installation::at(
             tmp.path().join("bin/lore"),
             tmp.path().join("data"),
             tmp.path().join("config"),
             Some(tmp.path().join("home")),
-            Some(source.clone()),
+            None,
         );
-        assert_eq!(installation.skills_dir(SkillLevel::Project), None);
-        assert!(installation.deploy_skills(SkillLevel::Project).is_err());
+        let codex = installation.for_engine(AgentEngine::Codex);
+        installation.deploy_skills(SkillLevel::User).unwrap();
+        assert!(codex.deployed_skill_levels().is_empty());
+        assert!(codex.deployed_record(SkillLevel::User).is_empty());
+        codex.deploy_skills(SkillLevel::User).unwrap();
+        let root = codex.skills_dir(SkillLevel::User).unwrap();
+        assert!(root.ends_with(".agents/skills"));
+        let source = std::fs::read_to_string(root.join("lore-process/SKILL.md")).unwrap();
+        let page = lk_core::frontmatter::parse_page(&source).unwrap();
+        assert_eq!(page.frontmatter.get("name").unwrap(), "lore-process");
+        assert_eq!(
+            installation.deployed_record(SkillLevel::User),
+            codex.deployed_record(SkillLevel::User)
+        );
+    }
 
-        // A directory that is not the checkout is an ordinary project level.
-        let elsewhere = Installation::at(
+    #[test]
+    fn project_deployment_preserves_canonical_skill_sources() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("skills/lore-process/SKILL.md");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::write(&source, "in-progress canonical instructions").unwrap();
+        let installation = Installation::at(
             tmp.path().join("bin/lore"),
             tmp.path().join("data"),
             tmp.path().join("config"),
-            Some(tmp.path().join("home")),
-            Some(tmp.path().to_path_buf()),
+            None,
+            Some(tmp.path().to_owned()),
         );
-        assert!(elsewhere.skills_dir(SkillLevel::Project).is_some());
-        assert!(source.join("Cargo.toml").is_file());
+        for engine in [AgentEngine::ClaudeCode, AgentEngine::Codex] {
+            let selected = installation.for_engine(engine);
+            selected.deploy_skills(SkillLevel::Project).unwrap();
+            assert!(
+                selected
+                    .skills_dir(SkillLevel::Project)
+                    .unwrap()
+                    .join("lore-process/SKILL.md")
+                    .is_file()
+            );
+            assert_eq!(
+                std::fs::read_to_string(&source).unwrap(),
+                "in-progress canonical instructions"
+            );
+        }
     }
 }

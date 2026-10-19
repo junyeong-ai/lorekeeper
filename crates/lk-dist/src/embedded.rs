@@ -1,15 +1,5 @@
-//! The files this binary carries and writes out.
-//!
-//! An agent skill describes the commands this binary exposes and a pipeline script composes
-//! them into a scheduled run, so both are true only of the version they shipped with. Carrying
-//! them here rather than publishing them beside the binary is what makes "the deployed skill
-//! matches the binary" hold by construction instead of by remembering — the two cannot be
-//! different versions when they are one file.
-//!
-//! `include_str!` reaches the repository through a generated manifest (`build.rs`) rather than
-//! a list written here, because the set is a directory tree: a seventh skill added under
-//! `.claude/skills` is carried without anything being remembered, and editing one rebuilds the
-//! binary that carries it.
+//! Canonical skill/config bytes and host-specific entry metadata embedded in the binary.
+//! Templates are embedded by lk-vault and reused here for deployment.
 
 include!(concat!(env!("OUT_DIR"), "/embedded.rs"));
 
@@ -18,13 +8,11 @@ include!(concat!(env!("OUT_DIR"), "/embedded.rs"));
 pub struct EmbeddedFile {
     pub relative: &'static str,
     pub contents: &'static str,
-    /// Unix permissions. A pipeline is fired by a system scheduler, which executes it rather
-    /// than reading it, so its bit is part of the artifact and not of the writing.
+    /// Required Unix permission bits for the carried file.
     pub mode: u32,
 }
 
 const READ_ONLY: u32 = 0o644;
-const EXECUTABLE: u32 = 0o755;
 
 /// Every skill name this binary carries, sorted.
 pub fn skill_names() -> Vec<&'static str> {
@@ -38,8 +26,16 @@ pub fn skill_names() -> Vec<&'static str> {
 
 /// The files of one skill, addressed relative to that skill's own directory.
 pub fn skill_files(name: &str) -> Vec<EmbeddedFile> {
+    skill_files_for(lk_core::execution::AgentEngine::Codex, name)
+}
+
+pub fn skill_files_for(engine: lk_core::execution::AgentEngine, name: &str) -> Vec<EmbeddedFile> {
     let prefix = format!("{name}/");
-    SKILL_FILES
+    let files = match engine {
+        lk_core::execution::AgentEngine::ClaudeCode => CLAUDE_SKILL_FILES,
+        lk_core::execution::AgentEngine::Codex => SKILL_FILES,
+    };
+    files
         .iter()
         .filter_map(|(path, contents)| {
             path.strip_prefix(&prefix).map(|relative| EmbeddedFile {
@@ -47,18 +43,6 @@ pub fn skill_files(name: &str) -> Vec<EmbeddedFile> {
                 contents,
                 mode: READ_ONLY,
             })
-        })
-        .collect()
-}
-
-/// The scheduled pipeline scripts, addressed relative to the pipelines directory.
-pub fn pipeline_files() -> Vec<EmbeddedFile> {
-    PIPELINE_FILES
-        .iter()
-        .map(|(relative, contents)| EmbeddedFile {
-            relative,
-            contents,
-            mode: EXECUTABLE,
         })
         .collect()
 }
@@ -95,11 +79,6 @@ pub fn config_files() -> Vec<EmbeddedFile> {
         .collect()
 }
 
-/// Pipeline file names, in the order a deploy writes them.
-pub fn pipeline_names() -> Vec<&'static str> {
-    PIPELINE_FILES.iter().map(|(name, _)| *name).collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -119,7 +98,7 @@ mod tests {
     }
 
     #[test]
-    fn every_skill_declares_its_qualified_invocation_name() {
+    fn each_host_receives_its_own_invocation_metadata_and_the_same_procedure() {
         for name in skill_names() {
             let files = skill_files(name);
             let instructions = files
@@ -127,48 +106,38 @@ mod tests {
                 .find(|file| file.relative == "SKILL.md")
                 .unwrap();
             let page = lk_core::frontmatter::parse_page(instructions.contents).unwrap();
-            let expected = format!("{name}:{name}");
+            let expected = name;
             assert_eq!(
                 page.frontmatter
                     .get("name")
                     .and_then(|value| value.as_str()),
-                Some(expected.as_str()),
-                "{name} must expose the same invocation through skill and plugin loading"
+                Some(expected),
+                "{name} must use a portable canonical name"
             );
+            let host = skill_files_for(lk_core::execution::AgentEngine::ClaudeCode, name);
+            let host = host
+                .iter()
+                .find(|file| file.relative == "SKILL.md")
+                .unwrap();
+            let host = lk_core::frontmatter::parse_page(host.contents).unwrap();
+            assert_eq!(
+                host.frontmatter.get("name").unwrap(),
+                &format!("{name}:{name}")
+            );
+            assert_eq!(host.body, page.body);
         }
     }
 
     /// The generated manifest addresses a skill's files by a path whose first segment is the
-    /// skill. A file directly under `.claude/skills` would have no such segment and would be
+    /// skill. A file directly under `skills/` would have no such segment and would be
     /// silently deployed as a skill named after itself.
     #[test]
     fn every_embedded_skill_file_is_inside_a_skill() {
         for (path, _) in SKILL_FILES {
             assert!(
                 path.contains('/'),
-                "`{path}` sits directly under .claude/skills, which names no skill"
+                "`{path}` sits directly under skills/, which names no skill"
             );
-        }
-    }
-
-    #[test]
-    fn the_pipelines_are_executable_and_the_rest_is_not() {
-        assert!(pipeline_files().iter().all(|f| f.mode == EXECUTABLE));
-        assert!(
-            skill_files(skill_names()[0])
-                .iter()
-                .all(|f| f.mode == READ_ONLY)
-        );
-    }
-
-    /// The shared library is sourced by both entry scripts; publishing the entries without it
-    /// installs two scripts that abort on their first line under a scheduler nobody is watching.
-    #[test]
-    fn the_pipeline_entries_ship_with_the_library_they_source() {
-        let names = pipeline_names();
-        assert!(names.contains(&"lore-pipeline.sh"), "{names:?}");
-        for entry in ["lore-daily.sh", "lore-weekly.sh"] {
-            assert!(names.contains(&entry), "{names:?}");
         }
     }
 }

@@ -169,10 +169,7 @@ jobs:
           shared-key: windows
       - run: cargo check --locked --workspace --all-targets --all-features
 
-  # `install.sh` is the documented entry point and the pipelines are what the scheduler runs, so
-  # ~1400 lines of shipped shell had no gate of any kind while every Rust line had several. The
-  # workflows are the same shape — `actionlint` was run by hand while reviewing them, which means
-  # it was run when someone remembered to, and these files now gate the release itself.
+  # Bootstrap scripts and workflow definitions are checked independently of Rust.
   shell:
     name: shellcheck + actionlint + zizmor
     runs-on: ubuntu-latest
@@ -189,9 +186,7 @@ jobs:
           tar -xJf "$archive" -C "$RUNNER_TEMP"
           sudo install -m 755 "$RUNNER_TEMP/shellcheck-v0.11.0/shellcheck" /usr/local/bin/shellcheck
       - run: bash -n scripts/*.sh
-      - run: shellcheck --severity=warning scripts/*.sh scripts/tests/*.sh
-      - run: bash scripts/tests/pipeline-git.sh
-      - run: bash scripts/tests/pipeline-periods.sh
+      - run: shellcheck --severity=warning scripts/*.sh
       # `actionlint` is a Go program, so it is not on crates.io and `install-action` has no recipe
       # for it — its cargo-binstall fallback reports "actionlint is not found". Installed through
       # Go instead, which the runner image ships and whose module proxy verifies the download

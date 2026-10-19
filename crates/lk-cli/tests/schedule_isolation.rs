@@ -5,7 +5,7 @@ use std::process::{Command, Output};
 fn workspace() -> tempfile::TempDir {
     let root = tempfile::tempdir().unwrap();
     std::fs::write(root.path().join("config.yaml"),
-        "vault:\n  root: vault\nidentity:\n  name: Test\n  email: test@example.invalid\nsources:\n  notes:\n    type: manual\n    params: {inbox_dir: inbox}\ningest:\n  schedule: '0 9 * * *'\n",
+        "execution:\n  default_profile: primary\n  profiles:\n    primary: {engine: claude-code, timeout_seconds: 60}\nvault:\n  root: vault\nidentity:\n  name: Test\n  email: test@example.invalid\nsources:\n  notes:\n    type: manual\n    params: {inbox_dir: inbox}\ningest:\n  schedule: '0 9 * * *'\n",
     ).unwrap();
     root
 }
@@ -116,7 +116,7 @@ fn unsafe_namespace_or_log_directory_is_rejected_before_emitting_definitions() {
 }
 
 #[test]
-fn direct_schedule_warns_that_period_intent_is_not_semantic_processing() {
+fn direct_schedule_runs_native_processing_and_defers_period_intents() {
     let root = workspace();
     let path = root.path().join("config.yaml");
     let mut config = std::fs::read_to_string(&path).unwrap();
@@ -128,8 +128,8 @@ fn direct_schedule_warns_that_period_intent_is_not_semantic_processing() {
         let stdout = String::from_utf8(output.stdout).unwrap();
         let stderr = String::from_utf8(output.stderr).unwrap();
         assert!(stdout.contains("--defer"), "{stdout}");
-        assert!(stderr.contains("no semantic consumer"), "{stderr}");
-        assert!(stderr.contains("lore synthesis pending"), "{stderr}");
+        assert!(!stderr.contains("no semantic consumer"), "{stderr}");
+        assert!(stdout.contains("daily"), "{stdout}");
         assert!(!root.path().join("vault").exists());
     }
 }

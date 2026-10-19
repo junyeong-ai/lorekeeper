@@ -1,0 +1,60 @@
+# Scheduling native jobs
+
+`lore schedule` prints definitions; OS registration is separate. On macOS use
+`lore schedule --format launchd --bin /absolute/path/to/lore`. On Linux review its
+cron output and merge with `crontab -e`; piping into `crontab -` replaces other jobs.
+Create the named log directory before loading launchd plists. Use `launchctl print`
+and an actual run to verify registration. Regenerate and replace definitions after
+changing configuration or environment; unload disabled jobs too. Uninstall does
+not unregister OS jobs.
+
+The scheduler emits native commands:
+
+- `ingest.schedule`: `lore run daily --wait`.
+- `graph.audit.schedule`: `lore run knowledge --wait`.
+- Period schedules: `lore synthesis PERIOD --previous --defer --wait-for-vault`.
+- Maintenance: `lore maintenance --prune-queue --wait-for-vault`.
+- A configured task board: `lore task remind notify` every five minutes.
+
+Queue-mode scheduled jobs require an explicit execution profile. Selection is CLI
+`--profile`, then `execution.operations`, then `execution.default_profile`.
+An unavailable host, authentication error or denied action never switches hosts.
+Native run outcomes distinguish completed, skipped, failed and cancelled stages;
+`--json` reserves stdout for that report and sends stage output to stderr.
+
+Daily collection waits for the short vault writer before semantic processing. A
+partial source failure still permits independent queue/reconciliation stages;
+a failed period stage stops dependent periods. Period triggers retain the exact
+closed interval, not proof of completion. The daily job resumes base, quarter and
+annual obligations in order. Inspect `lore synthesis pending --status --json` for
+blocked evidence; backfill missed source dates explicitly.
+
+The native runner holds the cooperative Unix workflow lease through semantic
+reading and publication. Do not reacquire it inside a skill. Cancellation and
+session deadlines terminate the foreground process group and preserve unfinished
+work. Manual agent sessions can use `lore workflow -- claude` or
+`lore workflow -- codex` before reading inputs. Closing inherited descriptors or
+detaching work is outside the manual exec lease's guarantee. Windows is unsupported
+for workflow leases and native agent jobs.
+
+Unattended skills come from the binary's data directory, independently of user or
+project interactive deployment. The runtime verifies every required packaged file.
+Claude loads explicit plugins and dependency permissions; Codex reads exact
+packaged skill paths with a workspace-write sandbox. These are different host
+permission models. Native result, source and target guards remain authoritative.
+
+Schedules capture absolute config/data paths, PATH entries anchored to the
+generation directory, and relevant existing `CLAUDE_CONFIG_DIR` or `CODEX_HOME`
+directories. They do not copy credential values. Explicit standard proxy variables
+retain casing and empty values; endpoint URLs must be credential-free and contain
+no query, fragment or non-root path. Regenerate definitions when these change.
+
+Calendar triggers use host local time; page dates use vault timezone. Launchd
+coalesces missed runs after sleep; cron skips them. Neither backfills every missed
+date. Unsupported launchd cron expressions are refused rather than approximated.
+For isolated testing use `--namespace org.example.lore-test` and
+`--log-dir /absolute/test/logs`; the renderer neither creates paths nor registers jobs.
+
+OS notifications retire a reminder only after the notifier accepts it. Acceptance
+is not proof the user saw it. A crash between acceptance and local retirement can
+cause redelivery; failed submissions remain pending.

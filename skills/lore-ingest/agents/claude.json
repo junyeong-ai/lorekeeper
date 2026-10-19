@@ -1,0 +1,6 @@
+{
+  "argument-hint": "<subcommand> [args]",
+  "disable-model-invocation": true,
+  "allowed-tools": "Bash(lore *)\nBash(crontab *)\nRead\n",
+  "name": "lore-ingest:lore-ingest"
+}
