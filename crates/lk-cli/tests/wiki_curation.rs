@@ -120,9 +120,13 @@ fn reviewed_curation_is_read_only_in_preview_guarded_and_discoverable_after_publ
     );
     assert_eq!(fingerprint["file_revision"], file_revision(&after));
     assert_eq!(fingerprint["source_revision"], source_revision(&after_page));
-    let audit = ok(&config, &["wiki", "audit-plan", "--limit", "1"]);
-    assert_eq!(audit["unreviewed"], 1);
+    let audit = ok(&config, &["wiki", "audit-plan", "--path", concept]);
+    assert_eq!(audit["unreviewed"], 2);
+    assert_eq!(audit["counts_by_kind"]["concept"]["unreviewed"], 1);
+    assert_eq!(audit["counts_by_kind"]["document"]["unreviewed"], 1);
     let candidate = &audit["candidates"][0];
+    assert_eq!(candidate["path"], concept);
+    assert_eq!(candidate["kind"], "concept");
     let result = root.path().join("audit.json");
     std::fs::write(&result, serde_json::to_vec(&json!({"assessments":[{
         "path":concept,"file_revision":candidate["file_revision"],
@@ -135,7 +139,10 @@ fn reviewed_curation_is_read_only_in_preview_guarded_and_discoverable_after_publ
         &["wiki", "audit-record", "--file", result.to_str().unwrap()],
     );
     assert_eq!(recorded["recorded"], json!([concept]));
-    assert_eq!(ok(&config, &["wiki", "audit-plan"])["reviewed_current"], 1);
+    let coverage = ok(&config, &["wiki", "audit-plan"]);
+    assert_eq!(coverage["reviewed_current"], 1);
+    assert_eq!(coverage["counts_by_kind"]["concept"]["reviewed_current"], 1);
+    assert_eq!(coverage["counts_by_kind"]["document"]["unreviewed"], 1);
     assert_eq!(
         ok(&config, &["wiki", "audit-plan", "--path", concept])["candidates"][0]["path"],
         concept
