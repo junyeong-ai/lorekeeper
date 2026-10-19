@@ -32,6 +32,10 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   dependent period stages stop on failure. Cancellation stops further stages.
   Preserve observed cancellation through cleanup errors and report those errors;
   send group SIGKILL once before reaping a forced foreground child.
+  Knowledge --batches is an explicit initial-campaign budget. Each batch uses a fresh
+  workflow lease, while configuration revision and cancellation supervision remain pinned
+  across the campaign. Stop on failure/cancellation or an empty plan; batch-limit success
+  does not establish full-corpus coverage. Existing receipts resume verified work.
 - `commands/schedule.rs` renders native jobs with stable scheduling-slot labels.
   Queue-mode semantic jobs need explicit execution profiles. Capture selected
   absolute config/data paths, anchored PATH and relevant existing host directories;

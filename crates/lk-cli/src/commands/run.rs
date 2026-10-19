@@ -24,16 +24,17 @@ pub async fn run(
     opts: &super::GlobalOptions,
     operation: Operation,
     profile: Option<String>,
+    batches: usize,
     wait: bool,
     json: bool,
 ) -> miette::Result<()> {
     #[cfg(unix)]
     {
-        native::run(opts, operation, profile, wait, json).await
+        native::run(opts, operation, profile, batches, wait, json).await
     }
     #[cfg(not(unix))]
     {
-        let _ = (opts, operation, profile, wait, json);
+        let _ = (opts, operation, profile, batches, wait, json);
         Err(miette::miette!(
             "agent jobs require Unix workflow leases; Windows is unsupported"
         ))
@@ -91,7 +92,7 @@ mod native {
         configuration_failed: bool,
         root: PathBuf,
         profile: Option<String>,
-        supervisor: execution::Supervisor,
+        supervisor: &'a mut execution::Supervisor,
         lease: Option<workflow::WorkflowLease>,
         selected: Option<ExecutionProfile>,
         drain_blocked: bool,
@@ -489,9 +490,15 @@ mod native {
         opts: &GlobalOptions,
         operation: Operation,
         profile: Option<String>,
+        batches: usize,
         wait: bool,
         json: bool,
     ) -> miette::Result<()> {
+        if batches == 0 || batches != 1 && !matches!(operation, Operation::Knowledge) {
+            return Err(miette::miette!(
+                "multiple batches are only supported for knowledge jobs"
+            ));
+        }
         let config_path = crate::commands::find_config(opts)?;
         let (config, config_revision) = crate::commands::load_config_with_revision(&config_path)?;
         if let Some(name) = profile.as_deref() {
@@ -509,6 +516,67 @@ mod native {
                 .transpose()
                 .map_err(|e| miette::miette!("template path: {e}"))?,
         };
+        let mut supervisor = execution::Supervisor::new()?;
+        let mut outcomes = Vec::new();
+        let mut stop_reason = "batch-limit";
+        for _ in 0..batches {
+            let result = execute(
+                &options,
+                config.clone(),
+                config_revision.clone(),
+                operation,
+                profile.clone(),
+                wait,
+                &mut supervisor,
+            )
+            .await;
+            stop_reason = if result.cancelled {
+                "cancelled"
+            } else if !result.ok {
+                "failed"
+            } else if result.audit.as_ref().is_some_and(Vec::is_empty) {
+                "settled"
+            } else {
+                "batch-limit"
+            };
+            outcomes.push(result);
+            if stop_reason != "batch-limit" {
+                break;
+            }
+        }
+        let ok = outcomes.iter().all(|result| result.ok);
+        if json {
+            let value = if batches == 1 {
+                serde_json::to_value(&outcomes[0])
+            } else {
+                Ok(serde_json::json!({
+                    "operation":operation,"ok":ok,"requested_batches":batches,
+                    "stop_reason":stop_reason,"runs":outcomes,
+                }))
+            }
+            .map_err(|error| miette::miette!("{error}"))?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&value).map_err(|error| miette::miette!("{error}"))?
+            );
+        }
+        if !ok {
+            return Err(miette::miette!(
+                "job incomplete; inspect failed stages and retained work"
+            ));
+        }
+        Ok(())
+    }
+
+    async fn execute(
+        options: &GlobalOptions,
+        config: Config,
+        config_revision: String,
+        operation: Operation,
+        profile: Option<String>,
+        wait: bool,
+        supervisor: &mut execution::Supervisor,
+    ) -> JobResult {
         let board = config
             .personal
             .as_ref()
@@ -519,9 +587,9 @@ mod native {
             config,
             config_revision,
             configuration_failed: false,
-            opts: &options,
+            opts: options,
             profile,
-            supervisor: execution::Supervisor::new()?,
+            supervisor,
             lease: None,
             selected: None,
             drain_blocked: false,
@@ -535,6 +603,9 @@ mod native {
                 stages: Vec::new(),
             },
         };
+        if !runner.configuration_is_current() {
+            return runner.result;
+        }
         if matches!(operation, Operation::Daily) {
             if board {
                 runner
@@ -574,17 +645,6 @@ mod native {
         eprintln!(
             "Vault changes and Git staging remain available for explicit review; no automatic commit."
         );
-        if json {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&runner.result).map_err(|e| miette::miette!("{e}"))?
-            );
-        }
-        if !runner.result.ok {
-            return Err(miette::miette!(
-                "job incomplete; inspect failed stages and retained work"
-            ));
-        }
-        Ok(())
+        runner.result
     }
 }

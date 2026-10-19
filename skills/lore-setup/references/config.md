@@ -79,6 +79,10 @@ Semantic maintenance is optional and separate from weekly synthesis and retentio
 Enable `graph.audit.schedule` deliberately: each run uses the LLM to review at most
 `batch_size` changed/first-time concepts. `lore run knowledge` uses the configured
 execution profile; structural lint alone cannot perform the semantic read.
+For an explicitly requested initial campaign, `lore run knowledge --batches N`
+repeats bounded batches, releasing the lease between them and resuming from current
+receipts. A failed/cancelled batch stops the campaign and preserves unfinished work.
+`batch-limit` is a completed execution budget, not full-corpus semantic completion.
 
 ## Initial setup
 

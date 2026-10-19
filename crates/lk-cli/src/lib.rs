@@ -34,12 +34,15 @@ pub struct Cli {
 pub enum Command {
     /// Execute a complete job using the configured Claude Code or Codex profile
     Run {
-        /// Complete daily collection, queued processing, or one knowledge audit batch
+        /// Complete daily collection, queued processing, or knowledge audit batches
         #[arg(value_enum)]
         operation: commands::run::Operation,
         /// Explicit execution profile; otherwise operation override then configured default
         #[arg(long)]
         profile: Option<String>,
+        /// Maximum knowledge batches; release the workflow lease between batches
+        #[arg(long, default_value = "1")]
+        batches: std::num::NonZeroUsize,
         /// Wait for the semantic workflow lease; default contention starts no semantic work
         #[arg(long)]
         wait: bool,
@@ -276,9 +279,10 @@ pub async fn run() -> miette::Result<()> {
         Command::Run {
             operation,
             profile,
+            batches,
             wait,
             json,
-        } => commands::run::run(&opts, operation, profile, wait, json).await,
+        } => commands::run::run(&opts, operation, profile, batches.get(), wait, json).await,
         Command::Workflow { wait, command } => commands::workflow::run(&opts, wait, command),
         Command::Init { target } => match target {
             InitTarget::Credentials { vault } => commands::init::credentials(&opts, vault).await,
