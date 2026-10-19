@@ -1033,12 +1033,36 @@ pub(super) fn excerpt_with_spacing(
 
 /// Visible text with one line per Markdown block. Inline formatting and soft breaks
 /// do not split a phrase; paragraphs, list items and table cells do. Link addresses
-/// and HTML markup are not prose. Code remains searchable as literal content.
+/// and markup are not prose. HTML contributes text through the parsed document;
+/// scripts, styles and metadata are excluded. Code remains searchable as literal content.
 pub(super) fn search_text(body: &str) -> String {
     let mut text = String::with_capacity(body.len());
     let options =
         Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
-    for event in Parser::new_ext(body, options) {
+    let events: Vec<_> = Parser::new_ext(body, options).collect();
+    if events
+        .iter()
+        .any(|event| matches!(event, Event::Html(_) | Event::InlineHtml(_)))
+    {
+        use html5ever::tendril::TendrilSink;
+        let mut html = String::with_capacity(body.len());
+        pulldown_cmark::html::push_html(&mut html, events.into_iter());
+        let document =
+            html5ever::parse_document(markup5ever_rcdom::RcDom::default(), Default::default())
+                .one(html);
+        append_html_search_text(&document.document, &mut text, false);
+    } else {
+        append_markdown_search_text(events, &mut text);
+    }
+    text.lines()
+        .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn append_markdown_search_text(events: Vec<Event<'_>>, text: &mut String) {
+    for event in events {
         match event {
             Event::Text(value) | Event::Code(value) => text.push_str(&value),
             Event::SoftBreak | Event::HardBreak => text.push(' '),
@@ -1060,11 +1084,114 @@ pub(super) fn search_text(body: &str) -> String {
             _ => text.push('\n'),
         }
     }
-    text.lines()
-        .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
-        .filter(|line| !line.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n")
+}
+
+fn append_html_search_text(node: &markup5ever_rcdom::Node, text: &mut String, preformatted: bool) {
+    use markup5ever_rcdom::NodeData;
+    match &node.data {
+        NodeData::Text { contents } => {
+            if preformatted {
+                text.push_str(&contents.borrow());
+            } else {
+                text.extend(
+                    contents
+                        .borrow()
+                        .chars()
+                        .map(|ch| if ch == '\n' { ' ' } else { ch }),
+                );
+            }
+        }
+        NodeData::Element { name, attrs, .. } => {
+            let tag = name.local.as_ref();
+            if matches!(
+                tag,
+                "head"
+                    | "script"
+                    | "style"
+                    | "template"
+                    | "noscript"
+                    | "iframe"
+                    | "noembed"
+                    | "noframes"
+            ) {
+                return;
+            }
+            if tag == "br" {
+                text.push(' ');
+                return;
+            }
+            let boundary = matches!(
+                tag,
+                "address"
+                    | "article"
+                    | "aside"
+                    | "blockquote"
+                    | "caption"
+                    | "dd"
+                    | "details"
+                    | "div"
+                    | "dl"
+                    | "dt"
+                    | "fieldset"
+                    | "figcaption"
+                    | "figure"
+                    | "footer"
+                    | "form"
+                    | "h1"
+                    | "h2"
+                    | "h3"
+                    | "h4"
+                    | "h5"
+                    | "h6"
+                    | "header"
+                    | "hgroup"
+                    | "hr"
+                    | "li"
+                    | "legend"
+                    | "main"
+                    | "nav"
+                    | "ol"
+                    | "optgroup"
+                    | "option"
+                    | "p"
+                    | "pre"
+                    | "section"
+                    | "select"
+                    | "summary"
+                    | "table"
+                    | "tbody"
+                    | "td"
+                    | "tfoot"
+                    | "th"
+                    | "thead"
+                    | "tr"
+                    | "ul"
+            );
+            if boundary {
+                text.push('\n');
+            }
+            if tag == "img"
+                && let Some(alt) = attrs
+                    .borrow()
+                    .iter()
+                    .find(|attr| attr.name.local.as_ref() == "alt")
+            {
+                text.push_str(&alt.value);
+            }
+            for child in node.children.borrow().iter() {
+                append_html_search_text(child, text, preformatted || tag == "pre");
+            }
+            if boundary {
+                text.push('\n');
+            }
+        }
+        NodeData::Document => {
+            for child in node.children.borrow().iter() {
+                append_html_search_text(child, text, preformatted);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn search_summary(body: &str) -> Option<String> {
@@ -1206,6 +1333,50 @@ pub(crate) fn markdown_files(root: &Path, dir: &Path) -> Result<Vec<PathBuf>, Va
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn visible_html_tables_preserve_text_and_cell_boundaries() {
+        let body = "<table><tr><td rowspan=\"2\">검색 <strong>품질</strong></td><td>230 kB</td></tr><tr><td>다음</td></tr></table>";
+        assert_eq!(search_text(body), "검색 품질\n230 kB\n다음");
+    }
+
+    #[test]
+    fn visible_html_keeps_inline_phrases_and_excludes_non_content() {
+        let body = "before <span data-note=\"attribute-secret\">soft\nbreak</span> and<br>hard break <a href=\"https://destination-secret.invalid\">link</a><img src=\"image-secret\" alt=\"description\"> after\n\n<script>script-secret</script>\n<style>style-secret</style>\n<template>template-secret</template>\n<!-- comment-secret -->";
+        assert_eq!(
+            search_text(body),
+            "before soft break and hard break linkdescription after"
+        );
+        assert_eq!(
+            search_text("one<script>script-secret</script>two"),
+            "onetwo"
+        );
+        assert_eq!(
+            search_text("<div>one &amp; two</div><div>next</div>"),
+            "one & two\nnext"
+        );
+    }
+
+    #[test]
+    fn visible_html_preserves_markdown_block_and_code_boundaries() {
+        let markdown = "## Heading\n\nsoft\nbreak and  \nhard break\n\n- first\n- second\n\n```html\n<p>literal</p>\nnext\n```\n\n| Key | Value |\n| --- | --- |\n| one | two |\n";
+        let with_html = format!("{markdown}\n<span></span>");
+        assert_eq!(search_text(markdown), search_text(&with_html));
+    }
+
+    #[test]
+    fn visible_html_excludes_embedded_fallbacks_and_separates_choices() {
+        for tag in ["noscript", "iframe", "noembed", "noframes"] {
+            let body = format!("<div>before<{tag}><div>fallback value</div></{tag}>after</div>");
+            assert_eq!(search_text(&body), "beforeafter", "{tag}");
+        }
+        for body in [
+            "<fieldset><legend>alpha</legend>beta</fieldset>",
+            "<select><optgroup label=\"Group\"><option>alpha</option><option>beta</option></optgroup></select>",
+        ] {
+            assert_eq!(search_text(body), "alpha\nbeta");
+        }
+    }
 
     #[test]
     fn created_browse_preserves_date_scope_facets_and_snapshot_pagination() {

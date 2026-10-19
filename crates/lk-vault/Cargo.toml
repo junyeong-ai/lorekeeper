@@ -22,7 +22,9 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 unicode-normalization = { workspace = true }
 rusqlite = { workspace = true }
-pulldown-cmark = { workspace = true }
+pulldown-cmark = { workspace = true, features = ["html"] }
+html5ever = { workspace = true }
+markup5ever_rcdom = { workspace = true }
 walkdir = { workspace = true }
 same-file = { workspace = true }
 regex = { workspace = true }

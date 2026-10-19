@@ -1,7 +1,8 @@
 //! Normalize source-specific rich text into standard Markdown so downstream LLM steps and
 //! the Obsidian vault receive clean, AI-friendly input instead of ADF JSON, raw HTML, or
 //! Slack's `<…>` token soup. Conversions are loss-averse: any construct without a Markdown
-//! equivalent degrades to its text content rather than being dropped.
+//! equivalent degrades to its text content rather than being dropped. Tables outside
+//! GFM's model retain their parsed HTML structure so cell relationships are not lost.
 
 use std::collections::HashMap;
 
@@ -24,6 +25,7 @@ pub fn html_to_markdown(html: &str) -> String {
             ..Default::default()
         })
         .add_handler(vec!["img"], img_without_data_uris)
+        .add_handler(vec!["table"], ordered_html_table)
         .add_handler(MACHINE_STATE_ELEMENTS.to_vec(), drop_element)
         .add_handler(vec!["ac:task-status"], task_checkbox)
         .add_handler(
@@ -41,6 +43,228 @@ pub fn html_to_markdown(html: &str) -> String {
         .convert(&normalize_storage_format(html))
         .map(|md| md.trim().to_string())
         .unwrap_or_default()
+}
+
+/// GFM has one column-header row and no spanning cells. Read direct cells together,
+/// in DOM order, retaining empty cells and row labels. Structures
+/// GFM cannot express stay HTML instead of being flattened into a different table.
+fn ordered_html_table(
+    handlers: &dyn htmd::element_handler::Handlers,
+    element: htmd::Element,
+) -> Option<htmd::element_handler::HandlerResult> {
+    let mut rows = Vec::new();
+    let mut captions = Vec::new();
+    let mut header_rows = 0;
+    let mut representable = true;
+    for child in element.node.children.borrow().iter() {
+        match element_name(child) {
+            Some("caption") => captions.push(handlers.walk_children(child).content),
+            Some("thead" | "tbody" | "tfoot") => {
+                for row in child.children.borrow().iter() {
+                    if element_name(row) == Some("tr") {
+                        let header = element_name(child) == Some("thead");
+                        header_rows += usize::from(header);
+                        rows.push((row.clone(), header));
+                    }
+                }
+            }
+            Some("tr") => rows.push((child.clone(), false)),
+            Some(_) => representable = false,
+            None => {}
+        }
+    }
+    representable &= header_rows <= 1;
+    let mut rendered_rows = Vec::new();
+    let mut has_header = false;
+    for (index, (row, in_head)) in rows.iter().enumerate() {
+        let cells: Vec<_> = row
+            .children
+            .borrow()
+            .iter()
+            .filter(|node| matches!(element_name(node), Some("th" | "td")))
+            .cloned()
+            .collect();
+        if cells.is_empty() {
+            representable = false;
+        }
+        let row_header = |cell: &std::rc::Rc<markup5ever_rcdom::Node>| {
+            html_attribute(cell, "scope").is_some_and(|scope| {
+                scope.eq_ignore_ascii_case("row") || scope.eq_ignore_ascii_case("rowgroup")
+            })
+        };
+        let column_header = |cell: &std::rc::Rc<markup5ever_rcdom::Node>| {
+            element_name(cell) == Some("th") && !row_header(cell)
+        };
+        if index == 0 {
+            has_header = *in_head || (!cells.is_empty() && cells.iter().all(column_header));
+            // A mixed row outside thead may contain column or row headers. Preserve
+            // its explicit HTML semantics rather than guessing which it is.
+            if !has_header && cells.iter().any(column_header) {
+                representable = false;
+            }
+        } else if *in_head || cells.iter().any(column_header) {
+            representable = false;
+        }
+        if *in_head && cells.iter().any(row_header) {
+            representable = false;
+        }
+        let mut rendered = Vec::new();
+        for cell in cells {
+            for attribute in ["rowspan", "colspan"] {
+                if html_attribute(&cell, attribute).is_some_and(|value| value != "1") {
+                    representable = false;
+                }
+            }
+            if html_attribute(&cell, "headers").is_some()
+                || html_attribute(&cell, "scope").is_some_and(|scope| {
+                    scope.eq_ignore_ascii_case("colgroup") || scope.eq_ignore_ascii_case("rowgroup")
+                })
+            {
+                representable = false;
+            }
+            // Lists, paragraphs, code blocks and nested tables cannot be flattened
+            // into one GFM cell without changing their structure.
+            representable &= !has_html_table_blocks(&cell);
+            let content = handlers.walk_children(&cell).content;
+            rendered.push(content.trim().replace('|', "\\|").replace('\n', "<br>"));
+        }
+        rendered_rows.push(rendered);
+    }
+    if !representable || rendered_rows.is_empty() {
+        let mut bytes = Vec::new();
+        // Writing to a Vec cannot fail. Retain real HTML cells/spans/header scopes;
+        // this is an HTML block in Markdown, not a claimed GFM approximation.
+        html5ever::serialize(
+            &mut bytes,
+            &NormalizedTableHtml(element.node),
+            html5ever::serialize::SerializeOpts {
+                traversal_scope: html5ever::serialize::TraversalScope::IncludeNode,
+                ..Default::default()
+            },
+        )
+        .expect("serializing HTML into a Vec cannot fail");
+        return Some(htmd::element_handler::HandlerResult {
+            content: format!(
+                "\n\n{}\n\n",
+                String::from_utf8(bytes).expect("HTML serializer writes UTF-8")
+            ),
+            markdown_translated: false,
+        });
+    }
+    let columns = rendered_rows.iter().map(Vec::len).max().unwrap_or(0);
+    let mut out = String::from("\n\n");
+    for caption in captions {
+        out.push_str(caption.trim());
+        out.push_str("\n\n");
+    }
+    // GFM requires a header. Empty cells add no source-written heading, and keep
+    // an ordinary first data row in the body instead of promoting it to a header.
+    if !has_header {
+        rendered_rows.insert(0, vec![String::new(); columns]);
+    }
+    for (index, row) in rendered_rows.iter().enumerate() {
+        out.push('|');
+        for column in 0..columns {
+            out.push(' ');
+            out.push_str(row.get(column).map(String::as_str).unwrap_or(""));
+            out.push_str(" |");
+        }
+        out.push('\n');
+        if index == 0 {
+            out.push('|');
+            for _ in 0..columns {
+                out.push_str(" --- |");
+            }
+            out.push('\n');
+        }
+    }
+    out.push('\n');
+    Some(out.into())
+}
+
+fn html_attribute(node: &markup5ever_rcdom::Node, attribute: &str) -> Option<String> {
+    match &node.data {
+        markup5ever_rcdom::NodeData::Element { attrs, .. } => attrs
+            .borrow()
+            .iter()
+            .find(|attr| &*attr.name.local == attribute)
+            .map(|attr| attr.value.to_string()),
+        _ => None,
+    }
+}
+
+fn has_html_table_blocks(node: &markup5ever_rcdom::Node) -> bool {
+    node.children.borrow().iter().any(|child| {
+        matches!(
+            element_name(child),
+            Some(
+                "table"
+                    | "p"
+                    | "div"
+                    | "pre"
+                    | "ul"
+                    | "ol"
+                    | "dl"
+                    | "blockquote"
+                    | "section"
+                    | "article"
+                    | "aside"
+                    | "figure"
+                    | "figcaption"
+                    | "details"
+                    | "summary"
+                    | "address"
+                    | "hr"
+                    | "h1"
+                    | "h2"
+                    | "h3"
+                    | "h4"
+                    | "h5"
+                    | "h6"
+            )
+        ) || has_html_table_blocks(child)
+    })
+}
+
+/// Preserve tables outside GFM's model, using the same machine-text/data-image
+/// exclusions as the Markdown handlers. The HTML serializer handles escaping.
+struct NormalizedTableHtml<'a>(&'a std::rc::Rc<markup5ever_rcdom::Node>);
+
+impl html5ever::serialize::Serialize for NormalizedTableHtml<'_> {
+    fn serialize<S: html5ever::serialize::Serializer>(
+        &self,
+        serializer: &mut S,
+        _: html5ever::serialize::TraversalScope,
+    ) -> std::io::Result<()> {
+        use markup5ever_rcdom::NodeData;
+        match &self.0.data {
+            NodeData::Element { name, attrs, .. } => {
+                if MACHINE_STATE_ELEMENTS.contains(&name.local.as_ref()) {
+                    return Ok(());
+                }
+                if name.local.as_ref() == "img"
+                    && html_attribute(self.0, "src").is_some_and(|src| is_data_uri(&src))
+                {
+                    return serializer
+                        .write_text(&html_attribute(self.0, "alt").unwrap_or_default());
+                }
+                serializer.start_elem(
+                    name.clone(),
+                    attrs.borrow().iter().map(|attr| (&attr.name, &*attr.value)),
+                )?;
+                for child in self.0.children.borrow().iter() {
+                    NormalizedTableHtml(child).serialize(
+                        serializer,
+                        html5ever::serialize::TraversalScope::IncludeNode,
+                    )?;
+                }
+                serializer.end_elem(name.clone())?;
+            }
+            NodeData::Text { contents } => serializer.write_text(&contents.borrow())?,
+            _ => {}
+        }
+        Ok(())
+    }
 }
 
 /// Elements whose TEXT is machine state rather than prose, so the loss-averse rule above —
@@ -2038,6 +2262,115 @@ mod tests {
         assert!(md.contains("one") && md.contains("two") && md.contains("-"));
         let link = html_to_markdown(r#"<a href="https://x.io">x</a>"#);
         assert!(link.contains("[x](https://x.io)"));
+    }
+
+    #[test]
+    fn html_tables_preserve_mixed_header_and_data_cell_positions() {
+        let fixtures = [
+            (
+                "<table><thead><tr><td></td><th>Pele</th><th>Mermaid.js</th></tr></thead><tbody><tr><td>Bundle size</td><td>230 kB</td><td>1.6 MB</td></tr></tbody></table>",
+                vec![
+                    vec!["", "Pele", "Mermaid.js"],
+                    vec!["Bundle size", "230 kB", "1.6 MB"],
+                ],
+            ),
+            (
+                "<table><thead><tr><th>Metric</th><th>Value</th></tr></thead><tbody><tr><th scope=\"row\">Bundle size</th><td>230 kB</td></tr></tbody></table>",
+                vec![vec!["Metric", "Value"], vec!["Bundle size", "230 kB"]],
+            ),
+            (
+                "<table><tr><td>first</td><td></td></tr><tr><td>second</td><td>끝</td></tr></table>",
+                vec![vec!["", ""], vec!["first", ""], vec!["second", "끝"]],
+            ),
+            (
+                "<table><tr><th>Key</th><th>Value</th></tr><tr><td><code>a|b</code></td><td><a href=\"https://example.com\">link</a></td></tr></table>",
+                vec![vec!["Key", "Value"], vec!["a|b", "link"]],
+            ),
+            (
+                "<table><tr><th scope=\"row\">one</th><td>1</td></tr><tr><th scope=\"row\">two</th><td>2</td></tr></table>",
+                vec![vec!["", ""], vec!["one", "1"], vec!["two", "2"]],
+            ),
+            (
+                "<table><tr><th scope=\"ROW\">one</th><td>1</td></tr></table>",
+                vec![vec!["", ""], vec!["one", "1"]],
+            ),
+            (
+                "<table><tr><th scope=\"ROW\">one</th><th scope=\"ROW\">two</th></tr></table>",
+                vec![vec!["", ""], vec!["one", "two"]],
+            ),
+        ];
+        for (html, expected) in fixtures {
+            let markdown = html_to_markdown(html);
+            let mut rows: Vec<Vec<String>> = Vec::new();
+            let mut cell: Option<String> = None;
+            for event in
+                pulldown_cmark::Parser::new_ext(&markdown, pulldown_cmark::Options::ENABLE_TABLES)
+            {
+                match event {
+                    pulldown_cmark::Event::Start(
+                        pulldown_cmark::Tag::TableHead | pulldown_cmark::Tag::TableRow,
+                    ) => rows.push(Vec::new()),
+                    pulldown_cmark::Event::Start(pulldown_cmark::Tag::TableCell) => {
+                        cell = Some(String::new())
+                    }
+                    pulldown_cmark::Event::Text(text) | pulldown_cmark::Event::Code(text) => {
+                        if let Some(cell) = &mut cell {
+                            cell.push_str(&text);
+                        }
+                    }
+                    pulldown_cmark::Event::End(pulldown_cmark::TagEnd::TableCell) => {
+                        rows.last_mut().unwrap().push(cell.take().unwrap())
+                    }
+                    _ => {}
+                }
+            }
+            assert_eq!(rows, expected, "{markdown}");
+        }
+    }
+
+    #[test]
+    fn html_tables_keep_captions_and_inline_formatting() {
+        let md = html_to_markdown(
+            "<table><caption>Measured sizes</caption><tr><th>Name</th><th>Size</th></tr><tr><td><strong>Pele</strong></td><td>230 kB</td></tr></table>",
+        );
+        assert!(md.starts_with("Measured sizes\n\n| Name | Size |"), "{md}");
+        assert!(md.contains("| **Pele** | 230 kB |"), "{md}");
+    }
+
+    #[test]
+    fn html_tables_preserve_structures_outside_the_gfm_model() {
+        let fixtures = [
+            "<table><tbody><tr><td rowspan=\"2\">A</td><td>B</td></tr><tr><td>C</td></tr></tbody></table>",
+            "<table><thead><tr><th colspan=\"2\">Group</th></tr><tr><th>A</th><th>B</th></tr></thead><tbody><tr><td>1</td><td>2</td></tr></tbody></table>",
+            "<table><tbody><tr><td>Outer<table><tbody><tr><td>Inner</td></tr></tbody></table></td></tr></tbody></table>",
+            "<table><tbody><tr><td><p>First</p><p>Second</p></td></tr></tbody></table>",
+            "<table><tbody><tr><th>Ambiguous</th><td>Data</td></tr></tbody></table>",
+            "<table><thead><tr><th scope=\"COLGROUP\">Group</th></tr></thead><tbody><tr><td>A</td></tr></tbody></table>",
+            "<table><thead><tr><th scope=\"ROW\">Row only</th></tr></thead><tbody><tr><td>A</td></tr></tbody></table>",
+        ];
+        for html in fixtures {
+            let md = html_to_markdown(html);
+            assert_eq!(md, html);
+            assert!(
+                pulldown_cmark::Parser::new_ext(&md, pulldown_cmark::Options::ENABLE_TABLES).all(
+                    |event| !matches!(
+                        event,
+                        pulldown_cmark::Event::Start(pulldown_cmark::Tag::Table(_))
+                    )
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn html_table_html_preservation_still_filters_machine_text_and_data_images() {
+        let md = html_to_markdown(
+            "<table><tr><td colspan=\"2\"><style>.secret{}</style><script>secret()</script><ac:parameter>encoded-state</ac:parameter><img src=\" DATA:image/png;base64,secret\" alt=\"Logo &amp; text\">Visible &amp; text</td></tr></table>",
+        );
+        assert_eq!(
+            md,
+            "<table><tbody><tr><td colspan=\"2\">Logo &amp; textVisible &amp; text</td></tr></tbody></table>"
+        );
     }
 
     #[test]
