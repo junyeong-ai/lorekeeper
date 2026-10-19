@@ -492,9 +492,14 @@ fn oversized_audit_input_retains_work_without_launching_an_agent() {
         .unwrap();
     assert!(plan.status.success());
     let plan: serde_json::Value = serde_json::from_slice(&plan.stdout).unwrap();
-    assert_eq!(plan["candidates"].as_array().unwrap().len(), 1);
+    assert_eq!(plan["candidates"], serde_json::json!([]));
     assert_eq!(plan["unreviewed"], 1);
-    assert_eq!(plan["input"]["status"], "oversized");
+    assert_eq!(plan["blocked_count"], 1);
+    assert_eq!(plan["blocked"][0]["path"], "wiki/concepts/unverified.md");
+    assert_eq!(plan["blocked"][0]["input"]["status"], "oversized");
+    assert_eq!(result["audit"], serde_json::json!([]));
+    assert_eq!(result["audit_blocked_count"], 1);
+    assert_eq!(result["audit_blocked"], plan["blocked"]);
     assert!(
         fixture
             .command()
@@ -503,6 +508,69 @@ fn oversized_audit_input_retains_work_without_launching_an_agent() {
             .unwrap()
             .success()
     );
+}
+
+#[test]
+fn oversized_concept_remains_pending_while_later_work_completes() {
+    let fixture = Fixture::new("codex", 30, RECORD_FIRST_AUDIT);
+    let config = std::fs::read_to_string(&fixture.config).unwrap()
+        + "graph:\n  audit:\n    batch_size: 1\n    max_input_bytes: 4096\n";
+    std::fs::write(&fixture.config, config).unwrap();
+    for name in ["a-large", "b-small"] {
+        write_audit_concept(&fixture, name);
+    }
+    let large = fixture.root().join("vault/wiki/concepts/a-large.md");
+    let original = std::fs::read_to_string(&large).unwrap();
+    std::fs::write(
+        &large,
+        original + &"\nLarge retained evidence.\n".repeat(300),
+    )
+    .unwrap();
+    let output = fixture
+        .command()
+        .args(["run", "knowledge", "--batches", "4", "--json"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["ok"], false);
+    assert_eq!(result["stop_reason"], "blocked");
+    let runs = result["runs"].as_array().unwrap();
+    assert_eq!(runs.len(), 2);
+    assert_eq!(runs[0]["ok"], true);
+    assert_eq!(
+        runs[0]["audit"][0]["assessed_path"],
+        "wiki/concepts/b-small.md"
+    );
+    assert_eq!(runs[0]["audit_blocked_count"], 1);
+    assert_eq!(runs[1]["audit"], serde_json::json!([]));
+    assert_eq!(runs[1]["audit_blocked_count"], 1);
+    assert!(runs[1]["execution"].is_null());
+    let state: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(
+            fixture
+                .root()
+                .join("vault/.lorekeeper/knowledge-audit.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(state["entries"].as_object().unwrap().len(), 1);
+    assert!(state["entries"]["wiki/concepts/a-large.md"].is_null());
+    assert!(std::fs::read_to_string(&large).unwrap().len() > 4096);
+    let explicit = fixture
+        .command()
+        .args(["wiki", "audit-plan", "--path", "wiki/concepts/a-large.md"])
+        .output()
+        .unwrap();
+    assert!(explicit.status.success());
+    let explicit: serde_json::Value = serde_json::from_slice(&explicit.stdout).unwrap();
+    assert_eq!(
+        explicit["candidates"][0]["path"],
+        "wiki/concepts/a-large.md"
+    );
+    assert_eq!(explicit["input"]["status"], "oversized");
+    assert_eq!(explicit["blocked_count"], 0);
 }
 
 #[test]
