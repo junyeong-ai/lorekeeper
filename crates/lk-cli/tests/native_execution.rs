@@ -526,7 +526,12 @@ fn cancellation_kills_foreground_children_and_preserves_cross_host_exclusion() {
     let result: serde_json::Value =
         serde_json::from_slice(&std::fs::read(fixture.root().join("result.json")).unwrap())
             .unwrap();
-    assert_eq!(result["cancelled"], true);
+    assert_eq!(
+        result["cancelled"],
+        true,
+        "result: {result}\nstderr: {}",
+        std::fs::read_to_string(fixture.root().join("stderr.log")).unwrap()
+    );
     assert_eq!(
         result["stages"].as_array().unwrap().last().unwrap()["state"],
         "cancelled"
