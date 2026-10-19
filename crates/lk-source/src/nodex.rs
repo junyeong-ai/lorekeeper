@@ -92,8 +92,7 @@ const INITIAL_REACH: usize = 500;
 /// `lookback_hours` the operator meant differently — not something the adapter can settle
 /// by asking again.
 const MAX_REACH: usize = 64_000;
-// Snapshot and verified-body envelopes below are the public nodex 0.59 contract.
-const NODEX_COMPATIBILITY: &str = ">=0.59, <0.60";
+const NODEX_COMPATIBILITY: &str = ">=0.60, <0.61";
 const INVENTORY_FIELDS: &str = "id,title,kind,status,path,created,updated,reviewed,supersedes,superseded_by,implements,related,covers,tags";
 
 /// One document, as `nodex query recent` reports it.
@@ -1149,6 +1148,35 @@ template = "{kind}-{path_slug}"
             canonical[0].metadata["source_record"]["observation_revision"],
             "rebuilt formatting-only changes are the same public observation, never a claim of equal raw bytes"
         );
+        let config: serde_json::Value = run_nodex(
+            &supported,
+            root.path(),
+            ctx.target_date,
+            &["export", "config"],
+            false,
+        )
+        .await
+        .unwrap();
+        let graph_path = root
+            .path()
+            .join(config["output"]["dir"].as_str().unwrap())
+            .join("graph.json");
+        let current_graph = std::fs::read(&graph_path).unwrap();
+        let mut foreign_graph: serde_json::Value = serde_json::from_slice(&current_graph).unwrap();
+        foreign_graph["schema_version"] =
+            serde_json::json!(foreign_graph["schema_version"].as_u64().unwrap() - 1);
+        foreign_graph["edges"] = serde_json::json!([{"source":"a","reference":null}]);
+        let foreign_bytes = serde_json::to_vec(&foreign_graph).unwrap();
+        std::fs::write(&graph_path, &foreign_bytes).unwrap();
+        let error = NodexSource
+            .extract(&selected, &ctx)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("GRAPH_OUTDATED"), "{error}");
+        assert!(error.contains("nodex build --full"), "{error}");
+        assert_eq!(std::fs::read(&graph_path).unwrap(), foreign_bytes);
+        std::fs::write(&graph_path, &current_graph).unwrap();
         // A rebuilding writer can change body without changing inventory fields.
         // Exercise the entire first-read/final-requery loop, not only its comparison helper.
         #[cfg(unix)]
