@@ -1,10 +1,7 @@
 ---
 name: lore-extract:lore-extract
 version: 0.66.1
-description: Extract repository decisions and reusable knowledge into a Lorekeeper vault using a persistent scan/run/audit manifest. Uses source documents, code boundaries and optional Git history; use lore-wiki capture for an insight from current work.
-when_to_use: |
-  Lorekeeper repository extraction, scan project knowledge, extract ADRs,
-  audit extraction coverage, 프로젝트 지식 추출, 저장소 지식 이관
+description: Extracts repository decisions and reusable knowledge into a Lorekeeper vault using a persistent scan/run/audit manifest. Uses source documents, code boundaries and optional Git history; use lore-wiki capture for an insight from current work.
 argument-hint: "scan|run|audit <repo-path> [--domain <name>] [--transferability T1|T2|T3] [--include-git] [--full]"
 allowed-tools: |
   Bash(lore *)

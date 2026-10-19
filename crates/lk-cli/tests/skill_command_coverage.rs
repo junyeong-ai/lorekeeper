@@ -141,8 +141,7 @@ fn a_command_name_is_matched_whole_not_as_a_prefix() {
 /// `--help` short-circuits clap before argument validation, so a documented invocation's
 /// placeholders and flags do not have to be satisfiable to ask whether the command path exists.
 ///
-/// Only backticked invocations count. `when_to_use` carries natural-language triggers — "lore
-/// capture", "lore extract" — which are the skill's own name in prose, not commands.
+/// Only backticked invocations count; natural-language skill descriptions are not commands.
 #[test]
 fn every_command_a_skill_tells_an_agent_to_run_exists() {
     let corpus = skill_corpus();

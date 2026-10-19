@@ -390,6 +390,8 @@ Use Claude Code 2.1.246 or later. Each skill declares a qualified name such as
 `/lore-process:lore-process`; the short commands below remain available as aliases.
 Scheduled runs explicitly load the selected skill from `LORE_SKILL_DIR` and invoke
 its qualified name.
+Knowledge maintenance loads both lore-wiki and lore-process to complete typed repairs.
+A missing required skill fails before the LLM session starts.
 
 Existing concepts may live at addresses such as `wiki/concepts/group/stored.md`.
 Resolution and concept inventory return `group/stored` as the `slug`, and later

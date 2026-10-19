@@ -1,10 +1,7 @@
 ---
 name: lore-process:lore-process
 version: 0.66.1
-description: Process pending Lorekeeper semantic queue tasks after ingestion or graph reconciliation. Stages typed summaries, concepts, synthesis and review narratives, then verifies publication and evidence consistency. Does not collect remote sources.
-when_to_use: |
-  queue process, drain queue, fill summaries,
-  concept extraction run, enrich daily pages, post-ingest
+description: Processes pending Lorekeeper semantic queue tasks after ingestion or graph reconciliation. Stages typed summaries, concepts, synthesis and review narratives, then verifies publication and evidence consistency. Does not collect remote sources.
 allowed-tools: |
   Bash(ls *)
   Bash(cat *)

@@ -1,5 +1,14 @@
 # config.yaml schema
 
+## Contents
+
+- [Configuration outline](#configuration-outline)
+- [Initial setup](#initial-setup)
+- [Location and validation](#location-and-validation)
+- [Nodex binary selection](#nodex-binary-selection)
+
+## Configuration outline
+
 `config.starter.yaml` enables one local inbox without provider credentials or
 personal tracking. `config.example.yaml` is the full catalog of optional source
 types and modules, with every source disabled. Both ship at the repo root and in
@@ -117,7 +126,7 @@ For a complete initial setup, distinguish these outcomes:
 Report completed, failed and untested stages separately. `health` is collection
 freshness; `self status` is installation coherence. Neither proves semantic quality.
 
-## Location / validation
+## Location and validation
 - `./config.yaml` (repo) or `~/.config/lorekeeper/config.yaml` (binary install). Also
   selectable via `--config` / `LORE_CONFIG`. Other locations require that explicit selection;
   `vault.root` resolves against the selected config file, not the working directory.
