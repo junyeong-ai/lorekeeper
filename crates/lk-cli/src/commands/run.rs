@@ -90,6 +90,8 @@ mod native {
         execution: Option<ExecutionInfo>,
         workflow_id: Option<lk_core::execution::WorkflowId>,
         audit: Option<Vec<lk_graph::audit::AuditCompletion>>,
+        audit_blocked: Vec<lk_graph::audit::AuditBlockedInput>,
+        audit_blocked_count: usize,
         review_health: Option<ReviewHealth>,
         stages: Vec<StageResult>,
     }
@@ -515,8 +517,28 @@ mod native {
                 self.failure("audit input bound", error);
                 return;
             }
+            self.result.audit_blocked = plan.blocked;
+            self.result.audit_blocked_count = plan.blocked_count;
+            if plan.blocked_count > 0 {
+                self.record(
+                    "audit input bound",
+                    if plan.candidates.is_empty() {
+                        StageState::Failed
+                    } else {
+                        StageState::Skipped
+                    },
+                    Some(format!(
+                        "{} encountered concepts exceed the complete input bound and remain pending; {} details reported",
+                        plan.blocked_count,
+                        self.result.audit_blocked.len(),
+                    )),
+                );
+            }
             if plan.candidates.is_empty() {
                 self.result.audit = Some(Vec::new());
+                if plan.blocked_count > 0 {
+                    return;
+                }
                 self.record(
                     "knowledge audit",
                     StageState::Skipped,
@@ -593,6 +615,10 @@ mod native {
             .await;
             stop_reason = if result.cancelled {
                 "cancelled"
+            } else if result.audit.as_ref().is_some_and(Vec::is_empty)
+                && result.audit_blocked_count > 0
+            {
+                "blocked"
             } else if !result.ok {
                 "failed"
             } else if result.audit.as_ref().is_some_and(Vec::is_empty) {
@@ -661,6 +687,8 @@ mod native {
                 execution: None,
                 workflow_id: None,
                 audit: None,
+                audit_blocked: Vec::new(),
+                audit_blocked_count: 0,
                 review_health: None,
                 stages: Vec::new(),
             },

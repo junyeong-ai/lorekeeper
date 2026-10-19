@@ -7,13 +7,18 @@ publication contracts in SKILL.md and read the curation reference before repairs
 1. Run `lore wiki audit-plan` once. When the caller supplies exact batch addresses,
    use repeated `--path` for those addresses instead of choosing a new batch.
    Keep its candidate addresses as this run's scope.
-   `graph.audit.batch_size` bounds semantic work (1..100). If no candidate exists,
-   report the returned counts and stop successfully. Do not expand the batch to
-   reduce the whole backlog to zero.
+   `graph.audit.batch_size` bounds semantic work (1..100). Automatic selection leaves
+   individually oversized concepts pending and selects later fitting work. `blocked_count`
+   counts blockers encountered during this selection; `blocked` supplies at most 100
+   path/revision/size details, not a whole-corpus inventory. If no candidate exists,
+   report the counts: stop successfully only when `blocked_count` is zero; otherwise
+   report incomplete work. Do not expand the batch to reduce the whole backlog to zero.
    Check `input.status` before reading: `oversized` retains the exact candidates
    because their complete page, scoped review/evidence and selected RSS payload bytes exceed
    `graph.audit.max_input_bytes`. Report the measured bytes and configured bound;
-   do not truncate evidence, skip candidates or record a completed assessment.
+   do not truncate evidence, replace explicitly selected candidates or record a completed
+   assessment. An execution profile changes the agent, not this configuration's input
+   bound; select any explicitly authorized larger-scope config before the workflow starts.
 2. For each candidate, read the complete concept and the actual evidence it cites.
    The candidate's evidence is the complete graph-derived set. For independent
    discovery, `wiki citations CONCEPT --snapshot ID` paginates that set; do not

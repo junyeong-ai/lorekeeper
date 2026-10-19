@@ -277,12 +277,25 @@ pub struct AuditCandidate {
 #[derive(Serialize)]
 pub struct AuditPlan {
     pub candidates: Vec<AuditCandidate>,
+    /// Individually oversized inputs encountered while selecting this automatic batch.
+    /// At most 100 details, in selection order; exact selections do not defer inputs.
+    pub blocked: Vec<AuditBlockedInput>,
+    /// All blockers encountered before filling the batch, not a corpus-wide inventory.
+    pub blocked_count: usize,
     pub total: usize,
     pub reviewed_current: usize,
     pub follow_up_current: usize,
     pub unreviewed: usize,
     pub changed: usize,
     pub limit: usize,
+    pub input: AuditInputBound,
+}
+
+#[derive(Serialize)]
+pub struct AuditBlockedInput {
+    pub path: String,
+    pub file_revision: String,
+    pub input_revision: String,
     pub input: AuditInputBound,
 }
 
@@ -318,7 +331,7 @@ impl AuditInputBound {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct InputResources {
     pages: BTreeMap<PathBuf, (String, u64)>,
     rss_payloads: BTreeMap<(String, String), u64>,
@@ -381,30 +394,24 @@ impl InputResources {
         );
         Ok(())
     }
-}
 
-fn measure_inputs<'a>(
-    root: &Path,
-    candidates: impl IntoIterator<Item = &'a AuditCandidate>,
-    max_input_bytes: u64,
-) -> Result<AuditInputBound, GraphError> {
-    if max_input_bytes == 0 {
-        return Err(error("audit max_input_bytes must be positive"));
-    }
-    let mut resources = InputResources::default();
-    for candidate in candidates {
-        resources.page(root, &candidate.path, Some(&candidate.file_revision), None)?;
+    fn include_candidate(
+        &mut self,
+        root: &Path,
+        candidate: &AuditCandidate,
+    ) -> Result<(), GraphError> {
+        self.page(root, &candidate.path, Some(&candidate.file_revision), None)?;
         for citation in candidate.evidence.iter().chain(&candidate.related_pages) {
             if citation.rss_event.is_some() {
-                resources.page(root, &citation.path, None, None)?;
-                resources.rss_payload(root, &candidate.path, citation)?;
+                self.page(root, &citation.path, None, None)?;
+                self.rss_payload(root, &candidate.path, citation)?;
             } else {
-                resources.page(root, &citation.path, None, Some(&citation.revision))?;
+                self.page(root, &citation.path, None, Some(&citation.revision))?;
             }
         }
         for review in &candidate.reviews {
             if let Some(document) = review.document() {
-                resources.page(
+                self.page(
                     root,
                     &document.path,
                     Some(&document.file_revision),
@@ -431,7 +438,7 @@ fn measure_inputs<'a>(
                 .iter()
                 .flat_map(|evidence| evidence.current.iter().chain(&evidence.archived))
             {
-                resources.page(
+                self.page(
                     root,
                     &page.path,
                     Some(&page.file_revision),
@@ -439,25 +446,47 @@ fn measure_inputs<'a>(
                 )?;
             }
         }
+        Ok(())
     }
-    let bytes = resources
-        .pages
-        .values()
-        .map(|(_, bytes)| *bytes)
-        .chain(resources.rss_payloads.values().copied())
-        .try_fold(0u64, |total, bytes| total.checked_add(bytes))
-        .ok_or_else(|| error("audit input byte count overflow"))?;
-    Ok(AuditInputBound {
-        status: if bytes > max_input_bytes {
-            AuditInputStatus::Oversized
-        } else {
-            AuditInputStatus::Ready
-        },
-        bytes,
-        max_bytes: max_input_bytes,
-        pages: resources.pages.len(),
-        rss_payloads: resources.rss_payloads.len(),
-    })
+
+    fn bound(&self, max_input_bytes: u64) -> Result<AuditInputBound, GraphError> {
+        if max_input_bytes == 0 {
+            return Err(error("audit max_input_bytes must be positive"));
+        }
+        let bytes = self
+            .pages
+            .values()
+            .map(|(_, bytes)| *bytes)
+            .chain(self.rss_payloads.values().copied())
+            .try_fold(0u64, |total, bytes| total.checked_add(bytes))
+            .ok_or_else(|| error("audit input byte count overflow"))?;
+        Ok(AuditInputBound {
+            status: if bytes > max_input_bytes {
+                AuditInputStatus::Oversized
+            } else {
+                AuditInputStatus::Ready
+            },
+            bytes,
+            max_bytes: max_input_bytes,
+            pages: self.pages.len(),
+            rss_payloads: self.rss_payloads.len(),
+        })
+    }
+}
+
+fn measure_inputs<'a>(
+    root: &Path,
+    candidates: impl IntoIterator<Item = &'a AuditCandidate>,
+    max_input_bytes: u64,
+) -> Result<AuditInputBound, GraphError> {
+    if max_input_bytes == 0 {
+        return Err(error("audit max_input_bytes must be positive"));
+    }
+    let mut resources = InputResources::default();
+    for candidate in candidates {
+        resources.include_candidate(root, candidate)?;
+    }
+    resources.bound(max_input_bytes)
 }
 
 fn load(root: &Path) -> Result<(Option<String>, Receipts), GraphError> {
@@ -843,6 +872,7 @@ fn pending(
 }
 
 /// Rotate changed and never-reviewed work, retaining first-discovery order in each class.
+/// Report oversized inputs as pending blockers while selecting later fitting work.
 /// Unchanged inputs skip repeated reads; missing or stale finding reviews reopen work.
 pub fn plan(
     root: &Path,
@@ -895,27 +925,60 @@ pub fn plan_selected(
         .partition(|candidate| candidate.reason == "changed");
     let changed_count = changed.len();
     let unreviewed_count = unreviewed.len();
-    let mut candidates = Vec::new();
+    let mut candidates = selected;
+    let mut resources = InputResources::default();
+    let mut input = if selection.is_empty() {
+        resources.bound(max_input_bytes)?
+    } else {
+        measure_inputs(root, &candidates, max_input_bytes)?
+    };
+    let mut blocked = Vec::new();
+    let mut blocked_count = 0;
     let mut next_class = receipts.next_class;
-    while candidates.len() < limit {
+    while selection.is_empty() && candidates.len() < limit {
         let next = match next_class {
             AuditClass::Changed => changed.pop_front().or_else(|| unreviewed.pop_front()),
             AuditClass::Unreviewed => unreviewed.pop_front().or_else(|| changed.pop_front()),
         };
         let Some(candidate) = next else { break };
-        next_class = if candidate.reason == "changed" {
-            AuditClass::Unreviewed
+        let mut prospective = resources.clone();
+        prospective.include_candidate(root, &candidate)?;
+        let combined = prospective.bound(max_input_bytes)?;
+        if combined.status == AuditInputStatus::Ready {
+            next_class = if candidate.reason == "changed" {
+                AuditClass::Unreviewed
+            } else {
+                AuditClass::Changed
+            };
+            candidates.push(candidate);
+            resources = prospective;
+            input = combined;
+            continue;
+        }
+        let individual = if candidates.is_empty() {
+            combined
         } else {
-            AuditClass::Changed
+            measure_inputs(root, std::iter::once(&candidate), max_input_bytes)?
         };
-        candidates.push(candidate);
+        if individual.status == AuditInputStatus::Ready {
+            // This complete input fits a fresh batch. Preserve its position instead
+            // of treating remaining batch capacity as an individual blocker.
+            break;
+        }
+        blocked_count += 1;
+        if blocked.len() < 100 {
+            blocked.push(AuditBlockedInput {
+                path: candidate.path,
+                file_revision: candidate.file_revision,
+                input_revision: candidate.input_revision,
+                input: individual,
+            });
+        }
     }
-    if !selection.is_empty() {
-        candidates = selected;
-    }
-    let input = measure_inputs(root, &candidates, max_input_bytes)?;
     Ok(AuditPlan {
         candidates,
+        blocked,
+        blocked_count,
         total,
         reviewed_current,
         follow_up_current,
@@ -1259,7 +1322,13 @@ mod tests {
             stale.input.bytes - 1,
         )
         .unwrap();
-        assert_eq!(oversized.input.status, AuditInputStatus::Oversized);
+        assert!(oversized.candidates.is_empty());
+        assert_eq!(oversized.blocked_count, 1);
+        assert_eq!(
+            oversized.blocked[0].input.status,
+            AuditInputStatus::Oversized
+        );
+        assert_eq!(oversized.blocked[0].input.bytes, stale.input.bytes);
         assert_eq!(
             stale.input.bytes,
             (concept.len() + content.len() + changed.len() + original.len()) as u64
@@ -1533,8 +1602,15 @@ mod tests {
         assert_eq!(ready.input.rss_payloads, 0);
         assert_eq!(ready.input.status, AuditInputStatus::Ready);
         ready.input.ensure_ready().unwrap();
-        let oversized = plan(root.path(), &dirs, &pages, 2, expected - 1).unwrap();
+        let paths = ready
+            .candidates
+            .iter()
+            .map(|candidate| candidate.path.clone())
+            .collect::<Vec<_>>();
+        let oversized = plan_selected(root.path(), &dirs, &pages, 2, &paths, expected - 1).unwrap();
         assert_eq!(oversized.input.status, AuditInputStatus::Oversized);
+        assert_eq!(oversized.blocked_count, 0);
+        assert!(oversized.blocked.is_empty());
         assert!(oversized.input.ensure_ready().is_err());
         assert_eq!(oversized.candidates.len(), 2);
         assert_eq!(
@@ -1588,6 +1664,224 @@ mod tests {
     }
 
     #[test]
+    fn oversized_pending_inputs_do_not_block_later_work_or_gain_receipts() {
+        for previously_reviewed in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let dirs = VaultDirs::default();
+            let large = "wiki/concepts/a.md";
+            let small = "---\ntype: concept\ntitle: Topic\n---\nA scoped claim.\n";
+            write(root.path(), large, small);
+            let session = MutationSession::acquire(root.path()).unwrap();
+            if previously_reviewed {
+                let initial = plan(root.path(), &dirs, &scan(root.path()), 1, u64::MAX).unwrap();
+                record(
+                    &session,
+                    &dirs,
+                    &scan(root.path()),
+                    AuditResults {
+                        assessments: vec![assessment(&initial.candidates[0])],
+                    },
+                    u64::MAX,
+                )
+                .unwrap();
+            }
+            let large_body = format!("{small}{}", "Large evidence context.\n".repeat(100));
+            write(root.path(), large, &large_body);
+            for path in ["wiki/concepts/b.md", "wiki/concepts/c.md"] {
+                write(root.path(), path, small);
+            }
+            let cap = small.len() as u64;
+            for expected in ["wiki/concepts/b.md", "wiki/concepts/c.md"] {
+                let before = std::fs::read(root.path().join(STATE)).ok();
+                let selected = plan(root.path(), &dirs, &scan(root.path()), 1, cap).unwrap();
+                assert_eq!(selected.candidates.len(), 1);
+                assert_eq!(selected.candidates[0].path, expected);
+                assert_eq!(selected.input.status, AuditInputStatus::Ready);
+                assert_eq!(selected.blocked_count, 1);
+                assert_eq!(selected.blocked[0].path, large);
+                assert_eq!(selected.blocked[0].input.bytes, large_body.len() as u64);
+                let repeated = plan(root.path(), &dirs, &scan(root.path()), 1, cap).unwrap();
+                assert_eq!(repeated.candidates[0].path, expected);
+                assert_eq!(
+                    repeated.blocked[0].input_revision,
+                    selected.blocked[0].input_revision
+                );
+                assert_eq!(std::fs::read(root.path().join(STATE)).ok(), before);
+                record(
+                    &session,
+                    &dirs,
+                    &scan(root.path()),
+                    AuditResults {
+                        assessments: vec![assessment(&selected.candidates[0])],
+                    },
+                    cap,
+                )
+                .unwrap();
+            }
+            let before = std::fs::read(root.path().join(STATE)).unwrap();
+            let blocked = plan(root.path(), &dirs, &scan(root.path()), 1, cap).unwrap();
+            assert!(blocked.candidates.is_empty());
+            assert_eq!(blocked.blocked_count, 1);
+            assert_eq!(blocked.reviewed_current, 2);
+            assert_eq!(blocked.changed, usize::from(previously_reviewed));
+            assert_eq!(blocked.unreviewed, usize::from(!previously_reviewed));
+            assert_eq!(blocked.input.bytes, 0);
+            assert_eq!(std::fs::read(root.path().join(STATE)).unwrap(), before);
+
+            let resumed = plan(root.path(), &dirs, &scan(root.path()), 1, u64::MAX).unwrap();
+            assert_eq!(resumed.candidates[0].path, large);
+            assert_eq!(resumed.blocked_count, 0);
+            assert_eq!(
+                resumed.candidates[0].input_revision, blocked.blocked[0].input_revision,
+                "resource policy changes cannot rebind semantic identities"
+            );
+        }
+    }
+
+    #[test]
+    fn oversized_inputs_do_not_consume_the_preferred_class_turn() {
+        for prefer_changed in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let dirs = VaultDirs::default();
+            let blocked = "wiki/concepts/a.md";
+            let fitting = "wiki/concepts/c.md";
+            let other_first = "wiki/concepts/u1.md";
+            let other_second = "wiki/concepts/u2.md";
+            let original = "---\ntype: concept\n---\nA scoped claim.\n";
+            let changed = original.replace("scoped", "reread");
+            let reviewed = if prefer_changed {
+                [blocked, fitting]
+            } else {
+                [other_first, other_second]
+            };
+            for path in reviewed {
+                write(root.path(), path, original);
+            }
+            let session = MutationSession::acquire(root.path()).unwrap();
+            let complete = |candidate: &AuditCandidate| {
+                record(
+                    &session,
+                    &dirs,
+                    &scan(root.path()),
+                    AuditResults {
+                        assessments: vec![assessment(candidate)],
+                    },
+                    u64::MAX,
+                )
+                .unwrap();
+            };
+            let initial = plan(root.path(), &dirs, &scan(root.path()), 2, u64::MAX).unwrap();
+            for candidate in &initial.candidates {
+                complete(candidate);
+            }
+            if !prefer_changed {
+                // Recording an already assessed member makes unreviewed work next.
+                complete(&initial.candidates[0]);
+            }
+            for path in reviewed {
+                write(root.path(), path, &changed);
+            }
+            let new = if prefer_changed {
+                [other_first, other_second]
+            } else {
+                [blocked, fitting]
+            };
+            for path in new {
+                write(root.path(), path, original);
+            }
+            write(
+                root.path(),
+                blocked,
+                &format!("{changed}{}", "Context.\n".repeat(100)),
+            );
+            let cap = changed.len() as u64;
+            let first = plan(root.path(), &dirs, &scan(root.path()), 1, cap).unwrap();
+            assert_eq!(
+                first.candidates[0].path, fitting,
+                "an oversized member must not pass its class turn to the other class (prefer_changed={prefer_changed})"
+            );
+            assert_eq!(first.blocked_count, 1);
+            assert_eq!(first.blocked[0].path, blocked);
+            complete(&first.candidates[0]);
+            let opposite = plan(root.path(), &dirs, &scan(root.path()), 1, cap).unwrap();
+            assert_eq!(opposite.candidates[0].path, other_first);
+            complete(&opposite.candidates[0]);
+            let exhausted = plan(root.path(), &dirs, &scan(root.path()), 1, cap).unwrap();
+            assert_eq!(exhausted.candidates[0].path, other_second);
+            assert_eq!(exhausted.blocked[0].path, blocked);
+        }
+    }
+
+    #[test]
+    fn batch_capacity_defers_a_fitting_input_without_calling_it_oversized() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let concept = "---\ntype: concept\ntitle: Topic\n---\nA scoped claim.\n";
+        for path in ["wiki/concepts/a.md", "wiki/concepts/b.md"] {
+            write(root.path(), path, concept);
+        }
+        let cap = concept.len() as u64;
+        let selected = plan(root.path(), &dirs, &scan(root.path()), 2, cap).unwrap();
+        assert_eq!(selected.candidates.len(), 1);
+        assert_eq!(selected.candidates[0].path, "wiki/concepts/a.md");
+        assert_eq!(selected.input.bytes, cap);
+        assert_eq!(selected.input.pages, 1);
+        assert_eq!(selected.blocked_count, 0);
+        assert!(selected.blocked.is_empty());
+        let exact = plan_selected(
+            root.path(),
+            &dirs,
+            &scan(root.path()),
+            2,
+            &["wiki/concepts/b.md".into(), "wiki/concepts/a.md".into()],
+            cap,
+        )
+        .unwrap();
+        assert_eq!(exact.candidates.len(), 2);
+        assert_eq!(exact.candidates[0].path, "wiki/concepts/b.md");
+        assert_eq!(exact.input.bytes, cap * 2);
+        assert_eq!(exact.input.status, AuditInputStatus::Oversized);
+        assert_eq!(exact.blocked_count, 0);
+        assert!(!root.path().join(STATE).exists());
+    }
+
+    #[test]
+    fn oversized_details_are_bounded_and_selection_stops_when_full() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let concept = "---\ntype: concept\n---\nA scoped claim.\n";
+        for index in 0..102 {
+            write(
+                root.path(),
+                &format!("wiki/concepts/{index:03}.md"),
+                concept,
+            );
+        }
+        let blocked = plan(root.path(), &dirs, &scan(root.path()), 1, 1).unwrap();
+        assert!(blocked.candidates.is_empty());
+        assert_eq!(blocked.blocked_count, 102);
+        assert_eq!(blocked.blocked.len(), 100);
+        assert_eq!(blocked.blocked[0].path, "wiki/concepts/000.md");
+        assert_eq!(blocked.blocked[99].path, "wiki/concepts/099.md");
+        assert_eq!(blocked.unreviewed, 102);
+
+        let small = "---\ntype: concept\n---\n";
+        write(root.path(), "wiki/concepts/000.md", small);
+        let selected = plan(
+            root.path(),
+            &dirs,
+            &scan(root.path()),
+            1,
+            small.len() as u64,
+        )
+        .unwrap();
+        assert_eq!(selected.candidates.len(), 1);
+        assert_eq!(selected.candidates[0].path, "wiki/concepts/000.md");
+        assert_eq!(selected.blocked_count, 0);
+        assert!(!root.path().join(STATE).exists());
+    }
+
+    #[test]
     fn input_measurement_refuses_changed_and_missing_dependencies() {
         let root = tempfile::tempdir().unwrap();
         let dirs = VaultDirs::default();
@@ -1613,6 +1907,38 @@ mod tests {
             &concept.replace("A claim.", "Changed."),
         );
         assert!(measure_inputs(root.path(), &candidates, u64::MAX).is_err());
+    }
+
+    #[test]
+    fn incremental_measurement_refuses_exact_drift_in_a_shared_dependency() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let source_path = "wiki/documents/shared.md";
+        let source = "---\ntype: document\nupdated: 2026-01-01\n---\nShared evidence.\n## Related Concepts\n- [A](../concepts/a.md)\n- [B](../concepts/b.md)\n";
+        let concept = "---\ntype: concept\n---\nA scoped claim.\n";
+        write(root.path(), source_path, source);
+        for path in ["wiki/concepts/a.md", "wiki/concepts/b.md"] {
+            write(root.path(), path, concept);
+        }
+        let ready = plan(root.path(), &dirs, &scan(root.path()), 2, u64::MAX).unwrap();
+        let mut resources = InputResources::default();
+        resources
+            .include_candidate(root.path(), &ready.candidates[0])
+            .unwrap();
+        let changed = source.replace("2026-01-01", "2026-01-02");
+        assert_eq!(
+            source_revision(&lk_vault::parse_page(source).unwrap()),
+            source_revision(&lk_vault::parse_page(&changed).unwrap()),
+            "bookkeeping drift leaves the semantic source identity unchanged"
+        );
+        write(root.path(), source_path, &changed);
+        let mut prospective = resources.clone();
+        assert!(
+            prospective
+                .include_candidate(root.path(), &ready.candidates[1])
+                .is_err()
+        );
+        assert_eq!(resources.bound(u64::MAX).unwrap().pages, 2);
     }
 
     #[cfg(unix)]

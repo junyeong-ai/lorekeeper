@@ -48,6 +48,9 @@ and CLI discovery, not a second graph authority.
   backlink authority. Receipts describe completed reads, never factual confidence.
 - Preserve pending first-discovery order and rotate changed/first-time work. A bounded
   weekly batch must not starve old work or grow into an unbounded full-corpus audit.
+  Individually oversized inputs remain visible pending blockers; they do not consume
+  a class turn or prevent later fitting work. Combined batch capacity is distinct
+  from an individual blocker. Exact selections retain their complete requested scope.
 - Scope reviews by their declared subjects, the concept's `knowledge_review` pointer,
   and prior receipt review paths. Omitting result review paths cannot bypass a missing,
   invalid or stale scoped review. Valid open findings remain durable follow-up.
