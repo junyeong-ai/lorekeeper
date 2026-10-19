@@ -121,6 +121,16 @@ claude_skill() {
     done
     local plugin_name="${skill_dir##*/}"
     prompt="/${plugin_name}:${prompt#/}"
+    local allowed_tools=(
+        "Bash(lore:*)" "Bash(ls:*)" "Bash(cat:*)" "Bash(jq:*)"
+        "Bash(mkdir:*)" "Bash(mv:*)" "Bash(basename:*)" "Bash(test:*)" "Bash([:*)"
+        "Bash(find:*)" "Bash(wc:*)" "Bash(head:*)" "Bash(date:*)" "Bash(grep:*)"
+        "Read" "Edit" "Write" "Glob" "Grep"
+    )
+    for skill in "$@"; do
+        local dependency="${skill##*/}"
+        allowed_tools+=("Skill(${dependency}:${dependency})" "Skill(${dependency}:${dependency} *)")
+    done
     # The carried SKILL.md declares this qualified name for both ordinary skill
     # discovery and explicit plugin loading. --add-dir grants file access only.
     # `LORE_CONFIG` is passed IN, not left to be rediscovered. `lore` auto-discovers
@@ -134,10 +144,7 @@ claude_skill() {
         "${plugin_args[@]}" \
         --append-system-prompt "$AUTONOMOUS_PREAMBLE" \
         --permission-mode acceptEdits \
-        --allowedTools "Bash(lore:*)" "Bash(ls:*)" "Bash(cat:*)" "Bash(jq:*)" \
-        "Bash(mkdir:*)" "Bash(mv:*)" "Bash(basename:*)" "Bash(test:*)" "Bash([:*)" \
-        "Bash(find:*)" "Bash(wc:*)" "Bash(head:*)" "Bash(date:*)" "Bash(grep:*)" \
-        "Read" "Edit" "Write" "Glob" "Grep" \
+        --allowedTools "${allowed_tools[@]}" \
         --output-format text
 }
 

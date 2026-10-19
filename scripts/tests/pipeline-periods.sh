@@ -134,9 +134,13 @@ awk '/^--add-dir$/ { getline; print }' "$TEST_ROOT/consumer-args" > "$TEST_ROOT/
 if [ "$scenario" = single ]; then
     printf '%s\n' "$skills/lore-process" > "$TEST_ROOT/expected-plugins"
     grep -Fxq '/lore-process:lore-process' "$TEST_ROOT/consumer-args"
+    if grep -q '^Skill(' "$TEST_ROOT/consumer-args"; then exit 1; fi
 else
     printf '%s\n' "$skills/lore-wiki" "$skills/lore-process" > "$TEST_ROOT/expected-plugins"
     grep -Fxq '/lore-wiki:lore-wiki maintain' "$TEST_ROOT/consumer-args"
+    grep -Fxq 'Skill(lore-process:lore-process)' "$TEST_ROOT/consumer-args"
+    grep -Fxq 'Skill(lore-process:lore-process *)' "$TEST_ROOT/consumer-args"
+    [ "$(grep -c '^Skill(' "$TEST_ROOT/consumer-args")" -eq 2 ]
 fi
 cmp "$TEST_ROOT/expected-plugins" "$TEST_ROOT/plugins"
 cmp "$TEST_ROOT/expected-plugins" "$TEST_ROOT/access"
