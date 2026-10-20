@@ -13,15 +13,8 @@ use crate::{
     Theme, ThemeRequest,
 };
 
-/// LlmClient that defers semantic work to a Claude Code skill. Buffers task records
-/// in memory during `summarize`/`extract_concepts` calls; `flush` admits requests not
-/// already pending to `<queue_dir>/{run_id}.jsonl` atomically (temp + fsync + rename).
-///
-/// The buffer-then-rename design preserves an invariant `/lore-process` depends on:
-/// **a queue file exists only when every task in it points at a page the pipeline
-/// also wrote successfully**. A fatal mid-run error drops the in-memory buffer
-/// without leaving a half-written JSONL or orphan tasks targeting pages that never
-/// got written.
+/// Buffers typed semantic requests. Page producers transfer them into their guarded
+/// publication journal; `flush` admits requests for targets already published.
 pub struct QueueLlmClient {
     queue_dir: PathBuf,
     run_id: String,
@@ -480,13 +473,28 @@ impl TaskKind {
 /// sync atomic write in the workspace); a `.jsonl` path yields a `*.jsonl.tmp` temp the
 /// ingest startup sweep still reaps.
 pub fn write_tasks_atomic(final_path: &Path, tasks: &[QueueTask]) -> std::io::Result<()> {
+    lk_core::fs::write_atomic(final_path, serialize_tasks(tasks)?.as_bytes(), None)
+}
+
+pub fn serialize_tasks(tasks: &[QueueTask]) -> std::io::Result<String> {
     let mut buf = String::with_capacity(tasks.len() * 256);
     for task in tasks {
         let line = serde_json::to_string(task).map_err(std::io::Error::other)?;
         buf.push_str(&line);
         buf.push('\n');
     }
-    lk_core::fs::write_atomic(final_path, buf.as_bytes(), None)
+    Ok(buf)
+}
+
+/// Select exact requests not already pending. The caller holds the queue writer claim.
+pub fn new_requests(queue_dir: &Path, tasks: &[QueueTask]) -> std::io::Result<Vec<QueueTask>> {
+    let pending = read_pending_tasks(queue_dir)?;
+    let mut identities: HashSet<_> = pending.iter().map(QueueTask::request_identity).collect();
+    Ok(tasks
+        .iter()
+        .filter(|task| identities.insert(task.request_identity()))
+        .cloned()
+        .collect())
 }
 
 pub struct QueueFile {
@@ -609,6 +617,10 @@ impl QueueLlmClient {
 
 #[async_trait]
 impl LlmClient for QueueLlmClient {
+    async fn take_requests(&self) -> Vec<QueueTask> {
+        std::mem::take(&mut *self.buffer.lock().await).tasks
+    }
+
     async fn begin_source(&self) {
         let mut buffer = self.buffer.lock().await;
         buffer.source_mark = buffer.tasks.len();
@@ -669,15 +681,8 @@ impl LlmClient for QueueLlmClient {
                 return Err(QueueError::QueueIo(format!("queue lock unavailable: {e}")));
             }
         };
-        let pending = read_pending_tasks(&self.queue_dir)
+        let tasks = new_requests(&self.queue_dir, &buffer.tasks)
             .map_err(|e| QueueError::QueueIo(format!("read pending requests: {e}")))?;
-        let mut identities: HashSet<_> = pending.iter().map(QueueTask::request_identity).collect();
-        let tasks: Vec<_> = buffer
-            .tasks
-            .iter()
-            .filter(|task| identities.insert(task.request_identity()))
-            .cloned()
-            .collect();
 
         if !tasks.is_empty() {
             let final_path = self.queue_path();

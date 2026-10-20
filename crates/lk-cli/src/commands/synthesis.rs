@@ -120,12 +120,8 @@ pub async fn run(
     );
 
     let synth = lk_pipeline::Synthesizer::new(&vault_root, ctx, &config, today);
-    let writer = lk_vault::VaultWriter::new(&vault_root);
+    let mut publication = super::publication::Publication::new(&_mutation, llm.clone());
 
-    // Plan every period's page upfront so all queue-mode LLM tasks land in the
-    // buffer before ANY write happens. This decouples buffering from page writes:
-    // if a write fails partway, we abort BEFORE flushing, so the buffered tasks are
-    // dropped consistently — the same recovery story as `lore ingest`.
     let personal_on = config.personal.is_some();
     let outputs: Vec<lk_pipeline::RenderResult> = match period {
         // The personal-review periods belong to the personal module; report the real
@@ -215,22 +211,13 @@ pub async fn run(
     };
 
     for out in &outputs {
-        // A synthesis section is LLM-owned like any other, so re-running a period whose
-        // input grew empties the narrative it already held. Named before the write, as
-        // `lore ingest` names the same thing.
         super::ingest::report_discards(out, false);
-        writer
-            .write_page(out.path.as_ref(), &out.content)
-            .await
-            .map_err(|e| miette::miette!("write {}: {e}", out.path))?;
+    }
+    publication.publish(&outputs).await?;
+    publication.finish().await?;
+    for out in &outputs {
         eprintln!("✓ wrote: {}", out.path);
     }
-
-    // Flush only after every page write succeeded. Same atomicity guarantee as
-    // `lore ingest`: the JSONL is only published if its target pages all exist.
-    llm.flush()
-        .await
-        .map_err(|e| miette::miette!("queue flush: {e}"))?;
 
     Ok(())
 }

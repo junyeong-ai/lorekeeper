@@ -9,8 +9,8 @@ pub use noop::NoopLlmClient;
 pub use queue::{
     CORRUPT_SUBDIR, PROCESSED_SUBDIR, QueueClaim, QueueFile, QueueLlmClient, QueueTask,
     RESULTS_SUBDIR, ReportedConcept, ResultBatch, SECTION_RESULT_SUFFIX, SYNTHESIS_RESULT_SUFFIX,
-    SectionResult, SynthesisResult, TaskKind, TaskResult, claim_queue, read_results, read_tasks,
-    write_tasks_atomic,
+    SectionResult, SynthesisResult, TaskKind, TaskResult, claim_queue, new_requests, read_results,
+    read_tasks, serialize_tasks, write_tasks_atomic,
 };
 
 use async_trait::async_trait;
@@ -510,6 +510,12 @@ pub trait LlmClient: Send + Sync {
     /// no-op.
     async fn rollback_source(&self) {}
 
+    /// Transfer buffered requests into the caller's guarded page publication plan.
+    /// Unpublished targets must never be admitted separately from that plan.
+    async fn take_requests(&self) -> Vec<QueueTask> {
+        Vec::new()
+    }
+
     /// Extract structured themes from combined multi-source text. Returns a JSON-parsed
     /// list of themes with titles and descriptions. The default returns an empty vec,
     /// which suffices for noop and mock clients; queue mode emits a deferred task and
@@ -529,16 +535,8 @@ pub trait LlmClient: Send + Sync {
         Ok(String::new())
     }
 
-    /// Commit any buffered side-effects. The CLI MUST call this exactly once at the
-    /// end of a successful ingest run, AFTER all vault writes have succeeded — and
-    /// MUST NOT enqueue further tasks after calling. The queue client buffers tasks
-    /// in memory and writes the JSONL file atomically here (temp + fsync + rename)
-    /// so a mid-run abort drops orphan tasks instead of persisting them ahead of
-    /// their target pages. A second `flush` after additional enqueues would truncate
-    /// the on-disk file and silently lose the first batch — the trait deliberately
-    /// requires single-call semantics rather than guarding internally, because there
-    /// is no legitimate use case for a multi-flush ingest. Noop and mock clients
-    /// leave this as the default no-op.
+    /// Admit requests whose targets are already durable. Page producers instead
+    /// transfer requests into the same mutation journal as their target writes.
     async fn flush(&self) -> Result<(), QueueError> {
         Ok(())
     }

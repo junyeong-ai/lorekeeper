@@ -78,7 +78,7 @@ one source to infer that distinction.
   synthesis. Failed-all fetches are errors; a genuinely empty observation is success.
 - **Retain state, not just history.** Maintenance keeps each source's latest
   collected log entry even beyond retention. Manual inputs retire only after all
-  page writes and queue flush succeed; exact regeneration uses retained input,
+  page/request publication succeeds; exact regeneration uses retained input,
   not a potentially changed refetch. Credentials are reported, never scrubbed from
   source text; rotation at the issuer is the repair.
 - **Installation and scheduling are explicit.** `lk-dist` owns embedded artifact

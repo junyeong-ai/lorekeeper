@@ -18,6 +18,7 @@ pub mod input;
 pub mod installation;
 pub mod maintenance;
 pub mod performance;
+mod publication;
 pub mod queue;
 pub mod resolve;
 pub mod run;

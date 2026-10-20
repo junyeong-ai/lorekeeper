@@ -12,6 +12,7 @@ identity:
 
 # Host-local cadence; takes effect only after explicit OS registration.
 ingest:
+  source_timeout_seconds: 600  # acquisition budget per source, excluding writer-lock waiting
   schedule: "0 7 * * *"
   originals:
     max_entry_bytes: 33554432

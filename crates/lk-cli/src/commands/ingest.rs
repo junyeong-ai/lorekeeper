@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use super::{build_llm_client, find_config, load_config, parse_date};
+use super::{build_llm_client, find_config, load_config_with_revision, parse_date};
 
 /// The number of events the page states about itself, as ` (N events)`.
 ///
@@ -48,6 +48,43 @@ pub(super) fn report_discards(page: &lk_pipeline::RenderResult, dry_run: bool) {
     }
 }
 
+struct SourceCapture {
+    observation: lk_source::SourceObservation,
+    originals: Vec<lk_core::manual_original::ManualBundleCapture>,
+    retirement_blocked: bool,
+}
+
+async fn collect_with_budget<T>(
+    started_at: std::time::Instant,
+    seconds: std::num::NonZeroU64,
+    collection: impl std::future::Future<Output = Result<T, lk_source::SourceError>>,
+) -> Result<T, lk_source::SourceError> {
+    let deadline = tokio::time::Instant::from_std(started_at)
+        .checked_add(std::time::Duration::from_secs(seconds.get()))
+        .ok_or_else(|| {
+            lk_source::SourceError::InvalidParams(
+                "collection timeout exceeds the platform clock range".into(),
+            )
+        })?;
+    let result = tokio::time::timeout_at(deadline, collection).await;
+    match result {
+        Ok(Ok(value)) if tokio::time::Instant::now() < deadline => Ok(value),
+        Ok(Err(error)) => Err(error),
+        Ok(Ok(_)) | Err(_) => Err(lk_source::SourceError::CollectionTimeout {
+            seconds: seconds.get(),
+        }),
+    }
+}
+
+fn ensure_config_current(path: &std::path::Path, expected: &str) -> miette::Result<()> {
+    if load_config_with_revision(path)?.1 != expected {
+        return Err(miette::miette!(
+            "selected configuration changed during collection; captured observations were not published; rerun with the intended configuration"
+        ));
+    }
+    Ok(())
+}
+
 pub async fn run(
     opts: &super::GlobalOptions,
     source: Option<String>,
@@ -55,24 +92,9 @@ pub async fn run(
     dry_run: bool,
     wait_for_vault: bool,
 ) -> miette::Result<()> {
-    let config = load_config(&find_config(opts)?)?;
+    let config_path = find_config(opts)?;
+    let (config, config_revision) = load_config_with_revision(&config_path)?;
     let vault_root = config.vault.root_path();
-    // Hold the shared vault writer lease before reading evidence or existing pages.
-    // External editors do not participate; publication still validates its own inputs.
-    let _mutation = if dry_run {
-        None
-    } else {
-        std::fs::create_dir_all(&vault_root).map_err(|e| miette::miette!("create vault: {e}"))?;
-        Some(
-            if wait_for_vault {
-                eprintln!("Waiting for exclusive vault access...");
-                lk_vault::MutationSession::acquire_waiting(&vault_root)
-            } else {
-                lk_vault::MutationSession::acquire(&vault_root)
-            }
-            .map_err(|e| miette::miette!("vault mutation: {e}"))?,
-        )
-    };
 
     let credential_store = lk_source::credentials::CredentialStore::new(&config.credentials_path())
         .map_err(|e| miette::miette!("{e}"))?;
@@ -90,51 +112,6 @@ pub async fn run(
         build_llm_client(&config, &vault_root)?
     };
 
-    // Surface pending (undrained) queue files — never silently ignore them. The risk
-    // differs by provider, so the message does too:
-    //   - queue mode: exact requests reuse pending work; changed requests still need a drain.
-    //   - any non-queue provider (e.g. noop): this run writes the pages but produces no
-    //     tasks to fill the empty sections, so the pending tasks are stranded — a stronger
-    //     warning, since draining means switching back to queue.
-    let pending = pending_queue_count(&vault_root)?;
-    if pending > 0 {
-        let queue_dir = vault_root.join(".lorekeeper").join("queue");
-        if config.llm.provider == lk_core::config::LlmProvider::Queue {
-            tracing::warn!(
-                pending,
-                queue_dir = %queue_dir.display(),
-                "pending queue files exist; run /lore-process to complete semantic work",
-            );
-            eprintln!(
-                "! {pending} pending queue file(s) under {}/.lorekeeper/queue/. Run \
-                 /lore-process to complete semantic work; identical pending requests are reused.",
-                vault_root.display(),
-            );
-        } else {
-            tracing::warn!(
-                pending,
-                provider = ?config.llm.provider,
-                queue_dir = %queue_dir.display(),
-                "pending queue files exist but provider is not `queue`; their tasks will be stranded",
-            );
-            eprintln!(
-                "! {pending} pending queue file(s) under {}/.lorekeeper/queue/ will be STRANDED: \
-                 provider is not `queue`, so this run creates no tasks to fill their target pages. \
-                 Switch to `llm.provider: queue` and run /lore-process to drain them first.",
-                vault_root.display(),
-            );
-        }
-    }
-
-    // Sweep stranded `.jsonl.tmp` files from previous crashed runs. The queue
-    // flush is sub-second, so any tmp older than an hour is from a process that
-    // died mid-flush (or was killed). Each ingest writes its own PID-suffixed
-    // tmp, so a concurrent ingest's just-created tmp is too young to be swept.
-    // Skipped under --dry-run, which must not mutate the vault at all.
-    if !dry_run {
-        sweep_stale_tmps(&vault_root).await?;
-    }
-
     let tz = config.vault.timezone();
     let today = jiff::Timestamp::now().to_zoned(tz.clone()).date();
     let target_date = if date_str.is_some() {
@@ -149,7 +126,6 @@ pub async fn run(
             .map_err(|e| miette::miette!("{e}"))?,
     );
     let mut pipeline = lk_pipeline::Pipeline::new(&vault_root, ctx);
-    let writer = lk_vault::VaultWriter::new(&vault_root);
     let log = lk_vault::IngestLog::new(vault_root.join(".lorekeeper").join("ingest.jsonl"));
     let options = lk_pipeline::IngestOptions {
         target_date,
@@ -204,7 +180,7 @@ pub async fn run(
         originals: config.ingest.originals.clone(),
     };
 
-    // Phase 1: Plan all sources (no vault writes yet).
+    // Capture source observations before acquiring the vault writer.
     struct Planned {
         id: String,
         result: lk_pipeline::IngestResult,
@@ -213,6 +189,12 @@ pub async fn run(
         manual_retirement_blocked: bool,
         observation_outcome: lk_source::ObservationOutcome,
     }
+    struct Acquired {
+        id: String,
+        started_at: std::time::Instant,
+        result: Result<(lk_source::Selection, SourceCapture), lk_source::SourceError>,
+    }
+    let mut acquired = Vec::new();
     let mut planned: Vec<Planned> = Vec::new();
     let mut manual_capture_bytes = 0usize;
     let mut rss_capture_bytes = 0usize;
@@ -223,32 +205,33 @@ pub async fn run(
 
     for (id, sc) in &sources {
         let started_at = std::time::Instant::now();
-        observations.insert(
-            id.clone(),
-            super::synthesis::pending::ObservedSource::failed(id),
-        );
-        eprintln!("▸ {id} ({})", sc.source_type);
-
+        eprintln!("▸ collect {id} ({})", sc.source_type);
         let adapter = match lk_source::build_source(
             sc.source_type,
             http.clone(),
             &creds,
             &atlassian,
             sc.instance.as_deref(),
-        ) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("  ✗ {e}");
-                had_failure = true;
-                if !dry_run {
-                    record_failure(&log, id, &started_at, &e.to_string(), &mut had_failure).await;
-                }
+        )
+        .and_then(|adapter| {
+            adapter
+                .selection(&sc.params)
+                .map(|selection| (adapter, selection))
+        }) {
+            Ok(adapter) => adapter,
+            Err(error) => {
+                acquired.push(Acquired {
+                    id: id.clone(),
+                    started_at,
+                    result: Err(error),
+                });
                 continue;
             }
         };
-
-        let extracted = if sc.source_type == lk_core::config::SourceType::Manual {
-            lk_source::capture_manual(&sc.params, &extract_ctx)
+        let (adapter, selection) = adapter;
+        let collection = async {
+            if sc.source_type == lk_core::config::SourceType::Manual {
+                lk_source::capture_manual(&sc.params, &extract_ctx)
                 .await
                 .and_then(|mut capture| {
                     capture.project_links(
@@ -271,8 +254,8 @@ pub async fn run(
                     ));
                     }
                     let retirement_blocked = !capture.failures.is_empty();
-                    Ok((
-                        lk_source::SourceObservation {
+                    Ok(SourceCapture {
+                        observation: lk_source::SourceObservation {
                             items: capture.items,
                             scope: lk_source::ObservationScope::Unverified,
                             outcome: if retirement_blocked {
@@ -281,27 +264,130 @@ pub async fn run(
                                 lk_source::ObservationOutcome::Unverified
                             },
                         },
-                        capture.originals,
+                        originals: capture.originals,
                         retirement_blocked,
-                    ))
+                    })
                 })
-        } else {
-            adapter
-                .observe(&sc.params, &extract_ctx)
-                .await
-                .map(|observation| (observation, Vec::new(), false))
+            } else {
+                adapter
+                    .observe(&sc.params, &extract_ctx)
+                    .await
+                    .map(|observation| SourceCapture {
+                        observation,
+                        originals: Vec::new(),
+                        retirement_blocked: false,
+                    })
+            }
         };
-        let (observation, manual_originals, manual_retirement_blocked) = match extracted {
+        let timeout = sc
+            .collection_timeout_seconds
+            .unwrap_or(config.ingest.source_timeout_seconds);
+        let result = collect_with_budget(started_at, timeout, collection).await;
+        if let Ok(capture) = &result {
+            manual_capture_bytes += capture
+                .originals
+                .iter()
+                .map(lk_core::manual_original::ManualBundleCapture::byte_len)
+                .sum::<usize>();
+        }
+        acquired.push(Acquired {
+            id: id.clone(),
+            started_at,
+            result: result.map(|capture| (selection, capture)),
+        });
+    }
+
+    ensure_config_current(&config_path, &config_revision)?;
+    let _mutation = if dry_run {
+        None
+    } else {
+        std::fs::create_dir_all(&vault_root).map_err(|e| miette::miette!("create vault: {e}"))?;
+        Some(
+            if wait_for_vault {
+                eprintln!("Waiting for exclusive vault access...");
+                lk_vault::MutationSession::acquire_waiting(&vault_root)
+            } else {
+                lk_vault::MutationSession::acquire(&vault_root)
+            }
+            .map_err(|e| miette::miette!("vault mutation: {e}"))?,
+        )
+    };
+
+    ensure_config_current(&config_path, &config_revision)?;
+
+    // Surface pending (undrained) queue files — never silently ignore them. The risk
+    // differs by provider, so the message does too:
+    //   - queue mode: exact requests reuse pending work; changed requests still need a drain.
+    //   - any non-queue provider (e.g. noop): this run writes the pages but produces no
+    //     tasks to fill the empty sections, so the pending tasks are stranded — a stronger
+    //     warning, since draining means switching back to queue.
+    let pending = pending_queue_count(&vault_root)?;
+    if pending > 0 {
+        let queue_dir = vault_root.join(".lorekeeper").join("queue");
+        if config.llm.provider == lk_core::config::LlmProvider::Queue {
+            tracing::warn!(
+                pending,
+                queue_dir = %queue_dir.display(),
+                "pending queue files exist; run /lore-process to complete semantic work",
+            );
+            eprintln!(
+                "! {pending} pending queue file(s) under {}/.lorekeeper/queue/. Run \
+                 /lore-process to complete semantic work; identical pending requests are reused.",
+                vault_root.display(),
+            );
+        } else {
+            tracing::warn!(
+                pending,
+                provider = ?config.llm.provider,
+                queue_dir = %queue_dir.display(),
+                "pending queue files exist but provider is not `queue`; their tasks will be stranded",
+            );
+            eprintln!(
+                "! {pending} pending queue file(s) under {}/.lorekeeper/queue/ will be STRANDED: \
+                 provider is not `queue`, so this run creates no tasks to fill their target pages. \
+                 Switch to `llm.provider: queue` and run /lore-process to drain them first.",
+                vault_root.display(),
+            );
+        }
+    }
+
+    // Sweep stranded `.jsonl.tmp` files from previous crashed runs. The queue
+    // flush is sub-second, so any tmp older than an hour is from a process that
+    // died mid-flush (or was killed). Each ingest writes its own PID-suffixed
+    // tmp, so a concurrent ingest's just-created tmp is too young to be swept.
+    // Skipped under --dry-run, which must not mutate the vault at all.
+    if !dry_run {
+        sweep_stale_tmps(&vault_root).await?;
+    }
+
+    for acquisition in acquired {
+        let id = &acquisition.id;
+        let sc = &config.sources[id];
+        let started_at = acquisition.started_at;
+        observations.insert(
+            id.clone(),
+            super::synthesis::pending::ObservedSource::failed(id),
+        );
+        let (
+            selection,
+            SourceCapture {
+                observation,
+                originals: manual_originals,
+                retirement_blocked: manual_retirement_blocked,
+            },
+        ) = match acquisition.result {
             Ok(capture) => capture,
-            Err(e) => {
-                eprintln!("  ✗ extract: {e}");
+            Err(error) => {
+                eprintln!("  ✗ {id} extract: {error}");
                 had_failure = true;
                 if !dry_run {
-                    record_failure(&log, id, &started_at, &e.to_string(), &mut had_failure).await;
+                    record_failure(&log, id, &started_at, &error.to_string(), &mut had_failure)
+                        .await;
                 }
                 continue;
             }
         };
+        eprintln!("▸ plan {id} ({})", sc.source_type);
         let observed =
             super::synthesis::pending::ObservedSource::from_observation(id, &observation);
         let observation_outcome = observation.outcome;
@@ -326,14 +412,10 @@ pub async fn run(
 
         // Open a per-source queue transaction: if plan fails partway it may have already
         // buffered LLM tasks for pages it never finished writing — roll those back so the
-        // flushed queue file never references an unwritten page.
+        // publication never retains requests for an abandoned target.
         llm.begin_source().await;
         let source_options = lk_pipeline::IngestOptions {
-            target_date: if adapter
-                .selection(&sc.params)
-                .map_err(|error| miette::miette!("{error}"))?
-                == lk_source::Selection::DocumentSnapshot
-            {
+            target_date: if selection == lk_source::Selection::DocumentSnapshot {
                 None
             } else {
                 options.target_date
@@ -504,10 +586,6 @@ pub async fn run(
             continue;
         }
 
-        manual_capture_bytes += manual_originals
-            .iter()
-            .map(lk_core::manual_original::ManualBundleCapture::byte_len)
-            .sum::<usize>();
         planned.push(Planned {
             observation_outcome,
             manual_originals,
@@ -518,6 +596,7 @@ pub async fn run(
         });
     }
 
+    ensure_config_current(&config_path, &config_revision)?;
     if dry_run {
         // Concept pages are accumulated across all sources, so preview them once.
         let concept_pages = pipeline
@@ -536,7 +615,13 @@ pub async fn run(
         return Ok(());
     }
 
-    // Phase 2: Write daily + concept pages.
+    let mut publication = super::publication::Publication::new(
+        _mutation
+            .as_ref()
+            .expect("writing ingest holds mutation session"),
+        llm.clone(),
+    );
+
     let mut total_pages = 0usize;
     let mut any_write_failed = false;
     let mut all_personal: Vec<lk_core::event::Event> = Vec::new();
@@ -563,53 +648,18 @@ pub async fn run(
         if any_write_failed {
             break;
         }
-        for out in &p.result.daily_pages {
-            report_discards(out, dry_run);
-            let mut plan = lk_vault::MutationPlan::default();
-            let publication = (|| {
-                if let Some(capture) = &out.rss_original {
-                    lk_vault::publish_rss_original(
-                        _mutation
-                            .as_ref()
-                            .expect("writing ingest holds mutation session"),
-                        capture,
-                    )?;
-                }
-                out.plan_publication(&mut plan, &vault_root)
-            })()
-            .and_then(|()| {
-                _mutation
-                    .as_ref()
-                    .expect("writing ingest holds mutation session")
-                    .apply(plan)
-            });
-            if let Err(e) = publication {
-                eprintln!("  ✗ vault write {}: {e}", out.path);
-                any_write_failed = true;
-                break;
-            }
+        let outputs = p.result.daily_pages.iter().chain(&p.result.document_pages);
+        for out in outputs.clone() {
+            report_discards(out, false);
+        }
+        if let Err(error) = publication.publish(outputs.clone()).await {
+            eprintln!("  ✗ source publication {}: {error}", p.id);
+            any_write_failed = true;
+            break;
+        }
+        for out in outputs {
             total_pages += 1;
             eprintln!("  ✓ wrote: {} ({})", out.path, p.id);
-        }
-        for out in &p.result.document_pages {
-            report_discards(out, dry_run);
-            if let Err(e) = lk_vault::publish_document_expected(
-                _mutation
-                    .as_ref()
-                    .expect("writing ingest holds mutation session"),
-                out.path.as_ref(),
-                &out.content,
-                out.expected_original.as_ref(),
-            ) {
-                eprintln!("  ✗ vault write {}: {e}", out.path);
-                any_write_failed = true;
-                break;
-            }
-            total_pages += 1;
-            eprintln!("  ✓ wrote: {} (document)", out.path);
-        }
-        if any_write_failed {
-            break;
         }
         // Only realized personal contribution feeds the work-log; a forecast (calendar
         // look-ahead) commitment is not work done, so it is neither collected nor counted.
@@ -636,22 +686,15 @@ pub async fn run(
             .render_concept_pages()
             .await
             .map_err(|e| miette::miette!("concept render: {e}"))?;
-        for out in &concept_pages {
-            let mut plan = lk_vault::MutationPlan::default();
-            let publication = out.plan_publication(&mut plan, &vault_root).and_then(|()| {
-                _mutation
-                    .as_ref()
-                    .expect("writing ingest holds mutation session")
-                    .apply(plan)
-            });
-            if let Err(e) = publication {
-                eprintln!("  ✗ vault write {}: {e}", out.path);
-                any_write_failed = true;
-                break;
+        if let Err(error) = publication.publish(&concept_pages).await {
+            eprintln!("  ✗ concept publication: {error}");
+            any_write_failed = true;
+        } else {
+            for out in &concept_pages {
+                total_pages += 1;
+                eprintln!("  ✓ wrote: {}", out.path);
+                super::report_refusals(out, false);
             }
-            total_pages += 1;
-            eprintln!("  ✓ wrote: {}", out.path);
-            super::report_refusals(out, false);
         }
     }
 
@@ -669,15 +712,17 @@ pub async fn run(
             .render_work_log(&all_personal, today)
             .await
             .map_err(|e| miette::miette!("work-log: {e}"))?;
-        for wl in &work_logs {
-            report_discards(wl, dry_run);
-            if let Err(e) = writer.write_page(wl.path.as_ref(), &wl.content).await {
-                eprintln!("✗ work-log write {}: {e}", wl.path);
-                any_write_failed = true;
-                break;
+        for out in &work_logs {
+            report_discards(out, false);
+        }
+        if let Err(error) = publication.publish(&work_logs).await {
+            eprintln!("✗ work-log publication: {error}");
+            any_write_failed = true;
+        } else {
+            for out in &work_logs {
+                total_pages += 1;
+                eprintln!("▸ work-log → {}", out.path);
             }
-            total_pages += 1;
-            eprintln!("▸ work-log → {}", wl.path);
         }
     } else if source.is_some() && !all_personal.is_empty() {
         eprintln!(
@@ -686,14 +731,8 @@ pub async fn run(
         );
     }
 
-    // Phase 4: Persist queued LLM tasks atomically. The queue file is the durability
-    // anchor for semantic work: the temp + fsync + rename inside the queue client ensures
-    // we never observe a half-written JSONL on disk, and a crash that strands the flush is
-    // recovered by the next run re-rendering the same pages and re-queueing the tasks.
     if !any_write_failed {
-        llm.flush()
-            .await
-            .map_err(|e| miette::miette!("queue flush: {e}"))?;
+        publication.finish().await?;
         super::synthesis::pending::record_collection(
             &config,
             _mutation
@@ -726,11 +765,8 @@ pub async fn run(
         .await;
     }
 
-    // Phase 6: Archive consumed inbox files for manual sources. Reached only when every
-    // vault write succeeded (`!any_write_failed`) AND the queue flush above succeeded (a
-    // flush error `?`-returns before here) — by then the manual source's knowledge is
-    // durably materialized, so another source's fetch failure must not strand its inbox.
-    // Any write/flush failure leaves files in the inbox for safe retry.
+    // Retire inbox entries only after all page/request publications succeeded.
+    // Independent collection failures do not strand a successfully published source.
     if !any_write_failed {
         for p in &planned {
             if p.manual_retirement_blocked {
@@ -906,6 +942,52 @@ mod observation_log_tests {
     use super::source_log_outcome;
     use lk_source::ObservationOutcome;
     use lk_vault::LogStatus;
+
+    #[tokio::test]
+    async fn collection_deadline_cancels_waiting_work_and_retains_source_errors() {
+        let seconds = std::num::NonZeroU64::new(1).unwrap();
+        let dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        struct PendingGuard(std::sync::Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for PendingGuard {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        let started = std::time::Instant::now() - std::time::Duration::from_millis(980);
+        let guard = PendingGuard(dropped.clone());
+        let result = super::collect_with_budget(started, seconds, async move {
+            let _guard = guard;
+            std::future::pending::<Result<(), lk_source::SourceError>>().await
+        })
+        .await;
+        assert!(matches!(
+            result,
+            Err(lk_source::SourceError::CollectionTimeout { seconds: 1 })
+        ));
+        assert!(dropped.load(std::sync::atomic::Ordering::SeqCst));
+        let failed = super::collect_with_budget(std::time::Instant::now(), seconds, async {
+            Err::<(), _>(lk_source::SourceError::Parse("provider failure".into()))
+        })
+        .await;
+        assert!(
+            matches!(failed, Err(lk_source::SourceError::Parse(message)) if message == "provider failure")
+        );
+    }
+
+    #[tokio::test]
+    async fn blocking_return_after_the_collection_budget_is_not_success() {
+        let started = std::time::Instant::now() - std::time::Duration::from_millis(900);
+        let result =
+            super::collect_with_budget(started, std::num::NonZeroU64::new(1).unwrap(), async {
+                std::thread::sleep(std::time::Duration::from_millis(150));
+                Ok(())
+            })
+            .await;
+        assert!(matches!(
+            result,
+            Err(lk_source::SourceError::CollectionTimeout { seconds: 1 })
+        ));
+    }
 
     #[test]
     fn partial_reach_never_becomes_success_or_a_quiet_skip() {

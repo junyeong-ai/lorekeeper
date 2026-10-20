@@ -73,15 +73,21 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
 
 ## Ingest and originals (`commands/ingest.rs`)
 
-- Ingest waits for a cooperating writer only with `--wait-for-vault`; scheduled
-  daily collection uses it. Dry run never takes the writer lock.
+- Ingest captures observations before taking the writer lock. After acquisition,
+  recover journals and derive page plans against current pages; never refresh a
+  previously captured publication baseline. Pin the selected config path/revision
+  across collection, lock waiting and planning. `ingest.source_timeout_seconds`
+  applies independently per source; source `collection_timeout_seconds` overrides
+  it. Deadlines include retries/pagination/conversion, cancel async waits and reject
+  over-budget blocking returns; they are not OS preemption or source completeness.
+  `--wait-for-vault` permits publication waiting; dry run never takes that lock.
 - Dry run creates no vault files, tmp results, logs, or queue writes; real source
   errors still return nonzero. A noop provider makes no promise to queue work.
 - Work-log generation belongs to full ingest only, not filtered runs. A full run
   with partial source failure still writes its work-log and reports failure.
   Startup tmp sweeping/pending diagnostics must preserve recoverable work.
-- Manual original publication is immutable bytes→complete manifest→page journal→
-  queue flush→optional retirement. Keep source ownership separate from original
+- Manual original publication is immutable bytes→complete manifest→page/request
+  journal→optional retirement. Keep source ownership separate from original
   references; archive=false still preserves original bytes. Capture limits are
   source-local plus a 512 MiB CLI aggregate bound, not unbounded whole-inbox memory.
 - Keep all capture dependency information, even for events removed by the pipeline.

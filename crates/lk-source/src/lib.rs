@@ -54,6 +54,10 @@ pub enum SourceError {
     Auth(String),
     #[error("invalid params: {0}")]
     InvalidParams(String),
+    #[error(
+        "source collection exceeded its {seconds}-second acquisition budget; observation is incomplete"
+    )]
+    CollectionTimeout { seconds: u64 },
     #[error("response exceeds the {max_bytes}-byte acquisition limit")]
     ResponseTooLarge { max_bytes: usize },
     #[error("API {status}: {message}")]

@@ -690,6 +690,26 @@ pub fn plan_concept_backlinks(
     dirs: &VaultDirs,
     synthesis: SynthesisPolicy,
 ) -> Result<(MutationPlan, BacklinksSyncResult), GraphError> {
+    plan_concept_backlinks_inner(pages, vault_root, dirs, synthesis, false)
+}
+
+/// Retain unchanged owed targets and evidence when a caller also publishes derived work.
+pub fn plan_concept_backlinks_for_work(
+    pages: &[ScannedPage],
+    vault_root: &Path,
+    dirs: &VaultDirs,
+    synthesis: SynthesisPolicy,
+) -> Result<(MutationPlan, BacklinksSyncResult), GraphError> {
+    plan_concept_backlinks_inner(pages, vault_root, dirs, synthesis, true)
+}
+
+fn plan_concept_backlinks_inner(
+    pages: &[ScannedPage],
+    vault_root: &Path,
+    dirs: &VaultDirs,
+    synthesis: SynthesisPolicy,
+    guard_work: bool,
+) -> Result<(MutationPlan, BacklinksSyncResult), GraphError> {
     let evidence = CitationGraph::build(pages, vault_root, dirs)?;
     let canonical_root = vault_root
         .canonicalize()
@@ -817,10 +837,12 @@ pub fn plan_concept_backlinks(
         // so the two questions are asked separately: a page whose sources list is already
         // correct can still be owed a synthesis, and asking them together would leave it owed
         // forever.
+        let mut requires_synthesis = false;
         if let (Some(digest), Some(section)) = (&owed_input, &synthesis_section)
             && !adopting
             && recorded_answer != Some(digest.as_str())
         {
+            requires_synthesis = true;
             let related = resolve_section(&raw, |s| s.related);
             report.resynthesize.push(ConceptResynthesis {
                 path: page.path.clone(),
@@ -910,9 +932,12 @@ pub fn plan_concept_backlinks(
         };
 
         // The complete derived page includes projection ownership and evidence revisions.
-        if updated_content == raw {
+        let changed = updated_content != raw;
+        if !changed {
             report.unchanged += 1;
-            continue;
+            if !guard_work || !requires_synthesis {
+                continue;
+            }
         }
 
         // Preserve the publication rule that leaf symlinks cannot be edited. Directory
@@ -935,21 +960,23 @@ pub fn plan_concept_backlinks(
             targets.insert(owner, (raw.clone(), updated_content));
         }
 
-        report.updated.push(ConceptUpdate {
-            path: page.path.clone(),
-            added: existing_set.as_ref().map(|existing| {
-                desired_set
-                    .difference(existing)
-                    .map(|s| (*s).to_owned())
-                    .collect()
-            }),
-            removed: existing_set.as_ref().map(|existing| {
-                existing
-                    .difference(&desired_set)
-                    .map(|s| (*s).to_owned())
-                    .collect()
-            }),
-        });
+        if changed {
+            report.updated.push(ConceptUpdate {
+                path: page.path.clone(),
+                added: existing_set.as_ref().map(|existing| {
+                    desired_set
+                        .difference(existing)
+                        .map(|s| (*s).to_owned())
+                        .collect()
+                }),
+                removed: existing_set.as_ref().map(|existing| {
+                    existing
+                        .difference(&desired_set)
+                        .map(|s| (*s).to_owned())
+                        .collect()
+                }),
+            });
+        }
     }
 
     let mut plan = MutationPlan::default();
@@ -960,7 +987,11 @@ pub fn plan_concept_backlinks(
         return Ok((MutationPlan::default(), report));
     }
     for (path, (before, after)) in targets {
-        plan.edit(path, before, after);
+        if before == after {
+            plan.require_unchanged(path, before);
+        } else {
+            plan.edit(path, before, after);
+        }
     }
     Ok((plan, report))
 }
@@ -1248,6 +1279,41 @@ mod tests {
             error.to_string().contains("source changed since scan"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn unchanged_backlink_work_plan_guards_targets_and_sources() {
+        for changed in ["wiki/concepts/topic.md", "daily/report.md"] {
+            let (root, dirs, pages) = build_guarded_fixture();
+            sync_concept_backlinks(&pages, root.path(), false, &dirs, SynthesisPolicy::Record)
+                .unwrap();
+            let pages = crate::scan::scan_vault(root.path(), false).unwrap();
+            let session = MutationSession::acquire(root.path()).unwrap();
+            let (mut plan, report) = plan_concept_backlinks_for_work(
+                &pages,
+                root.path(),
+                &dirs,
+                SynthesisPolicy::Record,
+            )
+            .unwrap();
+            assert!(report.updated.is_empty());
+            assert_eq!(report.resynthesize.len(), 2);
+            plan.create("work.json", "pending work".into());
+            let prior = std::fs::read_to_string(root.path().join(changed)).unwrap();
+            std::fs::write(
+                root.path().join(changed),
+                format!("{prior}\nExternal change.\n"),
+            )
+            .unwrap();
+            assert!(session.apply(plan).is_err());
+            assert!(!root.path().join("work.json").exists());
+            assert!(
+                !root
+                    .path()
+                    .join(".lorekeeper/mutation/pending.json")
+                    .exists()
+            );
+        }
     }
 
     #[test]
