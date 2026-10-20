@@ -203,6 +203,20 @@ fn plan_merge(
     }
 
     let mut plan = lk_vault::MutationPlan::default();
+    let mut review_updates = if dry_run {
+        std::collections::BTreeMap::new()
+    } else {
+        lk_vault::plan_review_repointing(
+            vault_root,
+            &pages
+                .iter()
+                .map(|page| page.path.clone())
+                .collect::<Vec<_>>(),
+            &[(from_rel.clone(), into_rel.clone())],
+            &mut plan,
+        )
+        .map_err(|error| GraphError::Io(error.to_string()))?
+    };
     let mut into_updated = None;
     let mut rewritten = Vec::new();
     for page in pages {
@@ -215,14 +229,20 @@ fn plan_merge(
                 lk_vault::same_existing_file(vault_root, Path::new(&link.dest), &from_rel)
                     .map_err(|error| GraphError::Io(error.to_string()))?;
         }
-        if !cites_from {
+        if !cites_from && !review_updates.contains_key(&page.path) {
             continue;
         }
         let abs = vault_root.join(&page.path);
-        let content = std::fs::read_to_string(&abs)
-            .map_err(|e| GraphError::Io(format!("read {}: {e}", abs.display())))?;
+        let (content, typed) = match review_updates.remove(&page.path) {
+            Some(update) => update,
+            None => {
+                let content = std::fs::read_to_string(&abs)
+                    .map_err(|e| GraphError::Io(format!("read {}: {e}", abs.display())))?;
+                (content.clone(), content)
+            }
+        };
         let (mut updated, count) =
-            rewrite_links(&content, &page.path, &from_rel, &into_rel, vault_root)?;
+            rewrite_links(&typed, &page.path, &from_rel, &into_rel, vault_root)?;
         if count > 0 && page.rss_evidence {
             lk_vault::rss_concept_citations(vault_root, &page.path, &content)
                 .map_err(|e| GraphError::Io(e.to_string()))?;
@@ -235,13 +255,17 @@ fn plan_merge(
             lk_vault::guard_rss_evidence(&mut plan, vault_root, &page.path, &updated)
                 .map_err(|e| GraphError::Io(e.to_string()))?;
         }
-        if count > 0 {
-            if !dry_run && updated != content {
-                plan.edit(&page.path, content.clone(), updated.clone());
-                if page.path == into_rel {
-                    into_updated = Some(updated);
-                }
+        if !dry_run {
+            if page.path == into_rel {
+                into_updated = Some(updated.clone());
             }
+            if updated != content {
+                plan.edit(&page.path, content.clone(), updated.clone());
+            } else if page.path != into_rel {
+                plan.require_unchanged(&page.path, content.clone());
+            }
+        }
+        if count > 0 || updated != content {
             rewritten.push(RewrittenPage {
                 path: page.path.clone(),
                 links: count,
@@ -263,8 +287,11 @@ fn plan_merge(
                 .ok_or_else(|| GraphError::Io("merge target has no frontmatter".into()))?;
             plan.edit(&into_rel, before, updated);
         }
-        let original = std::fs::read_to_string(vault_root.join(&from_rel))
-            .map_err(|e| GraphError::Io(e.to_string()))?;
+        let original = match review_updates.remove(&from_rel) {
+            Some((before, _)) => before,
+            None => std::fs::read_to_string(vault_root.join(&from_rel))
+                .map_err(|e| GraphError::Io(e.to_string()))?,
+        };
         plan.remove(&from_rel, original);
     }
 
@@ -444,6 +471,249 @@ mod tests {
                 .map(|s| Link::to(&format!("{s}.md")))
                 .collect(),
         }
+    }
+
+    #[test]
+    fn merge_preserves_declared_reviews_through_convergence() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let old = "wiki/concepts/old.md";
+        let into = "wiki/concepts/into.md";
+        let final_path = "wiki/concepts/final.md";
+        let pointer_review = "wiki/explorations/pointer.md";
+        let explicit_review = "wiki/explorations/explicit.md";
+        let source = "wiki/documents/source.md";
+        write(
+            root,
+            source,
+            "---\ntype: document\n---\nA scoped observation.\n",
+        );
+        let evidence = lk_vault::inspect_evidence(root, &[source.into()]).unwrap();
+        for (path, title) in [(old, "Old"), (into, "Into"), (final_path, "Final")] {
+            let pointer = if path == old {
+                format!("knowledge_review: {pointer_review}\n")
+            } else {
+                String::new()
+            };
+            write(
+                root,
+                path,
+                &format!(
+                    "---\ntype: concept\ntitle: {title}\n{pointer}---\n## Synthesis\n\n## Related\n\n## Sources\n"
+                ),
+            );
+        }
+        let explicit = serde_json::json!({"status":"open","subjects":[old,into],"evidence":evidence.citations,"resolution":null});
+        let pointer = serde_json::json!({"status":"resolved","subjects":[old],"evidence":evidence.citations,"resolution":"The scope distinction is established."});
+        let explicit_before = format!(
+            "---\ntype: exploration\nreview: {explicit}\n---\n[Old](../concepts/old.md) needs further evidence.\n"
+        );
+        let pointer_before =
+            format!("---\ntype: exploration\nreview: {pointer}\n---\nA scoped judgment.\n");
+        write(root, explicit_review, &explicit_before);
+        write(root, pointer_review, &pointer_before);
+        let prior =
+            lk_vault::inspect_evidence(root, &[explicit_review.into(), pointer_review.into()])
+                .unwrap();
+        let pages = crate::scan::scan_vault(root, false).unwrap();
+        merge_concepts(&pages, root, "wiki", "old", "into", true, false).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join(explicit_review)).unwrap(),
+            explicit_before
+        );
+        assert!(!root.join(".lorekeeper/evidence").exists());
+        merge_concepts(&pages, root, "wiki", "old", "into", false, false).unwrap();
+        for report in lk_vault::list_reviews(root, &lk_core::config::VaultDirs::default()).unwrap()
+        {
+            assert!(report.errors.is_empty());
+            let review = report.review.unwrap();
+            assert_eq!(review.subjects, [into]);
+            assert_eq!(review.evidence, evidence.citations);
+            if report.path == pointer_review {
+                assert_eq!(review.status, lk_vault::ReviewStatus::Resolved);
+            }
+        }
+        for citation in prior.citations {
+            let archived = lk_vault::load_archived_evidence(root, &citation.revision)
+                .unwrap()
+                .unwrap();
+            let before = if citation.path == explicit_review {
+                &explicit_before
+            } else {
+                &pointer_before
+            };
+            assert_eq!(archived.original.as_deref(), Some(before.as_str()));
+        }
+        let after_first =
+            lk_vault::inspect_evidence(root, &[explicit_review.into(), pointer_review.into()])
+                .unwrap();
+        let pages = crate::scan::scan_vault(root, false).unwrap();
+        let plan = crate::audit::plan_selected(
+            root,
+            &lk_core::config::VaultDirs::default(),
+            &pages,
+            1,
+            &[into.into()],
+            u64::MAX,
+        )
+        .unwrap();
+        assert_eq!(plan.candidates[0].reviews.len(), 2);
+        merge_concepts(&pages, root, "wiki", "into", "final", false, false).unwrap();
+        for report in lk_vault::list_reviews(root, &lk_core::config::VaultDirs::default()).unwrap()
+        {
+            assert_eq!(report.review.unwrap().subjects, [final_path]);
+        }
+        for citation in after_first.citations {
+            assert!(
+                lk_vault::load_archived_evidence(root, &citation.revision)
+                    .unwrap()
+                    .is_some()
+            );
+        }
+    }
+
+    #[test]
+    fn merge_refuses_losing_an_unavailable_pointer_only_review() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let old = "---\ntype: concept\ntitle: Old\nknowledge_review: wiki/explorations/missing.md\n---\n## Sources\n";
+        let into = "---\ntype: concept\ntitle: Into\n---\n## Sources\n";
+        write(root, "wiki/concepts/old.md", old);
+        write(root, "wiki/concepts/into.md", into);
+        let pages = crate::scan::scan_vault(root, false).unwrap();
+        let error = merge_concepts(&pages, root, "wiki", "old", "into", false, false).unwrap_err();
+        assert!(error.to_string().contains("knowledge_review"));
+        assert_eq!(
+            std::fs::read_to_string(root.join("wiki/concepts/old.md")).unwrap(),
+            old
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("wiki/concepts/into.md")).unwrap(),
+            into
+        );
+        assert!(!root.join(".lorekeeper/evidence").exists());
+    }
+
+    #[test]
+    fn merge_refuses_promoting_undeclared_pointer_scope_even_when_forced() {
+        for force in [false, true] {
+            let tmp = TempDir::new().unwrap();
+            let root = tmp.path();
+            let old = "---\ntype: concept\ntitle: Old\nknowledge_review: wiki/explorations/review.md\n---\n## Sources\n";
+            let into = "---\ntype: concept\ntitle: Into\n---\n## Sources\n";
+            write(root, "wiki/concepts/old.md", old);
+            write(root, "wiki/concepts/into.md", into);
+            write(root, "source.md", "---\ntype: document\n---\nEvidence.\n");
+            let evidence = lk_vault::inspect_evidence(root, &["source.md".into()]).unwrap();
+            let metadata = serde_json::json!({"status":"open","subjects":[],"evidence":evidence.citations,"resolution":null});
+            let review =
+                format!("---\ntype: exploration\nreview: {metadata}\n---\nAn unscoped judgment.\n");
+            write(root, "wiki/explorations/review.md", &review);
+            let pages = crate::scan::scan_vault(root, false).unwrap();
+            let error =
+                merge_concepts(&pages, root, "wiki", "old", "into", false, force).unwrap_err();
+            assert!(error.to_string().contains("explicitly reassess"));
+            assert_eq!(
+                std::fs::read_to_string(root.join("wiki/concepts/old.md")).unwrap(),
+                old
+            );
+            assert_eq!(
+                std::fs::read_to_string(root.join("wiki/concepts/into.md")).unwrap(),
+                into
+            );
+            assert_eq!(
+                std::fs::read_to_string(root.join("wiki/explorations/review.md")).unwrap(),
+                review
+            );
+            assert!(!root.join(".lorekeeper/evidence").exists());
+        }
+    }
+
+    #[test]
+    fn merge_keeps_unrelated_invalid_review_scope_unchanged() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        write(
+            root,
+            "wiki/concepts/old.md",
+            "---\ntype: concept\ntitle: Old\n---\n## Sources\n",
+        );
+        write(
+            root,
+            "wiki/concepts/into.md",
+            "---\ntype: concept\ntitle: Into\n---\n## Sources\n",
+        );
+        write(root, "source.md", "---\ntype: document\n---\nEvidence.\n");
+        let evidence = lk_vault::inspect_evidence(root, &["source.md".into()]).unwrap();
+        let metadata = serde_json::json!({"status":"open","subjects":["../invalid.md"],"evidence":evidence.citations,"resolution":null});
+        let review = format!(
+            "---\ntype: exploration\nreview: {metadata}\n---\nAn unrelated invalid scope.\n"
+        );
+        write(root, "wiki/explorations/review.md", &review);
+        let pages = crate::scan::scan_vault(root, false).unwrap();
+        merge_concepts(&pages, root, "wiki", "old", "into", false, false).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join("wiki/explorations/review.md")).unwrap(),
+            review
+        );
+        assert_eq!(
+            lk_vault::list_reviews(root, &lk_core::config::VaultDirs::default()).unwrap()[0]
+                .effective_state,
+            lk_vault::ReviewEffectiveState::Invalid
+        );
+        assert!(!root.join(".lorekeeper/evidence").exists());
+    }
+
+    #[test]
+    fn merge_review_migration_recovery_preserves_guards_and_archives() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let old = "wiki/concepts/old.md";
+        let into = "wiki/concepts/into.md";
+        let review_path = "wiki/explorations/review.md";
+        write(
+            root,
+            old,
+            "---\ntype: concept\ntitle: Old\n---\n## Sources\n",
+        );
+        write(
+            root,
+            into,
+            "---\ntype: concept\ntitle: Into\n---\n## Sources\n",
+        );
+        write(root, "source.md", "---\ntype: document\n---\nEvidence.\n");
+        let evidence = lk_vault::inspect_evidence(root, &["source.md".into()]).unwrap();
+        let metadata = serde_json::json!({"status":"open","subjects":[old],"evidence":evidence.citations,"resolution":null});
+        let before =
+            format!("---\ntype: exploration\nreview: {metadata}\n---\nA disputed claim.\n");
+        write(root, review_path, &before);
+        let pages = crate::scan::scan_vault(root, false).unwrap();
+        let (_, plan) = plan_merge(&pages, root, "wiki", "old", "into", false, false).unwrap();
+        let archive = lk_vault::archive_evidence(root, &[review_path.into()]).unwrap();
+        let journal = serde_json::json!({"version":1,"plan":plan});
+        write(
+            root,
+            ".lorekeeper/mutation/pending.json",
+            &journal.to_string(),
+        );
+        write(
+            root,
+            review_path,
+            &before.replace("disputed", "externally changed"),
+        );
+        assert!(lk_vault::MutationSession::acquire(root).is_err());
+        assert!(root.join(old).exists());
+        assert!(root.join(".lorekeeper/mutation/pending.json").exists());
+        write(root, review_path, &before);
+        let _session = lk_vault::MutationSession::acquire(root).unwrap();
+        assert!(!root.join(old).exists());
+        let reports = lk_vault::list_reviews(root, &lk_core::config::VaultDirs::default()).unwrap();
+        assert_eq!(reports[0].review.as_ref().unwrap().subjects, [into]);
+        let archived = lk_vault::load_archived_evidence(root, &archive.citations[0].revision)
+            .unwrap()
+            .unwrap();
+        assert_eq!(archived.original.as_deref(), Some(before.as_str()));
+        assert!(!root.join(".lorekeeper/mutation/pending.json").exists());
     }
 
     #[test]

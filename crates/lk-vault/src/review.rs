@@ -1,6 +1,6 @@
 //! Durable assessments live in authored exploration pages, outside regenerated synthesis.
-use std::collections::BTreeMap;
-use std::path::Path;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
 
 use lk_core::concept::Citation;
 use lk_core::config::VaultDirs;
@@ -155,6 +155,167 @@ impl KnowledgeReview {
         }
         Ok(())
     }
+}
+
+/// Plan current subject/pointer migration separately from immutable historical citations.
+/// Returned snapshots include the exact inputs needed to compose each caller's page edits.
+pub fn plan_review_repointing(
+    root: &Path,
+    page_paths: &[PathBuf],
+    redirects: &[(PathBuf, PathBuf)],
+    plan: &mut crate::MutationPlan,
+) -> Result<BTreeMap<PathBuf, (String, String)>, VaultError> {
+    fn address(value: &str) -> Result<PathBuf, VaultError> {
+        lk_core::link::resolve_dest(Path::new(""), value)
+            .filter(|path| {
+                path.to_string_lossy() == value
+                    && path.extension().is_some_and(|extension| extension == "md")
+            })
+            .ok_or_else(|| {
+                VaultError::Frontmatter(format!("invalid knowledge review address: {value}"))
+            })
+    }
+
+    fn destination(
+        resolver: &mut crate::ExistingPageResolver,
+        path: &Path,
+        redirects: &BTreeMap<PathBuf, PathBuf>,
+    ) -> Result<Option<PathBuf>, VaultError> {
+        Ok(resolver
+            .resolve(path)?
+            .and_then(|owner| redirects.get(&owner).cloned()))
+    }
+
+    fn set<T: Serialize>(raw: &str, key: &str, value: &T) -> Result<String, VaultError> {
+        let value = serde_json::to_string(value)
+            .map_err(|error| VaultError::Serialization(error.to_string()))?;
+        crate::set_frontmatter_field(raw, key, &value)
+            .ok_or_else(|| VaultError::Frontmatter("review migration requires frontmatter".into()))
+    }
+
+    let mut destinations = BTreeMap::new();
+    for (from, into) in redirects {
+        if destinations
+            .insert(from.clone(), into.clone())
+            .is_some_and(|prior| prior != *into)
+        {
+            return Err(VaultError::Frontmatter(
+                "review address has conflicting destinations".into(),
+            ));
+        }
+    }
+    let mut resolver = crate::ExistingPageResolver::new(root, destinations.keys().cloned())?;
+    let mut reviews = BTreeMap::new();
+    let mut pointer_subjects: BTreeMap<PathBuf, BTreeSet<String>> = BTreeMap::new();
+    let mut updates = BTreeMap::new();
+    for path in page_paths {
+        let raw = std::fs::read_to_string(crate::page_path(root, path)?)?;
+        let page = parse_page(&raw).map_err(VaultError::Frontmatter)?;
+        if let Some(value) = page.frontmatter.get("review") {
+            let review: KnowledgeReview = serde_json::from_value(value.clone())
+                .map_err(|error| VaultError::Frontmatter(error.to_string()))?;
+            reviews.insert(
+                path.clone(),
+                (lk_core::concept::file_revision(&raw), review),
+            );
+        }
+        let Some(pointer) = page.frontmatter.get("knowledge_review") else {
+            continue;
+        };
+        let moved_subject = destination(&mut resolver, path, &destinations)?;
+        let review_path = pointer.as_str().and_then(|pointer| address(pointer).ok());
+        let Some(review_path) = review_path else {
+            if moved_subject.is_some() {
+                return Err(VaultError::Frontmatter(
+                    "moved subject requires an exact knowledge_review address".into(),
+                ));
+            }
+            continue;
+        };
+        let moved_review = destination(&mut resolver, &review_path, &destinations)?;
+        if moved_subject.is_some() {
+            pointer_subjects
+                .entry(review_path)
+                .or_default()
+                .insert(path.to_string_lossy().into_owned());
+        }
+        if moved_subject.is_some() || moved_review.is_some() {
+            let after = match moved_review {
+                Some(review) => set(&raw, "knowledge_review", &review.to_string_lossy())?,
+                None => raw.clone(),
+            };
+            updates.insert(path.clone(), (raw, after));
+        }
+    }
+    let mut review_resolver = crate::ExistingPageResolver::new(root, reviews.keys().cloned())?;
+    for (pointer, subjects) in pointer_subjects {
+        let owner = review_resolver.resolve(&pointer)?.ok_or_else(|| {
+            VaultError::Frontmatter(format!(
+                "moved subject's knowledge_review is not an available authored review: {}",
+                pointer.display()
+            ))
+        })?;
+        if subjects
+            .iter()
+            .any(|subject| !reviews[&owner].1.subjects.contains(subject))
+        {
+            return Err(VaultError::Frontmatter(format!(
+                "knowledge_review does not declare the moved subject: {}; explicitly reassess its scope before moving or merging the subject",
+                owner.display()
+            )));
+        }
+    }
+    let mut archives = BTreeSet::new();
+    for (path, (revision, mut review)) in reviews {
+        let mut subjects = Vec::new();
+        let mut unique = BTreeSet::new();
+        let mut changed = false;
+        for subject in &review.subjects {
+            let target = match address(subject) {
+                Ok(path) => destination(&mut resolver, &path, &destinations)?
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| subject.clone()),
+                Err(_) => subject.clone(),
+            };
+            changed |= target != *subject;
+            if unique.insert(target.clone()) {
+                subjects.push(target);
+            }
+        }
+        if !changed {
+            continue;
+        }
+        let raw = std::fs::read_to_string(crate::page_path(root, &path)?)?;
+        if lk_core::concept::file_revision(&raw) != revision {
+            return Err(VaultError::Frontmatter(format!(
+                "review changed during address migration: {}",
+                path.display()
+            )));
+        }
+        let page = parse_page(&raw).map_err(VaultError::Frontmatter)?;
+        let errors = review.validation_errors(&path, &page);
+        if !errors.is_empty() {
+            return Err(VaultError::Frontmatter(errors.join("; ")));
+        }
+        let authored_revision = lk_core::concept::source_revision(&page);
+        let archive = evidence_archive_path(&authored_revision)?;
+        if archives.insert(archive.clone()) {
+            match load_archived_evidence(root, &authored_revision)? {
+                Some(page) => plan.require_unchanged(
+                    archive,
+                    page.original.expect("parsed archive retains exact bytes"),
+                ),
+                None => plan.create(archive, raw.clone()),
+            }
+        }
+        review.subjects = subjects;
+        let current = updates
+            .remove(&path)
+            .map(|(_, after)| after)
+            .unwrap_or_else(|| raw.clone());
+        updates.insert(path, (raw, set(&current, "review", &review)?));
+    }
+    Ok(updates)
 }
 
 /// Current usability of an authored judgment; never rewrites its historical status.
@@ -414,6 +575,18 @@ pub fn publish_document_expected_with_plan(
     expected: Option<&Option<String>>,
     mut plan: crate::MutationPlan,
 ) -> Result<(), VaultError> {
+    plan_document_publication(session, path, content, expected, &mut plan)?;
+    session.apply(plan)
+}
+
+/// Append an archive-before-edit publication to a caller-owned guarded mutation.
+pub fn plan_document_publication(
+    session: &crate::MutationSession,
+    path: &Path,
+    content: &str,
+    expected: Option<&Option<String>>,
+    plan: &mut crate::MutationPlan,
+) -> Result<(), VaultError> {
     let full = crate::writable_page_path(session.root(), path)?;
     crate::writer::refuse_format_change(&full, content)?;
     let current = match std::fs::read_to_string(&full) {
@@ -432,6 +605,7 @@ pub fn publish_document_expected_with_plan(
     match current {
         Some(before) => {
             if before == content {
+                plan.require_unchanged(path, before);
                 return Ok(());
             }
             let old = parse_page(&before).map_err(VaultError::Frontmatter)?;
@@ -464,7 +638,7 @@ pub fn publish_document_expected_with_plan(
             plan.create(path, content.to_owned());
         }
     }
-    session.apply(plan)
+    Ok(())
 }
 
 fn publish_archive(root: &Path, revision: &str, raw: &str) -> Result<(), VaultError> {
@@ -621,6 +795,103 @@ pub fn list_reviews(root: &Path, dirs: &VaultDirs) -> Result<Vec<ReviewReport>, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unchanged_document_publication_keeps_composed_work_and_guards_target() {
+        let root = tempfile::tempdir().unwrap();
+        let session = crate::MutationSession::acquire(root.path()).unwrap();
+        let document = "---\ntype: document\n---\nUnchanged source.\n";
+        std::fs::write(root.path().join("document.md"), document).unwrap();
+        let mut plan = crate::MutationPlan::default();
+        plan.create("work.json", "pending work".into());
+        publish_document_expected_with_plan(
+            &session,
+            Path::new("document.md"),
+            document,
+            Some(&Some(document.into())),
+            plan,
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("work.json")).unwrap(),
+            "pending work"
+        );
+        assert!(!root.path().join(".lorekeeper/evidence").exists());
+        let mut plan = crate::MutationPlan::default();
+        plan_document_publication(
+            &session,
+            Path::new("document.md"),
+            document,
+            Some(&Some(document.into())),
+            &mut plan,
+        )
+        .unwrap();
+        plan.create("next-work.json", "next work".into());
+        std::fs::write(
+            root.path().join("document.md"),
+            document.replace("Unchanged", "Changed"),
+        )
+        .unwrap();
+        assert!(session.apply(plan).is_err());
+        assert!(!root.path().join("next-work.json").exists());
+        assert!(
+            !root
+                .path()
+                .join(".lorekeeper/mutation/pending.json")
+                .exists()
+        );
+    }
+
+    #[test]
+    fn planned_document_edit_and_work_share_recoverable_publication() {
+        let root = tempfile::tempdir().unwrap();
+        let session = crate::MutationSession::acquire(root.path()).unwrap();
+        let before = "---\ntype: document\n---\nOriginal source.\n";
+        let after = "---\ntype: document\n---\nUpdated source.\n";
+        std::fs::write(root.path().join("document.md"), before).unwrap();
+        let mut plan = crate::MutationPlan::default();
+        plan_document_publication(
+            &session,
+            Path::new("document.md"),
+            after,
+            Some(&Some(before.into())),
+            &mut plan,
+        )
+        .unwrap();
+        plan.create("work.json", "pending work".into());
+        let journal = serde_json::json!({"version":1,"plan":plan});
+        std::fs::write(
+            root.path().join(".lorekeeper/mutation/pending.json"),
+            journal.to_string(),
+        )
+        .unwrap();
+        std::fs::write(root.path().join("document.md"), after).unwrap();
+        drop(session);
+        let _session = crate::MutationSession::acquire(root.path()).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("document.md")).unwrap(),
+            after
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("work.json")).unwrap(),
+            "pending work"
+        );
+        let revision = lk_core::concept::source_revision(&parse_page(before).unwrap());
+        assert_eq!(
+            load_archived_evidence(root.path(), &revision)
+                .unwrap()
+                .unwrap()
+                .original
+                .as_deref(),
+            Some(before)
+        );
+        assert!(
+            !root
+                .path()
+                .join(".lorekeeper/mutation/pending.json")
+                .exists()
+        );
+    }
 
     #[test]
     fn document_publication_preserves_prior_evidence_and_bounds_noops() {
