@@ -490,14 +490,22 @@ fn selected_review_drift_blocks_audit_completion_without_becoming_a_global_healt
 }
 
 const RECORD_BOUNDED_AUDIT: &str = r#"
+case "$*" in
+  *--output-schema*|*--safe-mode*) pwd > "$TEST_EXECUTION_ROOT/observation-cwd"; /bin/cat > "$TEST_EXECUTION_ROOT/native-request.txt" ;;
+esac
 exec python3 - "$@" <<'BOUNDED'
 import json, os, re, subprocess, sys
 from pathlib import Path
 root=Path(os.environ['TEST_EXECUTION_ROOT'])
-match=re.search(r'bounded (inspect|finish) ([0-9a-f]{64})(?: ([0-9a-f]{64}))?', '\n'.join(sys.argv[1:]))
-if match is None:
-    raise SystemExit('expected an exact bounded native request')
-action, work_id, node_id=match.groups()
+native='--output-schema' in sys.argv or '--safe-mode' in sys.argv
+if native:
+    request=json.loads((root/'native-request.txt').read_text().split('\nNative request:\n',1)[1])
+    action,work_id,node_id='inspect',request['work_id'],request['node_id']
+else:
+    match=re.search(r'bounded (inspect|finish) ([0-9a-f]{64})(?: ([0-9a-f]{64}))?', '\n'.join(sys.argv[1:]))
+    if match is None:
+        raise SystemExit('expected an exact bounded native request')
+    action, work_id, node_id=match.groups()
 def cli(*args):
     result=subprocess.run([os.environ['LORE_BIN'], *args], capture_output=True, text=True)
     if result.returncode:
@@ -506,7 +514,8 @@ def cli(*args):
         raise SystemExit(result.returncode)
     return json.loads(result.stdout)
 if action=='inspect':
-    request=cli('work', 'read', work_id, node_id)
+    if not native:
+        request=cli('work', 'read', work_id, node_id)
     row={'action':action, 'work_id':work_id, 'node_id':node_id,
          'kind':request['kind'], 'pid':os.getpid(), 'input_bytes':len(json.dumps(request, ensure_ascii=False, separators=(',', ':')).encode())}
     if request['kind']=='inspect':
@@ -517,9 +526,15 @@ if action=='inspect':
     output={'work_id':work_id, 'node_id':node_id, 'input_revision':request['input_revision'],
             'summary':'Fixture observation of this exact request; structural coverage is not factual verification.',
             'findings':[], 'unresolved':unresolved, 'resolutions':[]}
-    path=root/'observation.json'
-    path.write_text(json.dumps(output))
-    cli('work', 'record', '--file', str(path))
+    if native:
+        if '--safe-mode' in sys.argv:
+            print(json.dumps({'type':'result','subtype':'success','is_error':False,'structured_output':output}))
+        else:
+            print(json.dumps(output))
+    else:
+        path=root/'observation.json'
+        path.write_text(json.dumps(output))
+        cli('work', 'record', '--file', str(path))
 else:
     request=cli('work', 'result', work_id)
     subject=request['context']['subject']
@@ -591,6 +606,24 @@ fn selected_profile_budget_reaches_controller_and_worker_commands() {
         );
         let calls = bounded_calls(&fixture);
         assert_eq!(calls.len(), 1, "{result}");
+        let arguments = std::fs::read_to_string(fixture.root().join("arguments")).unwrap();
+        assert!(
+            !arguments.contains("Evidence clause"),
+            "source text goes through stdin rather than argv"
+        );
+        if engine == "codex" {
+            assert!(arguments.contains("--sandbox\nread-only\n"));
+            assert!(arguments.contains("--disable\nshell_tool\n"));
+        } else {
+            assert!(arguments.contains("--safe-mode\n--tools\n\n"));
+            assert!(!arguments.contains("--plugin-dir"));
+        }
+        let cwd = std::fs::read_to_string(fixture.root().join("observation-cwd")).unwrap();
+        assert_ne!(Path::new(cwd.trim()), fixture.root().join("vault"));
+        assert!(
+            !Path::new(cwd.trim()).exists(),
+            "private observation workspace is removed after the child"
+        );
         let work_id = calls[0]["work_id"].as_str().unwrap();
         let output = fixture
             .command()
@@ -771,6 +804,34 @@ fn oversized_audit_completes_through_fresh_bounded_workers_on_both_hosts() {
         assert_eq!(plan["reviewed_current"], 1);
         assert_eq!(plan["unreviewed"], 0);
     }
+}
+
+#[test]
+fn native_observation_cannot_record_another_selected_node() {
+    let behavior = RECORD_BOUNDED_AUDIT.replace(
+        "output={'work_id':work_id, 'node_id':node_id,",
+        "output={'work_id':work_id, 'node_id':'not-selected',",
+    );
+    let fixture = bounded_audit_fixture("codex", 1, &behavior);
+    let (output, result) = fixture.run("knowledge");
+    assert!(!output.status.success());
+    assert!(result["stages"].as_array().unwrap().iter().any(|stage| {
+        stage["name"] == "bounded work receipt"
+            && stage["state"] == "failed"
+            && stage["detail"]
+                .as_str()
+                .is_some_and(|detail| detail.contains("selected work node"))
+    }));
+    let calls = bounded_calls(&fixture);
+    let id = calls[0]["work_id"].as_str().unwrap();
+    let status = fixture
+        .command()
+        .args(["work", "status", id])
+        .output()
+        .unwrap();
+    assert!(status.status.success());
+    let status: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(status["completed"], 0);
 }
 
 #[test]

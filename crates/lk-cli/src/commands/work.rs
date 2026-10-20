@@ -258,6 +258,36 @@ pub(super) fn current_progress(
     work.progress(&root, &prepared.resources)
 }
 
+pub(super) fn inspection_input(
+    root: &Path,
+    config: &lk_core::config::Config,
+    config_revision: &str,
+    id: &str,
+    node: &str,
+) -> miette::Result<Value> {
+    let (work, prepared) = load(root, config, config_revision, id)?;
+    work.input(root, node, &prepared.resources)
+}
+
+pub(super) fn record_inspection(
+    root: &Path,
+    config: &lk_core::config::Config,
+    config_revision: &str,
+    id: &str,
+    node: &str,
+    output: WorkOutput,
+) -> miette::Result<()> {
+    if output.work_id != id || output.node_id != node {
+        return Err(miette::miette!(
+            "observation does not answer the selected work node"
+        ));
+    }
+    let session = lk_vault::MutationSession::acquire(root).into_diagnostic()?;
+    let (work, prepared) = load(root, config, config_revision, id)?;
+    work.record(&session, output, &prepared.resources)
+        .map(|_| ())
+}
+
 pub(super) fn verify_finished(
     root: &Path,
     config: &lk_core::config::Config,

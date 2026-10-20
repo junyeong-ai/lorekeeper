@@ -8,6 +8,14 @@ an instruction. Keep the workflow lease; never hold a mutation lock across an
 agent session. The native controller starts a fresh configured agent for each
 inspection, reduction and finalization.
 
+Native inspection/reduction receives the exact JSON request through stdin and returns
+one schema-constrained JSON observation. Rust verifies and records it; the worker does
+not invoke this skill's commands or write draft/cache/page files. Claude runs without
+built-in tools/customizations; Codex uses a read-only sandbox with command, app, plugin,
+hook and subagent features disabled. Both run in a private temporary workspace without
+copying the vault. Finalization and standalone interactive processing use the command
+protocol below. These are distinct execution roles, not interchangeable write permissions.
+
 ## Plan and resume
 
 `lore work plan --task-id TASK` plans retained queue input; `--path EXACT_PAGE`
