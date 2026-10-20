@@ -51,6 +51,99 @@ fn snapshot_metadata_remains_captured_after_external_edits_without_writes() {
 }
 
 #[test]
+fn context_groups_preserve_authority_and_pagination_without_live_page_reads() {
+    let root = tempfile::tempdir().unwrap();
+    let vault = root.path().join("vault");
+    std::fs::create_dir_all(vault.join("wiki/concepts")).unwrap();
+    std::fs::create_dir_all(vault.join("wiki/documents")).unwrap();
+    std::fs::write(root.path().join("config.yaml"), "vault:\n  root: vault\nidentity:\n  name: T\n  email: t@example.com\nsources:\n  notes:\n    type: manual\n    params:\n      inbox_dir: inbox\n").unwrap();
+    let concept = "wiki/concepts/topic.md";
+    std::fs::write(
+        vault.join(concept),
+        "---\ntype: concept\ntitle: Topic\n---\nA scoped topic.\n[Context](../documents/a.md)\n",
+    )
+    .unwrap();
+    for (name, links) in [
+        (
+            "a",
+            "[Topic](../concepts/topic.md)\n[Again](../concepts/topic.md)",
+        ),
+        ("b", "[Topic](../concepts/topic.md)"),
+    ] {
+        std::fs::write(
+            vault.join(format!("wiki/documents/{name}.md")),
+            format!("---\ntype: document\ntitle: {name}\n---\n{links}\n"),
+        )
+        .unwrap();
+    }
+    let prepared = report(run(root.path(), &["wiki", "prepare"]));
+    let id = prepared["snapshot"].as_str().unwrap();
+    let index = vault.join(".lorekeeper/search.sqlite");
+    let index_before = std::fs::read(&index).unwrap();
+    let first = report(run(
+        root.path(),
+        &["wiki", "context", concept, "--snapshot", id, "--limit", "1"],
+    ));
+    assert_eq!(first["links"]["total"], 4);
+    assert_eq!(first["links"]["links"].as_array().unwrap().len(), 1);
+    assert_eq!(first["evidence"]["status"], "available");
+    assert_eq!(first["evidence"]["data"]["total"], 2);
+    assert_eq!(
+        first["evidence"]["data"]["citations"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(first["declared_relations"]["status"], "not-applicable");
+    assert_eq!(first["reviews"]["total"], 0);
+    assert_eq!(first["next_offset"], 1);
+    for name in ["a", "b"] {
+        std::fs::remove_file(vault.join(format!("wiki/documents/{name}.md"))).unwrap();
+    }
+    let second = report(run(
+        root.path(),
+        &[
+            "wiki",
+            "context",
+            concept,
+            "--snapshot",
+            id,
+            "--limit",
+            "1",
+            "--offset",
+            "1",
+        ],
+    ));
+    assert_ne!(
+        first["evidence"]["data"]["citations"],
+        second["evidence"]["data"]["citations"]
+    );
+    assert_eq!(second["capture"], prepared);
+    let document = report(run(
+        root.path(),
+        &["wiki", "context", "wiki/documents/a.md", "--snapshot", id],
+    ));
+    assert_eq!(document["evidence"]["status"], "not-applicable");
+    assert_eq!(document["declared_relations"]["status"], "available");
+    assert_eq!(std::fs::read(index).unwrap(), index_before);
+    assert!(
+        !run(
+            root.path(),
+            &["wiki", "context", concept, "--snapshot", id, "--limit", "0"]
+        )
+        .status
+        .success()
+    );
+    report(run(root.path(), &["wiki", "prepare"]));
+    assert!(
+        !run(root.path(), &["wiki", "context", concept, "--snapshot", id])
+            .status
+            .success()
+    );
+}
+
+#[test]
 fn cli_preparation_and_refresh_publish_exact_citations_without_rewriting_concepts() {
     let root = tempfile::tempdir().unwrap();
     let vault = root.path().join("vault");

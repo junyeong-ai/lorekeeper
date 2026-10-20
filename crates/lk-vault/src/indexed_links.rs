@@ -73,6 +73,14 @@ pub fn inspect_indexed_links(
     let mut connection = Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     let transaction = connection.transaction()?;
     search_index::verify_snapshot(&transaction, root, dirs, options.snapshot)?;
+    inspect_captured(&transaction, path, options)
+}
+
+pub(super) fn inspect_captured(
+    transaction: &Connection,
+    path: &str,
+    options: &IndexedLinkOptions<'_>,
+) -> Result<IndexedLinks, VaultError> {
     let revision: Option<String> = transaction
         .query_row(
             "SELECT json_extract(metadata, '$.file_revision') FROM pages WHERE path = ?1",

@@ -52,6 +52,13 @@ Answer a question grounded in vault content, with compounding.
    Inspect its outline, then read relevant `--section ID` content and follow `next_offset`.
    Carry `--revision` through pagination; a mismatch requires fresh retrieval. A section
    includes nested subsections. Read the sources behind the claim, not only its synthesis.
+   For a selected page, `lore wiki context <exact-path> --snapshot <id> --limit 10`
+   returns links, concept evidence, declared document relations and scoped reviews in
+   one captured transaction. Each group has its own total and authority; links do not
+   establish support, and source declarations are not current-truth judgments.
+   `not-captured` differs from an available empty group. Follow its `next_offset` with
+   `--offset` in the same snapshot; the offset applies independently to every group.
+   Use the individual relation commands below when only one group needs expansion.
    For a selected concept, use `lore wiki citations <exact-concept-path> --snapshot <id>`
    and follow `next_offset` with the same snapshot to discover its complete evidence.
    This graph-derived set differs from ordinary explicit link occurrences. RSS entries

@@ -216,6 +216,10 @@ const EXEMPT: &[(&[&str], &str)] = &[
         "requires a prepared capture; wiki_citations tests read-only metadata access after external edits",
     ),
     (
+        &["wiki", "context"],
+        "requires a prepared capture; wiki_citations tests bounded, revision-pinned relationship groups and stale refusal",
+    ),
+    (
         &["wiki", "citations"],
         "requires a runtime snapshot identity containing the real vault path; wiki_citations tests configured paths, complete evidence, captured reads and superseded-snapshot refusal",
     ),

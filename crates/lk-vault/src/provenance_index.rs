@@ -170,6 +170,15 @@ pub(super) fn inspect(
     )?;
     let transaction = connection.transaction()?;
     crate::search_index::verify_snapshot(&transaction, root, dirs, snapshot)?;
+    inspect_captured(&transaction, path, options, snapshot)
+}
+
+pub(super) fn inspect_captured(
+    transaction: &Connection,
+    path: &Path,
+    options: &ProvenanceOptions<'_>,
+    snapshot: &str,
+) -> Result<ProvenanceReport, VaultError> {
     let center = transaction.query_row("SELECT d.payload FROM provenance_addresses a JOIN provenance_documents d ON d.path=a.owner WHERE a.path=?1", [path.to_string_lossy().as_ref()], |row|row.get::<_,String>(0))?;
     let center = decode(&center)?;
     let revision = lk_core::concept::file_revision(&serde_json::to_string(&json!({"snapshot":snapshot,"path":center.path,"direction":format!("{:?}",options.direction),"relation":options.relation})).map_err(|error| VaultError::Serialization(error.to_string()))?);

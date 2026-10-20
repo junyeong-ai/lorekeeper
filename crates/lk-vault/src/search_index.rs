@@ -35,7 +35,7 @@ pub fn inspect_search_snapshot(
     read_snapshot(&transaction)
 }
 
-fn read_snapshot(connection: &Connection) -> Result<SearchSnapshot, VaultError> {
+pub(super) fn read_snapshot(connection: &Connection) -> Result<SearchSnapshot, VaultError> {
     let (snapshot, pages, citations_available, captured_at, verified_at): (
         String,
         i64,

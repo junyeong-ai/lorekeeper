@@ -217,6 +217,7 @@ pgvector를 선택했다. 이 결정의 조건과 첫 메모의 검색 품질 �
 lore wiki snapshot                          # 저장된 검색 판본·마지막 검증 시각 조회
 lore wiki prepare                           # 현재 원본을 검증하고 검색 판본 생성
 lore wiki search "Vector DB" --snapshot <id> --limit 10 --json
+lore wiki context wiki/concepts/vector-db.md --snapshot <id> --limit 10 # 관계별 근거를 나누어 탐색
 lore wiki browse --type concept --category ai-ml --limit 20 --json
 lore wiki search "API 토큰" --phrase --snapshot <id> --json
 lore wiki search "인증정보" --spacing --snapshot <id> --json

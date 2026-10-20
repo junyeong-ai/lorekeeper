@@ -26,6 +26,8 @@
 | `lore task sync` | Record what an editor did: adopt lines typed by hand, close lines ticked, wake what is due |
 | `lore task rollover` | Close the day — carry every still-committed task, counting each carry so a task carried too long reads as the diagnosis it is |
 | `lore resolve <name>` | Which concept page a name addresses, by the rule ingest routes an extraction by. Exit 0 owned, 1 absent, 2 more than one page answers to it |
+| `lore wiki snapshot` | Read the prepared capture and its creation/verification times without refreshing source files; `lore wiki prepare` performs full current capture |
+| `lore wiki context <path> --snapshot ID [--limit N] [--offset N]` | Browse captured links, evidence, declared source relations and scoped reviews together; each group retains its authority, total and pagination |
 | `lore status` | One line per subsystem — the installation, source currency, the LLM queue, page contracts, the link graph — each naming the command that owns it. Reports without gating; the per-source timestamps are `lore health` |
 | `lore health [--strict]` | Warn if any source is overdue vs `ingest.schedule` (2 missed fires; 48h fallback). `--strict` also fails when a source has NEVER ingested, which a first install has and a broken one looks identical to |
 | `lore performance` | Performance category distribution |
