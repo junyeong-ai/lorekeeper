@@ -175,7 +175,10 @@ Use parser/token-state behavior, not regex replacement of arbitrary markup.
   process group so workflow cancellation includes it. Keep direct-child timeout/reaping;
   do not detach conversion or launch background helper processes from the processor.
 - XLSX preserves sheet state, cell coordinates, formulas and stored cached values without
-  calculation. PDF physical page numbers differ from DOCX flow content. OCR is explicit
+  calculation. Typed sheet structure retains merged rectangles, default row visibility
+  and declared row/column visibility intervals without expanding sparse geometry or
+  excluding hidden values. The locked openpyxl sparse parser is part of this boundary;
+  decoder upgrades must replay the optional runtime tests. PDF physical page numbers differ from DOCX flow content. OCR is explicit
   and distinct from native text; empty extraction is unprocessed, never completed knowledge.
 - Decode all image frames through Pillow before OCR; preserve frame ordinals, apply
   EXIF orientation and composite alpha on white. Bound aggregate RGBA bytes and unit

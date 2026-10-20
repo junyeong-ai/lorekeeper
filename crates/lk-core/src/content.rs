@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::ConfigError;
 
-pub const PROJECTION_POLICY: &str = "document-projection-v1";
+pub const PROJECTION_POLICY: &str = "document-projection-v2";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, strum::EnumIter)]
 #[serde(rename_all = "kebab-case")]
@@ -211,6 +211,36 @@ pub struct InputUnit {
     pub method: ProjectionMethod,
     pub representation: UnitRepresentation,
     pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sheet_structure: Option<SheetStructure>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SheetStructure {
+    pub default_row_hidden: bool,
+    pub merged_ranges: Vec<SheetRange>,
+    /// Inclusive intervals for declared rows; adjacent equal declarations may coalesce.
+    pub row_visibility: Vec<SheetVisibility>,
+    /// Inclusive intervals in source order, including overlapping declarations.
+    pub column_visibility: Vec<SheetVisibility>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SheetRange {
+    pub start_row: u32,
+    pub end_row: u32,
+    pub start_column: u32,
+    pub end_column: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SheetVisibility {
+    pub start: u32,
+    pub end: u32,
+    pub hidden: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -235,6 +265,20 @@ pub struct OcrProjection {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_projection_roundtrips_without_claiming_sheet_structure() {
+        let original = serde_json::json!({
+            "policy": "document-projection-v1", "format": "xlsx", "packages": {},
+            "ocr": null, "warnings": [], "units": [{
+                "location": {"kind": "sheet", "name": "Data", "state": "visible"},
+                "method": "native", "representation": "json-lines", "text": "retained input"
+            }]
+        });
+        let projection: InputProjection = serde_json::from_value(original.clone()).unwrap();
+        assert!(projection.units[0].sheet_structure.is_none());
+        assert_eq!(serde_json::to_value(projection).unwrap(), original);
+    }
 
     #[test]
     fn format_selection_does_not_treat_an_extension_as_a_decoder() {

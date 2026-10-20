@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use lk_core::content::{
     InputFormat, InputLocation, InputProcessingConfig, InputProjection, OcrConfig,
-    PROJECTION_POLICY, ProjectionMethod, UnitRepresentation,
+    PROJECTION_POLICY, ProjectionMethod, SheetStructure, UnitRepresentation,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -291,6 +291,22 @@ fn validate_projection(
         bytes = bytes
             .checked_add(unit.text.len())
             .ok_or(ProcessingError::Protocol)?;
+        match (&unit.location, &unit.sheet_structure) {
+            (InputLocation::Sheet { .. }, Some(structure)) => {
+                validate_sheet_structure(structure)?;
+                bytes = bytes
+                    .checked_add(
+                        serde_json::to_vec(structure)
+                            .map_err(|_| ProcessingError::Protocol)?
+                            .len(),
+                    )
+                    .ok_or(ProcessingError::Protocol)?;
+            }
+            (InputLocation::Sheet { .. }, None) | (_, Some(_)) => {
+                return Err(ProcessingError::Protocol);
+            }
+            (_, None) => {}
+        }
         let valid = match (&unit.location, unit.method, unit.representation) {
             (InputLocation::Document, ProjectionMethod::Native, UnitRepresentation::Markdown) => {
                 format == InputFormat::Docx
@@ -344,6 +360,31 @@ fn validate_projection(
     Ok(())
 }
 
+fn validate_sheet_structure(value: &SheetStructure) -> Result<(), ProcessingError> {
+    const MAX_ROWS: u32 = 1_048_576;
+    const MAX_COLUMNS: u32 = 16_384;
+    let is_range = |start, end, maximum| 1 <= start && start <= end && end <= maximum;
+    if value.merged_ranges.iter().any(|range| {
+        !is_range(range.start_row, range.end_row, MAX_ROWS)
+            || !is_range(range.start_column, range.end_column, MAX_COLUMNS)
+    }) || value
+        .row_visibility
+        .iter()
+        .any(|range| !is_range(range.start, range.end, MAX_ROWS))
+        || value
+            .row_visibility
+            .windows(2)
+            .any(|pair| pair[0].end >= pair[1].start)
+        || value
+            .column_visibility
+            .iter()
+            .any(|range| !is_range(range.start, range.end, MAX_COLUMNS))
+    {
+        return Err(ProcessingError::Protocol);
+    }
+    Ok(())
+}
+
 impl From<ProcessingError> for crate::SourceError {
     fn from(value: ProcessingError) -> Self {
         Self::Parse(value.to_string())
@@ -362,6 +403,14 @@ pub fn render_markdown(value: &InputProjection) -> Result<String, crate::SourceE
             "\n\n{}\n\n",
             crate::fetch::literal_markdown(&label)?
         ));
+        if let Some(structure) = &unit.sheet_structure {
+            let metadata = serde_json::to_string(&serde_json::json!({
+                "sheet_structure": structure,
+            }))
+            .map_err(|error| crate::SourceError::Parse(error.to_string()))?;
+            output.push_str(&crate::fetch::literal_markdown(&metadata)?);
+            output.push_str("\n\n");
+        }
         if unit.representation != UnitRepresentation::Markdown {
             output.push_str(&crate::fetch::literal_markdown(&unit.text)?);
             continue;
@@ -412,12 +461,168 @@ mod tests {
     }
 
     #[test]
+    fn sheet_structure_validates_coordinates_and_keeps_ordered_column_declarations() {
+        let valid = serde_json::json!({
+            "default_row_hidden": true,
+            "merged_ranges": [{"start_row": 1, "end_row": 1048576, "start_column": 1, "end_column": 16384}],
+            "row_visibility": [{"start": 1, "end": 2, "hidden": false}, {"start": 4, "end": 4, "hidden": true}],
+            "column_visibility": [{"start": 2, "end": 4, "hidden": true}, {"start": 2, "end": 2, "hidden": false}]
+        });
+        let structure: SheetStructure = serde_json::from_value(valid.clone()).unwrap();
+        validate_sheet_structure(&structure).unwrap();
+        for (pointer, value) in [
+            ("/merged_ranges/0/start_row", 0),
+            ("/merged_ranges/0/end_row", 1048577),
+            ("/merged_ranges/0/end_column", 16385),
+            ("/row_visibility/1/start", 2),
+            ("/column_visibility/0/end", 1),
+        ] {
+            let mut invalid = valid.clone();
+            *invalid.pointer_mut(pointer).unwrap() = serde_json::json!(value);
+            let structure = serde_json::from_value(invalid).unwrap();
+            assert!(validate_sheet_structure(&structure).is_err(), "{pointer}");
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires the pinned optional document runtime; set LORE_TEST_DOCUMENT_PYTHON"]
+    async fn spreadsheet_structure_preserves_hidden_values_and_sparse_geometry() {
+        let python =
+            std::env::var_os("LORE_TEST_DOCUMENT_PYTHON").expect("LORE_TEST_DOCUMENT_PYTHON");
+        let config = configuration(std::path::Path::new(&python));
+        let temporary = tempfile::tempdir().unwrap();
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/content/fixtures/policy.xlsx");
+        let generated = std::process::Command::new(&config.python)
+            .args([
+                "-I",
+                "-c",
+                r#"
+import pathlib, sys, zipfile, xml.etree.ElementTree as E
+source, output = map(pathlib.Path, sys.argv[1:])
+ns = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'
+def tag(name): return '{' + ns + '}' + name
+with zipfile.ZipFile(source) as archive:
+    members = {name: archive.read(name) for name in archive.namelist()}
+sheet = E.fromstring(members['xl/worksheets/sheet1.xml'])
+sheet.insert(0, E.Element(tag('dimension'), ref='A1:A1'))
+sheet.insert(1, E.Element(tag('sheetFormatPr'), zeroHeight='1', defaultRowHeight='15'))
+columns = E.Element(tag('cols'))
+E.SubElement(columns, tag('col'), min='2', max='4', hidden='1')
+E.SubElement(columns, tag('col'), min='2', max='2', hidden='0')
+sheet.insert(2, columns)
+sheet_data = sheet.find(tag('sheetData'))
+sheet_data[0].set('hidden', '1')
+sheet_data[1].set('hidden', '0')
+row = E.SubElement(sheet_data, tag('row'), r='1048576')
+cell = E.SubElement(row, tag('c'), r='XFD1048576', t='inlineStr')
+E.SubElement(E.SubElement(cell, tag('is')), tag('t')).text = 'sparse end'
+merged = E.SubElement(sheet, tag('mergeCells'), count='1')
+E.SubElement(merged, tag('mergeCell'), ref='C3:XFD1048575')
+members['xl/worksheets/sheet1.xml'] = E.tostring(sheet)
+workbook = E.fromstring(members['xl/workbook.xml'])
+workbook.find(tag('sheets'))[1].set('state', 'veryHidden')
+members['xl/workbook.xml'] = E.tostring(workbook)
+relations = E.fromstring(members['xl/_rels/workbook.xml.rels'])
+relations[0].set('Target', 'worksheets/nested/data.xml')
+members['xl/_rels/workbook.xml.rels'] = E.tostring(relations)
+members['xl/worksheets/nested/data.xml'] = members.pop('xl/worksheets/sheet1.xml')
+def save(name, contents):
+    with zipfile.ZipFile(output / name, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
+        for path, data in contents.items(): archive.writestr(path, data)
+save('structured.xlsx', members)
+invalid = dict(members)
+invalid.pop('xl/worksheets/nested/data.xml')
+save('missing-sheet.xlsx', invalid)
+invalid = dict(members)
+broken = E.fromstring(members['xl/worksheets/nested/data.xml'])
+broken.find(tag('cols'))[0].set('max', '16385')
+invalid['xl/worksheets/nested/data.xml'] = E.tostring(broken)
+save('invalid-range.xlsx', invalid)
+invalid = dict(members)
+relations[0].set('TargetMode', 'External')
+invalid['xl/_rels/workbook.xml.rels'] = E.tostring(relations)
+save('external-sheet.xlsx', invalid)
+"#,
+            ])
+            .arg(&fixture)
+            .arg(temporary.path())
+            .output()
+            .unwrap();
+        assert!(
+            generated.status.success(),
+            "{}",
+            String::from_utf8_lossy(&generated.stderr)
+        );
+        let bytes = std::fs::read(temporary.path().join("structured.xlsx")).unwrap();
+        let value = project(&bytes, InputFormat::Xlsx, Some(&config))
+            .await
+            .unwrap();
+        assert_eq!(value.policy, PROJECTION_POLICY);
+        assert_eq!(value.units.len(), 2);
+        let first = &value.units[0];
+        assert_eq!(first.text.lines().count(), 5);
+        assert!(first.text.contains("\"value\": 30"));
+        assert!(first.text.contains("\"formula\": \"=B1+1\""));
+        assert!(first.text.contains("\"cached_value\": 31"));
+        assert!(first.text.contains("XFD1048576"));
+        let structure = first.sheet_structure.as_ref().unwrap();
+        assert!(structure.default_row_hidden);
+        assert_eq!(structure.merged_ranges[0].end_row, 1048575);
+        assert_eq!(structure.merged_ranges[0].end_column, 16384);
+        assert!(structure.row_visibility[0].hidden);
+        assert!(!structure.row_visibility[1].hidden);
+        assert_eq!(structure.row_visibility[2].start, 1048576);
+        assert_eq!(structure.column_visibility.len(), 2);
+        assert!(structure.column_visibility[0].hidden);
+        assert!(!structure.column_visibility[1].hidden);
+        assert!(matches!(
+            value.units[1].location,
+            InputLocation::Sheet {
+                state: lk_core::content::SheetState::VeryHidden,
+                ..
+            }
+        ));
+        let rendered = render_markdown(&value).unwrap();
+        assert!(rendered.contains("sheet_structure"));
+        assert!(rendered.contains("merged_ranges"));
+        assert!(rendered.contains("sparse end"));
+        let mut bounded = config.clone();
+        bounded.max_decoded_bytes =
+            std::num::NonZeroUsize::new(value.units.iter().map(|unit| unit.text.len()).sum())
+                .unwrap();
+        assert!(validate_projection(&value, InputFormat::Xlsx, &bounded).is_err());
+        let plain = project(
+            &std::fs::read(&fixture).unwrap(),
+            InputFormat::Xlsx,
+            Some(&config),
+        )
+        .await
+        .unwrap();
+        assert_ne!(first.sheet_structure, plain.units[0].sheet_structure);
+        for name in [
+            "missing-sheet.xlsx",
+            "invalid-range.xlsx",
+            "external-sheet.xlsx",
+        ] {
+            let invalid = std::fs::read(temporary.path().join(name)).unwrap();
+            assert!(
+                project(&invalid, InputFormat::Xlsx, Some(&config))
+                    .await
+                    .is_err(),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
     fn projection_links_remain_original_text_without_wiki_edges() {
         let value = InputProjection {
             policy: PROJECTION_POLICY.into(), format: InputFormat::Docx, packages: BTreeMap::new(), ocr: None, warnings: vec![],
             units: vec![lk_core::content::InputUnit {
                 location: InputLocation::Document, method: ProjectionMethod::Native, representation: UnitRepresentation::Markdown,
                 text: "# Policy\n\n[local](../concepts/policy.md) ![figure](image.png) <script>source</script>\n\n| Scope | Days |\n| --- | --- |\n| prod | 7 |".into(),
+                sheet_structure: None,
             }],
         };
         let body = render_markdown(&value).unwrap();
