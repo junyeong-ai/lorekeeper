@@ -71,6 +71,16 @@ Answer a question grounded in vault content, with compounding.
    its `knowledge_review` and scoped `reviews` previews. A single source does not imply poor
    knowledge; verify supported scope and future retrieval value. Open or changed assessments
    require reading their reasoning, not merely counting them.
+   Search, browse and context expose concept `synthesis.status` separately from snapshot
+   currency. `current-input` means the completed synthesis names the captured graph evidence
+   digest; it does not establish semantic correctness or independent corroboration. `pending`
+   means the completed input differs or is missing: read the changed sources before using
+   the synthesis as a present answer. This detects source edits even before backlink
+   reconciliation updates the recorded request. `untracked` has no recorded synthesis input,
+   `empty-evidence` has no captured citations, and `invalid-metadata` requires inspecting its
+   reported issues. `not-captured` means live or lexical-only discovery cannot establish this
+   input relationship; prepare graph evidence when it matters. `not-applicable` covers other
+   page kinds. These states do not automatically retire knowledge or settle contradictions.
    Hits carry a compact `source_record` lifecycle preview and optional `source_identity`,
    `source_file`, `source_url`. Full declarations, relations and original manifests remain
    in the page; inspect them only for selected evidence. `metadata_issues` reports malformed

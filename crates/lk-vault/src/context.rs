@@ -48,6 +48,7 @@ pub struct PageContext {
     pub file_revision: String,
     pub format: Option<String>,
     pub knowledge_status: lk_core::frontmatter::KnowledgeStatus,
+    pub synthesis: crate::SynthesisFreshness,
     /// Bounded opening preview in source spelling; full content uses a revision-pinned read.
     pub summary: String,
     pub links: IndexedLinks,
@@ -128,6 +129,14 @@ pub fn inspect_page_context(
             },
         )?)
     };
+    let synthesis =
+        crate::SynthesisFreshness::from_frontmatter(&page.page.frontmatter, page.concept);
+    let synthesis = match &evidence {
+        ContextEvidence::Available(evidence) => {
+            synthesis.with_evidence(evidence.total, &evidence.digest)
+        }
+        _ => synthesis,
+    };
     let provenance_captured: bool = transaction.query_row(
         "SELECT EXISTS(SELECT 1 FROM provenance_addresses WHERE path = ?1)",
         [path_text],
@@ -177,6 +186,7 @@ pub fn inspect_page_context(
         file_revision: page.file_revision,
         format,
         knowledge_status: page.knowledge_status,
+        synthesis,
         summary,
         links,
         evidence,

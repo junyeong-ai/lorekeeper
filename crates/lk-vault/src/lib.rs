@@ -82,7 +82,7 @@ pub use self::rss_original::{
 };
 pub use self::search::{
     BrowseSort, CreatedStatus, MatchField, SearchHit, SearchOptions, SearchResult,
-    parse_created_date, search,
+    SynthesisFreshness, SynthesisInputStatus, parse_created_date, search,
 };
 pub use self::search_index::{
     SearchSnapshot, inspect_search_snapshot, prepare_search, prepare_search_with_citations,

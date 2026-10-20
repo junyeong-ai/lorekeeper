@@ -66,6 +66,7 @@ pub struct SearchHit {
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub created_truncated: bool,
     pub source_count: u64,
+    pub synthesis: SynthesisFreshness,
     pub knowledge_status: KnowledgeStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub knowledge_review: Option<String>,
@@ -86,6 +87,95 @@ pub struct SearchHit {
     pub source_url: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub metadata_issues: Vec<String>,
+}
+
+/// Whether a concept's completed synthesis answers the captured graph evidence.
+/// Input currency does not establish semantic correctness or independent corroboration.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct SynthesisFreshness {
+    pub status: SynthesisInputStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evidence_digest: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recorded_input: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completed_input: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub issues: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SynthesisInputStatus {
+    NotApplicable,
+    NotCaptured,
+    EmptyEvidence,
+    Untracked,
+    Pending,
+    CurrentInput,
+    InvalidMetadata,
+}
+
+impl SynthesisFreshness {
+    pub(super) fn from_frontmatter(
+        frontmatter: &lk_core::frontmatter::Frontmatter,
+        concept: bool,
+    ) -> Self {
+        let mut value = Self {
+            status: if concept {
+                SynthesisInputStatus::NotCaptured
+            } else {
+                SynthesisInputStatus::NotApplicable
+            },
+            evidence_digest: None,
+            recorded_input: None,
+            completed_input: None,
+            issues: Vec::new(),
+        };
+        if !concept {
+            return value;
+        }
+        let inputs = frontmatter.get(lk_core::frontmatter::field::LLM_INPUTS);
+        if inputs.is_some_and(|inputs| !inputs.is_null() && !inputs.is_object()) {
+            value
+                .issues
+                .push("llm_inputs must be an object or null".into());
+        }
+        let mut marker = |key: &str| match inputs.and_then(|inputs| inputs.get(key)) {
+            None | Some(serde_json::Value::Null) => None,
+            Some(serde_json::Value::String(text)) if !text.trim().is_empty() => Some(text.clone()),
+            Some(_) => {
+                value.issues.push(format!(
+                    "llm_inputs.{key} must be a nonblank string or null"
+                ));
+                None
+            }
+        };
+        value.recorded_input = marker(lk_core::frontmatter::field::SYNTHESIS);
+        value.completed_input = marker(&lk_core::frontmatter::field::completion(
+            lk_core::frontmatter::field::SYNTHESIS,
+        ));
+        if !value.issues.is_empty() {
+            value.status = SynthesisInputStatus::InvalidMetadata;
+        }
+        value
+    }
+
+    pub(super) fn with_evidence(mut self, citations: usize, digest: &str) -> Self {
+        self.evidence_digest = Some(digest.to_owned());
+        self.status = if !self.issues.is_empty() {
+            SynthesisInputStatus::InvalidMetadata
+        } else if citations == 0 {
+            SynthesisInputStatus::EmptyEvidence
+        } else if self.completed_input.as_deref() == Some(digest) {
+            SynthesisInputStatus::CurrentInput
+        } else if self.recorded_input.is_none() && self.completed_input.is_none() {
+            SynthesisInputStatus::Untracked
+        } else {
+            SynthesisInputStatus::Pending
+        };
+        self
+    }
 }
 
 /// Metadata browsing order. Search relevance ordering is unchanged.
@@ -688,6 +778,10 @@ impl<'a> SearchCollector<'a> {
                         .and_then(|v| v.as_str())
                         .is_some_and(|value| value.chars().count() > 160),
                     source_count: entry.page.frontmatter.source_count().unwrap_or(0),
+                    synthesis: SynthesisFreshness::from_frontmatter(
+                        &entry.page.frontmatter,
+                        entry.concept,
+                    ),
                     knowledge_status: entry.knowledge_status(),
                     knowledge_review,
                     tags: search_tags(&entry.page),
