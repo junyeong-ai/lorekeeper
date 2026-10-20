@@ -417,6 +417,8 @@ pub fn print_merge(result: &MergeResult) {
         result.into_slug,
         result.rewritten.len()
     );
+    println!("  from revision: {}", result.from_revision);
+    println!("  into revision: {}", result.into_revision);
     for r in &result.rewritten {
         println!("  {} ({} link(s))", r.path.display(), r.links);
     }

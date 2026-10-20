@@ -140,10 +140,16 @@ pub enum GraphCommand {
     /// `<from>` to `<into>`, then delete the `<from>` page. Run `backlinks-sync`
     /// afterward to re-derive the merged `## Sources` + `source_count`.
     Merge {
-        /// Slug of the duplicate concept to fold in (its page is deleted)
+        /// Exact collection-relative address without .md of the concept to delete
         from: String,
-        /// Slug of the canonical concept to keep
+        /// Exact collection-relative address without .md of the concept to keep
         into: String,
+        /// Full file revision read before comparing the concept to delete
+        #[arg(long, requires = "into_revision", required_unless_present = "dry_run")]
+        from_revision: Option<String>,
+        /// Full file revision read before comparing the survivor
+        #[arg(long, requires = "from_revision", required_unless_present = "dry_run")]
+        into_revision: Option<String>,
         /// Report what would change without writing or deleting
         #[arg(long)]
         dry_run: bool,
@@ -545,9 +551,20 @@ async fn run_inner(
         GraphCommand::Merge {
             ref from,
             ref into,
+            ref from_revision,
+            ref into_revision,
             dry_run,
             force,
         } => {
+            let request = merge::MergeRequest {
+                from,
+                into,
+                revisions: from_revision
+                    .as_deref()
+                    .zip(into_revision.as_deref())
+                    .map(|(from, into)| merge::MergeRevisions { from, into }),
+                force,
+            };
             let result = if let Some(session) = mutation.as_ref() {
                 let workflow_id = match std::env::var("LORE_WORKFLOW_ID") {
                     Ok(value) => Some(lk_core::execution::WorkflowId::try_from(value)?),
@@ -560,9 +577,7 @@ async fn run_inner(
                     &views.scanned,
                     session,
                     &rc.vault_dirs.wiki,
-                    from,
-                    into,
-                    force,
+                    &request,
                     workflow_id.as_ref(),
                 )
             } else {
@@ -570,10 +585,8 @@ async fn run_inner(
                     &views.scanned,
                     &rc.root,
                     &rc.vault_dirs.wiki,
-                    from,
-                    into,
+                    &request,
                     dry_run,
-                    force,
                 )
             }
             .map_err(|e| e.to_string())?;

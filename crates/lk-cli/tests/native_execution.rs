@@ -1879,12 +1879,9 @@ touch "$TEST_EXECUTION_ROOT/assessed-once"
 #[test]
 fn audit_completion_requires_this_workflows_native_merge_and_current_survivor() {
     for (action, expected) in [
+        ("merge_pair a-duplicate z-canonical || exit 31", true),
         (
-            "\"$LORE_BIN\" graph merge a-duplicate z-canonical --force || exit 31",
-            true,
-        ),
-        (
-            "\"$LORE_BIN\" graph merge a-duplicate m-intermediate --force || exit 31\n\"$LORE_BIN\" graph merge m-intermediate z-canonical --force || exit 31",
+            "merge_pair a-duplicate m-intermediate || exit 31\nmerge_pair m-intermediate z-canonical || exit 31",
             true,
         ),
         (
@@ -1892,12 +1889,25 @@ fn audit_completion_requires_this_workflows_native_merge_and_current_survivor() 
             false,
         ),
         (
-            "LORE_WORKFLOW_ID=ffffffffffffffffffffffffffffffff \"$LORE_BIN\" graph merge a-duplicate z-canonical --force || exit 31",
+            "LORE_WORKFLOW_ID=ffffffffffffffffffffffffffffffff merge_pair a-duplicate z-canonical || exit 31",
             false,
         ),
     ] {
         let behavior = format!(
-            "{action}\n{}",
+            "{}\n{action}\n{}",
+            r#"merge_pair() {
+python3 - "$1" "$2" <<'MERGE'
+import json, os, subprocess, sys
+lore = os.environ['LORE_BIN']
+source, survivor = sys.argv[1:]
+def revision(slug):
+    view = json.loads(subprocess.check_output([lore, 'wiki', 'read', f'wiki/concepts/{slug}.md']))
+    return view['file_revision']
+subprocess.run([lore, 'graph', 'merge', source, survivor, '--force',
+                '--from-revision', revision(source), '--into-revision', revision(survivor)], check=True)
+MERGE
+}
+"#,
             r#"
 "$LORE_BIN" graph backlinks-sync || exit 32
 "$LORE_BIN" wiki audit-plan --path wiki/concepts/z-canonical.md > "$TEST_EXECUTION_ROOT/plan.json" || exit 33

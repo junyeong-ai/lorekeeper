@@ -258,7 +258,8 @@ pub fn report_refusals(page: &lk_pipeline::RenderResult, dry_run: bool) {
         } else {
             eprintln!(
                 "! `{alias}` already answers to `{owner}`, so `{minted}` was minted beside \
-                 it — `lore graph merge {minted} {owner}` folds them once you have read both"
+                 it — compare both concepts and their evidence, then preview with \
+                 `lore graph merge {minted} {owner} --dry-run`"
             );
         }
     }

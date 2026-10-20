@@ -413,7 +413,22 @@ fn final_pair_retraction_and_merge_keep_links_and_typed_declarations_consistent(
             .all(|b| b.concept != "wiki/concepts/beta.md")
     );
     let f = Fixture::build();
-    f.ok(&["graph", "merge", "alpha", "beta", "--force"]);
+    let revision = |slug: &str| {
+        file_revision(
+            &std::fs::read_to_string(f.root().join(format!("wiki/concepts/{slug}.md"))).unwrap(),
+        )
+    };
+    f.ok(&[
+        "graph",
+        "merge",
+        "alpha",
+        "beta",
+        "--force",
+        "--from-revision",
+        &revision("alpha"),
+        "--into-revision",
+        &revision("beta"),
+    ]);
     assert!(!f.root().join("wiki/concepts/alpha.md").exists());
     let citations = f.citations("beta");
     assert_eq!(citations.len(), 2);

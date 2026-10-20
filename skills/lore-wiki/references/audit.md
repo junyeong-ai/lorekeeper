@@ -119,8 +119,9 @@ resolve section headings before inspecting pages.
      declared name. NFC and whitespace normalize; case, compatibility characters, punctuation
      and word boundaries remain significant. Shared names can mean duplicate concepts or distinct senses;
      inspect the sources before recommending a merge. For established equivalence, recommend
-     `lore graph merge <from> <into>`
-     followed by `lore graph backlinks-sync` (the merge rewires every link and deletes
+     `lore graph merge <from> <into> --dry-run` using exact collection-relative
+     addresses. Publication requires both read revisions as described in
+     [curation](curation.md), followed by `lore graph backlinks-sync` (the merge rewires every link and deletes
      the `from` page; it refuses if `from` has authored prose unless `--force`, so
      salvage that prose into the survivor first). Like every audit finding the merge is
      **surfaced, not run** — it deletes a page, so a human makes the call.

@@ -98,6 +98,9 @@ belong to exploration reviews, not a machine-persisted callout inferred by locat
 - Choose normalization candidates in analysis scope, but rewrite affected links
   throughout the vault. A merge must find all supported address spellings, retain
   labels/anchors, and fold declared title/aliases without copying prose blindly.
+- Merge endpoints are exact collection-relative addresses, preserving nesting,
+  case and punctuation. Publication requires both full file revisions from the
+  caller's reads; a preview exposes revisions but does not establish equivalence.
 - Related prose is authored content too: refuse merging it unless explicitly forced.
   Force does not bypass unreadable metadata or immutable evidence protection.
   A dry run previews without writes; backlink reconciliation follows publication.

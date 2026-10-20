@@ -72,7 +72,13 @@ sections or queue completion markers. Use `graph resynthesize` and `/lore-proces
 semantic corrections: preview `lore graph resynthesize wiki/concepts/subject.md --dry-run`,
 then omit `--dry-run` to queue current-evidence synthesis. Unlike retained-input
 `queue regenerate`, this does not require the original extraction task.
-Use revision-checked `graph merge --dry-run` only after comparing
-both complete concepts and their sources; shared words or source count are insufficient.
+Compare both complete concepts and their sources before proposing a merge; shared
+words or source count are insufficient. Preview with
+`lore graph merge <from> <into> --dry-run`, using exact addresses relative to the
+concept collection without `.md` (including nested directories). Publish with
+`--from-revision <hash> --into-revision <hash>` from the corresponding `wiki read`
+results. Revisions must describe the content actually assessed; after drift, reread
+and reassess rather than replacing the hashes alone. Salvage authored content into
+the survivor before explicitly using `--force`.
 Finish through lore-process's reconciliation and verification protocol, then refresh
 retrieval snapshots. New citations do not automatically reactivate retired knowledge.
