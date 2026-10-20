@@ -352,11 +352,8 @@ pub(super) fn visit_pages(
     vault_root: &Path,
     dirs: &VaultDirs,
     include_sources: bool,
-    mut visit: impl FnMut(Page, usize) -> Result<(), VaultError>,
+    visit: impl FnMut(Page, usize) -> Result<(), VaultError>,
 ) -> Result<(), VaultError> {
-    // Configured source roots can overlap the wiki (including filesystem aliases).
-    // Navigation is not evidence merely because a source walk also reaches it.
-    let reserved = crate::navigation::ReservedNavigationPaths::load(vault_root, dirs)?;
     let mut directories = vec![
         concepts_dir(dirs),
         documents_dir(dirs),
@@ -369,6 +366,16 @@ pub(super) fn visit_pages(
             PathBuf::from(&dirs.synthesis),
         ]);
     }
+    visit_collections(vault_root, dirs, directories, visit)
+}
+
+pub(super) fn visit_collections(
+    vault_root: &Path,
+    dirs: &VaultDirs,
+    directories: Vec<PathBuf>,
+    mut visit: impl FnMut(Page, usize) -> Result<(), VaultError>,
+) -> Result<(), VaultError> {
+    let reserved = crate::navigation::ReservedNavigationPaths::load(vault_root, dirs)?;
     let mut visited = std::collections::BTreeSet::new();
     for rel_dir in directories {
         let concept = rel_dir == concepts_dir(dirs);
@@ -531,27 +538,8 @@ impl<'a> SearchCollector<'a> {
         terms: &[String],
         query_identity: Option<&str>,
     ) {
-        let names: Vec<&str> = entry.names().collect();
-        let projection = entry.match_projection();
-        let exact_match = if options.query.is_none() {
-            Some(MatchField::Catalog)
-        } else {
-            match_page(
-                terms,
-                query_identity,
-                spellings,
-                &names,
-                &entry.page.body,
-                Some(&projection),
-            )
-        };
-        let matched = exact_match.or_else(|| {
-            options
-                .spacing
-                .then(|| match_spacing(terms, spellings, &names, &projection))
-                .flatten()
-        });
-        let Some(matched) = matched else {
+        let matched = match_query(&entry, options, spellings, terms, query_identity);
+        let Some((matched, phrase_match, spacing_match)) = matched else {
             return;
         };
         let metadata = |key| {
@@ -595,14 +583,6 @@ impl<'a> SearchCollector<'a> {
         if !entry.matches_filters(options) {
             return;
         }
-        let phrase_match = options.query.is_some_and(|query| {
-            let phrase = fold_name(query);
-            entry
-                .names()
-                .any(|name| contains_term(&fold_name(name), &phrase))
-                || contains_term(&projection.text, &phrase)
-        });
-        let spacing_match = exact_match.is_none() || matched == MatchField::NameVariant;
         self.result.total += 1;
         if self.window == 0 {
             return;
@@ -721,6 +701,45 @@ impl<'a> SearchCollector<'a> {
         self.result.next_offset = (end < self.result.total).then_some(end);
         self.result
     }
+}
+
+pub(super) fn match_query(
+    page: &Page,
+    options: &SearchOptions<'_>,
+    spellings: &[String],
+    terms: &[String],
+    identity: Option<&str>,
+) -> Option<(MatchField, bool, bool)> {
+    if options.query.is_none() {
+        return Some((MatchField::Catalog, false, false));
+    }
+    let names = page.names().collect::<Vec<_>>();
+    let projection = page.match_projection();
+    let exact = match_page(
+        terms,
+        identity,
+        spellings,
+        &names,
+        &page.page.body,
+        Some(&projection),
+    );
+    let matched = exact.or_else(|| {
+        options
+            .spacing
+            .then(|| match_spacing(terms, spellings, &names, &projection))
+            .flatten()
+    })?;
+    let phrase = options.query.is_some_and(|query| {
+        let phrase = fold_name(query);
+        page.names()
+            .any(|name| contains_term(&fold_name(name), &phrase))
+            || contains_term(&projection.text, &phrase)
+    });
+    Some((
+        matched,
+        phrase,
+        exact.is_none() || matched == MatchField::NameVariant,
+    ))
 }
 
 pub(super) fn search_pages(

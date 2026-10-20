@@ -345,6 +345,7 @@ pub(super) fn audit_candidate(
     let context = json!({
         "subject": subject,
         "purpose": {"operation":"audit", "subject_kind":candidate.kind, "path":path, "title":candidate.title, "locale":config.vault.locale,
+            "discovery_queries":candidate.discovery.as_ref().map(|discovery| &discovery.queries),
             "review_dependencies":candidate.reviews.iter().map(|review| &review.path).collect::<Vec<_>>()},
         "authority": "The selected page is the audit subject. Concept citations are evidence; a document is its own subject without a self-citation. Related pages are context, not automatically support. Reviews and historical archives are assessments/history, not independent corroboration. Join source-declared scope, time and attribution before judging contradictions; unknown context stays unknown.",
     });

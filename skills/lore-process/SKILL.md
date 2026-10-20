@@ -4,7 +4,7 @@ description: Processes pending Lorekeeper semantic queue tasks after ingestion o
   graph reconciliation. Stages typed summaries, concepts, synthesis and review narratives,
   then verifies publication and evidence consistency. Does not collect remote sources.
 metadata:
-  version: 0.72.0
+  version: 0.73.0
 ---
 
 # lore-process — Drain the Lorekeeper LLM queue

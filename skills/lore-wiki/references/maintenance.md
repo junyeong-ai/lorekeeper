@@ -4,6 +4,44 @@ This operation is a complete run of one batch, not a request to audit the entire
 The scheduled session already holds the workflow lease. Follow the shared page and
 publication contracts in SKILL.md and read the curation reference before repairs.
 
+## Related-document discovery
+
+For `discover`, prepare search scope only for the exact selected subjects, then return.
+For standalone maintenance, do this before reading the expanded audit inputs when
+`candidate.discovery` is null. Native maintenance performs discovery before partitioning.
+
+Read the selected subject's declared names, scope and outline with revision-checked
+`wiki read`. Choose distinguishing queries for its claims and conditions, including
+the source's names and declared aliases where useful. A query is a retrieval choice,
+not a semantic verdict. Do not add synonyms or equivalence as facts merely to find pages.
+
+Stage JSON under `.lorekeeper/`, then run `lore wiki audit-discover --file FILE`:
+
+```json
+{
+  "path": "wiki/documents/retention-policy.md",
+  "file_revision": "FROM_CURRENT_SUBJECT_READ",
+  "queries": [{"query": "production order retention", "phrase": false, "spacing": false}]
+}
+```
+
+Use 1..16 explicit nonblank queries. Native discovery captures every matching knowledge
+page, including retired pages, without a top-result cutoff. `wiki audit-plan --path
+SUBJECT` then reports the current query set and complete matched context. Read that
+expanded input through ordinary or bounded work before assessing. If a query is too
+broad, refine it explicitly before assessment; never treat a clipped result as complete.
+Stored queries reopen an assessment when matching pages or their authored revisions
+change. A changed subject needs fresh query selection. Unrelated corpus changes do not
+alone invalidate an assessment. This records the searched scope, not exhaustive semantic
+consistency: differently phrased claims outside the selected queries can remain undiscovered.
+
+Discovery does not create citations or semantic graph links. Compare candidates under
+their actual scope/time/attribution and record supported relationships or durable reviews
+through the normal publication contracts. A `discover` session never records completed
+assessments or performs repairs.
+
+## Assessment
+
 1. Run `lore wiki audit-plan` once. When the caller supplies exact batch addresses,
    use repeated `--path` for those addresses instead of choosing a new batch.
    Keep its candidate addresses as this run's scope.
@@ -75,6 +113,8 @@ publication contracts in SKILL.md and read the curation reference before repairs
    Do not substitute a new fingerprint
    without rereading changes. Record a completed assessment only
    when the exact final subject, evidence and related context have been read.
+   If repairs changed the subject and `discovery` is null, select queries again against
+   its final revision and read the expanded final scope before recording completion.
 
 Submit JSON via `lore wiki audit-record --file RESULTS.json`:
 

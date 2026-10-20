@@ -1,5 +1,5 @@
 {
-  "argument-hint": "query|add|capture|audit|curate|maintain|status [question, source or topic]",
+  "argument-hint": "query|add|capture|audit|discover|curate|maintain|status [question, source or topic]",
   "allowed-tools": "Bash(lore *)\nBash(ls *)\nBash(cat *)\nBash(find *)\nBash(grep *)\nBash(wc *)\nBash(jq *)\nBash(date *)\nRead\nEdit\nWrite\n",
   "name": "lore-wiki:lore-wiki"
 }

@@ -3,6 +3,7 @@ mod body_search;
 mod brief;
 mod citations;
 mod context;
+mod discovery;
 mod document;
 mod indexed_links;
 mod knowledge;
@@ -42,6 +43,7 @@ pub use self::context::{
     ContextEvidence, ContextOptions, ContextRelations, ContextReviews, PageContext,
     inspect_page_context,
 };
+pub use self::discovery::{DiscoveryQuery, discover_queries};
 pub use self::document::{
     DocumentContent, DocumentOptions, DocumentSection, DocumentView, inspect_document,
 };

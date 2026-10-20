@@ -11,8 +11,8 @@ use serde::{Deserialize, Serialize};
 use crate::{GraphError, scan::ScannedPage};
 
 const STATE: &str = ".lorekeeper/knowledge-audit.json";
-const CONCEPT_POLICY: &str = "concept-audit-v2";
-const DOCUMENT_POLICY: &str = "document-audit-v1";
+const CONCEPT_POLICY: &str = "concept-audit-v3";
+const DOCUMENT_POLICY: &str = "document-audit-v2";
 
 fn error(message: impl std::fmt::Display) -> GraphError {
     GraphError::Io(message.to_string())
@@ -64,8 +64,83 @@ struct Receipts {
     entries: BTreeMap<String, AuditAssessment>,
     pending: Vec<String>,
     next_class: AuditClass,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    discovery: BTreeMap<String, DiscoveryPlan>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     last_merges: Option<WorkflowMerges>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct DiscoveryPlan {
+    subject_revision: String,
+    queries: Vec<lk_vault::DiscoveryQuery>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuditDiscoveryRequest {
+    pub path: String,
+    pub file_revision: String,
+    pub queries: Vec<lk_vault::DiscoveryQuery>,
+}
+
+#[derive(Clone, Serialize)]
+pub struct AuditDiscovery {
+    pub queries: Vec<lk_vault::DiscoveryQuery>,
+    pub matches: Vec<Citation>,
+}
+
+pub fn record_discovery(
+    session: &MutationSession,
+    dirs: &VaultDirs,
+    pages: &[ScannedPage],
+    request: AuditDiscoveryRequest,
+) -> Result<(), GraphError> {
+    let root = session.root();
+    let (before, mut receipts) = load(root)?;
+    let candidate = inputs(root, dirs, pages, &receipts)?
+        .into_iter()
+        .find(|candidate| candidate.path == request.path)
+        .ok_or_else(|| error("discovery requires an exact audit subject"))?;
+    if candidate.file_revision != request.file_revision {
+        return Err(error(
+            "discovery subject changed; reread before selecting queries",
+        ));
+    }
+    if request.queries.is_empty() || request.queries.len() > 16 {
+        return Err(error("discovery requires 1..16 explicit queries"));
+    }
+    for query in &request.queries {
+        query.validate().map_err(error)?;
+    }
+    let mut queries = request.queries;
+    queries.sort();
+    queries.dedup();
+    let raw = std::fs::read_to_string(
+        lk_vault::page_path(root, Path::new(&request.path)).map_err(error)?,
+    )
+    .map_err(error)?;
+    if file_revision(&raw) != request.file_revision {
+        return Err(error("discovery subject changed during recording"));
+    }
+    receipts.discovery.insert(
+        request.path.clone(),
+        DiscoveryPlan {
+            subject_revision: source_revision(&lk_vault::parse_page(&raw).map_err(error)?),
+            queries,
+        },
+    );
+    let mut plan = MutationPlan::default();
+    plan.require_unchanged(&request.path, raw);
+    plan.publish_expected(
+        root,
+        STATE,
+        before,
+        serde_json::to_string_pretty(&receipts).map_err(error)? + "\n",
+    )
+    .map_err(error)?;
+    session.apply(plan).map_err(error)
 }
 
 #[derive(Deserialize, Serialize)]
@@ -339,6 +414,7 @@ pub struct AuditCandidate {
     pub evidence: Vec<Citation>,
     pub related_pages: Vec<Citation>,
     pub reviews: Vec<AuditReviewDependency>,
+    pub discovery: Option<AuditDiscovery>,
     pub reason: &'static str,
 }
 
@@ -900,6 +976,17 @@ fn inputs(
         .collect::<BTreeMap<_, _>>();
     let by_id: BTreeMap<_, _> = pages.iter().map(|page| (page.id.as_str(), page)).collect();
     let existence = crate::scan::VaultExistence::build_at(root, pages, dirs)?;
+    let mut queries = Vec::new();
+    for (path, plan) in &receipts.discovery {
+        if !kinds.contains_key(Path::new(path)) {
+            continue;
+        }
+        if plan.queries.is_empty() || plan.queries.len() > 16 {
+            return Err(error("stored discovery requires 1..16 explicit queries"));
+        }
+        queries.extend(plan.queries.clone());
+    }
+    let discovered = lk_vault::discover_queries(root, dirs, &queries).map_err(error)?;
     let mut result = Vec::new();
     for page in pages.iter().filter(|page| kinds.contains_key(&page.path)) {
         let kind = kinds[&page.path];
@@ -933,6 +1020,27 @@ fn inputs(
         }
         related_pages.sort();
         related_pages.dedup();
+        let discovery = receipts
+            .discovery
+            .get(&page.path.to_string_lossy().into_owned())
+            .filter(|plan| plan.subject_revision == revision)
+            .map(|plan| {
+                let mut matches = plan
+                    .queries
+                    .iter()
+                    .flat_map(|query| discovered[query].clone())
+                    .filter(|citation| citation.path != page.path.to_string_lossy())
+                    .collect::<Vec<_>>();
+                matches.sort();
+                matches.dedup();
+                related_pages.extend(matches.clone());
+                related_pages.sort();
+                related_pages.dedup();
+                AuditDiscovery {
+                    queries: plan.queries.clone(),
+                    matches,
+                }
+            });
         // A document is the subject being read, not evidence for itself. Its outgoing
         // links supply context only; concepts retain the shared backlink authority.
         let citations = match kind {
@@ -954,6 +1062,7 @@ fn inputs(
                 &revision,
                 &citations,
                 &related_pages,
+                &discovery,
                 review_identity,
             ))
             .map_err(error)?,
@@ -968,6 +1077,7 @@ fn inputs(
             evidence: citations,
             related_pages,
             reviews: scoped_reviews,
+            discovery,
             reason: "unreviewed",
         });
     }
@@ -1404,6 +1514,9 @@ pub fn record_with_guard(
     receipts
         .entries
         .retain(|path, _| candidates.contains_key(path));
+    receipts
+        .discovery
+        .retain(|path, _| candidates.contains_key(path));
     receipts.pending.retain(|path| !recorded.contains(path));
     let after = serde_json::to_string_pretty(&receipts).map_err(error)? + "\n";
     plan.publish_expected(root, STATE, before, after)
@@ -1434,6 +1547,128 @@ mod tests {
             "---\ntype: exploration\nupdated: 2026-01-01\nreview: {}\n---\n## Judgment\nThe claim needs a documented follow-up.\n",
             json!({"status":"open","subjects":[subject],"evidence":[{"path":evidence,"revision":revision}],"resolution":null})
         )
+    }
+
+    #[test]
+    fn discovery_reopens_only_changed_query_membership_and_keeps_matches_as_context() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let subject = "wiki/documents/a.md";
+        write(
+            root.path(),
+            subject,
+            "---\ntype: document\ntitle: Retention A\n---\nProduction order retention is exactly 30 days.\n",
+        );
+        write(
+            root.path(),
+            "wiki/documents/b.md",
+            "---\ntype: document\ntitle: Retention B\n---\nProduction order retention is exactly 7 days.\n",
+        );
+        let selected = || {
+            plan_selected_partitioned(
+                root.path(),
+                &dirs,
+                &scan(root.path()),
+                1,
+                &[subject.into()],
+                u64::MAX,
+            )
+            .unwrap()
+            .candidates
+            .remove(0)
+        };
+        let initial = selected();
+        assert!(initial.related_pages.is_empty());
+        assert!(initial.discovery.is_none());
+        let session = MutationSession::acquire(root.path()).unwrap();
+        record_discovery(
+            &session,
+            &dirs,
+            &scan(root.path()),
+            AuditDiscoveryRequest {
+                path: subject.into(),
+                file_revision: initial.file_revision.clone(),
+                queries: vec![lk_vault::DiscoveryQuery {
+                    query: "production order retention".into(),
+                    phrase: false,
+                    spacing: false,
+                }],
+            },
+        )
+        .unwrap();
+        let discovered = selected();
+        assert!(discovered.evidence.is_empty());
+        assert_eq!(
+            discovered
+                .related_pages
+                .iter()
+                .map(|c| c.path.as_str())
+                .collect::<Vec<_>>(),
+            ["wiki/documents/b.md"]
+        );
+        assert_eq!(
+            discovered.discovery.as_ref().unwrap().matches,
+            discovered.related_pages
+        );
+        record(
+            &session,
+            &dirs,
+            &scan(root.path()),
+            AuditResults {
+                assessments: vec![assessment(&discovered)],
+            },
+            u64::MAX,
+        )
+        .unwrap();
+        write(
+            root.path(),
+            "wiki/documents/unrelated.md",
+            "---\ntype: document\n---\nUnrelated material.\n",
+        );
+        assert_eq!(selected().input_revision, discovered.input_revision);
+        write(
+            root.path(),
+            "wiki/documents/new.md",
+            "---\ntype: document\n---\nProduction order retention has another applicable claim.\n",
+        );
+        assert_ne!(selected().input_revision, discovered.input_revision);
+        let before = std::fs::read(root.path().join(STATE)).unwrap();
+        assert!(
+            record(
+                &session,
+                &dirs,
+                &scan(root.path()),
+                AuditResults {
+                    assessments: vec![assessment(&discovered)]
+                },
+                u64::MAX
+            )
+            .is_err()
+        );
+        assert_eq!(std::fs::read(root.path().join(STATE)).unwrap(), before);
+        write(
+            root.path(),
+            subject,
+            "---\ntype: document\n---\nThe subject scope changed.\n",
+        );
+        assert!(selected().discovery.is_none());
+        assert!(
+            record_discovery(
+                &session,
+                &dirs,
+                &scan(root.path()),
+                AuditDiscoveryRequest {
+                    path: subject.into(),
+                    file_revision: initial.file_revision,
+                    queries: vec![lk_vault::DiscoveryQuery {
+                        query: "retention".into(),
+                        phrase: false,
+                        spacing: false
+                    }],
+                }
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -2074,10 +2309,11 @@ mod tests {
         let candidate = &selected.candidates[0];
         let previous_identity = file_revision(
             &serde_json::to_string(&(
-                "concept-audit-v2",
+                CONCEPT_POLICY,
                 source_revision(&lk_vault::parse_page(body).unwrap()),
                 &candidate.evidence,
                 &candidate.related_pages,
+                Option::<AuditDiscovery>::None,
                 Vec::<serde_json::Value>::new(),
             ))
             .unwrap(),

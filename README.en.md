@@ -680,6 +680,12 @@ context, not automatic corroborating evidence.
 `.lorekeeper/knowledge-audit.json` stores current assessments and pending order;
 judgments and conflicting evidence remain in Markdown reviews. Single-source
 status or citation count alone does not justify merging or deleting a concept.
+`wiki audit-discover --file FILE` records revision-guarded search queries before
+assessment. Native jobs discover first, then include every matching knowledge page
+as comparison context before partitioning. Changed query membership or authored
+revisions reopen work; matches create neither citations nor semantic relations.
+This records the searched scope, not consistency outside it. See
+[related-document discovery](skills/lore-wiki/references/maintenance.md#related-document-discovery).
 Run an initial resumable campaign with `lore run knowledge --profile codex --batches 20
 --json`, choosing a registered profile. Each batch releases its workflow lease;
 failures preserve pending work and completed receipts. `batch-limit` means the

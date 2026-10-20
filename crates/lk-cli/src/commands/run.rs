@@ -930,7 +930,7 @@ mod native {
             if !self.inspect_review_health() {
                 return;
             }
-            let plan = match self.audit_plan(&[]) {
+            let mut plan = match self.audit_plan(&[]) {
                 Ok(plan) => plan,
                 Err(error) => {
                     self.failure("audit planning", error);
@@ -979,6 +979,36 @@ mod native {
                 .map(|candidate| candidate.path.clone())
                 .collect::<Vec<_>>();
             let selection = serde_json::to_string(&paths).expect("string paths serialize");
+            let missing = plan
+                .candidates
+                .iter()
+                .filter(|candidate| candidate.discovery.is_none())
+                .map(|candidate| candidate.path.as_str())
+                .collect::<Vec<_>>();
+            if !missing.is_empty() {
+                let missing = serde_json::to_string(&missing).expect("string paths serialize");
+                if !self.consumer("lore-wiki", &format!("discover. Plan related-document search only for these exact audit subjects: {missing}. Read their names, scope and outline, choose explicit search queries and record each through wiki audit-discover. Do not audit, repair, synthesize or record completed assessments in this discovery session.")).await {
+                    return;
+                }
+                plan = match self.audit_plan(&paths) {
+                    Ok(plan) => plan,
+                    Err(error) => {
+                        self.failure("discovery planning", error);
+                        return;
+                    }
+                };
+                if plan
+                    .candidates
+                    .iter()
+                    .any(|candidate| candidate.discovery.is_none())
+                {
+                    self.failure(
+                        "related-document discovery",
+                        "selected subjects lack current recorded search queries",
+                    );
+                    return;
+                }
+            }
             let mut bounded = plan.input.ensure_ready().is_err();
             for candidate in &plan.candidates {
                 match crate::commands::work::audit_needs_work(

@@ -110,6 +110,12 @@ pub enum WikiCommand {
         #[arg(long = "path")]
         paths: Vec<String>,
     },
+    /// Record revision-guarded search queries for related-document discovery (JSON)
+    AuditDiscover {
+        /// JSON path, file_revision and 1..16 query objects (query, phrase, spacing)
+        #[arg(long)]
+        file: PathBuf,
+    },
     /// Record completed semantic reads with current subject and dependency guards (JSON)
     AuditRecord {
         /// JSON assessments with exact subject and semantic input revisions
@@ -498,6 +504,22 @@ pub async fn run(opts: &super::GlobalOptions, cmd: WikiCommand) -> miette::Resul
             );
             Ok(())
         }
+        WikiCommand::AuditDiscover { file } => {
+            let config = load_config(&find_config(opts)?)?;
+            let request = serde_json::from_slice(
+                &std::fs::read(file).map_err(|error| miette::miette!("{error}"))?,
+            )
+            .map_err(|error| miette::miette!("{error}"))?;
+            let root = config.vault.root_path();
+            let session = lk_vault::MutationSession::acquire(&root)
+                .map_err(|error| miette::miette!("{error}"))?;
+            let pages = lk_graph::scan::scan_vault(&root, config.graph.scope.follow_links)
+                .map_err(|error| miette::miette!("{error}"))?;
+            lk_graph::audit::record_discovery(&session, &config.vault.dirs, &pages, request)
+                .map_err(|error| miette::miette!("{error}"))?;
+            println!("{}", serde_json::json!({"recorded": true}));
+            Ok(())
+        }
         WikiCommand::AuditRecord { file } => {
             let (config, config_revision) = super::load_config_with_revision(&find_config(opts)?)?;
             let results: lk_graph::audit::AuditResults = serde_json::from_slice(
@@ -509,6 +531,29 @@ pub async fn run(opts: &super::GlobalOptions, cmd: WikiCommand) -> miette::Resul
                 .map_err(|error| miette::miette!("{error}"))?;
             let pages = lk_graph::scan::scan_vault(&root, config.graph.scope.follow_links)
                 .map_err(|error| miette::miette!("{error}"))?;
+            let selection = results
+                .assessments
+                .iter()
+                .map(|assessment| assessment.path.clone())
+                .collect::<Vec<_>>();
+            let selected = lk_graph::audit::plan_selected_partitioned(
+                &root,
+                &config.vault.dirs,
+                &pages,
+                selection.len(),
+                &selection,
+                config.graph.audit.max_input_bytes,
+            )
+            .map_err(|error| miette::miette!("{error}"))?;
+            if selected
+                .candidates
+                .iter()
+                .any(|candidate| candidate.discovery.is_none())
+            {
+                return Err(miette::miette!(
+                    "audit requires current related-document discovery; run wiki audit-discover, then reread the expanded audit-plan"
+                ));
+            }
             let recorded = lk_graph::audit::record_with_guard(
                 &session,
                 &config.vault.dirs,
