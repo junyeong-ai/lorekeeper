@@ -11,6 +11,8 @@ canonical; SQLite navigation is derived.
 - `lk_core::frontmatter::parse_page`: parse frontmatter only at standalone first-line/closing `---`
   delimiters (BOM/CRLF supported). `VaultPage.original` retains exact input for
   optimistic guards; never reconstruct it from parsed fields.
+- `VaultStore::read_frontmatter` projects metadata without validating the body. Use it
+  for name/address inventories; publication still reads and guards the complete page.
 - `section.rs`: section reads/replacements share fence-aware heading boundaries.
   Read with `resolve_section` across locales, preferring nonblank when both exist;
   legitimate blank remains present. Write current locale headings only.

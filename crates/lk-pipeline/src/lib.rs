@@ -935,13 +935,13 @@ impl Pipeline {
             .list_markdown_recursive(&lk_core::vault_path::documents_dir(&self.ctx.dirs))
             .await?
         {
-            let page = self.reader.read_page(&path).await?.ok_or_else(|| {
+            let metadata = self.reader.read_frontmatter(&path).await?.ok_or_else(|| {
                 PipelineError::Render(format!(
                     "document disappeared during address lookup: {}",
                     path.display()
                 ))
             })?;
-            if let Some(identity) = DocumentIdentity::from_page(&page.frontmatter)? {
+            if let Some(identity) = DocumentIdentity::from_page(&metadata)? {
                 let address = path
                     .strip_prefix(lk_core::vault_path::documents_dir(&self.ctx.dirs))
                     .map_err(|error| PipelineError::Render(error.to_string()))?
