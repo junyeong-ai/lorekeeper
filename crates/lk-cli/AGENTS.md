@@ -128,7 +128,7 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
 - Browse metadata with query=None; reject query-only/date-sort combinations in the
   library too. Created means declared authored date, not ingestion time. Preserve
   missing/invalid visibility, stable path ties, scope/filter/facet/pagination meaning.
-  Search rejects an empty query; limit0 returns no hits. Do not reintroduce full
+  Search rejects an empty query and a zero limit. Do not reintroduce full
   corpus metadata decode/sort for SQL browse or load concept vocabulary there.
 - Concept filenames are addresses, not necessarily IDs or implicit aliases. Use
   exact public resolution and return the resolved canonical title.

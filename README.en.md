@@ -595,7 +595,11 @@ For an initial backlog, select a registered profile and execution budget:
 the budget was reached; `settled` means the current eligible plan has no pending
 subjects. Neither proves universal truth or review of every external original.
 `audit_progress` reports before/after counts; `semantic_calls` counts invocation
-attempts, not tokens or billing. See [semantic maintenance](skills/lore-wiki/references/maintenance.md)
+attempts, not tokens or billing. Size the initial campaign from `lore wiki audit-plan`
+and a small run's actual completions, calls and duration; then check that recurring
+capacity keeps up with new and changed subjects. `batch_size` caps selected subjects,
+not completions or cost when work is deferred, partitioned or fails.
+See [semantic maintenance](skills/lore-wiki/references/maintenance.md)
 for discovery scope, complete evidence reads, repair and reassessment.
 
 Reminders retire after the OS accepts them, not after proof that a person read
@@ -608,6 +612,24 @@ them. A crash before retirement can cause redelivery; failed submissions stay pe
 Keep a backup or a reviewed Git commit before substantial rewrites or merges. Pipelines never stage or commit automatically because they cannot distinguish concurrent user edits from their own output. A mutation journal resumes interrupted changes; it is not a historical backup.
 
 Exclude `.lorekeeper/`, credentials and any private local state from Git. Review `git status` and `git diff`, then stage only the intended files. The small generated `index.md` entry guide can be excluded under the configured wiki directory. Check the sharing scope before using a remote repository.
+
+### Backup, restore and moving devices
+
+Back up the **entire vault, including hidden files**, separately from Git history.
+Original/evidence archives, observations, review receipts, work state and unfinished
+queues/journals under `.lorekeeper/` cannot be reconstructed from Markdown alone.
+Stop scheduled and interactive writers and external editors, wait for foreground
+work to finish, then take a consistent copy or filesystem snapshot. Include the
+selected configuration and custom templates. Protect credential backups separately
+or authenticate again on the new device; do not add all private state to public Git.
+
+Restore to a separate location with the same CLI version. Adjust the copied config's
+`vault.root` and external paths, reinstall optional document processing, and retain
+credential permissions `0600`. Inspect `lore status`, `lore queue check` and
+`lore wiki reviews` before resuming writes. Resolve unfinished work/conflicts through
+the existing recovery protocol rather than deleting state to appear healthy. Then
+rebuild derived SQLite with `lore wiki prepare`, run `lore graph lint` and inspect
+retained originals. SQLite and lock files cannot restore originals or work state.
 
 ---
 
