@@ -637,6 +637,66 @@ fn explicit_large_audit(fixture: &Fixture) -> serde_json::Value {
 }
 
 #[test]
+fn maintenance_prunes_published_work_only_after_exclusive_access_without_changing_knowledge() {
+    let fixture = bounded_audit_fixture("codex", 64, RECORD_BOUNDED_AUDIT);
+    let (output, result) = fixture.run("knowledge");
+    assert!(output.status.success(), "{result}");
+    let calls = bounded_calls(&fixture);
+    let work_id = calls[0]["work_id"].as_str().unwrap();
+    let work = fixture.root().join("vault/.lorekeeper/work").join(work_id);
+    let receipt_path = work.join("publication.json");
+    let mut receipt: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&receipt_path).unwrap()).unwrap();
+    receipt["published_at"] = "2000-01-01T00:00:00Z".into();
+    std::fs::write(&receipt_path, serde_json::to_vec(&receipt).unwrap()).unwrap();
+    let knowledge = fixture.root().join("vault/wiki/concepts/large.md");
+    let knowledge_before = std::fs::read(&knowledge).unwrap();
+    let audit = fixture
+        .root()
+        .join("vault/.lorekeeper/knowledge-audit.json");
+    let audit_before = std::fs::read(&audit).unwrap();
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(fixture.root().join("vault/.lorekeeper/workflow.lock"))
+        .unwrap();
+    lock.lock().unwrap();
+    let busy = fixture.command().arg("maintenance").output().unwrap();
+    assert!(
+        busy.status.success(),
+        "{}",
+        String::from_utf8_lossy(&busy.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&busy.stderr)
+            .contains("exclusive Unix workflow access is unavailable")
+    );
+    assert!(receipt_path.exists());
+    drop(lock);
+    let preview = fixture
+        .command()
+        .args(["maintenance", "--dry-run"])
+        .output()
+        .unwrap();
+    assert!(
+        preview.status.success(),
+        "{}",
+        String::from_utf8_lossy(&preview.stderr)
+    );
+    assert!(String::from_utf8_lossy(&preview.stderr).contains("work: pruned 1 published work"));
+    assert!(receipt_path.exists());
+    let prune = fixture.command().arg("maintenance").output().unwrap();
+    assert!(
+        prune.status.success(),
+        "{}",
+        String::from_utf8_lossy(&prune.stderr)
+    );
+    assert!(!work.exists());
+    assert_eq!(std::fs::read(knowledge).unwrap(), knowledge_before);
+    assert_eq!(std::fs::read(audit).unwrap(), audit_before);
+}
+
+#[test]
 fn oversized_audit_completes_through_fresh_bounded_workers_on_both_hosts() {
     for engine in ["claude-code", "codex"] {
         let fixture = bounded_audit_fixture(engine, 64, RECORD_BOUNDED_AUDIT);

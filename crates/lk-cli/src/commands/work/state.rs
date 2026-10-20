@@ -7,6 +7,9 @@ use lk_vault::{MutationPlan, MutationSession};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+mod retention;
+pub(crate) use retention::prune_published;
+
 #[derive(Clone, Copy)]
 pub(crate) struct WorkLimits {
     pub max_input_bytes: usize,
@@ -112,6 +115,14 @@ struct Seal {
     root_node: String,
     root_output_revision: String,
     final_result_revision: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Publication {
+    work_id: String,
+    final_result_revision: String,
+    published_at: jiff::Timestamp,
 }
 
 struct Evaluation {
@@ -977,6 +988,35 @@ impl Work {
         mutation.require_unchanged(seal_path, raw);
         Ok(())
     }
+
+    pub fn plan_publication(
+        &self,
+        mutation: &mut MutationPlan,
+        root: &Path,
+        result: &Value,
+    ) -> miette::Result<()> {
+        let path = work_path(&self.plan.id, "publication.json")?;
+        let digest = revision(result)?;
+        if let Some(raw) = read_optional(root, &path)? {
+            let receipt: Publication = serde_json::from_str(&raw).map_err(fail)?;
+            if receipt.work_id != self.plan.id || receipt.final_result_revision != digest {
+                return Err(fail(
+                    "work publication receipt differs from the sealed result",
+                ));
+            }
+            mutation.require_unchanged(path, raw);
+        } else {
+            let receipt = Publication {
+                work_id: self.plan.id.clone(),
+                final_result_revision: digest,
+                published_at: jiff::Timestamp::now(),
+            };
+            mutation
+                .publish_expected(root, path, None, encoded(&receipt)?)
+                .map_err(fail)?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -984,7 +1024,7 @@ mod tests {
     use super::*;
     use lk_core::semantic::SemanticAuthority;
 
-    fn resources() -> Vec<SemanticResource> {
+    pub(super) fn resources() -> Vec<SemanticResource> {
         vec![SemanticResource {
             address: "wiki/documents/source.md".into(),
             revision: "source-revision".into(),
@@ -993,11 +1033,11 @@ mod tests {
         }]
     }
 
-    fn context(subject: &str) -> Value {
+    pub(super) fn context(subject: &str) -> Value {
         json!({"subject": subject, "purpose": {"kind": "synthesis", "locale": "ko"}, "output_contract": "synthesis"})
     }
 
-    fn limits() -> WorkLimits {
+    pub(super) fn limits() -> WorkLimits {
         WorkLimits {
             max_input_bytes: 3000,
             max_result_bytes: 1500,
@@ -1028,7 +1068,7 @@ mod tests {
         }
     }
 
-    fn finish(work: &Work, session: &MutationSession, resources: &[SemanticResource]) {
+    pub(super) fn finish(work: &Work, session: &MutationSession, resources: &[SemanticResource]) {
         loop {
             let progress = work.progress(session.root(), resources).unwrap();
             if progress.complete {

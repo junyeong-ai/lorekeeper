@@ -384,7 +384,7 @@ lore graph retract-citation <원문.md> <개념.md> --revision <file_revision> -
 lore graph normalize --fix    # 링크 표기 정규화
 lore doctor                   # 페이지 계약 감사(텍스트 청결도·미답변 섹션·자격증명)
 lore extract status           # 프로젝트 지식 추출이 저장소보다 얼마나 뒤처졌는지
-lore maintenance              # 보관기한 지난 ingest 로그·드레인된 큐 파일 정리
+lore maintenance              # 지난 운영 이력·게시 완료 작업 캐시 정리; 미완료·참조 중 작업 보존
 lore queue status / prune     # LLM 작업 큐 상태 / 죽은 작업 정리
 lore queue apply              # 검증된 요약·테마·정제·개념 결과를 중앙 적용
 lore queue check              # 미완료 작업·미게시 결과·중단된 변경을 JSON으로 검사

@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use super::{find_config, load_config};
+use super::find_config;
 
 /// Seconds-since-epoch cutoff for pruning: entries with `seen_at`/mtime older than this
 /// are removed. Clamped at 0 so a retention horizon exceeding the time since the Unix
@@ -73,8 +73,36 @@ pub async fn run(
     wait_for_vault: bool,
     prune_queue: bool,
 ) -> miette::Result<()> {
-    let config = load_config(&find_config(opts)?)?;
+    let config_path = find_config(opts)?;
+    let (config, config_revision) = super::load_config_with_revision(&config_path)?;
     let vault_root = config.vault.root_path();
+    let work_present = vault_root
+        .join(".lorekeeper/work")
+        .try_exists()
+        .map_err(|error| miette::miette!("inspect work store: {error}"))?;
+    #[cfg(unix)]
+    let work_lease = if work_present && !dry_run {
+        let lease = super::workflow::WorkflowLease::prepare_selected(
+            opts,
+            &config,
+            config_path,
+            config_revision,
+        )?;
+        match lease.try_lock() {
+            Ok(()) => Some(lease),
+            Err(std::fs::TryLockError::WouldBlock) => None,
+            Err(error) => return Err(miette::miette!("work retention lease: {error}")),
+        }
+    } else {
+        None
+    };
+    #[cfg(unix)]
+    let work_available = dry_run || work_lease.is_some();
+    #[cfg(not(unix))]
+    let work_available = {
+        let _ = config_revision;
+        dry_run
+    };
     let _mutation = if dry_run {
         None
     } else {
@@ -93,6 +121,29 @@ pub async fn run(
     let log_path = vault_root.join(".lorekeeper").join("ingest.jsonl");
     let cutoff_secs = prune_cutoff_secs(jiff::Timestamp::now().as_second(), retention_days);
     let prefix = if dry_run { "[dry-run] " } else { "" };
+
+    if work_present {
+        if work_available {
+            let queue = super::queue::check::inspect(&vault_root)?;
+            if queue.is_settled() {
+                let report = super::work::state::prune_published(
+                    &vault_root,
+                    _mutation.as_ref(),
+                    cutoff_secs,
+                )?;
+                eprintln!(
+                    "{prefix}work: pruned {} published work(s), {} bytes; retained {} unpublished, referenced or unexpired work(s).",
+                    report.removed, report.bytes, report.retained
+                );
+            } else {
+                eprintln!(
+                    "{prefix}work: retained while queue work, staged results or a mutation journal remain."
+                );
+            }
+        } else {
+            eprintln!("{prefix}work: retained; exclusive Unix workflow access is unavailable.");
+        }
+    }
 
     // 1. Prune ingest log
     if log_path.exists() {

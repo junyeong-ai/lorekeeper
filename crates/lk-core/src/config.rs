@@ -1326,8 +1326,8 @@ pub struct ConceptCategory {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct MaintenanceConfig {
-    /// Retention horizon (days) for `lore maintenance`: prunes the ingest log and drained
-    /// `queue/processed/` files older than this. Operational history only — user-facing
+    /// Retention horizon (days) for ingest history, drained queue files and proven
+    /// published work caches. Unpublished and referenced work survives. User-facing
     /// pages AND the per-date streaming event logs (`.lorekeeper/events/`) are permanent.
     /// The event log is the raw layer a streaming source re-projects from; pruning it
     /// would silently break `lore ingest --date <past>` self-healing for those days.

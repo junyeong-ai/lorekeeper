@@ -129,6 +129,7 @@ fn guard_prepared(
         ));
     }
     work.guard_completion(mutation, root, &prepared.resources, &result)?;
+    work.plan_publication(mutation, root, &result)?;
     prepared.guard_pages(mutation);
     Ok(true)
 }
