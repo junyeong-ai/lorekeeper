@@ -595,7 +595,11 @@ For an initial backlog, select a registered profile and execution budget:
 the budget was reached; `settled` means the current eligible plan has no pending
 subjects. Neither proves universal truth or review of every external original.
 `audit_progress` reports before/after counts; `semantic_calls` counts invocation
-attempts, not tokens or billing. Size the initial campaign from `lore wiki audit-plan`
+attempts, not tokens or billing. `duration_ms` measures elapsed wall time including
+waiting and cleanup; campaigns report both total and per-batch time.
+`semantic_duration_ms` measures that batch's agent invocations, including failed or
+cancelled attempts. These are not provider processing time or billed cost.
+Size the initial campaign from `lore wiki audit-plan`
 and a small run's actual completions, calls and duration; then check that recurring
 capacity keeps up with new and changed subjects. `batch_size` caps selected subjects,
 not completions or cost when work is deferred, partitioned or fails.

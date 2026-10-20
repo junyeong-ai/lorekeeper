@@ -54,7 +54,7 @@ mod native {
     use lk_core::config::Config;
     use lk_core::execution::ExecutionProfile;
     use std::path::{Path, PathBuf};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     enum WorkStep {
         Pending,
@@ -125,6 +125,8 @@ mod native {
         operation: Operation,
         ok: bool,
         cancelled: bool,
+        duration_ms: u64,
+        semantic_duration_ms: u64,
         execution: Option<ExecutionInfo>,
         workflow_id: Option<lk_core::execution::WorkflowId>,
         semantic_calls: usize,
@@ -148,10 +150,16 @@ mod native {
         selected: Option<ExecutionProfile>,
         drain_blocked: bool,
         audit_batch: Option<Vec<lk_graph::audit::AuditCandidate>>,
+        started_at: Instant,
         result: JobResult,
     }
 
     impl Runner<'_> {
+        fn finish(mut self) -> JobResult {
+            self.result.duration_ms = self.started_at.elapsed().as_millis() as u64;
+            self.result
+        }
+
         fn record(&mut self, name: &str, state: StageState, detail: Option<String>) -> bool {
             let success = matches!(state, StageState::Completed | StageState::Skipped);
             self.result.ok &= success;
@@ -375,7 +383,10 @@ mod native {
                 Ok(mut command) => {
                     self.result.semantic_calls += 1;
                     command.current_dir(&self.root);
-                    self.child(skill, command, Some(timeout)).await
+                    let started_at = Instant::now();
+                    let completed = self.child(skill, command, Some(timeout)).await;
+                    self.result.semantic_duration_ms += started_at.elapsed().as_millis() as u64;
+                    completed
                 }
                 Err(error) => self.failure(skill, error),
             }
@@ -447,7 +458,8 @@ mod native {
                 );
             };
             self.result.semantic_calls += 1;
-            let child = match self
+            let started_at = Instant::now();
+            let outcome = self
                 .supervisor
                 .run_request(
                     command,
@@ -455,8 +467,9 @@ mod native {
                     Some(limit),
                     Some(&invocation.prompt),
                 )
-                .await
-            {
+                .await;
+            self.result.semantic_duration_ms += started_at.elapsed().as_millis() as u64;
+            let child = match outcome {
                 Ok(child) => child,
                 Err(error) => return self.failure("bounded work receipt", error),
             };
@@ -1338,6 +1351,7 @@ mod native {
         wait: bool,
         json: bool,
     ) -> miette::Result<()> {
+        let started_at = Instant::now();
         if batches == 0 || batches != 1 && !matches!(operation, Operation::Knowledge) {
             return Err(miette::miette!(
                 "multiple batches are only supported for knowledge jobs"
@@ -1422,6 +1436,7 @@ mod native {
                 Ok(serde_json::json!({
                     "operation":operation,"ok":ok,"requested_batches":batches,
                     "stop_reason":stop_reason,"runs":outcomes,
+                    "duration_ms":started_at.elapsed().as_millis() as u64,
                 }))
             }
             .map_err(|error| miette::miette!("{error}"))?;
@@ -1462,10 +1477,13 @@ mod native {
             selected: None,
             drain_blocked: false,
             audit_batch: None,
+            started_at: Instant::now(),
             result: JobResult {
                 operation,
                 ok: true,
                 cancelled: false,
+                duration_ms: 0,
+                semantic_duration_ms: 0,
                 execution: None,
                 workflow_id: None,
                 semantic_calls: 0,
@@ -1479,7 +1497,7 @@ mod native {
             },
         };
         if !runner.configuration_is_current() {
-            return runner.result;
+            return runner.finish();
         }
         if matches!(operation, Operation::Daily) {
             if board {
@@ -1532,6 +1550,6 @@ mod native {
         eprintln!(
             "Vault changes and Git staging remain available for explicit review; no automatic commit."
         );
-        runner.result
+        runner.finish()
     }
 }

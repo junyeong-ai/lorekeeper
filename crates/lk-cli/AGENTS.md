@@ -36,6 +36,8 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   workflow lease, while configuration revision and cancellation supervision remain pinned
   across the campaign. Stop on failure/cancellation or an empty plan; batch-limit success
   does not establish full-corpus coverage. Existing receipts resume verified work.
+  Report elapsed job time and agent-invocation time separately, including failures
+  and cancellation. Invocation counts and wall time are not tokens or billed cost.
   Native consumers own selected semantic reads and guarded publication; the controller
   owns final global reconciliation/checks. Keep this boundary explicit in the host
   instruction and shared skills; standalone skills still perform their own final checks.

@@ -70,13 +70,21 @@ impl Fixture {
             .args(["run", operation, "--json"])
             .output()
             .unwrap();
-        let json = serde_json::from_slice(&result.stdout).unwrap_or_else(|e| {
+        let json: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap_or_else(|e| {
             panic!(
                 "{e}: {}\n{}",
                 String::from_utf8_lossy(&result.stdout),
                 String::from_utf8_lossy(&result.stderr)
             )
         });
+        let duration = json["duration_ms"].as_u64().expect("job wall time");
+        let semantic = json["semantic_duration_ms"]
+            .as_u64()
+            .expect("agent wall time");
+        assert!(semantic <= duration, "{json}");
+        if json["semantic_calls"] == 0 {
+            assert_eq!(semantic, 0, "{json}");
+        }
         (result, json)
     }
 }
@@ -501,6 +509,7 @@ fn current_authored_assessment_does_not_hide_unfinished_bookkeeping_or_force_a_r
     let receipt_path = fixture
         .root()
         .join("vault/.lorekeeper/knowledge-audit.json");
+    assert!(report["semantic_duration_ms"].as_u64().unwrap() > 0);
     let receipt = std::fs::read(&receipt_path).unwrap();
     let pending = ready.replace(", summary_done: captured", "");
     assert_eq!(
@@ -697,6 +706,13 @@ fn unrelated_review_drift_remains_visible_while_knowledge_campaign_progresses() 
     assert_eq!(result["stop_reason"], "batch-limit");
     let runs = result["runs"].as_array().unwrap();
     assert_eq!(runs.len(), 2);
+    assert!(
+        result["duration_ms"].as_u64().unwrap()
+            >= runs
+                .iter()
+                .map(|run| run["duration_ms"].as_u64().unwrap())
+                .sum()
+    );
     for (index, run) in runs.iter().enumerate() {
         let progress = &run["audit_progress"];
         assert_eq!(progress["before"]["reviewed_current"], index);
