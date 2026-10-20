@@ -48,6 +48,7 @@ pub struct PageContext {
     pub file_revision: String,
     pub format: Option<String>,
     pub knowledge_status: lk_core::frontmatter::KnowledgeStatus,
+    /// Bounded opening preview in source spelling; full content uses a revision-pinned read.
     pub summary: String,
     pub links: IndexedLinks,
     pub evidence: ContextEvidence,
@@ -87,7 +88,7 @@ pub fn inspect_page_context(
     let capture = search_index::read_snapshot(&transaction)?;
     let row: Option<(String, String)> = transaction
         .query_row(
-            "SELECT metadata, summary FROM pages WHERE path = ?1",
+            "SELECT metadata, intro FROM pages WHERE path = ?1",
             [path_text],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
@@ -190,6 +191,42 @@ pub fn inspect_page_context(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn summary_is_bounded_and_preserves_source_spelling() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        std::fs::create_dir_all(root.path().join("wiki/concepts")).unwrap();
+        let path = Path::new("wiki/concepts/topic.md");
+        let short = "Keep APIKey and Kelvin distinct.";
+        for body in [short.to_owned(), "APIKey Kelvin 보존 정책 ".repeat(400)] {
+            std::fs::write(
+                root.path().join(path),
+                format!("---\ntype: concept\ntitle: Topic\n---\n## Synthesis\n\n{body}\n"),
+            )
+            .unwrap();
+            let session = crate::MutationSession::acquire(root.path()).unwrap();
+            let capture = crate::prepare_search(&session, &dirs).unwrap();
+            let context = inspect_page_context(
+                root.path(),
+                &dirs,
+                path,
+                &ContextOptions {
+                    snapshot: &capture.snapshot,
+                    limit: 1,
+                    offset: 0,
+                },
+            )
+            .unwrap();
+            assert!(context.summary.len() <= 203);
+            if body == short {
+                assert_eq!(context.summary, short);
+            } else {
+                assert!(context.summary.starts_with("APIKey Kelvin 보존 정책"));
+                assert!(context.summary.ends_with('…'));
+            }
+        }
+    }
 
     #[test]
     fn uncaptured_evidence_is_distinct_from_empty_and_scoped_reviews_paginate() {

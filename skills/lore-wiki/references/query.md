@@ -56,6 +56,7 @@ Answer a question grounded in vault content, with compounding.
    returns links, concept evidence, declared document relations and scoped reviews in
    one captured transaction. Each group has its own total and authority; links do not
    establish support, and source declarations are not current-truth judgments.
+   Its `summary` is a bounded opening preview; use revision-pinned reads for full content.
    `not-captured` differs from an available empty group. Follow its `next_offset` with
    `--offset` in the same snapshot; the offset applies independently to every group.
    Use the individual relation commands below when only one group needs expansion.
