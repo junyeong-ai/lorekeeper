@@ -14,6 +14,11 @@ exists twice. A page with no article body (a listing, or one the browser assembl
 refused rather than absorbed: say so and ask for the underlying article's URL, or for the
 page saved as HTML into the inbox.
 
+`fetch` accepts declared HTML, Markdown and plain text up to 16 MiB. Plain-text
+`.md`/`.markdown` URLs retain Markdown; parsed link/image destinations resolve
+against the final response URL. Unsupported media, invalid encoding or oversized
+responses fail explicitly. Raw HTML in Markdown remains subject to capture checks.
+
 Local files must enter the selected configured `manual` inbox. Read the selected
 source configuration; never assume the inbox is `<vault>/inbox` or choose among
 multiple sources silently. Use `/lore-setup` when the user needs a source configured.
@@ -73,8 +78,7 @@ original-file capture; do not claim `wiki original` coverage for it.
    it once the citation lands.
 5. **Finalize**: `lore graph backlinks-sync`, then `lore wiki refresh` (refresh SQLite navigation and the entry guide), then
    `lore graph lint`. A non-zero exit is the vault contradicting itself somewhere, which
-   is not the same as this add having caused it: a broken link or an unknown category
-   elsewhere in the vault predates you. Resolve every violation naming a page this add
+   does not establish whether this add caused it. Resolve every violation naming a page this add
    wrote — especially a `duplicate_concepts` entry, which means a new page claims a name
    another page already answers to — and REPORT the rest rather than fixing them silently.
    Observations (orphans, open conflicts) are reported without gating.
@@ -96,3 +100,5 @@ and ownership conflicts remain blocked; do not edit the manifest to approve them
 Apply archives original evidence and adds identity without rewriting bodies or asserting
 that historical source metadata is current. After publication, reconcile backlinks,
 process resulting synthesis tasks, and refresh navigation.
+For historical copies, repeat `--history-ref FULL_COMMIT_ID` on `plan`; the manifest
+pins Git blobs, declared IDs and production-projected bodies for `check`/`apply`.

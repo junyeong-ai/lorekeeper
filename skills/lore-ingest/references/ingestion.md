@@ -1,6 +1,11 @@
 # Ingestion, originals and retries
 
-Contents: per-page publication; original bundles; semantic completion; refetch and replay.
+## Contents
+
+- Publication and original bundles
+- [Semantic completion](#semantic-completion)
+- [Refetch and replay](#refetch-and-replay)
+- [Missing-date recovery](#missing-date-recovery)
 
 Each source's pages and new semantic requests share a recoverable mutation journal.
 Individual file replacement is atomic; the full run contains separate publication batches.
@@ -55,12 +60,25 @@ snapshot. Default capture limits are 32 MiB per entry, 64 MiB per member, 2048 m
 files; decoded text retains its separate bounds. Each source permits 256 MiB of derived text. Split unlinked batches or provide smaller self-contained
 exports when those limits fail.
 
-In **queue mode** (the default), the run leaves summary/concept/work-log
-sections empty and emit JSONL tasks. They are NOT knowledge yet — run
-**`/lore-process`** afterward to drain the queue (fill summaries, create/merge
-concept pages, work-log topic synthesis). Its own Finalize step reconciles the
-graph and SQLite discovery. Follow that skill's complete finalization protocol
-after publication. A daily run is `lore ingest` → `/lore-process`.
+RSS originals retain immutable pre-classification adapter-collected text, not the
+provider's HTTP/XML bytes. New bound extraction requires explicit article IDs and
+payload revisions for each reported concept; omission is not citation retraction.
+Legacy event logs are retained observations, not proof of a page's historical input.
+Use the [query reference](../../lore-wiki/references/query.md) to inspect exact originals.
+
+## Semantic completion
+
+In **queue mode**, collection publishes typed requests for unfinished inputs.
+Raw or prior prose can remain; matching completion markers establish reuse.
+Run `lore run process` or the `lore-process` skill to publish summaries, concepts
+and work-log synthesis. Native `lore run daily` collects and processes in order.
+Collection, semantic completion and unresolved reviews are separate outcomes.
+
+Personal period reviews verify actually published work-log inputs against recorded
+normalized personal contributions. Changed inputs after filtered collection and
+known work without a log block synthesis. Full-source `lore ingest --date DATE`
+refreshes this binding only if it actually publishes that day's log. Unknown or
+empty historical input does not authorize adopting or deleting retained logs.
 
 ## Refetch and replay
 
@@ -83,3 +101,20 @@ after publication. A daily run is `lore ingest` → `/lore-process`.
   — so a body nobody recorded (written by hand, or by a drain that did not stamp) is lost.
   `lore ingest` names each section it is about to empty before it writes; `lore doctor` lists
   the pages in that state.
+
+## Missing-date recovery
+
+Configure `ingest.recovery` with an explicit `start_date` and a positive
+`max_days_per_source_per_run` (default 3). `lore ingest --recover --dry-run` previews
+the oldest missing closed dates without network or writes. `lore ingest --recover`
+requeries them within each source's budget; it cannot combine a source or `--date`.
+Native daily runs recovery before ordinary collection. Only matching accepted
+publications establish closed query-day coverage; failed/partial attempts remain
+pending, and changing source selection does not inherit another selection's proof.
+
+Gmail, Slack channels, Drive, Calendar, Confluence and Tasks support dated replay.
+RSS, Slack search and arbitrary Jira JQL do not establish historical date coverage;
+manual/nodex keep current-input semantics. Recovery cannot restore deleted or
+intermediate provider revisions, and per-source replay does not rebuild the full
+cross-source personal work-log. Collection recovery and missing-period requests
+are separate settings; see [scheduling](scheduling.md).

@@ -14,8 +14,9 @@ defers all semantic work (summaries, refined events, concepts, themes, reviews)
 by writing JSONL task files into
 `<vault>/.lorekeeper/queue/*.jsonl`, committed with their target pages through
 one recoverable publication journal.
-Each task points at a vault page written with an empty section awaiting LLM
-content. This skill consumes those tasks: read the queue, perform the LLM
+Each task points at a vault page awaiting completion for its recorded input. Raw or
+previously generated prose may still be present; only matching markers prove completion.
+This skill consumes those tasks: read the queue, perform the LLM
 work in your own session, stage typed result files, and let `lore queue apply`
 publish pages and markers. `lore queue prune` retires completed runs.
 
@@ -211,7 +212,13 @@ on the matching marker, never on whether a section looks filled.
       file stays on disk so the next `/lore-process` run replays every
       task from the top (publication is marker-idempotent).
 
-4. **Finish the file, then let the classifier say it is finished.** Run `lore queue apply`
+   **Native `selected` boundary:** after applying and verifying the exact selected
+   tasks, or reporting their validated bounded-work handoff, return to the caller.
+   Do not retire files, reconcile global backlinks, drain newly queued work or run
+   the standalone steps below. The Rust controller owns those stages and the job
+   outcome; report selected failures and unfinished work without expanding scope.
+
+4. **Standalone: finish the file, then let the classifier say it is finished.** Run `lore queue apply`
    while the file is still in the queue, then re-run the step 3b `lore queue status --json`
    and check that no `task_id` from this file reads `current` or `unreadable`, and that
    the file contains no unparseable lines. Retire completed files through the CLI:
@@ -236,11 +243,10 @@ on the matching marker, never on whether a section looks filled.
    deciding further names. Quarantined results require diagnosis and correction, not
    blind retry.
 
-5. **Finalize publication and checks.** Apply whatever the last file left pending
-   and reconcile backlinks over everything this run wrote. Bounded concept
-   `## Sources` instructions and `source_count` are deliberately left empty during
-   processing; they are
-   machine-owned and reconciled here from the link graph. Complete citations live in
+5. **Standalone: finalize publication and checks.** Apply whatever the last file left
+   pending and reconcile backlinks over everything this run wrote. Concept
+   `## Sources` instructions and `source_count` remain machine-owned and are
+   reconciled from the link graph. Complete citations live in
    rebuildable SQLite discovery rather than growing Sources lists. Confirm each
    publication command exits 0:
    ```bash
@@ -250,13 +256,7 @@ on the matching marker, never on whether a section looks filled.
    If reconciliation queues current synthesis tasks, resume steps 2–4 for that work,
    then repeat apply and backlinks-sync. Continue until reconciliation leaves no
    current tasks; stop and report any blocked work or failed command.
-   A native `lore run` caller that explicitly owns finalization performs navigation
-   refresh and the operation's final graph, queue and review checks after this
-   semantic session. Return after publication, reconciliation and task retirement;
-   report retained work and failures without repeating global checks or listing
-   unrelated reviews. This delegation never skips selected source/review reads or
-   guards, and only the controller determines the complete job outcome.
-   Standalone sessions refresh and check completion after the drain:
+   Refresh and check completion after the drain:
    ```bash
    lore wiki refresh           # refresh SQLite navigation and the entry guide
    lore queue check            # pending or blocked work and unpublished results
@@ -268,8 +268,8 @@ on the matching marker, never on whether a section looks filled.
    controller verifies current reviews for its selected concepts through audit
    recording/completion. Keep the strict `--check` for standalone process and daily
    runs; do not expand a bounded batch to repair every global finding.
-   Run Finalize on every invocation that processed a task. Even when no current
-   task was found, standalone sessions run `lore queue check` and the applicable
+   Standalone invocations finalize whenever they processed a task. Even when no current
+   task was found, they run `lore queue check` and the applicable
    review check before reporting completion: zero current tasks alone does not rule
    out blocked inputs, unpublished results, interrupted mutations or evidence drift.
    Skipping reconciliation after publication leaves new concepts with no `## Sources` and a stale

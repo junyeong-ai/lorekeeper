@@ -7,26 +7,26 @@
 > **English** | **[한국어](README.md)**
 
 **Turn your scattered daily work into a knowledge wiki that grows itself.**
-Lorekeeper collects from Gmail, Slack, Jira, Calendar, RSS, and dropped notes every day, deduplicates them, extracts concepts, and writes structured Obsidian markdown. The LLM does the *bookkeeping*, so your knowledge **compounds** instead of rotting.
+Lorekeeper collects Gmail, Slack, Jira, Calendar, RSS and notes into source-linked Markdown knowledge. Rust owns collection, search and publication checks; a configured LLM host judges summaries, concepts and relationships.
 
 ---
 
 ## Why Lorekeeper?
 
-Notes and wikis fail not because reading or thinking is hard, but because of the **bookkeeping** — updating cross-references, deduping, classifying, flagging contradictions. People can't keep up, so the wiki gets abandoned. Lorekeeper hands that bookkeeping to an LLM.
+Growing knowledge needs continuing checks of cross-references, categories, duplicate candidates and competing claims. Lorekeeper automates reproducible checks and leaves evidence-based semantic judgments to explicit LLM work.
 
 > 📖 **New to the terms?** — **vault**: a folder of markdown files (i.e. your knowledge store) · **concept**: one page per topic · **link**: a `[Display](relative/path.md)` markdown link between pages (resolves in Obsidian, GitHub, and any OKF consumer) · **bookkeeping**: the chore of updating links, dedup, and categories by hand.
 
 | | |
 |---|---|
-| 📥 **Configure once → runs daily** | Collects yesterday's activity and knowledge from email, chat, issues, calendar, feeds, and notes |
+| 📥 **Scheduled collection** | Select sources and an agent, then register OS jobs for recurring runs |
 | 🧹 **Cuts the noise** | Dedup, filters irrelevant items, splits *your* work into a work-log automatically |
-| 🧩 **Concepts as assets** | The same concept converges to one page (`Vector DB` = `vector-database`), categorized and related |
+| 🧩 **Concept accumulation** | Reuse an existing subject after checking scope; preserve its names, aliases and evidence |
 | 🔗 **A connected knowledge graph** | Markdown links, backlinks, and clusters connect concepts |
 | 📈 **Compounding** | Weekly / monthly / quarterly / annual synthesis — value grows over time |
 | 🔑 **Reuse CLI login** | Uses existing Claude Code or Codex authentication; Lore needs no separate LLM API client |
 
-> 💡 Inspired by Andrej Karpathy's *"LLM-maintained wiki"*: **source material stays distinct from generated knowledge**, **the LLM writes and maintains the wiki**, and **the schema (config) defines the workflow**. You curate sources and ask questions; the LLM does the bookkeeping.
+> Inspired by [Andrej Karpathy's LLM Wiki](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f): separate sources, derived wiki and writing conventions, then repeat ingest/query/lint. Lorekeeper uses `config.yaml` for collection/execution and the vault's `AGENTS.md` for page and evidence contracts.
 
 ---
 
@@ -53,6 +53,11 @@ flowchart LR
 `lore` owns collection, execution ordering and guarded publication. Claude Code or Codex follows the shared `lore-process` skill to judge summaries, concepts and relationships. Markdown is authoritative; SQLite is a rebuildable search and navigation index.
 
 ---
+
+## Reading path
+
+[First setup](#quick-start) → [Example output](#what-do-you-actually-get) → [Sources](#sources) → [Execution profiles](#agent-skills-and-execution-profiles) → [Scheduling](#scheduling).
+Use the [task references](#commands) for detailed command and evidence contracts.
 
 ## Quick start
 
@@ -136,7 +141,8 @@ Let's walk through a hypothetical. **Sumin**, an AI engineer, drops a RAG troubl
 Problem: ~30% of queries retrieved irrelevant chunks, so the generator hallucinated.
 Cause: (1) 2000-token chunks were too coarse — a chunk's embedding averaged several
        topics. (2) We embedded the raw conversational question.
-Fix: re-chunk to ~400 tokens, rewrite the question into a standalone query, switch
+Design: a vector database (Vector DB) stores embeddings and retrieves records similar to a query vector.
+Fix: re-chunk to ~400 tokens, use query rewriting to make a standalone question, switch
      similarity L2 → cosine. Recall@5: 0.62 → 0.91.
 ```
 
@@ -183,9 +189,7 @@ change or establish a ranking across other environments.
 … (normalized, preserved from the original) …
 
 ## Related Concepts
-- [Retrieval-Augmented Generation](../../wiki/concepts/retrieval-augmented-generation.md)
 - [Vector Database](../../wiki/concepts/vector-database.md)
-- [Chunking](../../wiki/concepts/chunking.md)
 - [Query Rewriting](../../wiki/concepts/query-rewriting.md)
 ```
 
@@ -198,14 +202,13 @@ Days later Sumin drops another note, *"Choosing a vector database for production
 id: vector-database
 type: concept
 title: "Vector Database"
-aliases: ["Vector Database", "Vector DB"]
+aliases: ["Vector DB"]
 category: ai-ml
 source_count: 2          # ← two documents cite this one concept
 ---
 
 ## Synthesis
-A vector database stores high-dimensional embeddings and serves approximate
-nearest-neighbor (ANN) search over them. The second note chose pgvector in an existing
+A vector database stores embeddings and retrieves records similar to a query vector. The second note chose pgvector in an existing
 PostgreSQL environment to reduce the cost of operating a separate system. Keep the
 conditions of that decision separate from the first note's retrieval-quality observation.
 
@@ -215,9 +218,7 @@ conditions of that decision separate from the first note's retrieval-quality obs
 Run `lore wiki prepare` for a snapshot ID, then `lore wiki citations EXACT_CONCEPT_PATH --snapshot ID` for complete source citations.
 ```
 
-> Whether you write `Vector DB` or `Vector Database`, it lands on **one page** (registered as an alias). Knowledge not fragmenting — that *is* the "compounds over time" promise.
-
-### ✅ Result ③ — disclose detail as needed
+> This example assumes both notes support the same subject and scope. The registered `Vector DB` alias resolves to that owner; similar names alone never authorize merging. Extracting no concepts is also valid.
 
 Each source's `concept_policy` controls admission. `disabled` collects documents and
 summaries without extracting concepts; `existing-only` links published owners;
@@ -225,69 +226,44 @@ summaries without extracting concepts; `existing-only` links published owners;
 `focus` separately limits subject scope. The policy enters task identity and is
 enforced by native publication, rather than by prompts alone.
 
+### ✅ Result ③ — disclose detail as needed
+
 ```bash
-lore wiki snapshot                          # inspect saved capture and verification times
-lore wiki prepare                           # validate current originals and prepare SQLite
+lore wiki prepare                              # verify current originals and return a snapshot ID
 lore wiki search "Vector DB" --snapshot <id> --limit 10 --json
 lore wiki context wiki/concepts/vector-database.md --snapshot <id> --limit 10
-lore wiki browse --type concept --category ai-ml --limit 20 --json
-lore wiki read wiki/concepts/vector-database.md # outline/revision → select a section
-lore wiki links wiki/concepts/vector-database.md --limit 20
+lore wiki read wiki/concepts/vector-database.md  # outline → selected --section ID
 lore wiki citations wiki/concepts/vector-database.md --snapshot <id> --limit 20
-lore wiki reviews        # inspect unresolved judgments separately
+lore wiki reviews                              # related judgments and unresolved reviews
 ```
 
-Markdown is authoritative; `.lorekeeper/search.sqlite` is a rebuildable navigation layer.
-Start with names, aliases, excerpts and source identifiers, then read selected sections,
-relationships, evidence and preserved originals. `wiki search --body` supports literal
-text and `--regex` searches. Ranking and citation counts are not confidence scores.
+Narrow candidates by names, aliases and text, then expand selected sections,
+relationships and direct evidence. Use `wiki search --body` for literal body text,
+`--spacing` for whitespace differences, and `wiki browse --category ... --tag ...`
+for metadata filters. Candidates, ordinary links and citations have different
+meanings; ranking and citation counts are not confidence scores.
 
-A snapshot contains captured content. Prepare again after changes and verify evidence
-using the returned revision. Follow `next_offset` for page/link inventories. Snapshot
-link pagination keeps the same snapshot; do not combine it with live `--revision`.
+`index.md` is a small entry guide; `.lorekeeper/search.sqlite` holds discovery.
+Reuse a snapshot and `next_offset` for a session, then verify evidence with returned
+revisions. Replacing the one current snapshot makes its old ID unavailable.
+Omitting `--snapshot` reads live Markdown. `wiki prepare` verifies the complete
+current corpus, so it need not run before every query.
 
-`index.md` is a small entry guide. Page inventories, creation-date browsing and
-links/backlinks are queried through SQLite snapshots. Omitting `--snapshot` reads
-current Markdown. Declared creation dates are distinct from collection history.
-Obsidian follows the original knowledge-page links.
-
-A conflict requires incompatible claims under comparable conditions. A newer date
-or more citations cannot resolve it automatically. `wiki reviews` exposes current
-judgments; evidence changes require reassessment while preserving prior decisions.
-Scheduled `queue check` and `wiki reviews --check` detect unfinished work and evidence
-drift, not universal semantic truth.
-
-Before reassessment, archive the prior judgment with
-`lore wiki evidence --archive <review-path>`. Read and archive new evidence, explicitly
-replace `review.evidence`, and record a dated judgment with the prior archive path.
-Never update revision labels without reassessing the judgment.
+See [query, relationship and original lookup](skills/lore-wiki/references/query.md)
+and [conflict review](skills/lore-wiki/references/audit.md) for detailed procedures.
+Recency or citation frequency cannot settle a conflict; preserve unresolved
+judgments and reassess evidence that changes.
 
 ### ✅ Result ④ — a knowledge graph forms
 
-`lore graph cluster` groups concepts; `suggest-links` proposes link candidates ranked by an Adamic-Adar score that down-weights hub co-citations. Semantic relationships require review of source evidence:
+These are the concept citations supported by the example documents.
+Clusters and `suggest-links` supply candidates; meaningful relationships require evidence review.
 
 ```mermaid
-graph TD
-    RAG["RAG"]:::ai
-    VDB["Vector Database"]:::ai
-    EMB["Embeddings"]:::ai
-    CHK["Chunking"]:::ai
-    QR["Query Rewriting"]:::ai
-    COS["Cosine Similarity"]:::ai
-    PG["pgvector"]:::infra
-    HN["HNSW"]:::infra
-
-    RAG --- VDB
-    RAG --- CHK
-    RAG --- QR
-    VDB --- EMB
-    VDB --- PG
-    VDB --- HN
-    EMB --- COS
-    CHK --- EMB
-
-    classDef ai fill:#eef2ff,stroke:#6366f1,color:#1e1b4b
-    classDef infra fill:#ecfeff,stroke:#06b6d4,color:#083344
+graph LR
+    A["RAG retrieval-quality note"] --> V["Vector Database"]
+    A --> Q["Query Rewriting"]
+    B["Choosing a production vector DB"] --> V
 ```
 
 ### 📈 Over time — compounding
@@ -302,7 +278,7 @@ flowchart LR
     style Y fill:#fef2f2,stroke:#ef4444
 ```
 
-Each day's ingest grows the concept graph; synthesis summarizes it at ever-higher altitudes. Daily → weekly → quarterly → annual each build **on top of** what's already there, never re-deriving it.
+Collection connects sources and concepts; period synthesis uses ready daily records or child periods. Changed inputs can require renewed synthesis. Weekly knowledge themes and personal performance reviews remain separate outputs.
 
 ---
 
@@ -313,7 +289,7 @@ Each day's ingest grows the concept graph; synthesis summarizes it at ever-highe
 | `gmail` | Email digest (filter by label / sender) | Google OAuth |
 | `slack-channel` | Whole channel = team activity (threads, bot filter, watch_users) | Slack token |
 | `slack-search` | Keyword-trend search | Slack user token |
-| `jira` | Issues you worked on that day (ADF→Markdown) | Jira API |
+| `jira` | Current issues selected by JQL (updated time/current assignee, ADF→Markdown) | Jira API |
 | `confluence` | Spaces and pages selected by CQL (storage format→Markdown) | Atlassian OAuth or API token |
 | `google-calendar` | Schedule + meeting notes (auto-extracted from Drive links) | Google OAuth |
 | `google-drive` | Curated docs in a Drive folder | Google OAuth |
@@ -328,122 +304,70 @@ To add external knowledge, copy the catalog's `ai-news` or `tech-news` block int
 
 ---
 
+New sources register adapter types, configuration, document identity, observation scope
+and partial-failure contracts. Adding a configuration name alone does not install an
+adapter. There is no dedicated YouTube source; see [configuration](skills/lore-setup/references/config.md)
+for Drive/web format and historical-scope limits.
+
 ## Core ideas
 
-- **Output is plain markdown** — `daily/{source}/` (raw timeline), `wiki/concepts/` (concepts), `wiki/documents/` (documents), `me/` (work-log & reviews), `synthesis/` (weekly themes).
-- **Materialized views** — a page has two layers. The **structural layer** (frontmatter, raw items, headings) re-renders every ingest; the **semantic layer** (summary, concepts, synthesis) is LLM-owned and preserved across re-renders. Unchanged input with matching completion markers enqueues zero LLM work (a BLAKE3 hash decides).
-- **Collection budget** — `ingest.source_timeout_seconds` defaults to 600 seconds per source; `collection_timeout_seconds` on a source overrides it. This operating budget includes retry waits, pagination and conversion. Collection runs outside the vault writer lock; publication acquires the lock, recovers pending journals and derives from current pages. Async waits are cancelled; blocking local IO/decoding is checked on return rather than forcibly preempted. Timeout reports failure and does not establish automatic backfill or source completeness.
-- **Inputs and replay** — unchanged input hashes reuse completed LLM results. Refetching can observe remote edits, deletions and different query windows. RSS event logs retain collected entries after they leave the feed; exact-input regeneration requires a retained queue task.
-- **Collection recovery** — opt in with `ingest.recovery: {start_date: "2026-10-01", max_days_per_source_per_run: 3}`. Native daily retries uncollected closed dates per source before ordinary current collection. `lore ingest --recover --dry-run` previews selected dates without network or writes. Only accepted publications matching the current source selection establish covered query days; partial attempts remain pending. Dated replay supports Gmail, Slack channels, Drive, Calendar, Confluence and Tasks. RSS, Slack search and arbitrary Jira JQL remain explicitly unverified for historical coverage; manual/nodex retain current-input semantics. This does not restore deleted/intermediate provider revisions or rebuild the full-source personal work-log.
-- **Realized-only** — a future date materializes no page (a forecast isn't knowledge yet). It becomes knowledge once the date arrives.
-- **Config decides the vault's language** — `vault.locale` (ko | en) is not a label switch but **the language of every sentence Lorekeeper adds**: summaries, weekly themes, concept definitions, explorations. A concept's NAME is the form its own source writes, so a term a source writes in another language keeps its spelling. Source content is never translated.
-- **The graph does the bookkeeping** — `backlinks-sync` (re-derive each concept's citations, count and synthesis input, queueing a rewrite when the evidence moves), `lint` (orphans, broken links, duplicate concepts), `merge` (fold duplicate concepts), `cluster` / `suggest-links` (communities and link candidates).
+| Storage or stage | Responsibility |
+|---|---|
+| Originals and source pages | Preserve manual originals/dependencies and collected RSS text separately; refetch is not historical restoration |
+| `daily/`, `wiki/documents/` | Source observations and documents; the pipeline owns structure and queues semantic work |
+| `wiki/concepts/` | Durable retrieval subjects with resolved names, aliases, evidence and supported relationships |
+| `wiki/explorations/` | Comparisons, judgments and open reviews with exact evidence revisions and retained prior decisions |
+| `me/`, period synthesis | Optional personal work-log/reviews, separate from weekly knowledge themes |
+| SQLite and `index.md` | Rebuildable discovery and a small entry guide; Markdown remains authoritative |
 
----
+Structure and semantic results have different owners. A matching input hash and
+completion marker permit reuse; filled prose alone does not prove completion.
+Future dates do not materialize. `vault.locale` controls generated prose, while
+source text and source-written concept names retain their language. Established
+concept prose follows the [per-kind language policy](skills/lore-process/references/processing-kinds.md#output-language-all-kinds).
+
+Exact source identities deduplicate repeated observations. Similar documents from
+different sources are not automatically merged. The model judges meaning; Rust
+validates input identity, revisions, evidence and publication. Passing structural
+checks does not establish complete semantic consistency or factual truth.
 
 ## Commands
 
 ```bash
-lore validate                 # check config (no network)
-lore ingest [source]          # ingest (all sources, or a single one)
-lore ingest --dry-run         # preview without writing to the vault
-lore ingest --date 2026-06-01 # re-materialize a specific day (backfill / repair)
-lore ingest --recover         # recover missing closed source days within explicit budgets
-lore synthesis weekly         # weekly synthesis + personal review (monthly/quarterly/annual too)
-lore status                   # one line per subsystem (per-source times: lore health)
-lore health                   # warn when a source is overdue vs ingest.schedule
-lore health --json            # the same verdict as a contract, for a skill rather than an eye
-lore schedule                 # print definitions; OS registration is separate
-lore brief --date yesterday   # a day's knowledge — what was learned (a line each), what was seen again (names)
-lore fetch <url>              # read a link into the inbox, carrying its address
-lore wiki search <query>      # the pages a query reaches, and whether they NAME it or merely mention it
-lore wiki browse --category ai-ml --type concept --limit 20 --json # Browse metadata; follow next_offset
-lore graph --json neighbors wiki/concepts/example.md # Follow incoming/outgoing links, including evidence
-lore graph --json neighbors wiki/concepts/example.md --type concept # Browse linked concepts; --type document selects documents
-lore wiki snapshot            # Inspect the saved capture without rescanning originals
-lore wiki prepare             # Validate current originals; reuse --snapshot <id>
-lore wiki search "exact text" --body --json # Raw evidence lines/context/revision; opt into --regex
-lore wiki document-identity plan --source ID --manifest /tmp/identity.json # Verify legacy copy identity migration
-lore wiki read wiki/concepts/example.md # Outline → --section ID; pin subsequent reads with --revision
-lore wiki original wiki/documents/example.md # Verified manual original/member roster; select with --member
-lore wiki original daily/tech-news/2026-10-18.md # RSS collection inventory, authority and revision
-lore wiki original daily/tech-news/2026-10-18.md --revision REV --event EVENT_ID --text-offset 0 --text-limit 4096
-lore wiki links wiki/concepts/example.md --limit 20 # Inspect link source lines, context and revision
-lore wiki provenance wiki/documents/example.md # Follow declared relations by exact repository + document ID
-lore wiki concepts            # list concepts
-lore resolve <name>           # which concept page owns a name (0 owned / 1 absent / 2 ambiguous)
-lore graph lint               # structural health (orphans, broken links, duplicate concepts, …)
-lore graph suggest-links --limit 20 # topology candidates; continue with next_offset and --revision
-lore graph cluster            # topic communities (Louvain)
-lore graph backlinks-sync     # re-derive each concept's ## Sources, citation count and synthesis input
-lore graph merge <from> <into># fold a duplicate concept into the canonical one
-lore graph retract-citation <origin.md> <concept.md> --revision <file_revision> --dry-run # Preview a reviewed citation correction
-lore graph normalize --fix    # normalize link spelling across the vault
-lore doctor                   # page contracts: text cleanliness, unanswered sections, credentials
-lore extract status           # how far each project's knowledge extraction trails its repository
-lore maintenance              # prune ingest logs and drained queue files past retention
-lore queue status / prune     # LLM task queue status / clear dead tasks
-lore queue apply              # validate and publish all staged section/concept results
-lore queue check              # JSON completion check: outstanding work, results and mutations
-lore wiki reviews --check     # fail on evidence drift or invalid reviews; open reviews pass
-lore queue packet --task-id ID # revision-checked evidence (bodies: --include-content)
-lore queue regenerate --task-id ID --dry-run # preview retained-input regeneration
-lore queue count              # current task count as a bare integer (for scripts)
-lore work plan --task-id ID    # plan bounded retained-input reads (audit: --path)
-lore work status WORK_ID      # completed parts and resumable work
-lore work read WORK_ID NODE_ID # read one part or two child observations
-lore work result WORK_ID      # read the completed reduction for final publication
-lore config vault-root        # the vault's absolute path, and nothing else (for scripts)
-lore schema                   # generate wiki/AGENTS.md (the page-format schema)
+lore validate                    # validate configuration
+lore run daily                   # collect → process → reconcile/discover → resume ready periods
+lore run process                 # process already collected semantic work
+lore run knowledge               # one configured semantic audit batch
+lore ingest <source-id>          # collect one source; does not rebuild the cross-source work-log
+lore status                     # subsystem status and follow-up commands
+lore health --json              # source collection times and overdue state
+lore queue check                # unfinished work, staged results and interrupted publication
+lore wiki reviews --check       # invalid reviews/evidence drift; open judgments are separate
+lore graph lint                 # structural violations and observations
+lore maintenance --dry-run      # preview retention-based cleanup
 ```
 
-`lore wiki refresh` refreshes the SQLite navigation snapshot and a small `index.md` entry guide. Use `wiki browse/search/links` for page inventories, date ordering and relationship traversal. An existing entry file without a generation marker is preserved and reported as a collision. Start a retrieval session with `wiki snapshot` to inspect the saved ID and capture/verification times, then repeat `wiki browse/search/links --snapshot ID` (links supports `--direction incoming|both`). Verify originals with `wiki read --revision REV`. Run `wiki prepare` when current inventory is required or no compatible capture exists. Saved times do not certify freshness after external edits. Refresh prints the prepared ID too.
+The command/flag authority is `lore --help` and `lore <command> --help`.
+Continue with the reference for your task:
 
-SQLite retains one current search snapshot; replaced IDs cannot be queried. Freed
-pages are reused, so deletion need not shrink the database file immediately.
-Originals and review archives are separate retained evidence, never age-based
-retention targets. See [source retention](skills/lore-extract/references/manifest.md#source-retention)
-for repository captures and expendable working caches.
-
-`wiki context PATH --snapshot ID` groups explicit links, citations, declared source
-relations and scoped reviews separately. Follow each group's `next_offset` in the
-same snapshot. A captured relationship is not automatic corroboration or proof that
-two claims conflict.
-
-`wiki citations PATH --snapshot ID` reads complete graph-derived concept evidence
-from that captured SQLite snapshot, separately from ordinary link occurrences.
-Follow `next_offset` with the same snapshot. `total` counts citation entries;
-`source_count` counts origin pages, so selected RSS events may share one origin.
-These captured citations do not certify current source bytes or factual confidence.
-Concept Sources sections hold a fixed discovery instruction instead of growing lists.
-Replace `EXACT_CONCEPT_PATH` with the selected concept address. Only exact generated
-lists migrate; custom Sources prose is preserved and reported. The initial body
-change reopens affected revision-guarded assessments; later citation growth leaves
-the compact body unchanged.
-
-`source_file` preserves a declared string, list of derivation references, or null;
-it does not establish document ownership or readable historical originals.
-Guarded `wiki curate` accepts configured concept categories and complete tag lists.
-Omitted category retains the declaration, null explicitly clears it, and extraction
-preserves that choice. Omitted tags retain them; [] clears them. Tags describe the
-concept and are not inherited automatically from source documents.
-
-For date-based discovery, use `lore wiki browse --snapshot ID --sort created --from 2026-01-01 --to 2026-12-31 --json`. `created` may be the original authoring date rather than the ingestion date. Missing or invalid dates retain an explicit status and are excluded by date filters. Date order is newest first, with unknown dates last when no date filter is applied.
-
-For project documents, `source_record.attributes` preserves attributes from the verified public nodex response. Knowledge authored outside the body, such as a routine’s `prompt`, reaches summary and extraction inputs. Imported instructions are source content, not instructions for the current worker.
-
-New RSS ingests retain pre-classification collection text at immutable hash addresses under `.lorekeeper/evidence/rss/`, referenced by daily `source_record.rss_original`. These are adapter-acquired bodies, not provider HTTP/XML bytes. `event_timestamp` is the adapter’s published-or-updated timestamp, separate from unknown acquisition time (`captured_at: null`). `wiki original` returns metadata first; select an exact `event_id` with the returned `revision`, then paginate the title, blank line and body. New captures report `page_bound_collection`; read-only discovery of historical event logs reports `legacy_unbound`, which does not establish that a current daily was derived from those historical bytes. A summary is an interpretation, and omission does not prove absence from the collected text. Refetching a provider URL does not reproduce the collection. New bound RSS extraction may explicitly select event IDs and immutable payload revisions in `concept_evidence`. Only these selected article dependencies avoid resynthesis after unrelated daily edits; legacy pages and unbound links retain page guards. Use `wiki original ORIGIN --evidence-concept CONCEPT` to discover selections, then `--event ID --revision PAYLOAD_REV` to read that historical article even after its current manifest changes. A retained observation does not establish current truth or independent verification. Extraction omission never retracts a selection; `graph retract-citation --event ID --event-revision PAYLOAD_REV` explicitly removes it. `source_count` continues to count originating pages. Failed original publication prevents its page reference; dry-run stores nothing.
-
-These are the ones you reach for day to day. `lore --help` lists the full surface;
-`lore <command> --help` has each command's flags.
-
----
+| Task | Detailed procedure |
+|---|---|
+| Search, body text, relationships, citations and originals | [Query](skills/lore-wiki/references/query.md) |
+| Add files/URLs and migrate imported document identity | [Add](skills/lore-wiki/references/add.md) |
+| Collection, original preservation, retries and date recovery | [Ingestion](skills/lore-ingest/references/ingestion.md) |
+| Correct names, tags, categories/lifecycle or resynthesize concepts | [Curation](skills/lore-wiki/references/curation.md) |
+| Review relationships, contradictions and duplicate meanings | [Audit](skills/lore-wiki/references/audit.md) |
+| Recurring semantic review, progress and resumption | [Maintenance](skills/lore-wiki/references/maintenance.md) |
+| Partition and reduce large evidence | [Bounded work](skills/lore-process/references/bounded-work.md) |
+| Retain originals, repository captures and working caches | [Source retention](skills/lore-extract/references/manifest.md#source-retention) |
 
 ## Agent skills and execution profiles
 
 Canonical skill bodies and references live under `skills/`. Claude metadata lives
 in `agents/claude.json`; Codex invocation policy uses `agents/openai.yaml` where
 needed. Deployment generates host entry files from those shared procedures.
+Following the [official skill authoring guide](https://platform.claude.com/docs/en/agents-and-tools/agent-skills/best-practices),
+entry files describe responsibilities and routing; detailed contracts are directly linked references.
 
 | Skill | Responsibility |
 |---|---|
@@ -461,24 +385,11 @@ Claude discovers `.claude/skills`; Codex discovers `.agents/skills`.
 Unattended jobs use verified copies under `<data>/skills/<engine>/` independently
 of interactive deployment. Missing or modified required files refuse execution.
 
-The supported CLI contracts are Claude Code `>=2.1.303,<3` and Codex
-`>=0.163.0,<1`. Partition inspection and reduction receive bounded JSON through stdin
-and return structured observations. Rust validates and records the selected node;
-the model does not write observation caches. Claude disables tools/customizations;
-Codex uses a read-only sandbox. Interactive navigation, finalization and semantic
-maintenance are separate roles with the tools they require.
-Native scheduling rotates independent targets through inspection, reduction and
-finalization. Small requests share an evidence-bounded batch with at most one task
-per page. A guarded next-target cursor preserves turns across budget-limited runs;
-corrupt state is reported rather than silently reset.
-Hosts use their existing authentication and policies. Their permission
-and sandbox models differ; Rust publication guards are not OS access controls.
+Supported CLI contracts are Claude Code `>=2.1.303,<3` and Codex `>=0.163.0,<1`.
+Shared skills and typed results stay independent of host-specific authentication,
+tools and sandbox adapters. Publication checks do not replace OS access controls.
 
-Concept extraction captures discovery candidates together with their scoped reviews
-and evidence. Workers explicitly choose new admission or reuse of an exact existing
-revision; equal names never authorize automatic merging. Changed read scope refuses
-publication. Small sources hand off to bounded work when their related evidence is
-large. These guards establish processing and publication consistency, not semantic truth.
+For example, select Claude for daily processing and Codex for semantic review:
 
 ```yaml
 llm:
@@ -500,41 +411,23 @@ execution:
     knowledge: reviewer
 ```
 
-This selects `primary` for daily and queue processing, and `reviewer` for semantic
-audits. Selection is explicit `--profile`, operation profile, then default profile.
-An unavailable host never switches to another host. `timeout_seconds` is a session
-budget; unfinished work is preserved and reported as failure.
-`execution.work` bounds worker-request JSON bytes, observation-result JSON bytes
-and semantic sessions per run. Large inputs are divided into revision-pinned parts
-read in fresh sessions; observations are reduced in further fresh sessions.
-`max_calls` applies per daily/queue run and per knowledge-audit batch. Exhaustion
-stops incomplete work and preserves verified parts for resumption. These limits
-are not the model's total context, token count or spending cap. Input must be at
-least 4096 bytes; results must be at least 1024 bytes and at most one quarter of
-the input bound; calls must be positive. A profile's optional `work` overrides only
-its specified shared limits. For example,
-`work: {max_input_bytes: 131072, max_result_bytes: 16384}` can select smaller requests.
-Run JSON reports the effective limits; native children inherit the same selection.
-Set `LORE_EXECUTION_PROFILE` for standalone bounded commands to use that profile.
-See the
-[bounded evidence protocol](skills/lore-process/references/bounded-work.md)
-for manual resumption and result formats.
-Optional `executable` and `model` select the CLI and model. Relative executable paths and Claude
-`config_directory` resolve against the configuration file. Codex `profile` names a
-profile in that CLI. Changing models does not rewrite existing knowledge.
+Selection is explicit `--profile`, then operation profile, then default profile;
+an unavailable host never switches automatically. Set optional `executable`, `model`,
+Claude `config_directory` or Codex `profile` only where needed. `execution.work` bounds
+request/result JSON bytes and calls per run; large evidence uses fresh inspection
+and reduction sessions. These are not token or billing caps. Unfinished work is
+preserved and reported as failure. See [execution configuration](skills/lore-setup/references/config.md#execution-profiles)
+for profile-specific limits and manual selection, and [bounded work](skills/lore-process/references/bounded-work.md)
+for result contracts.
 
-`llm.provider: queue` retains typed semantic requests separately from host selection.
-`noop` creates no LLM work. Search, navigation and deterministic collection do not
-require an installed agent.
+`llm.provider: queue` retains semantic requests separately from host selection.
+`noop` creates no LLM work. Search, navigation and deterministic collection need no agent.
 
 ---
 
 ## Install · build
 
 ```bash
-# One-line install (macOS / Linux) — binary, templates, skills, SHA256-verified
-curl -fsSL https://raw.githubusercontent.com/junyeong-ai/lorekeeper/main/scripts/install.sh | bash
-
 # Windows (PowerShell)
 irm https://raw.githubusercontent.com/junyeong-ai/lorekeeper/main/scripts/install.ps1 | iex
 
@@ -549,7 +442,7 @@ directory and preserves your `config.yaml`. Beside them, `data-dir` records the
 installation path and `deployed-skills` records deployed skills. These automatic
 records support updates and removal; they contain no credentials.
 
-### Tasks
+## Tasks and personal reviews
 
 ```bash
 lore agenda                       # today: what is committed, what woke, what is due
@@ -578,7 +471,7 @@ refresh that binding only when it actually publishes that day's log. Empty or
 unavailable historical input does not authorize deleting or adopting a retained
 log. History outside the observed query remains unverified.
 
-### Update, status, removal
+## Updates and removal
 
 ```bash
 lore self status      # is every deployed copy still the one this binary carries (non-zero if not)
@@ -616,15 +509,7 @@ lore init credentials   # interactive wizard — Google tokens minted via browse
 ---
 
 
-Identity migration also accepts repeatable `--history-ref <full-commit-id>` on
-`lore wiki document-identity plan` to verify historical source copies. The plan seals
-Git blobs, authored IDs and exact projected bodies; `check` and `apply` revalidate them.
-`apply --allow-blocked` migrates the verified subset and leaves unresolved pages untouched.
 
-To deliberately rewrite one concept from its current citations, preview
-`lore graph resynthesize wiki/concepts/example.md --dry-run`, then omit `--dry-run`
-and process the queued task. This works after the historical task has expired;
-`queue regenerate --task-id` still requires retained original input.
 
 ## Scheduling
 
@@ -658,56 +543,38 @@ Scheduled jobs execute native Rust commands:
 | Maintenance | `lore maintenance --prune-queue --wait-for-vault` |
 | Reminders | `lore task remind notify` |
 
-The daily job collects all sources, reconciles the queue, backlinks and search
-index, then resumes base periods, quarters and years in order. A partial source
-failure still permits independent recovery. A failed dependent stage stops later
-periods. Collection and semantic completion have distinct outcomes. `--json`
-reserves stdout for the job report and sends child output to stderr.
-Jobs pin the selected configuration path and file revision. An edit stops the job
-as incomplete instead of redirecting remaining work to another vault. Start a new
-workflow with the intended configuration.
+Daily jobs collect, process semantic work, reconcile relationships/discovery and
+resume ready periods. Collection failures and semantic failures remain distinct;
+unfinished work is not reported as success. JSON results use stdout, child logs stderr.
 
-Rust holds the vault's cooperative Unix workflow lease through semantic reads and
-publication. Busy jobs refuse unless `--wait` is explicit. Cancellation and session
-deadlines terminate the foreground process group and preserve unfinished work.
-Short writer locks and target revision guards remain separate. Start a manual
-session before reading evidence with `lore workflow -- claude` or
-`lore workflow -- codex`. Do not reacquire inside a guarded session. Programs that
-close inherited descriptors or detach are outside the manual exec lease's lifetime
-guarantee. Workflow leases and native agent jobs require Unix.
+A cooperative Unix workflow lease and exact revision guards coordinate semantic
+sessions. Start manual work before reading evidence with `lore workflow -- claude`
+or `lore workflow -- codex`. Configuration edits stop the remaining job. Regenerate
+OS definitions after changing host authentication directories, PATH or proxy environment.
+Native agent jobs/workflow are unsupported on Windows. See [scheduling](skills/lore-ingest/references/scheduling.md)
+for registration, contention and captured-environment details.
 
-Definitions capture absolute configuration/data paths, anchored PATH entries and
-relevant existing `CLAUDE_CONFIG_DIR` or `CODEX_HOME` directories. Standard proxy
-variables preserve casing and empty values. Credentials and API keys are not copied
-into definitions. Regenerate and reload definitions after environment changes.
+### Recover after interruptions
 
-Calendar triggers use host local time; page dates use the vault timezone. Launchd
-coalesces runs missed during sleep; cron skips them. Neither backfills every missed
-date. Inspect `lore synthesis pending --status --json` for blocked evidence and
-backfill source dates explicitly. Isolate tests with `--namespace org.example.lore-test`
-and `--log-dir /absolute/test/logs`.
-
-To recover missing period requests, configure an explicit activation boundary:
+Launchd coalesces missed runs after sleep; cron skips them. Neither restores every
+missed date. Triggers use host local time; document dates use the vault timezone.
+Opt in with explicit activation boundaries and budgets:
 
 ```yaml
+ingest:
+  recovery: {start_date: "2026-10-01", max_days_per_source_per_run: 3}
 synthesis:
-  recovery:
-    start_date: "2026-10-01"
-    max_periods_per_run: 8
+  recovery: {start_date: "2026-10-01", max_periods_per_run: 8}
 ```
 
-`lore synthesis pending --reconcile --json` registers missing closed periods for
-currently enabled synthesis modes. Only periods starting on or after `start_date`
-qualify; an overlapping earlier period is excluded. Each invocation examines at
-most eight period slots, including existing requests, then resumes its persisted
-position on the next invocation. The daily job runs this once before resuming
-periods. Disabled modes pause their cursor and resume when enabled again. Omitting
-the configuration does not request historical periods automatically. A request
-does not establish collection coverage or semantic completion; source coverage,
-semantic readiness and personal contribution inputs are checked separately. Explicit
-`--date ... --defer` requests may independently target older periods.
+The first requeries [missing collection dates](skills/lore-ingest/references/ingestion.md#missing-date-recovery).
+The second registers closed periods starting on or after its activation date.
+Its budget counts examined slots, including existing requests, and resumes a
+persisted cursor. Neither setting invents historical originals or semantic completion.
+Inspect `lore ingest --recover --dry-run` and `lore synthesis pending --status --json`
+for selected reach and blockers.
 
-Configure weekly semantic maintenance independently from collection and synthesis:
+### Recurring semantic review
 
 ```yaml
 graph:
@@ -717,53 +584,22 @@ graph:
     max_input_bytes: 262144
 ```
 
-Changed and first-time subjects rotate fairly; unchanged inputs are not repeatedly
-audited. Subjects include concepts and source documents (`type: document`) in the
-configured wiki; document-only topics can be reviewed without creating concepts.
-`kind` identifies the subject type; `counts_by_kind` separates total, current and
-pending counts by type, and aggregate counts include both. Document links provide
-context, not automatic corroborating evidence.
-Knowledge jobs audit ready subjects before draining the global queue. Unfinished
-semantic sections or unpublished results in the subject, evidence or actual
-context defer that subject while later ready subjects remain eligible. Complete
-authored pages require no LLM completion markers. `audit_deferred` reports the
-encountered subjects and their blockers. Audit progress can coexist with unrelated
-queue backlog, while the overall job remains incomplete. Final verification follows
-global reconciliation and checks the selected inputs again.
-`.lorekeeper/knowledge-audit.json` stores current assessments and pending order;
-judgments and conflicting evidence remain in Markdown reviews. Single-source
-status or citation count alone does not justify merging or deleting a concept.
-`wiki audit-discover --file FILE` records revision-guarded search queries before
-assessment. Native jobs discover first, then include every matching knowledge page
-as comparison context before partitioning. Changed query membership or authored
-revisions reopen work; matches create neither citations nor semantic relations.
-This records the searched scope, not consistency outside it. See
-[related-document discovery](skills/lore-wiki/references/maintenance.md#related-document-discovery).
-Run an initial resumable campaign with `lore run knowledge --profile codex --batches 20
---json`, choosing a registered profile. Each batch releases its workflow lease;
-failures preserve pending work and completed receipts. `batch-limit` means the
-requested batch count was reached; `settled` means the current eligible audit plan
-is empty. Neither implies that every external original or attachment was read,
-or that the entire corpus is semantically consistent.
-`run knowledge --json` exposes before/after receipt counts in `audit_progress`: total, current, follow-up, unreviewed and changed. Failed verification leaves `after` null. `semantic_calls` counts agent invocation attempts, not tokens or billing.
-Audit plans measure distinct complete subject, evidence, direct context and scoped
-review/evidence bytes plus selected RSS payloads. `graph.audit.max_input_bytes`
-bounds that complete input; exceeding it remains visible as `input.status: oversized`.
-Automatic selection does not skip large subjects; `--path` preserves the selected
-scope. The Rust runner partitions and reduces the complete input under
-`execution.work` limits. Completing an oversized input requires proof of completed
-partitioned work and reduction against its current revision. Evidence is never
-truncated to claim completion; interrupted work remains resumable. `--profile`
-alone changes neither byte bound.
-Missing, invalid or stale scoped reviews prevent completion. Unrelated reassessment
-backlog remains visible in `run knowledge`'s bounded `review_health` counts without
-stopping the next batch. Invalid records or inspection errors fail the job.
-Use `wiki reviews --check` separately for a strict whole-vault health check.
-`follow-up` requires a current open review explicitly scoped to that subject.
+Review changed and first-time concepts/documents independently of collection and
+period synthesis. Ready subjects get a turn; `audit_deferred` exposes blockers.
+Progress can coexist with unrelated queue backlog while the overall job remains
+incomplete. Judgments and evidence revisions stay in Markdown reviews; one source
+or a high citation count alone never authorizes merging or deletion.
 
-Reminders retire only after the OS notifier accepts them. Acceptance does not prove
-the user saw the notification. A crash between acceptance and retirement may cause
-redelivery; failed submissions remain pending.
+For an initial backlog, select a registered profile and execution budget:
+`lore run knowledge --profile reviewer --batches 20 --json`. `batch-limit` means
+the budget was reached; `settled` means the current eligible plan has no pending
+subjects. Neither proves universal truth or review of every external original.
+`audit_progress` reports before/after counts; `semantic_calls` counts invocation
+attempts, not tokens or billing. See [semantic maintenance](skills/lore-wiki/references/maintenance.md)
+for discovery scope, complete evidence reads, repair and reassessment.
+
+Reminders retire after the OS accepts them, not after proof that a person read
+them. A crash before retirement can cause redelivery; failed submissions stay pending.
 
 ---
 

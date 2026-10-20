@@ -44,7 +44,8 @@ one source to infer that distinction.
   titles/aliases before creating a page.
 - **Keep the vault portable.** Every page declares its format in `type`. Internal
   links are CommonMark `[label](relative/path.md)`, not wikilinks. Exact addresses
-  survive rewriting; names are source-written, while generated prose uses `vault.locale`.
+  survive rewriting; names are source-written. New prose uses `vault.locale`;
+  concept synthesis preserves an established body's language under its per-kind policy.
   Generated `<wiki>/AGENTS.md` spec prose is English; its headings are localized
   and its language policy names the configured locale. Source text is not translated.
 - **Publish semantic values, not ad-hoc edits.** Workers stage typed results. The

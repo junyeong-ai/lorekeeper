@@ -13,17 +13,14 @@ atlassian-cli jira search "assignee = currentUser() ORDER BY updated DESC" \
 Use the `project.key` (e.g. `PROJ`) in the JQL.
 
 ## Find the start-date custom-field id
-Jira's "Start date" is a per-instance custom field (commonly `customfield_10015`). Fetch
-one issue and inspect its date fields:
+Jira's "Start date" is a per-instance custom field. Fetch all fields on a known issue:
 ```bash
-atlassian-cli jira get <ISSUE-KEY> | grep -i -A2 "start date"
+atlassian-cli jira get <ISSUE-KEY> --fields '*all'
 ```
-(`jira get` takes `--fields`, and its DEFAULT is an essential subset plus whatever custom
-fields are configured — so a custom field nobody configured is absent unless you pass
-`--fields '*all'`. Note the response names keys as `customfield_NNNNN`, not by label, so grepping
-for a human name may find nothing even then; `--expand names` is what maps them.)
-Put the id you find in `start_date_field`. Omit it if there is none (the start date just
-won't be shown).
+The response uses keys such as `customfield_10015`, not display labels. Confirm the
+exact field ID through the site's field metadata or administration UI; a date value
+alone does not identify its meaning. Set `start_date_field` only after confirming it.
+Omit this optional setting if the ID is unknown; the start date will not be shown.
 
 ## config block
 ```yaml
@@ -31,7 +28,7 @@ my-tasks:
   type: jira
   enabled: true
   params:
-    # Only issues changed that day (= worked on) = a work-history snapshot. Do NOT search by due/start date.
+    # Select currently assigned issues by updated time; this does not identify who changed them.
     jql: >
       project = PROJ AND assignee = currentUser()
       AND updated >= -1d
@@ -43,5 +40,7 @@ my-tasks:
   concept_policy: disabled
   # add this source id to personal.tracked_sources to feed your work-log
 ```
-The description is rendered ADF→Markdown, and status/period render as an as-of-that-day
-snapshot header.
+The description is rendered ADF→Markdown. Status, assignee and planned dates are
+current values at acquisition, not reconstructed values for a historical target day.
+The configured JQL determines selection; `updated` does not prove personal work or
+complete date coverage, and a later relative query can omit previously collected issues.

@@ -9,6 +9,7 @@
 | `lore ingest` | Collect ALL enabled sources, write pages; render the cross-source work-log when a `personal:` module is configured |
 | `lore ingest <source>` | Refresh one source's pages only — never rewrites the work-log (it sees a subset) |
 | `lore ingest --dry-run` | Preview without vault writes |
+| `lore ingest --recover [--dry-run]` | Requery bounded missing closed dates from the explicit recovery start; see ingestion scope and replay limits |
 | `lore ingest --date YYYY-MM-DD` | Re-materialize a specific day — RE-FETCHES it; see Safety notes before using it on a past date |
 | `lore fetch <URL> [--source ID]` | Save an HTML article, Markdown or text document into a configured manual inbox. Then ingest that source and run lore-process; fetching alone does not complete knowledge integration |
 | `lore input install DIRECTORY [--python PATH]` | Install optional pinned binary-document dependencies in a new isolated environment; prints the config block |

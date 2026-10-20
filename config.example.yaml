@@ -13,7 +13,7 @@
 vault:
   root: ~/Documents/Obsidian Vault
   timezone: system          # IANA name (e.g., "Asia/Seoul") or "system"
-  locale: ko                # output language for added labels/headers: ko | en
+  locale: ko                # language for generated prose and headings: ko | en
                             # (source content — mail/Slack/Jira bodies — is never translated)
   dirs:
     daily: daily
@@ -42,7 +42,7 @@ identity:
 # ─── Ingestion schedule ───────────────────────────────────
 # A single daily run over ALL enabled sources. `lore schedule` emits ONE `lore run daily`
 # crontab line from this. Ingestion is not scheduled per source: the work-log aggregates
-# personal events across every source for a day, so a single run keeps it complete.
+# personal events across sources. Source failures remain explicit and can block reviews.
 ingest:
   source_timeout_seconds: 600  # total acquisition budget per source, including retry waits
   schedule: "0 7 * * *"          # every day 07:00 (sources use lookback windows)
@@ -124,9 +124,9 @@ sources:
     # instance: default         # (optional) which credentials.atlassian entry authenticates
                                 # this source; required only when several are configured
     params:
-      # Issues changed (= worked on) that day = a work-history snapshot. Due/start dates are
-      # shown on the page as their values as-of that day, but the search key is `updated`
-      # (so a later date change doesn't retroactively pollute past pages).
+      # Current issues selected by updated time, not proof of who performed the work.
+      # Status, assignee and planned dates are values at acquisition. Historical replay
+      # does not reconstruct their old values, and this JQL is not date-coverage proof.
       # The JQL decides what is PROPOSED as well as what is ingested: an issue
       # outside this window is never fetched, so it is never declared open.
       # To have work still open proposed each morning, widen it — e.g.
@@ -140,17 +140,16 @@ sources:
     labels: [personal]
     concept_policy: existing-only
 
-  # Wiki pages I wrote or edited that day. A Confluence page is a LIVING document, so the
-  # page version is folded into the event identity: re-ingesting an unchanged page dedups
-  # away (zero LLM work), while an edit produces a new event that is re-summarized and
-  # re-conceptualized. That is the whole freshness mechanism — no separate sync pass.
+  # Confluence observations include the current page version in their event identity.
+  # Completed semantic results are reused only when their exact input hashes still match.
+  # A date query selects current records; it does not restore prior page versions.
   my-wiki:
     type: confluence
     enabled: false
     # instance: default
     params:
       # WHICH pages matter. Must NOT contain a time clause: the adapter appends the target
-      # day's window itself, so `lore ingest --date <past>` backfills correctly (a
+      # day's window itself, so `lore ingest --date <past>` queries that window (a
       # hand-written `lastModified` would pin the query to the wall clock instead).
       cql: >
         type = page AND contributor = currentUser()
