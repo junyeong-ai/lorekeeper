@@ -173,16 +173,7 @@ async fn run_processor(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    #[cfg(unix)]
-    command.process_group(0);
     let mut child = command.spawn()?;
-    #[cfg(unix)]
-    let _group = ProcessGroup(
-        child
-            .id()
-            .and_then(|id| i32::try_from(id).ok())
-            .and_then(rustix::process::Pid::from_raw),
-    );
     let mut stdin = child.stdin.take().ok_or(ProcessingError::Protocol)?;
     let stdout = child.stdout.take().ok_or(ProcessingError::Protocol)?;
     let stderr = child.stderr.take().ok_or(ProcessingError::Protocol)?;
@@ -217,18 +208,6 @@ async fn run_processor(
         return Err(ProcessingError::Exited);
     }
     serde_json::from_slice::<Response>(&output).map_err(|_| ProcessingError::Protocol)
-}
-
-#[cfg(unix)]
-struct ProcessGroup(Option<rustix::process::Pid>);
-
-#[cfg(unix)]
-impl Drop for ProcessGroup {
-    fn drop(&mut self) {
-        if let Some(pid) = self.0.filter(|pid| *pid != rustix::process::Pid::INIT) {
-            let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
-        }
-    }
 }
 
 async fn read_limited(
@@ -479,15 +458,36 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn processor_timeout_terminates_the_owned_process_group() {
+    async fn processor_inherits_workflow_group_and_timeout_reaps_it() {
         let root = tempfile::tempdir().unwrap();
-        let python = executable(root.path(), "/bin/sleep 60 &\nwait");
+        let python = executable(
+            root.path(),
+            "printf '%s' \"$$\" > \"$0.pid\"\nexec /bin/sleep 60",
+        );
+        let pid_path = python.with_extension("pid");
         let mut config = configuration(&python);
-        config.timeout_seconds = std::num::NonZeroU64::new(1).unwrap();
-        assert!(matches!(
-            project(b"", InputFormat::Pdf, Some(&config)).await,
-            Err(ProcessingError::Timeout)
-        ));
+        config.timeout_seconds = std::num::NonZeroU64::new(2).unwrap();
+        let task = tokio::spawn(async move { project(b"", InputFormat::Pdf, Some(&config)).await });
+        let pid = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if let Ok(value) = std::fs::read_to_string(&pid_path)
+                    && let Ok(value) = value.parse::<i32>()
+                    && let Some(pid) = rustix::process::Pid::from_raw(value)
+                {
+                    break pid;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let group = rustix::process::getpgid(Some(pid)).unwrap();
+        assert!(matches!(task.await.unwrap(), Err(ProcessingError::Timeout)));
+        assert_eq!(group, rustix::process::getpgrp());
+        assert_eq!(
+            rustix::process::getpgid(Some(pid)),
+            Err(rustix::io::Errno::SRCH)
+        );
     }
 
     #[tokio::test]

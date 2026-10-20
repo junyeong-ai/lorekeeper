@@ -157,6 +157,9 @@ Use parser/token-state behavior, not regex replacement of arbitrary markup.
   pinned Python runtime reads captured bytes through stdin; Rust bounds time/output,
   validates its typed response and owns publication. No runtime installs or OCR model
   downloads during ingestion. Decoder stderr may contain source text; never forward it.
+- The interpreter runs the embedded in-process decoders and inherits the caller's
+  process group so workflow cancellation includes it. Keep direct-child timeout/reaping;
+  do not detach conversion or launch background helper processes from the processor.
 - XLSX preserves sheet state, cell coordinates, formulas and stored cached values without
   calculation. PDF physical page numbers differ from DOCX flow content. OCR is explicit
   and distinct from native text; empty extraction is unprocessed, never completed knowledge.
