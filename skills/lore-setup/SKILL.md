@@ -29,6 +29,7 @@ reconfigure the rest of an existing vault.
    - Confluence → [Initial setup](references/config.md#initial-setup) and the Confluence example
    - Project repositories (`nodex`) → [Nodex binary selection](references/config.md#nodex-binary-selection)
    - Other supported sources → `config.example.yaml` for their parameters
+   - Local DOCX/XLSX/PDF/images → [Document preprocessing](references/config.md#document-preprocessing)
 3. **Write config** — start a new config from `config.starter.yaml` and add only the
    requested blocks from `config.example.yaml`. The catalog's sources are disabled;
    enable selected sources after filling their real scope. Use `references/config.md`

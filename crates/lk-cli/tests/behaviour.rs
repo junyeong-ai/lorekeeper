@@ -144,6 +144,18 @@ const SWEEP: &[&[&str]] = &[
 /// rather than an omission.
 const EXEMPT: &[(&[&str], &str)] = &[
     (
+        &["input", "install"],
+        "installs the optional external runtime; input tests refuse existing directories, first-user proof verifies pinned installation",
+    ),
+    (
+        &["input", "check"],
+        "requires an explicitly installed optional Python runtime and OCR data; content tests verify typed decoder responses and the optional runtime suite exercises real formats",
+    ),
+    (
+        &["input", "inspect"],
+        "requires a binary fixture and optional runtime; input tests cover bounded regular-file reads and content runtime tests preserve page/sheet/formula scope",
+    ),
+    (
         &["work", "plan"],
         "captures exact retained input/audit revisions; native_execution tests real partitioned plans and queue_apply tests publication guards",
     ),

@@ -77,6 +77,9 @@ impl Config {
         if let Some(parent) = path.parent() {
             config.vault.resolve_relative_to(parent);
             config.execution.resolve_relative_to(parent);
+            if let Some(documents) = &mut config.ingest.documents {
+                documents.resolve_relative_to(parent);
+            }
             if let Some(file) = config.credentials.file.as_mut() {
                 *file = resolve_vault_root(&file.to_string_lossy(), parent);
             }
@@ -100,6 +103,9 @@ impl Config {
 
     fn validate(&mut self) -> Result<(), ConfigError> {
         self.execution.validate()?;
+        if let Some(documents) = &self.ingest.documents {
+            documents.validate()?;
+        }
         if self.vault.root.trim().is_empty() {
             return Err(ConfigError::Validation(
                 "vault.root must not be empty or whitespace-only".into(),
@@ -1353,6 +1359,7 @@ impl Default for MaintenanceConfig {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct IngestConfig {
+    pub documents: Option<crate::content::InputProcessingConfig>,
     /// Optional cron expression; when set, `lore schedule` emits a single crontab line
     /// running `lore ingest` (all sources). Absent → no scheduled ingest line.
     pub schedule: Option<String>,

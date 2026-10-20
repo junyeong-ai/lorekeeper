@@ -200,6 +200,7 @@ pub async fn run(
         identity: config.identity.clone(),
         vault_root: vault_root.clone(),
         vault_dirs: config.vault.dirs.clone(),
+        documents: config.ingest.documents.clone(),
     };
 
     // Phase 1: Plan all sources (no vault writes yet).
@@ -246,38 +247,40 @@ pub async fn run(
         };
 
         let extracted = if sc.source_type == lk_core::config::SourceType::Manual {
-            lk_source::capture_manual(&sc.params, &extract_ctx).and_then(|mut capture| {
-                capture.project_links(
-                    &std::path::PathBuf::from(&config.vault.dirs.wiki)
-                        .join(lk_core::vault_path::DOCUMENTS_SUBDIR),
-                )?;
-                for failure in &capture.failures {
-                    eprintln!("  ✗ {failure}");
-                }
-                if !capture.failures.is_empty() {
-                    had_failure = true;
-                }
-                if manual_capture_bytes.saturating_add(capture.byte_len()) > 512 * 1024 * 1024 {
-                    return Err(lk_source::SourceError::Parse(
+            lk_source::capture_manual(&sc.params, &extract_ctx)
+                .await
+                .and_then(|mut capture| {
+                    capture.project_links(
+                        &std::path::PathBuf::from(&config.vault.dirs.wiki)
+                            .join(lk_core::vault_path::DOCUMENTS_SUBDIR),
+                    )?;
+                    for failure in &capture.failures {
+                        eprintln!("  ✗ {failure}");
+                    }
+                    if !capture.failures.is_empty() {
+                        had_failure = true;
+                    }
+                    if manual_capture_bytes.saturating_add(capture.byte_len()) > 512 * 1024 * 1024 {
+                        return Err(lk_source::SourceError::Parse(
                         "manual captures exceed the ingest-wide 512 MiB limit; split the ingest"
                             .into(),
                     ));
-                }
-                let retirement_blocked = !capture.failures.is_empty();
-                Ok((
-                    lk_source::SourceObservation {
-                        items: capture.items,
-                        scope: lk_source::ObservationScope::Unverified,
-                        outcome: if retirement_blocked {
-                            lk_source::ObservationOutcome::Partial
-                        } else {
-                            lk_source::ObservationOutcome::Unverified
+                    }
+                    let retirement_blocked = !capture.failures.is_empty();
+                    Ok((
+                        lk_source::SourceObservation {
+                            items: capture.items,
+                            scope: lk_source::ObservationScope::Unverified,
+                            outcome: if retirement_blocked {
+                                lk_source::ObservationOutcome::Partial
+                            } else {
+                                lk_source::ObservationOutcome::Unverified
+                            },
                         },
-                    },
-                    capture.originals,
-                    retirement_blocked,
-                ))
-            })
+                        capture.originals,
+                        retirement_blocked,
+                    ))
+                })
         } else {
             adapter
                 .observe(&sc.params, &extract_ctx)

@@ -45,6 +45,19 @@ identity:
 # personal events across every source for a day, so a single run keeps it complete.
 ingest:
   schedule: "0 7 * * *"          # every day 07:00 (sources use lookback windows)
+  # Optional local DOCX/XLSX/PDF/image decoder. `lore input install DIRECTORY`
+  # creates an isolated, pinned environment and prints its python path.
+  # Relative paths here resolve against this config file, not vault.root.
+  # documents:
+  #   python: ~/.local/share/lorekeeper/documents/venv/bin/python
+  #   timeout_seconds: 120
+  #   max_output_bytes: 33554432
+  #   max_decoded_bytes: 134217728
+  #   ocr:
+  #     tessdata_dir: ~/.local/share/lorekeeper/tessdata
+  #     languages: [kor, eng]     # explicitly installed <language>.traineddata files
+  #     layout: auto              # auto | single-block | sparse-text; no automatic retry
+  #     pdf: false               # true: additional OCR for every PDF page
 
 # ─── Source definitions ───────────────────────────────────
 # key = stable source ID; daily sources use daily/<id>, document sources use wiki/documents.
@@ -335,7 +348,9 @@ sources:
       # Relative paths anchor at vault.root. Keep raw input separate from all managed
       # vault.dirs roots and .lorekeeper, including symlink targets.
       inbox_dir: inbox
-      extensions: [md, txt, markdown, html, htm]
+      # Omitted: Markdown/text/HTML/DOCX/XLSX/PDF; images also selected when OCR is configured.
+      # An explicit list narrows selection; unsupported files remain untouched.
+      # extensions: [md, txt, markdown, html, htm, docx, xlsx, pdf, png, jpg, tiff, webp]
       archive_after_ingest: true  # auto-archive after processing (default true)
     labels: [knowledge]
     concept_policy: supported-new

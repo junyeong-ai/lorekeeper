@@ -31,15 +31,19 @@ Review and commit vault changes separately; existing staging remains untouched.
    Existing archive entries are never replaced; identical bytes may reuse an entry.
    An empty inbox means collection finished, not that semantic tasks or reviews finished.
 
-The manual adapter reads top-level UTF-8 Markdown, text and HTML files. Unsupported
-formats and subdirectories are not ingestion units; failed reads are reported, and
+The manual adapter reads top-level UTF-8 Markdown, text and HTML. DOCX/XLSX/PDF
+use optional configured preprocessing; images use explicitly configured OCR.
+See [document preprocessing](../../lore-setup/references/config.md#document-preprocessing)
+for setup, format scope and limits. Unsupported formats and subdirectories are not
+ingestion units; failed reads and empty binary projections are reported, and
 failure of every eligible read fails the source. Original YAML is preserved under
 `source_record.manual_frontmatter` as source evidence, never as page identity or
 completion state. Before page publication, the adapter preserves exact entry bytes
 and supported local dependencies under `.lorekeeper/evidence/manual/`. Identical
 file bytes share storage across bundle revisions. `source_record.manual_original`
 identifies the immutable manifest; `lore wiki original <document-path>` verifies it
-and lists members. Assets remain in the inbox; they are not independent ingestion units.
+and lists members. Assets remain in the inbox. Images become independent ingestion
+units only when selected by OCR configuration or an explicit extension list.
 
 Explicit relative Markdown links and supported HTML resources are captured within
 the inbox boundary. Missing, escaping or symlink dependencies fail capture. CSS/SVG

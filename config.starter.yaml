@@ -13,6 +13,8 @@ identity:
 # Host-local cadence; takes effect only after explicit OS registration.
 ingest:
   schedule: "0 7 * * *"
+  # DOCX/XLSX/PDF: `lore input install DIRECTORY`, then add its printed documents block.
+  # Image OCR additionally needs explicit traineddata/languages; see config.example.yaml.
 
 sources:
   manual-inbox:

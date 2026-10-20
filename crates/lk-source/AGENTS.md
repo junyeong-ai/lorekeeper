@@ -146,3 +146,18 @@ Use parser/token-state behavior, not regex replacement of arbitrary markup.
   Retire only direct inbox entries into a strict descendant of that inbox.
   These checks are not a global inbox snapshot or a lease against external editors.
   Publication order and immutable object/bundle storage belong to vault/CLI owners.
+
+## Document projection (`content.rs`, `content/`)
+
+- Format decoding is separate from source acquisition and semantic work. The optional
+  pinned Python runtime reads captured bytes through stdin; Rust bounds time/output,
+  validates its typed response and owns publication. No runtime installs or OCR model
+  downloads during ingestion. Decoder stderr may contain source text; never forward it.
+- XLSX preserves sheet state, cell coordinates, formulas and stored cached values without
+  calculation. PDF physical page numbers differ from DOCX flow content. OCR is explicit
+  and distinct from native text; empty extraction is unprocessed, never completed knowledge.
+- Decoder-generated links are original references, not canonical wiki edges. Render
+  them as literal destinations. Preserve raw input before optional inbox retirement.
+- Update the embedded requirements/hash lock and package protocol together. The ignored
+  real-runtime test is opt-in because Markdown-only CI needs no Python package installation;
+  run it explicitly when changing the decoder or its dependencies.

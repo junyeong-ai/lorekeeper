@@ -5,6 +5,7 @@
 - [Configuration outline](#configuration-outline)
 - [Initial setup](#initial-setup)
 - [Location and validation](#location-and-validation)
+- [Document preprocessing](#document-preprocessing)
 - [Nodex binary selection](#nodex-binary-selection)
 
 ## Configuration outline
@@ -176,6 +177,65 @@ An existing imported document keeps its vault address when its title or path cha
 Legacy pages without verified document identity require explicit migration; a matching
 path alone cannot authorize overwriting a curated synthesis. Missing inventory entries
 do not imply deletion, archival or false claims.
+
+## Document preprocessing
+
+Markdown, UTF-8 text and HTML need no extra runtime. For a requested DOCX/XLSX/PDF
+workflow, run `lore input install DIRECTORY --python /path/to/python3` with Python
+3.10+ and a new directory whose parent exists. It creates a dedicated virtual
+environment, installs the embedded hash-locked binary wheels from PyPI and prints
+an `ingest.documents.python` block. Merge it into the selected config without
+replacing its existing `ingest.schedule`. Missing platform wheels fail explicitly;
+the installer does not build native dependencies from source. A failed installation
+retains its incomplete directory for inspection and never overwrites existing data.
+
+Then run `lore input check`, `lore input inspect /path/to/file.pdf` and a selected
+`lore ingest --dry-run SOURCE`. Inspect emits the projection without publishing or
+moving the input. Runtime paths resolve against the config file. Ingestion never
+installs packages or downloads models. Input entries are capped at 32 MiB; configured
+time, decoded-content and serialized-output bounds refuse overflow without truncation.
+
+OCR requires explicitly installed Tesseract `<language>.traineddata` files:
+
+```yaml
+ingest:
+  documents:
+    python: /path/to/runtime/venv/bin/python
+    timeout_seconds: 120
+    max_output_bytes: 33554432
+    max_decoded_bytes: 134217728
+    ocr:
+      tessdata_dir: /path/to/tessdata
+      languages: [kor, eng]
+      layout: auto
+      pdf: false
+```
+
+Use the official [tessdata_fast](https://github.com/tesseract-ocr/tessdata_fast)
+models at a pinned revision; keep model provenance with the installation.
+`lore input check` reports installed model SHA-256 digests. `pdf: true` adds OCR
+for every PDF page while retaining native text separately. Image OCR recognizes
+text; it does not interpret diagrams. Native PDF text follows the decoder's reading
+order. DOCX has no reliable physical page labels. XLSX preserves formulas and their
+stored cached values without recalculation; drawings, comments and linked workbooks
+are outside that projection. `.doc`, `.xls`, audio and video are unsupported.
+
+OCR `layout` is explicit: `auto` for page layout, `single-block` for one text block,
+or `sparse-text` for scattered text without a reading-order guarantee. These map
+to Tesseract's documented [page segmentation modes](https://tesseract-ocr.github.io/tessdoc/ImproveQuality.html#page-segmentation-method).
+An empty result never triggers another mode silently; inspect the original and
+select the intended policy. Published projection metadata retains language order,
+layout and model hashes, as well as decoder versions.
+
+The inbox selects DOCX/XLSX/PDF in addition to text by default; a missing decoder
+is an explicit per-file failure. Images are selected by default only with OCR
+configured, so referenced image assets do not become empty standalone documents.
+An explicit `params.extensions` list narrows selection. Unknown extensions remain
+untouched. Failed/no-text entries stay in the inbox. Original bytes are preserved
+before publication; PDF pages and spreadsheet sheets remain units of one source
+document rather than generating independent concepts. Source metadata records format,
+projection policy, decoder versions and limitations. Drive still uses its documented
+provider text exports; adding an inbox decoder does not expand a remote adapter's reach.
 
 ### Nodex binary selection
 

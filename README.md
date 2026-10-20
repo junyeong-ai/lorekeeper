@@ -83,6 +83,11 @@ mkdir -p "$(lore config vault-root)/inbox"
 vault의 `inbox/`에 메모 파일 하나를 넣은 뒤 수집합니다. `inbox_dir: inbox`는 변경한
 `vault.root`를 따라갑니다. 기본 설정에는 공급자 인증 마법사가 필요하지 않습니다.
 
+DOCX·XLSX·PDF를 넣으려면 `lore input install DIRECTORY`로 선택적 변환 환경을 설치하고
+출력된 설정을 병합합니다. `lore input check`로 의존성을, `lore input inspect FILE.pdf`로
+원본을 옮기지 않고 변환 결과를 확인합니다. 이미지는 별도 OCR 언어 데이터가 필요합니다.
+[전처리 설정과 지원 범위](skills/lore-setup/references/config.md#document-preprocessing)를 참고하세요.
+
 ```bash
 # 4) 입력 접근을 확인한 뒤 실제 수집
 lore ingest --dry-run
@@ -322,7 +327,7 @@ flowchart LR
 | `google-drive` | Drive 폴더의 큐레이션 문서 | Google OAuth |
 | `rss` | 벤더 블로그·뉴스 → 개념 (인증 불필요, 다중 피드) | 없음 |
 | `nodex` | 프로젝트 저장소가 직접 쓴 결정·학습 기록 → 개념 (`nodex.toml`과 nodex `>=0.60,<0.61` 필요; [실행 파일·근거 버전 설정](skills/lore-setup/references/config.md#nodex-binary-selection)) | 없음 |
-| `manual` | `inbox/`에 드롭한 마크다운·텍스트·HTML 파일 | 없음 |
+| `manual` | `inbox/`의 Markdown·텍스트·HTML, 선택적 DOCX·XLSX·PDF·이미지 OCR | 소스 인증 없음; 바이너리 변환은 별도 런타임 |
 | `tasks` | 내가 끝낸 작업 — `lore task`로 닫은 항목이 그날의 페이지가 됨 | 없음 |
 
 소스 키 = vault의 하위 폴더 이름. 같은 타입을 여러 개 정의할 수 있습니다(예: `team-slack`, `ai-news`). 전체 예시는 [`config.example.yaml`](config.example.yaml).

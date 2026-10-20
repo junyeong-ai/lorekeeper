@@ -14,6 +14,7 @@ pub mod graph;
 pub mod health;
 pub mod ingest;
 pub mod init;
+pub mod input;
 pub mod installation;
 pub mod maintenance;
 pub mod performance;

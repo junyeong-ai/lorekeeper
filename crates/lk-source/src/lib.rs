@@ -1,5 +1,6 @@
 mod atlassian;
 mod confluence;
+pub mod content;
 pub mod credentials;
 pub mod fetch;
 mod google;
@@ -146,6 +147,7 @@ pub struct ExtractContext {
     pub vault_root: std::path::PathBuf,
     /// Managed output namespaces, kept separate from raw input directories.
     pub vault_dirs: lk_core::config::VaultDirs,
+    pub documents: Option<lk_core::content::InputProcessingConfig>,
 }
 
 impl ExtractContext {
@@ -479,6 +481,7 @@ mod tests {
             identity: lk_core::config::Identity::default(),
             vault_root: std::path::PathBuf::new(),
             vault_dirs: Default::default(),
+            documents: None,
         }
     }
 
