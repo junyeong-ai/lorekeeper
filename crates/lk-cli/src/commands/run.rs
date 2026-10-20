@@ -1131,7 +1131,7 @@ mod native {
                         self.failure("audit completion", error);
                     }
                 }
-            } else if self.result.audit_progress.is_some() {
+            } else if self.result.audit.as_ref().is_some_and(Vec::is_empty) {
                 match self.audit_plan(&[]) {
                     Ok(plan) => {
                         if let Some(progress) = &mut self.result.audit_progress {
