@@ -278,6 +278,16 @@ pub(super) fn audit(root: &Path, config: &Config, path: &str) -> miette::Result<
         .into_iter()
         .next()
         .ok_or_else(|| miette::miette!("audit subject not found: {path}"))?;
+    audit_candidate(root, config, &candidate)
+}
+
+/// Preliminary capture from the controller's selected plan; publication rederives scope.
+pub(super) fn audit_candidate(
+    root: &Path,
+    config: &Config,
+    candidate: &lk_graph::audit::AuditCandidate,
+) -> miette::Result<Prepared> {
+    let path = candidate.path.as_str();
     let mut captured = Capture::new(root);
     captured.page(
         path,
@@ -329,8 +339,8 @@ pub(super) fn audit(root: &Path, config: &Config, path: &str) -> miette::Result<
     }
     let subject = Subject::Audit {
         path: path.to_owned(),
-        file_revision: candidate.file_revision,
-        input_revision: candidate.input_revision,
+        file_revision: candidate.file_revision.clone(),
+        input_revision: candidate.input_revision.clone(),
     };
     let context = json!({
         "subject": subject,
@@ -359,4 +369,59 @@ pub(super) fn refresh(root: &Path, config: &Config, context: &Value) -> miette::
         ));
     }
     Ok(prepared)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn selected_audit_capture_matches_live_input_and_refuses_dependency_drift() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let documents = root.join("wiki/documents");
+        std::fs::create_dir_all(&documents).unwrap();
+        std::fs::write(
+            documents.join("a.md"),
+            "---\ntype: document\ntitle: A\n---\nSubject. [Context](b.md)\n",
+        )
+        .unwrap();
+        std::fs::write(
+            documents.join("b.md"),
+            "---\ntype: document\ntitle: B\n---\nContext.\n",
+        )
+        .unwrap();
+        let config_path = root.join("config.yaml");
+        std::fs::write(
+            &config_path,
+            "vault:\n  root: .\nidentity:\n  name: Test\n  email: test@example.com\nsources:\n  notes:\n    type: manual\n    enabled: false\n    params: {inbox_dir: inbox}\n",
+        )
+        .unwrap();
+        let config = Config::load(&config_path).unwrap();
+        let pages = lk_graph::scan::scan_vault(&root, false).unwrap();
+        let plan = lk_graph::audit::plan_selected(
+            &root,
+            &config.vault.dirs,
+            &pages,
+            1,
+            &["wiki/documents/a.md".into()],
+            u64::MAX,
+        )
+        .unwrap();
+        let candidate = &plan.candidates[0];
+        let live = audit(&root, &config, &candidate.path).unwrap();
+        let selected = audit_candidate(&root, &config, candidate).unwrap();
+        assert_eq!(live.subject, selected.subject);
+        assert_eq!(live.context, selected.context);
+        assert_eq!(live.resources, selected.resources);
+        assert_eq!(live.pages, selected.pages);
+        std::fs::write(documents.join("unrelated.md"), "---\ninvalid: [\n---\n").unwrap();
+        assert!(audit_candidate(&root, &config, candidate).is_ok());
+        std::fs::write(
+            documents.join("b.md"),
+            "---\ntype: document\ntitle: B\n---\nChanged context.\n",
+        )
+        .unwrap();
+        assert!(audit_candidate(&root, &config, candidate).is_err());
+    }
 }

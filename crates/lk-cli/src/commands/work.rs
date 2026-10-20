@@ -233,11 +233,11 @@ pub(super) fn prepare_audit(
     root: &Path,
     config: &lk_core::config::Config,
     config_revision: &str,
-    path: &str,
+    candidate: &lk_graph::audit::AuditCandidate,
 ) -> miette::Result<String> {
     let root = root.canonicalize().into_diagnostic()?;
     let session = lk_vault::MutationSession::acquire(&root).into_diagnostic()?;
-    let prepared = resources::audit(&root, config, path)?;
+    let prepared = resources::audit_candidate(&root, config, candidate)?;
     let work = Work::create(
         &session,
         &prepared.resources,
@@ -252,10 +252,10 @@ pub(super) fn audit_needs_work(
     root: &Path,
     config: &lk_core::config::Config,
     config_revision: &str,
-    path: &str,
+    candidate: &lk_graph::audit::AuditCandidate,
 ) -> miette::Result<bool> {
     let root = root.canonicalize().into_diagnostic()?;
-    let prepared = resources::audit(&root, config, path)?;
+    let prepared = resources::audit_candidate(&root, config, candidate)?;
     Ok(expected(&prepared, config, config_revision)?
         .plan
         .parts

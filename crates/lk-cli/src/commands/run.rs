@@ -980,12 +980,12 @@ mod native {
                 .collect::<Vec<_>>();
             let selection = serde_json::to_string(&paths).expect("string paths serialize");
             let mut bounded = plan.input.ensure_ready().is_err();
-            for path in &paths {
+            for candidate in &plan.candidates {
                 match crate::commands::work::audit_needs_work(
                     &self.root,
                     &self.config,
                     &self.config_revision,
-                    path,
+                    candidate,
                 ) {
                     Ok(required) => bounded |= required,
                     Err(error) => {
@@ -996,12 +996,13 @@ mod native {
             }
             if bounded {
                 let mut jobs = std::collections::BTreeMap::new();
-                for path in &paths {
+                for candidate in &plan.candidates {
+                    let path = &candidate.path;
                     let work = match crate::commands::work::prepare_audit(
                         &self.root,
                         &self.config,
                         &self.config_revision,
-                        path,
+                        candidate,
                     ) {
                         Ok(id) => id,
                         Err(error) => {
