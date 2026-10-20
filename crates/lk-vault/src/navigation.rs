@@ -40,11 +40,11 @@ pub fn plan_navigation_entry(
     };
     let guide = match locale {
         Locale::Ko => format!(
-            "# 지식 탐색\n\n`lore wiki refresh`는 SQLite 탐색 스냅샷을 갱신합니다.\n\n- 탐색 세션마다 `lore wiki prepare`로 snapshot ID를 한 번 확보합니다(refresh 출력 ID도 사용 가능).\n- `lore wiki browse --snapshot ID --json`과 `lore wiki search <query> --snapshot ID --json`으로 반복 탐색합니다.\n- `lore wiki links <path> --snapshot ID --direction both`로 명시 링크·역링크를 읽습니다.\n- 검색의 file_revision으로 `lore wiki read <path> --revision REV`를 호출해 현재 원문을 확인합니다.\n\nObsidian에서는 검색창에서 {}/concepts 및 {}/documents 경로로 범위를 좁히고 페이지의 백링크를 사용합니다.\n",
+            "# 지식 탐색\n\n`lore wiki refresh`는 SQLite 탐색 스냅샷을 갱신합니다.\n\n- `lore wiki snapshot`으로 기존 snapshot ID와 저장된 확인 시각을 읽습니다. 이 시각은 이후 외부 편집의 반영을 보장하지 않습니다.\n- 호환 스냅샷이 없거나 현재 문서 구성이 필요하면 `lore wiki prepare`로 전체를 확인하고 ID를 확보합니다(refresh 출력 ID도 사용 가능).\n- `lore wiki browse --snapshot ID --json`과 `lore wiki search <query> --snapshot ID --json`으로 반복 탐색합니다.\n- `lore wiki links <path> --snapshot ID --direction both`로 명시 링크·역링크를 읽습니다.\n- 검색의 file_revision으로 `lore wiki read <path> --revision REV`를 호출해 현재 원문을 확인합니다.\n\nObsidian에서는 검색창에서 {}/concepts 및 {}/documents 경로로 범위를 좁히고 페이지의 백링크를 사용합니다.\n",
             dirs.wiki, dirs.wiki,
         ),
         Locale::En => format!(
-            "# Knowledge navigation\n\n`lore wiki refresh` refreshes the SQLite navigation snapshot.\n\n- Start a retrieval session with `lore wiki prepare` and retain its snapshot ID (or the ID printed by refresh).\n- Repeat `lore wiki browse --snapshot ID --json` and `lore wiki search <query> --snapshot ID --json`.\n- Inspect links/backlinks with `lore wiki links <path> --snapshot ID --direction both`.\n- Verify current originals with `lore wiki read <path> --revision REV`, using the hit's file_revision.\n\nIn Obsidian, narrow search to {}/concepts and {}/documents and use page backlinks.\n",
+            "# Knowledge navigation\n\n`lore wiki refresh` refreshes the SQLite navigation snapshot.\n\n- Read an existing snapshot ID and its stored verification time with `lore wiki snapshot`. That time does not establish freshness after external edits.\n- Run `lore wiki prepare` to verify the corpus when no compatible snapshot exists or current membership is required; retain its ID (or the ID printed by refresh).\n- Repeat `lore wiki browse --snapshot ID --json` and `lore wiki search <query> --snapshot ID --json`.\n- Inspect links/backlinks with `lore wiki links <path> --snapshot ID --direction both`.\n- Verify current originals with `lore wiki read <path> --revision REV`, using the hit's file_revision.\n\nIn Obsidian, narrow search to {}/concepts and {}/documents and use page backlinks.\n",
             dirs.wiki, dirs.wiki,
         ),
     };
@@ -113,6 +113,10 @@ mod tests {
             session.apply(plan).unwrap();
             let first = std::fs::read_to_string(&entry).unwrap();
             assert!(first.starts_with(NAVIGATION_ENTRY_MARKER));
+            assert!(
+                first.find("lore wiki snapshot").unwrap()
+                    < first.find("lore wiki prepare").unwrap()
+            );
             assert!(first.contains("lore wiki browse --snapshot ID --json"));
             assert!(first.contains("knowledge/concepts"));
             assert!(first.len() < 2000);
