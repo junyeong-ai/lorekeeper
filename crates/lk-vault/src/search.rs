@@ -10,7 +10,9 @@
 //! every term. Names and aliases belong to the vault's vocabulary; the reader does not infer
 //! equivalent spellings or combine scattered words into a declared concept name.
 
-use std::collections::BTreeMap;
+use std::borrow::Cow;
+use std::cmp::{Ordering, Reverse};
+use std::collections::{BTreeMap, BinaryHeap};
 use std::path::{Path, PathBuf};
 
 use lk_core::concept::identity_key;
@@ -426,20 +428,109 @@ pub(super) fn visit_pages(
     Ok(())
 }
 
-pub(super) fn search_pages(
-    options: &SearchOptions<'_>,
-    pages: &[Page],
-    spellings: &[String],
-    terms: &[String],
-    query_identity: Option<&str>,
-) -> SearchResult {
-    let mut candidates = Vec::new();
-    let mut categories = BTreeMap::new();
-    let mut source_statuses = BTreeMap::new();
-    let mut formats = BTreeMap::new();
-    let mut tags = BTreeMap::new();
-    let mut knowledge_statuses = BTreeMap::new();
-    for entry in pages {
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+enum SearchRank {
+    Title(String, PathBuf),
+    Created(Reverse<Option<jiff::civil::Date>>, PathBuf),
+    Relevance(u8, MatchField, Reverse<u64>, String, PathBuf),
+}
+
+impl SearchRank {
+    fn build(
+        page: &Page,
+        options: &SearchOptions<'_>,
+        matched: MatchField,
+        phrase: bool,
+        spacing: bool,
+    ) -> Self {
+        if options.query.is_none() {
+            return match options.sort {
+                BrowseSort::Title => Self::Title(page.title.clone(), page.rel_path.clone()),
+                BrowseSort::Created => {
+                    Self::Created(Reverse(page.created_date()), page.rel_path.clone())
+                }
+            };
+        }
+        let priority = match matched {
+            MatchField::Identity => 0,
+            MatchField::NameVariant => 1,
+            _ if phrase => 2,
+            _ if !spacing => 3,
+            _ => 4,
+        };
+        Self::Relevance(
+            priority,
+            matched,
+            Reverse(page.page.frontmatter.source_count().unwrap_or(0)),
+            page.id.clone(),
+            page.rel_path.clone(),
+        )
+    }
+}
+
+struct SearchCandidate<'a> {
+    rank: SearchRank,
+    page: Cow<'a, Page>,
+    matched: MatchField,
+    phrase_match: bool,
+    spacing_match: bool,
+}
+
+impl PartialEq for SearchCandidate<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.rank == other.rank
+    }
+}
+impl Eq for SearchCandidate<'_> {}
+impl PartialOrd for SearchCandidate<'_> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for SearchCandidate<'_> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.rank.cmp(&other.rank)
+    }
+}
+
+pub(super) struct SearchCollector<'a> {
+    window: usize,
+    candidates: BinaryHeap<SearchCandidate<'a>>,
+    result: SearchResult,
+}
+
+impl<'a> SearchCollector<'a> {
+    pub(super) fn new(options: &SearchOptions<'_>) -> Self {
+        Self {
+            window: if options.limit == 0 {
+                0
+            } else {
+                options.offset.saturating_add(options.limit)
+            },
+            candidates: BinaryHeap::new(),
+            result: SearchResult {
+                snapshot: options.snapshot.map(String::from),
+                hits: Vec::new(),
+                total: 0,
+                offset: options.offset,
+                next_offset: None,
+                categories: BTreeMap::new(),
+                source_statuses: BTreeMap::new(),
+                formats: BTreeMap::new(),
+                tags: BTreeMap::new(),
+                knowledge_statuses: BTreeMap::new(),
+            },
+        }
+    }
+
+    pub(super) fn push(
+        &mut self,
+        mut entry: Cow<'a, Page>,
+        options: &SearchOptions<'_>,
+        spellings: &[String],
+        terms: &[String],
+        query_identity: Option<&str>,
+    ) {
         let names: Vec<&str> = entry.names().collect();
         let projection = entry.match_projection();
         let exact_match = if options.query.is_none() {
@@ -461,7 +552,7 @@ pub(super) fn search_pages(
                 .flatten()
         });
         let Some(matched) = matched else {
-            continue;
+            return;
         };
         let metadata = |key| {
             entry
@@ -471,14 +562,22 @@ pub(super) fn search_pages(
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
         };
-        *categories
+        *self
+            .result
+            .categories
             .entry(metadata("category").to_owned())
             .or_insert(0) += 1;
-        *formats.entry(metadata("type").to_owned()).or_insert(0) += 1;
+        *self
+            .result
+            .formats
+            .entry(metadata("type").to_owned())
+            .or_insert(0) += 1;
         for tag in search_tags(&entry.page) {
-            *tags.entry(tag).or_insert(0) += 1;
+            *self.result.tags.entry(tag).or_insert(0) += 1;
         }
-        *knowledge_statuses
+        *self
+            .result
+            .knowledge_statuses
             .entry(entry.knowledge_status().as_str().to_owned())
             .or_insert(0) += 1;
         let source_status = entry
@@ -488,9 +587,13 @@ pub(super) fn search_pages(
             .and_then(|record| record.get("status"))
             .and_then(|value| value.as_str())
             .unwrap_or("");
-        *source_statuses.entry(source_status.to_owned()).or_insert(0) += 1;
+        *self
+            .result
+            .source_statuses
+            .entry(source_status.to_owned())
+            .or_insert(0) += 1;
         if !entry.matches_filters(options) {
-            continue;
+            return;
         }
         let phrase_match = options.query.is_some_and(|query| {
             let phrase = fold_name(query);
@@ -500,129 +603,144 @@ pub(super) fn search_pages(
                 || contains_term(&projection.text, &phrase)
         });
         let spacing_match = exact_match.is_none() || matched == MatchField::NameVariant;
-        candidates.push((entry, matched, phrase_match, spacing_match));
+        self.result.total += 1;
+        if self.window == 0 {
+            return;
+        }
+        let rank = SearchRank::build(&entry, options, matched, phrase_match, spacing_match);
+        if self.candidates.len() == self.window
+            && self
+                .candidates
+                .peek()
+                .is_some_and(|candidate| candidate.rank <= rank)
+        {
+            return;
+        }
+        // Captured projections are needed only while matching; excerpts load selected bodies.
+        if let Cow::Owned(page) = &mut entry {
+            page.projection = None;
+        }
+        self.candidates.push(SearchCandidate {
+            rank,
+            page: entry,
+            matched,
+            phrase_match,
+            spacing_match,
+        });
+        if self.candidates.len() > self.window {
+            self.candidates.pop();
+        }
     }
 
-    candidates.sort_by(
-        |(a, a_match, a_phrase, a_spacing), (b, b_match, b_phrase, b_spacing)| {
-            if options.query.is_none() {
-                return match options.sort {
-                    BrowseSort::Title => a.title.cmp(&b.title).then(a.rel_path.cmp(&b.rel_path)),
-                    BrowseSort::Created => b
-                        .created_date()
-                        .cmp(&a.created_date())
-                        .then(a.rel_path.cmp(&b.rel_path)),
-                };
-            }
-            let priority = |matched: &MatchField, phrase: bool, spacing: bool| match matched {
-                MatchField::Identity => 0,
-                MatchField::NameVariant => 1,
-                _ if phrase => 2,
-                _ if !spacing => 3,
-                _ => 4,
-            };
-            priority(a_match, *a_phrase, *a_spacing)
-                .cmp(&priority(b_match, *b_phrase, *b_spacing))
-                .then(
-                    a_match
-                        .cmp(b_match)
-                        .then(
-                            b.page
-                                .frontmatter
-                                .source_count()
-                                .unwrap_or(0)
-                                .cmp(&a.page.frontmatter.source_count().unwrap_or(0)),
-                        )
-                        .then(a.id.cmp(&b.id))
-                        .then(a.rel_path.cmp(&b.rel_path)),
-                )
-        },
-    );
-    let total = candidates.len();
-    // Excerpts strip and search the body again. Only the selected hits need one.
-    let hits = candidates
-        .into_iter()
-        .skip(options.offset)
-        .take(options.limit)
-        .map(|(entry, matched, phrase_match, spacing_match)| {
-            let mut metadata_issues = Vec::new();
-            let source_record = source_record_preview(&entry.page, &mut metadata_issues);
-            let source_identity = source_identity_preview(&entry.page, &mut metadata_issues);
-            let source_file = source_file_preview(&entry.page, &mut metadata_issues);
-            let source_url = source_url_preview(&entry.page, &mut metadata_issues);
-            let knowledge_review = knowledge_review_preview(&entry.page, &mut metadata_issues);
-            SearchHit {
-                excerpt: excerpt_with_spacing(
-                    &entry.page.body,
+    pub(super) fn finish(
+        mut self,
+        options: &SearchOptions<'_>,
+        spellings: &[String],
+        terms: &[String],
+    ) -> SearchResult {
+        self.result.hits = self
+            .candidates
+            .into_sorted_vec()
+            .into_iter()
+            .skip(options.offset)
+            .take(options.limit)
+            .map(|candidate| {
+                let SearchCandidate {
+                    page: entry,
                     matched,
-                    terms,
-                    spellings,
+                    phrase_match,
                     spacing_match,
-                ),
-                file_revision: entry.file_revision.clone(),
-                source_record,
-                source_identity,
-                source_file,
-                source_url,
-                metadata_issues,
-                id: entry.id.clone(),
-                path: entry.rel_path.to_string_lossy().into_owned(),
-                title: entry.title.clone(),
-                aliases: entry.aliases.clone(),
-                format: entry
-                    .page
-                    .frontmatter
-                    .get("type")
-                    .and_then(|v| v.as_str())
-                    .map(String::from),
-                category: entry
-                    .page
-                    .frontmatter
-                    .get("category")
-                    .and_then(|v| v.as_str())
-                    .filter(|s| !s.is_empty())
-                    .map(String::from),
-                created: entry
-                    .page
-                    .frontmatter
-                    .get("created")
-                    .and_then(|v| v.as_str())
-                    .map(|value| value.chars().take(160).collect()),
-                created_status: match entry.page.frontmatter.get("created") {
-                    None | Some(serde_json::Value::Null) => CreatedStatus::Missing,
-                    Some(_) if entry.created_date().is_some() => CreatedStatus::Valid,
-                    Some(_) => CreatedStatus::Invalid,
-                },
-                created_truncated: entry
-                    .page
-                    .frontmatter
-                    .get("created")
-                    .and_then(|v| v.as_str())
-                    .is_some_and(|value| value.chars().count() > 160),
-                source_count: entry.page.frontmatter.source_count().unwrap_or(0),
-                knowledge_status: entry.knowledge_status(),
-                knowledge_review,
-                tags: search_tags(&entry.page),
-                phrase_match,
-                spacing_match,
-                reviews: entry.reviews.clone(),
-                matched,
-            }
-        })
-        .collect::<Vec<_>>();
-    let end = options.offset.saturating_add(hits.len());
-    SearchResult {
-        snapshot: options.snapshot.map(String::from),
-        hits,
-        total,
-        offset: options.offset,
-        next_offset: (end < total).then_some(end),
-        categories,
-        source_statuses,
-        formats,
-        tags,
-        knowledge_statuses,
+                    ..
+                } = candidate;
+                let mut metadata_issues = Vec::new();
+                let source_record = source_record_preview(&entry.page, &mut metadata_issues);
+                let source_identity = source_identity_preview(&entry.page, &mut metadata_issues);
+                let source_file = source_file_preview(&entry.page, &mut metadata_issues);
+                let source_url = source_url_preview(&entry.page, &mut metadata_issues);
+                let knowledge_review = knowledge_review_preview(&entry.page, &mut metadata_issues);
+                SearchHit {
+                    excerpt: excerpt_with_spacing(
+                        &entry.page.body,
+                        matched,
+                        terms,
+                        spellings,
+                        spacing_match,
+                    ),
+                    file_revision: entry.file_revision.clone(),
+                    source_record,
+                    source_identity,
+                    source_file,
+                    source_url,
+                    metadata_issues,
+                    id: entry.id.clone(),
+                    path: entry.rel_path.to_string_lossy().into_owned(),
+                    title: entry.title.clone(),
+                    aliases: entry.aliases.clone(),
+                    format: entry
+                        .page
+                        .frontmatter
+                        .get("type")
+                        .and_then(|v| v.as_str())
+                        .map(String::from),
+                    category: entry
+                        .page
+                        .frontmatter
+                        .get("category")
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                        .map(String::from),
+                    created: entry
+                        .page
+                        .frontmatter
+                        .get("created")
+                        .and_then(|v| v.as_str())
+                        .map(|value| value.chars().take(160).collect()),
+                    created_status: match entry.page.frontmatter.get("created") {
+                        None | Some(serde_json::Value::Null) => CreatedStatus::Missing,
+                        Some(_) if entry.created_date().is_some() => CreatedStatus::Valid,
+                        Some(_) => CreatedStatus::Invalid,
+                    },
+                    created_truncated: entry
+                        .page
+                        .frontmatter
+                        .get("created")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|value| value.chars().count() > 160),
+                    source_count: entry.page.frontmatter.source_count().unwrap_or(0),
+                    knowledge_status: entry.knowledge_status(),
+                    knowledge_review,
+                    tags: search_tags(&entry.page),
+                    phrase_match,
+                    spacing_match,
+                    reviews: entry.reviews.clone(),
+                    matched,
+                }
+            })
+            .collect();
+        let end = options.offset.saturating_add(self.result.hits.len());
+        self.result.next_offset = (end < self.result.total).then_some(end);
+        self.result
     }
+}
+
+pub(super) fn search_pages(
+    options: &SearchOptions<'_>,
+    pages: &[Page],
+    spellings: &[String],
+    terms: &[String],
+    query_identity: Option<&str>,
+) -> SearchResult {
+    let mut collector = SearchCollector::new(options);
+    for page in pages {
+        collector.push(
+            Cow::Borrowed(page),
+            options,
+            spellings,
+            terms,
+            query_identity,
+        );
+    }
+    collector.finish(options, spellings, terms)
 }
 
 /// One knowledge page, read and parsed once.
@@ -1325,6 +1443,64 @@ pub(crate) fn markdown_files(root: &Path, dir: &Path) -> Result<Vec<PathBuf>, Va
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn streamed_search_keeps_only_the_requested_rank_window_and_complete_facets() {
+        let options = SearchOptions {
+            query: Some("topic"),
+            category: Some("selected"),
+            offset: 1,
+            limit: 2,
+            ..Default::default()
+        };
+        let terms = vec!["topic".into()];
+        let mut collector = SearchCollector::new(&options);
+        for count in 0..1000 {
+            let category = if count % 2 == 0 { "selected" } else { "other" };
+            let page = Page {
+                file_revision: "revision".into(),
+                body_line_offset: 0,
+                id: format!("item-{count:04}"),
+                title: format!("Item {count}"),
+                aliases: vec![],
+                rel_path: PathBuf::from(format!("wiki/documents/{count}.md")),
+                concept: false,
+                page: crate::parse_page(&format!(
+                    "---\ntype: document\ncategory: {category}\nsource_count: {count}\n---\n"
+                ))
+                .unwrap(),
+                knowledge_status: KnowledgeStatus::Active,
+                reviews: vec![],
+                projection: Some(MatchProjection {
+                    summary: "topic".into(),
+                    text: format!("topic {}", "detail ".repeat(1000)),
+                    spacing_text: "topic".into(),
+                }),
+            };
+            collector.push(Cow::Owned(page), &options, &[], &terms, None);
+            assert!(collector.candidates.len() <= 3);
+            assert!(
+                collector
+                    .candidates
+                    .iter()
+                    .all(|candidate| candidate.page.projection.is_none())
+            );
+        }
+        let result = collector.finish(&options, &[], &terms);
+        assert_eq!(result.total, 500);
+        assert_eq!(result.next_offset, Some(3));
+        assert_eq!(result.formats["document"], 1000);
+        assert_eq!(result.categories["selected"], 500);
+        assert_eq!(result.categories["other"], 500);
+        assert_eq!(
+            result
+                .hits
+                .iter()
+                .map(|hit| hit.source_count)
+                .collect::<Vec<_>>(),
+            [996, 994]
+        );
+    }
 
     #[test]
     fn visible_html_tables_preserve_text_and_cell_boundaries() {

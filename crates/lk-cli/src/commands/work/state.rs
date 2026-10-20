@@ -39,7 +39,7 @@ pub(crate) struct WorkFinding {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct WorkUnresolved {
+pub(crate) struct WorkQuestion {
     pub id: String,
     pub question: String,
     pub evidence: Vec<SemanticRange>,
@@ -62,10 +62,31 @@ pub(crate) struct WorkOutput {
     pub summary: String,
     #[serde(default)]
     pub findings: Vec<WorkFinding>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_questions: Vec<WorkQuestion>,
     #[serde(default)]
-    pub unresolved: Vec<WorkUnresolved>,
+    pub unresolved: Vec<WorkQuestion>,
     #[serde(default)]
     pub resolutions: Vec<WorkResolution>,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum QuestionKind {
+    Source,
+    Processing,
+}
+
+impl WorkOutput {
+    fn questions(&self) -> impl Iterator<Item = (QuestionKind, &WorkQuestion)> {
+        self.source_questions
+            .iter()
+            .map(|question| (QuestionKind::Source, question))
+            .chain(
+                self.unresolved
+                    .iter()
+                    .map(|question| (QuestionKind::Processing, question)),
+            )
+    }
 }
 
 #[derive(Serialize)]
@@ -308,13 +329,13 @@ fn validate_output(
         }
         validate_references(&finding.evidence, &node.ranges)?;
     }
-    let mut unresolved = BTreeSet::new();
-    for concern in &output.unresolved {
-        nonblank(&concern.id)?;
-        nonblank(&concern.question)?;
-        validate_references(&concern.evidence, &node.ranges)?;
-        if !unresolved.insert(concern.id.as_str()) {
-            return Err(fail("duplicate unresolved concern id"));
+    let mut open = BTreeSet::new();
+    for (_, question) in output.questions() {
+        nonblank(&question.id)?;
+        nonblank(&question.question)?;
+        validate_references(&question.evidence, &node.ranges)?;
+        if !open.insert(question.id.as_str()) {
+            return Err(fail("duplicate open question id"));
         }
     }
     let mut resolved = BTreeSet::new();
@@ -322,33 +343,33 @@ fn validate_output(
         nonblank(&resolution.id)?;
         nonblank(&resolution.reason)?;
         validate_references(&resolution.evidence, &node.ranges)?;
-        if !resolved.insert(resolution.id.as_str()) || unresolved.contains(resolution.id.as_str()) {
+        if !resolved.insert(resolution.id.as_str()) || open.contains(resolution.id.as_str()) {
             return Err(fail(
-                "concern ids must have one unresolved or resolved disposition",
+                "question ids must have one open or resolved disposition",
             ));
         }
     }
-    let mut inherited = BTreeMap::<&str, &WorkUnresolved>::new();
+    let mut inherited = BTreeMap::new();
     for child in children {
-        for concern in &child.unresolved {
-            if let Some(prior) = inherited.insert(&concern.id, concern)
-                && prior != concern
+        for (kind, question) in child.questions() {
+            if let Some(prior) = inherited.insert(question.id.as_str(), (kind, question))
+                && prior != (kind, question)
             {
                 return Err(fail(
-                    "child concern ids collide; preserve distinct namespaced ids",
+                    "child question ids collide; preserve distinct namespaced ids",
                 ));
             }
         }
     }
-    for (id, concern) in &inherited {
-        if let Some(current) = output.unresolved.iter().find(|current| current.id == *id) {
-            if current != *concern {
+    for (id, prior) in &inherited {
+        if let Some(current) = output.questions().find(|(_, question)| question.id == *id) {
+            if current != *prior {
                 return Err(fail(
-                    "an inherited open concern must remain unchanged or be explicitly resolved",
+                    "an inherited open question and its kind must remain unchanged or be explicitly resolved",
                 ));
             }
         } else if !resolved.contains(id) {
-            return Err(fail("reduction omitted an inherited open concern"));
+            return Err(fail("reduction omitted an inherited open question"));
         }
     }
     if !children.is_empty() && resolved.iter().any(|id| !inherited.contains_key(id)) {
@@ -559,9 +580,8 @@ impl Work {
                     .flat_map(|finding| &finding.evidence)
                     .chain(
                         output
-                            .unresolved
-                            .iter()
-                            .flat_map(|concern| &concern.evidence),
+                            .questions()
+                            .flat_map(|(_, question)| &question.evidence),
                     )
                     .chain(
                         output
@@ -921,8 +941,12 @@ impl Work {
         for finding in &mut output.findings {
             remap(&mut finding.evidence)?;
         }
-        for concern in &mut output.unresolved {
-            remap(&mut concern.evidence)?;
+        for question in output
+            .source_questions
+            .iter_mut()
+            .chain(&mut output.unresolved)
+        {
+            remap(&mut question.evidence)?;
         }
         let (manifest_path, manifest_raw) = prior.manifest(session.root())?;
         self.record_with_reuse(
@@ -1061,16 +1085,20 @@ mod tests {
 
     fn draft(work: &Work, root: &Path, id: &str, resources: &[SemanticResource]) -> WorkOutput {
         let input = work.input(root, id, resources).unwrap();
-        let unresolved = input
+        let children: Vec<WorkOutput> = input
             .get("children")
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
-            .flat_map(|child| {
-                serde_json::from_value::<WorkOutput>(child["output"].clone())
-                    .unwrap()
-                    .unresolved
-            })
+            .map(|child| serde_json::from_value(child["output"].clone()).unwrap())
+            .collect();
+        let source_questions = children
+            .iter()
+            .flat_map(|child| child.source_questions.clone())
+            .collect();
+        let unresolved = children
+            .into_iter()
+            .flat_map(|child| child.unresolved)
             .collect();
         WorkOutput {
             work_id: work.plan.id.clone(),
@@ -1078,6 +1106,7 @@ mod tests {
             input_revision: input["input_revision"].as_str().unwrap().into(),
             summary: "Read the assigned range; source-scoped observation.".into(),
             findings: Vec::new(),
+            source_questions,
             unresolved,
             resolutions: Vec::new(),
         }
@@ -1185,7 +1214,7 @@ mod tests {
         for (index, part) in work.plan.parts.iter().enumerate() {
             let mut output = draft(&work, root.path(), &part.id, &source);
             if index == 0 {
-                output.unresolved.push(WorkUnresolved {
+                output.unresolved.push(WorkQuestion {
                     id: "scope:source:count".into(),
                     question: "The source count is inconsistent.".into(),
                     evidence: vec![part.ranges[0].clone()],
@@ -1209,6 +1238,62 @@ mod tests {
             evidence: concern.evidence,
         });
         work.record(&session, output, &source).unwrap();
+    }
+
+    #[test]
+    fn source_questions_keep_their_kind_and_evidence_through_reduction() {
+        let range = SemanticRange {
+            resource: 0,
+            start: 0,
+            end: 10,
+        };
+        let node = Node {
+            id: "parent".into(),
+            kind: NodeKind::Reduce {
+                children: ["a".into(), "b".into()],
+            },
+            ranges: vec![range.clone()],
+        };
+        let question = WorkQuestion {
+            id: "a:authority".into(),
+            question: "Which policy is approved?".into(),
+            evidence: vec![range.clone()],
+        };
+        let child: WorkOutput = serde_json::from_value(json!({
+            "work_id":"w", "node_id":"a", "input_revision":"r", "summary":"Sources disagree; no deciding authority is supplied.",
+            "findings":[], "source_questions":[question], "unresolved":[], "resolutions":[]
+        })).unwrap();
+        let mut parent = child.clone();
+        parent.node_id = "parent".into();
+        assert!(validate_output(&parent, &node, &[&child]).is_ok());
+        parent.source_questions.clear();
+        assert!(validate_output(&parent, &node, &[&child]).is_err());
+        parent.unresolved.push(question.clone());
+        assert!(validate_output(&parent, &node, &[&child]).is_err());
+        let blocker = parent.clone();
+        parent.unresolved.clear();
+        parent.source_questions.push(question.clone());
+        assert!(validate_output(&parent, &node, &[&blocker]).is_err());
+        parent.unresolved.push(question.clone());
+        assert!(validate_output(&parent, &node, &[]).is_err());
+        parent.unresolved.clear();
+        parent.source_questions[0].evidence[0].end += 1;
+        assert!(validate_output(&parent, &node, &[]).is_err());
+        parent.source_questions.clear();
+        parent.resolutions.push(WorkResolution {
+            id: question.id,
+            reason: "The signed decision explicitly supersedes both drafts.".into(),
+            evidence: vec![range],
+        });
+        assert!(validate_output(&parent, &node, &[&child]).is_ok());
+    }
+
+    #[test]
+    fn adding_source_questions_preserves_existing_observation_revisions() {
+        let encoded = r#"{"work_id":"w","node_id":"n","input_revision":"r","summary":"s","findings":[],"unresolved":[],"resolutions":[]}"#;
+        let output: WorkOutput = serde_json::from_str(encoded).unwrap();
+        assert!(output.source_questions.is_empty());
+        assert_eq!(serde_json::to_string(&output).unwrap(), encoded);
     }
 
     #[test]
@@ -1386,6 +1471,11 @@ mod tests {
             attribution: Some("authored report".into()),
             evidence: vec![part.ranges[0].clone()],
         });
+        output.source_questions.push(WorkQuestion {
+            id: format!("{}:authority", part.id),
+            question: "Who approved the scoped claim?".into(),
+            evidence: vec![part.ranges[0].clone()],
+        });
         old.record(&session, output, &source).unwrap();
         let mut changed = source.clone();
         changed[0].text.push('!');
@@ -1416,6 +1506,7 @@ mod tests {
         .unwrap();
         let stored: StoredOutput = serde_json::from_str(&raw).unwrap();
         assert_eq!(stored.output.findings[0].evidence[0].resource, 2);
+        assert_eq!(stored.output.source_questions[0].evidence[0].resource, 2);
         assert_eq!(stored.reused_from.unwrap().work_id, old.plan.id);
         let different = Work::create(
             &session,

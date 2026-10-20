@@ -401,19 +401,18 @@ const TITLE_RULE: &str = "**A concept's title is its name and nothing else.** Th
 fn alias_rule(language: &str) -> String {
     format!(
         "**This vault is written in {language}, and where the material writes the concept in \
-         {language} too that form is not optional in `aliases`.** A reader who does not know \
-         the title searches in the language the vault is written in, and without the alias \
-         they reach nothing while the page holds every citation on the subject — after which \
-         the next extraction writing that form mints a rival page. What bounds this is the \
-         same rule the title follows: an alias is a name the material WRITES, so a concept the \
-         sources only ever name one way gets one name. A translation nobody writes is a \
-         spelling nobody searches for, and inventing one costs a rival page rather than \
-         preventing it. An alias must name the SAME concept in the same scope: a method, \
+         {language} too that form is not optional in `aliases`.** Propose a new alias only for \
+         a name the material WRITES for the same concept in the same scope. A method, \
          component, broader category, narrower application or distinct version is a \
          relationship, not an alternative name. Co-occurrence or a conditional claim does not \
          establish identity: an input, precondition or outcome is not automatically another \
-         name for the operation or observation. Omit uncertain aliases and preserve the source \
-         wording in its evidence until equivalence is established."
+         name for the operation or observation. Omit uncertain new aliases and preserve the \
+         source wording until equivalence is established. Existing declared aliases are \
+         lookup keys: absence from the currently read citations does not establish that an \
+         alias is wrong. Retain that mapping and record uncertainty when its basis cannot be \
+         verified. Remove or qualify an existing alias through reviewed curation only when \
+         read evidence establishes a different subject, scope or ambiguous identity; pin \
+         that evidence and reason. Retention is not renewed semantic approval."
     )
 }
 

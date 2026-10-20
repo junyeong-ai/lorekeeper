@@ -199,7 +199,7 @@ jobs:
       # wider than the job needs.
       - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
-          tool: zizmor@1.31.0
+          tool: zizmor@1.31.1
       - run: zizmor .github/workflows/
 
   doc:

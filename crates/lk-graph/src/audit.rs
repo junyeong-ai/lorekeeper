@@ -82,7 +82,7 @@ struct ConceptRetirement {
     from_revision: String,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct AuditCompletion {
     pub kind: AuditSubjectKind,
     pub requested_path: String,
@@ -135,7 +135,7 @@ pub fn verify_batch(
     batch: &[AuditCandidate],
     workflow_id: &lk_core::execution::WorkflowId,
     max_input_bytes: u64,
-) -> Result<Vec<AuditCompletion>, GraphError> {
+) -> Result<AuditVerification, GraphError> {
     verify_batch_with_guard(
         root,
         dirs,
@@ -157,7 +157,7 @@ pub fn verify_batch_with_guard(
     workflow_id: &lk_core::execution::WorkflowId,
     max_input_bytes: u64,
     mut guard: impl FnMut(&AuditAssessment, &mut MutationPlan) -> Result<AuditReadCoverage, GraphError>,
-) -> Result<Vec<AuditCompletion>, GraphError> {
+) -> Result<AuditVerification, GraphError> {
     let (_, receipts) = load(root)?;
     let candidates = inputs(root, dirs, pages, &receipts)?
         .into_iter()
@@ -239,7 +239,10 @@ pub fn verify_batch_with_guard(
     } else {
         measure_inputs(root, whole_inputs, max_input_bytes)?.ensure_ready()?;
     }
-    Ok(verified)
+    Ok(AuditVerification {
+        completed: verified,
+        coverage: AuditCoverage::build(counts(candidates.values(), &receipts)),
+    })
 }
 
 #[derive(Clone, Copy, Default, Deserialize, Serialize)]
@@ -357,13 +360,55 @@ pub struct AuditPlan {
     pub input: AuditInputBound,
 }
 
-#[derive(Default, Serialize)]
+#[derive(Clone, Debug, Default, Serialize)]
 pub struct AuditCounts {
     pub total: usize,
     pub reviewed_current: usize,
     pub follow_up_current: usize,
     pub unreviewed: usize,
     pub changed: usize,
+}
+
+/// Corpus coverage describes current assessment receipts, not factual confidence.
+#[derive(Clone, Debug, Serialize)]
+pub struct AuditCoverage {
+    pub total: usize,
+    pub reviewed_current: usize,
+    pub follow_up_current: usize,
+    pub unreviewed: usize,
+    pub changed: usize,
+    pub counts_by_kind: BTreeMap<AuditSubjectKind, AuditCounts>,
+}
+
+impl AuditCoverage {
+    fn build(counts_by_kind: BTreeMap<AuditSubjectKind, AuditCounts>) -> Self {
+        Self {
+            total: counts_by_kind.values().map(|count| count.total).sum(),
+            reviewed_current: counts_by_kind
+                .values()
+                .map(|count| count.reviewed_current)
+                .sum(),
+            follow_up_current: counts_by_kind
+                .values()
+                .map(|count| count.follow_up_current)
+                .sum(),
+            unreviewed: counts_by_kind.values().map(|count| count.unreviewed).sum(),
+            changed: counts_by_kind.values().map(|count| count.changed).sum(),
+            counts_by_kind,
+        }
+    }
+}
+
+impl AuditPlan {
+    pub fn coverage(&self) -> AuditCoverage {
+        AuditCoverage::build(self.counts_by_kind.clone())
+    }
+}
+
+#[derive(Debug)]
+pub struct AuditVerification {
+    pub completed: Vec<AuditCompletion>,
+    pub coverage: AuditCoverage,
 }
 
 #[derive(Serialize)]
@@ -949,37 +994,46 @@ fn receipt_is_current(receipt: &AuditAssessment, candidate: &AuditCandidate) -> 
         })
 }
 
-fn pending(
-    candidates: Vec<AuditCandidate>,
+fn counts<'a>(
+    candidates: impl IntoIterator<Item = &'a AuditCandidate>,
     receipts: &Receipts,
-) -> (Vec<AuditCandidate>, BTreeMap<AuditSubjectKind, AuditCounts>) {
-    let mut remaining = BTreeMap::new();
+) -> BTreeMap<AuditSubjectKind, AuditCounts> {
     let mut counts = BTreeMap::from([
         (AuditSubjectKind::Concept, AuditCounts::default()),
         (AuditSubjectKind::Document, AuditCounts::default()),
     ]);
-    for mut candidate in candidates {
+    for candidate in candidates {
         let count = counts
             .get_mut(&candidate.kind)
             .expect("enumerated subject kind");
         count.total += 1;
         match receipts.entries.get(&candidate.path) {
-            Some(receipt) if receipt_is_current(receipt, &candidate) => {
+            Some(receipt) if receipt_is_current(receipt, candidate) => {
                 count.reviewed_current += 1;
                 if receipt.disposition == AuditDisposition::FollowUp {
                     count.follow_up_current += 1;
                 }
             }
-            previous => {
-                if previous.is_some() {
-                    candidate.reason = "changed";
-                    count.changed += 1;
-                } else {
-                    count.unreviewed += 1;
-                }
-                remaining.insert(candidate.path.clone(), candidate);
-            }
+            Some(_) => count.changed += 1,
+            None => count.unreviewed += 1,
         }
+    }
+    counts
+}
+
+fn pending(
+    candidates: Vec<AuditCandidate>,
+    receipts: &Receipts,
+) -> (Vec<AuditCandidate>, BTreeMap<AuditSubjectKind, AuditCounts>) {
+    let counts = counts(&candidates, receipts);
+    let mut remaining = BTreeMap::new();
+    for mut candidate in candidates {
+        match receipts.entries.get(&candidate.path) {
+            Some(receipt) if receipt_is_current(receipt, &candidate) => continue,
+            Some(_) => candidate.reason = "changed",
+            None => candidate.reason = "unreviewed",
+        }
+        remaining.insert(candidate.path.clone(), candidate);
     }
     let mut work = Vec::new();
     for path in &receipts.pending {
@@ -1974,9 +2028,9 @@ mod tests {
             u64::MAX,
         )
         .unwrap();
-        assert_eq!(completion[0].kind, AuditSubjectKind::Document);
-        assert_eq!(completion[0].requested_path, path);
-        assert_eq!(completion[0].assessed_path, path);
+        assert_eq!(completion.completed[0].kind, AuditSubjectKind::Document);
+        assert_eq!(completion.completed[0].requested_path, path);
+        assert_eq!(completion.completed[0].assessed_path, path);
         for replacement in [Some(body.replace("type: document", "type: concept")), None] {
             match replacement {
                 Some(replacement) => write(root.path(), path, &replacement),

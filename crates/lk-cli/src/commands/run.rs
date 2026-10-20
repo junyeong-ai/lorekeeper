@@ -106,13 +106,21 @@ mod native {
     }
 
     #[derive(Serialize)]
+    struct AuditProgress {
+        before: lk_graph::audit::AuditCoverage,
+        after: Option<lk_graph::audit::AuditCoverage>,
+    }
+
+    #[derive(Serialize)]
     struct JobResult {
         operation: Operation,
         ok: bool,
         cancelled: bool,
         execution: Option<ExecutionInfo>,
         workflow_id: Option<lk_core::execution::WorkflowId>,
+        semantic_calls: usize,
         audit: Option<Vec<lk_graph::audit::AuditCompletion>>,
+        audit_progress: Option<AuditProgress>,
         audit_blocked: Vec<lk_graph::audit::AuditBlockedInput>,
         audit_blocked_count: usize,
         review_health: Option<ReviewHealth>,
@@ -129,7 +137,6 @@ mod native {
         lease: Option<workflow::WorkflowLease>,
         selected: Option<ExecutionProfile>,
         drain_blocked: bool,
-        calls: usize,
         result: JobResult,
     }
 
@@ -324,7 +331,7 @@ mod native {
                 Ok(budget) => budget,
                 Err(error) => return self.failure("semantic work budget", error),
             };
-            if self.calls >= budget.max_calls {
+            if self.result.semantic_calls >= budget.max_calls {
                 return self.failure("semantic call budget", "configured execution.work.max_calls exhausted; unfinished work is retained for the next run");
             }
             if let Err(error) = self.prepare_agent().await {
@@ -349,7 +356,7 @@ mod native {
                 });
             match command {
                 Ok(mut command) => {
-                    self.calls += 1;
+                    self.result.semantic_calls += 1;
                     command.current_dir(&self.root);
                     self.child(skill, command, Some(timeout)).await
                 }
@@ -371,7 +378,7 @@ mod native {
                 Ok(budget) => budget,
                 Err(error) => return self.failure("semantic work budget", error),
             };
-            if self.calls >= budget.max_calls {
+            if self.result.semantic_calls >= budget.max_calls {
                 return self.failure("semantic call budget", "configured execution.work.max_calls exhausted; unfinished work is retained for the next run");
             }
             if let Err(error) = self.prepare_agent().await {
@@ -422,7 +429,7 @@ mod native {
                     "host output envelope limit overflow",
                 );
             };
-            self.calls += 1;
+            self.result.semantic_calls += 1;
             let child = match self
                 .supervisor
                 .run_request(
@@ -479,7 +486,7 @@ mod native {
 
         fn call_budget_available(&mut self) -> bool {
             match self.config.execution.effective_work() {
-                Ok(budget) if self.calls < budget.max_calls => true,
+                Ok(budget) if self.result.semantic_calls < budget.max_calls => true,
                 Ok(_) => self.failure("semantic call budget", "configured execution.work.max_calls exhausted; unfinished work is retained for the next run"),
                 Err(error) => self.failure("semantic work budget", error),
             }
@@ -557,7 +564,7 @@ mod native {
                 }
             }
             let operation = format!(
-                "bounded finish {id}. Read the bounded-work reference and lore work result for this exact work. Produce the normal typed final result using its completed root observation and selected generation specification. Submit with lore work finish. Do not read the whole corpus or drain other tasks. Leave the staged queue result or audit assessment for native controller publication. The controller owns global checks. Source uncertainty stays attributed; unresolved work concerns cannot be silently removed or marked reviewed."
+                "bounded finish {id}. Read the bounded-work reference and lore work result for this exact work. Produce the normal typed final result using its completed root observation and selected generation specification. Submit with lore work finish. Do not read the whole corpus or drain other tasks. Leave the staged queue result or audit assessment for native controller publication. The controller owns global checks. Preserve source_questions as attributed uncertainty in the final prose; do not invent answers. Material conflicts need a scoped open review and follow-up audit disposition. Processing blockers in unresolved cannot be silently removed or marked reviewed."
             );
             if !self.consumer(skill, &operation).await {
                 return WorkStep::Failed;
@@ -839,7 +846,7 @@ mod native {
         fn verify_audit(
             &self,
             batch: &[lk_graph::audit::AuditCandidate],
-        ) -> miette::Result<Vec<lk_graph::audit::AuditCompletion>> {
+        ) -> miette::Result<lk_graph::audit::AuditVerification> {
             let pages =
                 lk_graph::scan::scan_vault(&self.root, self.config.graph.scope.follow_links)
                     .map_err(|e| miette::miette!("{e}"))?;
@@ -930,6 +937,10 @@ mod native {
                     return;
                 }
             };
+            self.result.audit_progress = Some(AuditProgress {
+                before: plan.coverage(),
+                after: None,
+            });
             self.result.audit_blocked = plan.blocked;
             self.result.audit_blocked_count = plan.blocked_count;
             if plan.blocked_count > 0 {
@@ -952,6 +963,9 @@ mod native {
                 if plan.blocked_count > 0 {
                     return;
                 }
+                if let Some(progress) = &mut self.result.audit_progress {
+                    progress.after = Some(progress.before.clone());
+                }
                 self.record(
                     "knowledge audit",
                     StageState::Skipped,
@@ -966,12 +980,12 @@ mod native {
                 .collect::<Vec<_>>();
             let selection = serde_json::to_string(&paths).expect("string paths serialize");
             let mut bounded = plan.input.ensure_ready().is_err();
-            for path in &paths {
+            for candidate in &plan.candidates {
                 match crate::commands::work::audit_needs_work(
                     &self.root,
                     &self.config,
                     &self.config_revision,
-                    path,
+                    candidate,
                 ) {
                     Ok(required) => bounded |= required,
                     Err(error) => {
@@ -982,12 +996,13 @@ mod native {
             }
             if bounded {
                 let mut jobs = std::collections::BTreeMap::new();
-                for path in &paths {
+                for candidate in &plan.candidates {
+                    let path = &candidate.path;
                     let work = match crate::commands::work::prepare_audit(
                         &self.root,
                         &self.config,
                         &self.config_revision,
-                        path,
+                        candidate,
                     ) {
                         Ok(id) => id,
                         Err(error) => {
@@ -1051,8 +1066,11 @@ mod native {
                 return;
             }
             match self.verify_audit(&plan.candidates) {
-                Ok(completed) => {
-                    self.result.audit = Some(completed);
+                Ok(verified) => {
+                    self.result.audit = Some(verified.completed);
+                    if let Some(progress) = &mut self.result.audit_progress {
+                        progress.after = Some(verified.coverage);
+                    }
                     self.record("audit completion", StageState::Completed, None);
                 }
                 Err(error) => {
@@ -1187,14 +1205,15 @@ mod native {
             lease: None,
             selected: None,
             drain_blocked: false,
-            calls: 0,
             result: JobResult {
                 operation,
                 ok: true,
                 cancelled: false,
                 execution: None,
                 workflow_id: None,
+                semantic_calls: 0,
                 audit: None,
+                audit_progress: None,
                 audit_blocked: Vec::new(),
                 audit_blocked_count: 0,
                 review_health: None,
