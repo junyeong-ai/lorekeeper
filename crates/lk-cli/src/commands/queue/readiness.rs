@@ -42,6 +42,205 @@ pub(crate) fn unfinished_inputs(page: &lk_vault::VaultPage) -> Result<Vec<&'stat
         .collect())
 }
 
+impl AuditReadiness {
+    pub fn load(root: &Path) -> miette::Result<Self> {
+        let pending = read_pending_tasks(&root.join(".lorekeeper/queue"))?;
+        if pending.unparseable != 0 {
+            return Err(miette::miette!(
+                "unparseable pending tasks have unknown targets; repair them before assessing knowledge"
+            ));
+        }
+        let queue = root.join(".lorekeeper/queue");
+        let batch = lk_queue::read_results(&queue)
+            .map_err(|error| miette::miette!("audit staged results: {error}"))?;
+        if !batch.unreadable.is_empty() {
+            return Err(miette::miette!(
+                "unreadable staged results have unknown targets; repair them before assessing knowledge"
+            ));
+        }
+        let mut staged = BTreeSet::new();
+        for (_, result) in batch.ready {
+            staged.insert((result.task_id, result.cache_hash));
+        }
+        let entries = match std::fs::read_dir(queue.join(lk_queue::RESULTS_SUBDIR)) {
+            Ok(entries) => Some(entries),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(miette::miette!("audit staged results: {error}")),
+        };
+        for entry in entries.into_iter().flatten() {
+            let path = entry.map_err(|error| miette::miette!("{error}"))?.path();
+            let name = path.to_string_lossy();
+            let section = name.ends_with(lk_queue::SECTION_RESULT_SUFFIX);
+            if !section && !name.ends_with(lk_queue::SYNTHESIS_RESULT_SUFFIX) {
+                continue;
+            }
+            let raw = std::fs::read(&path).map_err(|error| miette::miette!("{error}"))?;
+            let identity = if section {
+                serde_json::from_slice::<lk_queue::SectionResult>(&raw)
+                    .map(|result| (result.task_id, result.cache_hash))
+            } else {
+                serde_json::from_slice::<lk_queue::SynthesisResult>(&raw)
+                    .map(|result| (result.task_id, result.cache_hash))
+            }
+            .map_err(|error| {
+                miette::miette!("unreadable staged result {}: {error}", path.display())
+            })?;
+            staged.insert(identity);
+        }
+        if staged
+            .iter()
+            .any(|identity| !pending.tasks.contains_key(identity))
+        {
+            return Err(miette::miette!(
+                "unmatched staged results have unknown targets; repair them before assessing knowledge"
+            ));
+        }
+        let mut tasks: BTreeMap<PathBuf, Vec<QueueTask>> = BTreeMap::new();
+        for task in pending.tasks.into_values() {
+            let Some(target) = resolve_target_path(&task.target.vault_path) else {
+                continue;
+            };
+            let Ok(full) = lk_vault::page_path(root, &target) else {
+                continue;
+            };
+            let owner = match full.canonicalize() {
+                Ok(owner) => owner,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => {
+                    return Err(miette::miette!(
+                        "audit task target {}: {error}",
+                        target.display()
+                    ));
+                }
+            };
+            tasks.entry(owner).or_default().push(task);
+        }
+        Ok(Self {
+            tasks,
+            staged,
+            pages: BTreeMap::new(),
+            revisions: BTreeMap::new(),
+        })
+    }
+
+    fn page(&mut self, root: &Path, path: &str) -> miette::Result<Vec<String>> {
+        let full = lk_vault::page_path(root, Path::new(path))
+            .map_err(|error| miette::miette!("{error}"))?;
+        let owner = full
+            .canonicalize()
+            .map_err(|error| miette::miette!("{path}: {error}"))?;
+        if let Some(page) = self.pages.get(&owner) {
+            return Ok(page.reasons.clone());
+        }
+        let raw =
+            std::fs::read_to_string(full).map_err(|error| miette::miette!("{path}: {error}"))?;
+        let page =
+            lk_vault::parse_page(&raw).map_err(|error| miette::miette!("{path}: {error}"))?;
+        let mut reasons = BTreeSet::new();
+        for key in unfinished_inputs(&page).map_err(|error| miette::miette!("{path}: {error}"))? {
+            reasons.insert(format!("{path}: unfinished {key}"));
+        }
+        for task in self.tasks.get(&owner).into_iter().flatten() {
+            let status = classify_task(root, task, &mut self.revisions)?;
+            if self
+                .staged
+                .contains(&(task.task_id.clone(), task.cache_hash.clone()))
+                && (matches!(status, TaskStatus::Current | TaskStatus::Unreadable)
+                    || status == TaskStatus::Done
+                        && task.kind == lk_queue::TaskKind::ExtractConcepts)
+            {
+                reasons.insert(format!("{path}: unpublished result {}", task.task_id));
+            }
+            if matches!(status, TaskStatus::Current | TaskStatus::Unreadable) {
+                reasons.insert(format!("{path}: {} task {}", status.as_str(), task.task_id));
+            }
+        }
+        let reasons = reasons.into_iter().collect::<Vec<_>>();
+        self.pages.insert(
+            owner,
+            ApprovedPage {
+                revision: lk_core::concept::file_revision(&raw),
+                reasons: reasons.clone(),
+            },
+        );
+        Ok(reasons)
+    }
+
+    pub fn guard(&self, root: &Path, plan: &mut lk_vault::MutationPlan) -> miette::Result<()> {
+        let root = root
+            .canonicalize()
+            .map_err(|error| miette::miette!("{error}"))?;
+        for (owner, approved) in &self.pages {
+            if !approved.reasons.is_empty() {
+                return Err(miette::miette!(
+                    "cannot publish an assessment with unfinished inputs"
+                ));
+            }
+            let relative = owner
+                .strip_prefix(&root)
+                .map_err(|error| miette::miette!("{error}"))?;
+            let raw = std::fs::read_to_string(
+                lk_vault::page_path(&root, relative).map_err(|error| miette::miette!("{error}"))?,
+            )
+            .map_err(|error| miette::miette!("{error}"))?;
+            if lk_core::concept::file_revision(&raw) != approved.revision {
+                return Err(miette::miette!(
+                    "audit readiness input changed: {}; reread before assessing",
+                    relative.display()
+                ));
+            }
+            plan.require_unchanged(relative, raw);
+        }
+        Ok(())
+    }
+
+    pub fn unfinished(
+        &mut self,
+        root: &Path,
+        candidate: &lk_graph::audit::AuditCandidate,
+    ) -> miette::Result<Vec<String>> {
+        let mut paths = BTreeSet::from([candidate.path.as_str()]);
+        paths.extend(
+            candidate
+                .evidence
+                .iter()
+                .chain(&candidate.related_pages)
+                .map(|citation| citation.path.as_str()),
+        );
+        for review in &candidate.reviews {
+            if review.file_revision.is_some() {
+                paths.insert(&review.path);
+            }
+            for evidence in &review.evidence {
+                if let Some(current) = &evidence.current {
+                    paths.insert(&current.path);
+                }
+            }
+        }
+        let mut reasons = BTreeSet::new();
+        for path in paths {
+            reasons.extend(self.page(root, path)?);
+        }
+        Ok(reasons.into_iter().collect())
+    }
+
+    pub fn require_ready(
+        &mut self,
+        root: &Path,
+        candidate: &lk_graph::audit::AuditCandidate,
+    ) -> miette::Result<()> {
+        let unfinished = self.unfinished(root, candidate)?;
+        if unfinished.is_empty() {
+            Ok(())
+        } else {
+            Err(miette::miette!(
+                "audit inputs have unfinished semantic work: {}",
+                unfinished.join("; ")
+            ))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -447,204 +646,5 @@ mod tests {
             .unwrap()
             .require_ready(root.path(), &candidate(root.path()))
             .unwrap();
-    }
-}
-
-impl AuditReadiness {
-    pub fn load(root: &Path) -> miette::Result<Self> {
-        let pending = read_pending_tasks(&root.join(".lorekeeper/queue"))?;
-        if pending.unparseable != 0 {
-            return Err(miette::miette!(
-                "unparseable pending tasks have unknown targets; repair them before assessing knowledge"
-            ));
-        }
-        let queue = root.join(".lorekeeper/queue");
-        let batch = lk_queue::read_results(&queue)
-            .map_err(|error| miette::miette!("audit staged results: {error}"))?;
-        if !batch.unreadable.is_empty() {
-            return Err(miette::miette!(
-                "unreadable staged results have unknown targets; repair them before assessing knowledge"
-            ));
-        }
-        let mut staged = BTreeSet::new();
-        for (_, result) in batch.ready {
-            staged.insert((result.task_id, result.cache_hash));
-        }
-        let entries = match std::fs::read_dir(queue.join(lk_queue::RESULTS_SUBDIR)) {
-            Ok(entries) => Some(entries),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-            Err(error) => return Err(miette::miette!("audit staged results: {error}")),
-        };
-        for entry in entries.into_iter().flatten() {
-            let path = entry.map_err(|error| miette::miette!("{error}"))?.path();
-            let name = path.to_string_lossy();
-            let section = name.ends_with(lk_queue::SECTION_RESULT_SUFFIX);
-            if !section && !name.ends_with(lk_queue::SYNTHESIS_RESULT_SUFFIX) {
-                continue;
-            }
-            let raw = std::fs::read(&path).map_err(|error| miette::miette!("{error}"))?;
-            let identity = if section {
-                serde_json::from_slice::<lk_queue::SectionResult>(&raw)
-                    .map(|result| (result.task_id, result.cache_hash))
-            } else {
-                serde_json::from_slice::<lk_queue::SynthesisResult>(&raw)
-                    .map(|result| (result.task_id, result.cache_hash))
-            }
-            .map_err(|error| {
-                miette::miette!("unreadable staged result {}: {error}", path.display())
-            })?;
-            staged.insert(identity);
-        }
-        if staged
-            .iter()
-            .any(|identity| !pending.tasks.contains_key(identity))
-        {
-            return Err(miette::miette!(
-                "unmatched staged results have unknown targets; repair them before assessing knowledge"
-            ));
-        }
-        let mut tasks: BTreeMap<PathBuf, Vec<QueueTask>> = BTreeMap::new();
-        for task in pending.tasks.into_values() {
-            let Some(target) = resolve_target_path(&task.target.vault_path) else {
-                continue;
-            };
-            let Ok(full) = lk_vault::page_path(root, &target) else {
-                continue;
-            };
-            let owner = match full.canonicalize() {
-                Ok(owner) => owner,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(error) => {
-                    return Err(miette::miette!(
-                        "audit task target {}: {error}",
-                        target.display()
-                    ));
-                }
-            };
-            tasks.entry(owner).or_default().push(task);
-        }
-        Ok(Self {
-            tasks,
-            staged,
-            pages: BTreeMap::new(),
-            revisions: BTreeMap::new(),
-        })
-    }
-
-    fn page(&mut self, root: &Path, path: &str) -> miette::Result<Vec<String>> {
-        let full = lk_vault::page_path(root, Path::new(path))
-            .map_err(|error| miette::miette!("{error}"))?;
-        let owner = full
-            .canonicalize()
-            .map_err(|error| miette::miette!("{path}: {error}"))?;
-        if let Some(page) = self.pages.get(&owner) {
-            return Ok(page.reasons.clone());
-        }
-        let raw =
-            std::fs::read_to_string(full).map_err(|error| miette::miette!("{path}: {error}"))?;
-        let page =
-            lk_vault::parse_page(&raw).map_err(|error| miette::miette!("{path}: {error}"))?;
-        let mut reasons = BTreeSet::new();
-        for key in unfinished_inputs(&page).map_err(|error| miette::miette!("{path}: {error}"))? {
-            reasons.insert(format!("{path}: unfinished {key}"));
-        }
-        for task in self.tasks.get(&owner).into_iter().flatten() {
-            let status = classify_task(root, task, &mut self.revisions)?;
-            if self
-                .staged
-                .contains(&(task.task_id.clone(), task.cache_hash.clone()))
-                && (matches!(status, TaskStatus::Current | TaskStatus::Unreadable)
-                    || status == TaskStatus::Done
-                        && task.kind == lk_queue::TaskKind::ExtractConcepts)
-            {
-                reasons.insert(format!("{path}: unpublished result {}", task.task_id));
-            }
-            if matches!(status, TaskStatus::Current | TaskStatus::Unreadable) {
-                reasons.insert(format!("{path}: {} task {}", status.as_str(), task.task_id));
-            }
-        }
-        let reasons = reasons.into_iter().collect::<Vec<_>>();
-        self.pages.insert(
-            owner,
-            ApprovedPage {
-                revision: lk_core::concept::file_revision(&raw),
-                reasons: reasons.clone(),
-            },
-        );
-        Ok(reasons)
-    }
-
-    pub fn guard(&self, root: &Path, plan: &mut lk_vault::MutationPlan) -> miette::Result<()> {
-        let root = root
-            .canonicalize()
-            .map_err(|error| miette::miette!("{error}"))?;
-        for (owner, approved) in &self.pages {
-            if !approved.reasons.is_empty() {
-                return Err(miette::miette!(
-                    "cannot publish an assessment with unfinished inputs"
-                ));
-            }
-            let relative = owner
-                .strip_prefix(&root)
-                .map_err(|error| miette::miette!("{error}"))?;
-            let raw = std::fs::read_to_string(
-                lk_vault::page_path(&root, relative).map_err(|error| miette::miette!("{error}"))?,
-            )
-            .map_err(|error| miette::miette!("{error}"))?;
-            if lk_core::concept::file_revision(&raw) != approved.revision {
-                return Err(miette::miette!(
-                    "audit readiness input changed: {}; reread before assessing",
-                    relative.display()
-                ));
-            }
-            plan.require_unchanged(relative, raw);
-        }
-        Ok(())
-    }
-
-    pub fn unfinished(
-        &mut self,
-        root: &Path,
-        candidate: &lk_graph::audit::AuditCandidate,
-    ) -> miette::Result<Vec<String>> {
-        let mut paths = BTreeSet::from([candidate.path.as_str()]);
-        paths.extend(
-            candidate
-                .evidence
-                .iter()
-                .chain(&candidate.related_pages)
-                .map(|citation| citation.path.as_str()),
-        );
-        for review in &candidate.reviews {
-            if review.file_revision.is_some() {
-                paths.insert(&review.path);
-            }
-            for evidence in &review.evidence {
-                if let Some(current) = &evidence.current {
-                    paths.insert(&current.path);
-                }
-            }
-        }
-        let mut reasons = BTreeSet::new();
-        for path in paths {
-            reasons.extend(self.page(root, path)?);
-        }
-        Ok(reasons.into_iter().collect())
-    }
-
-    pub fn require_ready(
-        &mut self,
-        root: &Path,
-        candidate: &lk_graph::audit::AuditCandidate,
-    ) -> miette::Result<()> {
-        let unfinished = self.unfinished(root, candidate)?;
-        if unfinished.is_empty() {
-            Ok(())
-        } else {
-            Err(miette::miette!(
-                "audit inputs have unfinished semantic work: {}",
-                unfinished.join("; ")
-            ))
-        }
     }
 }
