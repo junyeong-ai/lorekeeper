@@ -37,3 +37,40 @@ Inspect the resulting pages, not just exit codes:
   criteria. An assessed unresolved conflict is `follow-up`, not resolved.
 - Queue completion and audit receipts match published values. Re-ingest creates
   no duplicate documents; source count alone does not certify semantic quality.
+
+Check navigation separately from those semantic judgments. Live search reads current
+pages; a prepared snapshot pins captured pages and relations without rereading them:
+
+```sh
+lore wiki browse --json
+lore wiki search '보존 정책' --json
+time lore wiki search '보존정책' --json
+lore wiki search 'production 7 days' --json
+time lore wiki prepare
+```
+
+Replace the placeholders below with returned values. The declared Korean
+alias and its spacing variant should reach the established concept before its source
+documents. Spacing matches remain candidates. `production 7 days` can also reach the
+development document because it explicitly disclaims a production requirement; read
+the environment, effective period and negation before judging support or conflict.
+
+```sh
+time lore wiki search '보존정책' --snapshot '<snapshot>' --json
+lore wiki context wiki/concepts/data-retention-policy.md --snapshot '<snapshot>'
+lore wiki citations wiki/concepts/data-retention-policy.md --snapshot '<snapshot>'
+lore graph neighbors wiki/concepts/data-retention-policy.md
+lore wiki read wiki/documents/production-retention-requirement.md
+lore wiki read wiki/documents/production-retention-requirement.md --section '<id>' --revision '<file_revision>'
+lore wiki evidence wiki/documents/production-retention-requirement.md
+lore wiki original wiki/documents/production-retention-requirement.md
+lore wiki original wiki/documents/production-retention-requirement.md --member '<member-path>' --revision '<manifest_revision.value>'
+```
+
+Compare repeated-query times separately from preparation; fixture timings do not
+predict a larger corpus. Use the outline's section ID and `file_revision` for the
+selected read. Context and citations describe the capture; `read` and graph neighbors
+inspect current files. Explicit links, citation
+counts and copied statements do not establish independent corroboration. After editing
+a source, compare live and captured search before preparing again; a stale capture is
+expected to retain its earlier result, while a stale revision-pinned read must refuse.
