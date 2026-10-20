@@ -120,6 +120,9 @@ mod tests {
             CapturedSource::capture(source)
         })
         .await;
-        assert!(matches!(result, Err(SourceError::CollectionTimeout { seconds: 1 })));
+        assert!(matches!(
+            result,
+            Err(SourceError::CollectionTimeout { seconds: 1 })
+        ));
     }
 }

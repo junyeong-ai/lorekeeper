@@ -1,6 +1,6 @@
 pub(super) mod check;
-pub(super) mod readiness;
 mod packet;
+pub(super) mod readiness;
 mod regenerate;
 mod synthesis;
 

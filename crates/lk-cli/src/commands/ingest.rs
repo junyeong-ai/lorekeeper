@@ -295,13 +295,17 @@ pub async fn run(
                 .sum::<usize>();
         }
         let result = match result {
-            Ok(capture) => collect_with_budget(started_at, timeout, async move {
-                tokio::task::spawn_blocking(move || capture::CapturedSource::capture(capture))
-                    .await
-                    .map_err(|error| lk_source::SourceError::Parse(format!("capture source: {error}")))
-                    .and_then(std::convert::identity)
-            })
-            .await,
+            Ok(capture) => {
+                collect_with_budget(started_at, timeout, async move {
+                    tokio::task::spawn_blocking(move || capture::CapturedSource::capture(capture))
+                        .await
+                        .map_err(|error| {
+                            lk_source::SourceError::Parse(format!("capture source: {error}"))
+                        })
+                        .and_then(std::convert::identity)
+                })
+                .await
+            }
             Err(error) => Err(error),
         };
         acquired.push(Acquired {
@@ -389,9 +393,10 @@ pub async fn run(
                 originals: manual_originals,
                 retirement_blocked: manual_retirement_blocked,
             },
-        ) = match acquisition.result.and_then(|(selection, capture)| {
-            capture.restore().map(|source| (selection, source))
-        }) {
+        ) = match acquisition
+            .result
+            .and_then(|(selection, capture)| capture.restore().map(|source| (selection, source)))
+        {
             Ok(capture) => capture,
             Err(error) => {
                 eprintln!("  ✗ {id} extract: {error}");
