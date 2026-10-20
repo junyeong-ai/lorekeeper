@@ -326,6 +326,8 @@ fn audit_exit_zero_without_assessments_is_incomplete() {
     let (output, result) = fixture.run("knowledge");
     assert!(!output.status.success());
     assert_eq!(result["ok"], false);
+    assert_eq!(result["audit_progress"]["before"]["unreviewed"], 1);
+    assert!(result["audit_progress"]["after"].is_null());
     assert!(
         result["stages"]
             .as_array()
@@ -370,7 +372,16 @@ fn unrelated_review_drift_remains_visible_while_knowledge_campaign_progresses() 
     assert_eq!(result["stop_reason"], "batch-limit");
     let runs = result["runs"].as_array().unwrap();
     assert_eq!(runs.len(), 2);
-    for run in runs {
+    for (index, run) in runs.iter().enumerate() {
+        let progress = &run["audit_progress"];
+        assert_eq!(progress["before"]["reviewed_current"], index);
+        assert_eq!(progress["after"]["reviewed_current"], index + 1);
+        assert_eq!(progress["before"]["total"], progress["after"]["total"]);
+        assert_eq!(
+            progress["before"]["unreviewed"].as_u64().unwrap(),
+            progress["after"]["unreviewed"].as_u64().unwrap() + 1
+        );
+        assert_eq!(run["semantic_calls"], 1);
         assert_eq!(
             run["review_health"],
             serde_json::json!({

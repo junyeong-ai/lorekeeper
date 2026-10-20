@@ -658,6 +658,7 @@ Markdown 검토 문서에 남깁니다. 단일 출처나 인용 수만으로 병
 `stop_reason: batch-limit`는 지정한 실행량에 도달했다는 뜻이고, `settled`는 현재 감사 대상
 계획에 대기 항목이 없다는 뜻입니다. 이 집계가 외부 원본·첨부까지 모두 읽었다거나 전체 지식의
 의미적 일관성을 검증했다는 뜻은 아닙니다.
+`run knowledge --json`의 `audit_progress`는 검수 전후의 전체·현재 검수·후속 검토·미검수·변경 건수를 구분합니다. 검증에 실패하면 `after`는 `null`입니다. `semantic_calls`는 에이전트 실행 시도 수이며 토큰 사용량이나 요금이 아닙니다.
 `audit-plan`은 선택한 대상·근거·직접 관련 문맥·검토 문서와 그 근거·선택한 RSS 원본의 중복을
 제외한 전체 바이트 수를 보고합니다. `graph.audit.max_input_bytes`는 이 전체 입력의 한도로,
 이를 넘으면 `input.status: oversized`를 그대로 표시합니다. 자동 선택도 큰 대상을 건너뛰지

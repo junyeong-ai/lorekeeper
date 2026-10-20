@@ -686,6 +686,7 @@ failures preserve pending work and completed receipts. `batch-limit` means the
 requested batch count was reached; `settled` means the current eligible audit plan
 is empty. Neither implies that every external original or attachment was read,
 or that the entire corpus is semantically consistent.
+`run knowledge --json` exposes before/after receipt counts in `audit_progress`: total, current, follow-up, unreviewed and changed. Failed verification leaves `after` null. `semantic_calls` counts agent invocation attempts, not tokens or billing.
 Audit plans measure distinct complete subject, evidence, direct context and scoped
 review/evidence bytes plus selected RSS payloads. `graph.audit.max_input_bytes`
 bounds that complete input; exceeding it remains visible as `input.status: oversized`.
