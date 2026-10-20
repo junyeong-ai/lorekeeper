@@ -71,6 +71,8 @@ pub enum WikiCommand {
     },
     /// Prepare a reusable search and exact concept-citation snapshot from current pages (JSON)
     Prepare,
+    /// Read the existing snapshot and its verification time without rereading source pages (JSON)
+    Snapshot,
     /// Inspect complete citations captured for an exact concept (read-only JSON)
     Citations {
         /// Exact vault-relative concept Markdown address
@@ -559,6 +561,20 @@ pub async fn run(opts: &super::GlobalOptions, cmd: WikiCommand) -> miette::Resul
                     "file_revision": lk_core::concept::file_revision(&raw),
                     "source_revision": lk_core::concept::source_revision(&page),
                 })
+            );
+            Ok(())
+        }
+        WikiCommand::Snapshot => {
+            let config = load_config(&find_config(opts)?)?;
+            let snapshot = lk_vault::inspect_search_snapshot(
+                &config.vault.root_path(),
+                &config.vault.dirs,
+            )
+            .map_err(|error| miette::miette!("read discovery snapshot: {error}; run `lore wiki prepare` to capture current pages"))?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&snapshot)
+                    .map_err(|error| miette::miette!("{error}"))?
             );
             Ok(())
         }

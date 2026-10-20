@@ -26,6 +26,31 @@ fn report(output: Output) -> serde_json::Value {
 }
 
 #[test]
+fn snapshot_metadata_remains_captured_after_external_edits_without_writes() {
+    let root = tempfile::tempdir().unwrap();
+    let vault = root.path().join("vault");
+    std::fs::create_dir_all(vault.join("wiki/documents")).unwrap();
+    std::fs::write(root.path().join("config.yaml"), "vault:\n  root: vault\nidentity:\n  name: T\n  email: t@example.com\nsources:\n  notes:\n    type: manual\n    params:\n      inbox_dir: inbox\n").unwrap();
+    assert!(!run(root.path(), &["wiki", "snapshot"]).status.success());
+    assert!(!vault.join(".lorekeeper").exists());
+    let page = vault.join("wiki/documents/example.md");
+    std::fs::write(
+        &page,
+        "---\ntype: document\ntitle: Example\n---\nOriginal.\n",
+    )
+    .unwrap();
+    let prepared = report(run(root.path(), &["wiki", "prepare"]));
+    let index = vault.join(".lorekeeper/search.sqlite");
+    let before = std::fs::read(&index).unwrap();
+    std::fs::write(&page, "---\ninvalid: [\n---\nExternal edit.\n").unwrap();
+    let captured = report(run(root.path(), &["wiki", "snapshot"]));
+    assert_eq!(captured, prepared);
+    assert_eq!(std::fs::read(index).unwrap(), before);
+    assert!(!run(root.path(), &["wiki", "prepare"]).status.success());
+    assert_eq!(report(run(root.path(), &["wiki", "snapshot"])), prepared);
+}
+
+#[test]
 fn cli_preparation_and_refresh_publish_exact_citations_without_rewriting_concepts() {
     let root = tempfile::tempdir().unwrap();
     let vault = root.path().join("vault");

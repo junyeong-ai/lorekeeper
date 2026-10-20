@@ -214,7 +214,8 @@ pgvector를 선택했다. 이 결정의 조건과 첫 메모의 검색 품질 �
 ### ✅ 결과 ③ — 필요한 만큼 펼쳐 보는 탐색
 
 ```bash
-lore wiki prepare                           # 재사용할 SQLite 검색 판본 생성
+lore wiki snapshot                          # 저장된 검색 판본·마지막 검증 시각 조회
+lore wiki prepare                           # 현재 원본을 검증하고 검색 판본 생성
 lore wiki search "Vector DB" --snapshot <id> --limit 10 --json
 lore wiki browse --type concept --category ai-ml --limit 20 --json
 lore wiki search "API 토큰" --phrase --snapshot <id> --json
@@ -359,7 +360,8 @@ lore wiki search <질의>       # 질의가 닿는 페이지 — 이름으로 �
 lore wiki browse --category ai-ml --type concept --limit 20 --json # 분류별 탐색; next_offset으로 다음 페이지
 lore graph --json neighbors wiki/concepts/example.md # 출처를 포함한 양방향 링크 탐색
 lore graph --json neighbors wiki/concepts/example.md --type concept # 관련 개념만 탐색; --type document로 원문 조회
-lore wiki prepare             # 검색 판본 생성; 반복 검색에 --snapshot <id> 사용
+lore wiki snapshot            # 원본 재탐색 없이 저장된 판본 조회
+lore wiki prepare             # 현재 원본 전체 검증; 반복 검색에 --snapshot <id> 사용
 lore wiki search "정확한 문자열" --body --json # 원문 행·문맥·판본; 정규식은 --regex
 lore wiki search "정확한 문자열" --body --snapshot <id> --json # 준비한 판본에서 반복 검색
 lore wiki document-identity plan --source ID --manifest /tmp/identity.json # 기존 사본의 식별자 이관 검증
@@ -400,7 +402,7 @@ lore schema                   # wiki/AGENTS.md(페이지 포맷 스키마) 생�
 
 `lore fetch`는 HTTP `Content-Type`에 따라 HTML·Markdown·일반 텍스트를 읽습니다. `text/plain`으로 제공되는 `.md`·`.markdown` 파일도 Markdown으로 보존하며, 링크·이미지의 상대 주소는 최종 응답 URL을 기준으로 바꿉니다. 형식 선언이 없거나 지원하지 않는 응답, 잘못된 문자 인코딩과 16 MiB를 넘는 본문은 오류로 보고합니다. Markdown 안의 raw HTML 주소는 그대로 남아 수동 원본의 의존성 검사 대상이 됩니다.
 
-`lore wiki refresh`는 SQLite 탐색 스냅샷과 작은 `index.md` 진입 안내를 갱신합니다. 지식 목록·날짜순 조회·관계 탐색은 `wiki browse/search/links`로 수행합니다. 생성 마커가 없는 진입 파일은 보존하고 충돌을 보고합니다. 탐색 세션은 `wiki prepare` 한 번으로 ID를 확보한 뒤 `wiki browse/search/links --snapshot ID`를 반복하고(`links --direction incoming|both`), `wiki read --revision REV`로 현재 원문을 확인합니다. refresh도 준비한 ID를 출력합니다.
+`lore wiki refresh`는 SQLite 탐색 스냅샷과 작은 `index.md` 진입 안내를 갱신합니다. 지식 목록·날짜순 조회·관계 탐색은 `wiki browse/search/links`로 수행합니다. 생성 마커가 없는 진입 파일은 보존하고 충돌을 보고합니다. 탐색 세션은 `wiki snapshot`으로 저장된 ID와 생성·검증 시각을 조회한 뒤 `wiki browse/search/links --snapshot ID`를 반복하고(`links --direction incoming|both`), `wiki read --revision REV`로 현재 원문을 확인합니다. 현재 문서 목록이 필요하거나 호환되는 판본이 없으면 `wiki prepare`로 전체 원본을 검증합니다. 저장된 판본의 시각은 외부 편집 이후의 최신성을 보장하지 않습니다. refresh도 준비한 ID를 출력합니다.
 
 프로젝트 문서의 `source_record.attributes`는 nodex 공개 응답의 원본 속성을 보존합니다. routine의 `prompt`처럼 본문 밖에 있는 지식도 요약·추출 입력에 포함하며, 속성은 현재 작업을 실행하라는 지시가 아닌 출처의 내용으로 읽습니다.
 

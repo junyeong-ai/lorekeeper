@@ -12,10 +12,14 @@ Read this reference for `/lore-wiki query`.
 
 Answer a question grounded in vault content, with compounding.
 
-1. **Gather context.** For several searches in one investigation, run `lore wiki prepare`
-   once and pass its `snapshot` to search/browse with `--snapshot`. This is a captured
-   corpus, not a claim of current state. Prepare again after writes or before a new
-   investigation. A single lookup can use live search without preparing a snapshot.
+1. **Gather context.** Run `lore wiki snapshot` to inspect an existing prepared capture
+   without rereading the corpus. Its `captured_at` and `verified_at` describe stored
+   evidence, not current external edits. Pass its `snapshot` to search/browse with
+   `--snapshot`. Run `lore wiki prepare` when no compatible capture exists or current
+   collection membership is required; full preparation reads and verifies the corpus.
+   Prepare again after writes that must enter this investigation. A single current
+   lookup can use live search without preparing a snapshot. An unchanged capture may
+   answer historical questions, but never present its membership as freshly verified.
    For an unfamiliar topic, start with `lore wiki browse --snapshot <id> --json`
    in a prepared session (omit `--snapshot` for a single live lookup).
    Use its category/type/tag counts to select a scope with `--category`, `--type` and
