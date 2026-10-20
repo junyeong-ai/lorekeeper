@@ -211,8 +211,11 @@ page authored-revision contract. Mixed page/event citations require both kinds o
    answers both sections, which is why one task writes them: the pages citing this
    concept name others alongside it, and which of those the material actually relates
    to this one is what this section states. One link per line, in the form AGENTS.md
-   § Links defines — a concept's relations are its siblings, so the destination is the
-   bare `slug.md` and the display text is that page's title. Add a concise explanation
+   § Links defines. Resolve the target's complete canonical address, then make the
+   destination relative to the containing concept page. Use that page's title as
+   display text. From `concepts/first/a.md`, `concepts/second/b.md` is `../second/b.md`
+   and `concepts/c.md` is `../c.md`; a bare `slug.md` applies within the same directory.
+   Add a concise explanation
    of the relationship, its applicable conditions, and a link to the supporting source.
    Use ordinary prose rather than inventing relation labels or confidence scores:
 
