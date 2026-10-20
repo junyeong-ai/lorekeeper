@@ -555,7 +555,7 @@ pub(super) fn search(
             row.get::<_, String>(3)?,
         ))
     })?;
-    let mut pages = Vec::new();
+    let mut collector = super::search::SearchCollector::new(options);
     for row in rows {
         let (metadata, summary, text, spacing_text) = row?;
         let mut page: Page = serde_json::from_str(&metadata)
@@ -565,10 +565,15 @@ pub(super) fn search(
             text,
             spacing_text,
         });
-        pages.push(page);
+        collector.push(
+            std::borrow::Cow::Owned(page),
+            options,
+            &spellings,
+            &terms,
+            identity.as_deref(),
+        );
     }
-    let mut result =
-        super::search::search_pages(options, &pages, &spellings, &terms, identity.as_deref());
+    let mut result = collector.finish(options, &spellings, &terms);
     let mut body = transaction.prepare("SELECT body FROM pages WHERE path = ?1")?;
     for hit in &mut result.hits {
         let captured: String = body.query_row([&hit.path], |row| row.get(0))?;
