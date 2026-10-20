@@ -291,8 +291,8 @@ impl MutationSession {
 
     fn preflight(&self, plan: &MutationPlan) -> Result<(), VaultError> {
         self.validate_addresses(plan)?;
+        Self::validate_retained_guards(plan)?;
         let mut state: HashMap<PathBuf, Option<String>> = HashMap::new();
-        let mut retained: HashMap<&Path, Option<&str>> = HashMap::new();
         for step in &plan.steps {
             let paths: Vec<&Path> = match step {
                 Step::RequireAbsent { path }
@@ -347,9 +347,24 @@ impl MutationSession {
                     state.insert(path.clone(), None);
                 }
             }
-            for &path in &paths {
+        }
+        Ok(())
+    }
+
+    fn validate_retained_guards(plan: &MutationPlan) -> Result<(), VaultError> {
+        let mut retained: HashMap<&Path, Option<&str>> = HashMap::new();
+        for step in &plan.steps {
+            let states: Vec<(&Path, Option<&str>)> = match step {
+                Step::RequireAbsent { path } | Step::Remove { path, .. } => vec![(path, None)],
+                Step::Create { path, after } | Step::Edit { path, after, .. } => {
+                    vec![(path, Some(after))]
+                }
+                Step::Rename { from, to, expected } if from == to => vec![(to, Some(expected))],
+                Step::Rename { from, to, expected } => vec![(from, None), (to, Some(expected))],
+            };
+            for (path, after) in states {
                 if let Some(expected) = retained.get(path)
-                    && state[path].as_deref() != *expected
+                    && after != *expected
                 {
                     return Err(Self::conflict(path));
                 }
@@ -420,6 +435,7 @@ impl MutationSession {
 
     fn finish(&self, journal: &Journal) -> Result<(), VaultError> {
         self.validate_addresses(&journal.plan)?;
+        Self::validate_retained_guards(&journal.plan)?;
         let plan = serde_json::to_string(&journal.plan)
             .map_err(|e| VaultError::Serialization(e.to_string()))?;
         let plan_revision = lk_core::concept::file_revision(&plan);
@@ -633,6 +649,8 @@ mod tests {
         plan.edit("Old.md", "before".into(), "first".into());
         plan.rename("Old.md", "old.md", "first".into());
         plan.edit("old.md", "first".into(), "second".into());
+        plan.require_unchanged("old.md", "second".into());
+        plan.rename("old.md", "old.md", "second".into());
         plan.edit("hard.md", "before".into(), "independent".into());
         plan.create("new.md", "retained".into());
         plan.require_unchanged("new.md", "retained".into());
@@ -678,6 +696,26 @@ mod tests {
                 }
             );
         }
+    }
+
+    #[test]
+    fn recovery_refuses_legacy_plans_that_invalidate_retained_guards() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("page.md"), "before").unwrap();
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let mut plan = MutationPlan::default();
+        plan.require_unchanged("page.md", "before".into());
+        plan.edit("page.md", "before".into(), "after".into());
+        session.save(&Journal { version: 1, plan }).unwrap();
+        let path = session.journal.clone();
+        let original = fs::read(&path).unwrap();
+        drop(session);
+        assert!(MutationSession::acquire(root.path()).is_err());
+        assert_eq!(
+            fs::read_to_string(root.path().join("page.md")).unwrap(),
+            "before"
+        );
+        assert_eq!(fs::read(path).unwrap(), original);
     }
 
     #[test]
