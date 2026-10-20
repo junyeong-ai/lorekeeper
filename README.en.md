@@ -571,6 +571,13 @@ handles the queued summary and concept extraction. Full-source ingestion also
 updates the work-log, and the scheduled daily pipeline runs ingestion and semantic
 processing together. **What you did becomes evidence alongside what you read.**
 
+Personal reviews verify each published work-log against its actual personal
+contribution inputs. Changed inputs after filtered collection, or known work
+without a log, block synthesis. Full-source `lore ingest --date YYYY-MM-DD` can
+refresh that binding only when it actually publishes that day's log. Empty or
+unavailable historical input does not authorize deleting or adopting a retained
+log. History outside the observed query remains unverified.
+
 ### Update, status, removal
 
 ```bash
@@ -696,8 +703,8 @@ most eight period slots, including existing requests, then resumes its persisted
 position on the next invocation. The daily job runs this once before resuming
 periods. Disabled modes pause their cursor and resume when enabled again. Omitting
 the configuration does not request historical periods automatically. A request
-does not establish collection coverage or semantic completion; missing actual
-source coverage or personal work logs still block processing. Explicit
+does not establish collection coverage or semantic completion; source coverage,
+semantic readiness and personal contribution inputs are checked separately. Explicit
 `--date ... --defer` requests may independently target older periods.
 
 Configure weekly semantic maintenance independently from collection and synthesis:

@@ -94,6 +94,11 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
 - Work-log generation belongs to full ingest only, not filtered runs. A full run
   with partial source failure still writes its work-log and reports failure.
   Startup tmp sweeping/pending diagnostics must preserve recoverable work.
+- Collection receipts bind only actually published work-log input hashes and
+  normalized per-source personal contributions. Period readiness compares those
+  inputs, including ownership and resolved categories; semantic prose edits are
+  not new collection evidence. Known contributions without a log block. Missing
+  legacy bindings are not adopted, and unknown history is not observed empty.
 - Historical date replay never replaces current candidate or appointment snapshots.
   Source recovery needs an explicit start date and per-source day budget. Only
   config-matching observed windows, closed before acquisition and durably published,

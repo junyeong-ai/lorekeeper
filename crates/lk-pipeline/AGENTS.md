@@ -95,6 +95,9 @@ continued factual support; explicit reviewed retraction is separate.
 
 - `personal=None` means no work-log or personal reviews; weekly cross-source themes
   remain. A full ingest alone rewrites the cross-source work-log.
+- `work_log_inputs` projects the same normalized personal events and resolved
+  categories used by rendering. Keep its canonical ordering and policy fingerprint
+  aligned with the renderer; query coverage remains a separate receipt contract.
 - Theme = weekly cross-source cluster; topic = daily per-source activity group.
   Keep those distinct from contribution categories and graph communities.
 - Each rollup uses the same cache/section contract. Transient LLM failure yields

@@ -409,7 +409,7 @@ pub async fn run(
             }
         };
         eprintln!("▸ plan {id} ({})", sc.source_type);
-        let observed =
+        let mut observed =
             super::synthesis::pending::ObservedSource::from_observation(id, &observation);
         let observation_outcome = observation.outcome;
         if observation_outcome == lk_source::ObservationOutcome::Partial {
@@ -457,6 +457,9 @@ pub async fn run(
             }
         };
 
+        observed.personal_inputs = config.personal.as_ref().map(|personal| {
+            lk_pipeline::work_log_inputs(id, &result.events, personal, config.vault.locale(), today)
+        });
         observations.insert(id.clone(), observed);
 
         // Keep ALL captures for dependency/retirement guards, including entries the
@@ -728,6 +731,7 @@ pub async fn run(
     // trade that self-healing one-day gap for a work-log frozen by any persistently
     // failing source, news feeds included.
     // (`render_work_log` separately gates the whole subsystem on `config.personal` being set.)
+    let mut published_work_logs = std::collections::BTreeMap::new();
     if !any_write_failed && source.is_none() && !all_personal.is_empty() {
         let work_logs = pipeline
             .render_work_log(&all_personal, today)
@@ -736,10 +740,35 @@ pub async fn run(
         for out in &work_logs {
             report_discards(out, false);
         }
+        let mut bindings = std::collections::BTreeMap::new();
+        for out in &work_logs {
+            let page = lk_core::frontmatter::parse_page(&out.content)
+                .map_err(|e| miette::miette!("work-log publication binding: {e}"))?;
+            let day = out
+                .path
+                .as_ref()
+                .file_stem()
+                .and_then(|name| name.to_str())
+                .and_then(|name| name.parse::<jiff::civil::Date>().ok())
+                .ok_or_else(|| miette::miette!("work-log publication has no exact day"))?;
+            let input = page
+                .frontmatter
+                .get(lk_core::frontmatter::field::LLM_INPUTS)
+                .and_then(|value| {
+                    value.get(lk_queue::TargetKind::WorkLogSynthesis.llm_inputs_key())
+                })
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| {
+                    miette::miette!("work-log publication lacks its typed synthesis input")
+                })?;
+            bindings.insert(day, input.to_owned());
+        }
         if let Err(error) = publication.publish(&work_logs).await {
             eprintln!("✗ work-log publication: {error}");
             any_write_failed = true;
         } else {
+            published_work_logs = bindings;
             for out in &work_logs {
                 total_pages += 1;
                 eprintln!("▸ work-log → {}", out.path);
@@ -759,10 +788,13 @@ pub async fn run(
             _mutation
                 .as_ref()
                 .expect("writing ingest holds mutation session"),
-            extract_target,
-            source.is_none(),
-            collection_started_at,
-            target_date.is_some(),
+            super::synthesis::pending::CollectionPublication {
+                requested_day: extract_target,
+                full_ingest: source.is_none(),
+                started_at: collection_started_at,
+                targeted: target_date.is_some(),
+                work_logs: published_work_logs,
+            },
             observations.into_values().collect(),
         )?;
     }

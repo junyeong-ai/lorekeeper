@@ -15,6 +15,7 @@ pub use context::PipelineContext;
 pub use normalize::normalize_events;
 pub use render::RenderResult;
 pub use synthesis::{Synthesizer, completed_input, iso_week_range, month_range, quarter_range};
+pub use work_log::{WorkLogInputs, empty_work_log_input, work_log_inputs, work_log_scope};
 
 use std::collections::BTreeMap;
 use std::path::Path;
