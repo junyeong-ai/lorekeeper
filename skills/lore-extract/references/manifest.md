@@ -53,3 +53,22 @@ one (theme-driven extraction, not 1:1). When several fold into one, record
 `extracted[].source` as a LIST of the verbatim source paths (each still
 filesystem-checkable for re-scan diffing) plus a `coverage_note` — never a
 synthetic label like `"a + b"`, which would look deleted on the next scan.
+
+## Source retention
+
+Reuse a verified capture of the same repository and revision. Retain the source
+files and dependencies actually read, with their paths, revision and byte digests;
+a commit URL alone does not preserve bytes. Published citations must not point at
+temporary checkouts. A summary does not replace the source evidence.
+
+The extraction manifest records coverage, not every evidence dependency. Advancing
+the scan, superseding a page or finishing extraction does not release an older
+capture: published pages, retained review archives and unfinished queue/work inputs
+may still cite it. Remove retained evidence only after those consumers have been
+checked and any replacement has been verified at the published addresses.
+
+Regenerable indexes and checkout caches have a different lifetime. Reclaim them
+through their owner's locking protocol when no longer needed; preserve source
+bytes, Git objects needed to reconstruct the recorded revision, and manifests.
+`lore maintenance` prunes owned operational history and proven published work
+caches; it does not own ad-hoc repository copies under `source-snapshots/`.

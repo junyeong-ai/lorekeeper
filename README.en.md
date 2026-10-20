@@ -392,6 +392,12 @@ lore schema                   # generate wiki/AGENTS.md (the page-format schema)
 
 `lore wiki refresh` refreshes the SQLite navigation snapshot and a small `index.md` entry guide. Use `wiki browse/search/links` for page inventories, date ordering and relationship traversal. An existing entry file without a generation marker is preserved and reported as a collision. Start a retrieval session with `wiki snapshot` to inspect the saved ID and capture/verification times, then repeat `wiki browse/search/links --snapshot ID` (links supports `--direction incoming|both`). Verify originals with `wiki read --revision REV`. Run `wiki prepare` when current inventory is required or no compatible capture exists. Saved times do not certify freshness after external edits. Refresh prints the prepared ID too.
 
+SQLite retains one current search snapshot; replaced IDs cannot be queried. Freed
+pages are reused, so deletion need not shrink the database file immediately.
+Originals and review archives are separate retained evidence, never age-based
+retention targets. See [source retention](skills/lore-extract/references/manifest.md#source-retention)
+for repository captures and expendable working caches.
+
 `wiki context PATH --snapshot ID` groups explicit links, citations, declared source
 relations and scoped reviews separately. Follow each group's `next_offset` in the
 same snapshot. A captured relationship is not automatic corroboration or proof that
