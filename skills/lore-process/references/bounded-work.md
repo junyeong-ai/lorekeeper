@@ -72,6 +72,7 @@ with `lore work record --file FILE`:
     "attribution": "Who states this, when known",
     "evidence": [{"resource": 0, "start": 0, "end": 20}]
   }],
+  "source_questions": [],
   "unresolved": [],
   "resolutions": []
 }
@@ -80,8 +81,16 @@ with `lore work record --file FILE`:
 Replace example ranges with exact assigned ranges supporting each observation.
 Findings may be empty; summaries and statements must be nonblank. Optional
 `effective_time`, `scope` and `attribution` are source declarations, not guesses.
-An unresolved item has `id`, `question`, `evidence`; namespace new IDs by node ID.
-A reduction resolution has an inherited concern's `id`, `reason`, `evidence`.
+`source_questions` records questions the evidence leaves open after full inspection,
+such as competing policies without an authority, unmeasured enforcement or unproven
+source independence. Preserve them as attributed uncertainty in the final prose.
+`unresolved` records processing blockers preventing the requested interpretation,
+such as incomplete reading or an evidence mapping that cannot be established.
+Unknown source facts alone are not processing blockers. Both use `id`, `question`,
+`evidence`; namespace new IDs by node ID. Reduction must retain every inherited
+question unchanged in its original collection, or explicitly resolve it with an
+inherited question's `id`, `reason`, `evidence`. Never relabel a blocker as a source
+question to enable publication.
 An inspection cannot resolve another part's concern. The output must fit the
 request's result-byte limit; all evidence references must lie within its assigned
 coverage. Return after the selected node is recorded; do not drain other tasks.

@@ -1501,3 +1501,85 @@ fn a_section_target_outside_the_vault_is_unreadable_and_never_published() {
     assert!(!pruned.status.success());
     assert!(ws.vault().join(".lorekeeper/queue/tasks.jsonl").exists());
 }
+
+#[test]
+fn source_questions_can_publish_but_processing_blockers_cannot_bypass_explicit_work() {
+    for kind in ["source_questions", "unresolved"] {
+        let ws = Workspace::new();
+        bounded_config(&ws);
+        let source_path = "wiki/documents/source.md";
+        let source = "---\ntype: document\n---\nPolicy drafts disagree on retention; the approving authority is not recorded.\n";
+        ws.write(source_path, source);
+        let citation = lk_core::concept::Citation::new(
+            Path::new(source_path),
+            &lk_vault::parse_page(source).unwrap(),
+        );
+        let hash = lk_core::concept::citation_digest(std::slice::from_ref(&citation));
+        let target = "wiki/concepts/topic.md";
+        let body = format!(
+            "---\ntype: concept\nllm_inputs:\n  synthesis: {hash}\n---\n## Synthesis\n\n## Related\n"
+        );
+        ws.write(target, &body);
+        let task = serde_json::json!({"task_id":"syn-question", "kind":"synthesize-concept", "created_at":"2026-10-16T00:00:00Z", "cache_hash":hash,
+            "input":{"locale":"en","citations":[citation],"related_anchor":"## Related"}, "target":{"vault_path":target,"kind":"concept-synthesis","anchor":"## Synthesis"}});
+        ws.write(".lorekeeper/queue/syn-question.jsonl", &task.to_string());
+        let planned = work_json(&ws, &["work", "plan", "--task-id", "syn-question"]);
+        assert_eq!(planned["parts"], 1);
+        let work_id = planned["work_id"].as_str().unwrap();
+        let progress = work_json(&ws, &["work", "status", work_id]);
+        let node_id = progress["ready"][0].as_str().unwrap();
+        let input = work_json(&ws, &["work", "read", work_id, node_id]);
+        let mut observation = serde_json::json!({"work_id":work_id, "node_id":node_id, "input_revision":input["input_revision"],
+            "summary":"The exact source leaves the approving authority unknown.", "findings":[], "source_questions":[], "unresolved":[], "resolutions":[]});
+        observation[kind] = serde_json::json!([{"id":"authority", "question":"Who approves the policy?", "evidence":input["input"]["ranges"].as_array().unwrap().iter().map(|range| range["range"].clone()).collect::<Vec<_>>()}]);
+        let observation_file = ws.vault().join(".lorekeeper/observation.json");
+        ws.write(".lorekeeper/observation.json", &observation.to_string());
+        work_json(
+            &ws,
+            &[
+                "work",
+                "record",
+                "--file",
+                observation_file.to_str().unwrap(),
+            ],
+        );
+        let result = serde_json::json!({"task_id":"syn-question", "cache_hash":hash,
+            "target_revision":blake3::hash(body.as_bytes()).to_hex().to_string(), "synthesis":"The approving authority is unknown; the policy drafts remain unresolved.", "related":""});
+        let final_file = ws.vault().join(".lorekeeper/final.json");
+        ws.write(".lorekeeper/final.json", &result.to_string());
+        let finished = ws.run(&[
+            "work",
+            "finish",
+            work_id,
+            "--file",
+            final_file.to_str().unwrap(),
+        ]);
+        if kind == "source_questions" {
+            assert!(
+                finished.status.success(),
+                "{}",
+                String::from_utf8_lossy(&finished.stderr)
+            );
+            let applied = ws.run(&["queue", "apply"]);
+            assert!(
+                applied.status.success(),
+                "{}",
+                String::from_utf8_lossy(&applied.stderr)
+            );
+            assert!(ws.read(target).contains("approving authority is unknown"));
+        } else {
+            assert!(!finished.status.success());
+            assert!(
+                String::from_utf8_lossy(&finished.stderr)
+                    .contains("unresolved work concerns remain")
+            );
+            ws.write(
+                ".lorekeeper/queue/results/blocked.synthesis.json",
+                &result.to_string(),
+            );
+            let applied = ws.run(&["queue", "apply"]);
+            assert!(!applied.status.success());
+            assert_eq!(ws.read(target), body);
+        }
+    }
+}

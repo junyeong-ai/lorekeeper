@@ -564,7 +564,7 @@ mod native {
                 }
             }
             let operation = format!(
-                "bounded finish {id}. Read the bounded-work reference and lore work result for this exact work. Produce the normal typed final result using its completed root observation and selected generation specification. Submit with lore work finish. Do not read the whole corpus or drain other tasks. Leave the staged queue result or audit assessment for native controller publication. The controller owns global checks. Source uncertainty stays attributed; unresolved work concerns cannot be silently removed or marked reviewed."
+                "bounded finish {id}. Read the bounded-work reference and lore work result for this exact work. Produce the normal typed final result using its completed root observation and selected generation specification. Submit with lore work finish. Do not read the whole corpus or drain other tasks. Leave the staged queue result or audit assessment for native controller publication. The controller owns global checks. Preserve source_questions as attributed uncertainty in the final prose; do not invent answers. Material conflicts need a scoped open review and follow-up audit disposition. Processing blockers in unresolved cannot be silently removed or marked reviewed."
             );
             if !self.consumer(skill, &operation).await {
                 return WorkStep::Failed;

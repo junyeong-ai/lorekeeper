@@ -1,0 +1,32 @@
+vault:
+  root: vault
+  locale: en
+identity:
+  name: Scenario verification
+  email: scenario@example.com
+sources:
+  manual-inbox:
+    type: manual
+    params:
+      inbox_dir: inbox
+      archive_after_ingest: true
+    labels: [knowledge]
+    concept_policy: existing-only
+llm:
+  provider: queue
+execution:
+  default_profile: codex
+  work:
+    max_input_bytes: 262144
+    max_result_bytes: 32768
+    max_calls: 6
+  profiles:
+    codex:
+      engine: codex
+      timeout_seconds: 900
+    claude:
+      engine: claude-code
+      timeout_seconds: 900
+graph:
+  audit:
+    batch_size: 1
