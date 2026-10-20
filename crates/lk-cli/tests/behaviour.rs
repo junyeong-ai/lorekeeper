@@ -36,6 +36,12 @@ const SWEEP: &[&[&str]] = &[
         "--file",
         "corpus/vault/wiki/concepts/behaviour-snapshot.md",
     ],
+    &[
+        "wiki",
+        "audit-discover",
+        "--file",
+        "corpus/audit-discovery.json",
+    ],
     &["wiki", "original", "wiki/concepts/behaviour-snapshot.md"],
     &[
         "wiki",
