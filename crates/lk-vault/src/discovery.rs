@@ -48,7 +48,7 @@ pub fn discover_queries(
         dirs,
         vec![lk_core::vault_path::concepts_dir(dirs)],
         |mut page, _| {
-            page.page.body.clear();
+            page.page.body = String::new();
             page.page.original = None;
             vocabulary.push(page);
             Ok(())

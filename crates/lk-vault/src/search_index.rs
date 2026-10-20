@@ -117,7 +117,7 @@ fn prepare_search_inner(
             page.rel_path.clone(),
             lk_core::concept::source_revision(&page.page),
         );
-        page.page.body.clear();
+        page.page.body = String::new();
         page.page.original = None;
         pages.push(page);
         Ok(())
@@ -292,7 +292,7 @@ fn prepare_search_inner(
             let aliases = serde_json::to_string(&page.aliases)
                 .map_err(|e| VaultError::Serialization(e.to_string()))?;
             let mut metadata = page.clone();
-            metadata.page.body.clear();
+            metadata.page.body = String::new();
             metadata
                 .page
                 .frontmatter
