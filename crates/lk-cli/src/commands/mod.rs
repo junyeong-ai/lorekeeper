@@ -14,6 +14,7 @@ pub mod graph;
 pub mod health;
 pub mod ingest;
 pub mod init;
+pub mod input;
 pub mod installation;
 pub mod maintenance;
 pub mod performance;
@@ -103,11 +104,12 @@ pub fn load_config(path: &Path) -> miette::Result<lk_core::config::Config> {
 }
 
 pub(super) const CONFIG_REVISION_ENV: &str = "LORE_CONFIG_REVISION";
+pub(super) const EXECUTION_PROFILE_ENV: &str = "LORE_EXECUTION_PROFILE";
 
 pub(super) fn load_config_with_revision(
     path: &Path,
 ) -> miette::Result<(lk_core::config::Config, String)> {
-    let loaded =
+    let mut loaded =
         lk_core::config::Config::load_with_revision(path).map_err(|e| miette::miette!("{e}"))?;
     match std::env::var(CONFIG_REVISION_ENV) {
         Ok(expected) => {
@@ -121,6 +123,17 @@ pub(super) fn load_config_with_revision(
         Err(std::env::VarError::NotPresent) => {}
         Err(std::env::VarError::NotUnicode(_)) => {
             return Err(miette::miette!("invalid workflow configuration revision"));
+        }
+    }
+    match std::env::var(EXECUTION_PROFILE_ENV) {
+        Ok(name) => loaded
+            .0
+            .execution
+            .select_profile(&name)
+            .map_err(|error| miette::miette!("{error}"))?,
+        Err(std::env::VarError::NotPresent) => {}
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err(miette::miette!("invalid execution profile context"));
         }
     }
     Ok(loaded)

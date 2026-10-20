@@ -13,6 +13,8 @@ identity:
 # Host-local cadence; takes effect only after explicit OS registration.
 ingest:
   schedule: "0 7 * * *"
+  # DOCX/XLSX/PDF: `lore input install DIRECTORY`, then add its printed documents block.
+  # Image OCR additionally needs explicit traineddata/languages; see config.example.yaml.
 
 sources:
   manual-inbox:
@@ -33,6 +35,7 @@ llm:
 execution:
   default_profile: primary
   # JSON byte limits for bounded workers; calls reset per run/knowledge batch.
+  # A profile's optional work fields override these shared defaults.
   work:
     max_input_bytes: 262144
     max_result_bytes: 32768

@@ -9,13 +9,63 @@ use crate::search::{MatchProjection, Page, SearchOptions, SearchResult, fold_nam
 use crate::{MutationSession, VaultError};
 
 pub(super) const INDEX_PATH: &str = ".lorekeeper/search.sqlite";
-const VERSION: i32 = 13;
+const VERSION: i32 = 14;
 
 #[derive(Serialize)]
 pub struct SearchSnapshot {
     pub snapshot: String,
     pub pages: usize,
     pub citations_available: bool,
+    pub captured_at: jiff::Timestamp,
+    pub verified_at: jiff::Timestamp,
+}
+
+/// Read the prepared capture without consulting source pages. The recorded verification
+/// time describes the last full preparation, never the currency of external edits.
+pub fn inspect_search_snapshot(
+    root: &Path,
+    dirs: &VaultDirs,
+) -> Result<SearchSnapshot, VaultError> {
+    let path = crate::page_path(root, Path::new(INDEX_PATH))?;
+    let mut connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let transaction = connection.transaction()?;
+    let expected: String =
+        transaction.query_row("SELECT id FROM snapshot", [], |row| row.get(0))?;
+    verify_snapshot(&transaction, root, dirs, &expected)?;
+    read_snapshot(&transaction)
+}
+
+pub(super) fn read_snapshot(connection: &Connection) -> Result<SearchSnapshot, VaultError> {
+    let (snapshot, pages, citations_available, captured_at, verified_at): (
+        String,
+        i64,
+        bool,
+        String,
+        String,
+    ) = connection.query_row(
+        "SELECT id, pages, citations_available, captured_at, verified_at FROM snapshot",
+        [],
+        |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
+        },
+    )?;
+    Ok(SearchSnapshot {
+        snapshot,
+        pages: usize::try_from(pages).map_err(|error| invalid(error.to_string()))?,
+        citations_available,
+        captured_at: captured_at
+            .parse::<jiff::Timestamp>()
+            .map_err(|error| invalid(error.to_string()))?,
+        verified_at: verified_at
+            .parse::<jiff::Timestamp>()
+            .map_err(|error| invalid(error.to_string()))?,
+    })
 }
 
 fn context(root: &Path, dirs: &VaultDirs) -> Result<String, VaultError> {
@@ -96,11 +146,11 @@ fn prepare_search_inner(
                 verify_selected_capture(root, dirs, &selected_revisions)?;
             }
             verify(&selected_revisions)?;
-            return Ok(SearchSnapshot {
-                snapshot,
-                pages: pages.len(),
-                citations_available: citations.is_some(),
-            });
+            connection.execute(
+                "UPDATE snapshot SET verified_at = ?1",
+                [jiff::Timestamp::now().to_string()],
+            )?;
+            return read_snapshot(&connection);
         }
         compatible = current.1 == context && current.2 == VERSION;
     }
@@ -113,7 +163,8 @@ fn prepare_search_inner(
         DROP TABLE IF EXISTS pages;
         DROP TABLE IF EXISTS snapshot;
         CREATE TABLE snapshot (id TEXT NOT NULL, context TEXT NOT NULL, version INTEGER NOT NULL,
-            citations_available INTEGER NOT NULL);
+            citations_available INTEGER NOT NULL, pages INTEGER NOT NULL,
+            captured_at TEXT NOT NULL, verified_at TEXT NOT NULL);
         CREATE TABLE pages (id INTEGER PRIMARY KEY, path TEXT NOT NULL UNIQUE, title TEXT NOT NULL,
             aliases TEXT NOT NULL, concept INTEGER NOT NULL, knowledge INTEGER NOT NULL, body TEXT NOT NULL, metadata TEXT NOT NULL, intro TEXT NOT NULL,
             category TEXT NOT NULL, format TEXT NOT NULL, source_status TEXT NOT NULL, created_date TEXT, path_rank INTEGER NOT NULL,
@@ -332,22 +383,32 @@ fn prepare_search_inner(
     for (path, (id, ..)) in stored {
         remove_page(&transaction, id, &path)?;
     }
-    transaction.execute("DELETE FROM snapshot", [])?;
-    transaction.execute(
-        "INSERT INTO snapshot VALUES (?1, ?2, ?3, ?4)",
-        params![snapshot, context, VERSION, citations.is_some()],
-    )?;
     crate::provenance_index::write(&transaction, &provenance)?;
     crate::citations::write(&transaction, citations)?;
     if citations.is_some() {
         verify_selected_capture(root, dirs, &selected_revisions)?;
     }
     verify(&selected_revisions)?;
+    let verified_at = jiff::Timestamp::now();
+    transaction.execute("DELETE FROM snapshot", [])?;
+    transaction.execute(
+        "INSERT INTO snapshot VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+        params![
+            snapshot,
+            context,
+            VERSION,
+            citations.is_some(),
+            integer(pages.len())?,
+            verified_at.to_string()
+        ],
+    )?;
     transaction.commit()?;
     Ok(SearchSnapshot {
         snapshot,
         pages: pages.len(),
         citations_available: citations.is_some(),
+        captured_at: verified_at,
+        verified_at,
     })
 }
 
@@ -694,6 +755,75 @@ pub(super) fn visit_body_pages(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn snapshot_inspection_is_read_only_and_does_not_certify_current_pages() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        assert!(inspect_search_snapshot(root.path(), &dirs).is_err());
+        assert!(!root.path().join(".lorekeeper").exists());
+        let path = "wiki/concepts/topic.md";
+        write(
+            root.path(),
+            path,
+            "---\ntype: concept\ntitle: Topic\n---\nOriginal.\n",
+        );
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let prepared = prepare_search(&session, &dirs).unwrap();
+        let index_before = std::fs::read(root.path().join(INDEX_PATH)).unwrap();
+        write(root.path(), path, "---\ninvalid: [\n---\nChanged.\n");
+        let captured = inspect_search_snapshot(root.path(), &dirs).unwrap();
+        assert_eq!(captured.snapshot, prepared.snapshot);
+        assert_eq!(captured.pages, 1);
+        assert_eq!(captured.captured_at, prepared.captured_at);
+        assert_eq!(captured.verified_at, prepared.verified_at);
+        assert_eq!(
+            std::fs::read(root.path().join(INDEX_PATH)).unwrap(),
+            index_before
+        );
+        assert!(prepare_search(&session, &dirs).is_err());
+        assert_eq!(
+            inspect_search_snapshot(root.path(), &dirs)
+                .unwrap()
+                .verified_at,
+            prepared.verified_at
+        );
+        let incompatible = VaultDirs {
+            wiki: "other".into(),
+            ..dirs
+        };
+        assert!(inspect_search_snapshot(root.path(), &incompatible).is_err());
+    }
+
+    #[test]
+    fn successful_reverification_preserves_capture_and_updates_verification_time() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        write(
+            root.path(),
+            "wiki/concepts/topic.md",
+            "---\ntype: concept\ntitle: Topic\n---\nOriginal.\n",
+        );
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let prepared = prepare_search(&session, &dirs).unwrap();
+        let connection = Connection::open(root.path().join(INDEX_PATH)).unwrap();
+        connection
+            .execute(
+                "UPDATE snapshot SET verified_at = '2000-01-01T00:00:00Z'",
+                [],
+            )
+            .unwrap();
+        let reused = prepare_search(&session, &dirs).unwrap();
+        assert_eq!(reused.snapshot, prepared.snapshot);
+        assert_eq!(reused.captured_at, prepared.captured_at);
+        assert!(reused.verified_at >= prepared.verified_at);
+        assert_eq!(
+            inspect_search_snapshot(root.path(), &dirs)
+                .unwrap()
+                .verified_at,
+            reused.verified_at
+        );
+    }
 
     #[test]
     fn citation_capture_guards_the_selected_search_inventory_separately() {

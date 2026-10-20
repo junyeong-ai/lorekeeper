@@ -4,7 +4,7 @@ description: Processes pending Lorekeeper semantic queue tasks after ingestion o
   graph reconciliation. Stages typed summaries, concepts, synthesis and review narratives,
   then verifies publication and evidence consistency. Does not collect remote sources.
 metadata:
-  version: 0.70.0
+  version: 0.71.0
 ---
 
 # lore-process — Drain the Lorekeeper LLM queue
@@ -31,6 +31,12 @@ For a native `bounded inspect` or `bounded finish` request, follow
 Do not enter the ordinary queue-drain protocol. For manual processing, run
 `lore work plan --task-id TASK` before loading a large retained input; multi-part
 work requires complete guarded reduction before normal result publication.
+
+For a native `selected` request, read the exact JSON task-ID array from the named
+selection manifest. Follow the protocol only for those current tasks, one per
+distinct target, then return. Read metadata before loading each selected retained
+input; do not load unrelated task bodies or drain the remaining queue. Native Rust
+owns global reconciliation, pruning and completion checks after the selected batch.
 
 ## Start the session under the workflow lease
 

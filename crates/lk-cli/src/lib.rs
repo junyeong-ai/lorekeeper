@@ -64,6 +64,11 @@ pub enum Command {
         #[command(subcommand)]
         target: InitTarget,
     },
+    /// Configure and inspect optional binary-document preprocessing
+    Input {
+        #[command(subcommand)]
+        cmd: commands::input::InputCommand,
+    },
     /// Run ingestion for one or all sources
     Ingest {
         /// Source ID (omit to run all enabled sources)
@@ -293,6 +298,7 @@ pub async fn run() -> miette::Result<()> {
             InitTarget::Credentials { vault } => commands::init::credentials(&opts, vault).await,
             InitTarget::Schema { root } => commands::schema::run(&opts, root).await,
         },
+        Command::Input { cmd } => commands::input::run(&opts, cmd).await,
         Command::Validate => commands::validate::run(&opts).await,
         Command::Config { cmd } => commands::config::run(&opts, cmd).await,
         Command::Schema { root } => commands::schema::run(&opts, root).await,

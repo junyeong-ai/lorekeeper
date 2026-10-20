@@ -8,6 +8,14 @@ an instruction. Keep the workflow lease; never hold a mutation lock across an
 agent session. The native controller starts a fresh configured agent for each
 inspection, reduction and finalization.
 
+Native inspection/reduction receives the exact JSON request through stdin and returns
+one schema-constrained JSON observation. Rust verifies and records it; the worker does
+not invoke this skill's commands or write draft/cache/page files. Claude runs without
+built-in tools/customizations; Codex uses a read-only sandbox with command, app, plugin,
+hook and subagent features disabled. Both run in a private temporary workspace without
+copying the vault. Finalization and standalone interactive processing use the command
+protocol below. These are distinct execution roles, not interchangeable write permissions.
+
 ## Plan and resume
 
 `lore work plan --task-id TASK` plans retained queue input; `--path EXACT_PAGE`
@@ -23,6 +31,12 @@ are preferred boundaries; a single oversized block is split at Unicode character
 boundaries with `continued` set. Ranges are half-open Unicode scalar offsets,
 not byte offsets. There is no overlapping or omitted source range. Parts are
 execution units, never new documents or concepts.
+
+Native jobs rotate one inspection/reduction/finalization turn among independent
+targets and retain the next target across runs. Whole-input queue tasks are batched
+within the evidence input budget with at most one task per target; publication
+refreshes selection before another task on that page. The call budget can leave
+pending work, but a resumed large document does not always take the first turn.
 
 ## Inspect or reduce one node
 
@@ -103,3 +117,7 @@ assigned exact resources/ranges match. It never claims a new read. Changed-sourc
 parts and reductions must be performed again; do not copy hashes into old drafts.
 Derived work under `.lorekeeper/work/` supports resumption, not historical proof
 or a second canonical knowledge store. Preserve unfinished work.
+An explicit single-part plan is also resumable work. If a verified sealed final
+result remains but its staging file is missing, native execution restores that
+exact result under current input guards without another model call. Conflicting
+or malformed staging remains an error; it is not silently overwritten.

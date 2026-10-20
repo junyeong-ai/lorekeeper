@@ -154,6 +154,14 @@ pub fn inspect_concept_citations(
     let mut connection = Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     let transaction = connection.transaction()?;
     search_index::verify_snapshot(&transaction, root, dirs, options.snapshot)?;
+    inspect_captured(&transaction, path, options)
+}
+
+pub(super) fn inspect_captured(
+    transaction: &Connection,
+    path: &str,
+    options: &CitationOptions<'_>,
+) -> Result<ConceptCitations, VaultError> {
     let available: bool =
         transaction.query_row("SELECT citations_available FROM snapshot", [], |row| {
             row.get(0)

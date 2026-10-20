@@ -1,6 +1,9 @@
 use clap::ValueEnum;
 use serde::Serialize;
 
+#[cfg(unix)]
+mod scheduler;
+
 #[derive(Clone, Copy, Debug, ValueEnum, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Operation {
@@ -43,12 +46,31 @@ pub async fn run(
 
 #[cfg(unix)]
 mod native {
+    use super::scheduler;
     use super::*;
-    use crate::commands::{CONFIG_REVISION_ENV, GlobalOptions, execution, workflow};
+    use crate::commands::{
+        CONFIG_REVISION_ENV, EXECUTION_PROFILE_ENV, GlobalOptions, execution, workflow,
+    };
     use lk_core::config::Config;
     use lk_core::execution::ExecutionProfile;
     use std::path::PathBuf;
     use std::time::Duration;
+
+    enum WorkStep {
+        Pending,
+        Staged,
+        Failed,
+    }
+
+    enum QueueDispatch {
+        Partitioned {
+            id: String,
+            task: lk_queue::QueueTask,
+        },
+        WholeInput {
+            tasks: Vec<lk_queue::QueueTask>,
+        },
+    }
 
     #[derive(Serialize)]
     #[serde(rename_all = "kebab-case")]
@@ -72,6 +94,7 @@ mod native {
         engine: lk_core::execution::AgentEngine,
         version: String,
         requested_model: Option<String>,
+        work: lk_core::execution::SemanticWorkConfig,
     }
 
     #[derive(Default, Serialize)]
@@ -102,7 +125,6 @@ mod native {
         config_revision: String,
         configuration_failed: bool,
         root: PathBuf,
-        profile: Option<String>,
         supervisor: &'a mut execution::Supervisor,
         lease: Option<workflow::WorkflowLease>,
         selected: Option<ExecutionProfile>,
@@ -180,6 +202,11 @@ mod native {
                 "LORE_CONFIG",
                 self.opts.config.as_ref().expect("resolved config"),
             );
+            if let Some(name) = self.config.execution.selected_profile() {
+                command.env(EXECUTION_PROFILE_ENV, name);
+            } else {
+                command.env_remove(EXECUTION_PROFILE_ENV);
+            }
             let completed = match self.supervisor.run(command, timeout, false).await {
                 Ok(result) => self.record(
                     name,
@@ -237,19 +264,15 @@ mod native {
             let (name, profile) = self
                 .config
                 .execution
-                .resolve_profile(self.result.operation.semantic(), self.profile.as_deref())
+                .resolve_profile(
+                    self.result.operation.semantic(),
+                    self.config.execution.selected_profile(),
+                )
                 .map_err(|e| miette::miette!("{e}"))?;
             let name = name.to_owned();
             let mut profile = profile.clone();
             let executable = execution::executable_path(profile.executable())?;
-            match &mut profile {
-                ExecutionProfile::ClaudeCode {
-                    executable: path, ..
-                }
-                | ExecutionProfile::Codex {
-                    executable: path, ..
-                } => *path = executable.clone(),
-            }
+            profile.set_executable(executable.clone());
             let mut command = tokio::process::Command::new(executable);
             command.arg("--version");
             let version = self
@@ -280,6 +303,11 @@ mod native {
                     .trim()
                     .into(),
                 requested_model: profile.model().map(str::to_owned),
+                work: self
+                    .config
+                    .execution
+                    .effective_work()
+                    .map_err(|error| miette::miette!("{error}"))?,
             });
             self.selected = Some(profile);
             Ok(())
@@ -292,7 +320,11 @@ mod native {
             if self.config.llm.provider == lk_core::config::LlmProvider::Noop {
                 return self.failure(skill, "semantic execution is disabled by llm.provider");
             }
-            if self.calls >= self.config.execution.work.max_calls {
+            let budget = match self.config.execution.effective_work() {
+                Ok(budget) => budget,
+                Err(error) => return self.failure("semantic work budget", error),
+            };
+            if self.calls >= budget.max_calls {
                 return self.failure("semantic call budget", "configured execution.work.max_calls exhausted; unfinished work is retained for the next run");
             }
             if let Err(error) = self.prepare_agent().await {
@@ -325,35 +357,175 @@ mod native {
             }
         }
 
-        async fn bounded_work(&mut self, id: &str, skill: &str) -> bool {
-            loop {
-                let before = match crate::commands::work::current_progress(
+        async fn observe(&mut self, id: &str, node: &str) -> bool {
+            if self.result.cancelled || !self.configuration_is_current() {
+                return false;
+            }
+            if self.config.llm.provider == lk_core::config::LlmProvider::Noop {
+                return self.failure(
+                    "bounded work receipt",
+                    "semantic execution is disabled by llm.provider",
+                );
+            }
+            let budget = match self.config.execution.effective_work() {
+                Ok(budget) => budget,
+                Err(error) => return self.failure("semantic work budget", error),
+            };
+            if self.calls >= budget.max_calls {
+                return self.failure("semantic call budget", "configured execution.work.max_calls exhausted; unfinished work is retained for the next run");
+            }
+            if let Err(error) = self.prepare_agent().await {
+                return if self.result.cancelled {
+                    self.record(
+                        "bounded work receipt",
+                        StageState::Cancelled,
+                        Some(error.to_string()),
+                    )
+                } else {
+                    self.failure("bounded work receipt", error)
+                };
+            }
+            let request = match crate::commands::work::inspection_input(
+                &self.root,
+                &self.config,
+                &self.config_revision,
+                id,
+                node,
+            ) {
+                Ok(input) => input,
+                Err(error) => return self.failure("bounded work receipt", error),
+            };
+            let profile = self.selected.as_ref().expect("prepared agent");
+            let invocation = match execution::observation::build_invocation(profile, &request) {
+                Ok(invocation) => invocation,
+                Err(error) => return self.failure("bounded work receipt", error),
+            };
+            let timeout = profile.timeout();
+            let mut command = invocation.command;
+            if let Some(lease) = &self.lease {
+                lease.configure(command.as_std_mut());
+            }
+            command.env(CONFIG_REVISION_ENV, &self.config_revision).env(
+                "LORE_CONFIG",
+                self.opts.config.as_ref().expect("resolved config"),
+            );
+            if let Some(name) = self.config.execution.selected_profile() {
+                command.env(EXECUTION_PROFILE_ENV, name);
+            }
+            let Some(limit) = budget
+                .max_result_bytes
+                .checked_mul(3)
+                .and_then(|limit| limit.checked_add(16384))
+            else {
+                return self.failure(
+                    "bounded work receipt",
+                    "host output envelope limit overflow",
+                );
+            };
+            self.calls += 1;
+            let child = match self
+                .supervisor
+                .run_request(
+                    command,
+                    Some(timeout),
+                    Some(limit),
+                    Some(&invocation.prompt),
+                )
+                .await
+            {
+                Ok(child) => child,
+                Err(error) => return self.failure("bounded work receipt", error),
+            };
+            if !child.success {
+                self.record(
+                    "bounded work receipt",
+                    if child.cancelled {
+                        StageState::Cancelled
+                    } else {
+                        StageState::Failed
+                    },
+                    child.detail,
+                );
+                self.configuration_is_current();
+                return false;
+            }
+            if !self.configuration_is_current() {
+                return false;
+            }
+            let output = match execution::observation::decode(
+                invocation.engine,
+                &child.stdout,
+                budget.max_result_bytes,
+            ) {
+                Ok(output) => output,
+                Err(error) => return self.failure("bounded work receipt", error),
+            };
+            match crate::commands::work::record_inspection(
+                &self.root,
+                &self.config,
+                &self.config_revision,
+                id,
+                node,
+                output,
+            ) {
+                Ok(()) => self.record(
+                    "bounded work receipt",
+                    StageState::Completed,
+                    Some(node.into()),
+                ),
+                Err(error) => self.failure("bounded work receipt", error),
+            }
+        }
+
+        fn call_budget_available(&mut self) -> bool {
+            match self.config.execution.effective_work() {
+                Ok(budget) if self.calls < budget.max_calls => true,
+                Ok(_) => self.failure("semantic call budget", "configured execution.work.max_calls exhausted; unfinished work is retained for the next run"),
+                Err(error) => self.failure("semantic work budget", error),
+            }
+        }
+
+        async fn bounded_step(&mut self, id: &str, skill: &str) -> WorkStep {
+            let before = match crate::commands::work::current_progress(
+                &self.root,
+                &self.config,
+                &self.config_revision,
+                id,
+            ) {
+                Ok(status) => status,
+                Err(error) => {
+                    self.failure("bounded work progress", error);
+                    return WorkStep::Failed;
+                }
+            };
+            if !before.complete {
+                let Some(node) = before.ready.first() else {
+                    self.failure("bounded work progress", "incomplete work has no ready node");
+                    return WorkStep::Failed;
+                };
+                if !self.observe(id, node).await {
+                    return WorkStep::Failed;
+                }
+                return match crate::commands::work::current_progress(
                     &self.root,
                     &self.config,
                     &self.config_revision,
                     id,
                 ) {
-                    Ok(status) => status,
-                    Err(error) => return self.failure("bounded work progress", error),
+                    Ok(after)
+                        if after.completed > before.completed && !after.ready.contains(node) =>
+                    {
+                        WorkStep::Pending
+                    }
+                    Ok(_) => {
+                        self.failure("bounded work receipt", "worker exited without completing its selected node; unfinished work retained");
+                        WorkStep::Failed
+                    }
+                    Err(error) => {
+                        self.failure("bounded work receipt", error);
+                        WorkStep::Failed
+                    }
                 };
-                if before.complete {
-                    break;
-                }
-                let Some(node) = before.ready.first() else {
-                    return self
-                        .failure("bounded work progress", "incomplete work has no ready node");
-                };
-                let operation = format!(
-                    "bounded inspect {id} {node}. Read the bounded-work reference, then only this exact work node with lore work read. Inspect all assigned ranges or child observations, preserve scope/time/attribution and unresolved concerns, and submit one typed observation with lore work record. Do not execute the ordinary queue drain/maintenance protocol, edit pages, publish reviews, or process another node. The native controller starts a fresh session for each node and owns final publication checks."
-                );
-                if !self.consumer(skill, &operation).await {
-                    return false;
-                }
-                match crate::commands::work::current_progress(&self.root, &self.config, &self.config_revision, id) {
-                    Ok(after) if after.completed > before.completed && !after.ready.contains(node) => {}
-                    Ok(_) => return self.failure("bounded work receipt", "worker exited without completing its selected node; unfinished work retained"),
-                    Err(error) => return self.failure("bounded work receipt", error),
-                }
             }
             match crate::commands::work::is_finished(
                 &self.root,
@@ -362,20 +534,33 @@ mod native {
                 id,
             ) {
                 Ok(true) => {
-                    return self.record(
+                    if let Err(error) = crate::commands::work::restage_finished(
+                        &self.root,
+                        &self.config,
+                        &self.config_revision,
+                        id,
+                    ) {
+                        self.failure("bounded work completion", error);
+                        return WorkStep::Failed;
+                    }
+                    self.record(
                         "bounded work completion",
                         StageState::Skipped,
                         Some("verified sealed result already staged".into()),
                     );
+                    return WorkStep::Staged;
                 }
                 Ok(false) => {}
-                Err(error) => return self.failure("bounded work completion", error),
+                Err(error) => {
+                    self.failure("bounded work completion", error);
+                    return WorkStep::Failed;
+                }
             }
             let operation = format!(
                 "bounded finish {id}. Read the bounded-work reference and lore work result for this exact work. Produce the normal typed final result using its completed root observation and selected generation specification. Submit with lore work finish. Do not read the whole corpus or drain other tasks. Leave the staged queue result or audit assessment for native controller publication. The controller owns global checks. Source uncertainty stays attributed; unresolved work concerns cannot be silently removed or marked reviewed."
             );
             if !self.consumer(skill, &operation).await {
-                return false;
+                return WorkStep::Failed;
             }
             match crate::commands::work::verify_finished(
                 &self.root,
@@ -383,43 +568,161 @@ mod native {
                 &self.config_revision,
                 id,
             ) {
-                Ok(()) => self.record(
-                    "bounded work completion",
-                    StageState::Completed,
-                    Some(id.into()),
-                ),
-                Err(error) => self.failure("bounded work completion", error),
+                Ok(()) => {
+                    self.record(
+                        "bounded work completion",
+                        StageState::Completed,
+                        Some(id.into()),
+                    );
+                    WorkStep::Staged
+                }
+                Err(error) => {
+                    self.failure("bounded work completion", error);
+                    WorkStep::Failed
+                }
             }
         }
 
-        async fn bounded_queue(&mut self) -> bool {
-            let tasks = match crate::commands::queue::current_tasks(&self.root) {
-                Ok(tasks) => tasks,
-                Err(error) => return self.failure("bounded queue discovery", error),
-            };
+        fn queue_dispatches(
+            &self,
+        ) -> miette::Result<std::collections::BTreeMap<String, QueueDispatch>> {
+            fn flush(
+                batch: &mut Vec<lk_queue::QueueTask>,
+                jobs: &mut std::collections::BTreeMap<String, QueueDispatch>,
+            ) {
+                if let Some(last) = batch.last() {
+                    jobs.insert(
+                        last.target.vault_path.clone(),
+                        QueueDispatch::WholeInput {
+                            tasks: std::mem::take(batch),
+                        },
+                    );
+                }
+            }
+            let mut tasks = crate::commands::queue::current_tasks(&self.root)?;
+            tasks.sort_by(|left, right| {
+                (left.created_at, &left.task_id).cmp(&(right.created_at, &right.task_id))
+            });
+            let mut targets = std::collections::BTreeMap::new();
             for task in tasks {
-                let work = match crate::commands::work::prepare_task(
+                targets
+                    .entry(task.target.vault_path.clone())
+                    .or_insert(task);
+            }
+            let limit = self
+                .config
+                .execution
+                .effective_work()
+                .map_err(|error| miette::miette!("{error}"))?
+                .max_input_bytes;
+            let mut jobs = std::collections::BTreeMap::new();
+            let mut batch = Vec::new();
+            let mut batch_bytes = 0usize;
+            for (target, task) in targets {
+                match crate::commands::work::prepare_task(
                     &self.root,
                     &self.config,
                     &self.config_revision,
                     &task.task_id,
-                ) {
-                    Ok(work) => work,
-                    Err(error) => return self.failure("bounded queue planning", error),
+                )? {
+                    crate::commands::work::TaskWork::WholeInput { bytes } => {
+                        if bytes > limit.saturating_sub(batch_bytes) {
+                            flush(&mut batch, &mut jobs);
+                            batch_bytes = 0;
+                        }
+                        batch_bytes += bytes;
+                        batch.push(task);
+                    }
+                    crate::commands::work::TaskWork::Partitioned { id } => {
+                        flush(&mut batch, &mut jobs);
+                        batch_bytes = 0;
+                        jobs.insert(target, QueueDispatch::Partitioned { id, task });
+                    }
+                }
+            }
+            flush(&mut batch, &mut jobs);
+            Ok(jobs)
+        }
+
+        async fn dispatch_queue(&mut self) -> bool {
+            loop {
+                let jobs = match self.queue_dispatches() {
+                    Ok(jobs) => jobs,
+                    Err(error) => return self.failure("queue planning", error),
                 };
-                if let Some(id) = work {
-                    if !self.bounded_work(&id, "lore-process").await {
+                if jobs.is_empty() {
+                    return true;
+                }
+                loop {
+                    if !self.call_budget_available() {
                         return false;
                     }
+                    let keys = jobs.keys().cloned().collect();
+                    let selected =
+                        match scheduler::select(&self.root, scheduler::Stage::Queue, &keys) {
+                            Ok(Some(selected)) => selected,
+                            Ok(None) => return true,
+                            Err(error) => return self.failure("queue scheduling", error),
+                        };
+                    match &jobs[&selected] {
+                        QueueDispatch::Partitioned { id, .. } => {
+                            match self.bounded_step(id, "lore-process").await {
+                                WorkStep::Pending => continue,
+                                WorkStep::Failed => return false,
+                                WorkStep::Staged => {}
+                            }
+                        }
+                        QueueDispatch::WholeInput { tasks } => {
+                            let ids: Vec<_> = tasks.iter().map(|task| &task.task_id).collect();
+                            let directory = match tempfile::Builder::new()
+                                .prefix("lorekeeper-selection-")
+                                .tempdir()
+                            {
+                                Ok(directory) => directory,
+                                Err(error) => return self.failure("queue selection", error),
+                            };
+                            let path = directory.path().join("tasks.json");
+                            if let Err(error) = std::fs::write(
+                                &path,
+                                serde_json::to_vec(&ids).expect("task ids serialize"),
+                            ) {
+                                return self.failure("queue selection", error);
+                            }
+                            let selection = match serde_json::to_string(&path) {
+                                Ok(selection) => selection,
+                                Err(error) => return self.failure("queue selection", error),
+                            };
+                            let context = if matches!(self.result.operation, Operation::Knowledge) {
+                                "Process these tasks as part of this bounded knowledge maintenance job. Read the selected work's review dependencies. Do not enumerate unrelated reviews or expand this batch."
+                            } else {
+                                ""
+                            };
+                            let operation = format!(
+                                "selected. {context} The native controller selected one task per distinct target within the configured evidence input budget. Read the JSON array of exact task IDs from the selection manifest and process only those current tasks, then return. Do not drain the rest of the queue or run global finalization. Follow the ordinary typed staging/publication protocol for these tasks. Selected queue task manifest: {selection}"
+                            );
+                            if !self.consumer("lore-process", &operation).await {
+                                return false;
+                            }
+                        }
+                    }
                     if !self
-                        .native("bounded queue apply", &["queue", "apply"])
+                        .native("selected queue apply", &["queue", "apply"])
                         .await
                     {
                         return false;
                     }
+                    let tasks = match &jobs[&selected] {
+                        QueueDispatch::WholeInput { tasks } => tasks.as_slice(),
+                        QueueDispatch::Partitioned { task, .. } => std::slice::from_ref(task),
+                    };
+                    match crate::commands::queue::tasks_completed(&self.root, tasks) {
+                            Ok(true) => {},
+                            Ok(false) => return self.failure("selected queue receipt", "selected tasks are not completed against their retained inputs; unfinished work retained"),
+                            Err(error) => return self.failure("selected queue receipt", error),
+                        }
+                    break;
                 }
             }
-            true
         }
 
         async fn drain(&mut self) -> bool {
@@ -446,21 +749,7 @@ mod native {
                     false
                 }
                 Ok(_) => {
-                    if !self.bounded_queue().await {
-                        self.drain_blocked = true;
-                        return false;
-                    }
-                    match crate::commands::queue::check::inspect(&self.root) {
-                        Ok(state) if state.current == 0 => return true,
-                        Ok(_) => {}
-                        Err(error) => return self.failure("queue inspection", error),
-                    }
-                    let operation = if matches!(self.result.operation, Operation::Knowledge) {
-                        "Process current queue tasks as part of this bounded knowledge maintenance job. Read the selected work's review dependencies. The native controller inspects and reports global review health after this session; do not enumerate unrelated reviews or expand the batch to repair them."
-                    } else {
-                        ""
-                    };
-                    let completed = self.consumer("lore-process", operation).await;
+                    let completed = self.dispatch_queue().await;
                     self.drain_blocked = !completed;
                     completed
                 }
@@ -692,6 +981,7 @@ mod native {
                 }
             }
             if bounded {
+                let mut jobs = std::collections::BTreeMap::new();
                 for path in &paths {
                     let work = match crate::commands::work::prepare_audit(
                         &self.root,
@@ -705,13 +995,32 @@ mod native {
                             return;
                         }
                     };
-                    if !self.bounded_work(&work, "lore-wiki").await {
+                    jobs.insert(path.clone(), work);
+                }
+                while !jobs.is_empty() {
+                    if !self.call_budget_available() {
                         return;
+                    }
+                    let keys = jobs.keys().cloned().collect();
+                    let selected =
+                        match scheduler::select(&self.root, scheduler::Stage::Audit, &keys) {
+                            Ok(Some(selected)) => selected,
+                            Ok(None) => break,
+                            Err(error) => {
+                                self.failure("audit scheduling", error);
+                                return;
+                            }
+                        };
+                    let work = &jobs[&selected];
+                    match self.bounded_step(work, "lore-wiki").await {
+                        WorkStep::Pending => continue,
+                        WorkStep::Failed => return,
+                        WorkStep::Staged => {}
                     }
                     let assessment = self
                         .root
                         .join(".lorekeeper/work")
-                        .join(&work)
+                        .join(work)
                         .join("assessment.json");
                     let assessment = match assessment.to_str() {
                         Some(path) => path.to_owned(),
@@ -732,6 +1041,7 @@ mod native {
                     {
                         return;
                     }
+                    jobs.remove(&selected);
                 }
             } else {
                 self.consumer("lore-wiki", &format!("maintain. The controller selected this exact batch: {selection}. Start with audit-plan --path for these addresses; do not select another batch. Use bounded work for any subject whose work envelope requires partitioning.")).await;
@@ -766,11 +1076,28 @@ mod native {
             ));
         }
         let config_path = crate::commands::find_config(opts)?;
-        let (config, config_revision) = crate::commands::load_config_with_revision(&config_path)?;
-        if let Some(name) = profile.as_deref() {
+        let (mut config, config_revision) =
+            crate::commands::load_config_with_revision(&config_path)?;
+        let explicit = profile
+            .as_deref()
+            .or(config.execution.selected_profile())
+            .map(str::to_owned);
+        if explicit.is_some()
+            || config.execution.default_profile.is_some()
+            || config
+                .execution
+                .operations
+                .contains_key(&operation.semantic())
+        {
+            let name = config
+                .execution
+                .resolve_profile(operation.semantic(), explicit.as_deref())
+                .map_err(|e| miette::miette!("{e}"))?
+                .0
+                .to_owned();
             config
                 .execution
-                .resolve_profile(operation.semantic(), Some(name))
+                .select_profile(&name)
                 .map_err(|e| miette::miette!("{e}"))?;
         }
         let options = GlobalOptions {
@@ -791,7 +1118,6 @@ mod native {
                 config.clone(),
                 config_revision.clone(),
                 operation,
-                profile.clone(),
                 wait,
                 &mut supervisor,
             )
@@ -843,7 +1169,6 @@ mod native {
         config: Config,
         config_revision: String,
         operation: Operation,
-        profile: Option<String>,
         wait: bool,
         supervisor: &mut execution::Supervisor,
     ) -> JobResult {
@@ -858,7 +1183,6 @@ mod native {
             config_revision,
             configuration_failed: false,
             opts: options,
-            profile,
             supervisor,
             lease: None,
             selected: None,

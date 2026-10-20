@@ -140,9 +140,35 @@ Use parser/token-state behavior, not regex replacement of arbitrary markup.
   documents; CLI aggregate capture cap512 MiB. Closure overflow is an explicit error,
   not silently solved by splitting top-level entries. Binary attachments stay bytes;
   text entry conversion requires supported decoding.
+- Default standalone selection follows configured decoder capabilities. Keep other
+  known binary inputs explicitly unprocessed without failing a note's byte-preserving
+  attachment capture. An explicit extension selection requires its decoder. Do not
+  infer dependency ownership from filename folding, equal hashes or shared inodes.
 - Retirement requires complete preserved bytes and unchanged entry. Never remove
   attachments. Cross-entry references protect referenced entries even when an event
   is filtered out; any entry capture failure holds retirement for that source.
   Retire only direct inbox entries into a strict descendant of that inbox.
   These checks are not a global inbox snapshot or a lease against external editors.
   Publication order and immutable object/bundle storage belong to vault/CLI owners.
+
+## Document projection (`content.rs`, `content/`)
+
+- Format decoding is separate from source acquisition and semantic work. The optional
+  pinned Python runtime reads captured bytes through stdin; Rust bounds time/output,
+  validates its typed response and owns publication. No runtime installs or OCR model
+  downloads during ingestion. Decoder stderr may contain source text; never forward it.
+- The interpreter runs the embedded in-process decoders and inherits the caller's
+  process group so workflow cancellation includes it. Keep direct-child timeout/reaping;
+  do not detach conversion or launch background helper processes from the processor.
+- XLSX preserves sheet state, cell coordinates, formulas and stored cached values without
+  calculation. PDF physical page numbers differ from DOCX flow content. OCR is explicit
+  and distinct from native text; empty extraction is unprocessed, never completed knowledge.
+- Decode all image frames through Pillow before OCR; preserve frame ordinals, apply
+  EXIF orientation and composite alpha on white. Bound aggregate RGBA bytes and unit
+  counts before accepting a projection. Native and OCR PDF page inventories must match;
+  missing later frames/pages is an error, not a successful partial document.
+- Decoder-generated links are original references, not canonical wiki edges. Render
+  them as literal destinations. Preserve raw input before optional inbox retirement.
+- Update the embedded requirements/hash lock and package protocol together. The ignored
+  real-runtime test is opt-in because Markdown-only CI needs no Python package installation;
+  run it explicitly when changing the decoder or its dependencies.

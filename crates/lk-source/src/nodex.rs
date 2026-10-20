@@ -1087,6 +1087,7 @@ template = "{kind}-{path_slug}"
             identity: Default::default(),
             vault_root: root.path().join("unused-vault"),
             vault_dirs: Default::default(),
+            documents: None,
         };
         let selected = serde_json::json!({"repo":root.path(), "executable":supported, "reconcile":true, "repository_id":"fixture/repo", "document_ids":["a"]});
         let raw = NodexSource.extract(&selected, &ctx).await.unwrap();
@@ -1325,6 +1326,7 @@ exit "$rc"
             identity: Default::default(),
             vault_root: root.path().to_owned(),
             vault_dirs: Default::default(),
+            documents: None,
         };
         verify_selection(&selected, &detail.node, true).unwrap();
         let raw = build_document_observation(

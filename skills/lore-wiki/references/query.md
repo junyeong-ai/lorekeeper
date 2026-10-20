@@ -12,10 +12,14 @@ Read this reference for `/lore-wiki query`.
 
 Answer a question grounded in vault content, with compounding.
 
-1. **Gather context.** For several searches in one investigation, run `lore wiki prepare`
-   once and pass its `snapshot` to search/browse with `--snapshot`. This is a captured
-   corpus, not a claim of current state. Prepare again after writes or before a new
-   investigation. A single lookup can use live search without preparing a snapshot.
+1. **Gather context.** Run `lore wiki snapshot` to inspect an existing prepared capture
+   without rereading the corpus. Its `captured_at` and `verified_at` describe stored
+   evidence, not current external edits. Pass its `snapshot` to search/browse with
+   `--snapshot`. Run `lore wiki prepare` when no compatible capture exists or current
+   collection membership is required; full preparation reads and verifies the corpus.
+   Prepare again after writes that must enter this investigation. A single current
+   lookup can use live search without preparing a snapshot. An unchanged capture may
+   answer historical questions, but never present its membership as freshly verified.
    For an unfamiliar topic, start with `lore wiki browse --snapshot <id> --json`
    in a prepared session (omit `--snapshot` for a single live lookup).
    Use its category/type/tag counts to select a scope with `--category`, `--type` and
@@ -48,6 +52,13 @@ Answer a question grounded in vault content, with compounding.
    Inspect its outline, then read relevant `--section ID` content and follow `next_offset`.
    Carry `--revision` through pagination; a mismatch requires fresh retrieval. A section
    includes nested subsections. Read the sources behind the claim, not only its synthesis.
+   For a selected page, `lore wiki context <exact-path> --snapshot <id> --limit 10`
+   returns links, concept evidence, declared document relations and scoped reviews in
+   one captured transaction. Each group has its own total and authority; links do not
+   establish support, and source declarations are not current-truth judgments.
+   `not-captured` differs from an available empty group. Follow its `next_offset` with
+   `--offset` in the same snapshot; the offset applies independently to every group.
+   Use the individual relation commands below when only one group needs expansion.
    For a selected concept, use `lore wiki citations <exact-concept-path> --snapshot <id>`
    and follow `next_offset` with the same snapshot to discover its complete evidence.
    This graph-derived set differs from ordinary explicit link occurrences. RSS entries

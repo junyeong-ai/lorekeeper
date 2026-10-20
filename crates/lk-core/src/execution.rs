@@ -74,14 +74,49 @@ pub struct ExecutionConfig {
     pub profiles: BTreeMap<String, ExecutionProfile>,
     pub operations: BTreeMap<ExecutionOperation, String>,
     pub work: SemanticWorkConfig,
+    #[serde(skip)]
+    selected_profile: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct SemanticWorkConfig {
     pub max_input_bytes: usize,
     pub max_result_bytes: usize,
     pub max_calls: usize,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SemanticWorkOverrides {
+    pub max_input_bytes: Option<usize>,
+    pub max_result_bytes: Option<usize>,
+    pub max_calls: Option<usize>,
+}
+
+impl SemanticWorkOverrides {
+    fn resolve(&self, defaults: SemanticWorkConfig) -> SemanticWorkConfig {
+        SemanticWorkConfig {
+            max_input_bytes: self.max_input_bytes.unwrap_or(defaults.max_input_bytes),
+            max_result_bytes: self.max_result_bytes.unwrap_or(defaults.max_result_bytes),
+            max_calls: self.max_calls.unwrap_or(defaults.max_calls),
+        }
+    }
+}
+
+impl SemanticWorkConfig {
+    fn validate(&self) -> Result<(), ConfigError> {
+        if self.max_input_bytes < 4096
+            || self.max_result_bytes < 1024
+            || self.max_result_bytes > self.max_input_bytes / 4
+            || self.max_calls == 0
+        {
+            return Err(ConfigError::Validation(
+                "semantic work requires max_input_bytes >= 4096, max_result_bytes >= 1024 and <= max_input_bytes/4, and max_calls > 0".into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl Default for SemanticWorkConfig {
@@ -98,6 +133,8 @@ impl Default for SemanticWorkConfig {
 #[serde(tag = "engine", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum ExecutionProfile {
     ClaudeCode {
+        #[serde(default)]
+        work: SemanticWorkOverrides,
         #[serde(default = "claude_executable")]
         executable: PathBuf,
         #[serde(default)]
@@ -107,6 +144,8 @@ pub enum ExecutionProfile {
         timeout_seconds: NonZeroU64,
     },
     Codex {
+        #[serde(default)]
+        work: SemanticWorkOverrides,
         #[serde(default = "codex_executable")]
         executable: PathBuf,
         #[serde(default)]
@@ -126,6 +165,37 @@ fn codex_executable() -> PathBuf {
 }
 
 impl ExecutionConfig {
+    pub fn select_profile(&mut self, name: &str) -> Result<(), ConfigError> {
+        self.work_for(name)?;
+        self.selected_profile = Some(name.to_owned());
+        Ok(())
+    }
+
+    pub fn selected_profile(&self) -> Option<&str> {
+        self.selected_profile.as_deref()
+    }
+
+    pub fn work_for(&self, name: &str) -> Result<SemanticWorkConfig, ConfigError> {
+        let profile = self.profiles.get(name).ok_or_else(|| {
+            ConfigError::Validation(format!("unknown execution profile '{name}'"))
+        })?;
+        let overrides = match profile {
+            ExecutionProfile::ClaudeCode { work, .. } | ExecutionProfile::Codex { work, .. } => {
+                work
+            }
+        };
+        let work = overrides.resolve(self.work);
+        work.validate()?;
+        Ok(work)
+    }
+
+    pub fn effective_work(&self) -> Result<SemanticWorkConfig, ConfigError> {
+        match self.selected_profile() {
+            Some(name) => self.work_for(name),
+            None => Ok(self.work),
+        }
+    }
+
     pub fn resolve_profile(
         &self,
         operation: ExecutionOperation,
@@ -147,17 +217,10 @@ impl ExecutionConfig {
     }
 
     pub(crate) fn validate(&self) -> Result<(), ConfigError> {
-        if self.work.max_input_bytes < 4096
-            || self.work.max_result_bytes < 1024
-            || self.work.max_result_bytes > self.work.max_input_bytes / 4
-            || self.work.max_calls == 0
-        {
-            return Err(ConfigError::Validation(
-                "execution.work requires max_input_bytes >= 4096, max_result_bytes >= 1024 and <= max_input_bytes / 4, and max_calls > 0".into(),
-            ));
-        }
+        self.work.validate()?;
         for name in self.profiles.keys() {
             validate_text("execution profile name", name)?;
+            self.work_for(name)?;
         }
         for name in self.default_profile.iter().chain(self.operations.values()) {
             if !self.profiles.contains_key(name) {
@@ -236,6 +299,14 @@ impl ExecutionProfile {
     pub fn executable(&self) -> &Path {
         match self {
             Self::ClaudeCode { executable, .. } | Self::Codex { executable, .. } => executable,
+        }
+    }
+
+    pub fn set_executable(&mut self, path: std::path::PathBuf) {
+        match self {
+            Self::ClaudeCode { executable, .. } | Self::Codex { executable, .. } => {
+                *executable = path
+            }
         }
     }
 
@@ -338,6 +409,42 @@ mod tests {
                 "{body}"
             );
         }
+    }
+
+    #[test]
+    fn profile_work_overrides_inherit_and_validate_the_effective_budget() {
+        let mut config: ExecutionConfig = crate::yaml::from_str(
+            "work: {max_calls: 12}\nprofiles:\n  main: {engine: claude-code, timeout_seconds: 60}\n  small: {engine: codex, timeout_seconds: 60, work: {max_input_bytes: 16384, max_result_bytes: 4096, max_calls: 2}}\n"
+        ).unwrap();
+        config.validate().unwrap();
+        assert_eq!(config.effective_work().unwrap().max_calls, 12);
+        config.select_profile("small").unwrap();
+        assert_eq!(
+            config.effective_work().unwrap(),
+            SemanticWorkConfig {
+                max_input_bytes: 16384,
+                max_result_bytes: 4096,
+                max_calls: 2
+            }
+        );
+        assert!(config.select_profile("missing").is_err());
+        assert_eq!(config.selected_profile(), Some("small"));
+        config.select_profile("main").unwrap();
+        assert_eq!(config.effective_work().unwrap(), config.work);
+        for fields in ["max_input_bytes: 8192", "max_calls: 0"] {
+            let body = format!(
+                "profiles: {{x: {{engine: codex, timeout_seconds: 1, work: {{{fields}}}}}}}"
+            );
+            let config: ExecutionConfig = crate::yaml::from_str(&body).unwrap();
+            assert!(config.validate().is_err(), "{body}");
+        }
+        assert!(
+            crate::yaml::from_str::<ExecutionConfig>(
+                "profiles: {x: {engine: codex, timeout_seconds: 1, work: {max_call: 2}}}"
+            )
+            .is_err()
+        );
+        assert!(crate::yaml::from_str::<ExecutionConfig>("selected_profile: x").is_err());
     }
 
     #[test]

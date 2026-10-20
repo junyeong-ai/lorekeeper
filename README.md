@@ -83,6 +83,11 @@ mkdir -p "$(lore config vault-root)/inbox"
 vault의 `inbox/`에 메모 파일 하나를 넣은 뒤 수집합니다. `inbox_dir: inbox`는 변경한
 `vault.root`를 따라갑니다. 기본 설정에는 공급자 인증 마법사가 필요하지 않습니다.
 
+DOCX·XLSX·PDF를 넣으려면 `lore input install DIRECTORY`로 선택적 변환 환경을 설치하고
+출력된 설정을 병합합니다. `lore input check`로 의존성을, `lore input inspect FILE.pdf`로
+원본을 옮기지 않고 변환 결과를 확인합니다. 이미지는 별도 OCR 언어 데이터가 필요합니다.
+[전처리 설정과 지원 범위](skills/lore-setup/references/config.md#document-preprocessing)를 참고하세요.
+
 ```bash
 # 4) 입력 접근을 확인한 뒤 실제 수집
 lore ingest --dry-run
@@ -214,8 +219,10 @@ pgvector를 선택했다. 이 결정의 조건과 첫 메모의 검색 품질 �
 ### ✅ 결과 ③ — 필요한 만큼 펼쳐 보는 탐색
 
 ```bash
-lore wiki prepare                           # 재사용할 SQLite 검색 판본 생성
+lore wiki snapshot                          # 저장된 검색 판본·마지막 검증 시각 조회
+lore wiki prepare                           # 현재 원본을 검증하고 검색 판본 생성
 lore wiki search "Vector DB" --snapshot <id> --limit 10 --json
+lore wiki context wiki/concepts/vector-db.md --snapshot <id> --limit 10 # 관계별 근거를 나누어 탐색
 lore wiki browse --type concept --category ai-ml --limit 20 --json
 lore wiki search "API 토큰" --phrase --snapshot <id> --json
 lore wiki search "인증정보" --spacing --snapshot <id> --json
@@ -320,7 +327,7 @@ flowchart LR
 | `google-drive` | Drive 폴더의 큐레이션 문서 | Google OAuth |
 | `rss` | 벤더 블로그·뉴스 → 개념 (인증 불필요, 다중 피드) | 없음 |
 | `nodex` | 프로젝트 저장소가 직접 쓴 결정·학습 기록 → 개념 (`nodex.toml`과 nodex `>=0.60,<0.61` 필요; [실행 파일·근거 버전 설정](skills/lore-setup/references/config.md#nodex-binary-selection)) | 없음 |
-| `manual` | `inbox/`에 드롭한 마크다운·텍스트·HTML 파일 | 없음 |
+| `manual` | `inbox/`의 Markdown·텍스트·HTML, 선택적 DOCX·XLSX·PDF·이미지 OCR | 소스 인증 없음; 바이너리 변환은 별도 런타임 |
 | `tasks` | 내가 끝낸 작업 — `lore task`로 닫은 항목이 그날의 페이지가 됨 | 없음 |
 
 소스 키 = vault의 하위 폴더 이름. 같은 타입을 여러 개 정의할 수 있습니다(예: `team-slack`, `ai-news`). 전체 예시는 [`config.example.yaml`](config.example.yaml).
@@ -359,7 +366,8 @@ lore wiki search <질의>       # 질의가 닿는 페이지 — 이름으로 �
 lore wiki browse --category ai-ml --type concept --limit 20 --json # 분류별 탐색; next_offset으로 다음 페이지
 lore graph --json neighbors wiki/concepts/example.md # 출처를 포함한 양방향 링크 탐색
 lore graph --json neighbors wiki/concepts/example.md --type concept # 관련 개념만 탐색; --type document로 원문 조회
-lore wiki prepare             # 검색 판본 생성; 반복 검색에 --snapshot <id> 사용
+lore wiki snapshot            # 원본 재탐색 없이 저장된 판본 조회
+lore wiki prepare             # 현재 원본 전체 검증; 반복 검색에 --snapshot <id> 사용
 lore wiki search "정확한 문자열" --body --json # 원문 행·문맥·판본; 정규식은 --regex
 lore wiki search "정확한 문자열" --body --snapshot <id> --json # 준비한 판본에서 반복 검색
 lore wiki document-identity plan --source ID --manifest /tmp/identity.json # 기존 사본의 식별자 이관 검증
@@ -382,7 +390,7 @@ lore graph retract-citation <원문.md> <개념.md> --revision <file_revision> -
 lore graph normalize --fix    # 링크 표기 정규화
 lore doctor                   # 페이지 계약 감사(텍스트 청결도·미답변 섹션·자격증명)
 lore extract status           # 프로젝트 지식 추출이 저장소보다 얼마나 뒤처졌는지
-lore maintenance              # 보관기한 지난 ingest 로그·드레인된 큐 파일 정리
+lore maintenance              # 지난 운영 이력·게시 완료 작업 캐시 정리; 미완료·참조 중 작업 보존
 lore queue status / prune     # LLM 작업 큐 상태 / 죽은 작업 정리
 lore queue apply              # 검증된 요약·테마·정제·개념 결과를 중앙 적용
 lore queue check              # 미완료 작업·미게시 결과·중단된 변경을 JSON으로 검사
@@ -400,7 +408,7 @@ lore schema                   # wiki/AGENTS.md(페이지 포맷 스키마) 생�
 
 `lore fetch`는 HTTP `Content-Type`에 따라 HTML·Markdown·일반 텍스트를 읽습니다. `text/plain`으로 제공되는 `.md`·`.markdown` 파일도 Markdown으로 보존하며, 링크·이미지의 상대 주소는 최종 응답 URL을 기준으로 바꿉니다. 형식 선언이 없거나 지원하지 않는 응답, 잘못된 문자 인코딩과 16 MiB를 넘는 본문은 오류로 보고합니다. Markdown 안의 raw HTML 주소는 그대로 남아 수동 원본의 의존성 검사 대상이 됩니다.
 
-`lore wiki refresh`는 SQLite 탐색 스냅샷과 작은 `index.md` 진입 안내를 갱신합니다. 지식 목록·날짜순 조회·관계 탐색은 `wiki browse/search/links`로 수행합니다. 생성 마커가 없는 진입 파일은 보존하고 충돌을 보고합니다. 탐색 세션은 `wiki prepare` 한 번으로 ID를 확보한 뒤 `wiki browse/search/links --snapshot ID`를 반복하고(`links --direction incoming|both`), `wiki read --revision REV`로 현재 원문을 확인합니다. refresh도 준비한 ID를 출력합니다.
+`lore wiki refresh`는 SQLite 탐색 스냅샷과 작은 `index.md` 진입 안내를 갱신합니다. 지식 목록·날짜순 조회·관계 탐색은 `wiki browse/search/links`로 수행합니다. 생성 마커가 없는 진입 파일은 보존하고 충돌을 보고합니다. 탐색 세션은 `wiki snapshot`으로 저장된 ID와 생성·검증 시각을 조회한 뒤 `wiki browse/search/links --snapshot ID`를 반복하고(`links --direction incoming|both`), `wiki read --revision REV`로 현재 원문을 확인합니다. 현재 문서 목록이 필요하거나 호환되는 판본이 없으면 `wiki prepare`로 전체 원본을 검증합니다. 저장된 판본의 시각은 외부 편집 이후의 최신성을 보장하지 않습니다. refresh도 준비한 ID를 출력합니다.
 
 프로젝트 문서의 `source_record.attributes`는 nodex 공개 응답의 원본 속성을 보존합니다. routine의 `prompt`처럼 본문 밖에 있는 지식도 요약·추출 입력에 포함하며, 속성은 현재 작업을 실행하라는 지시가 아닌 출처의 내용으로 읽습니다.
 
@@ -435,7 +443,15 @@ Claude 경로는 `.claude/skills`, Codex 경로는 `.agents/skills`입니다.
 무인 실행은 `<data>/skills/<engine>/`의 검증된 배포본을 사용합니다.
 누락·변조된 필수 파일은 세션 시작 전에 거부합니다.
 
-실행기 지원 범위는 Claude Code `>=2.1.259,<3`, Codex CLI `>=0.163.0,<1`입니다.
+실행기 지원 범위는 Claude Code `>=2.1.303,<3`, Codex CLI `>=0.163.0,<1`입니다.
+분할 검수·축약 단계는 읽을 JSON을 표준 입력으로 받고 구조화된 관찰만 반환합니다.
+Rust가 작업·범위·현재 근거·출력 한도를 검증해 저장하며, 모델이 검수 캐시를 직접 쓰지 않습니다.
+Claude는 도구와 사용자 확장을 끄고, Codex는 읽기 전용 샌드박스를 사용합니다.
+대화형 탐색·최종 결과 준비·의미 보정은 필요한 도구를 사용하는 별도 역할입니다.
+실행 예산이 작아도 큰 문서 하나가 매번 첫 차례를 차지하지 않도록, 서로 다른 문서의
+검수·축약·최종화 단계를 순환 배분합니다. 작은 요청은 근거 입력 한도 안에서 묶되 같은
+페이지의 작업은 한 번에 하나만 선택합니다. 다음 차례는 `.lorekeeper/execution-cursor.json`에
+저장하므로 재실행에서도 이어지며, 손상된 상태를 조용히 초기화하지 않습니다.
 호스트의 기존 인증과 정책을 사용합니다. 두 제품의 권한·샌드박스는 서로 다르며,
 Rust의 게시 검증을 OS 접근 통제와 같은 보장으로 취급하지 않습니다.
 
@@ -468,6 +484,10 @@ execution:
 각 배치마다 적용합니다. 예산이 소진되면 미완료로 중단하고 검증된 작업을 다음 실행에 남깁니다.
 모델의 전체 문맥·토큰 수나 요금 한도를 뜻하지는 않습니다. 입력은 최소 4096바이트,
 결과는 최소 1024바이트이면서 입력 한도의 1/4 이하여야 하며 호출 수는 양수입니다.
+프로필 내부의 `work`는 지정한 항목만 공통 예산에서 덮어씁니다. 예를 들어 작은 문맥의 모델에는
+`work: {max_input_bytes: 131072, max_result_bytes: 16384}`를 지정할 수 있습니다.
+`lore run ... --json`은 실제 적용한 예산을 출력하고, 자식 명령에도 같은 프로필을 전달합니다.
+수동 분할 명령에서 같은 예산을 사용하려면 `LORE_EXECUTION_PROFILE`에 해당 프로필 이름을 지정합니다.
 수동 재개·분할 결과 형식은 [분할 근거 처리 절차](skills/lore-process/references/bounded-work.md)를 참고하세요.
 실행 파일은 `executable`, 모델은 `model`로 필요한 프로필에만 지정합니다.
 상대 실행 파일 경로와 Claude의 `config_directory`는 설정 파일 기준입니다.

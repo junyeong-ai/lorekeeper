@@ -71,6 +71,22 @@ pub enum WikiCommand {
     },
     /// Prepare a reusable search and exact concept-citation snapshot from current pages (JSON)
     Prepare,
+    /// Read the existing snapshot and its verification time without rereading source pages (JSON)
+    Snapshot,
+    /// Inspect captured links, citations, declared relations and scoped reviews together (JSON)
+    Context {
+        /// Exact vault-relative Markdown address
+        path: PathBuf,
+        /// Snapshot returned by wiki snapshot or prepare; current pages are not reread
+        #[arg(long)]
+        snapshot: String,
+        /// Maximum entries per relation group (1..100)
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
+        /// Skip this many entries in each relation group
+        #[arg(long, default_value_t = 0)]
+        offset: usize,
+    },
     /// Inspect complete citations captured for an exact concept (read-only JSON)
     Citations {
         /// Exact vault-relative concept Markdown address
@@ -559,6 +575,45 @@ pub async fn run(opts: &super::GlobalOptions, cmd: WikiCommand) -> miette::Resul
                     "file_revision": lk_core::concept::file_revision(&raw),
                     "source_revision": lk_core::concept::source_revision(&page),
                 })
+            );
+            Ok(())
+        }
+        WikiCommand::Context {
+            path,
+            snapshot,
+            limit,
+            offset,
+        } => {
+            let config = load_config(&find_config(opts)?)?;
+            let context = lk_vault::inspect_page_context(
+                &config.vault.root_path(),
+                &config.vault.dirs,
+                &path,
+                &lk_vault::ContextOptions {
+                    snapshot: &snapshot,
+                    limit,
+                    offset,
+                },
+            )
+            .map_err(|error| miette::miette!("{error}"))?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&context)
+                    .map_err(|error| miette::miette!("{error}"))?
+            );
+            Ok(())
+        }
+        WikiCommand::Snapshot => {
+            let config = load_config(&find_config(opts)?)?;
+            let snapshot = lk_vault::inspect_search_snapshot(
+                &config.vault.root_path(),
+                &config.vault.dirs,
+            )
+            .map_err(|error| miette::miette!("read discovery snapshot: {error}; run `lore wiki prepare` to capture current pages"))?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&snapshot)
+                    .map_err(|error| miette::miette!("{error}"))?
             );
             Ok(())
         }

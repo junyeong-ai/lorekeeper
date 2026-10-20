@@ -45,6 +45,20 @@ identity:
 # personal events across every source for a day, so a single run keeps it complete.
 ingest:
   schedule: "0 7 * * *"          # every day 07:00 (sources use lookback windows)
+  # Optional local DOCX/XLSX/PDF/image decoder. `lore input install DIRECTORY`
+  # creates an isolated, pinned environment and prints its python path.
+  # Relative paths here resolve against this config file, not vault.root.
+  # documents:
+  #   python: ~/.local/share/lorekeeper/documents/venv/bin/python
+  #   timeout_seconds: 120
+  #   max_output_bytes: 33554432
+  #   max_decoded_bytes: 134217728
+  #   max_units: 10000              # projected pages/sheets/frames, including extra PDF OCR
+  #   ocr:
+  #     tessdata_dir: ~/.local/share/lorekeeper/tessdata
+  #     languages: [kor, eng]     # explicitly installed <language>.traineddata files
+  #     layout: auto              # auto | single-block | sparse-text; no automatic retry
+  #     pdf: false               # true: additional OCR for every PDF page
 
 # ─── Source definitions ───────────────────────────────────
 # key = stable source ID; daily sources use daily/<id>, document sources use wiki/documents.
@@ -335,7 +349,10 @@ sources:
       # Relative paths anchor at vault.root. Keep raw input separate from all managed
       # vault.dirs roots and .lorekeeper, including symlink targets.
       inbox_dir: inbox
-      extensions: [md, txt, markdown, html, htm]
+      # Omitted: text plus configured document/OCR formats. Other known binary inputs
+      # are retained with a diagnostic; explicit selection requires its decoder.
+      # An explicit list narrows selection; unsupported files remain untouched.
+      # extensions: [md, txt, markdown, html, htm, docx, xlsx, pdf, png, jpg, tiff, webp]
       archive_after_ingest: true  # auto-archive after processing (default true)
     labels: [knowledge]
     concept_policy: supported-new
@@ -463,7 +480,9 @@ concepts:
 #     suggest_min_shared_neighbors: 2  # suggest-links floor: min shared neighbors per pair (cuts co-citation noise)
 
 # ─── Maintenance ──────────────────────────────────────────
-# Retention horizon for `lore maintenance` pruning (ingest log + drained queue files).
+# Retention for ingest history, drained queue files and verified published work caches.
+# Unpublished, referenced or unowned work artifacts are preserved; work cleanup requires
+# exclusive workflow access and a settled queue. Sealing alone is not publication.
 # Streaming event logs (`.lorekeeper/events/`) are the permanent raw layer — never pruned.
 # Fully optional — omit the block to use the default.
 # maintenance:
@@ -484,7 +503,7 @@ execution:
   # Bounded worker requests/results are compact JSON bytes, not model tokens or cost.
   # Native execution splits evidence and reduces observations in fresh sessions.
   work:
-    max_input_bytes: 262144        # >=4096; includes the selected worker context
+    max_input_bytes: 262144        # >=4096; serialized evidence request, not total model context
     max_result_bytes: 32768        # >=1024 and <=max_input_bytes/4
     max_calls: 64                  # per daily/process run, or per knowledge batch; >0
   profiles:
@@ -499,5 +518,9 @@ execution:
     #   timeout_seconds: 3600
     #   executable: /absolute/path/to/codex
     #   profile: <existing Codex profile name>
+    #   work:                       # only specified fields override execution.work
+    #     max_input_bytes: 131072
+    #     max_result_bytes: 16384
+    #     max_calls: 32
   # operations:
   #   knowledge: reviewer

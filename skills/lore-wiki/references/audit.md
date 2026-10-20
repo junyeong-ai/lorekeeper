@@ -144,9 +144,15 @@ resolve section headings before inspecting pages.
      expansion (`rag` ↔ `retrieval-augmented-generation`, `k8s` ↔ `kubernetes`), a plural
      (`doc-hub` ↔ `docs-hub`), or a team's shorthand and the full id (`enterprise-prd` ↔
      `oy-gemini-enterprise-prd`).
-     That judgment is yours and it is where this layer earns its keep. From the
-     `lore wiki concepts` registry you already loaded, read down the list ONCE and spot
-     equivalent pairs by meaning; check the cited daily pages when a short form might
+     Use `lore wiki snapshot` for an existing captured vocabulary, or `lore wiki prepare`
+     when current membership is required. Browse a bounded page with
+     `lore wiki browse --snapshot ID --type concept --knowledge-status all --limit 50 --json`.
+     Titles and aliases are candidates, never proof of equivalence. Compare names
+     relevant to the selected audit subjects; use search and exact resolution to
+     inspect possible counterparts. For an explicitly requested vocabulary campaign,
+     follow `next_offset` with the same snapshot in separate bounded batches and
+     report the visited range and remaining work. Do not load or claim to judge the
+     whole registry in one context. Check cited daily pages when a short form might
      just be how the team writes the long one. Recommend declaring the non-canonical
      form as an `aliases` entry on the canonical concept (the registry returns aliases,
      so future extractions converge on the one page instead of minting a variant), or a

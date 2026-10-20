@@ -734,6 +734,7 @@ mod tests {
             },
             vault_root: std::path::PathBuf::from("."),
             vault_dirs: Default::default(),
+            documents: None,
         }
     }
 

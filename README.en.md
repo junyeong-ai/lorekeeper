@@ -82,6 +82,12 @@ mkdir -p "$(lore config vault-root)/inbox"
 Put one note in the vault's `inbox/`, then collect it. `inbox_dir: inbox` follows
 your selected `vault.root`. The starter does not need the provider credential wizard.
 
+For DOCX, XLSX and PDF inputs, install the optional decoder with
+`lore input install DIRECTORY` and merge its printed configuration. Verify dependencies
+with `lore input check`, then inspect a file without moving it using
+`lore input inspect FILE.pdf`. Images additionally need explicit OCR language data.
+See [preprocessing configuration and scope](skills/lore-setup/references/config.md#document-preprocessing).
+
 ```bash
 # 4) Check input access, then collect for real
 lore ingest --dry-run
@@ -216,8 +222,10 @@ summaries without extracting concepts; `existing-only` links published owners;
 enforced by native publication, rather than by prompts alone.
 
 ```bash
-lore wiki prepare                           # create a reusable SQLite snapshot
+lore wiki snapshot                          # inspect saved capture and verification times
+lore wiki prepare                           # validate current originals and prepare SQLite
 lore wiki search "Vector DB" --snapshot <id> --limit 10 --json
+lore wiki context wiki/concepts/vector-database.md --snapshot <id> --limit 10
 lore wiki browse --type concept --category ai-ml --limit 20 --json
 lore wiki read wiki/concepts/vector-database.md # outline/revision → select a section
 lore wiki links wiki/concepts/vector-database.md --limit 20
@@ -307,7 +315,7 @@ Each day's ingest grows the concept graph; synthesis summarizes it at ever-highe
 | `google-drive` | Curated docs in a Drive folder | Google OAuth |
 | `rss` | Vendor blogs / news → concepts (no auth, multi-feed) | none |
 | `nodex` | A project repository's own decision and learning records → concepts (needs `nodex.toml` and nodex `>=0.60,<0.61`; see [binary selection and evidence versions](skills/lore-setup/references/config.md#nodex-binary-selection)) | none |
-| `manual` | Markdown, text, and HTML files dropped in `inbox/` | none |
+| `manual` | Inbox Markdown, text and HTML; optional DOCX, XLSX, PDF and image OCR | No source credentials; binary decoding needs an optional runtime |
 | `tasks` | Your own finished tasks — what `lore task` closed becomes the day's page | none |
 
 The source key becomes the vault subfolder name. You can define several of the same type (e.g. `team-slack`, `ai-news`). Full reference: [`config.example.yaml`](config.example.yaml).
@@ -345,7 +353,8 @@ lore wiki search <query>      # the pages a query reaches, and whether they NAME
 lore wiki browse --category ai-ml --type concept --limit 20 --json # Browse metadata; follow next_offset
 lore graph --json neighbors wiki/concepts/example.md # Follow incoming/outgoing links, including evidence
 lore graph --json neighbors wiki/concepts/example.md --type concept # Browse linked concepts; --type document selects documents
-lore wiki prepare             # Capture once; use --snapshot <id> for repeated searches
+lore wiki snapshot            # Inspect the saved capture without rescanning originals
+lore wiki prepare             # Validate current originals; reuse --snapshot <id>
 lore wiki search "exact text" --body --json # Raw evidence lines/context/revision; opt into --regex
 lore wiki document-identity plan --source ID --manifest /tmp/identity.json # Verify legacy copy identity migration
 lore wiki read wiki/concepts/example.md # Outline → --section ID; pin subsequent reads with --revision
@@ -381,7 +390,12 @@ lore config vault-root        # the vault's absolute path, and nothing else (for
 lore schema                   # generate wiki/AGENTS.md (the page-format schema)
 ```
 
-`lore wiki refresh` refreshes the SQLite navigation snapshot and a small `index.md` entry guide. Use `wiki browse/search/links` for page inventories, date ordering and relationship traversal. An existing entry file without a generation marker is preserved and reported as a collision. For each retrieval session, prepare once and repeat `wiki browse/search/links --snapshot ID` (links supports `--direction incoming|both`), then verify originals with `wiki read --revision REV`. Refresh prints the prepared ID too.
+`lore wiki refresh` refreshes the SQLite navigation snapshot and a small `index.md` entry guide. Use `wiki browse/search/links` for page inventories, date ordering and relationship traversal. An existing entry file without a generation marker is preserved and reported as a collision. Start a retrieval session with `wiki snapshot` to inspect the saved ID and capture/verification times, then repeat `wiki browse/search/links --snapshot ID` (links supports `--direction incoming|both`). Verify originals with `wiki read --revision REV`. Run `wiki prepare` when current inventory is required or no compatible capture exists. Saved times do not certify freshness after external edits. Refresh prints the prepared ID too.
+
+`wiki context PATH --snapshot ID` groups explicit links, citations, declared source
+relations and scoped reviews separately. Follow each group's `next_offset` in the
+same snapshot. A captured relationship is not automatic corroboration or proof that
+two claims conflict.
 
 `wiki citations PATH --snapshot ID` reads complete graph-derived concept evidence
 from that captured SQLite snapshot, separately from ordinary link occurrences.
@@ -434,8 +448,17 @@ Claude discovers `.claude/skills`; Codex discovers `.agents/skills`.
 Unattended jobs use verified copies under `<data>/skills/<engine>/` independently
 of interactive deployment. Missing or modified required files refuse execution.
 
-The supported CLI contracts are Claude Code `>=2.1.259,<3` and Codex
-`>=0.163.0,<1`. Hosts use their existing authentication and policies. Their permission
+The supported CLI contracts are Claude Code `>=2.1.303,<3` and Codex
+`>=0.163.0,<1`. Partition inspection and reduction receive bounded JSON through stdin
+and return structured observations. Rust validates and records the selected node;
+the model does not write observation caches. Claude disables tools/customizations;
+Codex uses a read-only sandbox. Interactive navigation, finalization and semantic
+maintenance are separate roles with the tools they require.
+Native scheduling rotates independent targets through inspection, reduction and
+finalization. Small requests share an evidence-bounded batch with at most one task
+per page. A guarded next-target cursor preserves turns across budget-limited runs;
+corrupt state is reported rather than silently reset.
+Hosts use their existing authentication and policies. Their permission
 and sandbox models differ; Rust publication guards are not OS access controls.
 
 ```yaml
@@ -469,7 +492,12 @@ read in fresh sessions; observations are reduced in further fresh sessions.
 stops incomplete work and preserves verified parts for resumption. These limits
 are not the model's total context, token count or spending cap. Input must be at
 least 4096 bytes; results must be at least 1024 bytes and at most one quarter of
-the input bound; calls must be positive. See the
+the input bound; calls must be positive. A profile's optional `work` overrides only
+its specified shared limits. For example,
+`work: {max_input_bytes: 131072, max_result_bytes: 16384}` can select smaller requests.
+Run JSON reports the effective limits; native children inherit the same selection.
+Set `LORE_EXECUTION_PROFILE` for standalone bounded commands to use that profile.
+See the
 [bounded evidence protocol](skills/lore-process/references/bounded-work.md)
 for manual resumption and result formats.
 Optional `executable` and `model` select the CLI and model. Relative executable paths and Claude

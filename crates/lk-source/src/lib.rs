@@ -1,5 +1,6 @@
 mod atlassian;
 mod confluence;
+pub mod content;
 pub mod credentials;
 pub mod fetch;
 mod google;
@@ -19,8 +20,8 @@ mod tasks;
 /// this only once a source's vault writes and the queue flush have succeeded, so a
 /// write/flush failure leaves the inbox intact for retry.
 pub use manual::{
-    ManualExtraction, archive_consumed_files, archive_manual_originals, capture_manual,
-    inbox_dir as manual_inbox_dir,
+    ManualExtraction, UnprocessedInput, archive_consumed_files, archive_manual_originals,
+    capture_manual, inbox_dir as manual_inbox_dir,
 };
 
 use std::sync::Arc;
@@ -146,6 +147,7 @@ pub struct ExtractContext {
     pub vault_root: std::path::PathBuf,
     /// Managed output namespaces, kept separate from raw input directories.
     pub vault_dirs: lk_core::config::VaultDirs,
+    pub documents: Option<lk_core::content::InputProcessingConfig>,
 }
 
 impl ExtractContext {
@@ -479,6 +481,7 @@ mod tests {
             identity: lk_core::config::Identity::default(),
             vault_root: std::path::PathBuf::new(),
             vault_dirs: Default::default(),
+            documents: None,
         }
     }
 

@@ -2,6 +2,7 @@ mod address;
 mod body_search;
 mod brief;
 mod citations;
+mod context;
 mod document;
 mod indexed_links;
 mod knowledge;
@@ -36,6 +37,10 @@ pub use self::brief::{Brief, BriefEntry, build_brief};
 pub use self::citations::{
     CitationOptions, ConceptCitationProjection, ConceptCitationSet, ConceptCitations,
     inspect_concept_citations,
+};
+pub use self::context::{
+    ContextEvidence, ContextOptions, ContextRelations, ContextReviews, PageContext,
+    inspect_page_context,
 };
 pub use self::document::{
     DocumentContent, DocumentOptions, DocumentSection, DocumentView, inspect_document,
@@ -77,7 +82,9 @@ pub use self::search::{
     BrowseSort, CreatedStatus, MatchField, SearchHit, SearchOptions, SearchResult,
     parse_created_date, search,
 };
-pub use self::search_index::{SearchSnapshot, prepare_search, prepare_search_with_citations};
+pub use self::search_index::{
+    SearchSnapshot, inspect_search_snapshot, prepare_search, prepare_search_with_citations,
+};
 pub use self::section::{
     PageSection, SectionKey, clear_llm_input, record_llm_input, replace_section, resolve_section,
     section_body, section_headings, set_frontmatter_field, set_llm_input,

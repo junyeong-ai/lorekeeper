@@ -126,6 +126,7 @@ mod tests {
             },
             vault_root: root.to_path_buf(),
             vault_dirs: Default::default(),
+            documents: None,
         }
     }
 

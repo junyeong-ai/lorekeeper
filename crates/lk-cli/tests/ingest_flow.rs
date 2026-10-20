@@ -108,6 +108,70 @@ fn dry_run_is_side_effect_free() {
 }
 
 #[test]
+#[ignore = "requires LORE_TEST_DOCUMENT_PYTHON and LORE_TEST_TESSDATA for the pinned optional runtime"]
+fn binary_documents_preserve_exact_originals_through_publication_and_retirement() {
+    let ws = Workspace::with_notes_options("    concept_policy: supported-new\n", "");
+    let config_path = ws.root.path().join("config.yaml");
+    let mut config = std::fs::read_to_string(&config_path).unwrap();
+    let python = PathBuf::from(
+        std::env::var_os("LORE_TEST_DOCUMENT_PYTHON").expect("LORE_TEST_DOCUMENT_PYTHON"),
+    );
+    let models = PathBuf::from(std::env::var_os("LORE_TEST_TESSDATA").expect("LORE_TEST_TESSDATA"));
+    config.push_str(&format!("\nllm: {{provider: queue}}\ningest:\n  documents:\n    python: {}\n    ocr:\n      tessdata_dir: {}\n      languages: [kor, eng]\n      layout: single-block\n", serde_json::to_string(&python).unwrap(), serde_json::to_string(&models).unwrap()));
+    std::fs::write(&config_path, config).unwrap();
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../lk-source/src/content/fixtures");
+    let names = ["policy.docx", "policy.xlsx", "policy.pdf", "policy-ko.png"];
+    for name in names {
+        std::fs::copy(fixtures.join(name), ws.vault().join("inbox").join(name)).unwrap();
+    }
+    let dry_run = ws.run(&["ingest", "--dry-run"]);
+    assert!(dry_run.status.success(), "{}", stderr_of(&dry_run));
+    assert_eq!(files_under(&ws.vault()).len(), 4);
+    let result = ws.run(&["ingest"]);
+    assert!(result.status.success(), "{}", stderr_of(&result));
+    let documents = files_under(&ws.vault().join("wiki/documents"));
+    assert_eq!(
+        documents.len(),
+        4,
+        "same file stem across formats retains separate source ownership"
+    );
+    let mut formats = std::collections::BTreeSet::new();
+    for path in documents {
+        let page =
+            lk_core::frontmatter::parse_page(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let record = page.frontmatter.get("source_record").unwrap();
+        formats.insert(record["input_format"].as_str().unwrap().to_string());
+        let reference: lk_core::manual_original::ManualOriginalReference =
+            serde_json::from_value(record["manual_original"].clone()).unwrap();
+        let original =
+            std::fs::read(ws.vault().join(reference.entry_vault_path().unwrap())).unwrap();
+        assert!(
+            names
+                .iter()
+                .any(|name| std::fs::read(fixtures.join(name)).unwrap() == original)
+        );
+    }
+    assert_eq!(
+        formats,
+        ["docx", "xlsx", "pdf", "png"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    );
+    let archived = files_under(&ws.vault().join("inbox/archived"));
+    assert_eq!(archived.len(), 4);
+    for path in archived {
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            std::fs::read(fixtures.join(path.file_name().unwrap())).unwrap()
+        );
+    }
+    let rerun = ws.run(&["ingest"]);
+    assert!(rerun.status.success(), "{}", stderr_of(&rerun));
+    assert_eq!(files_under(&ws.vault().join("wiki/documents")).len(), 4);
+}
+
+#[test]
 fn ingest_writes_pages_flushes_queue_then_archives() {
     let ws = Workspace::new("");
     ws.drop_note("note.md", "# Real Note\n\nknowledge body\n");
@@ -631,6 +695,25 @@ fn manual_html_preserves_raw_and_marks_unsupported_closure_without_retiring() {
     assert!(
         String::from_utf8_lossy(&help.stdout).contains("read-only")
             || String::from_utf8_lossy(&help.stdout).contains("JSON")
+    );
+}
+
+#[test]
+fn a_captured_pdf_attachment_needs_no_standalone_decoder_to_preserve_the_note() {
+    let ws = Workspace::new("");
+    ws.drop_note(
+        "annotation.md",
+        "# Annotation\n\nRead the [original paper](paper.pdf).\n",
+    );
+    let bytes = include_bytes!("../../lk-source/src/content/fixtures/policy.pdf");
+    std::fs::write(ws.vault().join("inbox/paper.pdf"), bytes).unwrap();
+    let result = ws.run(&["ingest"]);
+    assert!(result.status.success(), "{}", stderr_of(&result));
+    assert_eq!(files_under(&ws.vault().join("wiki/documents")).len(), 1);
+    assert!(!ws.vault().join("inbox/annotation.md").exists());
+    assert_eq!(
+        std::fs::read(ws.vault().join("inbox/paper.pdf")).unwrap(),
+        bytes
     );
 }
 

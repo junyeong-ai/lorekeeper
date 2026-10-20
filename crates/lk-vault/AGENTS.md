@@ -67,6 +67,10 @@ canonical; SQLite navigation is derived.
 
 ## Read surfaces
 
+- `context.rs`: return explicit links, graph evidence, source-declared relations and
+  scoped reviews from one prepared SQLite transaction. Preserve each authority and
+  distinguish unavailable capture from an available empty set. Pagination bounds
+  each group independently; a shared offset never establishes a semantic relation.
 - `search.rs`: exact identity, whole-name spacing candidates and contiguous visible
   phrases precede scattered terms, then weakest field/source count/exact path. Retrieval
   folding never changes identity. `--phrase` and block-bounded `--spacing` are explicit;
