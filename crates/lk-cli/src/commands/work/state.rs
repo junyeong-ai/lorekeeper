@@ -727,6 +727,20 @@ impl Work {
         reused_from: Option<Reuse>,
         additional_guards: Vec<(PathBuf, String)>,
     ) -> miette::Result<WorkProgress> {
+        let mutation =
+            self.plan_record(session, output, resources, reused_from, additional_guards)?;
+        session.apply(mutation).map_err(fail)?;
+        self.progress(session.root(), resources)
+    }
+
+    fn plan_record(
+        &self,
+        session: &MutationSession,
+        output: WorkOutput,
+        resources: &[SemanticResource],
+        reused_from: Option<Reuse>,
+        additional_guards: Vec<(PathBuf, String)>,
+    ) -> miette::Result<MutationPlan> {
         if output.work_id != self.plan.id {
             return Err(fail("output belongs to another work"));
         }
@@ -764,17 +778,22 @@ impl Work {
         let mut mutation = MutationPlan::default();
         let (manifest_path, manifest) = self.manifest(session.root())?;
         mutation.require_unchanged(manifest_path, manifest);
-        for (path, raw) in evaluated.raw {
-            mutation.require_unchanged(path, raw);
+        // The node edit owns its before/after guard. A separate unchanged guard
+        // would reject our own replacement when an interrupted journal resumes.
+        for (dependency, raw) in evaluated.raw {
+            if dependency != path {
+                mutation.require_unchanged(dependency, raw);
+            }
         }
-        for (path, raw) in additional_guards {
-            mutation.require_unchanged(path, raw);
+        for (dependency, raw) in additional_guards {
+            if dependency != path {
+                mutation.require_unchanged(dependency, raw);
+            }
         }
         mutation
             .publish_expected(session.root(), path, before, encoded(&stored)?)
             .map_err(fail)?;
-        session.apply(mutation).map_err(fail)?;
-        self.progress(session.root(), resources)
+        Ok(mutation)
     }
 
     pub fn reuse_from(
@@ -1171,6 +1190,89 @@ mod tests {
             .is_err()
         );
         work.seal(&session, &source, final_result).unwrap();
+    }
+
+    #[test]
+    fn revised_observation_recovery_accepts_own_edit_and_preserves_other_guards() {
+        for additional_own_guard in [false, true] {
+            for edit_receipted in [false, true] {
+                for damaged_dependency in [false, true] {
+                    let root = tempfile::tempdir().unwrap();
+                    let source = resources();
+                    let session = MutationSession::acquire(root.path()).unwrap();
+                    let work = Work::create(&session, &source, "subject", context("one"), limits())
+                        .unwrap();
+                    assert!(work.plan.parts.len() > 1);
+                    let id = &work.plan.parts[0].id;
+                    let other = &work.plan.parts[1].id;
+                    for node in [id, other] {
+                        work.record(&session, draft(&work, root.path(), node, &source), &source)
+                            .unwrap();
+                    }
+                    let own_path = output_path(&work.plan.id, id).unwrap();
+                    let other_path = output_path(&work.plan.id, other).unwrap();
+                    let other_raw = read_optional(root.path(), &other_path).unwrap().unwrap();
+                    let additional = if additional_own_guard {
+                        vec![(
+                            own_path.clone(),
+                            read_optional(root.path(), &own_path).unwrap().unwrap(),
+                        )]
+                    } else {
+                        Vec::new()
+                    };
+                    let mut replacement = draft(&work, root.path(), id, &source);
+                    replacement.summary =
+                        "Corrected observation after rereading the assigned evidence.".into();
+                    let plan = work
+                        .plan_record(&session, replacement.clone(), &source, None, additional)
+                        .unwrap();
+                    let plan_revision = lk_core::concept::file_revision(&encoded(&plan).unwrap());
+                    let plan_value = serde_json::to_value(&plan).unwrap();
+                    let steps = plan_value["steps"].as_array().unwrap();
+                    let edit = steps.last().unwrap();
+                    assert_eq!(edit["path"], own_path.to_str().unwrap());
+                    assert_ne!(edit["before"], edit["after"]);
+                    let after = edit["after"].as_str().unwrap().to_owned();
+                    let completed = steps.len() - usize::from(!edit_receipted);
+                    drop(session);
+
+                    // Native journal/progress wire shapes from lk-vault::mutation.
+                    // Simulate interruption after the node write, on either side
+                    // of its progress receipt, without a timing race.
+                    let directory = root.path().join(".lorekeeper/mutation");
+                    let pending = directory.join("pending.json");
+                    let progress = directory.join("progress.json");
+                    let journal = encoded(&json!({"version":1,"plan":plan_value})).unwrap();
+                    std::fs::write(&pending, &journal).unwrap();
+                    std::fs::write(root.path().join(&own_path), &after).unwrap();
+                    std::fs::write(&progress, encoded(&json!({
+                        "plan_revision":plan_revision,
+                        "completed":completed,
+                        "checksum":lk_core::concept::file_revision(&format!("{plan_revision}:{completed}")),
+                    })).unwrap()).unwrap();
+                    if damaged_dependency {
+                        std::fs::write(root.path().join(&other_path), "external dependency edit")
+                            .unwrap();
+                        assert!(MutationSession::acquire(root.path()).is_err());
+                        assert_eq!(std::fs::read_to_string(&pending).unwrap(), journal);
+                        assert_eq!(
+                            std::fs::read_to_string(root.path().join(&own_path)).unwrap(),
+                            after
+                        );
+                        std::fs::write(root.path().join(&other_path), &other_raw).unwrap();
+                    }
+                    let _recovered = MutationSession::acquire(root.path()).unwrap();
+                    assert!(!pending.exists());
+                    assert!(!progress.exists());
+                    let stored: StoredOutput = serde_json::from_str(
+                        &read_optional(root.path(), &own_path).unwrap().unwrap(),
+                    )
+                    .unwrap();
+                    assert_eq!(stored.output, replacement);
+                    assert_eq!(work.progress(root.path(), &source).unwrap().completed, 2);
+                }
+            }
+        }
     }
 
     #[test]
