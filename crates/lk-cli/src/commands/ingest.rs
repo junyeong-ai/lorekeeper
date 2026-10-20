@@ -257,6 +257,9 @@ pub async fn run(
                     for failure in &capture.failures {
                         eprintln!("  ✗ {failure}");
                     }
+                    if !capture.unprocessed.is_empty() {
+                        eprintln!("  retained: {} binary input(s) without a configured standalone decoder; configure ingest.documents/OCR for independent processing", capture.unprocessed.len());
+                    }
                     if !capture.failures.is_empty() {
                         had_failure = true;
                     }

@@ -140,6 +140,10 @@ Use parser/token-state behavior, not regex replacement of arbitrary markup.
   documents; CLI aggregate capture cap512 MiB. Closure overflow is an explicit error,
   not silently solved by splitting top-level entries. Binary attachments stay bytes;
   text entry conversion requires supported decoding.
+- Default standalone selection follows configured decoder capabilities. Keep other
+  known binary inputs explicitly unprocessed without failing a note's byte-preserving
+  attachment capture. An explicit extension selection requires its decoder. Do not
+  infer dependency ownership from filename folding, equal hashes or shared inodes.
 - Retirement requires complete preserved bytes and unchanged entry. Never remove
   attachments. Cross-entry references protect referenced entries even when an event
   is filtered out; any entry capture failure holds retirement for that source.

@@ -227,11 +227,13 @@ An empty result never triggers another mode silently; inspect the original and
 select the intended policy. Published projection metadata retains language order,
 layout and model hashes, as well as decoder versions.
 
-The inbox selects DOCX/XLSX/PDF in addition to text by default; a missing decoder
-is an explicit per-file failure. Images are selected by default only with OCR
-configured, so referenced image assets do not become empty standalone documents.
+The inbox defaults to text plus formats enabled by `ingest.documents`/OCR.
+Known binary files without that capability stay in the inbox and are counted as
+unprocessed for standalone interpretation. Their bytes can still be preserved as
+dependencies of a selected note. This does not declare them independently processed.
 An explicit `params.extensions` list narrows selection. Unknown extensions remain
-untouched. Failed/no-text entries stay in the inbox. Original bytes are preserved
+untouched; explicitly selected binary input without its decoder fails. Failed/no-text
+entries stay in the inbox. Original bytes are preserved
 before publication; PDF pages and spreadsheet sheets remain units of one source
 document rather than generating independent concepts. Source metadata records format,
 projection policy, decoder versions and limitations. Drive still uses its documented

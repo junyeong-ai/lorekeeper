@@ -348,7 +348,8 @@ sources:
       # Relative paths anchor at vault.root. Keep raw input separate from all managed
       # vault.dirs roots and .lorekeeper, including symlink targets.
       inbox_dir: inbox
-      # Omitted: Markdown/text/HTML/DOCX/XLSX/PDF; images also selected when OCR is configured.
+      # Omitted: text plus configured document/OCR formats. Other known binary inputs
+      # are retained with a diagnostic; explicit selection requires its decoder.
       # An explicit list narrows selection; unsupported files remain untouched.
       # extensions: [md, txt, markdown, html, htm, docx, xlsx, pdf, png, jpg, tiff, webp]
       archive_after_ingest: true  # auto-archive after processing (default true)

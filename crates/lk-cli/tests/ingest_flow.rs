@@ -699,6 +699,25 @@ fn manual_html_preserves_raw_and_marks_unsupported_closure_without_retiring() {
 }
 
 #[test]
+fn a_captured_pdf_attachment_needs_no_standalone_decoder_to_preserve_the_note() {
+    let ws = Workspace::new("");
+    ws.drop_note(
+        "annotation.md",
+        "# Annotation\n\nRead the [original paper](paper.pdf).\n",
+    );
+    let bytes = include_bytes!("../../lk-source/src/content/fixtures/policy.pdf");
+    std::fs::write(ws.vault().join("inbox/paper.pdf"), bytes).unwrap();
+    let result = ws.run(&["ingest"]);
+    assert!(result.status.success(), "{}", stderr_of(&result));
+    assert_eq!(files_under(&ws.vault().join("wiki/documents")).len(), 1);
+    assert!(!ws.vault().join("inbox/annotation.md").exists());
+    assert_eq!(
+        std::fs::read(ws.vault().join("inbox/paper.pdf")).unwrap(),
+        bytes
+    );
+}
+
+#[test]
 fn missing_local_asset_is_a_loud_refusal_without_retirement_or_false_page() {
     let ws = Workspace::new("");
     ws.drop_note("missing.md", "# Missing\n\n![x](missing.png)\n");

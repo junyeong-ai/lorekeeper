@@ -51,11 +51,11 @@ impl ManualParams {
                 .any(|value| value.eq_ignore_ascii_case(extension));
         }
         lk_core::content::InputFormat::from_extension(extension).is_some_and(|format| {
-            !format.is_image()
+            !format.requires_processor()
                 || ctx
                     .documents
                     .as_ref()
-                    .is_some_and(|config| config.ocr.is_some())
+                    .is_some_and(|config| !format.is_image() || config.ocr.is_some())
         })
     }
 }
@@ -592,6 +592,12 @@ pub struct ManualExtraction {
     pub originals: Vec<lk_core::manual_original::ManualBundleCapture>,
     /// Per-entry refusal remains visible to the CLI even when other entries succeeded.
     pub failures: Vec<String>,
+    pub unprocessed: Vec<UnprocessedInput>,
+}
+
+pub struct UnprocessedInput {
+    pub path: PathBuf,
+    pub format: lk_core::content::InputFormat,
 }
 impl ManualExtraction {
     pub fn project_links(&mut self, documents: &Path) -> Result<(), SourceError> {
@@ -640,6 +646,7 @@ pub async fn capture_manual(
         items: Vec::new(),
         originals: Vec::new(),
         failures: Vec::new(),
+        unprocessed: Vec::new(),
     };
     let mut total = 0usize;
     let mut total_members = 0usize;
@@ -663,6 +670,12 @@ pub async fn capture_manual(
             continue;
         };
         if !p.selects(ext, ctx) {
+            if p.extensions.is_none()
+                && let Some(format) = lk_core::content::InputFormat::from_extension(ext)
+                    .filter(|format| format.requires_processor())
+            {
+                result.unprocessed.push(UnprocessedInput { path, format });
+            }
             continue;
         }
         attempted += 1;
@@ -1019,6 +1032,11 @@ mod tests {
                 .is_empty()
         );
         std::fs::write(tmp.path().join("binary.pdf"), [0xff]).unwrap();
+        let retained = capture_manual(&params, &ctx).await.unwrap();
+        assert!(retained.items.is_empty());
+        assert_eq!(retained.unprocessed.len(), 1);
+        assert!(retained.failures.is_empty());
+        let params = serde_json::json!({"inbox_dir":tmp.path(), "extensions":["PDF"]});
         assert!(matches!(
             ManualSource::new().extract(&params, &ctx).await,
             Err(SourceError::NothingObserved { attempted: 1, .. })
