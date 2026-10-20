@@ -193,20 +193,6 @@ impl Source for RssSource {
             let (mut seen, mut observed) = (0usize, 0usize);
             let mut kept = 0usize;
             for entry in feed.entries {
-                if kept >= p.max_items_per_feed {
-                    partial = true;
-                    // Observable truncation, like every other capped adapter: a later
-                    // in-window entry may have been dropped this fetch (the streaming event
-                    // log still preserves it across runs, but the operator should know).
-                    tracing::warn!(
-                        feed = %feed_cfg.id,
-                        max = p.max_items_per_feed,
-                        "rss: per-feed cap hit, later entries may have been dropped; raise max_items_per_feed"
-                    );
-                    break;
-                }
-                // Counted here, where the entry is actually examined — the cap breaks out
-                // above without looking at one.
                 seen += 1;
                 let Some(MappedEntry {
                     mut item,
@@ -221,6 +207,15 @@ impl Source for RssSource {
                     // never a sign that anything is wrong.
                     observed += 1;
                     continue;
+                }
+                if kept >= p.max_items_per_feed {
+                    partial = true;
+                    tracing::warn!(
+                        feed = %feed_cfg.id,
+                        max = p.max_items_per_feed,
+                        "rss: per-feed cap omitted an in-window entry; raise max_items_per_feed"
+                    );
+                    break;
                 }
                 let mut article_recovered_body = false;
                 // Article enrichment is separate from feed/query reach. Failure keeps
@@ -285,7 +280,7 @@ impl Source for RssSource {
             tracing::info!(
                 feed = %feed_cfg.id,
                 kept,
-                unusable = seen - observed,
+                unobserved = seen - observed,
                 "rss: feed extracted"
             );
         }
@@ -579,6 +574,54 @@ mod tests {
         );
         assert_eq!(observed.scope, crate::ObservationScope::ConfiguredQuery);
         assert_eq!(observed.outcome, crate::ObservationOutcome::Observed);
+    }
+
+    #[tokio::test]
+    async fn exact_feed_cap_with_only_older_remaining_entries_is_observed() {
+        let server = tiny_feed_server(
+            r#"<feed xmlns="http://www.w3.org/2005/Atom">
+          <entry><title>Recent</title><id>recent</id><updated>2026-05-23T01:00:00Z</updated></entry>
+          <entry><title>Old</title><id>old</id><updated>2026-05-01T01:00:00Z</updated></entry>
+        </feed>"#,
+        )
+        .await;
+        let params = serde_json::json!({
+            "feeds": [{"id": "a", "url": format!("http://{}/f.xml", server.addr)}],
+            "max_items_per_feed": 1,
+        });
+        let source = RssSource::new(loopback_client());
+        let observation = source.observe(&params, &test_ctx()).await.unwrap();
+        assert_eq!(observation.items.len(), 1);
+        assert_eq!(observation.items[0].title, "Recent");
+        assert_eq!(observation.scope, crate::ObservationScope::ConfiguredQuery);
+        assert_eq!(observation.outcome, crate::ObservationOutcome::Observed);
+    }
+
+    #[tokio::test]
+    async fn feed_cap_preserves_matching_overflow_and_malformed_tail_diagnostics() {
+        for tail in [
+            r#"<entry><title>Later matching</title><id>later</id><updated>2026-05-23T02:00:00Z</updated></entry>"#,
+            r#"<entry><title>Undated</title><id>undated</id></entry>"#,
+        ] {
+            let server = tiny_feed_server(format!(
+                r#"<feed xmlns="http://www.w3.org/2005/Atom">
+              <entry><title>Recent</title><id>recent</id><updated>2026-05-23T01:00:00Z</updated></entry>
+              <entry><title>Old</title><id>old</id><updated>2026-05-01T01:00:00Z</updated></entry>
+              {tail}
+            </feed>"#
+            ))
+            .await;
+            let params = serde_json::json!({
+                "feeds": [{"id": "a", "url": format!("http://{}/f.xml", server.addr)}],
+                "max_items_per_feed": 1,
+            });
+            let source = RssSource::new(loopback_client());
+            let observation = source.observe(&params, &test_ctx()).await.unwrap();
+            assert_eq!(observation.items.len(), 1);
+            assert_eq!(observation.items[0].title, "Recent");
+            assert_eq!(observation.scope, crate::ObservationScope::ConfiguredQuery);
+            assert_eq!(observation.outcome, crate::ObservationOutcome::Partial);
+        }
     }
 
     #[tokio::test]

@@ -104,6 +104,59 @@ fn read(root: &Path, path: &Path, revision: Option<&str>) -> Result<Option<Strin
     Ok(current)
 }
 
+fn resolve_page_owner(root: &Path, path: &Path) -> Result<PathBuf, VaultError> {
+    let full = crate::page_path(root, path)?;
+    lk_core::fs::canonical_prefix(&full)
+        .strip_prefix(root.canonicalize()?)
+        .map(Path::to_path_buf)
+        .map_err(|error| invalid(error.to_string()))
+}
+
+fn retain_read(
+    guarded: &mut BTreeMap<PathBuf, String>,
+    path: PathBuf,
+    raw: String,
+) -> Result<(), VaultError> {
+    if guarded
+        .insert(path, raw.clone())
+        .is_some_and(|before| before != raw)
+    {
+        return Err(invalid("curation evidence changed while planning"));
+    }
+    Ok(())
+}
+
+fn build_concept_names(
+    path: &Path,
+    directory: &Path,
+    page: &crate::VaultPage,
+) -> Result<(ConceptIdentity, Vec<String>), VaultError> {
+    let title = page
+        .frontmatter
+        .get("title")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| path.file_stem().and_then(|stem| stem.to_str()))
+        .ok_or_else(|| invalid("concept name is not UTF-8"))?
+        .to_owned();
+    let aliases = page
+        .frontmatter
+        .get("aliases")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .map(String::from)
+        .collect();
+    let slug = path
+        .strip_prefix(directory)
+        .map_err(|error| invalid(error.to_string()))?
+        .with_extension("")
+        .to_str()
+        .ok_or_else(|| invalid("concept address is not UTF-8"))?
+        .replace(std::path::MAIN_SEPARATOR, "/");
+    Ok((ConceptIdentity { slug, title }, aliases))
+}
+
 fn set<T: Serialize>(text: &str, key: &str, value: &T) -> Result<String, VaultError> {
     let value = serde_json::to_string(value)
         .map_err(|error| VaultError::Serialization(error.to_string()))?;
@@ -174,7 +227,6 @@ fn build_curation(
         if guarded.insert(path.clone(), text.clone()).is_some() {
             return Err(invalid("duplicate curation evidence"));
         }
-        plan.require_unchanged(path, text);
     }
     let concepts_dir = lk_core::vault_path::concepts_dir(dirs);
     let explorations_dir = lk_core::vault_path::explorations_dir(dirs);
@@ -281,56 +333,52 @@ fn build_curation(
             return Err(invalid("duplicate curation target"));
         }
     }
+    let mut owners = BTreeMap::new();
+    for path in staged.keys() {
+        crate::writable_page_path(root, path)?;
+        if owners
+            .insert(resolve_page_owner(root, path)?, path.clone())
+            .is_some()
+        {
+            return Err(invalid("duplicate physical curation target"));
+        }
+    }
     let mut registry = ConceptRegistry::new();
     let mut identities = Vec::new();
+    let mut registered = BTreeSet::new();
     for page in crate::search::load_pages(root, dirs, false)?
         .into_iter()
         .filter(|page| page.concept)
     {
-        let proposed = staged
-            .get(&page.rel_path)
+        let owner = resolve_page_owner(root, &page.rel_path)?;
+        let proposed = owners
+            .get(&owner)
+            .and_then(|path| staged.get(path))
             .map(|(_, after)| crate::parse_page(after).map_err(invalid))
             .transpose()?;
         let page_data = proposed.as_ref().unwrap_or(&page.page);
-        let title = page_data
-            .frontmatter
-            .get("title")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or(&page.title)
-            .to_owned();
-        let aliases = page_data
-            .frontmatter
-            .get("aliases")
-            .and_then(serde_json::Value::as_array)
-            .map(|values| {
-                values
-                    .iter()
-                    .filter_map(serde_json::Value::as_str)
-                    .map(String::from)
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        let slug = page
-            .rel_path
-            .strip_prefix(&concepts_dir)
-            .map_err(|error| invalid(error.to_string()))?
-            .with_extension("")
-            .to_string_lossy()
-            .into_owned();
-        registry.register(
-            ConceptIdentity {
-                slug: slug.clone(),
-                title: title.clone(),
-            },
-            &aliases,
-        );
-        if staged.contains_key(&page.rel_path) {
-            identities.push((slug, title, aliases));
+        let (identity, aliases) = build_concept_names(&page.rel_path, &concepts_dir, page_data)?;
+        registry.register(identity.clone(), &aliases);
+        if proposed.is_some() {
+            registered.insert(owner);
+            identities.push((identity, aliases));
         }
     }
-    for (slug, title, aliases) in identities {
-        for name in std::iter::once(&title).chain(&aliases) {
-            if !matches!(registry.resolve(name), Resolution::Owned(owner) if owner.slug==slug) {
+    for change in &request.concepts {
+        let path = address(&change.path, Some(&concepts_dir))?;
+        if !registered.insert(resolve_page_owner(root, &path)?) {
+            continue;
+        }
+        let (_, after) = &staged[&path];
+        let page = crate::parse_page(after).map_err(invalid)?;
+        let (identity, aliases) = build_concept_names(&path, &concepts_dir, &page)?;
+        registry.register(identity.clone(), &aliases);
+        identities.push((identity, aliases));
+    }
+    for (identity, aliases) in identities {
+        for name in std::iter::once(&identity.title).chain(&aliases) {
+            if !matches!(registry.resolve(name), Resolution::Owned(owner) if owner.slug==identity.slug)
+            {
                 return Err(invalid(format!(
                     "curation introduces ambiguous concept name: {name}"
                 )));
@@ -351,11 +399,12 @@ fn build_curation(
     );
     for review_path in assessments {
         let path = address(&review_path, Some(&explorations_dir))?;
-        let raw = if let Some((_, after)) = staged.get(&path) {
+        let staged_path = owners.get(&resolve_page_owner(root, &path)?);
+        let raw = if let Some((_, after)) = staged_path.and_then(|path| staged.get(path)) {
             after.clone()
         } else {
             let raw = std::fs::read_to_string(crate::page_path(root, &path)?)?;
-            plan.require_unchanged(path.clone(), raw.clone());
+            retain_read(&mut guarded, path.clone(), raw.clone())?;
             raw
         };
         let page = crate::parse_page(&raw).map_err(invalid)?;
@@ -383,12 +432,13 @@ fn build_curation(
         }
         for citation in &assessment.evidence {
             let path = address(&citation.path, None)?;
-            let raw = if let Some((_, after)) = staged.get(&path) {
+            let staged_path = owners.get(&resolve_page_owner(root, &path)?);
+            let raw = if let Some((_, after)) = staged_path.and_then(|path| staged.get(path)) {
                 after.clone()
             } else {
                 match std::fs::read_to_string(crate::page_path(root, &path)?) {
                     Ok(raw) => {
-                        plan.require_unchanged(path, raw.clone());
+                        retain_read(&mut guarded, path, raw.clone())?;
                         raw
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -421,9 +471,24 @@ fn build_curation(
             }
         }
     }
+    let mut read_owners = BTreeMap::new();
+    for (path, raw) in guarded {
+        let owner = resolve_page_owner(root, &path)?;
+        if let Some(target) = owners.get(&owner) {
+            if staged[target].0.as_ref() != Some(&raw) {
+                return Err(invalid("curation target differs from captured evidence"));
+            }
+        } else {
+            retain_read(&mut read_owners, owner, raw)?;
+        }
+    }
+    for (owner, raw) in read_owners {
+        plan.require_unchanged(owner, raw);
+    }
     for (path, (before, after)) in &staged {
         if let Some(before) = before {
             if before == after {
+                plan.require_unchanged(path, before.clone());
                 continue;
             }
             let revision = source_revision(&crate::parse_page(before).map_err(invalid)?);
@@ -463,6 +528,289 @@ fn build_curation(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn recover_completed_curation(root: &Path, plan: MutationPlan) {
+        let session = MutationSession::acquire(root).unwrap();
+        let plan_revision = file_revision(&serde_json::to_string(&plan).unwrap());
+        let journal = json!({"version": 1, "plan": plan});
+        let steps = journal["plan"]["steps"].as_array().unwrap();
+        let mutation = root.join(".lorekeeper/mutation");
+        std::fs::write(mutation.join("pending.json"), journal.to_string()).unwrap();
+        for step in steps {
+            let destination = root.join(step["path"].as_str().unwrap());
+            assert!(matches!(step["kind"].as_str(), Some("create" | "edit")));
+            std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+            std::fs::write(destination, step["after"].as_str().unwrap()).unwrap();
+        }
+        let completed = steps.len();
+        std::fs::write(
+            mutation.join("progress.json"),
+            json!({
+                "plan_revision": plan_revision,
+                "completed": completed,
+                "checksum": file_revision(&format!("{plan_revision}:{completed}"))
+            })
+            .to_string(),
+        )
+        .unwrap();
+        drop(session);
+        let _recovered = MutationSession::acquire(root).unwrap();
+        assert!(!mutation.join("pending.json").exists());
+        assert!(!mutation.join("progress.json").exists());
+    }
+
+    #[cfg(unix)]
+    fn alias_curation_fixture(root: &Path) -> &'static str {
+        let before = "---\ntype: concept\ntitle: First\naliases: [First]\n---\n## Synthesis\nFirst meaning.\n";
+        let writer = crate::VaultWriter::new(root);
+        writer
+            .write_page_sync(Path::new("wiki/concepts/real/first.md"), before)
+            .unwrap();
+        writer
+            .write_page_sync(
+                Path::new("wiki/concepts/second.md"),
+                &before.replace("First", "Second"),
+            )
+            .unwrap();
+        std::os::unix::fs::symlink("real", root.join("wiki/concepts/alias")).unwrap();
+        before
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn curation_refuses_title_collision_through_a_directory_alias() {
+        let root = tempfile::tempdir().unwrap();
+        let before = alias_curation_fixture(root.path());
+        let path = "wiki/concepts/alias/first.md";
+        let request = || {
+            serde_json::from_value::<CurationPlan>(json!({
+                "evidence": [{"path": path, "revision": file_revision(before)}],
+                "concepts": [{"path": path, "revision": file_revision(before), "title": "Second"}]
+            }))
+            .unwrap()
+        };
+        let error = preview_curation(root.path(), &VaultDirs::default(), &[], request())
+            .err()
+            .expect("title collision must refuse before publication");
+        assert!(error.to_string().contains("ambiguous concept name"));
+        let session = MutationSession::acquire(root.path()).unwrap();
+        assert!(curate(&session, &VaultDirs::default(), &[], request()).is_err());
+        assert_eq!(
+            std::fs::read_to_string(root.path().join(path)).unwrap(),
+            before
+        );
+        assert!(!root.path().join(".lorekeeper/evidence").exists());
+        assert!(
+            !root
+                .path()
+                .join(".lorekeeper/mutation/pending.json")
+                .exists()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn curation_refuses_multiple_addresses_of_one_physical_target_before_publication() {
+        let root = tempfile::tempdir().unwrap();
+        let before = alias_curation_fixture(root.path());
+        let request = || {
+            serde_json::from_value::<CurationPlan>(json!({
+                "evidence": [{"path": "wiki/concepts/real/first.md", "revision": file_revision(before)}],
+                "concepts": [
+                    {"path": "wiki/concepts/real/first.md", "revision": file_revision(before), "tags": ["first"]},
+                    {"path": "wiki/concepts/alias/first.md", "revision": file_revision(before), "tags": ["second"]}
+                ]
+            }))
+            .unwrap()
+        };
+        assert!(preview_curation(root.path(), &VaultDirs::default(), &[], request()).is_err());
+        let session = MutationSession::acquire(root.path()).unwrap();
+        assert!(curate(&session, &VaultDirs::default(), &[], request()).is_err());
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("wiki/concepts/real/first.md")).unwrap(),
+            before
+        );
+        assert!(!root.path().join(".lorekeeper/evidence").exists());
+        assert!(
+            !root
+                .path()
+                .join(".lorekeeper/mutation/pending.json")
+                .exists()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn curation_accepts_single_directory_alias_and_recovers_alias_evidence() {
+        let root = tempfile::tempdir().unwrap();
+        let before = alias_curation_fixture(root.path());
+        let path = "wiki/concepts/alias/first.md";
+        let request = |raw: &str, tag: &str| {
+            serde_json::from_value::<CurationPlan>(json!({
+                "evidence": [{"path": "wiki/concepts/real/first.md", "revision": file_revision(raw)}],
+                "concepts": [{"path": path, "revision": file_revision(raw), "tags": [tag]}]
+            }))
+            .unwrap()
+        };
+        preview_curation(
+            root.path(),
+            &VaultDirs::default(),
+            &[],
+            request(before, "first"),
+        )
+        .unwrap();
+        let session = MutationSession::acquire(root.path()).unwrap();
+        curate(
+            &session,
+            &VaultDirs::default(),
+            &[],
+            request(before, "first"),
+        )
+        .unwrap();
+        drop(session);
+        let updated = std::fs::read_to_string(root.path().join(path)).unwrap();
+        let (plan, _) = build_curation(
+            root.path(),
+            &VaultDirs::default(),
+            &[],
+            request(&updated, "second"),
+        )
+        .unwrap();
+        recover_completed_curation(root.path(), plan);
+        let final_page = std::fs::read_to_string(root.path().join(path)).unwrap();
+        assert_eq!(
+            crate::parse_page(&final_page)
+                .unwrap()
+                .frontmatter
+                .get("tags"),
+            Some(&json!(["second"]))
+        );
+        assert_eq!(
+            crate::parse_page(&final_page).unwrap().body,
+            crate::parse_page(before).unwrap().body
+        );
+    }
+
+    #[test]
+    fn curation_recovers_when_its_evidence_is_the_edited_concept() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let path = "wiki/concepts/subject.md";
+        let before = "---\ntype: concept\ntitle: Subject\ntags: [old]\n---\n## Synthesis\nAuthored meaning.\n";
+        crate::VaultWriter::new(root.path())
+            .write_page_sync(Path::new(path), before)
+            .unwrap();
+        let request = serde_json::from_value::<CurationPlan>(json!({
+            "evidence": [{"path": path, "revision": file_revision(before)}],
+            "concepts": [{"path": path, "revision": file_revision(before), "tags": ["reviewed"]}]
+        }))
+        .unwrap();
+        let (plan, _) = build_curation(root.path(), &dirs, &[], request).unwrap();
+        let serialized = serde_json::to_value(&plan).unwrap();
+        let after = serialized["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|step| step["path"] == path && step["before"] != step["after"])
+            .unwrap()["after"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        recover_completed_curation(root.path(), plan);
+        assert_eq!(
+            std::fs::read_to_string(root.path().join(path)).unwrap(),
+            after
+        );
+        let prior_revision = source_revision(&crate::parse_page(before).unwrap());
+        assert_eq!(
+            crate::load_archived_evidence(root.path(), &prior_revision)
+                .unwrap()
+                .unwrap()
+                .original
+                .as_deref(),
+            Some(before)
+        );
+    }
+
+    #[test]
+    fn curation_keeps_unowned_and_unchanged_target_read_guards() {
+        for changed_path in ["wiki/documents/source.md", "wiki/concepts/subject.md"] {
+            let root = tempfile::tempdir().unwrap();
+            let concept = "wiki/concepts/subject.md";
+            let source = "wiki/documents/source.md";
+            let review = "wiki/explorations/nested/assessment.md";
+            let before =
+                "---\ntype: concept\ntitle: Subject\n---\n## Synthesis\nAuthored meaning.\n";
+            let evidence = "---\ntype: document\ntitle: Source\n---\nSource evidence.\n";
+            let writer = crate::VaultWriter::new(root.path());
+            writer.write_page_sync(Path::new(concept), before).unwrap();
+            writer.write_page_sync(Path::new(source), evidence).unwrap();
+            let content = format!(
+                "---\ntype: exploration\ntitle: Assessment\nreview: {}\n---\n## Question\nWhat does this source establish?\n",
+                json!({"status":"open","subjects":[concept],"evidence":[{"path":source,"revision":source_revision(&crate::parse_page(evidence).unwrap())}],"resolution":null})
+            );
+            let request = serde_json::from_value::<CurationPlan>(json!({
+                "evidence": [{"path":source,"revision":file_revision(evidence)}],
+                "concepts": [{"path":concept,"revision":file_revision(before)}],
+                "reviews": [{"path":review,"revision":null,"content":content}]
+            }))
+            .unwrap();
+            let session = MutationSession::acquire(root.path()).unwrap();
+            let (plan, _) =
+                build_curation(root.path(), &VaultDirs::default(), &[], request).unwrap();
+            let previous = std::fs::read_to_string(root.path().join(changed_path)).unwrap();
+            let changed = format!("{previous}\nExternal edit.\n");
+            writer
+                .write_page_sync(Path::new(changed_path), &changed)
+                .unwrap();
+            assert!(session.apply(plan).is_err());
+            assert_eq!(
+                std::fs::read_to_string(root.path().join(changed_path)).unwrap(),
+                changed
+            );
+            assert!(!root.path().join(review).exists());
+            assert!(!root.path().join(".lorekeeper/evidence").exists());
+            assert!(
+                !root
+                    .path()
+                    .join(".lorekeeper/mutation/pending.json")
+                    .exists()
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn curation_supports_a_symlinked_collection_root_and_distinct_hardlink_entries() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("wiki")).unwrap();
+        std::fs::create_dir(root.path().join("concept-pages")).unwrap();
+        std::os::unix::fs::symlink("../concept-pages", root.path().join("wiki/concepts")).unwrap();
+        let first = "wiki/concepts/first.md";
+        let second = "wiki/concepts/second.md";
+        let before = "---\ntype: concept\ntitle: Before\n---\n## Synthesis\nRetained meaning.\n";
+        crate::VaultWriter::new(root.path())
+            .write_page_sync(Path::new(first), before)
+            .unwrap();
+        std::fs::hard_link(root.path().join(first), root.path().join(second)).unwrap();
+        let request = serde_json::from_value::<CurationPlan>(json!({
+            "evidence": [{"path":first,"revision":file_revision(before)}],
+            "concepts": [
+                {"path":first,"revision":file_revision(before),"title":"First"},
+                {"path":second,"revision":file_revision(before),"title":"Second"}
+            ]
+        }))
+        .unwrap();
+        let session = MutationSession::acquire(root.path()).unwrap();
+        curate(&session, &VaultDirs::default(), &[], request).unwrap();
+        for (path, title) in [(first, "First"), (second, "Second")] {
+            let raw = std::fs::read_to_string(root.path().join(path)).unwrap();
+            assert_eq!(
+                crate::parse_page(&raw).unwrap().frontmatter.get("title"),
+                Some(&json!(title))
+            );
+        }
+    }
 
     #[test]
     fn metadata_curation_validates_vocabulary_and_preserves_semantic_sections() {
