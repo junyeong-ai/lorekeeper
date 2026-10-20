@@ -46,6 +46,14 @@ identity:
 ingest:
   source_timeout_seconds: 600  # total acquisition budget per source, including retry waits
   schedule: "0 7 * * *"          # every day 07:00 (sources use lookback windows)
+  # Explicit opt-in: native daily retries missing CLOSED query days before current collection.
+  # Choose the earliest day you intend to recover; no history is inferred from installation.
+  # recovery:
+  #   start_date: "2026-10-01"
+  #   max_days_per_source_per_run: 3
+  # Only date-window adapters replay automatically. RSS/Slack search/arbitrary Jira JQL
+  # cannot prove historical coverage; manual/nodex collect current retained inputs.
+  # A replay queries current provider records, not deleted/intermediate revisions.
   # Raw originals use private temporary files, separate from decoded/model output.
   # Entry/member limits must fit max_source_bytes; the full ingest capture cap is 512 MiB.
   originals:
@@ -84,7 +92,7 @@ sources:
     enabled: false
     params:
       folder_id: "YOUR_DRIVE_FOLDER_ID" # copy the ID from the Drive folder URL; "root" is valid
-      lookback_days: 1                 # target civil day plus previous day; increase for longer gaps
+      lookback_days: 1                 # target civil day plus previous day; recovery handles longer query gaps
       # name_prefix: "briefing-"       # optional filename prefix, not a date or glob pattern
       # max_files: 200                 # a reached cap is a partial observation
     labels: [ai-industry]
@@ -439,6 +447,9 @@ personal:
 # module — though `lore synthesis weekly` also produces the personal weekly review when a
 # `personal:` block is configured above.
 synthesis:
+  # recovery:
+  #   start_date: "2026-10-01"      # opt in to full closed periods starting on/after this date
+  #   max_periods_per_run: 8        # examined slots; resumes a persisted cursor, no collection proof
   weekly:
     enabled: true
     schedule: "0 8 * * 1"           # Monday 08:00

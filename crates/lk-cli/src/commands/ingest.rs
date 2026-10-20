@@ -3,6 +3,7 @@ use std::sync::Arc;
 use super::{build_llm_client, find_config, load_config_with_revision, parse_date};
 
 mod capture;
+pub mod recovery;
 
 /// The number of events the page states about itself, as ` (N events)`.
 ///
@@ -183,6 +184,7 @@ pub async fn run(
     };
 
     // Capture source observations before acquiring the vault writer.
+    let collection_started_at = jiff::Timestamp::now();
     struct Planned {
         id: String,
         result: lk_pipeline::IngestResult,
@@ -457,7 +459,10 @@ pub async fn run(
         // Written BEFORE the empty-pages skip, and written even when the list is empty: a
         // source can be open-work-only in a run that renders nothing, and an empty answer is
         // what retires proposals whose work is now finished. `--dry-run` writes nothing at all.
-        if !dry_run && config.personal.as_ref().is_some_and(|p| p.tasks.is_some()) {
+        let records_current_intent = !dry_run
+            && target_date.is_none_or(|date| date == today)
+            && config.personal.as_ref().is_some_and(|p| p.tasks.is_some());
+        if records_current_intent {
             // Held for the write and no longer. These are the intent plane's files, so the
             // command writing them holds the plane whoever it is — scoped to `lore task`, the
             // guard was named for the first writer that needed it and left every other one
@@ -476,10 +481,7 @@ pub async fn run(
         // day's tasks and nothing ever proposes. One SNAPSHOT per source, replaced whole and
         // written even when EMPTY — that is the answer that clears a day whose every meeting
         // was cancelled, which a file per date could not say.
-        if !dry_run
-            && sc.source_type.descriptor().scheduled
-            && config.personal.as_ref().is_some_and(|p| p.tasks.is_some())
-        {
+        if records_current_intent && sc.source_type.descriptor().scheduled {
             let appointments: Vec<_> = result
                 .appointments
                 .iter()
@@ -754,6 +756,8 @@ pub async fn run(
                 .expect("writing ingest holds mutation session"),
             extract_target,
             source.is_none(),
+            collection_started_at,
+            target_date.is_some(),
             observations.into_values().collect(),
         )?;
     }

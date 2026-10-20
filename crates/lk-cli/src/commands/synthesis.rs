@@ -13,14 +13,17 @@ pub enum Period {
     /// Resume durable closed-period obligations, or inspect them without writes
     Pending {
         /// Resume only this dependency stage (default: all stages)
-        #[arg(long)]
+        #[arg(long, conflicts_with = "reconcile")]
         stage: Option<pending::ResumeStage>,
         /// Print the durable intent report as JSON
         #[arg(long)]
         json: bool,
         /// Inspect durable intent status without resuming or writing
-        #[arg(long)]
+        #[arg(long, conflicts_with = "reconcile")]
         status: bool,
+        /// Register bounded missing closed periods from synthesis.recovery without processing them
+        #[arg(long)]
+        reconcile: bool,
     },
     /// Cross-source themes + personal weekly review
     Weekly {
@@ -102,6 +105,14 @@ pub async fn run(
         lk_vault::MutationSession::acquire(&vault_root)
     }
     .map_err(|e| miette::miette!("vault mutation: {e}"))?;
+    if let Period::Pending {
+        reconcile: true,
+        json,
+        ..
+    } = period
+    {
+        return pending::reconcile(&config, &_mutation, today, json);
+    }
     if let Period::Pending { stage, json, .. } = period {
         return pending::resume(&config, opts, &_mutation, stage, json, today).await;
     }

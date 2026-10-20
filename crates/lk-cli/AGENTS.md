@@ -39,6 +39,12 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   Native consumers own selected semantic reads and guarded publication; the controller
   owns final global reconciliation/checks. Keep this boundary explicit in the host
   instruction and shared skills; standalone skills still perform their own final checks.
+  Knowledge jobs give ready audit subjects a turn before global queue draining. Scope
+  readiness to the actual subject/evidence/context/review pages, verified physical
+  owners, typed unfinished work and staged results. Unknown task/result targets cannot
+  be assumed unrelated. Recheck readiness under vault→queue claims before recording,
+  and verify selected receipts after final reconciliation even when unrelated backlog
+  leaves the overall job incomplete. Authored pages require no invented done markers.
   Grant each temporary selection manifest's directory explicitly to the selected host;
   keep it alive through the foreground consumer and remove it afterward.
   `commands/work.rs` binds retained input and audit dependencies to resumable derived
@@ -88,6 +94,11 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
 - Work-log generation belongs to full ingest only, not filtered runs. A full run
   with partial source failure still writes its work-log and reports failure.
   Startup tmp sweeping/pending diagnostics must preserve recoverable work.
+- Historical date replay never replaces current candidate or appointment snapshots.
+  Source recovery needs an explicit start date and per-source day budget. Only
+  config-matching observed windows, closed before acquisition and durably published,
+  establish query-day coverage; current snapshots and configured queries remain
+  distinct from historical replay. Coverage is not deleted/revision-history proof.
 - Manual original publication is immutable bytes→complete manifest→page/request
   journal→optional retirement. Keep source ownership separate from original
   references; archive=false still preserves original bytes. Capture limits are
@@ -147,6 +158,11 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
 - Synthesis owns both sections and its completion marker atomically, with exact
   source/target/queue guards. Do not split core and related publication. Explicit
   year/date conflicts with `--previous` fail before flushing work.
+- Optional synthesis recovery registers only closed periods starting on/after its
+  explicit activation date. Persist per-kind cursors and fair turns in the existing
+  intent store; bound examined slots, including existing requests. Disabled modes
+  pause without losing their cursor. Registration never supplies missing collection
+  coverage, semantic completion or a cross-source personal work log.
 - Backlinks queues synthesis only with an answering provider; noop neither changes
   that promise nor fabricates input. Reuse exact pending requests through lk-queue.
 - `queue check` is read-only: report current/unreadable/unparseable tasks,

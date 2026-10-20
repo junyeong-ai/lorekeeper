@@ -76,6 +76,9 @@ pub enum Command {
         /// Override date (YYYY-MM-DD, default: today)
         #[arg(long)]
         date: Option<String>,
+        /// Recover bounded closed-day windows from ingest.recovery's explicit start date
+        #[arg(long, conflicts_with_all = ["source", "date"])]
+        recover: bool,
         /// Preview without writing to vault
         #[arg(long)]
         dry_run: bool,
@@ -306,9 +309,16 @@ pub async fn run() -> miette::Result<()> {
         Command::Ingest {
             source,
             date,
+            recover,
             dry_run,
             wait_for_vault,
-        } => commands::ingest::run(&opts, source, date, dry_run, wait_for_vault).await,
+        } => {
+            if recover {
+                commands::ingest::recovery::run(&opts, dry_run, wait_for_vault).await
+            } else {
+                commands::ingest::run(&opts, source, date, dry_run, wait_for_vault).await
+            }
+        }
         Command::Task { cmd } => commands::task::run(&opts, cmd).await,
         Command::Fetch { url, source } => commands::fetch::run(&opts, &url, source).await,
         Command::Brief { date, json } => commands::brief::run(&opts, date, json).await,

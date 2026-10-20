@@ -334,6 +334,7 @@ To add external knowledge, copy the catalog's `ai-news` or `tech-news` block int
 - **Materialized views** — a page has two layers. The **structural layer** (frontmatter, raw items, headings) re-renders every ingest; the **semantic layer** (summary, concepts, synthesis) is LLM-owned and preserved across re-renders. Unchanged input with matching completion markers enqueues zero LLM work (a BLAKE3 hash decides).
 - **Collection budget** — `ingest.source_timeout_seconds` defaults to 600 seconds per source; `collection_timeout_seconds` on a source overrides it. This operating budget includes retry waits, pagination and conversion. Collection runs outside the vault writer lock; publication acquires the lock, recovers pending journals and derives from current pages. Async waits are cancelled; blocking local IO/decoding is checked on return rather than forcibly preempted. Timeout reports failure and does not establish automatic backfill or source completeness.
 - **Inputs and replay** — unchanged input hashes reuse completed LLM results. Refetching can observe remote edits, deletions and different query windows. RSS event logs retain collected entries after they leave the feed; exact-input regeneration requires a retained queue task.
+- **Collection recovery** — opt in with `ingest.recovery: {start_date: "2026-10-01", max_days_per_source_per_run: 3}`. Native daily retries uncollected closed dates per source before ordinary current collection. `lore ingest --recover --dry-run` previews selected dates without network or writes. Only accepted publications matching the current source selection establish covered query days; partial attempts remain pending. Dated replay supports Gmail, Slack channels, Drive, Calendar, Confluence and Tasks. RSS, Slack search and arbitrary Jira JQL remain explicitly unverified for historical coverage; manual/nodex retain current-input semantics. This does not restore deleted/intermediate provider revisions or rebuild the full-source personal work-log.
 - **Realized-only** — a future date materializes no page (a forecast isn't knowledge yet). It becomes knowledge once the date arrives.
 - **Config decides the vault's language** — `vault.locale` (ko | en) is not a label switch but **the language of every sentence Lorekeeper adds**: summaries, weekly themes, concept definitions, explorations. A concept's NAME is the form its own source writes, so a term a source writes in another language keeps its spelling. Source content is never translated.
 - **The graph does the bookkeeping** — `backlinks-sync` (re-derive each concept's citations, count and synthesis input, queueing a rewrite when the evidence moves), `lint` (orphans, broken links, duplicate concepts), `merge` (fold duplicate concepts), `cluster` / `suggest-links` (communities and link candidates).
@@ -347,6 +348,7 @@ lore validate                 # check config (no network)
 lore ingest [source]          # ingest (all sources, or a single one)
 lore ingest --dry-run         # preview without writing to the vault
 lore ingest --date 2026-06-01 # re-materialize a specific day (backfill / repair)
+lore ingest --recover         # recover missing closed source days within explicit budgets
 lore synthesis weekly         # weekly synthesis + personal review (monthly/quarterly/annual too)
 lore status                   # one line per subsystem (per-source times: lore health)
 lore health                   # warn when a source is overdue vs ingest.schedule
@@ -678,6 +680,26 @@ date. Inspect `lore synthesis pending --status --json` for blocked evidence and
 backfill source dates explicitly. Isolate tests with `--namespace org.example.lore-test`
 and `--log-dir /absolute/test/logs`.
 
+To recover missing period requests, configure an explicit activation boundary:
+
+```yaml
+synthesis:
+  recovery:
+    start_date: "2026-10-01"
+    max_periods_per_run: 8
+```
+
+`lore synthesis pending --reconcile --json` registers missing closed periods for
+currently enabled synthesis modes. Only periods starting on or after `start_date`
+qualify; an overlapping earlier period is excluded. Each invocation examines at
+most eight period slots, including existing requests, then resumes its persisted
+position on the next invocation. The daily job runs this once before resuming
+periods. Disabled modes pause their cursor and resume when enabled again. Omitting
+the configuration does not request historical periods automatically. A request
+does not establish collection coverage or semantic completion; missing actual
+source coverage or personal work logs still block processing. Explicit
+`--date ... --defer` requests may independently target older periods.
+
 Configure weekly semantic maintenance independently from collection and synthesis:
 
 ```yaml
@@ -694,6 +716,13 @@ configured wiki; document-only topics can be reviewed without creating concepts.
 `kind` identifies the subject type; `counts_by_kind` separates total, current and
 pending counts by type, and aggregate counts include both. Document links provide
 context, not automatic corroborating evidence.
+Knowledge jobs audit ready subjects before draining the global queue. Unfinished
+semantic sections or unpublished results in the subject, evidence or actual
+context defer that subject while later ready subjects remain eligible. Complete
+authored pages require no LLM completion markers. `audit_deferred` reports the
+encountered subjects and their blockers. Audit progress can coexist with unrelated
+queue backlog, while the overall job remains incomplete. Final verification follows
+global reconciliation and checks the selected inputs again.
 `.lorekeeper/knowledge-audit.json` stores current assessments and pending order;
 judgments and conflicting evidence remain in Markdown reviews. Single-source
 status or citation count alone does not justify merging or deleting a concept.

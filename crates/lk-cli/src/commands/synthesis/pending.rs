@@ -235,6 +235,10 @@ pub enum ObservedScope {
 #[serde(deny_unknown_fields)]
 struct CollectionBatch {
     at: jiff::Timestamp,
+    #[serde(default)]
+    started_at: Option<jiff::Timestamp>,
+    #[serde(default)]
+    targeted: bool,
     requested_day: Date,
     full_ingest: bool,
     sources: Vec<ObservedSource>,
@@ -295,6 +299,168 @@ struct State {
     version: u32,
     intents: BTreeMap<String, Intent>,
     batches: Vec<CollectionBatch>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    recovery: Option<RecoveryCursor>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecoveryCursor {
+    start_date: Date,
+    timezone: String,
+    next: BTreeMap<Kind, Date>,
+    next_kind: Option<Kind>,
+}
+
+#[derive(Debug, Default, Serialize)]
+struct RecoveryResult {
+    examined: usize,
+    requested: Vec<String>,
+    remaining: bool,
+}
+
+fn enabled_kinds(config: &Config) -> Vec<Kind> {
+    let mut kinds = Vec::new();
+    if config.synthesis.weekly.enabled {
+        if !config.synthesis.weekly.include_sources.is_empty() {
+            kinds.push(Kind::WeeklyThemes);
+        }
+        if config.personal.is_some() {
+            kinds.push(Kind::WeeklyReview);
+        }
+    }
+    if let Some(personal) = &config.personal {
+        if personal.monthly.enabled {
+            kinds.push(Kind::Monthly);
+        }
+        if personal.quarterly.enabled {
+            kinds.push(Kind::Quarterly);
+        }
+        if personal.annual.enabled {
+            kinds.push(Kind::Annual);
+        }
+    }
+    kinds
+}
+
+fn next_period(period: &ClosedPeriod) -> miette::Result<Date> {
+    period
+        .end
+        .checked_add(jiff::Span::new().days(1))
+        .map_err(|error| miette::miette!("next closed period: {error}"))
+}
+
+fn reconcile_periods(
+    state: &mut State,
+    config: &Config,
+    today: Date,
+) -> miette::Result<RecoveryResult> {
+    let recovery = config.synthesis.recovery.as_ref().ok_or_else(|| {
+        miette::miette!("configure synthesis.recovery.start_date before reconciling closed periods")
+    })?;
+    let timezone = timezone_identity(config)?;
+    if state.recovery.as_ref().is_none_or(|cursor| {
+        cursor.start_date != recovery.start_date || cursor.timezone != timezone
+    }) {
+        state.recovery = Some(RecoveryCursor {
+            start_date: recovery.start_date,
+            timezone,
+            next: BTreeMap::new(),
+            next_kind: None,
+        });
+    }
+    let kinds = enabled_kinds(config);
+    let cursor = state
+        .recovery
+        .as_mut()
+        .expect("recovery cursor initialized");
+    for kind in &kinds {
+        if !cursor.next.contains_key(kind) {
+            let period = ClosedPeriod::containing(*kind, recovery.start_date)?;
+            let first = if period.start < recovery.start_date {
+                next_period(&period)?
+            } else {
+                period.start
+            };
+            cursor.next.insert(*kind, first);
+        }
+    }
+    let mut result = RecoveryResult::default();
+    while result.examined < recovery.max_periods_per_run.get() {
+        let cursor = state
+            .recovery
+            .as_ref()
+            .expect("recovery cursor initialized");
+        let start = cursor
+            .next_kind
+            .and_then(|next| kinds.iter().position(|kind| *kind >= next))
+            .unwrap_or(0);
+        let mut selected = None;
+        for kind in kinds.iter().cycle().skip(start).take(kinds.len()) {
+            let period = ClosedPeriod::containing(*kind, cursor.next[kind])?;
+            if period.end < today {
+                selected = Some(period);
+                break;
+            }
+        }
+        let Some(period) = selected else {
+            break;
+        };
+        let cursor = state
+            .recovery
+            .as_mut()
+            .expect("recovery cursor initialized");
+        cursor.next.insert(period.kind, next_period(&period)?);
+        let position = kinds
+            .iter()
+            .position(|kind| *kind == period.kind)
+            .expect("selected enabled kind");
+        cursor.next_kind = Some(kinds[(position + 1) % kinds.len()]);
+        result.examined += 1;
+        let key = period.key();
+        if !state.intents.contains_key(&key) {
+            request(state, period, config, today)?;
+            result.requested.push(key);
+        }
+    }
+    let cursor = state
+        .recovery
+        .as_ref()
+        .expect("recovery cursor initialized");
+    for kind in kinds {
+        if ClosedPeriod::containing(kind, cursor.next[&kind])?.end < today {
+            result.remaining = true;
+            break;
+        }
+    }
+    Ok(result)
+}
+
+pub fn reconcile(
+    config: &Config,
+    session: &MutationSession,
+    today: Date,
+    json: bool,
+) -> miette::Result<()> {
+    let root = config.vault.root_path();
+    let (mut state, before) = load(&root)?;
+    let result = reconcile_periods(&mut state, config, today)?;
+    save(&root, session, &state, before)?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&result)
+                .map_err(|error| miette::miette!("period recovery report: {error}"))?
+        );
+    } else {
+        eprintln!(
+            "Closed-period recovery: examined {}, requested {}, remaining={}; source coverage is checked separately before processing",
+            result.examined,
+            result.requested.len(),
+            result.remaining
+        );
+    }
+    Ok(())
 }
 
 fn load(root: &Path) -> miette::Result<(State, Option<String>)> {
@@ -322,6 +488,13 @@ fn load(root: &Path) -> miette::Result<(State, Option<String>)> {
         intent.period.validate()?;
         if *key != intent.period.key() {
             return Err(miette::miette!("period state key mismatch"));
+        }
+    }
+    if let Some(cursor) = &state.recovery {
+        for (kind, next) in &cursor.next {
+            if *next < cursor.start_date || ClosedPeriod::containing(*kind, *next)?.start != *next {
+                return Err(miette::miette!("invalid stored period recovery cursor"));
+            }
         }
     }
     Ok((state, Some(original)))
@@ -420,12 +593,16 @@ pub fn record_collection(
     session: &MutationSession,
     requested_day: Date,
     full_ingest: bool,
+    started_at: jiff::Timestamp,
+    targeted: bool,
     sources: Vec<ObservedSource>,
 ) -> miette::Result<()> {
     let root = config.vault.root_path();
     let (mut state, before) = load(&root)?;
     let batch = CollectionBatch {
         at: jiff::Timestamp::now(),
+        started_at: Some(started_at),
+        targeted,
         requested_day,
         full_ingest,
         source_scopes: sources
@@ -434,13 +611,315 @@ pub fn record_collection(
             .collect::<miette::Result<BTreeMap<_, _>>>()?,
         sources,
     };
-    // Keep one current publication receipt per requested date/full-run mode,
-    // not a copy of remote events or an entry for every retry.
-    state.batches.retain(|old| {
-        old.requested_day != batch.requested_day || old.full_ingest != batch.full_ingest
-    });
+    let scopes = current_source_scopes(config)?;
+    let accepted = accepted_windows(&batch, config, &scopes)?;
+    let mut retained = Vec::with_capacity(state.batches.len() + 1);
+    for old in state.batches {
+        let same_selection = old.requested_day == batch.requested_day
+            && old.full_ingest == batch.full_ingest
+            && old.source_scopes.keys().eq(batch.source_scopes.keys());
+        let old_accepted = accepted_windows(&old, config, &scopes)?;
+        if !same_selection
+            || old_accepted.iter().any(|(id, old_window)| {
+                !accepted.iter().any(|(new_id, new_window)| {
+                    id == new_id
+                        && new_window.start <= old_window.start
+                        && new_window.end >= old_window.end
+                })
+            })
+        {
+            retained.push(old);
+        }
+    }
+    state.batches = retained;
     state.batches.push(batch);
     save(&root, session, &state, before)
+}
+
+/// Complete civil days selected by an observed provider query, end-exclusive.
+/// This establishes query reach, not historical provider revision completeness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CollectionWindow {
+    pub start: Date,
+    pub end: Date,
+}
+
+fn current_source_scopes(config: &Config) -> miette::Result<BTreeMap<String, String>> {
+    config
+        .enabled_sources()
+        .map(|(id, _)| Ok((id.to_owned(), source_scope(config, id)?)))
+        .collect()
+}
+
+fn accepted_windows(
+    batch: &CollectionBatch,
+    config: &Config,
+    scopes: &BTreeMap<String, String>,
+) -> miette::Result<Vec<(String, CollectionWindow)>> {
+    let Some(started_at) = batch.started_at.filter(|started| *started <= batch.at) else {
+        return Ok(vec![]);
+    };
+    let tz = config.vault.timezone();
+    let closed_end = started_at
+        .to_zoned(tz.clone())
+        .date()
+        .to_zoned(tz.clone())
+        .map_err(|e| miette::miette!("collection coverage timezone: {e}"))?
+        .timestamp();
+    let mut accepted = Vec::new();
+    for source in &batch.sources {
+        if source.outcome != ResponseOutcome::Observed
+            || scopes.get(&source.source_id).is_none()
+            || batch.source_scopes.get(&source.source_id) != scopes.get(&source.source_id)
+        {
+            continue;
+        }
+        let ObservedScope::Window { start, end } = source.scope else {
+            continue;
+        };
+        let end = end.min(closed_end);
+        if start >= end {
+            continue;
+        }
+        let mut first = start.to_zoned(tz.clone()).date();
+        let midnight = first
+            .to_zoned(tz.clone())
+            .map_err(|e| miette::miette!("collection coverage start: {e}"))?
+            .timestamp();
+        if start > midnight {
+            first = first
+                .tomorrow()
+                .map_err(|e| miette::miette!("collection coverage date: {e}"))?;
+        }
+        let mut last = end.to_zoned(tz.clone()).date();
+        if batch.targeted {
+            first = first.max(batch.requested_day);
+            last = last.min(
+                batch
+                    .requested_day
+                    .tomorrow()
+                    .map_err(|e| miette::miette!("collection target date: {e}"))?,
+            );
+        }
+        if first < last {
+            accepted.push((
+                source.source_id.clone(),
+                CollectionWindow {
+                    start: first,
+                    end: last,
+                },
+            ));
+        }
+    }
+    Ok(accepted)
+}
+
+/// Load once per recovery run; accepted intervals use the exact current source
+/// selection and were already closed when acquisition began. Legacy batches
+/// without acquisition time cannot establish this coverage.
+pub fn source_coverage(config: &Config) -> miette::Result<BTreeMap<String, Vec<CollectionWindow>>> {
+    let (state, _) = load(&config.vault.root_path())?;
+    let scopes = current_source_scopes(config)?;
+    let mut windows: BTreeMap<String, Vec<CollectionWindow>> = BTreeMap::new();
+    for batch in &state.batches {
+        for (id, window) in accepted_windows(batch, config, &scopes)? {
+            windows.entry(id).or_default().push(window);
+        }
+    }
+    for values in windows.values_mut() {
+        values.sort_by_key(|window| (window.start, window.end));
+        let mut merged: Vec<CollectionWindow> = Vec::with_capacity(values.len());
+        for window in values.drain(..) {
+            if let Some(last) = merged.last_mut()
+                && window.start <= last.end
+            {
+                last.end = last.end.max(window.end);
+            } else {
+                merged.push(window);
+            }
+        }
+        *values = merged;
+    }
+    Ok(windows)
+}
+
+#[cfg(test)]
+mod collection_coverage_tests {
+    use super::*;
+    use jiff::civil::date;
+
+    fn config() -> (tempfile::TempDir, Config) {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.yaml");
+        std::fs::write(&path, "vault: {root: vault, timezone: UTC}\nidentity: {name: Test, email: test@example.invalid}\nsources:\n  mail: {type: gmail}\n  other: {type: gmail}\n").unwrap();
+        (temp, Config::load(&path).unwrap())
+    }
+
+    fn observed(id: &str, start: &str, end: &str) -> ObservedSource {
+        ObservedSource {
+            source_id: id.into(),
+            scope: ObservedScope::Window {
+                start: start.parse().unwrap(),
+                end: end.parse().unwrap(),
+            },
+            outcome: ResponseOutcome::Observed,
+        }
+    }
+
+    fn receipt(config: &Config, started_at: &str) -> CollectionBatch {
+        CollectionBatch {
+            at: "2026-10-20T09:00:00Z".parse().unwrap(),
+            started_at: Some(started_at.parse().unwrap()),
+            targeted: false,
+            requested_day: date(2026, 10, 19),
+            full_ingest: true,
+            sources: vec![observed(
+                "mail",
+                "2026-10-17T00:00:00Z",
+                "2026-10-21T00:00:00Z",
+            )],
+            source_scopes: current_source_scopes(config).unwrap(),
+        }
+    }
+
+    #[test]
+    fn coverage_excludes_open_days_and_fetched_but_unpublished_target_days() {
+        let (_temp, config) = config();
+        let scopes = current_source_scopes(&config).unwrap();
+        let mut batch = receipt(&config, "2026-10-20T07:00:00Z");
+        assert_eq!(
+            accepted_windows(&batch, &config, &scopes).unwrap(),
+            vec![(
+                "mail".into(),
+                CollectionWindow {
+                    start: date(2026, 10, 17),
+                    end: date(2026, 10, 20),
+                }
+            )]
+        );
+        batch.targeted = true;
+        assert_eq!(
+            accepted_windows(&batch, &config, &scopes).unwrap(),
+            vec![(
+                "mail".into(),
+                CollectionWindow {
+                    start: date(2026, 10, 19),
+                    end: date(2026, 10, 20),
+                }
+            )]
+        );
+        batch.started_at = Some("2026-10-19T23:59:59Z".parse().unwrap());
+        assert!(
+            accepted_windows(&batch, &config, &scopes)
+                .unwrap()
+                .is_empty()
+        );
+        batch.started_at = None;
+        assert!(
+            accepted_windows(&batch, &config, &scopes)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn coverage_requires_observed_window_and_exact_selection_configuration() {
+        let (_temp, config) = config();
+        let scopes = current_source_scopes(&config).unwrap();
+        let mut batch = receipt(&config, "2026-10-20T07:00:00Z");
+        for outcome in [
+            ResponseOutcome::Partial,
+            ResponseOutcome::Failed,
+            ResponseOutcome::Unverified,
+        ] {
+            batch.sources[0].outcome = outcome;
+            assert!(
+                accepted_windows(&batch, &config, &scopes)
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+        batch.sources[0].outcome = ResponseOutcome::Observed;
+        batch.sources[0].scope = ObservedScope::ConfiguredQuery;
+        assert!(
+            accepted_windows(&batch, &config, &scopes)
+                .unwrap()
+                .is_empty()
+        );
+        batch.sources[0] = observed("mail", "2026-10-17T00:00:00Z", "2026-10-20T00:00:00Z");
+        batch.source_scopes.insert("mail".into(), "changed".into());
+        assert!(
+            accepted_windows(&batch, &config, &scopes)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn coverage_tracks_complete_civil_days_across_daylight_saving_time() {
+        let (_temp, mut config) = config();
+        config.vault.timezone = Some("America/New_York".into());
+        let scopes = current_source_scopes(&config).unwrap();
+        let mut batch = receipt(&config, "2026-11-02T12:00:00Z");
+        batch.at = "2026-11-02T13:00:00Z".parse().unwrap();
+        batch.sources[0] = observed("mail", "2026-11-01T04:00:00Z", "2026-11-02T05:00:00Z");
+        assert_eq!(
+            accepted_windows(&batch, &config, &scopes).unwrap(),
+            vec![(
+                "mail".into(),
+                CollectionWindow {
+                    start: date(2026, 11, 1),
+                    end: date(2026, 11, 2),
+                }
+            )]
+        );
+    }
+
+    #[test]
+    fn filtered_receipts_and_accepted_coverage_survive_independent_and_partial_retries() {
+        let (_temp, mut config) = config();
+        let root = config.vault.root_path();
+        std::fs::create_dir_all(&root).unwrap();
+        let session = MutationSession::acquire(&root).unwrap();
+        let started = "2020-01-02T07:00:00Z".parse().unwrap();
+        for id in ["mail", "other"] {
+            record_collection(
+                &config,
+                &session,
+                date(2020, 1, 1),
+                false,
+                started,
+                true,
+                vec![observed(id, "2020-01-01T00:00:00Z", "2020-01-02T00:00:00Z")],
+            )
+            .unwrap();
+        }
+        let mut partial = observed("mail", "2020-01-01T00:00:00Z", "2020-01-02T00:00:00Z");
+        partial.outcome = ResponseOutcome::Partial;
+        record_collection(
+            &config,
+            &session,
+            date(2020, 1, 1),
+            false,
+            started,
+            true,
+            vec![partial],
+        )
+        .unwrap();
+        let coverage = source_coverage(&config).unwrap();
+        assert_eq!(coverage.len(), 2);
+        assert_eq!(
+            coverage["mail"],
+            vec![CollectionWindow {
+                start: date(2020, 1, 1),
+                end: date(2020, 1, 2)
+            }]
+        );
+        config.sources.get_mut("mail").unwrap().params = serde_json::json!({"queries":["changed"]});
+        let coverage = source_coverage(&config).unwrap();
+        assert!(!coverage.contains_key("mail"));
+        assert!(coverage.contains_key("other"));
+    }
 }
 
 fn request(
@@ -513,7 +992,9 @@ fn closing_day_ready(
     config: &Config,
     period: &ClosedPeriod,
 ) -> Result<String, String> {
-    let sources = required_sources(config, period.kind);
+    let mut sources = required_sources(config, period.kind);
+    sources.sort();
+    sources.dedup();
     if sources.is_empty() {
         return Ok("No configured contributing sources".into());
     }
@@ -535,24 +1016,17 @@ fn closing_day_ready(
         .to_zoned(tz)
         .map_err(|e| e.to_string())?
         .timestamp();
-    let personal = period.kind != Kind::WeeklyThemes;
-    let candidate = state.batches.iter().rev().find(|batch| {
-        (!personal || batch.full_ingest) && batch.at >= end
-            && batch.sources.iter().any(|s| sources.contains(&s.source_id)
-                && match s.scope {
-                    ObservedScope::Window { start: min, end: max } => min <= start && max >= end,
-                    ObservedScope::ConfiguredQuery | ObservedScope::Unverified => true,
-                })
-    }).ok_or_else(|| format!("unobserved closing day {}; collect its actual window with `lore ingest --date {}` (full-source) and finish semantic processing before resuming", period.end, period.end))?;
-    for id in &sources {
-        let source = candidate
+    let scopes = current_source_scopes(config).map_err(|error| error.to_string())?;
+    let check = |batch: &CollectionBatch,
+                 accepted: &[(String, CollectionWindow)],
+                 id: &str|
+     -> Result<(), String> {
+        let source = batch
             .sources
             .iter()
-            .find(|s| s.source_id == *id)
+            .find(|source| source.source_id == id)
             .ok_or_else(|| format!("{id}: unobserved in the current collection batch"))?;
-        if candidate.source_scopes.get(id)
-            != Some(&source_scope(config, id).map_err(|error| error.to_string())?)
-        {
+        if batch.source_scopes.get(id) != scopes.get(id) {
             return Err(format!("{id}: collection configuration changed"));
         }
         if source.outcome != ResponseOutcome::Observed {
@@ -561,23 +1035,84 @@ fn closing_day_ready(
                 source.outcome
             ));
         }
+        if batch.started_at.is_none_or(|at| at < end || at > batch.at)
+            || (batch.targeted && batch.requested_day != period.end)
+        {
+            return Err(format!(
+                "{id}: closing day was not published from a known post-close acquisition"
+            ));
+        }
         match source.scope {
-            ObservedScope::Window {
-                start: min,
-                end: max,
-            } if min <= start && max >= end => {}
-            ObservedScope::ConfiguredQuery => {}
-            _ => {
-                return Err(format!(
-                    "{id}: closing-day response window unknown or outside scope"
-                ));
+            ObservedScope::Window { .. }
+                if accepted.iter().any(|(source_id, window)| {
+                    source_id == id && window.start <= period.end && window.end > period.end
+                }) =>
+            {
+                Ok(())
+            }
+            ObservedScope::ConfiguredQuery => Ok(()),
+            _ => Err(format!(
+                "{id}: closing-day response window unknown or outside published scope"
+            )),
+        }
+    };
+    let scope_limit = "earlier-history coverage unverified; configured-query scopes do not establish date coverage";
+    if period.kind != Kind::WeeklyThemes {
+        // A later partial full ingest can replace the work-log with its available
+        // sources. An earlier successful batch must not certify that newer view.
+        let candidate = state.batches.iter().rev().find(|batch| {
+            batch.full_ingest && batch.at >= end
+                && (!batch.targeted || batch.requested_day == period.end)
+                && batch.sources.iter().any(|source| sources.contains(&source.source_id)
+                    && match source.scope {
+                        ObservedScope::Window { start: min, end: max } => min <= start && max >= end,
+                        ObservedScope::ConfiguredQuery | ObservedScope::Unverified => true,
+                    })
+        }).ok_or_else(|| format!("unobserved closing day {}; collect its actual window with `lore ingest --date {}` (full-source) and finish semantic processing before resuming", period.end, period.end))?;
+        let accepted =
+            accepted_windows(candidate, config, &scopes).map_err(|error| error.to_string())?;
+        for id in &sources {
+            check(candidate, &accepted, id)?;
+        }
+        return Ok(format!(
+            "Configured response batch at {}; closing day {}; {scope_limit}",
+            candidate.at, period.end
+        ));
+    }
+    let mut ready = BTreeMap::new();
+    let mut reasons = BTreeMap::new();
+    for batch in state.batches.iter().rev().filter(|batch| batch.at >= end) {
+        let accepted =
+            accepted_windows(batch, config, &scopes).map_err(|error| error.to_string())?;
+        for id in &sources {
+            if ready.contains_key(id) || !batch.sources.iter().any(|source| source.source_id == *id)
+            {
+                continue;
+            }
+            match check(batch, &accepted, id) {
+                Ok(()) => {
+                    ready.insert(id.clone(), batch.at);
+                }
+                Err(reason) => {
+                    reasons.entry(id.clone()).or_insert(reason);
+                }
             }
         }
+        if ready.len() == sources.len() {
+            return Ok(format!(
+                "Configured per-source response receipts; closing day {}; earliest accepted receipt {}; {scope_limit}",
+                period.end,
+                ready.values().min().expect("required sources are nonempty")
+            ));
+        }
     }
-    Ok(format!(
-        "Configured response batch at {}; closing day {}; earlier-history coverage unverified; configured-query scopes do not establish date coverage",
-        candidate.at, period.end
-    ))
+    let missing = sources
+        .iter()
+        .find(|id| !ready.contains_key(id.as_str()))
+        .expect("incomplete sources");
+    Err(reasons.remove(missing).unwrap_or_else(|| format!(
+        "{missing}: unobserved closing day {}; collect its actual window and finish semantic processing before resuming", period.end
+    )))
 }
 
 fn children(period: &ClosedPeriod, config: &Config) -> Result<Vec<ClosedPeriod>, String> {
@@ -617,32 +1152,13 @@ async fn page(reader: &FsVault, path: &Path) -> miette::Result<Option<VaultPage>
 }
 
 fn page_semantics_ready(page: &VaultPage) -> bool {
-    let Some(inputs) = page
-        .frontmatter
-        .get(field::LLM_INPUTS)
-        .and_then(serde_json::Value::as_object)
-    else {
-        // Directly authored history remains evidence, not an invented completion marker.
-        return true;
-    };
-    for kind in [
-        TargetKind::DailySummary,
-        TargetKind::DailyRefineEvents,
-        TargetKind::DailyConcepts,
-        TargetKind::WorkLogSynthesis,
-    ] {
-        if inputs.contains_key(kind.llm_inputs_key())
-            && lk_pipeline::completed_input(page, kind).is_none()
-        {
-            return false;
-        }
-    }
-    true
+    super::super::queue::readiness::unfinished_inputs(page).is_ok_and(|keys| keys.is_empty())
 }
 
 struct CapturedInputs {
     pages: Vec<InputPage>,
     has_contributing_page: bool,
+    guards: MutationPlan,
 }
 
 async fn input_pages(
@@ -700,17 +1216,26 @@ async fn input_pages(
     }
     let mut result = Vec::new();
     let mut has_contributing_page = false;
+    let mut guards = MutationPlan::default();
     for (path, contributes) in paths {
         if let Some(source) = page(&reader, Path::new(&path)).await? {
             if !page_semantics_ready(&source) {
                 return Ok(Err(format!("semantic input pending: {path}")));
             }
             has_contributing_page |= contributes;
+            guards.require_unchanged(
+                &path,
+                source
+                    .original
+                    .clone()
+                    .ok_or_else(|| miette::miette!("period input snapshot missing"))?,
+            );
             result.push(InputPage {
                 path,
                 revision: Some(lk_core::concept::source_revision(&source)),
             });
         } else {
+            guards.require_absent(&path);
             result.push(InputPage {
                 path,
                 revision: None,
@@ -720,6 +1245,7 @@ async fn input_pages(
     Ok(Ok(CapturedInputs {
         pages: result,
         has_contributing_page,
+        guards,
     }))
 }
 
@@ -987,6 +1513,7 @@ async fn process(
     let CapturedInputs {
         pages: inputs,
         has_contributing_page,
+        mut guards,
     } = match input_pages(config, intent, &child_periods).await? {
         Ok(inputs) => inputs,
         Err(reason) => {
@@ -1003,6 +1530,15 @@ async fn process(
         && lk_pipeline::completed_input(&target_page, intent.period.kind.target_kind())
             == Some(input)
     {
+        guards.require_unchanged(
+            target.as_ref(),
+            target_page
+                .original
+                .ok_or_else(|| miette::miette!("period target snapshot missing"))?,
+        );
+        publisher
+            .publish_with_plan(std::iter::empty::<&RenderResult>(), guards)
+            .await?;
         intent.status = Status::Complete;
         intent.reason = None;
         intent.scope = scope;
@@ -1046,22 +1582,7 @@ async fn process(
                 .and_then(serde_json::Value::as_str)
                 .ok_or_else(|| miette::miette!("planned period has no input"))?
                 .to_owned();
-            let mut publication = MutationPlan::default();
-            for input in &intent.inputs {
-                let current = page(reader, Path::new(&input.path)).await?;
-                if current.as_ref().map(lk_core::concept::source_revision) != input.revision {
-                    return Err(miette::miette!("period input changed: {}", input.path));
-                }
-                if let Some(current) = current {
-                    publication.require_unchanged(
-                        &input.path,
-                        current
-                            .original
-                            .ok_or_else(|| miette::miette!("period input snapshot missing"))?,
-                    );
-                }
-            }
-            publisher.publish_with_plan([&output], publication).await?;
+            publisher.publish_with_plan([&output], guards).await?;
             intent.target_input = Some(input.clone());
             intent.status =
                 if lk_pipeline::completed_input(&parsed, intent.period.kind.target_kind())
@@ -1080,6 +1601,9 @@ async fn process(
             if config.llm.provider != lk_core::config::LlmProvider::Queue || has_contributing_page {
                 blocked(intent, "no output with retained input or without an answering queue provider; no-data is not established".into());
             } else {
+                publisher
+                    .publish_with_plan(std::iter::empty::<&RenderResult>(), guards)
+                    .await?;
                 intent.status = Status::NoData;
                 intent.target_input = None;
                 intent.scope.push_str("; no retained contributing period input; this does not establish zero historical remote activity");
@@ -1121,11 +1645,11 @@ async fn refresh_completed(
             continue;
         }
         for input in &intent.inputs {
-            if page(reader, Path::new(&input.path))
-                .await?
-                .as_ref()
-                .map(lk_core::concept::source_revision)
-                != input.revision
+            let current = page(reader, Path::new(&input.path)).await?;
+            if current.as_ref().map(lk_core::concept::source_revision) != input.revision
+                || current
+                    .as_ref()
+                    .is_some_and(|page| !page_semantics_ready(page))
             {
                 intent.status = Status::Pending;
                 break;
@@ -1184,6 +1708,175 @@ mod tests {
         (temp, config)
     }
 
+    fn recovery(config: &mut Config, start_date: Date, budget: usize) {
+        config.synthesis.recovery = Some(lk_core::config::PeriodRecoveryConfig {
+            start_date,
+            max_periods_per_run: std::num::NonZeroUsize::new(budget).unwrap(),
+        });
+    }
+
+    #[tokio::test]
+    async fn completed_period_reopens_for_marker_only_pending_input_and_reuses_restored_authored_state()
+     {
+        let (_temp, config) = config();
+        let root = config.vault.root_path();
+        let source = VaultPath::daily(&config.vault.dirs, "mail", date(2026, 9, 30));
+        let path = root.join(source.as_ref());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let heading = config.vault.locale().strings().summary;
+        let ready = format!(
+            "---\ntype: gmail-daily\nllm_inputs: {{summary: captured, summary_done: captured}}\n---\n## {heading}\nRead interpretation.\n"
+        );
+        let pending = ready.replace(", summary_done: captured", "");
+        std::fs::write(&path, &ready).unwrap();
+        let mut intent = Intent::new(period(), &config).unwrap();
+        intent.status = Status::NoData;
+        intent.input_scope = input_scope(&config, &intent.period).unwrap();
+        intent.inputs = vec![InputPage {
+            path: source.to_string(),
+            revision: Some(lk_core::concept::source_revision(
+                &lk_vault::parse_page(&ready).unwrap(),
+            )),
+        }];
+        let mut state = State {
+            intents: BTreeMap::from([(intent.period.key(), intent)]),
+            ..Default::default()
+        };
+        std::fs::write(&path, &pending).unwrap();
+        assert_eq!(
+            lk_core::concept::source_revision(&lk_vault::parse_page(&ready).unwrap()),
+            lk_core::concept::source_revision(&lk_vault::parse_page(&pending).unwrap())
+        );
+        refresh_completed(&mut state, &config, &FsVault::new(&root))
+            .await
+            .unwrap();
+        assert_eq!(state.intents[&period().key()].status, Status::Pending);
+        std::fs::write(&path, &ready).unwrap();
+        assert!(page_semantics_ready(
+            &page(&FsVault::new(&root), source.as_ref())
+                .await
+                .unwrap()
+                .unwrap()
+        ));
+    }
+
+    #[tokio::test]
+    async fn period_input_guards_refuse_a_previously_missing_page_appearing_before_publication() {
+        let (_temp, config) = config();
+        let root = config.vault.root_path();
+        std::fs::create_dir_all(&root).unwrap();
+        let intent = Intent::new(period(), &config).unwrap();
+        let captured = input_pages(&config, &intent, &[]).await.unwrap().unwrap();
+        let absent = captured
+            .pages
+            .iter()
+            .find(|input| input.revision.is_none())
+            .unwrap();
+        let new_source = root.join(&absent.path);
+        std::fs::create_dir_all(new_source.parent().unwrap()).unwrap();
+        std::fs::write(
+            &new_source,
+            "---\ntype: work-log\n---\nNew historical observation.\n",
+        )
+        .unwrap();
+        let mut guards = captured.guards;
+        guards.create(
+            "must-not-publish.md",
+            "A stale period interpretation".into(),
+        );
+        let session = MutationSession::acquire(&root).unwrap();
+        assert!(session.apply(guards).is_err());
+        assert!(!root.join("must-not-publish.md").exists());
+    }
+
+    #[test]
+    fn period_recovery_is_opt_in_bounded_resumable_and_does_not_invent_collection_coverage() {
+        let (_temp, mut config) = config();
+        let mut state = State {
+            version: 1,
+            ..Default::default()
+        };
+        assert!(reconcile_periods(&mut state, &config, date(2026, 5, 20)).is_err());
+        config.synthesis.weekly.enabled = false;
+        let personal = config.personal.as_mut().unwrap();
+        personal.quarterly.enabled = false;
+        personal.annual.enabled = false;
+        recovery(&mut config, date(2026, 1, 15), 2);
+        let result = reconcile_periods(&mut state, &config, date(2026, 5, 20)).unwrap();
+        assert_eq!(result.examined, 2);
+        assert_eq!(
+            result.requested,
+            ["monthly:2026-02-01", "monthly:2026-03-01"]
+        );
+        assert!(result.remaining);
+        assert!(state.batches.is_empty());
+        assert!(
+            closing_day_ready(&state, &config, &state.intents["monthly:2026-02-01"].period)
+                .is_err()
+        );
+        state.intents.get_mut("monthly:2026-02-01").unwrap().status = Status::Complete;
+        state = serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
+        let result = reconcile_periods(&mut state, &config, date(2026, 5, 20)).unwrap();
+        assert_eq!(result.requested, ["monthly:2026-04-01"]);
+        assert!(!result.remaining);
+        assert_eq!(state.intents["monthly:2026-02-01"].status, Status::Complete);
+        assert_eq!(
+            reconcile_periods(&mut state, &config, date(2026, 5, 20))
+                .unwrap()
+                .examined,
+            0
+        );
+    }
+
+    #[test]
+    fn period_recovery_rotates_modes_and_pauses_disabled_modes_without_losing_their_cursor() {
+        let (_temp, mut config) = config();
+        config.synthesis.weekly.include_sources = vec!["news".into()];
+        recovery(&mut config, date(2026, 1, 1), 2);
+        let mut state = State::default();
+        let first = reconcile_periods(&mut state, &config, date(2026, 10, 20)).unwrap();
+        assert_eq!(
+            first.requested,
+            ["weekly-themes:2026-01-05", "weekly-review:2026-01-05"]
+        );
+        let second = reconcile_periods(&mut state, &config, date(2026, 10, 20)).unwrap();
+        assert_eq!(
+            second.requested,
+            ["monthly:2026-01-01", "quarterly:2026-01-01"]
+        );
+        let paused = state.recovery.as_ref().unwrap().next[&Kind::Monthly];
+        config.personal.as_mut().unwrap().monthly.enabled = false;
+        reconcile_periods(&mut state, &config, date(2026, 10, 20)).unwrap();
+        assert_eq!(
+            state.recovery.as_ref().unwrap().next[&Kind::Monthly],
+            paused
+        );
+        config.personal.as_mut().unwrap().monthly.enabled = true;
+        for _ in 0..3 {
+            reconcile_periods(&mut state, &config, date(2026, 10, 20)).unwrap();
+        }
+        assert!(state.intents.contains_key("monthly:2026-02-01"));
+    }
+
+    #[test]
+    fn period_recovery_first_install_and_timezone_changes_preserve_prior_intent_authority() {
+        let (_temp, mut config) = config();
+        recovery(&mut config, date(2026, 10, 20), 8);
+        let mut state = State::default();
+        let first = reconcile_periods(&mut state, &config, date(2026, 10, 20)).unwrap();
+        assert_eq!(first.examined, 0);
+        assert!(state.intents.is_empty());
+        let explicit = ClosedPeriod::containing(Kind::Monthly, date(2026, 9, 1)).unwrap();
+        request(&mut state, explicit, &config, date(2026, 10, 20)).unwrap();
+        let old_timezone = state.intents["monthly:2026-09-01"].timezone.clone();
+        config.vault.timezone = Some("Asia/Seoul".into());
+        recovery(&mut config, date(2026, 1, 1), 1);
+        reconcile_periods(&mut state, &config, date(2026, 10, 20)).unwrap();
+        assert_eq!(state.intents["monthly:2026-09-01"].timezone, old_timezone);
+        assert_ne!(state.recovery.as_ref().unwrap().timezone, old_timezone);
+        assert!(state.batches.is_empty());
+    }
+
     fn period() -> ClosedPeriod {
         ClosedPeriod::containing(Kind::Monthly, date(2026, 9, 15)).unwrap()
     }
@@ -1191,6 +1884,8 @@ mod tests {
     fn batch(config: &Config, outcome: ResponseOutcome, scope: ObservedScope) -> CollectionBatch {
         CollectionBatch {
             at: "2026-10-01T08:00:00Z".parse().unwrap(),
+            started_at: Some("2026-10-01T07:00:00Z".parse().unwrap()),
+            targeted: false,
             requested_day: date(2026, 9, 30),
             full_ingest: true,
             sources: vec![ObservedSource {
@@ -1243,7 +1938,10 @@ mod tests {
             ResponseOutcome::Unverified,
         ] {
             let state = State {
-                batches: vec![batch(&config, outcome, window())],
+                batches: vec![
+                    batch(&config, ResponseOutcome::Observed, window()),
+                    batch(&config, outcome, window()),
+                ],
                 ..Default::default()
             };
             assert!(closing_day_ready(&state, &config, &period()).is_err());
@@ -1293,6 +1991,68 @@ mod tests {
         state.batches[0]
             .source_scopes
             .insert("mail".into(), "old-config".into());
+        assert!(closing_day_ready(&state, &config, &period()).is_err());
+    }
+
+    #[test]
+    fn filtered_recovery_receipts_jointly_ready_weekly_themes_without_certifying_worklog() {
+        let (_temp, mut config) = config();
+        config
+            .sources
+            .insert("other".into(), config.sources["mail"].clone());
+        config.synthesis.weekly.include_sources = vec!["mail".into(), "other".into()];
+        config.personal.as_mut().unwrap().tracked_sources = vec!["mail".into(), "other".into()];
+        let themes = ClosedPeriod::containing(Kind::WeeklyThemes, date(2026, 9, 30)).unwrap();
+        let mut first = batch(
+            &config,
+            ResponseOutcome::Observed,
+            ObservedScope::Window {
+                start: "2026-10-04T00:00:00Z".parse().unwrap(),
+                end: "2026-10-05T00:00:00Z".parse().unwrap(),
+            },
+        );
+        first.at = "2026-10-05T08:00:00Z".parse().unwrap();
+        first.started_at = Some("2026-10-05T07:00:00Z".parse().unwrap());
+        first.requested_day = date(2026, 10, 4);
+        first.targeted = true;
+        first.full_ingest = false;
+        let mut second = first.clone();
+        second.sources[0].source_id = "other".into();
+        second.source_scopes =
+            BTreeMap::from([("other".into(), source_scope(&config, "other").unwrap())]);
+        let state = State {
+            batches: vec![first, second],
+            ..Default::default()
+        };
+        assert!(closing_day_ready(&state, &config, &themes).is_ok());
+        let review = ClosedPeriod::containing(Kind::WeeklyReview, date(2026, 9, 30)).unwrap();
+        assert!(closing_day_ready(&state, &config, &review).is_err());
+    }
+
+    #[test]
+    fn period_readiness_refuses_fetched_but_unpublished_closing_day() {
+        let (_temp, config) = config();
+        let mut receipt = batch(&config, ResponseOutcome::Observed, window());
+        receipt.targeted = true;
+        receipt.requested_day = date(2026, 10, 1);
+        let state = State {
+            batches: vec![receipt],
+            ..Default::default()
+        };
+        assert!(closing_day_ready(&state, &config, &period()).is_err());
+    }
+
+    #[test]
+    fn period_readiness_refuses_acquisition_before_close_even_if_publication_finishes_afterward() {
+        let (_temp, config) = config();
+        let mut receipt = batch(&config, ResponseOutcome::Observed, window());
+        receipt.started_at = Some("2026-09-30T23:59:59Z".parse().unwrap());
+        let mut state = State {
+            batches: vec![receipt],
+            ..Default::default()
+        };
+        assert!(closing_day_ready(&state, &config, &period()).is_err());
+        state.batches[0].started_at = None;
         assert!(closing_day_ready(&state, &config, &period()).is_err());
     }
 
@@ -1395,6 +2155,8 @@ mod tests {
             &session,
             date(2026, 9, 30),
             true,
+            "2026-10-01T07:00:00Z".parse().unwrap(),
+            false,
             vec![ObservedSource {
                 source_id: "mail".into(),
                 scope: window(),

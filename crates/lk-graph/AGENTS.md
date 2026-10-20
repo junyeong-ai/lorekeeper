@@ -60,6 +60,9 @@ and CLI discovery, not a second graph authority.
   use the same complete live matcher without preparing or mutating navigation.
 - Preserve pending first-discovery order and rotate changed/first-time work. A bounded
   weekly batch must not starve old work or grow into an unbounded full-corpus audit.
+  Native admission can defer unavailable subjects through a readiness callback;
+  preserve complete coverage counts and pending order, and do not consume a class
+  turn or create a receipt merely because a subject is deferred.
   Whole-input library planning defers individually oversized inputs without consuming
   a class turn, allowing later fitting work. Partitioned CLI/native planning admits
   them fairly and preserves the measured oversized status. Recording/completion then
