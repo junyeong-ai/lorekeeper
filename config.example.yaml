@@ -53,6 +53,7 @@ ingest:
   #   timeout_seconds: 120
   #   max_output_bytes: 33554432
   #   max_decoded_bytes: 134217728
+  #   max_units: 10000              # projected pages/sheets/frames, including extra PDF OCR
   #   ocr:
   #     tessdata_dir: ~/.local/share/lorekeeper/tessdata
   #     languages: [kor, eng]     # explicitly installed <language>.traineddata files

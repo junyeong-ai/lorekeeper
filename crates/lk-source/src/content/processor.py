@@ -9,10 +9,11 @@ import json
 import os
 import pathlib
 import sys
+import warnings
 import zipfile
 
 POLICY = "document-projection-v1"
-PACKAGES = {"kreuzberg": "4.10.4", "openpyxl": "3.1.5", "defusedxml": "0.7.1"}
+PACKAGES = {"kreuzberg": "4.10.4", "openpyxl": "3.1.5", "defusedxml": "0.7.1", "et-xmlfile": "2.0.0", "pillow": "13.0.0"}
 MIMES = {
     "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -66,7 +67,7 @@ def check_archive(data, limit):
                         raise ProjectionError("decoded-limit")
 
 
-def spreadsheet(data, limit):
+def spreadsheet(data, limit, max_units):
     import openpyxl
     from openpyxl.xml import DEFUSEDXML
     from openpyxl.worksheet.formula import ArrayFormula, DataTableFormula
@@ -80,6 +81,8 @@ def spreadsheet(data, limit):
         stack.callback(formulas.close)
         cached = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True, keep_links=False)
         stack.callback(cached.close)
+        if len(formulas.sheetnames) > max_units:
+            raise ProjectionError("unit-limit")
         for sheet in formulas:
             values = cached[sheet.title]
             # Read actual XML rows; producer-written dimension metadata can be wrong.
@@ -116,6 +119,42 @@ def spreadsheet(data, limit):
     return units, ["Spreadsheet formulas are preserved with stored cached values; they were not recalculated. Charts, drawings, comments and external linked workbooks are not projected."]
 
 
+def image_frames(data, options):
+    from PIL import Image, ImageOps, ImageSequence
+
+    Image.MAX_IMAGE_PIXELS = max(1, options["max_decoded_bytes"] // 4)
+    remaining = options["max_decoded_bytes"]
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with Image.open(io.BytesIO(data)) as image:
+                expected = {"png": "PNG", "jpeg": "JPEG", "tiff": "TIFF", "webp": "WEBP"}[options["format"]]
+                if image.format != expected:
+                    raise ProjectionError("format-mismatch")
+                for number, source in enumerate(ImageSequence.Iterator(image), 1):
+                    if number > options["max_units"]:
+                        raise ProjectionError("unit-limit")
+                    remaining -= source.width * source.height * 4
+                    if remaining < 0:
+                        raise ProjectionError("decoded-limit")
+                    frame = ImageOps.exif_transpose(source).convert("RGBA")
+                    background = Image.new("RGBA", frame.size, "white")
+                    background.alpha_composite(frame)
+                    encoded = io.BytesIO()
+                    background.convert("RGB").save(encoded, format="PNG")
+                    yield number, encoded.getvalue()
+    except (Image.DecompressionBombWarning, Image.DecompressionBombError):
+        raise ProjectionError("decoded-limit") from None
+
+
+def pdf_pages(result):
+    pages = result.pages
+    expected = result.metadata.get("pages", {}).get("total_count")
+    if pages is None or expected is None or len(pages) != expected or [page["page_number"] for page in pages] != list(range(1, expected + 1)):
+        raise ProjectionError("invalid-projection")
+    return pages
+
+
 def extraction(data, options):
     import kreuzberg as k
 
@@ -148,28 +187,36 @@ def extraction(data, options):
     if image:
         config.disable_ocr = False
         config.ocr = ocr_config()
+        units = []
+        size = 0
+        for number, frame in image_frames(data, options):
+            result = k.extract_bytes_sync(frame, "image/png", config)
+            size += len(result.content.encode("utf-8"))
+            if size > limit:
+                raise ProjectionError("decoded-limit")
+            units.append(unit({"kind": "image-frame", "number": number}, result.content, method="ocr", representation="markdown"))
+        return units, ["Every decoded image frame is projected in stored order with EXIF orientation applied and transparency composited on white. OCR recognizes text only; diagrams and recognition accuracy require separate inspection."]
     result = k.extract_bytes_sync(data, MIMES[kind], config)
     warnings = []
     if result.processing_warnings:
         # Libraries may put source text in diagnostics. Keep the condition, not that text.
         warnings.append("The decoder reported processing warnings; inspect the original before relying on this projection.")
     if kind == "pdf":
-        if result.pages is None:
-            raise ProjectionError("invalid-projection")
-        units = [unit({"kind": "page", "number": page["page_number"]}, page["content"], representation="markdown") for page in result.pages]
+        pages = pdf_pages(result)
+        if len(pages) * (2 if ocr is not None and ocr["pdf"] else 1) > options["max_units"]:
+            raise ProjectionError("unit-limit")
+        units = [unit({"kind": "page", "number": page["page_number"]}, page["content"], representation="markdown") for page in pages]
         warnings.append("PDF native text follows the decoder's reading order; diagrams and image content require separate inspection.")
         if ocr is not None and ocr["pdf"]:
             config.disable_ocr = False
             config.force_ocr = True
             config.ocr = ocr_config()
             recognized = k.extract_bytes_sync(data, MIMES[kind], config)
-            if recognized.pages is None:
+            recognized_pages = pdf_pages(recognized)
+            if len(recognized_pages) != len(pages):
                 raise ProjectionError("invalid-projection")
-            units.extend(unit({"kind": "page", "number": page["page_number"]}, page["content"], method="ocr", representation="markdown") for page in recognized.pages)
+            units.extend(unit({"kind": "page", "number": page["page_number"]}, page["content"], method="ocr", representation="markdown") for page in recognized_pages)
             warnings.append("OCR is an additional interpretation, not a replacement for native PDF text.")
-    elif image:
-        units = [unit({"kind": "image"}, result.content, method="ocr", representation="markdown")]
-        warnings.append("OCR projects recognized text only; it does not interpret images or guarantee recognition accuracy.")
     else:
         units = [unit({"kind": "document"}, result.content, representation="markdown")]
         warnings.append("DOCX is projected as a flow document without physical page numbers. Embedded objects, comments and revision history are not projected.")
@@ -197,11 +244,21 @@ def project(options, data):
     if options["format"] in ("docx", "xlsx"):
         check_archive(data, limit)
     if options["format"] == "xlsx":
-        units, warnings = spreadsheet(data, limit)
+        units, warnings = spreadsheet(data, limit, options["max_units"])
     else:
         units, warnings = extraction(data, options)
     if sum(len(part["text"].encode("utf-8")) for part in units) > limit:
         raise ProjectionError("decoded-limit")
+    if len(units) > options["max_units"]:
+        raise ProjectionError("unit-limit")
+    if ocr is not None:
+        directory = pathlib.Path(ocr["tessdata_dir"])
+        try:
+            changed = any(model_digest(directory / f"{language}.traineddata") != digest for language, digest in models.items())
+        except OSError:
+            changed = True
+        if changed:
+            raise ProjectionError("ocr-data-changed")
     if not any(part["text"].strip() for part in units):
         raise ProjectionError("no-text")
     return {"policy": POLICY, "format": options["format"], "packages": PACKAGES, "ocr": {"languages": ocr["languages"], "layout": ocr["layout"], "models": models} if ocr is not None else None, "units": units, "warnings": warnings}
@@ -215,7 +272,10 @@ def main():
                 raise ProjectionError("dependency-version")
         import kreuzberg
         import openpyxl.xml
+        from PIL import Image, features
         if not openpyxl.xml.DEFUSEDXML:
+            raise ProjectionError("dependency")
+        if not all(features.check(name) for name in ("jpg", "zlib", "libtiff", "webp")):
             raise ProjectionError("dependency")
         models = {}
         ocr = options.get("ocr")

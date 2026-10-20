@@ -37,6 +37,12 @@ pub enum ProcessingFailure {
     InputLimit,
     #[error("decoded content exceeds configured limits")]
     DecodedLimit,
+    #[error("document exceeds the configured unit limit")]
+    UnitLimit,
+    #[error("image bytes do not match the selected format")]
+    FormatMismatch,
+    #[error("OCR model data changed during projection")]
+    OcrDataChanged,
     #[error("pinned decoder dependencies are missing")]
     Dependency,
     #[error("decoder dependency versions differ from the embedded lock")]
@@ -63,6 +69,7 @@ struct Options<'a> {
     format: InputFormat,
     max_input_bytes: usize,
     max_decoded_bytes: usize,
+    max_units: usize,
     timeout_seconds: u64,
     ocr: Option<OcrOptions<'a>>,
 }
@@ -147,6 +154,7 @@ async fn run_processor(
         format,
         max_input_bytes: MAX_INPUT_BYTES,
         max_decoded_bytes: config.max_decoded_bytes.get(),
+        max_units: config.max_units.get(),
         timeout_seconds: config.timeout_seconds.get(),
         ocr: config.ocr.as_ref().map(OcrOptions::from),
     };
@@ -258,6 +266,8 @@ fn validate_projection(
         ("kreuzberg".into(), "4.10.4".into()),
         ("openpyxl".into(), "3.1.5".into()),
         ("defusedxml".into(), "0.7.1".into()),
+        ("et-xmlfile".into(), "2.0.0".into()),
+        ("pillow".into(), "13.0.0".into()),
     ]
     .into();
     if value.policy != PROJECTION_POLICY || value.format != format || value.packages != expected {
@@ -284,6 +294,10 @@ fn validate_projection(
     }
     let mut bytes = 0usize;
     let mut locations = std::collections::BTreeSet::new();
+    let mut frames = Vec::new();
+    let mut native_pages = Vec::new();
+    let mut ocr_pages = Vec::new();
+    let mut sheets = std::collections::BTreeSet::new();
     for unit in &value.units {
         bytes = bytes
             .checked_add(unit.text.len())
@@ -302,9 +316,11 @@ fn validate_projection(
                     && (method == ProjectionMethod::Native
                         || config.ocr.as_ref().is_some_and(|ocr| ocr.pdf))
             }
-            (InputLocation::Image, ProjectionMethod::Ocr, UnitRepresentation::Markdown) => {
-                format.is_image() && config.ocr.is_some()
-            }
+            (
+                InputLocation::ImageFrame { .. },
+                ProjectionMethod::Ocr,
+                UnitRepresentation::Markdown,
+            ) => format.is_image() && config.ocr.is_some(),
             _ => false,
         };
         let key = serde_json::to_string(&(&unit.location, unit.method))
@@ -312,8 +328,26 @@ fn validate_projection(
         if !valid || !locations.insert(key) {
             return Err(ProcessingError::Protocol);
         }
+        match &unit.location {
+            InputLocation::ImageFrame { number } => frames.push(number.get()),
+            InputLocation::Page { number } if unit.method == ProjectionMethod::Native => {
+                native_pages.push(number.get())
+            }
+            InputLocation::Page { number } => ocr_pages.push(number.get()),
+            InputLocation::Sheet { name, .. } if !sheets.insert(name) => {
+                return Err(ProcessingError::Protocol);
+            }
+            InputLocation::Document | InputLocation::Sheet { .. } => {}
+        }
     }
-    if bytes > config.max_decoded_bytes.get()
+    if frames.iter().copied().ne(1..=frames.len())
+        || native_pages.iter().copied().ne(1..=native_pages.len())
+        || (format == InputFormat::Pdf && uses_ocr && ocr_pages != native_pages)
+    {
+        return Err(ProcessingError::Protocol);
+    }
+    if value.units.len() > config.max_units.get()
+        || bytes > config.max_decoded_bytes.get()
         || !value.units.iter().any(|unit| !unit.text.trim().is_empty())
     {
         return Err(ProcessingError::Protocol);
@@ -529,5 +563,79 @@ mod tests {
         .unwrap();
         assert!(korean.units[0].text.contains("운영 환경"));
         assert!(korean.units[0].text.contains("30 일"));
+        let temporary = tempfile::tempdir().unwrap();
+        let fixtures =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/content/fixtures");
+        let generated = std::process::Command::new(&config.python)
+            .args([
+                "-I",
+                "-c",
+                r#"
+from PIL import Image
+import pathlib, sys
+source, target = map(pathlib.Path, sys.argv[1:])
+first = Image.open(source/'policy.png').convert('RGB')
+second = Image.open(source/'policy-ko.png').convert('RGB')
+first.save(target/'pages.tiff', save_all=True, append_images=[second], compression='tiff_deflate')
+first.save(target/'page.jpeg', quality=95)
+first.save(target/'page.webp', lossless=True)
+"#,
+            ])
+            .arg(fixtures)
+            .arg(temporary.path())
+            .output()
+            .unwrap();
+        assert!(
+            generated.status.success(),
+            "{}",
+            String::from_utf8_lossy(&generated.stderr)
+        );
+        for (name, format, count) in [
+            ("pages.tiff", InputFormat::Tiff, 2),
+            ("page.jpeg", InputFormat::Jpeg, 1),
+            ("page.webp", InputFormat::Webp, 1),
+        ] {
+            let bytes = std::fs::read(temporary.path().join(name)).unwrap();
+            let projection = project(&bytes, format, Some(&config)).await.unwrap();
+            assert_eq!(projection.units.len(), count);
+            assert!(projection.units[0].text.contains("30 days"));
+            if count == 2 {
+                assert!(projection.units[1].text.contains("운영 환경"));
+                let mut omitted = serde_json::from_value::<InputProjection>(
+                    serde_json::to_value(&projection).unwrap(),
+                )
+                .unwrap();
+                omitted.units.remove(0);
+                assert!(validate_projection(&omitted, format, &config).is_err());
+            }
+        }
+        let tiff = std::fs::read(temporary.path().join("pages.tiff")).unwrap();
+        config.max_units = std::num::NonZeroUsize::new(1).unwrap();
+        assert!(matches!(
+            project(&tiff, InputFormat::Tiff, Some(&config)).await,
+            Err(ProcessingError::Failed(ProcessingFailure::UnitLimit))
+        ));
+        config.max_units = std::num::NonZeroUsize::new(10000).unwrap();
+        config.max_decoded_bytes = std::num::NonZeroUsize::new(1024).unwrap();
+        assert!(matches!(
+            project(&tiff, InputFormat::Tiff, Some(&config)).await,
+            Err(ProcessingError::Failed(ProcessingFailure::DecodedLimit))
+        ));
+        config.max_decoded_bytes = std::num::NonZeroUsize::new(128 * 1024 * 1024).unwrap();
+        assert!(matches!(
+            project(&tiff, InputFormat::Png, Some(&config)).await,
+            Err(ProcessingError::Failed(ProcessingFailure::FormatMismatch))
+        ));
+        config.ocr.as_mut().unwrap().pdf = true;
+        let pdf = project(
+            include_bytes!("content/fixtures/policy.pdf"),
+            InputFormat::Pdf,
+            Some(&config),
+        )
+        .await
+        .unwrap();
+        assert_eq!(pdf.units.len(), 4);
+        assert!(pdf.units[2].text.contains("30 days"));
+        assert!(pdf.units[3].text.contains("7 days"));
     }
 }

@@ -13,7 +13,7 @@ pub enum InputCommand {
     /// Install the pinned optional document runtime into a new dedicated directory
     Install {
         directory: PathBuf,
-        /// Python 3.10+ interpreter used only to create the isolated environment
+        /// Python 3.11+ interpreter used only to create the isolated environment
         #[arg(long, default_value = "python3")]
         python: PathBuf,
     },

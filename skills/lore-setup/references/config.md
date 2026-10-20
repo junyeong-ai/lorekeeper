@@ -182,7 +182,7 @@ do not imply deletion, archival or false claims.
 
 Markdown, UTF-8 text and HTML need no extra runtime. For a requested DOCX/XLSX/PDF
 workflow, run `lore input install DIRECTORY --python /path/to/python3` with Python
-3.10+ and a new directory whose parent exists. It creates a dedicated virtual
+3.11+ and a new directory whose parent exists. It creates a dedicated virtual
 environment, installs the embedded hash-locked binary wheels from PyPI and prints
 an `ingest.documents.python` block. Merge it into the selected config without
 replacing its existing `ingest.schedule`. Missing platform wheels fail explicitly;
@@ -204,6 +204,7 @@ ingest:
     timeout_seconds: 120
     max_output_bytes: 33554432
     max_decoded_bytes: 134217728
+    max_units: 10000
     ocr:
       tessdata_dir: /path/to/tessdata
       languages: [kor, eng]
@@ -226,6 +227,12 @@ to Tesseract's documented [page segmentation modes](https://tesseract-ocr.github
 An empty result never triggers another mode silently; inspect the original and
 select the intended policy. Published projection metadata retains language order,
 layout and model hashes, as well as decoder versions.
+Images are decoded frame by frame, including multipage TIFF, with EXIF orientation
+and white-background transparency composition before OCR. Every frame has a distinct
+ordinal inside one source document. The decoded-byte budget bounds aggregate RGBA
+frame bytes as well as projected text; `max_units` bounds projected pages/sheets/frames
+(native plus additional OCR count separately for PDF). Overflow refuses the projection
+instead of dropping later frames/pages. Model files must stay unchanged during OCR.
 
 The inbox defaults to text plus formats enabled by `ingest.documents`/OCR.
 Known binary files without that capability stay in the inbox and are counted as

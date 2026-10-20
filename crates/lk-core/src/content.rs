@@ -91,6 +91,8 @@ pub struct InputProcessingConfig {
     pub max_output_bytes: NonZeroUsize,
     #[serde(default = "decoded_limit")]
     pub max_decoded_bytes: NonZeroUsize,
+    #[serde(default = "unit_limit")]
+    pub max_units: NonZeroUsize,
     #[serde(default)]
     pub ocr: Option<OcrConfig>,
 }
@@ -103,6 +105,9 @@ fn output_limit() -> NonZeroUsize {
 }
 fn decoded_limit() -> NonZeroUsize {
     NonZeroUsize::new(128 * 1024 * 1024).unwrap()
+}
+fn unit_limit() -> NonZeroUsize {
+    NonZeroUsize::new(10000).unwrap()
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -173,7 +178,7 @@ pub enum InputLocation {
     Document,
     Page { number: NonZeroUsize },
     Sheet { name: String, state: SheetState },
-    Image,
+    ImageFrame { number: NonZeroUsize },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
@@ -272,6 +277,7 @@ mod tests {
             "timeout_seconds: 0",
             "max_output_bytes: 0",
             "max_decoded_bytes: 0",
+            "max_units: 0",
             "unknown: true",
         ] {
             assert!(

@@ -160,6 +160,10 @@ Use parser/token-state behavior, not regex replacement of arbitrary markup.
 - XLSX preserves sheet state, cell coordinates, formulas and stored cached values without
   calculation. PDF physical page numbers differ from DOCX flow content. OCR is explicit
   and distinct from native text; empty extraction is unprocessed, never completed knowledge.
+- Decode all image frames through Pillow before OCR; preserve frame ordinals, apply
+  EXIF orientation and composite alpha on white. Bound aggregate RGBA bytes and unit
+  counts before accepting a projection. Native and OCR PDF page inventories must match;
+  missing later frames/pages is an error, not a successful partial document.
 - Decoder-generated links are original references, not canonical wiki edges. Render
   them as literal destinations. Preserve raw input before optional inbox retirement.
 - Update the embedded requirements/hash lock and package protocol together. The ignored
