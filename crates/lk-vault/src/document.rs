@@ -245,6 +245,7 @@ mod tests {
                 path.to_string_lossy().into_owned(),
                 &crate::parse_page(&raw).unwrap(),
                 file_revision(&raw),
+                lk_core::concept::source_revision(&crate::parse_page(&raw).unwrap()),
             )
             .unwrap();
             assert_eq!(provenance.metadata["source_file"], source);
@@ -258,6 +259,7 @@ mod tests {
             path.to_string_lossy().into_owned(),
             &crate::parse_page(raw).unwrap(),
             file_revision(raw),
+            lk_core::concept::source_revision(&crate::parse_page(raw).unwrap()),
         )
         .unwrap();
         assert!(read.source_file.is_none());

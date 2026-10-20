@@ -110,9 +110,20 @@ fn prepare_search_inner(
     verify: impl FnOnce(&[(PathBuf, String)]) -> Result<(), VaultError>,
 ) -> Result<SearchSnapshot, VaultError> {
     let root = session.root();
-    let mut pages = super::search::load_pages(root, dirs, true)?;
+    let mut pages = Vec::new();
+    let mut authored_revisions = BTreeMap::new();
+    super::search::visit_pages(root, dirs, true, |mut page, _| {
+        authored_revisions.insert(
+            page.rel_path.clone(),
+            lk_core::concept::source_revision(&page.page),
+        );
+        page.page.body.clear();
+        page.page.original = None;
+        pages.push(page);
+        Ok(())
+    })?;
     super::search::attach_reviews(root, dirs, &mut pages)?;
-    let provenance = crate::provenance_index::capture(root, dirs, &pages)?;
+    let provenance = crate::provenance_index::capture(root, dirs, &pages, &authored_revisions)?;
     // Body-search pagination retains traversal order; browse ties use PathBuf ordering.
     let mut ordered_paths = pages.iter().map(|page| &page.rel_path).collect::<Vec<_>>();
     ordered_paths.sort();
@@ -271,6 +282,13 @@ fn prepare_search_inner(
                     .ok_or_else(|| invalid("page ID overflow"))?;
                 next_id
             };
+            let raw = std::fs::read_to_string(crate::page_path(root, &page.rel_path)?)?;
+            if lk_core::concept::file_revision(&raw) != page.file_revision {
+                return Err(invalid("page changed during snapshot preparation"));
+            }
+            let mut page = page.clone();
+            page.page = crate::parse_page(&raw).map_err(VaultError::Frontmatter)?;
+            page.page.original = None;
             let aliases = serde_json::to_string(&page.aliases)
                 .map_err(|e| VaultError::Serialization(e.to_string()))?;
             let mut metadata = page.clone();

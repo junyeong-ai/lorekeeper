@@ -391,7 +391,8 @@ pub(super) fn visit_collections(
                 path.strip_prefix(vault_root)
                     .map_err(std::io::Error::other)?,
             )?)?;
-            let page = crate::parse_page(&raw).map_err(VaultError::Frontmatter)?;
+            let mut page = crate::parse_page(&raw).map_err(VaultError::Frontmatter)?;
+            page.original = None;
             let knowledge_status = page
                 .frontmatter
                 .knowledge_status()
