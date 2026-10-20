@@ -120,6 +120,26 @@ fn reviewed_curation_is_read_only_in_preview_guarded_and_discoverable_after_publ
     );
     assert_eq!(fingerprint["file_revision"], file_revision(&after));
     assert_eq!(fingerprint["source_revision"], source_revision(&after_page));
+    let discovery = root.path().join("discovery.json");
+    std::fs::write(
+        &discovery,
+        serde_json::to_vec(&json!({
+            "path": concept,
+            "file_revision": fingerprint["file_revision"],
+            "queries": [{"query": "Stored"}]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    ok(
+        &config,
+        &[
+            "wiki",
+            "audit-discover",
+            "--file",
+            discovery.to_str().unwrap(),
+        ],
+    );
     let audit = ok(&config, &["wiki", "audit-plan", "--path", concept]);
     assert_eq!(audit["unreviewed"], 2);
     assert_eq!(audit["counts_by_kind"]["concept"]["unreviewed"], 1);
