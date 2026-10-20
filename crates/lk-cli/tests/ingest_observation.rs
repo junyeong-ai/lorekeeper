@@ -126,7 +126,7 @@ fn partial_daily_refetch_preserves_pages_queue_and_work_observations() {
     let vault = temp.path().join("vault");
     let config = temp.path().join("config.yaml");
     let credentials = temp.path().join("credentials.json");
-    let at = jiff::Timestamp::now() - jiff::SignedDuration::from_hours(1);
+    let at = jiff::Timestamp::now();
     let date = at.to_zoned(jiff::tz::TimeZone::UTC).date().to_string();
     let changed = Arc::new(AtomicBool::new(false));
     let has_changed = changed.clone();
@@ -229,7 +229,11 @@ fn partial_daily_refetch_preserves_pages_queue_and_work_observations() {
         &std::fs::read(vault.join(".lorekeeper/periods/state.json")).unwrap(),
     )
     .unwrap();
-    let observed = &state["batches"][0]["sources"][0];
+    let batches = state["batches"].as_array().unwrap();
+    assert!(batches.iter().any(|batch| {
+        batch["sources"][0]["source_id"] == "issues" && batch["sources"][0]["outcome"] == "observed"
+    }));
+    let observed = &batches.last().unwrap()["sources"][0];
     assert_eq!(observed["source_id"], "issues");
     assert_eq!(observed["outcome"], "partial");
     assert_eq!(observed["scope"]["kind"], "configured-query");
