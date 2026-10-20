@@ -1606,6 +1606,7 @@ dependencies = [
  "lk-core",
  "lk-vault",
  "petgraph",
+ "pulldown-cmark",
  "rayon",
  "serde",
  "serde_json",

@@ -419,29 +419,56 @@ fn rewrite_links(
     Ok((out, count))
 }
 
-/// Preserve every substantive body except a Sources projection recognized by the exact
-/// shared structural classifier. Related prose and custom Sources remain authored.
+/// Recognize only the template title, owned section headings and generated Sources.
 fn concept_has_authored_body(root: &Path, path: &Path) -> Result<bool, GraphError> {
-    let abs = root.join(path);
-    let raw = std::fs::read_to_string(&abs)
-        .map_err(|e| GraphError::Io(format!("read {}: {e}", abs.display())))?;
-    let mut body = lk_core::frontmatter::parse_page(&raw)
-        .map(|p| p.body)
-        .unwrap_or(raw);
+    use pulldown_cmark::{Event, HeadingLevel, Parser, Tag};
 
-    for heading in lk_vault::section_headings(|s| s.concept_sources) {
+    let raw = std::fs::read_to_string(
+        lk_vault::page_path(root, path).map_err(|error| GraphError::Io(error.to_string()))?,
+    )
+    .map_err(|error| GraphError::Io(format!("read {}: {error}", path.display())))?;
+    let parsed = lk_core::frontmatter::parse_page(&raw)
+        .map_err(|error| GraphError::Io(format!("parse {}: {error}", path.display())))?;
+    let title = parsed
+        .frontmatter
+        .get("title")
+        .and_then(|value| value.as_str())
+        .map(|title| format!("# {title}"));
+    let headings = lk_vault::section_headings(|strings| strings.concept_synthesis)
+        .chain(lk_vault::section_headings(|strings| {
+            strings.concept_sources
+        }))
+        .chain(lk_vault::section_headings(|strings| strings.related))
+        .map(|heading| format!("## {heading}"))
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut body = parsed.body;
+    for heading in lk_vault::section_headings(|strings| strings.concept_sources) {
         if let Some(sources) = lk_vault::section_body(&body, heading)
             && crate::sources::classify(sources, path) != crate::sources::SourcesBody::Authored
         {
             body = lk_vault::replace_section(&body, heading, "");
         }
     }
-    for line in body.lines() {
-        let t = line.trim();
-        if t.is_empty() || t.starts_with('#') {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut heading_end = 0;
+    for (event, range) in Parser::new(&body).into_offset_iter() {
+        if range.start < heading_end {
             continue;
         }
-        return Ok(true);
+        let heading = body[range.clone()].trim_end();
+        match event {
+            Event::Start(Tag::Heading { level, .. })
+                if ((level == HeadingLevel::H1
+                    && heading.starts_with("# ")
+                    && title.as_deref().is_none_or(|title| heading == title)
+                    && seen.is_empty())
+                    || (level == HeadingLevel::H2 && headings.contains(heading)))
+                    && seen.insert(heading.to_owned()) =>
+            {
+                heading_end = range.end;
+            }
+            _ => return Ok(true),
+        }
     }
     Ok(false)
 }
@@ -451,6 +478,46 @@ mod tests {
     use super::*;
     use crate::scan::Link;
     use tempfile::TempDir;
+
+    #[test]
+    fn authored_blocks_are_not_template_headings() {
+        let tmp = TempDir::new().unwrap();
+        let path = Path::new("wiki/concepts/topic.md");
+        for body in [
+            "#define RETRY_LIMIT 3\n",
+            "#standalone-tag\n",
+            "### A necessary qualification\n",
+            "# Another subject\n",
+            "```text\n## Sources\n```\n",
+            "<!-- retained explanation -->\n",
+            "Title\n=====\n",
+        ] {
+            write(
+                tmp.path(),
+                path.to_str().unwrap(),
+                &format!("---\ntitle: Topic\n---\n# Topic\n\n## Synthesis\n\n{body}"),
+            );
+            assert!(
+                concept_has_authored_body(tmp.path(), path).unwrap(),
+                "{body}"
+            );
+        }
+        for locale in lk_core::i18n::Locale::ALL {
+            let strings = locale.strings();
+            write(
+                tmp.path(),
+                path.to_str().unwrap(),
+                &format!(
+                    "---\ntitle: Topic\n---\n# Topic\n\n## {}\n\n## {}\n\n{}\n\n## {}\n",
+                    strings.concept_synthesis,
+                    strings.concept_sources,
+                    crate::sources::render(*locale),
+                    strings.related
+                ),
+            );
+            assert!(!concept_has_authored_body(tmp.path(), path).unwrap());
+        }
+    }
 
     fn write(root: &Path, rel: &str, content: &str) {
         let p = root.join(rel);
