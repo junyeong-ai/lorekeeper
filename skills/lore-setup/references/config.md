@@ -227,12 +227,15 @@ ingest:
 
 Use the official [tessdata_fast](https://github.com/tesseract-ocr/tessdata_fast)
 models at a pinned revision; keep model provenance with the installation.
-`lore input check` reports installed model SHA-256 digests. `pdf: true` adds OCR
-for every PDF page while retaining native text separately. Image OCR recognizes
-text; it does not interpret diagrams. Native PDF text follows the decoder's reading
+`lore input check` reports installed model SHA-256 digests. `pdf: true` renders every
+physical PDF page at 150 DPI for OCR while retaining native text separately. OCR
+preserves literal recognized text without dictionary-based line deletion or table
+reconstruction; it does not interpret diagrams. Native PDF text follows the decoder's reading
 order. DOCX has no reliable physical page labels. XLSX preserves formulas and their
-stored cached values without recalculation; drawings, comments and linked workbooks
-are outside that projection. `.doc`, `.xls`, audio and video are unsupported.
+stored cached values without recalculation. Typed sheet structure includes merged
+rectangles, default row visibility and ordered row/column visibility intervals;
+hidden values remain included. Drawings, comments and linked workbooks are outside
+that projection. `.doc`, `.xls`, audio and video are unsupported.
 
 OCR `layout` is explicit: `auto` for page layout, `single-block` for one text block,
 or `sparse-text` for scattered text without a reading-order guarantee. These map
@@ -243,7 +246,8 @@ layout and model hashes, as well as decoder versions.
 Images are decoded frame by frame, including multipage TIFF, with EXIF orientation
 and white-background transparency composition before OCR. Every frame has a distinct
 ordinal inside one source document. The decoded-byte budget bounds aggregate RGBA
-frame bytes as well as projected text; `max_units` bounds projected pages/sheets/frames
+frame bytes, including rendered PDF OCR pages, as well as projected text;
+`max_units` bounds projected pages/sheets/frames
 (native plus additional OCR count separately for PDF). Overflow refuses the projection
 instead of dropping later frames/pages. Model files must stay unchanged during OCR.
 

@@ -178,8 +178,15 @@ Use parser/token-state behavior, not regex replacement of arbitrary markup.
   calculation. Typed sheet structure retains merged rectangles, default row visibility
   and declared row/column visibility intervals without expanding sparse geometry or
   excluding hidden values. The locked openpyxl sparse parser is part of this boundary;
-  decoder upgrades must replay the optional runtime tests. PDF physical page numbers differ from DOCX flow content. OCR is explicit
-  and distinct from native text; empty extraction is unprocessed, never completed knowledge.
+  decoder upgrades must replay the optional runtime tests. PDF physical page numbers differ
+  from DOCX flow content. OCR is explicit literal text, distinct from native Markdown;
+  dictionary-based line deletion and table reconstruction are disabled. Empty
+  extraction is unprocessed, never completed knowledge.
+  PDF OCR renders and recognizes each physical page at 150 DPI with geometry preflight
+  and aggregate RGBA/output bounds; never reuse native page text as OCR evidence.
+  Kreuzberg v4's [best-effort support](https://docs.kreuzberg.dev/lts/) ends in 2026.
+  A decoder replacement must retain supported platform wheels and pass native/OCR
+  page/frame, resource-bound and private-diagnostic contracts.
 - Decode all image frames through Pillow before OCR; preserve frame ordinals, apply
   EXIF orientation and composite alpha on white. Bound aggregate RGBA bytes and unit
   counts before accepting a projection. Native and OCR PDF page inventories must match;

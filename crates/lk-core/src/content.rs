@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::ConfigError;
 
-pub const PROJECTION_POLICY: &str = "document-projection-v2";
+pub const PROJECTION_POLICY: &str = "document-projection-v3";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, strum::EnumIter)]
 #[serde(rename_all = "kebab-case")]
@@ -275,9 +275,22 @@ mod tests {
                 "method": "native", "representation": "json-lines", "text": "retained input"
             }]
         });
-        let projection: InputProjection = serde_json::from_value(original.clone()).unwrap();
-        assert!(projection.units[0].sheet_structure.is_none());
-        assert_eq!(serde_json::to_value(projection).unwrap(), original);
+        for policy in ["document-projection-v1", "document-projection-v2"] {
+            let mut original = original.clone();
+            original["policy"] = policy.into();
+            if policy == "document-projection-v2" {
+                original["units"][0]["sheet_structure"] = serde_json::json!({
+                    "default_row_hidden": false, "merged_ranges": [],
+                    "row_visibility": [], "column_visibility": []
+                });
+            }
+            let projection: InputProjection = serde_json::from_value(original.clone()).unwrap();
+            assert_eq!(
+                projection.units[0].sheet_structure.is_some(),
+                policy == "document-projection-v2"
+            );
+            assert_eq!(serde_json::to_value(projection).unwrap(), original);
+        }
     }
 
     #[test]

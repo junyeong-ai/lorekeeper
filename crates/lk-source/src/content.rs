@@ -316,16 +316,17 @@ fn validate_projection(
                 ProjectionMethod::Native,
                 UnitRepresentation::JsonLines,
             ) => format == InputFormat::Xlsx && !name.is_empty(),
-            (InputLocation::Page { .. }, method, UnitRepresentation::Markdown) => {
-                format == InputFormat::Pdf
-                    && (method == ProjectionMethod::Native
-                        || config.ocr.as_ref().is_some_and(|ocr| ocr.pdf))
-            }
             (
-                InputLocation::ImageFrame { .. },
-                ProjectionMethod::Ocr,
+                InputLocation::Page { .. },
+                ProjectionMethod::Native,
                 UnitRepresentation::Markdown,
-            ) => format.is_image() && config.ocr.is_some(),
+            ) => format == InputFormat::Pdf,
+            (InputLocation::Page { .. }, ProjectionMethod::Ocr, UnitRepresentation::Text) => {
+                format == InputFormat::Pdf && config.ocr.as_ref().is_some_and(|ocr| ocr.pdf)
+            }
+            (InputLocation::ImageFrame { .. }, ProjectionMethod::Ocr, UnitRepresentation::Text) => {
+                format.is_image() && config.ocr.is_some()
+            }
             _ => false,
         };
         let key = serde_json::to_string(&(&unit.location, unit.method))
@@ -810,6 +811,7 @@ save('external-sheet.xlsx', invalid)
         .await
         .unwrap();
         assert_eq!(image.units[0].method, ProjectionMethod::Ocr);
+        assert_eq!(image.units[0].representation, UnitRepresentation::Text);
         assert!(image.units[0].text.contains("30 days"));
         config.ocr.as_mut().unwrap().layout = lk_core::content::OcrLayout::SingleBlock;
         let korean = project(
@@ -820,7 +822,7 @@ save('external-sheet.xlsx', invalid)
         .await
         .unwrap();
         assert!(korean.units[0].text.contains("운영 환경"));
-        assert!(korean.units[0].text.contains("30 일"));
+        assert!(korean.units[0].text.contains("30일"));
         let temporary = tempfile::tempdir().unwrap();
         let fixtures =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/content/fixtures");
@@ -837,6 +839,7 @@ second = Image.open(source/'policy-ko.png').convert('RGB')
 first.save(target/'pages.tiff', save_all=True, append_images=[second], compression='tiff_deflate')
 first.save(target/'page.jpeg', quality=95)
 first.save(target/'page.webp', lossless=True)
+first.save(target/'scanned.pdf', 'PDF', save_all=True, append_images=[second])
 "#,
             ])
             .arg(fixtures)
@@ -895,5 +898,42 @@ first.save(target/'page.webp', lossless=True)
         assert_eq!(pdf.units.len(), 4);
         assert!(pdf.units[2].text.contains("30 days"));
         assert!(pdf.units[3].text.contains("7 days"));
+        let mut raster_limited = config.clone();
+        raster_limited.max_decoded_bytes = std::num::NonZeroUsize::new(10 * 1024 * 1024).unwrap();
+        assert!(matches!(
+            project(
+                include_bytes!("content/fixtures/policy.pdf"),
+                InputFormat::Pdf,
+                Some(&raster_limited)
+            )
+            .await,
+            Err(ProcessingError::Failed(ProcessingFailure::DecodedLimit))
+        ));
+        let scanned = project(
+            &std::fs::read(temporary.path().join("scanned.pdf")).unwrap(),
+            InputFormat::Pdf,
+            Some(&config),
+        )
+        .await
+        .unwrap();
+        assert_eq!(scanned.units.len(), 4);
+        assert!(scanned.units[..2].iter().all(|unit| unit.text.is_empty()));
+        assert!(scanned.units[2].text.contains("30 days"));
+        assert!(scanned.units[3].text.contains("운영 환경"));
+        for number in 1..=2 {
+            let native = &scanned.units[number - 1];
+            let recognized = &scanned.units[number + 1];
+            assert_eq!(native.location, recognized.location);
+            assert_eq!(native.method, ProjectionMethod::Native);
+            assert_eq!(native.representation, UnitRepresentation::Markdown);
+            assert_eq!(recognized.method, ProjectionMethod::Ocr);
+            assert_eq!(recognized.representation, UnitRepresentation::Text);
+        }
+        let mut invalid = scanned;
+        invalid.units[2].representation = UnitRepresentation::Markdown;
+        assert!(validate_projection(&invalid, InputFormat::Pdf, &config).is_err());
+        invalid.units[2].representation = UnitRepresentation::Text;
+        invalid.units.pop();
+        assert!(validate_projection(&invalid, InputFormat::Pdf, &config).is_err());
     }
 }

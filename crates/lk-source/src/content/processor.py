@@ -6,6 +6,7 @@ import importlib.metadata
 import hashlib
 import io
 import json
+import math
 import os
 import pathlib
 import posixpath
@@ -14,7 +15,7 @@ import sys
 import warnings
 import zipfile
 
-POLICY = "document-projection-v2"
+POLICY = "document-projection-v3"
 PACKAGES = {"kreuzberg": "4.10.4", "openpyxl": "3.1.5", "defusedxml": "0.7.1", "et-xmlfile": "2.0.0", "pillow": "13.0.0"}
 MIMES = {
     "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -276,7 +277,7 @@ def image_frames(data, options):
                     background.alpha_composite(frame)
                     encoded = io.BytesIO()
                     background.convert("RGB").save(encoded, format="PNG")
-                    yield number, encoded.getvalue()
+                    yield number, encoded.getvalue(), source.width * source.height * 4
     except (Image.DecompressionBombWarning, Image.DecompressionBombError):
         raise ProjectionError("decoded-limit") from None
 
@@ -287,6 +288,26 @@ def pdf_pages(result):
     if pages is None or expected is None or len(pages) != expected or [page["page_number"] for page in pages] != list(range(1, expected + 1)):
         raise ProjectionError("invalid-projection")
     return pages
+
+
+def validate_pdf_raster_budget(result, limit, dpi):
+    pages = result.metadata.get("pages", {}).get("pages")
+    if not isinstance(pages, list) or len(pages) != len(result.pages):
+        raise ProjectionError("invalid-projection")
+    scale = dpi / 72
+    for number, page in enumerate(pages, 1):
+        dimensions = page.get("dimensions")
+        if (page.get("number") != number or not isinstance(dimensions, list) or len(dimensions) != 2
+                or any(not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0 for value in dimensions)):
+            raise ProjectionError("invalid-projection")
+        width, height = [math.ceil(value * scale) for value in dimensions]
+        # The pinned renderer rescales larger dimensions; refuse that change to
+        # the declared DPI rather than silently using a lower resolution.
+        if width > 65536 or height > 65536:
+            raise ProjectionError("decoded-limit")
+        limit -= width * height * 4
+        if limit < 0:
+            raise ProjectionError("decoded-limit")
 
 
 def extraction(data, options):
@@ -314,23 +335,35 @@ def extraction(data, options):
     def ocr_config():
         language = "+".join(ocr["languages"])
         psm = {"auto": 3, "single-block": 6, "sparse-text": 11}[ocr["layout"]]
-        return k.OcrConfig(backend="tesseract", language=language, tesseract_config=k.TesseractConfig(language=language, psm=psm, use_cache=False))
+        return k.OcrConfig(backend="tesseract", language=language,
+                           tesseract_config=k.TesseractConfig(language=language, psm=psm, use_cache=False,
+                                                           output_format="text", enable_table_detection=False))
+    def enable_ocr():
+        config.disable_ocr = False
+        config.ocr = ocr_config()
+        config.output_format = "plain"
+    def recognize(location, frame):
+        result = k.extract_bytes_sync(frame, "image/png", config)
+        if result.mime_type != "image/png":
+            raise ProjectionError("invalid-projection")
+        return unit(location, result.content, method="ocr", representation="text")
     image = kind in ("png", "jpeg", "tiff", "webp")
     if image and ocr is None:
         raise ProjectionError("ocr-not-configured")
     if image:
-        config.disable_ocr = False
-        config.ocr = ocr_config()
+        enable_ocr()
         units = []
         size = 0
-        for number, frame in image_frames(data, options):
-            result = k.extract_bytes_sync(frame, "image/png", config)
-            size += len(result.content.encode("utf-8"))
+        for number, frame, _ in image_frames(data, options):
+            recognized = recognize({"kind": "image-frame", "number": number}, frame)
+            size += len(recognized["text"].encode("utf-8"))
             if size > limit:
                 raise ProjectionError("decoded-limit")
-            units.append(unit({"kind": "image-frame", "number": number}, result.content, method="ocr", representation="markdown"))
-        return units, ["Every decoded image frame is projected in stored order with EXIF orientation applied and transparency composited on white. OCR recognizes text only; diagrams and recognition accuracy require separate inspection."]
+            units.append(recognized)
+        return units, ["Every decoded image frame is projected in stored order with EXIF orientation applied and transparency composited on white. OCR preserves literal recognized text without dictionary-based line deletion or table reconstruction; layout, diagrams and recognition accuracy require separate inspection."]
     result = k.extract_file_sync(data, MIMES[kind], config)
+    if result.mime_type != MIMES[kind]:
+        raise ProjectionError("invalid-projection")
     warnings = []
     if result.processing_warnings:
         # Libraries may put source text in diagnostics. Keep the condition, not that text.
@@ -342,15 +375,24 @@ def extraction(data, options):
         units = [unit({"kind": "page", "number": page["page_number"]}, page["content"], representation="markdown") for page in pages]
         warnings.append("PDF native text follows the decoder's reading order; diagrams and image content require separate inspection.")
         if ocr is not None and ocr["pdf"]:
-            config.disable_ocr = False
-            config.force_ocr = True
-            config.ocr = ocr_config()
-            recognized = k.extract_file_sync(data, MIMES[kind], config)
-            recognized_pages = pdf_pages(recognized)
-            if len(recognized_pages) != len(pages):
-                raise ProjectionError("invalid-projection")
-            units.extend(unit({"kind": "page", "number": page["page_number"]}, page["content"], method="ocr", representation="markdown") for page in recognized_pages)
-            warnings.append("OCR is an additional interpretation, not a replacement for native PDF text.")
+            dpi = 150
+            validate_pdf_raster_budget(result, limit, dpi)
+            enable_ocr()
+            size = sum(len(part["text"].encode("utf-8")) for part in units)
+            remaining_raster = limit
+            for number in range(1, len(pages) + 1):
+                rendered = k.render_pdf_page(data, number - 1, dpi=dpi)
+                if len(rendered) > limit:
+                    raise ProjectionError("decoded-limit")
+                image_options = {**options, "format": "png", "max_decoded_bytes": remaining_raster, "max_units": 1}
+                for _, frame, decoded_bytes in image_frames(io.BytesIO(rendered), image_options):
+                    remaining_raster -= decoded_bytes
+                    recognized = recognize({"kind": "page", "number": number}, frame)
+                    size += len(recognized["text"].encode("utf-8"))
+                    if size > limit:
+                        raise ProjectionError("decoded-limit")
+                    units.append(recognized)
+            warnings.append("Every PDF page is rendered at 150 DPI for additional literal OCR text; native text remains separate. OCR does not reconstruct tables or delete lines using dictionaries. Inspect the original for layout and recognition accuracy.")
     else:
         units = [unit({"kind": "document"}, result.content, representation="markdown")]
         warnings.append("DOCX is projected as a flow document without physical page numbers. Embedded objects, comments and revision history are not projected.")
