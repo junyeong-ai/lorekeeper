@@ -531,50 +531,10 @@ async fn run_inner(
             violated
         }
         GraphCommand::BacklinksSync { dry_run } => {
-            // A provider that queues nothing must not have the sweep write a promise nothing
-            // can keep: `lore doctor` reports a recorded input with no answer, and no path
-            // re-derives a concept page's markers, so it would never clear.
-            let policy = match rc.llm.provider {
-                lk_core::config::LlmProvider::Queue => backlinks::SynthesisPolicy::Record,
-                lk_core::config::LlmProvider::Noop => backlinks::SynthesisPolicy::Skip,
-            };
-            let sync = if dry_run {
-                backlinks::sync_concept_backlinks(
-                    &views.scanned,
-                    &rc.root,
-                    true,
-                    &rc.vault_dirs,
-                    policy,
-                )
-            } else {
-                backlinks::sync_concept_backlinks_in_session(
-                    &views.scanned,
-                    mutation
-                        .as_ref()
-                        .expect("mutation command holds the vault lock"),
-                    &rc.vault_dirs,
-                    policy,
-                )
-            }
-            .map_err(|e| format!("{e}"))?;
-            let changed = sync.updated.len();
-            // Deriving a concept's evidence and writing the section that answers to it are
-            // separate acts, and only this sweep knows the first has moved. It computes what
-            // is owed; turning that into queued work is the CLI's, because lk-graph reaches
-            // no LLM. A dry run enqueues nothing, like every other write it withholds.
-            let queued = if dry_run {
-                0
-            } else {
-                enqueue_syntheses(&rc, &sync.resynthesize).await?
-            };
+            let report = synchronize_backlinks(&rc, &views.scanned, dry_run, mutation.as_ref())?;
             // A page the sweep could not record a count on keeps a `source_count` the graph
             // contradicts, and only a human adding frontmatter fixes it.
-            let violated = !sync.skipped.is_empty();
-            let report = output::BacklinksSyncReport {
-                sync,
-                changed,
-                queued,
-            };
+            let violated = !report.sync.skipped.is_empty();
             if json {
                 output::print_json(&report, violated)?;
             } else {
@@ -643,22 +603,53 @@ fn rename_suggestions(renames: &[normalize::Rename]) -> Vec<output::RenameSugges
         .collect()
 }
 
-/// Queue one synthesis task per concept whose evidence has moved, and commit them as one
-/// file. The queue's own invariant carries over unchanged: a task file becomes visible only
-/// after every page it names was written, which `sync_concept_backlinks` has already done by
-/// the time this runs.
-///
-/// The task carries the citation set as its input and the page's own heading as its anchor,
-/// so the drain writes the section the page actually has — the same reason every other task
-/// carries one.
-async fn enqueue_syntheses(
+fn synchronize_backlinks(
     rc: &ResolvedConfig,
-    owed: &[backlinks::ConceptResynthesis],
-) -> Result<usize, String> {
+    pages: &[scan::ScannedPage],
+    dry_run: bool,
+    session: Option<&lk_vault::MutationSession>,
+) -> Result<output::BacklinksSyncReport, String> {
+    let policy = match rc.llm.provider {
+        lk_core::config::LlmProvider::Queue => backlinks::SynthesisPolicy::Record,
+        lk_core::config::LlmProvider::Noop => backlinks::SynthesisPolicy::Skip,
+    };
+    if dry_run {
+        let sync = backlinks::sync_concept_backlinks(pages, &rc.root, true, &rc.vault_dirs, policy)
+            .map_err(|error| error.to_string())?;
+        return Ok(output::BacklinksSyncReport {
+            changed: sync.updated.len(),
+            sync,
+            queued: 0,
+        });
+    }
+    let _claim = if policy == backlinks::SynthesisPolicy::Record {
+        super::queue::claim_writer(&rc.root.join(".lorekeeper/queue"), false)
+            .map_err(|error| error.to_string())?
+    } else {
+        None
+    };
+    let (plan, report) = plan_backlinks_publication(rc, pages, policy)?;
+    if report.changed > 0 || report.queued > 0 {
+        session
+            .ok_or("backlinks publication requires a vault mutation session")?
+            .apply(plan)
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(report)
+}
+
+fn plan_backlinks_publication(
+    rc: &ResolvedConfig,
+    pages: &[scan::ScannedPage],
+    policy: backlinks::SynthesisPolicy,
+) -> Result<(lk_vault::MutationPlan, output::BacklinksSyncReport), String> {
+    let (mut plan, sync) =
+        backlinks::plan_concept_backlinks_for_work(pages, &rc.root, &rc.vault_dirs, policy)
+            .map_err(|error| error.to_string())?;
     // A task already waiting for the SAME INPUT is the same task. This sweep runs on every
     // pipeline pass and by hand, and re-queueing what a drain has not reached yet accumulates
     // identical jobs that all classify `current` — so `queue prune` keeps them and the drain
-    // does the work again for each. The common queue flush also reuses exact pending requests.
+    // does the work again for each. The shared queue admission also reuses exact pending requests.
     //
     // Keyed on the input AND on the task still being alive — both, because a task can stop
     // being answerable in two independent ways. Its input can move on (an ordinary page
@@ -671,7 +662,8 @@ async fn enqueue_syntheses(
     // question is asked of `queue status`'s own classifier rather than of the bytes on disk.
     let pending =
         super::queue::pending_work_inputs(&rc.root, lk_queue::TargetKind::ConceptSynthesis);
-    let owed: Vec<&backlinks::ConceptResynthesis> = owed
+    let owed: Vec<&backlinks::ConceptResynthesis> = sync
+        .resynthesize
         .iter()
         .filter(|entry| {
             !pending.contains(&(
@@ -680,13 +672,14 @@ async fn enqueue_syntheses(
             ))
         })
         .collect();
-    if owed.is_empty() {
-        return Ok(0);
-    }
-    let client = super::build_llm_client_for(rc.llm.provider, &rc.root);
-    for entry in owed.iter().copied() {
-        client
-            .synthesize_concept(lk_queue::ConceptSynthesisRequest {
+    let queue = rc.root.join(".lorekeeper/queue");
+    let client = lk_queue::QueueLlmClient::new(queue.clone());
+    let mut tasks = Vec::new();
+    for entry in owed {
+        let task = client.build_task(
+            "syn",
+            lk_queue::TaskKind::SynthesizeConcept,
+            lk_queue::ConceptSynthesisRequest {
                 citations: entry.citations.clone(),
                 locale: rc.locale,
                 related_anchor: entry.related_anchor.clone(),
@@ -695,12 +688,31 @@ async fn enqueue_syntheses(
                     kind: lk_queue::TargetKind::ConceptSynthesis,
                     anchor: entry.anchor.clone(),
                 },
-            })
-            .await
-            .map_err(|e| format!("queue synthesis for {}: {e}", entry.path.display()))?;
+            },
+        );
+        task.validate_retained_input()
+            .map_err(|error| error.to_string())?;
+        tasks.push(task);
     }
-    client.flush().await.map_err(|e| format!("{e}"))?;
-    Ok(owed.len())
+    let tasks = if tasks.is_empty() {
+        tasks
+    } else {
+        lk_queue::new_requests(&queue, &tasks).map_err(|error| error.to_string())?
+    };
+    if !tasks.is_empty() {
+        plan.create(
+            PathBuf::from(".lorekeeper/queue").join(format!("{}.backlinks.jsonl", client.run_id())),
+            lk_queue::serialize_tasks(&tasks).map_err(|error| error.to_string())?,
+        );
+    }
+    Ok((
+        plan,
+        output::BacklinksSyncReport {
+            changed: sync.updated.len(),
+            sync,
+            queued: tasks.len(),
+        },
+    ))
 }
 
 fn resolve_config_full(
@@ -735,5 +747,187 @@ fn resolve_config_full(
                 llm: lk_core::config::LlmConfig::default(),
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TARGET: &str = "wiki/concepts/retry.md";
+
+    fn fixture() -> (tempfile::TempDir, ResolvedConfig) {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("wiki/concepts")).unwrap();
+        std::fs::create_dir_all(root.path().join("wiki/documents")).unwrap();
+        std::fs::write(root.path().join(TARGET), "---\ntype: concept\ntitle: Retry\nsource_count: 0\nllm_inputs:\n  synthesis: old\n  synthesis_done: old\n---\n## Synthesis\nPrior scoped answer.\n\n## Related\n\n## Sources\n").unwrap();
+        std::fs::write(
+            root.path().join("wiki/documents/source.md"),
+            "---\ntype: document\n---\nRetry three times. [Retry](../concepts/retry.md)\n",
+        )
+        .unwrap();
+        let config = ResolvedConfig {
+            root: root.path().into(),
+            graph: Default::default(),
+            locale: Locale::En,
+            vault_dirs: Default::default(),
+            concept_categories: vec![],
+            llm: Default::default(),
+        };
+        (root, config)
+    }
+
+    fn pages(config: &ResolvedConfig) -> Vec<scan::ScannedPage> {
+        scan::scan_vault(&config.root, false).unwrap()
+    }
+
+    #[test]
+    fn backlinks_queue_contention_preserves_pages_and_preview_is_read_only() {
+        let (_root, config) = fixture();
+        let before = std::fs::read_to_string(config.root.join(TARGET)).unwrap();
+        let preview = synchronize_backlinks(&config, &pages(&config), true, None).unwrap();
+        assert_eq!(preview.changed, 1);
+        assert_eq!(preview.queued, 0);
+        assert!(!config.root.join(".lorekeeper").exists());
+        let session = lk_vault::MutationSession::acquire(&config.root).unwrap();
+        let _claim =
+            super::super::queue::claim_writer(&config.root.join(".lorekeeper/queue"), false)
+                .unwrap();
+        assert!(synchronize_backlinks(&config, &pages(&config), false, Some(&session)).is_err());
+        assert_eq!(
+            std::fs::read_to_string(config.root.join(TARGET)).unwrap(),
+            before
+        );
+        let preview = synchronize_backlinks(&config, &pages(&config), true, None).unwrap();
+        assert!(preview.sync.dry_run);
+        assert!(
+            !config
+                .root
+                .join(".lorekeeper/mutation/pending.json")
+                .exists()
+        );
+    }
+
+    #[test]
+    fn backlinks_queue_path_conflict_refuses_all_page_changes() {
+        let (_root, config) = fixture();
+        let session = lk_vault::MutationSession::acquire(&config.root).unwrap();
+        let _claim =
+            super::super::queue::claim_writer(&config.root.join(".lorekeeper/queue"), false)
+                .unwrap();
+        let before = std::fs::read_to_string(config.root.join(TARGET)).unwrap();
+        let (plan, report) = plan_backlinks_publication(
+            &config,
+            &pages(&config),
+            backlinks::SynthesisPolicy::Record,
+        )
+        .unwrap();
+        assert_eq!(report.queued, 1);
+        let serialized = serde_json::to_value(&plan).unwrap();
+        let queue_path = serialized["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|step| {
+                step["kind"] == "create"
+                    && step["path"]
+                        .as_str()
+                        .is_some_and(|path| path.ends_with(".jsonl"))
+            })
+            .unwrap()["path"]
+            .as_str()
+            .unwrap();
+        std::fs::write(config.root.join(queue_path), "occupied queue entry").unwrap();
+        assert!(session.apply(plan).is_err());
+        assert_eq!(
+            std::fs::read_to_string(config.root.join(TARGET)).unwrap(),
+            before
+        );
+        assert_eq!(
+            std::fs::read_to_string(config.root.join(queue_path)).unwrap(),
+            "occupied queue entry"
+        );
+        assert!(
+            !config
+                .root
+                .join(".lorekeeper/mutation/pending.json")
+                .exists()
+        );
+    }
+
+    #[test]
+    fn backlinks_page_and_request_recover_together_and_reuse_pending_work() {
+        let (_root, config) = fixture();
+        let session = lk_vault::MutationSession::acquire(&config.root).unwrap();
+        let claim =
+            super::super::queue::claim_writer(&config.root.join(".lorekeeper/queue"), false)
+                .unwrap();
+        let (plan, report) = plan_backlinks_publication(
+            &config,
+            &pages(&config),
+            backlinks::SynthesisPolicy::Record,
+        )
+        .unwrap();
+        assert_eq!(report.changed, 1);
+        assert_eq!(report.queued, 1);
+        let serialized = serde_json::to_value(plan).unwrap();
+        let target_after = serialized["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|step| step["path"] == TARGET)
+            .unwrap()["after"]
+            .as_str()
+            .unwrap();
+        std::fs::write(config.root.join(TARGET), target_after).unwrap();
+        let journal = serde_json::json!({"version":1,"plan":serialized});
+        std::fs::write(
+            config.root.join(".lorekeeper/mutation/pending.json"),
+            journal.to_string(),
+        )
+        .unwrap();
+        drop(claim);
+        drop(session);
+        let session = lk_vault::MutationSession::acquire(&config.root).unwrap();
+        let hash = lk_core::concept::citation_digest(&report.sync.resynthesize[0].citations);
+        let task = super::super::queue::current_synthesis_request(&config.root, TARGET, &hash)
+            .unwrap()
+            .unwrap();
+        task.validate_retained_input().unwrap();
+        assert_eq!(
+            task.input["citations"],
+            serde_json::to_value(&report.sync.resynthesize[0].citations).unwrap()
+        );
+        let repeated =
+            synchronize_backlinks(&config, &pages(&config), false, Some(&session)).unwrap();
+        assert_eq!(repeated.changed, 0);
+        assert_eq!(repeated.queued, 0);
+        let same = super::super::queue::current_synthesis_request(&config.root, TARGET, &hash)
+            .unwrap()
+            .unwrap();
+        assert_eq!(task.task_id, same.task_id);
+        assert!(
+            !config
+                .root
+                .join(".lorekeeper/mutation/pending.json")
+                .exists()
+        );
+    }
+
+    #[test]
+    fn backlinks_noop_provider_does_not_require_the_queue_claim() {
+        let (_root, mut config) = fixture();
+        config.llm.provider = lk_core::config::LlmProvider::Noop;
+        let session = lk_vault::MutationSession::acquire(&config.root).unwrap();
+        let _claim =
+            super::super::queue::claim_writer(&config.root.join(".lorekeeper/queue"), false)
+                .unwrap();
+        let result =
+            synchronize_backlinks(&config, &pages(&config), false, Some(&session)).unwrap();
+        assert_eq!(result.changed, 1);
+        assert_eq!(result.queued, 0);
+        let concept = std::fs::read_to_string(config.root.join(TARGET)).unwrap();
+        assert!(concept.contains("source_count: 1"));
+        assert!(concept.contains("synthesis: old"));
     }
 }

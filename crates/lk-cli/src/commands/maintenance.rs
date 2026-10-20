@@ -305,7 +305,11 @@ pub async fn run(
     }
 
     if prune_queue {
-        super::queue::prune(opts, None, false, dry_run).await?;
+        if let Some(session) = &_mutation {
+            super::queue::prune_with_session(session, false)?;
+        } else {
+            super::queue::prune(opts, None, false, true).await?;
+        }
     }
     Ok(())
 }

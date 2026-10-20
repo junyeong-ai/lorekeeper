@@ -27,7 +27,7 @@ The JSON contract is:
   "concepts": [{
     "path": "wiki/concepts/subject.md",
     "revision": "FULL_FILE_REVISION",
-    "title": "Source-written qualified name",
+    "title": "Source-grounded qualified name",
     "aliases": ["Equivalent source form"],
     "category": "CONFIGURED_CATEGORY_ID",
     "tags": ["specific-theme"],

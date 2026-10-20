@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use lk_core::config::VaultDirs;
-use rusqlite::{Connection, OpenFlags, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde::Serialize;
 
 use crate::search::{MatchProjection, Page, SearchOptions, SearchResult, fold_name, spacing_key};
@@ -110,9 +110,20 @@ fn prepare_search_inner(
     verify: impl FnOnce(&[(PathBuf, String)]) -> Result<(), VaultError>,
 ) -> Result<SearchSnapshot, VaultError> {
     let root = session.root();
-    let mut pages = super::search::load_pages(root, dirs, true)?;
+    let mut pages = Vec::new();
+    let mut authored_revisions = BTreeMap::new();
+    super::search::visit_pages(root, dirs, true, |mut page, _| {
+        authored_revisions.insert(
+            page.rel_path.clone(),
+            lk_core::concept::source_revision(&page.page),
+        );
+        page.page.body = String::new();
+        page.page.original = None;
+        pages.push(page);
+        Ok(())
+    })?;
     super::search::attach_reviews(root, dirs, &mut pages)?;
-    let provenance = crate::provenance_index::capture(root, dirs, &pages)?;
+    let provenance = crate::provenance_index::capture(root, dirs, &pages, &authored_revisions)?;
     // Body-search pagination retains traversal order; browse ties use PathBuf ordering.
     let mut ordered_paths = pages.iter().map(|page| &page.rel_path).collect::<Vec<_>>();
     ordered_paths.sort();
@@ -271,10 +282,17 @@ fn prepare_search_inner(
                     .ok_or_else(|| invalid("page ID overflow"))?;
                 next_id
             };
+            let raw = std::fs::read_to_string(crate::page_path(root, &page.rel_path)?)?;
+            if lk_core::concept::file_revision(&raw) != page.file_revision {
+                return Err(invalid("page changed during snapshot preparation"));
+            }
+            let mut page = page.clone();
+            page.page = crate::parse_page(&raw).map_err(VaultError::Frontmatter)?;
+            page.page.original = None;
             let aliases = serde_json::to_string(&page.aliases)
                 .map_err(|e| VaultError::Serialization(e.to_string()))?;
             let mut metadata = page.clone();
-            metadata.page.body.clear();
+            metadata.page.body = String::new();
             metadata
                 .page
                 .frontmatter
@@ -469,11 +487,46 @@ pub(super) fn search(
     if options.query.is_none() {
         return browse(&transaction, options);
     }
+    let mut collector = super::search::SearchCollector::new(options);
+    let (spellings, terms) =
+        visit_query_candidates(&transaction, options, |page, spellings, terms, identity| {
+            collector.push(
+                std::borrow::Cow::Owned(page),
+                options,
+                spellings,
+                terms,
+                identity,
+            );
+            Ok(())
+        })?;
+    let mut result = collector.finish(options, &spellings, &terms);
+    let mut body = transaction.prepare("SELECT body FROM pages WHERE path = ?1")?;
+    for hit in &mut result.hits {
+        let captured: String = body.query_row([&hit.path], |row| row.get(0))?;
+        hit.excerpt = super::search::excerpt_with_spacing(
+            &captured,
+            hit.matched,
+            &terms,
+            &spellings,
+            hit.spacing_match,
+        );
+    }
+    attach_synthesis(&transaction, &mut result)?;
+    Ok(result)
+}
+
+/// Enumerate the complete indexed lexical candidate set. The shared matcher decides
+/// exact hits; metadata filters and result pagination remain the caller's responsibility.
+pub(super) fn visit_query_candidates(
+    connection: &Connection,
+    options: &SearchOptions<'_>,
+    mut visit: impl FnMut(Page, &[String], &[String], Option<&str>) -> Result<(), VaultError>,
+) -> Result<(Vec<String>, Vec<String>), VaultError> {
     let query = options.query.unwrap_or_default();
     let identity = lk_core::concept::identity_key(query);
     let terms = super::search::query_terms(query, options.phrase);
     let vocabulary = |column: &str, key: &str| -> Result<Vec<Page>, VaultError> {
-        let mut statement = transaction.prepare(&format!(
+        let mut statement = connection.prepare(&format!(
             "SELECT DISTINCT pages.metadata FROM names JOIN pages ON pages.id = names.page_id WHERE pages.concept = 1 AND names.{column} = ?1 ORDER BY pages.path"
         ))?;
         let rows = statement.query_map([key], |row| row.get::<_, String>(0))?;
@@ -546,7 +599,7 @@ pub(super) fn search(
     let sql = format!(
         "SELECT metadata, summary, text, spacing_text FROM pages WHERE {scope} AND {filter} ORDER BY traversal_rank"
     );
-    let mut statement = transaction.prepare(&sql)?;
+    let mut statement = connection.prepare(&sql)?;
     let rows = statement.query_map(rusqlite::params_from_iter(&arguments), |row| {
         Ok((
             row.get::<_, String>(0)?,
@@ -555,7 +608,6 @@ pub(super) fn search(
             row.get::<_, String>(3)?,
         ))
     })?;
-    let mut collector = super::search::SearchCollector::new(options);
     for row in rows {
         let (metadata, summary, text, spacing_text) = row?;
         let mut page: Page = serde_json::from_str(&metadata)
@@ -565,27 +617,35 @@ pub(super) fn search(
             text,
             spacing_text,
         });
-        collector.push(
-            std::borrow::Cow::Owned(page),
-            options,
-            &spellings,
-            &terms,
-            identity.as_deref(),
-        );
+        visit(page, &spellings, &terms, identity.as_deref())?;
     }
-    let mut result = collector.finish(options, &spellings, &terms);
-    let mut body = transaction.prepare("SELECT body FROM pages WHERE path = ?1")?;
+    Ok((spellings, terms))
+}
+
+fn attach_synthesis(connection: &Connection, result: &mut SearchResult) -> Result<(), VaultError> {
+    let available: bool =
+        connection.query_row("SELECT citations_available FROM snapshot", [], |row| {
+            row.get(0)
+        })?;
+    if !available {
+        return Ok(());
+    }
+    let mut evidence = connection
+        .prepare("SELECT citation_count, digest FROM concept_evidence WHERE path = ?1")?;
     for hit in &mut result.hits {
-        let captured: String = body.query_row([&hit.path], |row| row.get(0))?;
-        hit.excerpt = super::search::excerpt_with_spacing(
-            &captured,
-            hit.matched,
-            &terms,
-            &spellings,
-            hit.spacing_match,
-        );
+        if hit.synthesis.status == crate::SynthesisInputStatus::NotApplicable {
+            continue;
+        }
+        let header: Option<(i64, String)> = evidence
+            .query_row([&hit.path], |row| Ok((row.get(0)?, row.get(1)?)))
+            .optional()?;
+        let (count, digest) = header.ok_or_else(|| {
+            invalid("exact concept page is absent from the selected evidence snapshot")
+        })?;
+        let count = usize::try_from(count).map_err(|error| invalid(error.to_string()))?;
+        hit.synthesis = hit.synthesis.clone().with_evidence(count, &digest);
     }
-    Ok(result)
+    Ok(())
 }
 
 /// Exact captured metadata filters shared by browse and raw-body traversal.
@@ -707,6 +767,7 @@ fn browse(
     result.source_statuses = source_statuses;
     result.knowledge_statuses = knowledge_statuses;
     result.tags = tags;
+    attach_synthesis(connection, &mut result)?;
     Ok(result)
 }
 
@@ -1393,6 +1454,174 @@ mod tests {
     }
 
     #[test]
+    fn synthesis_freshness_tracks_captured_evidence_across_all_discovery_views() {
+        use crate::SynthesisInputStatus as Status;
+        use lk_core::concept::{Citation, citation_digest};
+
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let concept = "wiki/concepts/retention.md";
+        let source = "wiki/documents/policy.md";
+        let source_text = "---\ntype: document\ntitle: Policy\n---\n## Summary\nProduction retention is 30 days.\n\n[Retention](../concepts/retention.md)\n";
+        write(root.path(), source, source_text);
+        let first = Citation::new(Path::new(source), &crate::parse_page(source_text).unwrap());
+        let first_digest = citation_digest(std::slice::from_ref(&first));
+        let concept_text = |markers: &str, body: &str| {
+            format!(
+                "---\ntype: concept\ntitle: Retention\n{markers}---\n## Synthesis\n{body}\n\n## Sources\n\n## Related\n"
+            )
+        };
+        let tracked = concept_text(
+            &format!("llm_inputs: {{synthesis: {first_digest}, synthesis_done: {first_digest}}}\n"),
+            "Production retention is 30 days.",
+        );
+        write(root.path(), concept, &tracked);
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let capture = |citations: Vec<Citation>| {
+            prepare_search_with_citations(
+                &session,
+                &dirs,
+                &crate::ConceptCitationProjection {
+                    input_revision: "fixture-graph".into(),
+                    concepts: vec![crate::ConceptCitationSet {
+                        path: concept.into(),
+                        source_count: usize::from(!citations.is_empty()),
+                        citations,
+                    }],
+                },
+                |_| Ok(()),
+            )
+            .unwrap()
+        };
+        let inspect = |snapshot: &str, status: Status| {
+            let mut values = Vec::new();
+            for query in [None, Some("Retention")] {
+                let result = crate::search(
+                    root.path(),
+                    &dirs,
+                    &SearchOptions {
+                        query,
+                        snapshot: Some(snapshot),
+                        format: Some("concept"),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                assert_eq!(result.hits.len(), 1);
+                values.push(result.hits[0].synthesis.clone());
+            }
+            let context = crate::inspect_page_context(
+                root.path(),
+                &dirs,
+                Path::new(concept),
+                &crate::ContextOptions {
+                    snapshot,
+                    limit: 1,
+                    offset: 0,
+                },
+            )
+            .unwrap();
+            values.push(context.synthesis);
+            for value in &values {
+                assert_eq!(value.status, status);
+                assert_eq!(value, &values[0]);
+            }
+            values.remove(0)
+        };
+        let prepared = prepare_search(&session, &dirs).unwrap();
+        inspect(&prepared.snapshot, Status::NotCaptured);
+        let live = crate::search(
+            root.path(),
+            &dirs,
+            &SearchOptions {
+                query: Some("Retention"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            live.hits
+                .iter()
+                .filter(|hit| hit.format.as_deref() == Some("concept"))
+                .all(|hit| hit.synthesis.status == Status::NotCaptured)
+        );
+        let prepared = capture(vec![first]);
+        inspect(&prepared.snapshot, Status::CurrentInput);
+
+        let changed = source_text.replace("30 days", "7 days");
+        write(root.path(), source, &changed);
+        let second = Citation::new(Path::new(source), &crate::parse_page(&changed).unwrap());
+        let second_digest = citation_digest(std::slice::from_ref(&second));
+        let prepared = capture(vec![second.clone()]);
+        let pending = inspect(&prepared.snapshot, Status::Pending);
+        assert_eq!(
+            pending.evidence_digest.as_deref(),
+            Some(second_digest.as_str())
+        );
+        assert_eq!(pending.recorded_input, pending.completed_input);
+        assert_eq!(
+            std::fs::read_to_string(root.path().join(concept)).unwrap(),
+            tracked
+        );
+
+        write(
+            root.path(),
+            concept,
+            &concept_text(
+                &format!(
+                    "llm_inputs: {{synthesis: {second_digest}, synthesis_done: {first_digest}}}\n"
+                ),
+                "Production retention is 30 days.",
+            ),
+        );
+        let prepared = capture(vec![second.clone()]);
+        inspect(&prepared.snapshot, Status::Pending);
+        write(
+            root.path(),
+            concept,
+            &concept_text(
+                &format!(
+                    "llm_inputs: {{synthesis: {second_digest}, synthesis_done: {second_digest}}}\n"
+                ),
+                "",
+            ),
+        );
+        let prepared = capture(vec![second.clone()]);
+        inspect(&prepared.snapshot, Status::CurrentInput);
+
+        write(root.path(), concept, &concept_text("", "Authored scope."));
+        let prepared = capture(vec![second.clone()]);
+        inspect(&prepared.snapshot, Status::Untracked);
+        write(
+            root.path(),
+            concept,
+            &concept_text("llm_inputs: {synthesis_done: 42}\n", "Authored scope."),
+        );
+        let prepared = capture(vec![second]);
+        assert!(
+            !inspect(&prepared.snapshot, Status::InvalidMetadata)
+                .issues
+                .is_empty()
+        );
+
+        write(root.path(), concept, &tracked);
+        let prepared = capture(Vec::new());
+        inspect(&prepared.snapshot, Status::EmptyEvidence);
+        let document = crate::inspect_page_context(
+            root.path(),
+            &dirs,
+            Path::new(source),
+            &crate::ContextOptions {
+                snapshot: &prepared.snapshot,
+                limit: 1,
+                offset: 0,
+            },
+        )
+        .unwrap();
+        assert_eq!(document.synthesis.status, Status::NotApplicable);
+    }
+
+    #[test]
     fn incremental_refresh_matches_fresh_views_without_replacing_unchanged_owners() {
         let root = tempfile::tempdir().unwrap();
         let fresh = tempfile::tempdir().unwrap();
@@ -1532,6 +1761,18 @@ mod tests {
                     serde_json::to_value(&full).unwrap(),
                     "{query:?} {tags:?}"
                 );
+                for (captured, current) in incremental.hits.iter_mut().zip(&live.hits) {
+                    if current.synthesis.status == crate::SynthesisInputStatus::NotCaptured {
+                        assert!(captured.synthesis.evidence_digest.is_some());
+                        assert_ne!(
+                            captured.synthesis.status,
+                            crate::SynthesisInputStatus::NotCaptured
+                        );
+                    } else {
+                        assert_eq!(captured.synthesis, current.synthesis);
+                    }
+                    captured.synthesis = current.synthesis.clone();
+                }
                 assert_eq!(
                     serde_json::to_value(&incremental.hits).unwrap(),
                     serde_json::to_value(&live.hits).unwrap(),

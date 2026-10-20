@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -103,6 +104,10 @@ impl Config {
 
     fn validate(&mut self) -> Result<(), ConfigError> {
         self.execution.validate()?;
+        self.ingest
+            .originals
+            .validate()
+            .map_err(ConfigError::Validation)?;
         if let Some(documents) = &self.ingest.documents {
             documents.validate()?;
         }
@@ -814,6 +819,9 @@ pub struct SourceConfig {
     pub classify: Vec<ClassifyRule>,
     #[serde(default)]
     pub labels: Vec<String>,
+    /// Complete acquisition budget for this source, overriding ingest.source_timeout_seconds.
+    #[serde(default)]
+    pub collection_timeout_seconds: Option<NonZeroU64>,
     #[serde(default)]
     pub concept_policy: ConceptPolicy,
     /// Optional natural-language relevance criterion. When set, the LLM keeps only
@@ -1356,13 +1364,26 @@ impl Default for MaintenanceConfig {
 /// When `lore ingest` runs. Ingestion is scheduled as ONE run over every enabled source,
 /// never per source: the work-log is a cross-source daily aggregate, so a per-source run
 /// would render it from a subset and overwrite the complete page.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct IngestConfig {
+    pub source_timeout_seconds: NonZeroU64,
     pub documents: Option<crate::content::InputProcessingConfig>,
+    pub originals: crate::manual_original::OriginalCaptureConfig,
     /// Optional cron expression; when set, `lore schedule` emits a single crontab line
     /// running `lore ingest` (all sources). Absent → no scheduled ingest line.
     pub schedule: Option<String>,
+}
+
+impl Default for IngestConfig {
+    fn default() -> Self {
+        Self {
+            source_timeout_seconds: NonZeroU64::new(600).unwrap(),
+            documents: None,
+            originals: Default::default(),
+            schedule: None,
+        }
+    }
 }
 
 /// Link graph analysis configuration, consumed by `lore graph` / `lk-graph`.
@@ -1632,6 +1653,37 @@ mod tests {
     }
 
     #[test]
+    fn collection_budgets_default_and_allow_positive_source_overrides() {
+        let yaml = "vault: {root: /tmp/vault}\nidentity: {name: Test, email: test@example.invalid}\nsources:\n  notes: {type: manual, collection_timeout_seconds: 45}\n";
+        let config: Config = crate::yaml::from_str(yaml).unwrap();
+        assert_eq!(config.ingest.source_timeout_seconds.get(), 600);
+        assert_eq!(
+            config.sources["notes"]
+                .collection_timeout_seconds
+                .unwrap()
+                .get(),
+            45
+        );
+        for extra in [
+            "ingest: {source_timeout_seconds: 0}\n",
+            "ingest: {source_timeout_seconds: -1}\n",
+        ] {
+            assert!(crate::yaml::from_str::<Config>(&format!("{yaml}{extra}")).is_err());
+        }
+        assert!(
+            crate::yaml::from_str::<Config>(&yaml.replace(
+                "collection_timeout_seconds: 45",
+                "collection_timeout_seconds: 0"
+            ))
+            .is_err()
+        );
+        let configured: Config =
+            crate::yaml::from_str(&format!("{yaml}ingest: {{source_timeout_seconds: 120}}\n"))
+                .unwrap();
+        assert_eq!(configured.ingest.source_timeout_seconds.get(), 120);
+    }
+
+    #[test]
     fn normalized_focus_treats_blank_as_none() {
         let mk = |f: Option<&str>| SourceConfig {
             source_type: SourceType::Rss,
@@ -1641,6 +1693,7 @@ mod tests {
             classify: vec![],
             labels: vec![],
             concept_policy: ConceptPolicy::SupportedNew,
+            collection_timeout_seconds: None,
             focus: f.map(str::to_owned),
             highlights: vec![],
         };

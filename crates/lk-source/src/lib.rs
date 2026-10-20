@@ -54,6 +54,12 @@ pub enum SourceError {
     Auth(String),
     #[error("invalid params: {0}")]
     InvalidParams(String),
+    #[error(
+        "source collection exceeded its {seconds}-second acquisition budget; observation is incomplete"
+    )]
+    CollectionTimeout { seconds: u64 },
+    #[error("response exceeds the {max_bytes}-byte acquisition limit")]
+    ResponseTooLarge { max_bytes: usize },
     #[error("API {status}: {message}")]
     Api { status: u16, message: String },
     #[error("parse: {0}")]
@@ -148,6 +154,7 @@ pub struct ExtractContext {
     /// Managed output namespaces, kept separate from raw input directories.
     pub vault_dirs: lk_core::config::VaultDirs,
     pub documents: Option<lk_core::content::InputProcessingConfig>,
+    pub originals: lk_core::manual_original::OriginalCaptureConfig,
 }
 
 impl ExtractContext {
@@ -482,6 +489,7 @@ mod tests {
             vault_root: std::path::PathBuf::new(),
             vault_dirs: Default::default(),
             documents: None,
+            originals: Default::default(),
         }
     }
 

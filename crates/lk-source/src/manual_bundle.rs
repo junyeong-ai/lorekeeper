@@ -4,14 +4,16 @@ use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
 use html5ever::tendril::TendrilSink;
+use lk_core::captured_file::CapturedFile;
 use lk_core::manual_original::{
-    MAX_ORIGINAL_MEMBER_BYTES, MAX_ORIGINAL_MEMBERS, ManualBundleCapture, ManualBundleManifest,
-    ManualBundleMember, ORIGINAL_SCHEME, OriginalDigest, UnsupportedOriginalConstruct,
+    MAX_ORIGINAL_MEMBERS, ManualBundleCapture, ManualBundleManifest, ManualBundleMember,
+    ORIGINAL_SCHEME, OriginalCaptureConfig, UnsupportedOriginalConstruct,
 };
 use markup5ever_rcdom::{NodeData, RcDom};
 use pulldown_cmark::{Event, LinkType, Options, Parser, Tag};
 
 use crate::SourceError;
+#[cfg(test)]
 const MAX_TEXT_BYTES: usize = lk_core::manual_original::MAX_ORIGINAL_ENTRY_BYTES;
 const MAX_DEPTH: usize = 32;
 const SERIALIZER_OPTIONS: Options = Options::ENABLE_TABLES
@@ -44,6 +46,7 @@ pub(crate) fn direct_member(root: &Path, relative: &Path) -> Result<PathBuf, Sou
     }
     Ok(full)
 }
+#[cfg(test)]
 fn read_bounded(path: &Path, limit: usize) -> Result<Vec<u8>, SourceError> {
     let mut file = std::fs::File::open(path).map_err(error)?;
     if !file.metadata().map_err(error)?.is_file() {
@@ -278,10 +281,27 @@ pub(crate) fn capture(root: &Path, entry: &Path) -> Result<ManualBundleCapture, 
         lk_core::manual_original::MAX_MANUAL_BATCH_BYTES,
     )
 }
+#[cfg(test)]
 pub(crate) fn capture_limited(
     root: &Path,
     entry: &Path,
     budget: usize,
+) -> Result<ManualBundleCapture, SourceError> {
+    capture_with_limits(
+        root,
+        entry,
+        budget,
+        &OriginalCaptureConfig::default(),
+        MAX_TEXT_BYTES,
+    )
+}
+
+pub(crate) fn capture_with_limits(
+    root: &Path,
+    entry: &Path,
+    budget: usize,
+    limits: &OriginalCaptureConfig,
+    text_limit: usize,
 ) -> Result<ManualBundleCapture, SourceError> {
     let entry = entry.strip_prefix(root).map_err(error)?.to_path_buf();
     lk_core::manual_original::validate_member_path(
@@ -304,25 +324,25 @@ pub(crate) fn capture_limited(
         }
         let path = direct_member(root, &relative)?;
         let kind = text_kind(&path);
-        let bytes = read_bounded(
-            &path,
-            (if kind.is_some() || relative == entry {
-                MAX_TEXT_BYTES
-            } else {
-                MAX_ORIGINAL_MEMBER_BYTES
-            })
-            .min(budget.saturating_sub(total)),
-        )?;
+        let input_limit = (if relative == entry {
+            limits.max_entry_bytes.get()
+        } else {
+            limits.max_member_bytes.get()
+        })
+        .min(budget.saturating_sub(total));
+        let bytes = CapturedFile::capture(std::fs::File::open(&path).map_err(error)?, input_limit)
+            .map_err(error)?;
         total = total
-            .checked_add(bytes.len())
+            .checked_add(bytes.byte_len())
             .ok_or_else(|| error("bundle size overflow"))?;
         if total > budget {
-            return Err(error(
-                "local dependency closure exceeds 256 MiB; provide a smaller self-contained export (splitting inbox entries does not shrink a linked closure)",
-            ));
+            return Err(error(format!(
+                "local dependency closure exceeds the remaining {budget}-byte source budget; splitting entries does not shrink a linked closure"
+            )));
         }
         if let Some(html) = kind {
-            let text = std::str::from_utf8(&bytes).map_err(error)?;
+            let raw = bytes.read_bytes(text_limit).map_err(error)?;
+            let text = std::str::from_utf8(&raw).map_err(error)?;
             let (refs, unsupported) = if html {
                 html_references(text)
             } else {
@@ -366,8 +386,8 @@ pub(crate) fn capture_limited(
             .iter()
             .map(|(p, b)| ManualBundleMember {
                 path: p.to_string_lossy().into(),
-                bytes: b.len(),
-                revision: OriginalDigest::of(b),
+                bytes: b.byte_len(),
+                revision: b.revision().clone(),
             })
             .collect(),
         unsupported: issues.into_iter().collect(),
@@ -389,6 +409,7 @@ pub(crate) fn project_links(
     entry: &Path,
     capture: &ManualBundleCapture,
     wiki_documents: &Path,
+    max_output_bytes: usize,
 ) -> Result<String, SourceError> {
     let reference = capture.manifest.reference().map_err(error)?;
     let entry = entry.strip_prefix(root).map_err(error)?;
@@ -476,29 +497,73 @@ pub(crate) fn project_links(
     }
     let mut out = String::new();
     pulldown_cmark_to_cmark::cmark(events, &mut out, SERIALIZER_OPTIONS).map_err(error)?;
-    if out.len() > MAX_TEXT_BYTES {
-        return Err(error("derived Markdown exceeds 32 MiB"));
+    if out.len() > max_output_bytes {
+        return Err(error(
+            "derived Markdown exceeds the configured projection limit",
+        ));
     }
     Ok(out)
 }
 
 pub(crate) fn unchanged(root: &Path, capture: &ManualBundleCapture) -> bool {
-    capture
-        .manifest
-        .members
-        .iter()
-        .zip(&capture.contents)
-        .all(|(member, bytes)| {
-            direct_member(root, Path::new(&member.path))
-                .and_then(|p| read_bounded(&p, MAX_ORIGINAL_MEMBER_BYTES))
-                .is_ok_and(|now| now == *bytes)
-        })
+    capture.manifest.members.iter().all(|member| {
+        direct_member(root, Path::new(&member.path))
+            .and_then(|path| {
+                let file = std::fs::File::open(path).map_err(error)?;
+                if file.metadata().map_err(error)?.len() != member.bytes as u64 {
+                    return Err(error("original size changed"));
+                }
+                lk_core::captured_file::hash_reader(file.take(member.bytes as u64 + 1))
+                    .map_err(error)
+            })
+            .is_ok_and(|(bytes, revision)| bytes == member.bytes && revision == member.revision)
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn larger_binary_capture_is_explicit_file_backed_and_retirement_checks_original_bytes() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("large.pdf");
+        let bytes = MAX_TEXT_BYTES + 1;
+        std::fs::File::create(&path)
+            .unwrap()
+            .set_len(bytes as u64)
+            .unwrap();
+        assert!(capture(root.path(), &path).is_err());
+        assert!(path.exists());
+        let limits = OriginalCaptureConfig {
+            max_entry_bytes: std::num::NonZeroUsize::new(bytes).unwrap(),
+            ..Default::default()
+        };
+        limits.validate().unwrap();
+        let captured = capture_with_limits(
+            root.path(),
+            &path,
+            limits.max_source_bytes.get(),
+            &limits,
+            MAX_TEXT_BYTES,
+        )
+        .unwrap();
+        assert_eq!(captured.byte_len(), bytes);
+        assert_eq!(captured.manifest.schema, ORIGINAL_SCHEME);
+        let scratch = captured.contents[0].path().to_owned();
+        assert!(scratch.exists());
+        assert!(unchanged(root.path(), &captured));
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        file.write_all(b"changed").unwrap();
+        assert!(!unchanged(root.path(), &captured));
+        captured.validate().unwrap();
+        drop(captured);
+        assert!(!scratch.exists());
+        assert!(path.exists());
+        assert!(!root.path().join(".lorekeeper").exists());
+    }
     fn fixture() -> (TempDir, PathBuf) {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path().canonicalize().unwrap();
@@ -519,6 +584,7 @@ mod tests {
             &root.join("note.md"),
             &a,
             Path::new("knowledge/docs"),
+            MAX_TEXT_BYTES,
         )
         .unwrap();
         let destinations: Vec<_> = Parser::new(&projected)
@@ -537,7 +603,9 @@ mod tests {
                 .members
                 .iter()
                 .position(|m| m.path == "note.md")
-                .unwrap()],
+                .unwrap()]
+            .read_bytes(MAX_TEXT_BYTES)
+            .unwrap(),
             source.as_bytes()
         );
         std::fs::write(root.join("images/a (1).png"), b"new").unwrap();
@@ -561,7 +629,8 @@ mod tests {
                 &root,
                 &root.join("n.md"),
                 &a,
-                Path::new("wiki/documents")
+                Path::new("wiki/documents"),
+                MAX_TEXT_BYTES
             )
             .is_ok()
         );
@@ -659,7 +728,8 @@ mod tests {
                 &root,
                 &root.join("n.md"),
                 &captured,
-                Path::new("wiki/documents")
+                Path::new("wiki/documents"),
+                MAX_TEXT_BYTES
             )
             .is_err()
         );
@@ -702,6 +772,7 @@ mod wikilink_tests {
             &root.join("note.md"),
             &captured,
             Path::new("wiki/documents"),
+            MAX_TEXT_BYTES,
         )
         .unwrap();
         let mut found = 0;

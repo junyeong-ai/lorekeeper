@@ -60,6 +60,47 @@ impl Workspace {
         std::fs::read_to_string(self.vault().join(rel)).expect("read page")
     }
 
+    fn capture_extraction_scope(
+        &self,
+        task_id: &str,
+        queries: &[lk_core::discovery::DiscoveryQuery],
+    ) -> String {
+        let status = work_json(self, &["queue", "status", "--json"]);
+        let target = status["data"]["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["task_id"] == task_id)
+            .unwrap();
+        assert!(matches!(
+            target["status"].as_str(),
+            Some("current" | "done")
+        ));
+        self.write(
+            ".lorekeeper/discovery-request.json",
+            &serde_json::json!({
+                "target_revision":target["target_revision"],"queries":queries,
+            })
+            .to_string(),
+        );
+        let file = self.vault().join(".lorekeeper/discovery-request.json");
+        work_json(
+            self,
+            &[
+                "work",
+                "discover",
+                "--task-id",
+                task_id,
+                "--file",
+                file.to_str().unwrap(),
+            ],
+        );
+        work_json(self, &["work", "context", "--task-id", task_id])["context_revision"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    }
+
     /// One `extract-concepts` result naming a single concept, as a drain writes it.
     /// Serialized from the real type so the fixture cannot drift from the wire format.
     fn drop_result(&self, task_id: &str, target: &str, hash: &str, concept: &str) {
@@ -76,53 +117,120 @@ impl Workspace {
         concept: &str,
         synthesis: Option<&str>,
     ) {
+        let target_revision = std::fs::read_to_string(self.vault().join(target))
+            .map(|content| lk_core::concept::file_revision(&content))
+            .unwrap_or_default();
+        let task_target = lk_queue::TaskTarget {
+            vault_path: target.into(),
+            kind: lk_queue::TargetKind::DailyConcepts,
+            anchor: "## Related Concepts".into(),
+        };
+        let mut request = extraction_request(hash);
+        request.target = task_target.clone();
+        let mut task = lk_queue::QueueLlmClient::new(self.vault().join(".lorekeeper/queue"))
+            .build_task("fixture", lk_queue::TaskKind::ExtractConcepts, request);
+        task.task_id = task_id.into();
+        self.write(
+            &format!(".lorekeeper/queue/{task_id}.jsonl"),
+            &serde_json::to_string(&task).unwrap(),
+        );
+        let discovery = vec![lk_core::discovery::DiscoveryQuery {
+            query: concept.into(),
+            phrase: true,
+            spacing: false,
+        }];
+        let status = work_json(self, &["queue", "status", "--json"]);
+        let selected = status["data"]["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["task_id"] == task_id)
+            .unwrap();
+        let context_revision = if matches!(selected["status"].as_str(), Some("current" | "done")) {
+            self.write(
+                ".lorekeeper/discovery-request.json",
+                &serde_json::json!({
+                    "target_revision":target_revision,"queries":discovery,
+                })
+                .to_string(),
+            );
+            let file = self.vault().join(".lorekeeper/discovery-request.json");
+            work_json(
+                self,
+                &[
+                    "work",
+                    "discover",
+                    "--task-id",
+                    task_id,
+                    "--file",
+                    file.to_str().unwrap(),
+                ],
+            );
+            work_json(self, &["work", "context", "--task-id", task_id])["context_revision"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        } else {
+            assert!(matches!(
+                selected["status"].as_str(),
+                Some("unreadable" | "missing-target" | "stale")
+            ));
+            "unavailable-for-noncurrent-target".into()
+        };
+        let resolved = self.run(&["resolve", concept, "--json"]);
+        let resolved: serde_json::Value = serde_json::from_slice(&resolved.stdout).unwrap();
+        let admission = if resolved["verdict"] == "owned" {
+            let path = resolved["path"].as_str().unwrap();
+            lk_queue::ConceptAdmission::Reuse {
+                owner: lk_queue::ConceptOwner {
+                    path: path.into(),
+                    revision: lk_core::concept::file_revision(&self.read(path)),
+                },
+            }
+        } else {
+            assert!(matches!(
+                resolved["verdict"].as_str(),
+                Some("absent" | "ambiguous")
+            ));
+            lk_queue::ConceptAdmission::New
+        };
+        let grounding = synthesis.map(str::to_owned).or_else(|| {
+            matches!(admission, lk_queue::ConceptAdmission::New).then(|| {
+                format!(
+                    "{concept} is the scoped concept declared by this fixture's retained source."
+                )
+            })
+        });
         let result = lk_queue::TaskResult {
             concept_policy: lk_core::config::ConceptPolicy::SupportedNew,
-            target_revision: std::fs::read_to_string(self.vault().join(target))
-                .map(|content| blake3::hash(content.as_bytes()).to_hex().to_string())
-                .unwrap_or_default(),
+            target_revision,
+            context_revision,
+            discovery,
             task_id: task_id.into(),
-            cache_hash: extraction_request(hash).cache_hash(),
-            target: lk_queue::TaskTarget {
-                vault_path: target.into(),
-                kind: lk_queue::TargetKind::DailyConcepts,
-                anchor: "## Related Concepts".into(),
-            },
+            cache_hash: task.cache_hash,
+            target: task_target,
             date: jiff::civil::date(2026, 5, 23),
             concepts: vec![lk_queue::ReportedConcept {
+                admission,
                 rss_evidence: Vec::new(),
                 concept: lk_core::concept::ExtractedConcept {
                     name: concept.into(),
                     category: None,
                     aliases: Vec::new(),
                 },
-                synthesis: synthesis.map(str::to_string),
+                synthesis: grounding,
             }],
         };
-        let body = serde_json::to_string(&result).expect("serialize result");
-        let task = lk_queue::QueueTask {
-            task_id: result.task_id.clone(),
-            kind: lk_queue::TaskKind::ExtractConcepts,
-            created_at: "2026-05-23T00:00:00Z".parse().unwrap(),
-            cache_hash: result.cache_hash.clone(),
-            input: {
-                let mut input = extraction_request(hash).task_input();
-                input.insert("locale".into(), "en".into());
-                input
-            },
-            target: result.target.clone(),
-        };
-        self.write(
-            &format!(".lorekeeper/queue/{task_id}.jsonl"),
-            &serde_json::to_string(&task).unwrap(),
-        );
         let dir = self
             .vault()
-            .join(".lorekeeper")
-            .join("queue")
+            .join(".lorekeeper/queue")
             .join(lk_queue::RESULTS_SUBDIR);
         std::fs::create_dir_all(&dir).expect("results dir");
-        std::fs::write(dir.join(format!("{task_id}.json")), body).expect("result");
+        std::fs::write(
+            dir.join(format!("{task_id}.json")),
+            serde_json::to_vec(&result).unwrap(),
+        )
+        .expect("result");
     }
 
     /// Run `queue apply` and require it to have APPLIED `applied` results and dropped
@@ -248,7 +356,563 @@ fn two_results_for_one_page_both_land() {
 }
 
 #[test]
-fn existing_only_policy_refuses_new_nodes_and_retains_work_until_an_owner_exists() {
+#[cfg(unix)]
+fn directory_alias_targets_keep_one_publication_owner_and_refuse_duplicate_owners() {
+    for duplicate in [false, true] {
+        let ws = Workspace::new();
+        let seed = "Selected Candidate A and Selected Candidate B describe distinct mechanisms.";
+        let before = daily_page(seed);
+        ws.write(PAGE, &before);
+        std::os::unix::fs::symlink(ws.vault().join("daily"), ws.vault().join("daily-alias"))
+            .unwrap();
+        let alias = "daily-alias/notes/2026-05-23.md";
+        let owner_a = "wiki/concepts/first.md";
+        let owner_b = "wiki/concepts/second.md";
+        let definition = |title: &str| {
+            format!(
+                "---\ntype: concept\ntitle: {title}\n---\n## Synthesis\nEstablished scope.\n\n## Sources\n\n## Related\n"
+            )
+        };
+        let first_before = definition("Selected Candidate A");
+        let second_before = definition("Selected Candidate B");
+        ws.write(owner_a, &first_before);
+        ws.write(owner_b, &second_before);
+        ws.drop_result("alias", alias, seed, "Selected Candidate B");
+        if duplicate {
+            ws.drop_result("original", PAGE, seed, "Selected Candidate A");
+        }
+        let status = work_json(&ws, &["queue", "status", "--json"]);
+        assert_eq!(
+            status["data"]["tasks"].as_array().unwrap().len(),
+            if duplicate { 2 } else { 1 }
+        );
+        assert!(
+            status["data"]["tasks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|task| task["status"] == "current")
+        );
+        assert_eq!(
+            ws.vault().join(alias).canonicalize().unwrap(),
+            ws.vault().join(PAGE).canonicalize().unwrap()
+        );
+        let results: Vec<_> = json_files(&results_dir(&ws))
+            .into_iter()
+            .map(|path| {
+                let raw = std::fs::read(&path).unwrap();
+                (path, raw)
+            })
+            .collect();
+        for dry_run in [true, false] {
+            let output = ws.run(if dry_run {
+                &["queue", "apply", "--dry-run"]
+            } else {
+                &["queue", "apply"]
+            });
+            assert_eq!(
+                output.status.success(),
+                !duplicate,
+                "duplicate={duplicate}, dry={dry_run}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            if duplicate {
+                assert!(
+                    String::from_utf8_lossy(&output.stderr)
+                        .contains("multiple publication addresses resolve to the same page")
+                );
+            }
+            if dry_run || duplicate {
+                assert_eq!(ws.read(PAGE), before);
+                assert_eq!(ws.read(owner_a), first_before);
+                assert_eq!(ws.read(owner_b), second_before);
+                for (path, raw) in &results {
+                    assert_eq!(std::fs::read(path).unwrap(), *raw);
+                }
+            }
+            assert!(
+                !ws.vault()
+                    .join(".lorekeeper/mutation/pending.json")
+                    .exists()
+            );
+        }
+        if !duplicate {
+            assert!(ws.read(PAGE).contains("concepts_done:"));
+            assert!(ws.read(PAGE).contains("wiki/concepts/second.md"));
+            assert!(json_files(&results_dir(&ws)).is_empty());
+        }
+    }
+}
+
+#[test]
+fn duplicate_extraction_files_fold_once_and_conflicting_proposals_stay_unpublished() {
+    for conflicting in [false, true] {
+        let ws = Workspace::new();
+        ws.write(PAGE, &daily_page("h"));
+        ws.drop_result("duplicate", PAGE, "h", "Shared Subject");
+        let original_path = ".lorekeeper/queue/results/duplicate.json";
+        let original = ws.read(original_path);
+        let mut alias: serde_json::Value = serde_json::from_str(&original).unwrap();
+        if conflicting {
+            alias["concepts"][0]["synthesis"] =
+                "An incompatible proposal for the same retained task.".into();
+        }
+        let alias = serde_json::to_string_pretty(&alias).unwrap();
+        let alias_path = ".lorekeeper/queue/results/another-name.json";
+        ws.write(alias_path, &alias);
+        let other = "daily/notes/other.md";
+        ws.write(other, &daily_page("other"));
+        ws.drop_result("independent", other, "other", "Independent Subject");
+        let before = ws.read(PAGE);
+        let preview = ws.run(&["queue", "apply", "--dry-run"]);
+        assert_eq!(
+            preview.status.success(),
+            !conflicting,
+            "{}",
+            String::from_utf8_lossy(&preview.stderr)
+        );
+        assert_eq!(ws.read(PAGE), before);
+        assert_eq!(ws.read(original_path), original);
+        assert_eq!(ws.read(alias_path), alias);
+        if conflicting {
+            let output = ws.run(&["queue", "apply"]);
+            assert!(!output.status.success());
+            assert!(
+                String::from_utf8_lossy(&output.stderr).contains("conflicting extraction results")
+            );
+            assert_eq!(ws.read(PAGE), before);
+            assert_eq!(ws.read(original_path), original);
+            assert_eq!(ws.read(alias_path), alias);
+            assert!(!ws.vault().join("wiki/concepts/shared-subject.md").exists());
+        } else {
+            ws.apply_expecting(2, 0);
+            assert!(ws.read(PAGE).contains("concepts_done:"));
+            assert!(!ws.vault().join(original_path).exists());
+            assert!(!ws.vault().join(alias_path).exists());
+            assert_eq!(
+                ws.read(PAGE)
+                    .matches("wiki/concepts/shared-subject.md")
+                    .count(),
+                1
+            );
+        }
+        assert!(ws.read(other).contains("concepts_done:"));
+        assert!(
+            ws.vault()
+                .join("wiki/concepts/independent-subject.md")
+                .exists()
+        );
+    }
+}
+
+#[test]
+fn extraction_discovery_guards_complete_candidates_and_explicit_admission() {
+    for scenario in [
+        "current",
+        "new-match",
+        "changed-match",
+        "unrelated",
+        "missing-context",
+        "missing-admission",
+        "missing-grounding",
+        "no-queries",
+        "empty-extraction",
+    ] {
+        let ws = Workspace::new();
+        ws.write(PAGE, &daily_page("h"));
+        ws.write(
+            "wiki/documents/context.md",
+            "---\ntype: document\n---\nConcept A has a scoped neighboring claim.\n",
+        );
+        ws.drop_grounded_result(
+            "discovery",
+            PAGE,
+            "h",
+            "Concept A",
+            Some("Concept A is supported by this fixture's retained source."),
+        );
+        let path = ".lorekeeper/queue/results/discovery.json";
+        let mut result: serde_json::Value = serde_json::from_str(&ws.read(path)).unwrap();
+        let before = ws.read(PAGE);
+        match scenario {
+            "new-match" => ws.write(
+                "wiki/documents/new.md",
+                "---\ntype: document\n---\nConcept A has another source-scoped claim.\n",
+            ),
+            "changed-match" => ws.write(
+                "wiki/documents/context.md",
+                "---\ntype: document\n---\nConcept A applies only in development.\n",
+            ),
+            "unrelated" => ws.write(
+                "wiki/documents/unrelated.md",
+                "---\ntype: document\n---\nA separate subject.\n",
+            ),
+            "missing-context" => {
+                result.as_object_mut().unwrap().remove("context_revision");
+            }
+            "missing-admission" => {
+                result["concepts"][0]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("admission");
+            }
+            "missing-grounding" => {
+                result["concepts"][0]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("synthesis");
+            }
+            "no-queries" => result["discovery"] = serde_json::json!([]),
+            "empty-extraction" => {
+                result["concepts"] = serde_json::json!([]);
+                result["discovery"] = serde_json::json!([]);
+                result["context_revision"] = ws.capture_extraction_scope("discovery", &[]).into();
+            }
+            _ => {}
+        }
+        ws.write(path, &result.to_string());
+        let should_apply = matches!(scenario, "current" | "unrelated" | "empty-extraction");
+        let output = ws.run(&["queue", "apply"]);
+        assert_eq!(
+            output.status.success(),
+            should_apply,
+            "{scenario}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let records = ws.vault().join(".lorekeeper/queue/discovery");
+        let recipes = std::fs::read_dir(records)
+            .unwrap()
+            .filter_map(Result::ok)
+            .count();
+        if should_apply {
+            assert!(ws.read(PAGE).contains("concepts_done:"));
+            assert_eq!(recipes, 0, "successful publication retires its recipe");
+        } else {
+            assert_eq!(ws.read(PAGE), before);
+            assert!(!ws.vault().join("wiki/concepts/concept-a.md").exists());
+            assert_eq!(
+                recipes, 1,
+                "unfinished extraction keeps its discovery recipe"
+            );
+        }
+        if matches!(scenario, "new-match" | "changed-match") {
+            assert!(
+                String::from_utf8_lossy(&output.stderr).contains("semantic read scope changed")
+            );
+        }
+        if scenario == "no-queries" {
+            assert!(
+                String::from_utf8_lossy(&output.stderr)
+                    .contains("requires discovery before drafting")
+            );
+        }
+        if matches!(scenario, "missing-context" | "missing-admission") {
+            assert!(
+                ws.vault()
+                    .join(".lorekeeper/queue/results/corrupt/discovery.json")
+                    .exists()
+            );
+        }
+    }
+}
+
+#[test]
+fn explicit_discovery_scope_replaces_the_recorded_recipe_instead_of_adding_to_it() {
+    let ws = Workspace::new();
+    ws.write(PAGE, &daily_page("h"));
+    ws.write(
+        "wiki/documents/recorded.md",
+        "---\ntype: document\n---\nRecorded Candidate has a separate claim.\n",
+    );
+    ws.write(
+        "wiki/documents/selected.md",
+        "---\ntype: document\n---\nSelected Candidate has a scoped claim.\n",
+    );
+    ws.drop_result("explicit-discovery", PAGE, "h", "Selected Candidate");
+    ws.capture_extraction_scope(
+        "explicit-discovery",
+        &[lk_core::discovery::DiscoveryQuery {
+            query: "Recorded Candidate".into(),
+            phrase: true,
+            spacing: false,
+        }],
+    );
+    let queries = vec![lk_core::discovery::DiscoveryQuery {
+        query: "Selected Candidate".into(),
+        phrase: true,
+        spacing: false,
+    }];
+    ws.write(
+        ".lorekeeper/explicit-discovery.json",
+        &serde_json::json!({"queries":queries}).to_string(),
+    );
+    let file = ws.vault().join(".lorekeeper/explicit-discovery.json");
+    let context = work_json(
+        &ws,
+        &[
+            "work",
+            "context",
+            "--task-id",
+            "explicit-discovery",
+            "--discovery-file",
+            file.to_str().unwrap(),
+        ],
+    );
+    let addresses: Vec<_> = context["resources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|resource| resource["address"].as_str().unwrap())
+        .collect();
+    assert!(addresses.contains(&"wiki/documents/selected.md"));
+    assert!(!addresses.contains(&"wiki/documents/recorded.md"));
+    let result_path = ".lorekeeper/queue/results/explicit-discovery.json";
+    let mut result: lk_queue::TaskResult = serde_json::from_str(&ws.read(result_path)).unwrap();
+    result.context_revision = context["context_revision"].as_str().unwrap().into();
+    result.discovery = queries;
+    ws.write(result_path, &serde_json::to_string(&result).unwrap());
+    ws.write(
+        "wiki/documents/recorded.md",
+        "---\ntype: document\n---\nRecorded Candidate changed outside the explicit read scope.\n",
+    );
+    ws.apply_expecting(1, 0);
+    assert!(
+        ws.read(PAGE)
+            .contains("wiki/concepts/selected-candidate.md")
+    );
+}
+
+#[test]
+fn multipart_context_discloses_an_exact_plan_without_a_large_resource_roster() {
+    let ws = Workspace::new();
+    bounded_config(&ws);
+    let text = "Complete retained source.\n".repeat(600);
+    ws.write(PAGE, &daily_page(&text));
+    ws.drop_result("context-plan", PAGE, &text, "Selected Candidate");
+    let query = lk_core::discovery::DiscoveryQuery {
+        query: "Selected Candidate".into(),
+        phrase: true,
+        spacing: false,
+    };
+    ws.write(
+        ".lorekeeper/explicit-discovery.json",
+        &serde_json::json!({"queries":[query]}).to_string(),
+    );
+    let file = ws.vault().join(".lorekeeper/explicit-discovery.json");
+    let context = work_json(
+        &ws,
+        &[
+            "work",
+            "context",
+            "--task-id",
+            "context-plan",
+            "--discovery-file",
+            file.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(context["requires_bounded_work"], true);
+    assert!(context["resources"].is_null());
+    assert!(context["resource_count"].as_u64().unwrap() > 0);
+    assert!(context["part_count"].as_u64().unwrap() > 1);
+    assert!(
+        !ws.vault().join(".lorekeeper/work").exists(),
+        "context capture remains read-only"
+    );
+    let command: Vec<_> = context["plan_command"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|arg| arg.as_str().unwrap())
+        .collect();
+    assert_eq!(command[0], "lore");
+    assert_eq!(command[command.len() - 2], "--discovery-file");
+    assert_eq!(
+        Path::new(command.last().unwrap()),
+        file.canonicalize().unwrap()
+    );
+    let planned = work_json(&ws, &command[1..]);
+    assert_eq!(planned["context_revision"], context["context_revision"]);
+    assert_eq!(planned["parts"], context["part_count"]);
+}
+
+#[test]
+fn extraction_scope_tracks_declared_reviews_without_a_lexical_match() {
+    let owner = "wiki/concepts/canonical.md";
+    for (bounded, subject, scenario) in [
+        (false, owner, "current"),
+        (false, owner, "new"),
+        (false, owner, "changed"),
+        (false, owner, "deleted"),
+        (false, owner, "unrelated"),
+        (false, PAGE, "new"),
+        (false, PAGE, "unrelated"),
+        (true, owner, "current"),
+        (true, owner, "changed"),
+        (true, owner, "unrelated"),
+    ] {
+        let ws = Workspace::new();
+        if bounded {
+            bounded_config(&ws);
+        }
+        let text = if bounded {
+            "Retained source material.\n".repeat(500)
+        } else {
+            "h".into()
+        };
+        ws.write(PAGE, &daily_page(&text));
+        ws.write(owner, "---\ntype: concept\ntitle: Selected Candidate\n---\n## Synthesis\nEstablished scoped definition.\n\n## Sources\n\n## Related\n");
+        ws.write(
+            "wiki/concepts/unrelated.md",
+            "---\ntype: concept\n---\nSeparate subject.\n",
+        );
+        let evidence_path = "wiki/documents/proof.md";
+        let evidence = "---\ntype: document\n---\nAn independent recorded observation.\n";
+        ws.write(evidence_path, evidence);
+        let citation = lk_core::concept::Citation::new(
+            Path::new(evidence_path),
+            &lk_vault::parse_page(evidence).unwrap(),
+        );
+        let review_path = "wiki/explorations/judgment.md";
+        let review = |subject: &str, judgment: &str| {
+            format!(
+                "---\ntype: exploration\nreview: {}\n---\n## Judgment\n{judgment}\n",
+                serde_json::json!({"status":"open","subjects":[subject],"evidence":[citation],"resolution":null}),
+            )
+        };
+        if matches!(scenario, "current" | "changed" | "deleted") {
+            ws.write(
+                review_path,
+                &review(subject, "The recorded scope needs clarification."),
+            );
+        }
+        ws.drop_result("review-scope", PAGE, &text, "Selected Candidate");
+        let result_path = ".lorekeeper/queue/results/review-scope.json";
+        let result = ws.read(result_path);
+        if bounded {
+            let planned = work_json(&ws, &["work", "plan", "--task-id", "review-scope"]);
+            assert!(planned["parts"].as_u64().unwrap() > 1);
+            let work_id = planned["work_id"].as_str().unwrap();
+            loop {
+                let progress = work_json(&ws, &["work", "status", work_id]);
+                if progress["complete"] == true {
+                    break;
+                }
+                for node in progress["ready"].as_array().unwrap() {
+                    let node_id = node.as_str().unwrap();
+                    let input = work_json(&ws, &["work", "read", work_id, node_id]);
+                    ws.write(".lorekeeper/observation.json", &serde_json::json!({
+                        "work_id":work_id,"node_id":node_id,"input_revision":input["input_revision"],
+                        "summary":"Fixture observation preserves the assigned source and scoped review context.",
+                        "findings":[],"unresolved":[],"resolutions":[],
+                    }).to_string());
+                    let file = ws.vault().join(".lorekeeper/observation.json");
+                    work_json(&ws, &["work", "record", "--file", file.to_str().unwrap()]);
+                }
+            }
+            ws.write(".lorekeeper/final.json", &result);
+            let file = ws.vault().join(".lorekeeper/final.json");
+            let finished = work_json(
+                &ws,
+                &["work", "finish", work_id, "--file", file.to_str().unwrap()],
+            );
+            assert_ne!(finished["staged_result"], result_path);
+            let aliases = json_files(&results_dir(&ws));
+            assert_eq!(
+                aliases.len(),
+                2,
+                "manual staging and work finish use different result filenames"
+            );
+            for path in aliases {
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(
+                        &std::fs::read_to_string(path).unwrap()
+                    )
+                    .unwrap(),
+                    serde_json::from_str::<serde_json::Value>(&result).unwrap()
+                );
+            }
+        }
+        let target_before = ws.read(PAGE);
+        let owner_before = ws.read(owner);
+        match scenario {
+            "new" => ws.write(review_path, &review(subject, "The source is disputed.")),
+            "changed" => ws.write(
+                review_path,
+                &review(subject, "The assessment now limits the applicable scope."),
+            ),
+            "deleted" => std::fs::remove_file(ws.vault().join(review_path)).unwrap(),
+            "unrelated" => ws.write(
+                review_path,
+                &review("wiki/concepts/unrelated.md", "An unrelated assessment."),
+            ),
+            _ => {}
+        }
+        let should_apply = matches!(scenario, "current" | "unrelated");
+        for dry_run in [true, false] {
+            let output = ws.run(if dry_run {
+                &["queue", "apply", "--dry-run"]
+            } else {
+                &["queue", "apply"]
+            });
+            assert_eq!(
+                output.status.success(),
+                should_apply,
+                "bounded={bounded}, subject={subject}, scenario={scenario}, dry={dry_run}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            if !should_apply {
+                assert!(
+                    String::from_utf8_lossy(&output.stderr).contains("semantic read scope changed")
+                );
+            }
+            if dry_run || !should_apply {
+                assert_eq!(ws.read(PAGE), target_before);
+                assert_eq!(ws.read(owner), owner_before);
+            }
+        }
+    }
+}
+
+#[test]
+fn reuse_requires_the_exact_owner_inside_the_captured_discovery_scope() {
+    let ws = Workspace::new();
+    ws.write(PAGE, &daily_page("h"));
+    let owner = "wiki/concepts/canonical.md";
+    let original = "---\ntype: concept\ntitle: Canonical Owner\n---\n## Synthesis\nEstablished scope.\n\n## Sources\n\n## Related\n";
+    ws.write(owner, original);
+    ws.drop_result("owner-scope", PAGE, "h", "Source Term");
+    let path = ".lorekeeper/queue/results/owner-scope.json";
+    let mut result: lk_queue::TaskResult = serde_json::from_str(&ws.read(path)).unwrap();
+    result.concepts[0].admission = lk_queue::ConceptAdmission::Reuse {
+        owner: lk_queue::ConceptOwner {
+            path: owner.into(),
+            revision: lk_core::concept::file_revision(original),
+        },
+    };
+    ws.write(path, &serde_json::to_string(&result).unwrap());
+    let before = ws.read(PAGE);
+    let refused = ws.run(&["queue", "apply"]);
+    assert!(!refused.status.success());
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("outside the captured discovery context")
+    );
+    assert_eq!(ws.read(PAGE), before);
+    assert_eq!(ws.read(owner), original);
+    result.discovery.push(lk_core::discovery::DiscoveryQuery {
+        query: "Canonical Owner".into(),
+        phrase: true,
+        spacing: false,
+    });
+    result.context_revision = ws.capture_extraction_scope(&result.task_id, &result.discovery);
+    ws.write(path, &serde_json::to_string(&result).unwrap());
+    ws.apply_expecting(1, 0);
+    assert!(ws.read(PAGE).contains("wiki/concepts/canonical.md"));
+    assert!(ws.read(owner).contains("Established scope."));
+    assert!(!ws.vault().join("wiki/concepts/source-term.md").exists());
+}
+
+#[test]
+fn existing_only_policy_requires_explicit_reuse_after_an_owner_appears() {
     let ws = Workspace::new();
     let mut request = extraction_request("policy-proof");
     request.concept_policy = lk_core::config::ConceptPolicy::ExistingOnly;
@@ -269,6 +933,7 @@ fn existing_only_policy_refuses_new_nodes_and_retains_work_until_an_owner_exists
     let mut result: lk_queue::TaskResult = serde_json::from_str(&ws.read(result_path)).unwrap();
     result.concept_policy = lk_core::config::ConceptPolicy::ExistingOnly;
     result.cache_hash = hash;
+    result.context_revision = ws.capture_extraction_scope(&result.task_id, &result.discovery);
     ws.write(result_path, &serde_json::to_string(&result).unwrap());
 
     let before = ws.read(PAGE);
@@ -284,6 +949,17 @@ fn existing_only_policy_refuses_new_nodes_and_retains_work_until_an_owner_exists
     assert!(ws.vault().join(task_path).exists());
 
     ws.write("wiki/concepts/stable-address.md", "---\ntype: concept\ntitle: Existing subject\naliases: [Known alias]\n---\n## Synthesis\nA stable scoped definition.\n\n## Sources\n\n## Related\n");
+    let outdated = ws.run(&["queue", "apply", "--dry-run"]);
+    assert!(!outdated.status.success());
+    assert!(String::from_utf8_lossy(&outdated.stderr).contains("semantic read scope changed"));
+    result.concepts[0].admission = lk_queue::ConceptAdmission::Reuse {
+        owner: lk_queue::ConceptOwner {
+            path: "wiki/concepts/stable-address.md".into(),
+            revision: lk_core::concept::file_revision(&ws.read("wiki/concepts/stable-address.md")),
+        },
+    };
+    result.context_revision = ws.capture_extraction_scope(&result.task_id, &result.discovery);
+    ws.write(result_path, &serde_json::to_string(&result).unwrap());
     ws.apply_expecting(1, 0);
     assert!(ws.read(PAGE).contains("wiki/concepts/stable-address.md"));
     assert!(!ws.vault().join("wiki/concepts/known-alias.md").exists());
@@ -360,25 +1036,17 @@ fn dry_run_applies_nothing_and_consumes_nothing() {
 
 #[test]
 fn extraction_refuses_a_manual_source_edit_without_a_cache_marker_change() {
-    for recovery in [false, true] {
-        let ws = Workspace::new();
-        ws.write(PAGE, &daily_page("h"));
-        ws.drop_grounded_result("ext-1", PAGE, "h", "Concept A", Some("Original claim."));
-        let revised = format!("{}\nThe original claim was withdrawn.\n", ws.read(PAGE));
-        ws.write(PAGE, &revised);
-
-        let output = if recovery {
-            std::fs::remove_file(ws.vault().join(".lorekeeper/queue/ext-1.jsonl")).unwrap();
-            ws.run(&["queue", "apply", "--recover-extraction", "ext-1"])
-        } else {
-            ws.run(&["queue", "apply"])
-        };
-        assert!(!output.status.success());
-        assert!(String::from_utf8_lossy(&output.stderr).contains("target changed"));
-        assert_eq!(ws.read(PAGE), revised);
-        assert!(!ws.vault().join("wiki/concepts/concept-a.md").exists());
-        assert!(results_dir(&ws).join("ext-1.json").exists());
-    }
+    let ws = Workspace::new();
+    ws.write(PAGE, &daily_page("h"));
+    ws.drop_grounded_result("ext-1", PAGE, "h", "Concept A", Some("Original claim."));
+    let revised = format!("{}\nThe original claim was withdrawn.\n", ws.read(PAGE));
+    ws.write(PAGE, &revised);
+    let output = ws.run(&["queue", "apply"]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("target changed"));
+    assert_eq!(ws.read(PAGE), revised);
+    assert!(!ws.vault().join("wiki/concepts/concept-a.md").exists());
+    assert!(results_dir(&ws).join("ext-1.json").exists());
 }
 
 #[test]
@@ -574,47 +1242,42 @@ fn re_applying_preserves_everything_an_established_concept_page_accumulated() {
     );
 }
 
-/// Explicit recovery uses the current stored page without re-fetching an expired source window.
 #[test]
-fn a_result_file_with_no_task_behind_it_recovers_a_lost_section() {
-    let ws = Workspace::new();
-    ws.write(PAGE, &daily_page("recorded-hash"));
-    assert!(
-        !ws.read(PAGE).contains("concepts_done"),
-        "the fixture starts unanswered"
-    );
-
-    ws.drop_result("recovered", PAGE, "recorded-hash", "Recovered Concept");
-    std::fs::remove_file(ws.vault().join(".lorekeeper/queue/recovered.jsonl")).unwrap();
-    let evidence = ws.run(&["wiki", "evidence", PAGE]);
-    assert!(evidence.status.success());
-    let report: serde_json::Value = serde_json::from_slice(&evidence.stdout).unwrap();
-    let result: serde_json::Value =
-        serde_json::from_str(&ws.read(".lorekeeper/queue/results/recovered.json")).unwrap();
-    assert_eq!(report["file_revisions"][PAGE], result["target_revision"]);
-    let out = ws.run(&["queue", "apply", "--recover-extraction", "recovered"]);
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert!(
-        String::from_utf8_lossy(&out.stderr)
-            .contains("original retained-input and part coverage cannot be established")
-    );
-
-    let page = ws.read(PAGE);
-    assert!(
-        page.contains("wiki/concepts/recovered-concept.md"),
-        "{page}"
-    );
-    assert!(
-        page.contains(&format!(
-            "concepts_done: \"{}\"",
-            extraction_request("recorded-hash").cache_hash()
-        )),
-        "the applier stamps the marker it owns\n{page}"
-    );
+fn missing_retained_extraction_refuses_small_and_large_sources_without_publication() {
+    for large in [false, true] {
+        let ws = Workspace::new();
+        bounded_config(&ws);
+        let source = format!(
+            "{}{}",
+            daily_page("orphan"),
+            if large {
+                "Complete retained source.\n".repeat(1000)
+            } else {
+                String::new()
+            }
+        );
+        ws.write(PAGE, &source);
+        ws.drop_result("orphan", PAGE, "orphan", "Unpublished Subject");
+        std::fs::remove_file(ws.vault().join(".lorekeeper/queue/orphan.jsonl")).unwrap();
+        let result = ws.read(".lorekeeper/queue/results/orphan.json");
+        let dry = ws.run(&["queue", "apply", "--dry-run"]);
+        assert!(!dry.status.success());
+        assert!(String::from_utf8_lossy(&dry.stderr).contains("no matching pending task"));
+        assert_eq!(ws.read(".lorekeeper/queue/results/orphan.json"), result);
+        let applied = ws.run(&["queue", "apply"]);
+        assert!(!applied.status.success());
+        assert_eq!(ws.read(PAGE), source);
+        assert!(
+            !ws.vault()
+                .join("wiki/concepts/unpublished-subject.md")
+                .exists()
+        );
+        assert_eq!(
+            ws.read(".lorekeeper/queue/results/orphaned/orphan.json"),
+            result
+        );
+        assert!(!ws.vault().join(".lorekeeper/work").exists());
+    }
 }
 
 fn bounded_config(ws: &Workspace) {
@@ -634,6 +1297,10 @@ fn work_json(ws: &Workspace, args: &[&str]) -> serde_json::Value {
         String::from_utf8_lossy(&output.stderr)
     );
     serde_json::from_slice(&output.stdout).unwrap()
+}
+
+fn synthesis_context(ws: &Workspace, task_id: &str) -> serde_json::Value {
+    work_json(ws, &["work", "context", "--task-id", task_id])["context_revision"].clone()
 }
 
 #[test]
@@ -675,34 +1342,6 @@ fn multipart_extraction_requires_completed_work_without_poisoning_valid_results(
         assert!(results_dir(&ws).join("a-large.json").exists());
         assert!(!results_dir(&ws).join("z-small.json").exists());
     }
-}
-
-#[test]
-fn oversized_orphan_recovery_preserves_source_and_requires_retained_task() {
-    let ws = Workspace::new();
-    bounded_config(&ws);
-    let source = format!(
-        "{}\n{}",
-        daily_page("orphan"),
-        "Full source evidence.\n".repeat(1000)
-    );
-    ws.write(PAGE, &source);
-    ws.drop_result("orphan", PAGE, "orphan", "Unpublished Subject");
-    std::fs::remove_file(ws.vault().join(".lorekeeper/queue/orphan.jsonl")).unwrap();
-    let output = ws.run(&["queue", "apply", "--recover-extraction", "orphan"]);
-    assert!(!output.status.success());
-    assert!(
-        String::from_utf8_lossy(&output.stderr)
-            .contains("restore the retained task before bounded processing")
-    );
-    assert_eq!(ws.read(PAGE), source);
-    assert!(
-        !ws.vault()
-            .join("wiki/concepts/unpublished-subject.md")
-            .exists()
-    );
-    assert!(results_dir(&ws).join("orphan.json").exists());
-    assert!(!ws.vault().join(".lorekeeper/work").exists());
 }
 
 #[test]
@@ -750,7 +1389,7 @@ fn sealed_synthesis_requires_exact_read_source_bytes_even_when_authored_revision
             work_json(&ws, &["work", "record", "--file", file.to_str().unwrap()]);
         }
     }
-    let result = serde_json::json!({"task_id":"syn-large","cache_hash":hash,
+    let result = serde_json::json!({"task_id":"syn-large","cache_hash":hash,"context_revision":planned["context_revision"],
         "target_revision":blake3::hash(body.as_bytes()).to_hex().to_string(),
         "synthesis":"The retained source supports the scoped claim.","related":""});
     ws.write(".lorekeeper/fixture-final.json", &result.to_string());
@@ -773,7 +1412,7 @@ fn sealed_synthesis_requires_exact_read_source_bytes_even_when_authored_revision
     ws.write(source_path, &changed);
     let output = ws.run(&["queue", "apply"]);
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("bounded evidence work is required"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("semantic read scope changed"));
     assert_eq!(ws.read(target), body);
     assert!(!json_files(&results_dir(&ws)).is_empty());
     ws.write(source_path, &source);
@@ -841,8 +1480,9 @@ fn a_grounding_answers_one_page_and_a_second_citation_owes_a_rewrite() {
     ws.write(PAGE, &daily_page("h"));
     ws.write(SECOND, &dated_daily_page("2026-05-24", "h"));
     ws.drop_grounded_result("ext-1", PAGE, "h", "Concept A", Some("What Concept A is."));
+    ws.apply_expecting(1, 0);
     ws.drop_result("ext-2", SECOND, "h", "Concept A");
-    ws.apply_expecting(2, 0);
+    ws.apply_expecting(1, 0);
 
     let concept = ws.read("wiki/concepts/concept-a.md");
     let grounded = lk_core::concept::citation_digest(&[lk_core::concept::Citation::new(
@@ -937,6 +1577,7 @@ fn synthesis_results_preserve_edits_and_apply_both_sections_only_to_current_inpu
         "current",
         "source-changed",
         "target-changed",
+        "missing-context",
         "missing-related",
         "missing-link",
         "existing-link",
@@ -959,7 +1600,7 @@ fn synthesis_results_preserve_edits_and_apply_both_sections_only_to_current_inpu
         let status = ws.run(&["queue", "status", "--json"]);
         assert!(status.status.success());
         let status: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
-        let mut result = serde_json::json!({"task_id":"syn-1", "cache_hash":hash, "target_revision":status["data"]["tasks"][0]["target_revision"], "synthesis":"Timeout is 30 seconds.", "related":"A sourced relationship."});
+        let mut result = serde_json::json!({"task_id":"syn-1", "cache_hash":hash, "context_revision":synthesis_context(&ws, "syn-1"), "target_revision":status["data"]["tasks"][0]["target_revision"], "synthesis":"Timeout is 30 seconds.", "related":"A sourced relationship."});
         match scenario {
             "source-changed" => ws.write("wiki/documents/spec.md", &source.replace("30", "5")),
             "target-changed" => ws.write(
@@ -968,6 +1609,9 @@ fn synthesis_results_preserve_edits_and_apply_both_sections_only_to_current_inpu
             ),
             "missing-related" => {
                 result.as_object_mut().unwrap().remove("related");
+            }
+            "missing-context" => {
+                result.as_object_mut().unwrap().remove("context_revision");
             }
             "missing-link" => {
                 result["synthesis"] =
@@ -1025,9 +1669,159 @@ fn synthesis_results_preserve_edits_and_apply_both_sections_only_to_current_inpu
 }
 
 #[test]
+fn synthesis_read_scope_guards_scoped_reviews_and_context_for_whole_and_bounded_work() {
+    for bounded in [false, true] {
+        for scenario in [
+            "current",
+            "new-review",
+            "changed-review",
+            "deleted-review",
+            "unrelated-review",
+            "related-changed",
+            "config-changed",
+        ] {
+            let ws = Workspace::new();
+            if bounded {
+                bounded_config(&ws);
+            }
+            let source_path = "wiki/documents/policy.md";
+            let source = format!(
+                "---\ntype: document\n---\nRetention is 30 days.\n{}",
+                if bounded {
+                    "Exact supporting context.\n\n".repeat(700)
+                } else {
+                    String::new()
+                }
+            );
+            ws.write(source_path, &source);
+            let citation = lk_core::concept::Citation::new(
+                Path::new(source_path),
+                &lk_core::frontmatter::parse_page(&source).unwrap(),
+            );
+            let hash = lk_core::concept::citation_digest(std::slice::from_ref(&citation));
+            let target = "wiki/concepts/retention.md";
+            let body = format!(
+                "---\ntype: concept\nllm_inputs:\n  synthesis: {hash}\n---\n## Synthesis\nPrior scope.\n\n## Related\n[Related](related.md)\n"
+            );
+            ws.write(target, &body);
+            ws.write(
+                "wiki/concepts/related.md",
+                "---\ntype: concept\n---\n## Synthesis\nRelated context.\n",
+            );
+            ws.write(
+                "wiki/concepts/unrelated.md",
+                "---\ntype: concept\n---\n## Synthesis\nSeparate scope.\n",
+            );
+            let review_path = "wiki/explorations/retention-review.md";
+            let review = |subject: &str, reason: &str| {
+                format!(
+                    "---\ntype: exploration\nreview: {}\n---\n## Judgment\n{reason}\n",
+                    serde_json::json!({"status":"open","subjects":[subject],"evidence":[citation],"resolution":null})
+                )
+            };
+            if matches!(scenario, "changed-review" | "deleted-review") {
+                ws.write(review_path, &review(target, "Initial scoped uncertainty."));
+            }
+            let task = serde_json::json!({"task_id":"scope", "kind":"synthesize-concept", "created_at":"2026-10-16T00:00:00Z", "cache_hash":hash,
+                "input":{"locale":"en","citations":[citation],"related_anchor":"## Related"}, "target":{"vault_path":target,"kind":"concept-synthesis","anchor":"## Synthesis"}});
+            ws.write(".lorekeeper/queue/scope.jsonl", &task.to_string());
+            let context = work_json(&ws, &["work", "context", "--task-id", "scope"]);
+            assert!(!ws.vault().join(".lorekeeper/work").exists());
+            let result = serde_json::json!({"task_id":"scope","cache_hash":hash,
+                "target_revision":context["subject"]["target_revision"],"context_revision":context["context_revision"],
+                "synthesis":"The source declares retention of 30 days.","related":"Related context remains separate from supporting evidence."});
+            if bounded {
+                let planned = work_json(&ws, &["work", "plan", "--task-id", "scope"]);
+                assert!(planned["parts"].as_u64().unwrap() > 1);
+                assert_eq!(planned["context_revision"], context["context_revision"]);
+                let work_id = planned["work_id"].as_str().unwrap();
+                loop {
+                    let progress = work_json(&ws, &["work", "status", work_id]);
+                    if progress["complete"] == true {
+                        break;
+                    }
+                    for node in progress["ready"].as_array().unwrap() {
+                        let node_id = node.as_str().unwrap();
+                        let input = work_json(&ws, &["work", "read", work_id, node_id]);
+                        let observation = serde_json::json!({"work_id":work_id,"node_id":node_id,"input_revision":input["input_revision"],
+                            "summary":"Fixture observation preserves the exact assigned evidence scope.","findings":[],"unresolved":[],"resolutions":[]});
+                        ws.write(".lorekeeper/observation.json", &observation.to_string());
+                        let file = ws.vault().join(".lorekeeper/observation.json");
+                        work_json(&ws, &["work", "record", "--file", file.to_str().unwrap()]);
+                    }
+                }
+                ws.write(".lorekeeper/final.json", &result.to_string());
+                let file = ws.vault().join(".lorekeeper/final.json");
+                work_json(
+                    &ws,
+                    &["work", "finish", work_id, "--file", file.to_str().unwrap()],
+                );
+            } else {
+                ws.write(
+                    ".lorekeeper/queue/results/scope.synthesis.json",
+                    &result.to_string(),
+                );
+            }
+            match scenario {
+                "new-review" => ws.write(
+                    review_path,
+                    &review(target, "New scoped uncertainty after drafting."),
+                ),
+                "changed-review" => ws.write(
+                    review_path,
+                    &review(target, "Changed judgment after drafting."),
+                ),
+                "deleted-review" => std::fs::remove_file(ws.vault().join(review_path)).unwrap(),
+                "unrelated-review" => ws.write(
+                    review_path,
+                    &review("wiki/concepts/unrelated.md", "Separate assessment."),
+                ),
+                "related-changed" => ws.write(
+                    "wiki/concepts/related.md",
+                    "---\ntype: concept\n---\n## Synthesis\nChanged related context.\n",
+                ),
+                "config-changed" => {
+                    let path = ws.root.path().join("config.yaml");
+                    let mut config = std::fs::read_to_string(&path).unwrap();
+                    config.push_str("\n# Selected configuration revision changed.\n");
+                    std::fs::write(path, config).unwrap();
+                }
+                _ => {}
+            }
+            let should_apply = matches!(scenario, "current" | "unrelated-review");
+            for dry in [true, false] {
+                let out = if dry {
+                    ws.run(&["queue", "apply", "--dry-run"])
+                } else {
+                    ws.run(&["queue", "apply"])
+                };
+                assert_eq!(
+                    out.status.success(),
+                    should_apply,
+                    "bounded={bounded}, scenario={scenario}, dry={dry}: {}",
+                    String::from_utf8_lossy(&out.stderr)
+                );
+                if !should_apply {
+                    assert!(
+                        String::from_utf8_lossy(&out.stderr)
+                            .contains("semantic read scope changed")
+                    );
+                }
+                if dry || !should_apply {
+                    assert_eq!(ws.read(target), body);
+                }
+            }
+            if should_apply {
+                assert!(ws.read(target).contains("synthesis_done:"));
+            }
+        }
+    }
+}
+
+#[test]
 fn orphan_synthesis_is_preserved_with_a_reason_and_does_not_fail_forever() {
     let ws = Workspace::new();
-    let result = serde_json::json!({"task_id":"retired", "cache_hash":"old", "target_revision":"old", "synthesis":"Evidence.", "related":null}).to_string();
+    let result = serde_json::json!({"task_id":"retired", "cache_hash":"old", "context_revision":"unavailable", "target_revision":"old", "synthesis":"Evidence.", "related":null}).to_string();
     let path = ".lorekeeper/queue/results/retired.synthesis.json";
     ws.write(path, &result);
     let out = ws.run(&["queue", "apply", "--dry-run"]);
@@ -1052,7 +1846,7 @@ fn malformed_pending_task_prevents_orphan_disposition() {
     let ws = Workspace::new();
     ws.write(".lorekeeper/queue/tasks.jsonl", "{truncated task");
     let path = ".lorekeeper/queue/results/unknown.synthesis.json";
-    let result = serde_json::json!({"task_id":"unknown", "cache_hash":"old", "target_revision":"old", "synthesis":"Evidence.", "related":null}).to_string();
+    let result = serde_json::json!({"task_id":"unknown", "cache_hash":"old", "context_revision":"unavailable", "target_revision":"old", "synthesis":"Evidence.", "related":null}).to_string();
     ws.write(path, &result);
     let out = ws.run(&["queue", "apply"]);
     assert!(!out.status.success());
@@ -1081,7 +1875,7 @@ fn corrupt_result_payloads_are_preserved_once_without_blocking_valid_synthesis()
             ws.write(".lorekeeper/queue/tasks.jsonl", &task.to_string());
             let status: serde_json::Value =
                 serde_json::from_slice(&ws.run(&["queue", "status", "--json"]).stdout).unwrap();
-            let result = serde_json::json!({"task_id":"good","cache_hash":hash,"target_revision":status["data"]["tasks"][0]["target_revision"],"synthesis":"Grounded evidence.","related":""});
+            let result = serde_json::json!({"task_id":"good","cache_hash":hash,"context_revision":synthesis_context(&ws, "good"),"target_revision":status["data"]["tasks"][0]["target_revision"],"synthesis":"Grounded evidence.","related":""});
             ws.write(
                 ".lorekeeper/queue/results/good.synthesis.json",
                 &result.to_string(),
@@ -1130,7 +1924,7 @@ fn shortened_synthesis_citations_cannot_bypass_source_validation_or_be_pruned() 
         let status: serde_json::Value =
             serde_json::from_slice(&ws.run(&["queue", "status", "--json"]).stdout).unwrap();
         assert_eq!(status["data"]["unreadable"], 1);
-        let result = serde_json::json!({"task_id":"bad-input","cache_hash":task["cache_hash"],"target_revision":status["data"]["tasks"][0]["target_revision"],"synthesis":"Unsupported.","related":""});
+        let result = serde_json::json!({"task_id":"bad-input","cache_hash":task["cache_hash"],"context_revision":"unreadable","target_revision":status["data"]["tasks"][0]["target_revision"],"synthesis":"Unsupported.","related":""});
         ws.write(
             ".lorekeeper/queue/results/bad-input.synthesis.json",
             &result.to_string(),
@@ -1543,7 +2337,7 @@ fn source_questions_can_publish_but_processing_blockers_cannot_bypass_explicit_w
                 observation_file.to_str().unwrap(),
             ],
         );
-        let result = serde_json::json!({"task_id":"syn-question", "cache_hash":hash,
+        let result = serde_json::json!({"task_id":"syn-question", "cache_hash":hash,"context_revision":planned["context_revision"],
             "target_revision":blake3::hash(body.as_bytes()).to_hex().to_string(), "synthesis":"The approving authority is unknown; the policy drafts remain unresolved.", "related":""});
         let final_file = ws.vault().join(".lorekeeper/final.json");
         ws.write(".lorekeeper/final.json", &result.to_string());

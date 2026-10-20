@@ -85,7 +85,7 @@ config loading and the shared filesystem primitives intentionally perform I/O.
   before `.tmp` for existing suffix sweeps. Use this shared implementation.
   Create temporaries exclusively with requested Unix permissions before writing;
   preserve occupied names and clean up only the temporary this call created.
-- `publish_exclusive` preserves originals: private short-name temp then exclusive
+- `publish_exclusive`/`publish_exclusive_from` preserve originals: private short-name temp then exclusive
   hard-link publication. `Created`/`Reused` succeed; `Occupied` means different bytes
   or a non-regular/symlink entry. Other I/O errors propagate. Every suffix candidate
   must attempt this operation, not preflight existence then overwrite.
@@ -93,6 +93,15 @@ config loading and the shared filesystem primitives intentionally perform I/O.
   Hard-link support is required; no overwriting fallback. It does not freeze
   external in-place edits or parent replacement, nor authorize deleting a source
   without separately checking consumed bytes. Long destination names must fit.
+
+## Captured files and manual originals (`captured_file.rs`, `manual_original.rs`)
+
+- `CapturedFile` owns a private RAII temporary file; streaming capture records exact
+  length and digest. Streaming publication verifies both before exposing a destination.
+  Dry runs may own scratch files but leave neither scratch nor retained evidence.
+- Acquisition budgets are configuration, not immutable evidence validation rules.
+  New manual-bundle-v2 manifests use the fixed512 MiB storage envelope; existing v1
+  manifests keep their original digest domain and 32/64/256 MiB bounds.
 
 ## RSS original serialization (`rss_original.rs`)
 

@@ -23,6 +23,7 @@ fn base_config(vault_root: &std::path::Path) -> Config {
             classify: Default::default(),
             labels: vec!["test".into()],
             concept_policy: lk_core::config::ConceptPolicy::SupportedNew,
+            collection_timeout_seconds: None,
             focus: None,
             highlights: vec![],
         },
@@ -50,6 +51,17 @@ fn base_config(vault_root: &std::path::Path) -> Config {
         concepts: Default::default(),
         graph: Default::default(),
         maintenance: Default::default(),
+    }
+}
+
+fn reuse_concept(vault: &std::path::Path, slug: &str) -> lk_queue::ConceptAdmission {
+    let path = format!("wiki/concepts/{slug}.md");
+    let original = std::fs::read_to_string(vault.join(&path)).unwrap();
+    lk_queue::ConceptAdmission::Reuse {
+        owner: lk_queue::ConceptOwner {
+            path,
+            revision: lk_core::concept::file_revision(&original),
+        },
     }
 }
 
@@ -314,6 +326,7 @@ async fn concept_accumulates_across_sources_in_one_run() {
             classify: Default::default(),
             labels: vec![],
             concept_policy: lk_core::config::ConceptPolicy::SupportedNew,
+            collection_timeout_seconds: None,
             focus: None,
             highlights: vec![],
         },
@@ -2853,6 +2866,8 @@ async fn queue_results_materialize_through_the_same_merge_path() {
 
     let page = "---\nid: daily-1\ntype: daily\nllm_inputs:\n  concepts: \"h\"\n---\n\n## Summary\n\nbody\n\n## Related Concepts\n\n## Key Events\n\n- a\n";
     let result = lk_queue::TaskResult {
+        context_revision: String::new(),
+        discovery: Vec::new(),
         concept_policy: lk_core::config::ConceptPolicy::SupportedNew,
         target_revision: String::new(),
         task_id: "ext-1".into(),
@@ -2865,6 +2880,7 @@ async fn queue_results_materialize_through_the_same_merge_path() {
         date: jiff::civil::date(2026, 5, 23),
         concepts: vec![
             lk_queue::ReportedConcept {
+                admission: lk_queue::ConceptAdmission::New,
                 rss_evidence: Vec::new(),
                 concept: ExtractedConcept {
                     name: "Retrieval Augmented Generation".into(),
@@ -2876,13 +2892,16 @@ async fn queue_results_materialize_through_the_same_merge_path() {
             // An unknown category is dropped by the same filter the synchronous path uses,
             // rather than reaching a page and surfacing later as a lint finding.
             lk_queue::ReportedConcept {
+                admission: lk_queue::ConceptAdmission::New,
                 rss_evidence: Vec::new(),
                 concept: ExtractedConcept {
                     name: "Vector Database".into(),
                     category: Some("not-a-real-category".into()),
                     aliases: Vec::new(),
                 },
-                synthesis: None,
+                synthesis: Some(
+                    "A vector database stores and queries vector representations.".into(),
+                ),
             },
         ],
     };
@@ -2959,6 +2978,8 @@ async fn a_page_without_the_concepts_section_is_an_error_not_a_silent_no_op() {
 
     let page = "---\nid: daily-1\ntype: daily\n---\n\n## Summary\n\nbody\n";
     let result = lk_queue::TaskResult {
+        context_revision: String::new(),
+        discovery: Vec::new(),
         concept_policy: lk_core::config::ConceptPolicy::SupportedNew,
         target_revision: String::new(),
         task_id: "ext-1".into(),
@@ -2970,6 +2991,7 @@ async fn a_page_without_the_concepts_section_is_an_error_not_a_silent_no_op() {
         },
         date: jiff::civil::date(2026, 5, 23),
         concepts: vec![lk_queue::ReportedConcept {
+            admission: lk_queue::ConceptAdmission::New,
             rss_evidence: Vec::new(),
             concept: ExtractedConcept {
                 name: "Retrieval Augmented Generation".into(),
@@ -3005,6 +3027,8 @@ async fn a_page_that_cannot_record_completion_is_an_error() {
     let page =
         "---\nid: daily-1\ntype: daily\n---\n\n## Related Concepts\n\n## Key Events\n\n- a\n";
     let result = lk_queue::TaskResult {
+        context_revision: String::new(),
+        discovery: Vec::new(),
         concept_policy: lk_core::config::ConceptPolicy::SupportedNew,
         target_revision: String::new(),
         task_id: "ext-1".into(),
@@ -3016,6 +3040,7 @@ async fn a_page_that_cannot_record_completion_is_an_error() {
         },
         date: jiff::civil::date(2026, 5, 23),
         concepts: vec![lk_queue::ReportedConcept {
+            admission: lk_queue::ConceptAdmission::New,
             rss_evidence: Vec::new(),
             concept: ExtractedConcept {
                 name: "Retrieval Augmented Generation".into(),
@@ -3060,15 +3085,20 @@ async fn a_concept_that_fails_to_stage_takes_its_whole_result_with_it() {
 
     let page = "---\nid: daily-1\ntype: daily\nllm_inputs:\n  concepts: \"h\"\n---\n\n## Related Concepts\n\n## Key Events\n\n- a\n";
     let named = |name: &str| lk_queue::ReportedConcept {
+        admission: lk_queue::ConceptAdmission::New,
         rss_evidence: Vec::new(),
         concept: ExtractedConcept {
             name: name.into(),
             category: None,
             aliases: Vec::new(),
         },
-        synthesis: None,
+        synthesis: Some(format!(
+            "The source establishes {name} as its reusable subject."
+        )),
     };
     let result = |names: &[&str]| lk_queue::TaskResult {
+        context_revision: String::new(),
+        discovery: Vec::new(),
         concept_policy: lk_core::config::ConceptPolicy::SupportedNew,
         target_revision: String::new(),
         task_id: "ext".into(),
@@ -3128,12 +3158,8 @@ async fn a_concept_that_fails_to_stage_takes_its_whole_result_with_it() {
     );
 }
 
-/// Two results in one apply run can name the same new concept, and only one of them may
-/// carry a grounding sentence. Whichever arrives first stages the draft, so seeding the
-/// synthesis only on that merge would leave the created page's `## Synthesis` empty or
-/// filled depending on the order the run happened to read the result files in.
 #[tokio::test]
-async fn a_grounding_from_a_later_result_still_seeds_a_new_concept_page() {
+async fn new_concept_grounding_is_required_before_staging_and_can_be_retried() {
     let dir = TempDir::new().unwrap();
     let vault = dir.path();
     let config = base_config(vault);
@@ -3142,6 +3168,8 @@ async fn a_grounding_from_a_later_result_still_seeds_a_new_concept_page() {
 
     let page = "---\nid: daily-1\ntype: daily\nllm_inputs:\n  concepts: \"h\"\n---\n\n## Related Concepts\n\n## Key Events\n\n- a\n";
     let result = |vault_path: &str, synthesis: Option<&str>| lk_queue::TaskResult {
+        context_revision: String::new(),
+        discovery: Vec::new(),
         concept_policy: lk_core::config::ConceptPolicy::SupportedNew,
         target_revision: String::new(),
         task_id: "ext".into(),
@@ -3153,6 +3181,7 @@ async fn a_grounding_from_a_later_result_still_seeds_a_new_concept_page() {
         },
         date: jiff::civil::date(2026, 5, 23),
         concepts: vec![lk_queue::ReportedConcept {
+            admission: lk_queue::ConceptAdmission::New,
             rss_evidence: Vec::new(),
             concept: ExtractedConcept {
                 name: "Retrieval Augmented Generation".into(),
@@ -3163,11 +3192,14 @@ async fn a_grounding_from_a_later_result_still_seeds_a_new_concept_page() {
         }],
     };
 
-    // First result names the concept with no grounding; the second supplies one.
-    pipeline
-        .apply_concept_result(&result("daily/a/2026-05-23.md", None), page)
-        .await
-        .unwrap();
+    for grounding in [None, Some(" \n ")] {
+        let error = pipeline
+            .apply_concept_result(&result("daily/a/2026-05-23.md", grounding), page)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("source-grounded synthesis"));
+        assert!(pipeline.render_concept_pages().await.unwrap().is_empty());
+    }
     pipeline
         .apply_concept_result(
             &result(
@@ -3214,6 +3246,8 @@ async fn ambiguous_names_refuse_writes_without_touching_either_page() {
 
     let page = "---\nid: daily-1\ntype: daily\nllm_inputs:\n  concepts: \"h\"\n---\n\n## Related Concepts\n\n## Key Events\n\n- a\n";
     let result = lk_queue::TaskResult {
+        context_revision: String::new(),
+        discovery: Vec::new(),
         concept_policy: lk_core::config::ConceptPolicy::SupportedNew,
         target_revision: String::new(),
         task_id: "ext-1".into(),
@@ -3225,6 +3259,7 @@ async fn ambiguous_names_refuse_writes_without_touching_either_page() {
         },
         date: jiff::civil::date(2026, 5, 23),
         concepts: vec![lk_queue::ReportedConcept {
+            admission: lk_queue::ConceptAdmission::New,
             rss_evidence: Vec::new(),
             concept: ExtractedConcept {
                 name: "Claude 35".into(),
@@ -3239,12 +3274,8 @@ async fn ambiguous_names_refuse_writes_without_touching_either_page() {
     assert!(pipeline.render_concept_pages().await.unwrap().is_empty());
 }
 
-/// The narrowest version of the same guarantee, and the one the pipeline actually
-/// exercises: `apply_concept_result` stages a whole extraction before folding any of it,
-/// so two spellings of one name inside a SINGLE result both resolve before either is
-/// committed. Registering at commit time would be too late for exactly this path.
 #[tokio::test]
-async fn two_spellings_in_one_extraction_resolve_to_one_page() {
+async fn one_new_concept_declares_alternative_spellings_without_duplicate_owners() {
     let dir = TempDir::new().unwrap();
     let vault = dir.path();
     let config = base_config(vault);
@@ -3255,6 +3286,7 @@ async fn two_spellings_in_one_extraction_resolve_to_one_page() {
 
     let page = "---\nid: daily-1\ntype: daily\nllm_inputs:\n  concepts: \"h\"\n---\n\n## Related Concepts\n\n## Key Events\n\n- a\n";
     let reported = |name: &str| lk_queue::ReportedConcept {
+        admission: lk_queue::ConceptAdmission::New,
         rss_evidence: Vec::new(),
         concept: ExtractedConcept {
             name: name.into(),
@@ -3264,6 +3296,8 @@ async fn two_spellings_in_one_extraction_resolve_to_one_page() {
         synthesis: Some("Seeded on creation.".into()),
     };
     let result = lk_queue::TaskResult {
+        context_revision: String::new(),
+        discovery: Vec::new(),
         concept_policy: lk_core::config::ConceptPolicy::SupportedNew,
         target_revision: String::new(),
         task_id: "ext-1".into(),
@@ -3274,7 +3308,7 @@ async fn two_spellings_in_one_extraction_resolve_to_one_page() {
             anchor: "## Related Concepts".into(),
         },
         date: jiff::civil::date(2026, 5, 23),
-        concepts: vec![reported("Vector DB"), reported("VectorDB")],
+        concepts: vec![reported("Vector DB")],
     };
 
     let rewritten = pipeline.apply_concept_result(&result, page).await.unwrap();
@@ -3288,12 +3322,8 @@ async fn two_spellings_in_one_extraction_resolve_to_one_page() {
     assert!(paths[0].ends_with("vector-db.md"), "{paths:?}");
 }
 
-/// The same guarantee across separate results in one run: the index is read from disk once,
-/// so a page the run itself created has to be findable by a later spelling — otherwise the
-/// two mint rival pages, exactly the pair the index exists to prevent and one only a later
-/// `graph merge` could undo.
 #[tokio::test]
-async fn a_page_created_earlier_in_the_run_is_found_by_a_later_spelling() {
+async fn a_published_new_concept_is_explicitly_reused_by_a_later_spelling() {
     let dir = TempDir::new().unwrap();
     let vault = dir.path();
     let config = base_config(vault);
@@ -3304,6 +3334,8 @@ async fn a_page_created_earlier_in_the_run_is_found_by_a_later_spelling() {
 
     let page = "---\nid: daily-1\ntype: daily\nllm_inputs:\n  concepts: \"h\"\n---\n\n## Related Concepts\n\n## Key Events\n\n- a\n";
     let result = |task: &str, name: &str| lk_queue::TaskResult {
+        context_revision: String::new(),
+        discovery: Vec::new(),
         concept_policy: lk_core::config::ConceptPolicy::SupportedNew,
         target_revision: String::new(),
         task_id: task.into(),
@@ -3315,6 +3347,7 @@ async fn a_page_created_earlier_in_the_run_is_found_by_a_later_spelling() {
         },
         date: jiff::civil::date(2026, 5, 23),
         concepts: vec![lk_queue::ReportedConcept {
+            admission: lk_queue::ConceptAdmission::New,
             rss_evidence: Vec::new(),
             concept: ExtractedConcept {
                 name: name.into(),
@@ -3329,8 +3362,14 @@ async fn a_page_created_earlier_in_the_run_is_found_by_a_later_spelling() {
         .apply_concept_result(&result("ext-1", "Vector DB"), page)
         .await
         .unwrap();
+    for rendered in pipeline.render_concept_pages().await.unwrap() {
+        std::fs::write(vault.join(rendered.path.as_ref()), &rendered.content).unwrap();
+    }
+    let mut second_result = result("ext-2", "VectorDB");
+    second_result.concepts[0].admission = reuse_concept(vault, "vector-db");
+    let mut pipeline = Pipeline::new(vault, build_ctx(&config, Arc::new(NoopLlmClient)));
     let second = pipeline
-        .apply_concept_result(&result("ext-2", "VectorDB"), page)
+        .apply_concept_result(&second_result, page)
         .await
         .unwrap();
 
@@ -3370,6 +3409,8 @@ async fn a_break_between_digits_does_not_fold_one_version_onto_another() {
 
     let page = "---\nid: daily-1\ntype: daily\nllm_inputs:\n  concepts: \"h\"\n---\n\n## Related Concepts\n\n## Key Events\n\n- a\n";
     let result = lk_queue::TaskResult {
+        context_revision: String::new(),
+        discovery: Vec::new(),
         concept_policy: lk_core::config::ConceptPolicy::SupportedNew,
         target_revision: String::new(),
         task_id: "ext-1".into(),
@@ -3381,6 +3422,7 @@ async fn a_break_between_digits_does_not_fold_one_version_onto_another() {
         },
         date: jiff::civil::date(2026, 5, 23),
         concepts: vec![lk_queue::ReportedConcept {
+            admission: lk_queue::ConceptAdmission::New,
             rss_evidence: Vec::new(),
             concept: ExtractedConcept {
                 name: "Claude 3.5".into(),
@@ -3735,6 +3777,8 @@ async fn a_name_spelled_without_separators_lands_on_the_established_page() {
 
     let page = "---\nid: daily-1\ntype: daily\nllm_inputs:\n  concepts: \"h\"\n---\n\n## Related Concepts\n\n## Key Events\n\n- a\n";
     let result = lk_queue::TaskResult {
+        context_revision: String::new(),
+        discovery: Vec::new(),
         concept_policy: lk_core::config::ConceptPolicy::SupportedNew,
         target_revision: String::new(),
         task_id: "ext-1".into(),
@@ -3746,6 +3790,7 @@ async fn a_name_spelled_without_separators_lands_on_the_established_page() {
         },
         date: jiff::civil::date(2026, 5, 23),
         concepts: vec![lk_queue::ReportedConcept {
+            admission: reuse_concept(vault, "vector-db"),
             rss_evidence: Vec::new(),
             concept: ExtractedConcept {
                 name: "VectorDB".into(),
@@ -3822,6 +3867,8 @@ async fn stale_alias_loses_to_the_address_owner(claimant: &str) {
 
     let page = "---\nid: daily-1\ntype: daily\nllm_inputs:\n  concepts: \"h\"\n---\n\n## Related Concepts\n\n## Key Events\n\n- a\n";
     let result = lk_queue::TaskResult {
+        context_revision: String::new(),
+        discovery: Vec::new(),
         concept_policy: lk_core::config::ConceptPolicy::SupportedNew,
         target_revision: String::new(),
         task_id: "ext-1".into(),
@@ -3833,6 +3880,7 @@ async fn stale_alias_loses_to_the_address_owner(claimant: &str) {
         },
         date: jiff::civil::date(2026, 5, 23),
         concepts: vec![lk_queue::ReportedConcept {
+            admission: reuse_concept(vault, "access-ingress-2axis-model"),
             rss_evidence: Vec::new(),
             concept: ExtractedConcept {
                 name: "Access x Ingress 2-Axis Deployment Model".into(),
@@ -3897,6 +3945,8 @@ async fn an_extraction_naming_an_alias_lands_on_the_established_page() {
 
     let page = "---\nid: daily-1\ntype: daily\nllm_inputs:\n  concepts: \"h\"\n---\n\n## Related Concepts\n\n## Key Events\n\n- a\n";
     let result = lk_queue::TaskResult {
+        context_revision: String::new(),
+        discovery: Vec::new(),
         concept_policy: lk_core::config::ConceptPolicy::SupportedNew,
         target_revision: String::new(),
         task_id: "ext-1".into(),
@@ -3908,6 +3958,7 @@ async fn an_extraction_naming_an_alias_lands_on_the_established_page() {
         },
         date: jiff::civil::date(2026, 5, 23),
         concepts: vec![lk_queue::ReportedConcept {
+            admission: reuse_concept(vault, "adversarial-design-review"),
             rss_evidence: Vec::new(),
             concept: ExtractedConcept {
                 // An alias, not the title — its slugify differs from the page's id.
@@ -4024,6 +4075,8 @@ async fn applying_a_result_adds_to_a_pages_citations_rather_than_replacing_them(
 
     let page = "---\nid: daily-1\ntype: daily\nllm_inputs:\n  concepts: \"h\"\n---\n\n## Related Concepts\n\n- [Cited Earlier](../../wiki/concepts/cited-earlier.md)\n\n## Key Events\n\n- a\n";
     let result = lk_queue::TaskResult {
+        context_revision: String::new(),
+        discovery: Vec::new(),
         concept_policy: lk_core::config::ConceptPolicy::SupportedNew,
         target_revision: String::new(),
         task_id: "ext-1".into(),
@@ -4035,13 +4088,16 @@ async fn applying_a_result_adds_to_a_pages_citations_rather_than_replacing_them(
         },
         date: jiff::civil::date(2026, 5, 23),
         concepts: vec![lk_queue::ReportedConcept {
+            admission: lk_queue::ConceptAdmission::New,
             rss_evidence: Vec::new(),
             concept: ExtractedConcept {
                 name: "Reported Now".into(),
                 category: None,
                 aliases: Vec::new(),
             },
-            synthesis: None,
+            synthesis: Some(
+                "The current event introduces Reported Now alongside the earlier citation.".into(),
+            ),
         }],
     };
 
@@ -4414,7 +4470,9 @@ async fn symbol_distinct_names_keep_separate_pages_and_resolve_after_reload() {
     let mut pipeline = Pipeline::new(dir.path(), ctx.clone());
     let page = "---\ntype: daily\nllm_inputs:\n  concepts: h\n---\n## Related Concepts\n";
     let long_name = "지식".repeat(100);
-    let result = lk_queue::TaskResult {
+    let mut result = lk_queue::TaskResult {
+        context_revision: String::new(),
+        discovery: Vec::new(),
         concept_policy: lk_core::config::ConceptPolicy::SupportedNew,
         target_revision: String::new(),
         task_id: "languages".into(),
@@ -4428,6 +4486,7 @@ async fn symbol_distinct_names_keep_separate_pages_and_resolve_after_reload() {
         concepts: ["C++", "C#", "C", "CO", "Co", "x²", "x2", long_name.as_str()]
             .into_iter()
             .map(|name| lk_queue::ReportedConcept {
+                admission: lk_queue::ConceptAdmission::New,
                 rss_evidence: Vec::new(),
                 concept: ExtractedConcept {
                     name: name.into(),
@@ -4454,6 +4513,25 @@ async fn symbol_distinct_names_keep_separate_pages_and_resolve_after_reload() {
         let path = dir.path().join(p.path.as_ref());
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, &p.content).unwrap();
+    }
+    for reported in &mut result.concepts {
+        let published = pages
+            .iter()
+            .find(|published| {
+                lk_core::frontmatter::parse_page(&published.content)
+                    .unwrap()
+                    .frontmatter
+                    .get("title")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(reported.concept.name.as_str())
+            })
+            .unwrap();
+        reported.admission = lk_queue::ConceptAdmission::Reuse {
+            owner: lk_queue::ConceptOwner {
+                path: published.path.to_string(),
+                revision: lk_core::concept::file_revision(&published.content),
+            },
+        };
     }
     let mut reloaded = Pipeline::new(dir.path(), ctx);
     let after = reloaded.apply_concept_result(&result, page).await.unwrap();
@@ -4809,6 +4887,8 @@ async fn extraction_publication_preserves_concepts_edited_after_staging() {
         std::fs::create_dir_all(origin_path.parent().unwrap()).unwrap();
         std::fs::write(&origin_path, origin).unwrap();
         let result = lk_queue::TaskResult {
+            context_revision: String::new(),
+            discovery: Vec::new(),
             concept_policy: lk_core::config::ConceptPolicy::SupportedNew,
             target_revision: lk_core::concept::file_revision(origin),
             task_id: "guarded-extraction".into(),
@@ -4820,13 +4900,18 @@ async fn extraction_publication_preserves_concepts_edited_after_staging() {
             },
             date: jiff::civil::date(2026, 5, 23),
             concepts: vec![lk_queue::ReportedConcept {
+                admission: if preexisting {
+                    reuse_concept(vault, "guarded")
+                } else {
+                    lk_queue::ConceptAdmission::New
+                },
                 rss_evidence: Vec::new(),
                 concept: ExtractedConcept {
                     name: "Guarded".into(),
                     category: None,
                     aliases: vec![],
                 },
-                synthesis: None,
+                synthesis: Some("Guarded is grounded in the current source event.".into()),
             }],
         };
         let rewritten = pipeline
@@ -5019,4 +5104,249 @@ async fn closed_parent_accepts_empty_but_completed_child_without_dropping_it() {
             .unwrap()
             .is_some()
     );
+}
+
+fn admission_test_concept(name: &str, aliases: &[&str]) -> lk_queue::ReportedConcept {
+    lk_queue::ReportedConcept {
+        admission: lk_queue::ConceptAdmission::New,
+        rss_evidence: Vec::new(),
+        concept: ExtractedConcept {
+            name: name.into(),
+            category: None,
+            aliases: aliases.iter().map(|alias| (*alias).into()).collect(),
+        },
+        synthesis: Some(format!("The source explains the reusable subject {name}.")),
+    }
+}
+
+fn admission_test_result(
+    day: i8,
+    concepts: Vec<lk_queue::ReportedConcept>,
+) -> lk_queue::TaskResult {
+    lk_queue::TaskResult {
+        context_revision: String::new(),
+        discovery: Vec::new(),
+        concept_policy: lk_core::config::ConceptPolicy::SupportedNew,
+        target_revision: String::new(),
+        task_id: format!("admission-{day}"),
+        cache_hash: "h".into(),
+        target: lk_queue::TaskTarget {
+            vault_path: format!("daily/test-source/2026-05-{day:02}.md"),
+            kind: lk_queue::TargetKind::DailyConcepts,
+            anchor: "## Related Concepts".into(),
+        },
+        date: jiff::civil::date(2026, 5, day),
+        concepts,
+    }
+}
+
+#[tokio::test]
+async fn new_admission_cannot_reuse_an_unpublished_alias_owner() {
+    let temp = TempDir::new().unwrap();
+    let config = base_config(temp.path());
+    let mut pipeline = Pipeline::new(temp.path(), build_ctx(&config, Arc::new(NoopLlmClient)));
+    let origin = "---\ntype: daily\nllm_inputs:\n  concepts: h\n---\n\n## Related Concepts\n";
+    let first = admission_test_result(
+        23,
+        vec![admission_test_concept(
+            "Primary Subject",
+            &["Alternate Subject"],
+        )],
+    );
+    let rewritten = pipeline.apply_concept_result(&first, origin).await.unwrap();
+    assert!(rewritten.contains("[Primary Subject]"));
+    let before: Vec<_> = pipeline
+        .render_concept_pages()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|page| (page.path.to_string(), page.content))
+        .collect();
+    assert_eq!(before.len(), 1);
+    assert_eq!(before[0].0, "wiki/concepts/primary-subject.md");
+
+    let alias = admission_test_result(24, vec![admission_test_concept("Alternate Subject", &[])]);
+    let error = pipeline
+        .apply_concept_result(&alias, origin)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("unowned name"));
+    let after: Vec<_> = pipeline
+        .render_concept_pages()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|page| (page.path.to_string(), page.content))
+        .collect();
+    assert_eq!(after, before);
+
+    let pages = pipeline.render_concept_pages().await.unwrap();
+    assert_eq!(pages.len(), 1);
+    assert!(pages[0].content.contains("Alternate Subject"));
+}
+
+#[tokio::test]
+async fn failed_concept_staging_does_not_reserve_names_for_a_later_result() {
+    let temp = TempDir::new().unwrap();
+    let config = base_config(temp.path());
+    let mut pipeline = Pipeline::new(temp.path(), build_ctx(&config, Arc::new(NoopLlmClient)));
+    let origin = "---\ntype: daily\nllm_inputs:\n  concepts: h\n---\n\n## Related Concepts\n";
+    let established = admission_test_result(
+        23,
+        vec![admission_test_concept(
+            "Committed Subject",
+            &["Committed Alias"],
+        )],
+    );
+    pipeline
+        .apply_concept_result(&established, origin)
+        .await
+        .unwrap();
+
+    let mut missing_owner = admission_test_concept("Missing Owner", &[]);
+    missing_owner.admission = lk_queue::ConceptAdmission::Reuse {
+        owner: lk_queue::ConceptOwner {
+            path: "wiki/concepts/missing-owner.md".into(),
+            revision: "missing".into(),
+        },
+    };
+    let failed = admission_test_result(
+        24,
+        vec![
+            admission_test_concept("Abandoned Subject", &["Independent Subject"]),
+            missing_owner,
+        ],
+    );
+    let error = pipeline
+        .apply_concept_result(&failed, origin)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("owner is absent"));
+
+    let independent =
+        admission_test_result(25, vec![admission_test_concept("Independent Subject", &[])]);
+    let rewritten = pipeline
+        .apply_concept_result(&independent, origin)
+        .await
+        .unwrap();
+    assert!(rewritten.contains("[Independent Subject]"));
+    assert!(rewritten.contains("independent-subject.md"));
+    assert!(!rewritten.contains("abandoned-subject.md"));
+
+    let alias = admission_test_result(26, vec![admission_test_concept("Committed Alias", &[])]);
+    assert!(pipeline.apply_concept_result(&alias, origin).await.is_err());
+    let pages = pipeline.render_concept_pages().await.unwrap();
+    let paths: Vec<_> = pages.iter().map(|page| page.path.to_string()).collect();
+    assert_eq!(
+        paths,
+        [
+            "wiki/concepts/committed-subject.md",
+            "wiki/concepts/independent-subject.md"
+        ]
+    );
+    let independent = pages
+        .iter()
+        .find(|page| page.path.to_string().ends_with("independent-subject.md"))
+        .unwrap();
+    let parsed = lk_core::frontmatter::parse_page(&independent.content).unwrap();
+    assert_eq!(
+        parsed.frontmatter.get("title").unwrap(),
+        "Independent Subject"
+    );
+    assert!(!independent.content.contains("Abandoned Subject"));
+    let committed = pages
+        .iter()
+        .find(|page| page.path.to_string().ends_with("committed-subject.md"))
+        .unwrap();
+    assert!(committed.content.contains("Committed Alias"));
+}
+
+#[tokio::test]
+async fn new_admission_does_not_merge_equal_titles_with_different_grounding() {
+    let temp = TempDir::new().unwrap();
+    let config = base_config(temp.path());
+    let mut pipeline = Pipeline::new(temp.path(), build_ctx(&config, Arc::new(NoopLlmClient)));
+    let origin = "---\ntype: daily\nllm_inputs:\n  concepts: h\n---\n\n## Related Concepts\n";
+    let mut first = admission_test_concept("Lease", &[]);
+    first.synthesis =
+        Some("A lease grants a worker exclusive coordination rights until a deadline.".into());
+    pipeline
+        .apply_concept_result(&admission_test_result(23, vec![first]), origin)
+        .await
+        .unwrap();
+    let before: Vec<_> = pipeline
+        .render_concept_pages()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|page| (page.path.to_string(), page.content))
+        .collect();
+    assert_eq!(before.len(), 1);
+    assert_eq!(before[0].0, "wiki/concepts/lease.md");
+    assert!(before[0].1.contains("exclusive coordination rights"));
+
+    let mut second = admission_test_concept("Lease", &[]);
+    second.synthesis =
+        Some("A lease grants a tenant the contractual right to occupy a property.".into());
+    assert!(
+        pipeline
+            .apply_concept_result(&admission_test_result(24, vec![second]), origin)
+            .await
+            .is_err()
+    );
+    let after: Vec<_> = pipeline
+        .render_concept_pages()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|page| (page.path.to_string(), page.content))
+        .collect();
+    assert_eq!(after, before);
+
+    let mut qualified = admission_test_concept("Lease — property contracts", &[]);
+    qualified.synthesis =
+        Some("A lease grants a tenant the contractual right to occupy a property.".into());
+    let linked = pipeline
+        .apply_concept_result(&admission_test_result(24, vec![qualified]), origin)
+        .await
+        .unwrap();
+    assert!(linked.contains("lease-property-contracts.md"));
+    let pages = pipeline.render_concept_pages().await.unwrap();
+    assert_eq!(pages.len(), 2);
+    let coordination = pages
+        .iter()
+        .find(|page| page.path.to_string() == before[0].0)
+        .unwrap();
+    assert_eq!(coordination.content, before[0].1);
+}
+
+#[tokio::test]
+async fn invalid_concept_names_refuse_the_whole_result_without_orphan_drafts() {
+    let temp = TempDir::new().unwrap();
+    let config = base_config(temp.path());
+    let mut pipeline = Pipeline::new(temp.path(), build_ctx(&config, Arc::new(NoopLlmClient)));
+    let origin = "---\ntype: daily\nllm_inputs:\n  concepts: h\n---\n\n## Related Concepts\n";
+    let result = admission_test_result(
+        23,
+        vec![
+            admission_test_concept("Valid Subject", &[]),
+            admission_test_concept("---", &[]),
+        ],
+    );
+    assert!(
+        pipeline
+            .apply_concept_result(&result, origin)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("valid name")
+    );
+    assert!(pipeline.render_concept_pages().await.unwrap().is_empty());
+    let corrected = admission_test_result(23, vec![admission_test_concept("Valid Subject", &[])]);
+    let linked = pipeline
+        .apply_concept_result(&corrected, origin)
+        .await
+        .unwrap();
+    assert!(linked.contains("[Valid Subject]"));
+    assert_eq!(pipeline.render_concept_pages().await.unwrap().len(), 1);
 }

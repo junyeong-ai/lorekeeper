@@ -8,6 +8,7 @@ import io
 import json
 import os
 import pathlib
+import stat
 import sys
 import warnings
 import zipfile
@@ -53,7 +54,7 @@ def json_value(value):
 
 
 def check_archive(data, limit):
-    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+    with zipfile.ZipFile(data) as archive:
         members = archive.infolist()
         if len(members) > 10000 or sum(member.file_size for member in members) > limit:
             raise ProjectionError("decoded-limit")
@@ -77,9 +78,11 @@ def spreadsheet(data, limit, max_units):
     units = []
     size = 0
     with contextlib.ExitStack() as stack:
-        formulas = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=False, keep_links=False)
+        formula_input = stack.enter_context(data.open("rb"))
+        formulas = openpyxl.load_workbook(formula_input, read_only=True, data_only=False, keep_links=False)
         stack.callback(formulas.close)
-        cached = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True, keep_links=False)
+        cached_input = stack.enter_context(data.open("rb"))
+        cached = openpyxl.load_workbook(cached_input, read_only=True, data_only=True, keep_links=False)
         stack.callback(cached.close)
         if len(formulas.sheetnames) > max_units:
             raise ProjectionError("unit-limit")
@@ -127,7 +130,7 @@ def image_frames(data, options):
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("error", Image.DecompressionBombWarning)
-            with Image.open(io.BytesIO(data)) as image:
+            with Image.open(data) as image:
                 expected = {"png": "PNG", "jpeg": "JPEG", "tiff": "TIFF", "webp": "WEBP"}[options["format"]]
                 if image.format != expected:
                     raise ProjectionError("format-mismatch")
@@ -196,7 +199,7 @@ def extraction(data, options):
                 raise ProjectionError("decoded-limit")
             units.append(unit({"kind": "image-frame", "number": number}, result.content, method="ocr", representation="markdown"))
         return units, ["Every decoded image frame is projected in stored order with EXIF orientation applied and transparency composited on white. OCR recognizes text only; diagrams and recognition accuracy require separate inspection."]
-    result = k.extract_bytes_sync(data, MIMES[kind], config)
+    result = k.extract_file_sync(data, MIMES[kind], config)
     warnings = []
     if result.processing_warnings:
         # Libraries may put source text in diagnostics. Keep the condition, not that text.
@@ -211,7 +214,7 @@ def extraction(data, options):
             config.disable_ocr = False
             config.force_ocr = True
             config.ocr = ocr_config()
-            recognized = k.extract_bytes_sync(data, MIMES[kind], config)
+            recognized = k.extract_file_sync(data, MIMES[kind], config)
             recognized_pages = pdf_pages(recognized)
             if len(recognized_pages) != len(pages):
                 raise ProjectionError("invalid-projection")
@@ -286,8 +289,9 @@ def main():
                     raise ProjectionError("ocr-data-missing")
                 models[language] = model_digest(model)
         return {"status": "ready", "runtime": {"packages": PACKAGES, "formats": list(MIMES), "ocr_models": models}}
-    data = sys.stdin.buffer.read(options["max_input_bytes"] + 1)
-    if len(data) > options["max_input_bytes"]:
+    data = pathlib.Path(options["input_path"])
+    metadata = data.stat()
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > options["max_input_bytes"]:
         raise ProjectionError("input-limit")
     return {"status": "projected", "projection": project(options, data)}
 

@@ -36,6 +36,12 @@ const SWEEP: &[&[&str]] = &[
         "--file",
         "corpus/vault/wiki/concepts/behaviour-snapshot.md",
     ],
+    &[
+        "wiki",
+        "audit-discover",
+        "--file",
+        "corpus/audit-discovery.json",
+    ],
     &["wiki", "original", "wiki/concepts/behaviour-snapshot.md"],
     &[
         "wiki",
@@ -73,6 +79,15 @@ const SWEEP: &[&[&str]] = &[
     &["queue", "check"],
     &["queue", "count"],
     &["queue", "prune"],
+    &["work", "context", "--task-id", "missing-task"],
+    &[
+        "work",
+        "discover",
+        "--task-id",
+        "missing-task",
+        "--file",
+        "corpus/extraction-discovery.json",
+    ],
     // Pending status is a read-only empty-state contract, not a calendar-dependent resume.
     &["synthesis", "pending", "--status", "--json"],
     &["task", "list"],

@@ -611,6 +611,7 @@ async fn run_nodex<T: serde::de::DeserializeOwned>(
     query: bool,
 ) -> Result<T, SourceError> {
     let output = tokio::process::Command::new(executable)
+        .kill_on_drop(true)
         .arg("-C")
         .arg(repo)
         .arg("--check-version")
@@ -1088,6 +1089,7 @@ template = "{kind}-{path_slug}"
             vault_root: root.path().join("unused-vault"),
             vault_dirs: Default::default(),
             documents: None,
+            originals: Default::default(),
         };
         let selected = serde_json::json!({"repo":root.path(), "executable":supported, "reconcile":true, "repository_id":"fixture/repo", "document_ids":["a"]});
         let raw = NodexSource.extract(&selected, &ctx).await.unwrap();
@@ -1327,6 +1329,7 @@ exit "$rc"
             vault_root: root.path().to_owned(),
             vault_dirs: Default::default(),
             documents: None,
+            originals: Default::default(),
         };
         verify_selection(&selected, &detail.node, true).unwrap();
         let raw = build_document_observation(

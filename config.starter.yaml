@@ -12,7 +12,13 @@ identity:
 
 # Host-local cadence; takes effect only after explicit OS registration.
 ingest:
+  source_timeout_seconds: 600  # acquisition budget per source, excluding writer-lock waiting
   schedule: "0 7 * * *"
+  originals:
+    max_entry_bytes: 33554432
+    max_member_bytes: 67108864
+    max_source_bytes: 268435456
+  # Raise entry limits explicitly for larger originals; all source limits fit 512 MiB.
   # DOCX/XLSX/PDF: `lore input install DIRECTORY`, then add its printed documents block.
   # Image OCR additionally needs explicit traineddata/languages; see config.example.yaml.
 
@@ -22,7 +28,7 @@ sources:
     enabled: true
     params:
       inbox_dir: inbox
-      # Originals are preserved; collected entries move to inbox/archived after queue flush.
+      # Originals are preserved; collected entries move to inbox/archived after durable publication.
       archive_after_ingest: true
     labels: [knowledge]
     concept_policy: supported-new

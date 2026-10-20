@@ -71,6 +71,12 @@ continued factual support; explicit reviewed retraction is separate.
   Source concept_policy controls admission: disabled enqueues no extraction, existing-only
   refuses absent owners, and supported-new permits supported new subjects. Queue results
   carry the task's exact policy; changing policy changes extraction input identity.
+- Applied extraction explicitly admits new or reuses an exact revision-pinned owner.
+  New names/aliases cannot claim an established owner and require nonblank grounding.
+  Separate new proposals never coalesce by name alone, including unpublished drafts;
+  publish the selected owner and rediscover before explicitly reusing it.
+  On a failed extraction discard transient name reservations, retaining committed
+  drafts; rebuild the registry lazily instead of copying it for every result.
 - Resolve each proposed alias; accept only absent or same-owner names, including
   earlier decisions in this result. Never approximate. Keep established aliases.
   Result ordering determines first ownership; do not silently merge rival pages.

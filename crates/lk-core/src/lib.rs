@@ -1,7 +1,9 @@
+pub mod captured_file;
 pub mod concept;
 pub mod config;
 pub mod content;
 pub mod cron;
+pub mod discovery;
 pub mod document;
 pub mod error;
 pub mod event;

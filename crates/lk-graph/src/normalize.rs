@@ -107,6 +107,19 @@ pub fn apply_in_session(
         .collect();
     let mut destinations: HashMap<PathBuf, &Path> = HashMap::new();
     let mut plan = lk_vault::MutationPlan::default();
+    let mut review_updates = lk_vault::plan_review_repointing(
+        root,
+        &pages
+            .iter()
+            .map(|page| page.path.clone())
+            .collect::<Vec<_>>(),
+        &renames
+            .iter()
+            .map(|rename| (rename.old_path.clone(), rename.new_path.clone()))
+            .collect::<Vec<_>>(),
+        &mut plan,
+    )
+    .map_err(|error| GraphError::Io(error.to_string()))?;
     for rename in renames {
         destinations.insert(rename.old_path.clone(), &rename.new_path);
         let absolute = root
@@ -114,8 +127,11 @@ pub fn apply_in_session(
             .canonicalize()
             .map_err(|e| GraphError::Io(e.to_string()))?;
         destinations.insert(absolute, &rename.new_path);
-        let before = std::fs::read_to_string(root.join(&rename.old_path))
-            .map_err(|e| GraphError::Io(e.to_string()))?;
+        let before = match review_updates.get(&rename.old_path) {
+            Some((before, _)) => before.clone(),
+            None => std::fs::read_to_string(root.join(&rename.old_path))
+                .map_err(|e| GraphError::Io(e.to_string()))?,
+        };
         plan.rename(&rename.old_path, &rename.new_path, before);
     }
 
@@ -124,9 +140,17 @@ pub fn apply_in_session(
             .get(page.path.as_path())
             .copied()
             .unwrap_or(&page.path);
-        let content = std::fs::read_to_string(root.join(&page.path))
-            .map_err(|e| GraphError::Io(format!("read {}: {e}", page.path.display())))?;
-        let mut updated = repoint_renamed_links(&content, &page.path, &destinations, root)?;
+        let typed = review_updates.remove(&page.path);
+        let has_association = typed.is_some();
+        let (content, typed) = match typed {
+            Some(update) => update,
+            None => {
+                let content = std::fs::read_to_string(root.join(&page.path))
+                    .map_err(|e| GraphError::Io(format!("read {}: {e}", page.path.display())))?;
+                (content.clone(), content)
+            }
+        };
+        let mut updated = repoint_renamed_links(&typed, &page.path, &destinations, root)?;
         if page.rss_evidence {
             lk_vault::rss_concept_citations(root, &page.path, &content)
                 .map_err(|e| GraphError::Io(e.to_string()))?;
@@ -154,7 +178,12 @@ pub fn apply_in_session(
             updated = with_id;
         }
 
-        plan.edit(rel_path, content, updated);
+        if has_association && content == updated && !renamed_paths.contains_key(page.path.as_path())
+        {
+            plan.require_unchanged(rel_path, content);
+        } else {
+            plan.edit(rel_path, content, updated);
+        }
     }
     session
         .apply(plan)
@@ -246,6 +275,71 @@ mod tests {
             "[Original](../bad-name.md)\n"
         );
         assert!(!root.join(".lorekeeper/mutation/pending.json").exists());
+    }
+
+    #[test]
+    fn normalization_moves_review_subjects_and_pointers_but_preserves_historical_evidence() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let old = "wiki/concepts/Old_Name.md";
+        let new = "wiki/concepts/old-name.md";
+        let old_review = "wiki/explorations/Review_Name.md";
+        let new_review = "wiki/explorations/review-name.md";
+        for directory in ["wiki/concepts", "wiki/explorations"] {
+            std::fs::create_dir_all(root.join(directory)).unwrap();
+        }
+        let concept = format!(
+            "---\ntype: concept\ntitle: Scoped subject\nknowledge_review: {old_review}\n---\n## Sources\n"
+        );
+        std::fs::write(root.join(old), &concept).unwrap();
+        let evidence = lk_vault::archive_evidence(root, &[old.into()]).unwrap();
+        let metadata = serde_json::json!({"status":"open","subjects":[old],"evidence":evidence.citations,"resolution":null});
+        let review = format!(
+            "---\ntype: exploration\nreview: {metadata}\n---\n[Subject](../concepts/Old_Name.md) needs evidence.\n"
+        );
+        std::fs::write(root.join(old_review), &review).unwrap();
+        let prior = lk_vault::inspect_evidence(root, &[old_review.into()]).unwrap();
+        let pages = crate::scan::scan_vault(root, false).unwrap();
+        let renames = scan(&pages);
+        assert_eq!(apply(&renames, &pages, root).unwrap(), 2);
+        assert!(!root.join(old).exists());
+        assert!(!root.join(old_review).exists());
+        let concept =
+            lk_vault::parse_page(&std::fs::read_to_string(root.join(new)).unwrap()).unwrap();
+        assert_eq!(
+            concept
+                .frontmatter
+                .get("knowledge_review")
+                .and_then(serde_json::Value::as_str),
+            Some(new_review)
+        );
+        let reports = lk_vault::list_reviews(root, &lk_core::config::VaultDirs::default()).unwrap();
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].path, new_review);
+        assert_eq!(
+            reports[0].effective_state,
+            lk_vault::ReviewEffectiveState::Open
+        );
+        let current = reports[0].review.as_ref().unwrap();
+        assert_eq!(current.subjects, [new]);
+        assert_eq!(current.evidence, evidence.citations);
+        assert_eq!(reports[0].missing_evidence, [old]);
+        assert_eq!(reports[0].archived_evidence, [old]);
+        let archived = lk_vault::load_archived_evidence(root, &prior.citations[0].revision)
+            .unwrap()
+            .unwrap();
+        assert_eq!(archived.original.as_deref(), Some(review.as_str()));
+        let pages = crate::scan::scan_vault(root, false).unwrap();
+        let audit = crate::audit::plan_selected(
+            root,
+            &lk_core::config::VaultDirs::default(),
+            &pages,
+            1,
+            &[new.into()],
+            u64::MAX,
+        )
+        .unwrap();
+        assert_eq!(audit.candidates[0].reviews[0].path, new_review);
     }
 
     #[test]

@@ -39,6 +39,8 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   Native consumers own selected semantic reads and guarded publication; the controller
   owns final global reconciliation/checks. Keep this boundary explicit in the host
   instruction and shared skills; standalone skills still perform their own final checks.
+  Grant each temporary selection manifest's directory explicitly to the selected host;
+  keep it alive through the foreground consumer and remove it afterward.
   `commands/work.rs` binds retained input and audit dependencies to resumable derived
   work. Oversized requests use a fresh configured agent per inspection/reduction and
   a bounded finalizer; small requests retain ordinary batching. `execution.work` limits
@@ -73,15 +75,21 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
 
 ## Ingest and originals (`commands/ingest.rs`)
 
-- Ingest waits for a cooperating writer only with `--wait-for-vault`; scheduled
-  daily collection uses it. Dry run never takes the writer lock.
+- Ingest captures observations before taking the writer lock. After acquisition,
+  recover journals and derive page plans against current pages; never refresh a
+  previously captured publication baseline. Pin the selected config path/revision
+  across collection, lock waiting and planning. `ingest.source_timeout_seconds`
+  applies independently per source; source `collection_timeout_seconds` overrides
+  it. Deadlines include retries/pagination/conversion, cancel async waits and reject
+  over-budget blocking returns; they are not OS preemption or source completeness.
+  `--wait-for-vault` permits publication waiting; dry run never takes that lock.
 - Dry run creates no vault files, tmp results, logs, or queue writes; real source
   errors still return nonzero. A noop provider makes no promise to queue work.
 - Work-log generation belongs to full ingest only, not filtered runs. A full run
   with partial source failure still writes its work-log and reports failure.
   Startup tmp sweeping/pending diagnostics must preserve recoverable work.
-- Manual original publication is immutable bytes→complete manifest→page journal→
-  queue flush→optional retirement. Keep source ownership separate from original
+- Manual original publication is immutable bytes→complete manifest→page/request
+  journal→optional retirement. Keep source ownership separate from original
   references; archive=false still preserves original bytes. Capture limits are
   source-local plus a 512 MiB CLI aggregate bound, not unbounded whole-inbox memory.
 - Keep all capture dependency information, even for events removed by the pipeline.
@@ -124,7 +132,15 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   atomic writer; do not add another UTF-8/JSONL interpretation.
 - Extraction result application may ignore a prior done marker while retaining exact
   input/target guards. Already-done section/synthesis tasks can retire normally.
-  Stage matching task/result pairs; no orphan application except explicit recovery.
+  Stage matching task/result pairs; missing retained input refuses application.
+  Extraction and synthesis pin the worker's full read scope. Extraction also
+  carries explicit discovery recipes and new/reuse admission. Native oversized
+  extraction records discovery before planning bounded evidence work; discovery
+  never marks extraction complete. Retire successful recipes in the publication
+  journal; prune only owned valid recipes with no retained pending identity.
+  Compose batch read guards against the actual publication set and matching original
+  bytes; owned edits guard themselves during recovery. Distinct publication addresses
+  resolving to one physical page refuse before any write, including in dry runs.
 - Hold the vault claim for each apply, not an entire LLM session; vault→queue is the
   lock order. Distinguish a page-local failure, quarantined malformed result, and
   fatal IO. Aggregate output honestly reports all/some/none applied.

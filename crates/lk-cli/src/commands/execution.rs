@@ -215,6 +215,7 @@ pub(super) fn agent_command(
     operation: &str,
     installation: &lk_dist::Installation,
     config: &Path,
+    input_directory: Option<&Path>,
 ) -> miette::Result<tokio::process::Command> {
     let engine = profile.engine();
     let root = installation.for_engine(engine).runtime_skills_dir();
@@ -311,6 +312,9 @@ pub(super) fn agent_command(
                 .map_err(|e| miette::miette!("{e}"))?;
             command.arg(format!("{instruction}\n\nUse the exact packaged skill at {entry}. Read that SKILL.md and follow its requested operation: {operation}. Its dependency skills are at: {}. Resolve dependency names to these exact files. Read only the references needed for this operation.", dependencies.join(", ")));
         }
+    }
+    if let Some(directory) = input_directory {
+        command.arg("--add-dir").arg(directory);
     }
     if let Some(model) = profile.model() {
         command.arg(format!("--model={model}"));

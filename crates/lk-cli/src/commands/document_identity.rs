@@ -427,6 +427,7 @@ async fn observe(
         vault_root: root.clone(),
         vault_dirs: config.vault.dirs.clone(),
         documents: config.ingest.documents.clone(),
+        originals: config.ingest.originals.clone(),
     };
     let http = lk_source::build_http_client().map_err(failure)?;
     let adapter = lk_source::build_source(

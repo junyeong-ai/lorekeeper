@@ -21,7 +21,5 @@ unicode-normalization = { workspace = true }
 regex = { workspace = true }
 strum = { workspace = true }
 same-file = { workspace = true }
-pulldown-cmark = { workspace = true }
-
-[dev-dependencies]
 tempfile = { workspace = true }
+pulldown-cmark = { workspace = true }

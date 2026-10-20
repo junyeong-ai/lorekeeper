@@ -70,6 +70,7 @@ pub(super) fn read_document(path: &Path, full: &Path) -> Result<Option<Document>
         path.to_string_lossy().into_owned(),
         &page,
         file_revision(&raw),
+        source_revision(&page),
     )
     .map(Some)
 }
@@ -78,6 +79,7 @@ pub(super) fn document_page(
     path: String,
     page: &crate::VaultPage,
     revision: String,
+    authored_revision: String,
 ) -> Result<Document, VaultError> {
     let fm = &page.frontmatter;
     let identity_value = fm.get("source_identity");
@@ -153,7 +155,7 @@ pub(super) fn document_page(
         "path": path,
         "title": fm.get("title"),
         "file_revision": revision,
-        "source_revision": source_revision(page),
+        "source_revision": authored_revision,
         "source_identity": parsed_identity.as_ref().and_then(|identity|identity.as_ref().ok()),
         "identity_status": identity_status,
         "metadata_issue_count": issues.len(),

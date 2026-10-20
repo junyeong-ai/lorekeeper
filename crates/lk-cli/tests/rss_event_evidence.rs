@@ -65,7 +65,59 @@ impl Fixture {
             task.cache_hash
         );
         std::fs::write(root.join(&origin), &raw).unwrap();
+        let queue = root.join(".lorekeeper/queue");
+        std::fs::create_dir_all(queue.join("results")).unwrap();
+        std::fs::write(
+            queue.join("fixture.jsonl"),
+            serde_json::to_string(&task).unwrap() + "\n",
+        )
+        .unwrap();
+        let discovery = vec![lk_core::discovery::DiscoveryQuery {
+            query: "Independent mechanism".into(),
+            phrase: true,
+            spacing: false,
+        }];
+        let discovery_file = root.join("discovery-request.json");
+        std::fs::write(
+            &discovery_file,
+            serde_json::to_vec(&serde_json::json!({
+                "target_revision":file_revision(&raw), "queries":discovery,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let cli = |args: &[&str]| {
+            let mut command = Command::new(env!("CARGO_BIN_EXE_lore"));
+            for (key, _) in std::env::vars() {
+                if key.starts_with("LORE_") {
+                    command.env_remove(key);
+                }
+            }
+            let output = command
+                .arg("--config")
+                .arg(&config)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
+        };
+        cli(&[
+            "work",
+            "discover",
+            "--task-id",
+            &task.task_id,
+            "--file",
+            discovery_file.to_str().unwrap(),
+        ]);
+        let context = cli(&["work", "context", "--task-id", &task.task_id]);
         let result = lk_queue::TaskResult {
+            context_revision: context["context_revision"].as_str().unwrap().into(),
+            discovery,
             concept_policy: lk_core::config::ConceptPolicy::SupportedNew,
             task_id: task.task_id.clone(),
             cache_hash: task.cache_hash.clone(),
@@ -76,6 +128,7 @@ impl Fixture {
                 .iter()
                 .zip(&capture.manifest.events)
                 .map(|(name, event)| lk_queue::ReportedConcept {
+                    admission: lk_queue::ConceptAdmission::New,
                     concept: lk_core::concept::ExtractedConcept {
                         name: (*name).into(),
                         ..Default::default()
@@ -88,13 +141,6 @@ impl Fixture {
                 })
                 .collect(),
         };
-        let queue = root.join(".lorekeeper/queue");
-        std::fs::create_dir_all(queue.join("results")).unwrap();
-        std::fs::write(
-            queue.join("fixture.jsonl"),
-            serde_json::to_string(&task).unwrap() + "\n",
-        )
-        .unwrap();
         std::fs::write(
             queue.join("results").join(format!("{}.json", task.task_id)),
             serde_json::to_vec(&result).unwrap(),

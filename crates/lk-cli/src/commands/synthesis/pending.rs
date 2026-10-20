@@ -812,6 +812,7 @@ pub async fn resume(
     );
     let synth = Synthesizer::new(&root, ctx, config, today);
     refresh_completed(&mut state, config, &reader).await?;
+    let mut publication = super::super::publication::Publication::new(session, llm.clone());
     let mut failed = None;
     let mut keys: Vec<_> = state.intents.keys().cloned().collect();
     keys.sort_by_key(|key| {
@@ -828,7 +829,16 @@ pub async fn resume(
         {
             continue;
         }
-        let result = process(&mut intent, &state, config, &reader, &synth, session, today).await;
+        let result = process(
+            &mut intent,
+            &state,
+            config,
+            &reader,
+            &synth,
+            &mut publication,
+            today,
+        )
+        .await;
         if let Err(error) = result {
             intent.status = Status::Blocked;
             intent.reason = Some(error.to_string());
@@ -839,12 +849,10 @@ pub async fn resume(
             break;
         }
     }
-    // Targets must exist before queue publication. A failed flush retains intent
-    // and will recreate the exact request on the next resume.
     if failed.is_none()
-        && let Err(error) = llm.flush().await
+        && let Err(error) = publication.finish().await
     {
-        failed = Some(miette::miette!("period queue flush: {error}"));
+        failed = Some(error);
     }
     save(&root, session, &state, before)?;
     if json {
@@ -878,7 +886,7 @@ async fn process(
     config: &Config,
     reader: &FsVault,
     synth: &Synthesizer,
-    session: &MutationSession,
+    publisher: &mut super::super::publication::Publication<'_>,
     today: Date,
 ) -> miette::Result<()> {
     let blocked = |intent: &mut Intent, reason: String| {
@@ -1053,10 +1061,7 @@ async fn process(
                     );
                 }
             }
-            output
-                .plan_publication(&mut publication, &config.vault.root_path())
-                .and_then(|()| session.apply(publication))
-                .map_err(|e| miette::miette!("publish period target: {e}"))?;
+            publisher.publish_with_plan([&output], publication).await?;
             intent.target_input = Some(input.clone());
             intent.status =
                 if lk_pipeline::completed_input(&parsed, intent.period.kind.target_kind())
@@ -1346,7 +1351,8 @@ mod tests {
         };
         let session = MutationSession::acquire(&root).unwrap();
         let llm = super::super::super::build_llm_client(&config, &root).unwrap();
-        let ctx = Arc::new(PipelineContext::build(None, llm, &config).unwrap());
+        let ctx = Arc::new(PipelineContext::build(None, llm.clone(), &config).unwrap());
+        let mut publisher = super::super::super::publication::Publication::new(&session, llm);
         let reader = FsVault::new(&root);
         let synth = Synthesizer::new(&root, ctx, &config, date(2026, 10, 1));
         process(
@@ -1355,7 +1361,7 @@ mod tests {
             &config,
             &reader,
             &synth,
-            &session,
+            &mut publisher,
             date(2026, 10, 1),
         )
         .await
@@ -1370,7 +1376,7 @@ mod tests {
             &config,
             &reader,
             &synth,
-            &session,
+            &mut publisher,
             date(2026, 10, 1),
         )
         .await

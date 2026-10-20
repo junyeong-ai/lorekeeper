@@ -21,6 +21,7 @@ pub(super) fn capture(
     root: &Path,
     dirs: &VaultDirs,
     pages: &[Page],
+    authored_revisions: &BTreeMap<std::path::PathBuf, String>,
 ) -> Result<Capture, VaultError> {
     let directory = lk_core::vault_path::documents_dir(dirs);
     let mut by_path = BTreeMap::new();
@@ -46,6 +47,7 @@ pub(super) fn capture(
                     path.to_string_lossy().into_owned(),
                     &page.page,
                     page.file_revision.clone(),
+                    authored_revisions[&page.rel_path].clone(),
                 )
                 .map(Some)
             }

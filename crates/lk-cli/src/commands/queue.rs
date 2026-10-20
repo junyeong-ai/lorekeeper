@@ -37,7 +37,7 @@ pub enum QueueCommand {
     /// Validate pending task identity and the exact target revision before publishing
     /// sections and completion markers. Synthesis also validates cited source revisions.
     /// Superseded task inputs are dropped; changed target files require regenerated results.
-    /// Lost extraction tasks require explicit recovery by task id.
+    /// Publication requires the original retained task and captured read scope.
     Apply {
         /// Vault root override (default: vault.root from config)
         #[arg(long)]
@@ -45,9 +45,6 @@ pub enum QueueCommand {
         /// Report what would be written, and write nothing
         #[arg(long)]
         dry_run: bool,
-        /// Recover a specific extraction result whose original queue task was lost
-        #[arg(long, value_name = "TASK_ID")]
-        recover_extraction: Vec<String>,
     },
     /// Regenerate one retained task from its original input, without remote fetching.
     Regenerate {
@@ -210,11 +207,7 @@ pub async fn run(opts: &super::GlobalOptions, cmd: QueueCommand) -> miette::Resu
         } => packet::run(opts, root, task_ids, include_content),
         QueueCommand::Status { root, json } => status(opts, root, json).await,
         QueueCommand::Count { root } => count(opts, root).await,
-        QueueCommand::Apply {
-            root,
-            dry_run,
-            recover_extraction,
-        } => apply(opts, root, dry_run, &recover_extraction).await,
+        QueueCommand::Apply { root, dry_run } => apply(opts, root, dry_run).await,
         QueueCommand::Prune {
             root,
             json,
@@ -531,7 +524,6 @@ async fn apply(
     opts: &super::GlobalOptions,
     root: Option<PathBuf>,
     dry_run: bool,
-    recover_extraction: &[String],
 ) -> miette::Result<()> {
     let (config, config_revision) = load_config_with_revision(&find_config(opts)?)?;
     let vault_root = root.unwrap_or_else(|| config.vault.root_path());
@@ -548,17 +540,6 @@ async fn apply(
     let batch = lk_queue::read_results(&queue_dir)
         .map_err(|e| miette::miette!("read queue results: {e}"))?;
 
-    for task_id in recover_extraction {
-        if !batch
-            .ready
-            .iter()
-            .any(|(_, result)| &result.task_id == task_id)
-        {
-            return Err(miette::miette!(
-                "no readable extraction result for recovery: {task_id}"
-            ));
-        }
-    }
     let synthesis_result = synthesis::apply(
         &vault_root,
         &queue_dir,
@@ -624,12 +605,48 @@ async fn apply(
     let mut origin_revisions: BTreeMap<PathBuf, String> = BTreeMap::new();
     let mut origin_pages: BTreeMap<PathBuf, (String, Vec<PathBuf>)> = BTreeMap::new();
     let mut consumed: Vec<PathBuf> = Vec::new();
-    let mut work_guards = lk_vault::MutationPlan::default();
+    let mut completed_tasks = std::collections::BTreeSet::new();
+    let mut work_guards = Vec::new();
+    let mut proposals: BTreeMap<_, Vec<_>> = BTreeMap::new();
+    for (path, result) in results {
+        proposals
+            .entry((result.task_id.clone(), result.cache_hash.clone()))
+            .or_default()
+            .push((path, result));
+    }
+    let mut agreed = Vec::new();
+    for group in proposals.into_values() {
+        let expected =
+            serde_json::to_value(&group[0].1).map_err(|error| miette::miette!("{error}"))?;
+        let mut ambiguous = false;
+        for (_, result) in group.iter().skip(1) {
+            if serde_json::to_value(result).map_err(|error| miette::miette!("{error}"))? != expected
+            {
+                ambiguous = true;
+                break;
+            }
+        }
+        if ambiguous {
+            eprintln!(
+                "  ✗ {}: conflicting extraction results for the same retained task and input; review and reconcile all retained proposals to one agreed value before retrying",
+                group[0].1.task_id
+            );
+            failed += 1;
+            continue;
+        }
+        let mut entries = group.into_iter();
+        let (path, result) = entries.next().expect("proposal groups are nonempty");
+        let paths = std::iter::once(path)
+            .chain(entries.map(|(path, _)| path))
+            .collect::<Vec<_>>();
+        agreed.push((paths, result));
+    }
+    agreed.sort_by(|left, right| left.0[0].cmp(&right.0[0]));
 
     // Everything a result can get wrong is that result's problem, not the batch's: aborting
     // would strand every other valid extraction in the run. A RETRYABLE failure leaves the
     // file in place so a fixed page picks it up next time, and the run exits non-zero.
-    for (path, result) in &results {
+    for (paths, result) in &agreed {
         let fail = |reason: String| {
             eprintln!(
                 "  ✗ {} ({}): {reason}",
@@ -651,7 +668,7 @@ async fn apply(
         let Some(rel_path) = resolve_target_path(&result.target.vault_path) else {
             drop_dead("target path escapes the vault root");
             dropped += 1;
-            consumed.push(path.clone());
+            consumed.extend(paths.iter().cloned());
             continue;
         };
         if !matches!(
@@ -665,16 +682,16 @@ async fn apply(
         let task = pending
             .tasks
             .get(&(result.task_id.clone(), result.cache_hash.clone()));
-        if task.is_none()
-            && (pending.unparseable > 0 || !recover_extraction.contains(&result.task_id))
-        {
+        if task.is_none() {
             let reason = if pending.unparseable > 0 {
                 "no matching readable task; repair unparseable queue lines before deciding this result's fate"
             } else {
                 "no matching pending task; its run was retired or the task identity is invalid"
             };
             if pending.unparseable == 0 && !dry_run {
-                synthesis::quarantine_orphan(&queue_dir, path, reason)?;
+                for path in paths {
+                    synthesis::quarantine_orphan(&queue_dir, path, reason)?;
+                }
             }
             fail(reason.into());
             failed += 1;
@@ -711,14 +728,8 @@ async fn apply(
         {
             drop_dead("superseded generation policy");
             dropped += 1;
-            consumed.push(path.clone());
+            consumed.extend(paths.iter().cloned());
             continue;
-        }
-        if task.is_none() {
-            eprintln!(
-                "  recovering extraction {} without its original queue task",
-                result.task_id
-            );
         }
         match classify_against_page(
             &vault_root,
@@ -744,7 +755,7 @@ async fn apply(
             Ok(status @ (TaskStatus::Done | TaskStatus::Stale | TaskStatus::MissingTarget)) => {
                 drop_dead(status.as_str());
                 dropped += 1;
-                consumed.push(path.clone());
+                consumed.extend(paths.iter().cloned());
                 continue;
             }
             Err(e) => {
@@ -774,63 +785,28 @@ async fn apply(
             {
                 drop_dead("already materialized");
                 dropped += 1;
-                consumed.push(path.clone());
+                consumed.extend(paths.iter().cloned());
                 continue;
             }
             fail("target changed; read the current page and regenerate this result".into());
             failed += 1;
             continue;
         }
-        let mut result_guards = lk_vault::MutationPlan::default();
-        let guarded = if task.is_some() {
-            super::work::guard_queue(
-                &vault_root,
-                &config,
-                &config_revision,
-                &result.task_id,
-                serde_json::to_value(result).map_err(|e| miette::miette!("{e}"))?,
-                &mut result_guards,
-            )
-            .map(|_| ())
-        } else {
-            // Only the explicit orphan-recovery branch reaches this point. It
-            // cannot reconstruct the original retained task or claim part reads.
-            (|| -> miette::Result<()> {
-                let source = read_page(&vault_root, &rel_path)
-                    .map_err(|error| miette::miette!("read recovery source: {error}"))?;
-                if synthesis::revision(&source) != result.target_revision {
-                    return Err(miette::miette!(
-                        "recovery source changed; reread before recovery"
-                    ));
-                }
-                let envelope = serde_json::to_vec(&serde_json::json!({
-                    "operation":"recover-extraction",
-                    "authority":"Current source page only; original retained input and part coverage are unavailable.",
-                    "target":result.target, "date":result.date, "source":source,
-                })).map_err(|error| miette::miette!("recovery input: {error}"))?;
-                let budget = config
-                    .execution
-                    .effective_work()
-                    .map_err(|error| miette::miette!("{error}"))?;
-                if envelope.len() > budget.max_input_bytes {
-                    return Err(miette::miette!(
-                        "orphan recovery input is {} bytes, exceeding execution.work.max_input_bytes {}; restore the retained task before bounded processing",
-                        envelope.len(),
-                        budget.max_input_bytes,
-                    ));
-                }
-                eprintln!(
-                    "  orphan recovery {} uses the complete current source page; original retained-input and part coverage cannot be established",
-                    result.task_id
-                );
-                Ok(())
-            })()
+        let guarded = super::work::prepare_queue_publication(
+            &vault_root,
+            &config,
+            &config_revision,
+            &result.task_id,
+            serde_json::to_value(result).map_err(|e| miette::miette!("{e}"))?,
+        );
+        let result_guards = match guarded {
+            Ok(guards) => guards,
+            Err(error) => {
+                fail(error.to_string());
+                failed += 1;
+                continue;
+            }
         };
-        if let Err(error) = guarded {
-            fail(error.to_string());
-            failed += 1;
-            continue;
-        }
         let rss_manifest = task
             .and_then(|t| t.input.get("rss_original"))
             .map(|v| {
@@ -849,8 +825,9 @@ async fn apply(
                     .entry(rel_path)
                     .or_insert_with(|| (String::new(), Vec::new()));
                 page.0 = rewritten;
-                page.1.push(path.clone());
-                work_guards.extend(result_guards);
+                page.1.extend(paths.iter().cloned());
+                completed_tasks.insert((result.task_id.clone(), result.cache_hash.clone()));
+                work_guards.push(result_guards);
                 applied += 1;
             }
             Err(e) => {
@@ -876,6 +853,56 @@ async fn apply(
         }
     }
 
+    // One durable write set: concepts precede their origins, and recovery resumes it
+    // before the next cooperating writer reads the vault. Results remain until commit.
+    let mut publications = lk_vault::MutationPlan::default();
+    let mut owned = BTreeMap::new();
+    for page in &concept_pages {
+        page.plan_publication(&mut publications, &vault_root)
+            .map_err(|e| miette::miette!("prepare {}: {e}", page.path))?;
+        if let Some(Some(original)) = &page.expected_original {
+            register_publication_owner(&vault_root, &mut owned, page.path.as_ref(), original)?;
+        }
+        if page.expected_original.as_ref().and_then(Option::as_ref) == Some(&page.content) {
+            publications.require_unchanged(page.path.as_ref(), page.content.clone());
+        }
+    }
+    let mut committed_results = Vec::new();
+    for (rel_path, (content, results)) in &origin_pages {
+        let current = read_page(&vault_root, rel_path);
+        match current {
+            Ok(current) if synthesis::revision(&current) == origin_revisions[rel_path] => {
+                // This content is derived from this exact page and parsed before staging;
+                // keep its expected original bytes rather than capturing a newer version.
+                lk_vault::guard_rss_evidence(&mut publications, &vault_root, rel_path, content)
+                    .map_err(|e| miette::miette!("RSS evidence: {e}"))?;
+                register_publication_owner(&vault_root, &mut owned, rel_path, &current)?;
+                if current == *content {
+                    publications.require_unchanged(rel_path.clone(), current);
+                } else {
+                    publications.edit(rel_path.clone(), current, content.clone());
+                }
+                committed_results.extend(results.iter().cloned());
+            }
+            other => {
+                let reason = match other {
+                    Err(error) => error.to_string(),
+                    _ => {
+                        "target changed before publication; regenerate its extraction result".into()
+                    }
+                };
+                return Err(miette::miette!(
+                    "{}: {reason}; extraction publication refused",
+                    rel_path.display()
+                ));
+            }
+        }
+    }
+    let mut plan = lk_vault::MutationPlan::default();
+    for guard in work_guards {
+        guard.append_to(&mut plan, &owned)?;
+    }
+    plan.extend(publications);
     if dry_run {
         for page in &concept_pages {
             super::report_refusals(page, true);
@@ -887,38 +914,8 @@ async fn apply(
         );
         return finish_apply(failed, unreadable, moved, dry_run);
     }
-
-    // One durable write set: concepts precede their origins, and recovery resumes it
-    // before the next cooperating writer reads the vault. Results remain until commit.
-    let mut plan = work_guards;
-    for page in &concept_pages {
-        page.plan_publication(&mut plan, &vault_root)
-            .map_err(|e| miette::miette!("prepare {}: {e}", page.path))?;
-    }
-    let mut committed_results = Vec::new();
-    for (rel_path, (content, results)) in &origin_pages {
-        let current = read_page(&vault_root, rel_path);
-        match current {
-            Ok(current) if synthesis::revision(&current) == origin_revisions[rel_path] => {
-                // This content is derived from this exact page and parsed before staging;
-                // keep its expected original bytes rather than capturing a newer version.
-                lk_vault::guard_rss_evidence(&mut plan, &vault_root, rel_path, content)
-                    .map_err(|e| miette::miette!("RSS evidence: {e}"))?;
-                plan.edit(rel_path.clone(), current, content.clone());
-                committed_results.extend(results.iter().cloned());
-            }
-            other => {
-                let reason = match other {
-                    Err(error) => error.to_string(),
-                    _ => {
-                        "target changed before publication; regenerate its extraction result".into()
-                    }
-                };
-                eprintln!("  ✗ {}: {reason}", rel_path.display());
-                applied -= results.len();
-                failed += results.len();
-            }
-        }
+    for identity in completed_tasks {
+        super::work::retire_discovery(&vault_root, &pending.tasks[&identity], &mut plan)?;
     }
     mutation
         .as_ref()
@@ -941,6 +938,33 @@ async fn apply(
         concept_pages.len()
     );
     finish_apply(failed, unreadable, moved, dry_run)
+}
+
+fn register_publication_owner(
+    root: &Path,
+    owned: &mut BTreeMap<PathBuf, String>,
+    path: &Path,
+    original: &str,
+) -> miette::Result<()> {
+    let root = root
+        .canonicalize()
+        .map_err(|error| miette::miette!("{error}"))?;
+    let absolute = lk_vault::page_path(&root, path)
+        .map_err(|error| miette::miette!("{error}"))?
+        .canonicalize()
+        .map_err(|error| miette::miette!("{error}"))?;
+    let relative = absolute
+        .strip_prefix(&root)
+        .map_err(|error| miette::miette!("{error}"))?
+        .to_path_buf();
+    if owned.contains_key(&relative) {
+        return Err(miette::miette!(
+            "multiple publication addresses resolve to the same page: {}",
+            relative.display()
+        ));
+    }
+    owned.insert(relative, original.into());
+    Ok(())
 }
 
 /// Exit non-zero when anything needs a human: a retryable failure, or a file that could not
@@ -1313,6 +1337,19 @@ struct PruneSummary {
 /// is nothing to archive; it is deleted. Rewrites go through `lk_queue::write_tasks_atomic`
 /// (temp + fsync + rename), and a file needing no change stays byte-identical.
 fn prune_queue(vault_root: &Path, queue_dir: &Path, dry_run: bool) -> miette::Result<PruneSummary> {
+    let session = (!dry_run)
+        .then(|| lk_vault::MutationSession::acquire(vault_root))
+        .transpose()
+        .map_err(|error| miette::miette!("claim vault mutation: {error}"))?;
+    prune_queue_with_session(vault_root, queue_dir, session.as_ref())
+}
+
+fn prune_queue_with_session(
+    vault_root: &Path,
+    queue_dir: &Path,
+    session: Option<&lk_vault::MutationSession>,
+) -> miette::Result<PruneSummary> {
+    let dry_run = session.is_none();
     let _claim = claim_writer(queue_dir, dry_run)?;
     let mut revisions = BTreeMap::new();
     let mut summary = PruneSummary::default();
@@ -1396,6 +1433,35 @@ fn prune_queue(vault_root: &Path, queue_dir: &Path, dry_run: bool) -> miette::Re
             }
         }
     }
+    if let Some(session) = session {
+        let mut identities = std::collections::BTreeSet::new();
+        let mut complete = true;
+        for path in pending_queue_files(queue_dir)? {
+            let pending = match read_tasks(&path) {
+                Ok(pending) => pending,
+                Err(error) => match std::fs::metadata(&path) {
+                    Err(io_error) if io_error.kind() == std::io::ErrorKind::NotFound => continue,
+                    _ => return Err(error),
+                },
+            };
+            if !pending.is_rewritable() {
+                complete = false;
+                break;
+            }
+            identities.extend(
+                pending
+                    .tasks
+                    .into_iter()
+                    .map(|task| (task.task_id, task.cache_hash)),
+            );
+        }
+        if complete {
+            let removed = super::work::prune_discovery(session, &identities)?;
+            if removed != 0 {
+                eprintln!("pruned {removed} unreferenced extraction discovery recipe(s)");
+            }
+        }
+    }
     Ok(summary)
 }
 
@@ -1421,7 +1487,19 @@ pub(super) async fn prune(
     let vault_root = resolve_vault_root(opts, root)?;
     let queue_dir = vault_root.join(".lorekeeper").join("queue");
     let summary = prune_queue(&vault_root, &queue_dir, dry_run)?;
+    report_prune(summary, json, dry_run)
+}
 
+pub(super) fn prune_with_session(
+    session: &lk_vault::MutationSession,
+    json: bool,
+) -> miette::Result<()> {
+    let root = session.root();
+    let summary = prune_queue_with_session(root, &root.join(".lorekeeper/queue"), Some(session))?;
+    report_prune(summary, json, false)
+}
+
+fn report_prune(summary: PruneSummary, json: bool, dry_run: bool) -> miette::Result<()> {
     // A retained-because-unclassifiable task is a defect with a named repair — the target page's
     // frontmatter, or the queue line itself — and nothing else in a scheduled run reports it:
     // `queue count` deliberately omits it from the drain decision so a session is never spent on
@@ -1818,6 +1896,42 @@ mod tests {
             1
         );
         assert!(!pending.exists());
+    }
+
+    #[test]
+    fn pruning_reuses_the_held_vault_session_and_preserves_queue_protection() {
+        let directory = TempDir::new().unwrap();
+        let root = directory.path();
+        let session = lk_vault::MutationSession::acquire(root).unwrap();
+        let queue = root.join(".lorekeeper/queue");
+        let recipes = queue.join("discovery");
+        std::fs::create_dir_all(&recipes).unwrap();
+        let recipe = recipes.join(format!(
+            "{}.json",
+            lk_core::rss_original::digest(b"completed-extraction")
+        ));
+        let original = serde_json::json!({
+            "task_id": "completed-extraction",
+            "cache_hash": "input",
+            "target_revision": "target",
+            "queries": [{"query": "subject", "phrase": false, "spacing": false}]
+        })
+        .to_string();
+        std::fs::write(&recipe, &original).unwrap();
+
+        assert!(prune_queue(root, &queue, false).is_err());
+        let claim = lk_queue::claim_queue(&queue).unwrap();
+        assert!(matches!(claim, lk_queue::QueueClaim::Held(_)));
+        let error = super::prune_with_session(&session, false).unwrap_err();
+        assert!(error.to_string().contains("another queue writer"));
+        assert_eq!(prune_queue(root, &queue, true).unwrap(), Default::default());
+        assert_eq!(std::fs::read_to_string(&recipe).unwrap(), original);
+        drop(claim);
+
+        super::prune_with_session(&session, false).unwrap();
+        assert!(!recipe.exists());
+        assert!(lk_vault::MutationSession::acquire(root).is_err());
+        assert!(!root.join(".lorekeeper/mutation/pending.json").exists());
     }
 
     #[test]

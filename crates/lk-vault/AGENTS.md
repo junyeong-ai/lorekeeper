@@ -126,13 +126,15 @@ canonical; SQLite navigation is derived.
 
 ## Immutable originals (`manual_original.rs`, `rss_original.rs`, `rss_evidence.rs`)
 
-- Manual originals are separate from review archives: validate captured bytes,
+- Manual originals are separate from review archives: stream-verify captured files,
   exclusive-publish objects/exact hard-linked members, manifest last. Same bytes
   reuse; occupied/corrupt objects fail, no suffix overwrite fallback. Refuse store
   symlinks. Inventory isn't a promise of complete browser offline capture.
 - Original reads verify manifest/selected member, never mutable `source_file`.
   Legacy missing originals report unavailable. Bound roster/revision pagination;
-  raw UTF-8 preview ≤64KiB, binary validated path. Only listed digest-verified
+  raw UTF-8 preview ≤64KiB, binary validated path. Verify large members without
+  retaining their full bytes in memory. Current acquisition settings do not restrict
+  historical manifests. Only listed digest-verified
   members are graph-resolvable, not hidden knowledge nodes.
 - RSS store is `.lorekeeper/evidence/rss/`: event JSON before complete manifest.
   Metadata inventory does not verify every unselected payload. Selected content is

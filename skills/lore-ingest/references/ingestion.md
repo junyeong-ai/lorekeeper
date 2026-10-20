@@ -2,34 +2,32 @@
 
 Contents: per-page publication; original bundles; semantic completion; refetch and replay.
 
-Pages are replaced atomically per file; a run is not a multi-page transaction.
-After a write or queue-flush failure, retry from retained inputs where available.
-A remote re-fetch may return edited, deleted or expired events, even on the same day,
-so byte-identical recovery requires identical retained inputs. Per-source queue
-boundaries roll back buffered tasks when source planning fails; the queue is
-published only after vault writes succeed. The scheduled pipeline logs an explicit
-automatic-commit skip: it cannot prove which working-tree changes belong to its run.
-Review and commit vault changes separately; existing staging remains untouched.
+Each source's pages and new semantic requests share a recoverable mutation journal.
+Individual file replacement is atomic; the full run contains separate publication batches.
+After failure, use retained inputs and pending journals where available. A remote refetch
+may return edited, deleted or expired events, so it does not establish exact historical
+replay. Failed planning discards that source's buffered requests. Native jobs do not
+commit vault edits automatically; review and commit them separately.
 
-1. **Plan each source** — fetch, normalize, intra-batch dedup, classify. A source
-   that fails is recorded and skipped; the run continues with the rest.
-2. **Write pages** — atomic per file (tmp + rename). Document-unit sources (`manual`,
-   `nodex` and `google-drive`) write individual pages under `<wiki>/documents/`; day-unit sources
-   write `<daily>/{source-id}/DATE.md`. Imported repository documents keep their
-   identity and vault address across source renames. Concept pages are a cross-source aggregate, rendered once
-   after all sources plan.
-3. **Write work-log** — personal events only, and only when the optional `personal:`
-   module is configured (a source must be in `personal.tracked_sources` AND match its
-   adapter `is_self`; `manual`/nodex/RSS/Drive have no authorship, so never produce work-log
-   entries even if listed). FULL ingest only: a source-filtered run skips this step —
-   its event set is a structural subset and would overwrite the complete page.
-4. **Flush LLM queue** — one atomic JSONL task file (queue mode).
-5. **Archive** — eligible `manual` inbox entries move to `archived/{date}/` when
-   enabled, only after original preservation, every vault write and the queue flush
-   succeeded. Partial dependency coverage, changed bytes, shared entry dependencies
-   or a failed entry in the same manual source prevent retirement.
-   Existing archive entries are never replaced; identical bytes may reuse an entry.
-   An empty inbox means collection finished, not that semantic tasks or reviews finished.
+1. **Collect observations** before taking the vault writer lock. Acquisition includes
+   fetch, retries and local preprocessing within each source's configured budget.
+   Failed sources are reported; independent healthy sources can continue.
+2. **Plan against current pages** after acquiring the writer lock and recovering
+   journals. The selected configuration must remain unchanged. Normalize, deduplicate
+   exact source identities and classify. Document-unit sources (`manual`, `nodex`,
+   `google-drive`) retain stable ownership under `<wiki>/documents/`; day-unit sources
+   write `<daily>/{source-id}/DATE.md`.
+3. **Publish pages and requests** through the same journal. Immutable originals precede
+   their references. Source pages and JSONL admission commit together; concept pages
+   accumulate across sources and render once. A publication failure retains inputs.
+4. **Publish the work-log** only for full ingest and configured personal tracking.
+   Adapter-owned authorship decides personal events; manual/nodex/RSS/Drive do not
+   infer authorship. A filtered run cannot replace a cross-source work-log.
+5. **Retire consumed inputs** only after successful publication. Eligible unchanged
+   manual entries move to `archived/{date}/` when enabled. Partial dependency coverage,
+   changed bytes, shared entry dependencies or a failed entry in the same source prevent
+   retirement. Archive collisions never overwrite different bytes. An empty inbox says
+   nothing about semantic queue or review completion.
 
 The manual adapter reads top-level UTF-8 Markdown, text and HTML. DOCX/XLSX/PDF
 use optional configured preprocessing; images use explicitly configured OCR.
@@ -51,13 +49,13 @@ and other unsupported resource constructs are reported as incomplete coverage an
 keep the entry for retry; HTML `base`, implicit Obsidian basename lookup and local
 raw-HTML links in Markdown are refused. Inspect `unsupported` before assuming a
 self-contained export. Each entry is a separate observation, not an atomic inbox
-snapshot. Capture is bounded to 32 MiB per text, 64 MiB per member, 2048 members,
-32 dependency levels and 8192 member records per source. Each source allows
-256 MiB of captured bytes and 256 MiB of derived text; captures across an ingest
-are limited to 512 MiB. Split unlinked batches or provide smaller self-contained
+snapshot. Default capture limits are 32 MiB per entry, 64 MiB per member, 2048 members,
+32 dependency levels and 8192 member records per source. `ingest.originals` configures entry/member/source acquisition limits, with a default
+256 MiB per source and a fixed 512 MiB ingest envelope. Captures use private temporary
+files; decoded text retains its separate bounds. Each source permits 256 MiB of derived text. Split unlinked batches or provide smaller self-contained
 exports when those limits fail.
 
-In **queue mode** (the default), phases 1–5 leave summary/concept/work-log
+In **queue mode** (the default), the run leaves summary/concept/work-log
 sections empty and emit JSONL tasks. They are NOT knowledge yet — run
 **`/lore-process`** afterward to drain the queue (fill summaries, create/merge
 concept pages, work-log topic synthesis). Its own Finalize step reconciles the

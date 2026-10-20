@@ -88,6 +88,14 @@ import json, os
 from pathlib import Path
 root=Path(os.environ['TEST_EXECUTION_ROOT'])
 candidate=json.loads((root/'plan.json').read_text())['candidates'][0]
+import subprocess
+if candidate['discovery'] is None:
+    discovery={key:candidate[key] for key in ['path','file_revision']}
+    discovery['queries']=[{'query':candidate['title'],'phrase':True,'spacing':False}]
+    path=root/'discovery.json'
+    path.write_text(json.dumps(discovery))
+    subprocess.run([os.environ['LORE_BIN'],'wiki','audit-discover','--file',str(path)],check=True)
+    candidate=json.loads(subprocess.check_output([os.environ['LORE_BIN'],'wiki','audit-plan','--path',candidate['path']]))['candidates'][0]
 assessment={key:candidate[key] for key in ['path','file_revision','input_revision']}
 assessment.update(disposition='reviewed', reason='Read the exact selected concept and its scoped evidence.', reviews=[])
 (root/'assessment.json').write_text(json.dumps({'assessments':[assessment]}))
@@ -106,6 +114,132 @@ fn write_audit_concept(fixture: &Fixture, name: &str) {
             .replace("unlinked-note", name),
     )
     .unwrap();
+    record_discovery(fixture, &format!("wiki/concepts/{name}.md"));
+}
+
+fn record_discovery(fixture: &Fixture, path: &str) {
+    let result = fixture
+        .command()
+        .args(["graph", "backlinks-sync"])
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let raw = std::fs::read_to_string(fixture.root().join("vault").join(path)).unwrap();
+    let request = fixture.root().join("discovery.json");
+    std::fs::write(
+        &request,
+        serde_json::to_vec(&serde_json::json!({
+            "path": path, "file_revision": lk_core::concept::file_revision(&raw),
+            "queries": [{"query":"Unlinked note", "phrase":true, "spacing":false}]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let result = fixture
+        .command()
+        .args(["wiki", "audit-discover", "--file"])
+        .arg(request)
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+
+#[test]
+fn knowledge_discovers_unlinked_documents_before_assessment_on_both_hosts() {
+    let discover = r#"
+case "$*" in
+  *"discover."*)
+    "$LORE_BIN" wiki audit-plan > "$TEST_EXECUTION_ROOT/plan.json" || exit 40
+    python3 - <<'DISCOVERY'
+import json, os, subprocess
+from pathlib import Path
+root=Path(os.environ['TEST_EXECUTION_ROOT'])
+for candidate in json.loads((root/'plan.json').read_text())['candidates']:
+    request={key:candidate[key] for key in ['path','file_revision']}
+    request['queries']=[{'query':'production order retention','phrase':False,'spacing':False}]
+    path=root/'discovery.json'
+    path.write_text(json.dumps(request))
+    subprocess.run([os.environ['LORE_BIN'],'wiki','audit-discover','--file',str(path)],check=True)
+DISCOVERY
+    exit $?
+esac
+"#;
+    for engine in ["claude-code", "codex"] {
+        let fixture = Fixture::new(engine, 30, &format!("{discover}\n{RECORD_FIRST_AUDIT}"));
+        std::fs::write(
+            &fixture.config,
+            std::fs::read_to_string(&fixture.config).unwrap()
+                + "graph:\n  audit:\n    batch_size: 1\n",
+        )
+        .unwrap();
+        let documents = fixture.root().join("vault/wiki/documents");
+        std::fs::create_dir_all(&documents).unwrap();
+        for (name, days) in [("a", 30), ("b", 7)] {
+            std::fs::write(documents.join(format!("{name}.md")), format!("---\ntype: document\ntitle: Policy {name}\n---\nProduction order retention is exactly {days} days, effective 2026-10-01.\n")).unwrap();
+        }
+        let plan: serde_json::Value = serde_json::from_slice(
+            &fixture
+                .command()
+                .args(["wiki", "audit-plan", "--path", "wiki/documents/a.md"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap();
+        let candidate = &plan["candidates"][0];
+        let unsearched = fixture.root().join("unsearched-assessment.json");
+        std::fs::write(&unsearched, serde_json::to_vec(&serde_json::json!({"assessments":[{
+            "path":candidate["path"], "file_revision":candidate["file_revision"], "input_revision":candidate["input_revision"],
+            "disposition":"reviewed", "reason":"A source was read without searching for related material.", "reviews":[]
+        }]})).unwrap()).unwrap();
+        let refused = fixture
+            .command()
+            .args(["wiki", "audit-record", "--file"])
+            .arg(unsearched)
+            .output()
+            .unwrap();
+        assert!(!refused.status.success());
+        assert!(String::from_utf8_lossy(&refused.stderr).contains("related-document discovery"));
+        assert!(
+            !fixture
+                .root()
+                .join("vault/.lorekeeper/knowledge-audit.json")
+                .exists()
+        );
+        let (output, result) = fixture.run("knowledge");
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            result,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(result["semantic_calls"], 2);
+        let selected: serde_json::Value = serde_json::from_slice(
+            &fixture
+                .command()
+                .args(["wiki", "audit-plan", "--path", "wiki/documents/a.md"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap();
+        let candidate = &selected["candidates"][0];
+        assert_eq!(candidate["evidence"], serde_json::json!([]));
+        assert_eq!(candidate["related_pages"][0]["path"], "wiki/documents/b.md");
+        assert_eq!(
+            candidate["discovery"]["matches"],
+            candidate["related_pages"]
+        );
+        assert_eq!(selected["reviewed_current"], 1);
+    }
 }
 
 fn write_review_attention(fixture: &Fixture, subject: &str, invalid: bool) {
@@ -161,12 +295,32 @@ fn empty_work_does_not_launch_or_require_an_agent() {
 #[test]
 fn both_hosts_receive_distinct_contracts_and_exit_zero_does_not_prove_completion() {
     for engine in ["claude-code", "codex"] {
-        let fixture = Fixture::new(engine, 30, "exit 0");
+        let fixture = Fixture::new(
+            engine,
+            30,
+            r#"python3 - "$@" <<'CHECK'
+import json, os, sys
+from pathlib import Path
+prompt='\n'.join(sys.argv[1:])
+selection,_=json.JSONDecoder().raw_decode(prompt.split('Selected queue task manifest: ',1)[1])
+path=Path(selection)
+assert isinstance(json.loads(path.read_text()),list)
+granted=[Path(sys.argv[index+1]).resolve() for index,arg in enumerate(sys.argv[:-1]) if arg=='--add-dir']
+assert path.parent.resolve() in granted, 'selection must be readable inside an explicitly granted directory'
+(Path(os.environ['TEST_EXECUTION_ROOT'])/'selection-path').write_text(str(path))
+CHECK
+"#,
+        );
         fixture.ingest();
         let (output, result) = fixture.run("process");
         assert!(!output.status.success());
         assert_eq!(result["ok"], false);
         assert_eq!(result["execution"]["engine"], engine);
+        let selection = std::fs::read_to_string(fixture.root().join("selection-path")).unwrap();
+        assert!(
+            !Path::new(&selection).parent().unwrap().exists(),
+            "selection directories must retire after the consumer exits"
+        );
         let arguments = std::fs::read_to_string(fixture.root().join("arguments")).unwrap();
         assert!(!arguments.contains("bounded knowledge maintenance"));
         if engine == "codex" {
@@ -333,7 +487,9 @@ fn audit_exit_zero_without_assessments_is_incomplete() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|stage| stage["name"] == "audit completion" && stage["state"] == "failed"),
+            .any(
+                |stage| stage["name"] == "related-document discovery" && stage["state"] == "failed"
+            ),
         "{}\n{}",
         result,
         String::from_utf8_lossy(&output.stderr)
@@ -446,6 +602,11 @@ fn invalid_review_evidence_blocks_knowledge_before_launching_agent() {
 #[test]
 fn selected_review_drift_blocks_audit_completion_without_becoming_a_global_health_failure() {
     let fixture = Fixture::new("codex", 30, RECORD_FIRST_AUDIT);
+    std::fs::write(
+        &fixture.config,
+        std::fs::read_to_string(&fixture.config).unwrap() + "graph:\n  audit:\n    batch_size: 1\n",
+    )
+    .unwrap();
     write_audit_concept(&fixture, "a");
     write_review_attention(&fixture, "wiki/concepts/a.md", false);
     let (output, result) = fixture.run("knowledge");
@@ -467,7 +628,7 @@ fn selected_review_drift_blocks_audit_completion_without_becoming_a_global_healt
     );
     let plan = fixture
         .command()
-        .args(["wiki", "audit-plan"])
+        .args(["wiki", "audit-plan", "--limit", "2"])
         .output()
         .unwrap();
     assert!(plan.status.success());
@@ -574,6 +735,7 @@ fn bounded_audit_fixture(engine: &str, max_calls: usize, behavior: &str) -> Fixt
     let body = std::fs::read_to_string(&path).unwrap()
         + &"\nEvidence clause with Unicode 한🙂 remains source scoped.\n".repeat(180);
     std::fs::write(path, body).unwrap();
+    record_discovery(&fixture, "wiki/concepts/large.md");
     fixture
 }
 
@@ -649,12 +811,16 @@ fn selected_profile_budget_reaches_controller_and_worker_commands() {
         );
         let status: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(status["completed"], 1);
-        assert!(
-            !fixture
-                .root()
-                .join("vault/.lorekeeper/knowledge-audit.json")
-                .exists()
-        );
+        let receipts: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(
+                fixture
+                    .root()
+                    .join("vault/.lorekeeper/knowledge-audit.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(receipts["entries"].as_object().unwrap().is_empty());
         assert!(
             !fixture
                 .root()
@@ -894,6 +1060,7 @@ fn resumed_knowledge_batches_share_budget_across_oversized_subjects() {
         .unwrap()
         .replace("large", "second");
     std::fs::write(source.with_file_name("second.md"), second).unwrap();
+    record_discovery(&fixture, "wiki/concepts/second.md");
     for _ in 0..2 {
         let (output, result) = fixture.run("knowledge");
         assert!(!output.status.success(), "{result}");
@@ -1027,6 +1194,270 @@ fn native_queue_resumes_an_explicit_single_part_work_plan() {
     assert_eq!(calls[0]["work_id"], plan["work_id"]);
 }
 
+fn build_extraction_behavior(discovery_handler: &str) -> String {
+    let mut behavior = RECORD_BOUNDED_AUDIT.replace(
+        "    if match is None:\n        raise SystemExit('expected an exact bounded native request')",
+        discovery_handler,
+    );
+    behavior = behavior.replace(
+        "        assert all('text' in item for item in request['input']['ranges'])",
+        "        assert all('text' in item for item in request['input']['ranges'])\n        row['addresses']=[item['address'] for item in request['input']['ranges']]",
+    );
+    let start = behavior
+        .find("    assert subject['kind']=='audit'")
+        .unwrap();
+    let end = behavior[start..].find("    row={'action':action").unwrap() + start;
+    behavior.replace_range(start..end, r#"    assert subject['kind']=='queue'
+    context=request['context']['purpose']
+    result={key:subject[key] for key in ['task_id','cache_hash','target_revision']}
+    result.update(context_revision=cli('work','status',work_id)['context_revision'],
+                  discovery=context['discovery']['queries'],concept_policy=context['parameters']['concept_policy'],
+                  target=context['target'],date=context['parameters']['date'],concepts=[])
+    path=root/'extraction-result.json'
+    path.write_text(json.dumps(result))
+    cli('work','finish',work_id,'--file',str(path))
+"#);
+    behavior
+}
+
+#[test]
+fn oversized_extraction_records_discovery_before_planning_on_both_hosts() {
+    let behavior = build_extraction_behavior(
+        r#"    if match is None:
+        match=re.search(r'discover ("[^"\n]+")', '\n'.join(sys.argv[1:]))
+        assert match is not None
+        assert not (root/'vault/.lorekeeper/work').exists(), 'discovery must precede bounded planning'
+        selection=Path(json.loads(match.group(1)))
+        granted=[Path(sys.argv[index+1]).resolve() for index,arg in enumerate(sys.argv[:-1]) if arg=='--add-dir']
+        assert selection.parent.resolve() in granted, 'discovery selection requires explicit directory access'
+        ids=json.loads(selection.read_text())
+        lore=os.environ['LORE_BIN']
+        rows=json.loads(subprocess.check_output([lore,'queue','status','--json']))['data']['tasks']
+        for task_id in ids:
+            row=next(row for row in rows if row['task_id']==task_id)
+            request={'target_revision':row['target_revision'],'queries':[{'query':'transactional outbox','phrase':True,'spacing':False}]}
+            path=root/'extraction-discovery.json'
+            path.write_text(json.dumps(request))
+            subprocess.run([lore,'work','discover','--task-id',task_id,'--file',str(path)],check=True)
+        (root/'discovery-called').write_text('recorded')
+        raise SystemExit(0)"#,
+    );
+    for engine in ["claude-code", "codex"] {
+        let fixture = Fixture::new(engine, 30, &behavior);
+        let config = std::fs::read_to_string(&fixture.config).unwrap().replace(
+            "  default_profile: primary\n",
+            "  default_profile: primary\n  work: {max_input_bytes: 8192, max_result_bytes: 1024, max_calls: 64}\n",
+        );
+        std::fs::write(&fixture.config, config).unwrap();
+        let root = fixture.root().join("vault");
+        let source = "Transactional outbox commits an event with its state change.\n\n".repeat(400);
+        let request = lk_queue::ExtractConceptsRequest {
+            concept_policy: lk_core::config::ConceptPolicy::SupportedNew,
+            rss_original: None,
+            text: source.clone(),
+            source_id: "notes".into(),
+            source_type: lk_core::config::SourceType::Manual,
+            date: jiff::civil::date(2026, 10, 20),
+            focus: None,
+            locale: lk_core::i18n::Locale::En,
+            categories: Vec::new(),
+            target: lk_queue::TaskTarget {
+                vault_path: "wiki/documents/source.md".into(),
+                kind: lk_queue::TargetKind::DocumentConcepts,
+                anchor: "## Related Concepts".into(),
+            },
+        };
+        let queue = root.join(".lorekeeper/queue");
+        let client = lk_queue::QueueLlmClient::new(queue.clone());
+        let task = client.build_task("ext", lk_queue::TaskKind::ExtractConcepts, request);
+        std::fs::create_dir_all(root.join("wiki/documents")).unwrap();
+        std::fs::write(root.join("wiki/documents/source.md"), format!("---\ntype: document\ntitle: Source\nllm_inputs:\n  concepts: {}\n---\n## Summary\nSource observation.\n\n## Content\n{source}\n\n## Related Concepts\n", task.cache_hash)).unwrap();
+        std::fs::write(root.join("wiki/documents/related.md"), "---\ntype: document\ntitle: Related\n---\n## Summary\nA transactional outbox has source-scoped delivery assumptions.\n").unwrap();
+        std::fs::create_dir_all(&queue).unwrap();
+        std::fs::write(
+            queue.join("fixture.jsonl"),
+            serde_json::to_string(&task).unwrap() + "\n",
+        )
+        .unwrap();
+        let (output, result) = fixture.run("process");
+        assert!(output.status.success(), "{engine}: {result}");
+        assert!(fixture.root().join("discovery-called").exists());
+        let calls = bounded_calls(&fixture);
+        assert!(calls.iter().any(|call| call["action"] == "finish"));
+        assert!(calls.iter().any(
+            |call| call["addresses"].as_array().is_some_and(|addresses| {
+                addresses
+                    .iter()
+                    .any(|address| address == "wiki/documents/related.md")
+            })
+        ));
+        assert!(
+            std::fs::read_to_string(root.join("wiki/documents/source.md"))
+                .unwrap()
+                .contains("concepts_done:")
+        );
+    }
+}
+
+#[test]
+fn small_extraction_hands_expanded_discovery_to_bounded_work_on_both_hosts() {
+    let behavior = build_extraction_behavior(
+        r#"    if match is None:
+        prompt='\n'.join(sys.argv[1:])
+        path,_=json.JSONDecoder().raw_decode(prompt.split('Selected queue task manifest: ',1)[1])
+        ids=json.loads(Path(path).read_text())
+        lore=os.environ['LORE_BIN']
+        assert not (root/'vault/.lorekeeper/work').exists(), 'small retained inputs must start in the ordinary selected batch'
+        rows={row['task_id']:row for row in json.loads(subprocess.check_output([lore,'queue','status','--json']))['data']['tasks']}
+        tasks=[json.loads(line) for file in (root/'vault/.lorekeeper/queue').glob('*.jsonl') for line in file.read_text().splitlines()]
+        selected=[task for task in tasks if task['task_id'] in ids]
+        assert len(selected)==2
+        results=root/'vault/.lorekeeper/queue/results'
+        results.mkdir(exist_ok=True)
+        for task in selected:
+            row=rows[task['task_id']]
+            if task['kind']=='extract-concepts':
+                request={'target_revision':row['target_revision'],'queries':[{'query':'transactional outbox','phrase':True,'spacing':False}]}
+                file=root/'extraction-discovery.json'
+                file.write_text(json.dumps(request))
+                subprocess.run([lore,'work','discover','--task-id',task['task_id'],'--file',str(file)],check=True)
+                context=json.loads(subprocess.check_output([lore,'work','context','--task-id',task['task_id']]))
+                if context['requires_bounded_work']:
+                    assert context['resources'] is None
+                    assert context['resource_count']>=2 and context['part_count']>1
+                    plan=json.loads(subprocess.check_output([lore,*context['plan_command'][1:]]))
+                    assert plan['parts']>1
+            else:
+                assert task['kind']=='summarize'
+                result={key:task[key] for key in ['task_id','cache_hash']}
+                result.update(target_revision=row['target_revision'],body='Completed the other selected source.')
+                (results/(task['task_id']+'.section.json')).write_text(json.dumps(result))
+        (root/'selected-handoff.json').write_text(json.dumps(ids))
+        raise SystemExit(0)"#,
+    );
+    for engine in ["claude-code", "codex"] {
+        for expands in [true, false] {
+            let fixture = Fixture::new(engine, 30, &behavior);
+            let config = std::fs::read_to_string(&fixture.config).unwrap().replace(
+                "  default_profile: primary\n",
+                "  default_profile: primary\n  work: {max_input_bytes: 8192, max_result_bytes: 1024, max_calls: 64}\n",
+            );
+            std::fs::write(&fixture.config, config).unwrap();
+            let root = fixture.root().join("vault");
+            let queue = root.join(".lorekeeper/queue");
+            let client = lk_queue::QueueLlmClient::new(queue.clone());
+            let task = client.build_task(
+                "ext",
+                lk_queue::TaskKind::ExtractConcepts,
+                lk_queue::ExtractConceptsRequest {
+                    concept_policy: lk_core::config::ConceptPolicy::SupportedNew,
+                    rss_original: None,
+                    text: "A transactional outbox commits an event with its state change.".into(),
+                    source_id: "notes".into(),
+                    source_type: lk_core::config::SourceType::Manual,
+                    date: jiff::civil::date(2026, 10, 20),
+                    focus: None,
+                    locale: lk_core::i18n::Locale::En,
+                    categories: vec![],
+                    target: lk_queue::TaskTarget {
+                        vault_path: "wiki/documents/source.md".into(),
+                        kind: lk_queue::TargetKind::DocumentConcepts,
+                        anchor: "## Related Concepts".into(),
+                    },
+                },
+            );
+            let summary = client.build_task(
+                "sum",
+                lk_queue::TaskKind::Summarize,
+                lk_queue::SummarizeRequest {
+                    text: "A separate short source.".into(),
+                    max_sentences: 3,
+                    focus: None,
+                    locale: lk_core::i18n::Locale::En,
+                    source_type: None,
+                    target: lk_queue::TaskTarget {
+                        vault_path: "wiki/documents/summary.md".into(),
+                        kind: lk_queue::TargetKind::DocumentSummary,
+                        anchor: "## Summary".into(),
+                    },
+                },
+            );
+            std::fs::create_dir_all(root.join("wiki/documents")).unwrap();
+            std::fs::write(root.join("wiki/documents/source.md"), format!("---\ntype: document\nllm_inputs:\n  concepts: {}\n---\n## Content\nShort source.\n\n## Related Concepts\n",task.cache_hash)).unwrap();
+            std::fs::write(
+                root.join("wiki/documents/summary.md"),
+                format!(
+                    "---\ntype: document\nllm_inputs:\n  summary: {}\n---\n## Summary\n",
+                    summary.cache_hash
+                ),
+            )
+            .unwrap();
+            std::fs::write(
+                root.join("wiki/documents/related.md"),
+                format!(
+                    "---\ntype: document\n---\n{}",
+                    "A transactional outbox has source-scoped delivery assumptions.\n\n"
+                        .repeat(if expands { 400 } else { 1 })
+                ),
+            )
+            .unwrap();
+            std::fs::create_dir_all(&queue).unwrap();
+            std::fs::write(
+                queue.join("fixture.jsonl"),
+                [
+                    serde_json::to_string(&task).unwrap(),
+                    serde_json::to_string(&summary).unwrap(),
+                ]
+                .join("\n")
+                    + "\n",
+            )
+            .unwrap();
+            let (output, result) = fixture.run("process");
+            assert_eq!(
+                output.status.success(),
+                expands,
+                "{engine}, expands={expands}: {result}"
+            );
+            assert!(fixture.root().join("selected-handoff.json").exists());
+            assert!(
+                std::fs::read_to_string(root.join("wiki/documents/summary.md"))
+                    .unwrap()
+                    .contains("summary_done:")
+            );
+            assert_eq!(
+                std::fs::read_to_string(root.join("wiki/documents/source.md"))
+                    .unwrap()
+                    .contains("concepts_done:"),
+                expands
+            );
+            if expands {
+                assert!(
+                    bounded_calls(&fixture)
+                        .iter()
+                        .any(|call| call["action"] == "finish")
+                );
+                assert!(
+                    result["stages"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|stage| stage["name"] == "expanded extraction work")
+                );
+            } else {
+                assert!(bounded_calls(&fixture).is_empty());
+                assert!(
+                    result["stages"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|stage| stage["name"] == "selected queue receipt"
+                            && stage["state"] == "failed")
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn sealed_queue_work_restages_a_missing_result_without_calling_the_model_again() {
     let start = RECORD_BOUNDED_AUDIT
@@ -1109,12 +1540,16 @@ fn bounded_audit_resumes_call_budgets_and_exit_zero_cannot_forge_a_receipt() {
         assert!(result["stages"].as_array().unwrap().iter().any(|stage| {
             stage["name"] == "bounded work receipt" && stage["state"] == "failed"
         }));
-        assert!(
-            !no_receipt
-                .root()
-                .join("vault/.lorekeeper/knowledge-audit.json")
-                .exists()
-        );
+        let receipts: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(
+                no_receipt
+                    .root()
+                    .join("vault/.lorekeeper/knowledge-audit.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(receipts["entries"].as_object().unwrap().is_empty());
         assert!(bounded_calls(&no_receipt).is_empty());
         let manifests = std::fs::read_dir(no_receipt.root().join("vault/.lorekeeper/work"))
             .unwrap()
@@ -1164,12 +1599,16 @@ fn bounded_audit_resumes_call_budgets_and_exit_zero_cannot_forge_a_receipt() {
                 }),
                 "{result}"
             );
-            assert!(
-                !fixture
-                    .root()
-                    .join("vault/.lorekeeper/knowledge-audit.json")
-                    .exists()
-            );
+            let receipts: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(
+                    fixture
+                        .root()
+                        .join("vault/.lorekeeper/knowledge-audit.json"),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            assert!(receipts["entries"].as_object().unwrap().is_empty());
         }
         assert!(completed, "bounded native work should resume to completion");
         let calls = bounded_calls(&fixture);
@@ -1210,17 +1649,8 @@ touch "$TEST_EXECUTION_ROOT/assessed-once"
         let config = std::fs::read_to_string(&fixture.config).unwrap()
             + "graph:\n  audit:\n    batch_size: 1\n";
         std::fs::write(&fixture.config, config).unwrap();
-        let concepts = fixture.root().join("vault/wiki/concepts");
-        std::fs::create_dir_all(&concepts).unwrap();
-        let template = include_str!("behaviour/corpus/small/vault/wiki/concepts/unlinked-note.md");
         for name in ["a", "b"] {
-            std::fs::write(
-                concepts.join(format!("{name}.md")),
-                template
-                    .replace("Unlinked note", name)
-                    .replace("unlinked-note", name),
-            )
-            .unwrap();
+            write_audit_concept(&fixture, name);
         }
         let output = fixture
             .command()
@@ -1307,6 +1737,14 @@ import json, os
 from pathlib import Path
 root=Path(os.environ['TEST_EXECUTION_ROOT'])
 candidate=json.loads((root/'plan.json').read_text())['candidates'][0]
+import subprocess
+if candidate['discovery'] is None:
+    discovery={key:candidate[key] for key in ['path','file_revision']}
+    discovery['queries']=[{'query':candidate['title'],'phrase':True,'spacing':False}]
+    path=root/'discovery.json'
+    path.write_text(json.dumps(discovery))
+    subprocess.run([os.environ['LORE_BIN'],'wiki','audit-discover','--file',str(path)],check=True)
+    candidate=json.loads(subprocess.check_output([os.environ['LORE_BIN'],'wiki','audit-plan','--path',candidate['path']]))['candidates'][0]
 assessment={key:candidate[key] for key in ['path','file_revision','input_revision']}
 assessment.update(disposition='reviewed', reason='The final survivor and its evidence were reviewed.', reviews=[])
 (root/'assessment.json').write_text(json.dumps({'assessments':[assessment]}))
@@ -1334,6 +1772,9 @@ ASSESS
             )
             .unwrap();
         }
+        record_discovery(&fixture, "wiki/concepts/a-duplicate.md");
+        record_discovery(&fixture, "wiki/concepts/m-intermediate.md");
+        record_discovery(&fixture, "wiki/concepts/z-canonical.md");
         let (output, result) = fixture.run("knowledge");
         assert_eq!(
             output.status.success(),

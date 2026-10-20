@@ -72,7 +72,10 @@ execution:
 
 A Drive source uses the exact `folder_id` from its folder URL (or `root`), an
 optional `name_prefix`, and `max_files` (default 200). It queries actual modification
-time and imports independent documents. A folder name, date filename or glob is not
+time over the target civil day plus `lookback_days` earlier days (default 1; 0 means
+only the target day) and imports independent documents. The overlap includes edits
+after the previous daily run; longer outages need a wider window or explicit date
+backfill. It does not reconstruct provider revision history. A folder name, date filename or glob is not
 a selector. Google Docs and Slides have explicit text exports; unsupported formats
 are partial coverage. Inventory absence does not authorize retiring existing pages.
 
@@ -192,13 +195,23 @@ retains its incomplete directory for inspection and never overwrites existing da
 Then run `lore input check`, `lore input inspect /path/to/file.pdf` and a selected
 `lore ingest --dry-run SOURCE`. Inspect emits the projection without publishing or
 moving the input. Runtime paths resolve against the config file. Ingestion never
-installs packages or downloads models. Input entries are capped at 32 MiB; configured
-time, decoded-content and serialized-output bounds refuse overflow without truncation.
+installs packages or downloads models. Acquisition defaults are 32 MiB per entry,
+64 MiB per locally referenced member and 256 MiB per
+manual source. Raise `ingest.originals` budgets explicitly for larger originals;
+entry/member limits must fit `max_source_bytes`, and all captures in one ingest
+must fit 512 MiB. Captured originals use private, automatically removed temporary
+files, including inspection and dry runs; retained evidence is published only by
+real ingestion. Decoder peak memory is format-dependent. Time, decoded-content,
+unit and serialized-output bounds refuse overflow without truncation.
 
 OCR requires explicitly installed Tesseract `<language>.traineddata` files:
 
 ```yaml
 ingest:
+  originals:
+    max_entry_bytes: 33554432
+    max_member_bytes: 67108864
+    max_source_bytes: 268435456
   documents:
     python: /path/to/runtime/venv/bin/python
     timeout_seconds: 120

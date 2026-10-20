@@ -44,7 +44,14 @@ identity:
 # crontab line from this. Ingestion is not scheduled per source: the work-log aggregates
 # personal events across every source for a day, so a single run keeps it complete.
 ingest:
+  source_timeout_seconds: 600  # total acquisition budget per source, including retry waits
   schedule: "0 7 * * *"          # every day 07:00 (sources use lookback windows)
+  # Raw originals use private temporary files, separate from decoded/model output.
+  # Entry/member limits must fit max_source_bytes; the full ingest capture cap is 512 MiB.
+  originals:
+    max_entry_bytes: 33554432     # 32 MiB per inbox entry; raise explicitly for larger inputs
+    max_member_bytes: 67108864    # 64 MiB per locally referenced attachment
+    max_source_bytes: 268435456   # 256 MiB captured originals per manual source
   # Optional local DOCX/XLSX/PDF/image decoder. `lore input install DIRECTORY`
   # creates an isolated, pinned environment and prints its python path.
   # Relative paths here resolve against this config file, not vault.root.
@@ -63,6 +70,8 @@ ingest:
 # ─── Source definitions ───────────────────────────────────
 # key = stable source ID; daily sources use daily/<id>, document sources use wiki/documents.
 # You can define several sources of the same type.
+# Optional source-level collection_timeout_seconds overrides the global acquisition budget.
+# The deadline cancels async waits; blocking local IO/decoding is checked when it returns.
 # concept_policy: disabled collects without concepts; existing-only links known
 # subjects; supported-new also admits directly supported durable new subjects.
 # focus narrows semantic relevance independently of the admission policy.
@@ -75,6 +84,7 @@ sources:
     enabled: false
     params:
       folder_id: "YOUR_DRIVE_FOLDER_ID" # copy the ID from the Drive folder URL; "root" is valid
+      lookback_days: 1                 # target civil day plus previous day; increase for longer gaps
       # name_prefix: "briefing-"       # optional filename prefix, not a date or glob pattern
       # max_files: 200                 # a reached cap is a partial observation
     labels: [ai-industry]
@@ -340,7 +350,7 @@ sources:
   # individual wiki/documents/{slug}.md document pages (LLM summary + concept extraction included).
   # HTML is run through a readability extractor to extract the body, then converted to Markdown.
   # Exact originals and supported local dependencies are preserved before page publication.
-  # Eligible unchanged entries move to inbox/archived/{date}/ after writes and queue flush.
+  # Eligible unchanged entries move to inbox/archived/{date}/ after durable page/request publication.
   # Incomplete dependency coverage or capture failures retain inputs; assets are never removed.
   manual-inbox:
     type: manual
@@ -468,7 +478,7 @@ concepts:
 #                                  # requires an explicit execution profile and deployed skills
 #   scope:
 #     dirs: [wiki]                   # vault-relative dirs to scan (default: vault.dirs.wiki)
-#     exclude: []                    # glob patterns to skip (e.g., ["wiki/log.md"])
+#     exclude: []                    # glob patterns to skip (e.g., ["wiki/drafts/**"])
 #     follow_links: false            # follow symlinks during walk
 #   metrics:
 #     min_hub_degree: 5              # minimum total degree to flag as hub in lint

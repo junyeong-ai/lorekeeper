@@ -16,23 +16,27 @@ protocol; this file carries the format details you consult only when needed.
 ## Queue file lifecycle
 
 ```
-<run>.jsonl.tmp        ←  ingest is mid-flush (transient, sub-second; not for consumption)
-<run>.jsonl            ←  pending, ready to be drained by this skill
-processed/<run>.jsonl  ←  drained successfully, retained 90 days
-(deleted)              ←  pruned by `lore maintenance` after retention expires
+<batch>.jsonl            ← pending requests, published with their target pages
+processed/<batch>.jsonl  ← fully answered batch, retained for configured history
+(deleted)                ← maintenance expires processed history after retention
 ```
 
-`lore ingest` sweeps `*.jsonl.tmp` files older than 1 hour at startup (crash debris
-from previous runs); `lore maintenance` does NOT touch tmp files, so a concurrent
-maintenance run cannot race an active flush. Only `.jsonl` files matter to this skill.
-
-Cooperating ingest runs hold the vault mutation lock before sweeping temporary files;
-a paused ingest therefore blocks another ingest from sweeping its active file. The sweep
-uses mtime, so external processes and older binaries must not share an active queue writer.
+Page edits and newly admitted requests share one recoverable mutation journal.
+Only root-level `.jsonl` files are pending work; names are generated batch addresses,
+not task identity. Default processed-history retention is 90 days.
+Older standalone queue flushes may leave `.jsonl.tmp` files. Ingest sweeps those older
+than 1 hour under the vault writer lock; maintenance preserves temporary files.
+Cooperating queue producers hold the vault lock first. External writers and older
+binaries must not share an active writer directory.
 After failure, inspect retained tasks and input before retrying. Refetching the same date
 can observe changed remote content; it is not exact historical replay. Use
 `lore queue regenerate --task-id ID --dry-run` when the original task is retained and its
 target still matches. Missing input must be reported, not reconstructed from generated prose.
+
+If several extraction result files carry the same task/input identity, apply folds
+identical typed values once and retires every matching file only after publication.
+Different values remain unpublished for review. Reconcile all retained proposals to
+one agreed value before retrying; adding a third draft does not resolve the conflict.
 
 ## Queue task schema
 
@@ -124,30 +128,35 @@ status and target bytes normally. Do not replace a stale answer's guards.
 
 ## Recovering a lost extraction task
 
-When the original extraction task is unavailable, recover from the stored source page;
-re-fetching an expired source window may lose content. Run `lore wiki evidence <page>`
-before reading it and use `file_revisions[<page>]` as the result's `target_revision`.
-Read the current page and produce the complete extraction result described in
-`processing-kinds.md`, retaining its concepts input hash, target section and source date.
-Do not invent missing source metadata or reuse an old answer with a new revision.
-Use a unique recovery task id and apply that result explicitly:
-`lore queue apply --recover-extraction <task_id>`.
-Recovered page-only extraction cannot introduce new RSS event selections without its retained versioned manifest; existing validated selections remain accumulated.
-Other orphan results remain rejected. Unparseable queue lines must be repaired first.
-If a rejected result is already in `results/orphaned/`, regenerate it from the current
-page in `results/`; preserve the rejected copy and its diagnostic record.
+Publication requires the original retained, validated task and the read scope captured
+before drafting. A current source page cannot establish a lost request's original input
+or candidate/review context. Restore the exact retained request from pending/processed
+history or a backup and validate it before generating a new result. If that input is no
+longer available, collect the preserved original as a new valid task; do not reconstruct
+raw evidence from generated prose or relabel the old answer. Rejected orphan results and
+their reasons are preserved in `results/orphaned/`. Unparseable pending lines require repair
+before absence of a matching task can be established.
 
 ## Synthesis result
 
 Write `.lorekeeper/queue/results/<task_id>.synthesis.json` atomically (write a temporary
-file, then rename). Copy `target_revision` from `lore queue status --json` before reading
-and drafting. The task supplies the exact source revisions and section anchors.
+file, then rename). Before reading and drafting, run `lore work context --task-id ID`.
+Copy its `subject.target_revision` and `context_revision`, then read the selected
+resource roster and scoped review dependencies. This read-only command does not
+create a work plan or certify a read. The task supplies exact source revisions and
+section anchors; the context also binds related pages, review membership and the
+selected configuration. Bounded finalizers use the same `context_revision` from
+`work plan` or `work status`.
+Context reports resource and part counts before disclosing bodies. When
+`requires_bounded_work` is true, `resources` is null; execute `plan_command` and
+complete its exact bounded inspections instead of loading a growing resource roster.
 
 ```json
 {
   "task_id": "<task.task_id>",
   "cache_hash": "<task.cache_hash>",
-  "target_revision": "<status.tasks entry target_revision>",
+  "target_revision": "<work context subject.target_revision captured before reading>",
+  "context_revision": "<work context revision captured before drafting>",
   "synthesis": "Section body, without its heading",
   "related": "Section body, without its heading; empty is valid"
 }
@@ -155,9 +164,10 @@ and drafting. The task supplies the exact source revisions and section anchors.
 
 Omit `related` only when the task has no `input.related_anchor`. Do not add level-two
 headings inside either body. `lore queue apply` validates the pending task, source revisions,
-and target snapshot before publishing both sections and `synthesis_done` in one atomic
-file replacement. If the target changed, read it again and regenerate the result; never
-update only the revision on an old draft. Apply, prune, and processed-file maintenance share a writer lock;
+and target/read-scope snapshot before publishing both sections and `synthesis_done` in
+one atomic file replacement. New, changed or removed scoped reviews and changed context
+invalidate the draft. Read the changed scope and regenerate; never replace only a guard
+on old prose. Apply, prune, and processed-file maintenance share a writer lock;
 external editors do not participate, so avoid editing the target during publication.
 
 
@@ -197,7 +207,7 @@ New task inputs include `generation_policy` (`summary-v1`, `event-refinement-v1`
 `themes-v1`, `concept-extraction-v2`, or `concept-synthesis-v1`). These identifiers
 change only when generation semantics change, independently of binary release numbers.
 They are not part of `cache_hash`; old tasks without them remain valid legacy inputs.
-Result JSON stays unchanged: apply reads policy from its matching task and writes
+Apply reads generation policy from the matching retained task and writes
 `llm_inputs.<key>_policy_done` (or `legacy` when no policy was recorded).
 
 `queue regenerate --task-id <exact-retained-id>` selects one pending/processed task,
@@ -235,6 +245,9 @@ For changed bytes, review the actual complete diff and relevant original context
 new claims or previously unread sources require their full supporting context.
 Every worker still reads its current target and judges its claims and relations
 individually. No command certifies this semantic work from hashes or receipt counts.
+Capture `lore work context --task-id ID` before each target's evidence reading and
+carry its `context_revision` into the synthesis result; packet export does not bind
+the scoped review/context membership for publication.
 
 When the user explicitly requests `gpt-6.1-sol` parallel work, retain that model for
 the assigned workers. Give each target one owner, share source-group notes under the

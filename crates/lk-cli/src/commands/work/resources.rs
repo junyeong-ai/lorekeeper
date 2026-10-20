@@ -33,7 +33,13 @@ pub(super) struct Prepared {
 
 impl Prepared {
     pub fn revision(&self, config_revision: &str) -> miette::Result<String> {
-        let bytes = serde_json::to_vec(&(config_revision, &self.subject)).into_diagnostic()?;
+        let resources = self
+            .resources
+            .iter()
+            .map(|resource| (&resource.address, &resource.revision, resource.authority))
+            .collect::<Vec<_>>();
+        let bytes = serde_json::to_vec(&(config_revision, &self.subject, &self.context, resources))
+            .into_diagnostic()?;
         Ok(lk_core::rss_original::digest(&bytes))
     }
 
@@ -137,6 +143,39 @@ impl<'a> Capture<'a> {
         Ok(())
     }
 
+    fn review(&mut self, review: &lk_graph::audit::AuditReviewDependency) -> miette::Result<()> {
+        let expected = review
+            .file_revision
+            .as_deref()
+            .ok_or_else(|| miette::miette!("unreadable scoped review: {}", review.path))?;
+        self.page(
+            &review.path,
+            Some(expected),
+            review.source_revision.as_deref(),
+            SemanticAuthority::Review,
+        )?;
+        for evidence in &review.evidence {
+            for current in evidence.current.iter().chain(&evidence.archived) {
+                let authority = if evidence
+                    .archived
+                    .as_ref()
+                    .is_some_and(|archive| archive.path == current.path)
+                {
+                    SemanticAuthority::Archive
+                } else {
+                    SemanticAuthority::Page
+                };
+                self.page(
+                    &current.path,
+                    Some(&current.file_revision),
+                    current.source_revision.as_deref(),
+                    authority,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
     fn finish(self, subject: Subject, context: Value) -> Prepared {
         Prepared {
             subject,
@@ -148,8 +187,127 @@ impl<'a> Capture<'a> {
 }
 
 pub(super) fn task(root: &Path, config: &Config, task_id: &str) -> miette::Result<Prepared> {
-    let task = super::super::queue::current_task(root, task_id)?;
-    capture_task(root, config, task)
+    let task = super::super::queue::select_task(
+        root,
+        task_id,
+        super::super::queue::TaskSelection::CurrentOrDoneExtraction,
+    )?;
+    let extraction = task.kind == lk_queue::TaskKind::ExtractConcepts;
+    let queries = if extraction {
+        super::discovery::current(root, &task)?.unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let prepared = capture_task(root, config, task)?;
+    if extraction {
+        with_discovery(root, config, prepared, &queries)
+    } else {
+        Ok(prepared)
+    }
+}
+
+pub(super) fn task_with_discovery(
+    root: &Path,
+    config: &Config,
+    task_id: &str,
+    queries: &[lk_core::discovery::DiscoveryQuery],
+) -> miette::Result<Prepared> {
+    let task = super::super::queue::select_task(
+        root,
+        task_id,
+        super::super::queue::TaskSelection::CurrentOrDoneExtraction,
+    )?;
+    with_discovery(root, config, capture_task(root, config, task)?, queries)
+}
+
+pub(super) fn with_discovery(
+    root: &Path,
+    config: &Config,
+    mut prepared: Prepared,
+    queries: &[lk_core::discovery::DiscoveryQuery],
+) -> miette::Result<Prepared> {
+    if prepared.context["purpose"]["task_kind"]
+        != serde_json::to_value(lk_queue::TaskKind::ExtractConcepts).into_diagnostic()?
+    {
+        return Err(miette::miette!(
+            "discovery recipes require concept extraction"
+        ));
+    }
+    let queries = super::discovery::validate_queries(queries)?;
+    let matches =
+        lk_vault::discover_queries(root, &config.vault.dirs, &queries).into_diagnostic()?;
+    let target_address = match &prepared.subject {
+        Subject::Queue { target, .. } => target,
+        _ => return Err(miette::miette!("discovery requires a queue subject")),
+    }
+    .clone();
+    let target = lk_vault::page_path(root, Path::new(&target_address))
+        .into_diagnostic()?
+        .canonicalize()
+        .into_diagnostic()?;
+    let mut selected = Vec::new();
+    for citation in matches.into_values().flatten() {
+        if lk_vault::page_path(root, Path::new(&citation.path))
+            .into_diagnostic()?
+            .canonicalize()
+            .into_diagnostic()?
+            != target
+        {
+            selected.push(citation);
+        }
+    }
+    selected.sort();
+    selected.dedup();
+    let mut captured = Capture {
+        root,
+        pages: std::mem::take(&mut prepared.pages),
+        resources: std::mem::take(&mut prepared.resources)
+            .into_iter()
+            .map(|resource| (resource.address.clone(), resource))
+            .collect(),
+    };
+    let mut review_subjects = BTreeMap::from([(
+        target_address,
+        lk_vault::parse_page(
+            captured
+                .pages
+                .get(target.strip_prefix(root).into_diagnostic()?)
+                .ok_or_else(|| miette::miette!("captured extraction target is missing"))?,
+        )
+        .map_err(|error| miette::miette!("extraction target: {error}"))?,
+    )]);
+    for candidate in &selected {
+        let raw = captured.page(
+            &candidate.path,
+            None,
+            Some(&candidate.revision),
+            SemanticAuthority::Context,
+        )?;
+        review_subjects.insert(
+            candidate.path.clone(),
+            lk_vault::parse_page(&raw)
+                .map_err(|error| miette::miette!("{}: {error}", candidate.path))?,
+        );
+    }
+    let reviews = lk_graph::audit::review_dependencies(root, &config.vault.dirs, &review_subjects)
+        .into_diagnostic()?;
+    let mut review_paths = std::collections::BTreeSet::new();
+    for review in reviews.values().flatten() {
+        if review_paths.insert(review.path.clone()) {
+            captured.review(review)?;
+        }
+    }
+    prepared.context["purpose"]["review_dependencies"] = json!({
+        "subject_count":review_subjects.len(),
+        "review_count":review_paths.len(),
+        "revision":file_revision(&serde_json::to_string(&reviews).into_diagnostic()?),
+    });
+    prepared.context["purpose"]["discovery"] = json!({
+        "queries":queries,
+        "match_count":selected.len(),
+        "match_revision":lk_core::concept::citation_digest(&selected),
+    });
+    Ok(captured.finish(prepared.subject, prepared.context))
 }
 
 pub(super) fn task_for_publication(
@@ -307,35 +465,7 @@ pub(super) fn audit_candidate(
         )?;
     }
     for review in &candidate.reviews {
-        let expected = review
-            .file_revision
-            .as_deref()
-            .ok_or_else(|| miette::miette!("unreadable scoped review: {}", review.path))?;
-        captured.page(
-            &review.path,
-            Some(expected),
-            review.source_revision.as_deref(),
-            SemanticAuthority::Review,
-        )?;
-        for evidence in &review.evidence {
-            for current in evidence.current.iter().chain(&evidence.archived) {
-                let authority = if evidence
-                    .archived
-                    .as_ref()
-                    .is_some_and(|archive| archive.path == current.path)
-                {
-                    SemanticAuthority::Archive
-                } else {
-                    SemanticAuthority::Page
-                };
-                captured.page(
-                    &current.path,
-                    Some(&current.file_revision),
-                    current.source_revision.as_deref(),
-                    authority,
-                )?;
-            }
-        }
+        captured.review(review)?;
     }
     let subject = Subject::Audit {
         path: path.to_owned(),
@@ -345,6 +475,7 @@ pub(super) fn audit_candidate(
     let context = json!({
         "subject": subject,
         "purpose": {"operation":"audit", "subject_kind":candidate.kind, "path":path, "title":candidate.title, "locale":config.vault.locale,
+            "discovery_queries":candidate.discovery.as_ref().map(|discovery| &discovery.queries),
             "review_dependencies":candidate.reviews.iter().map(|review| &review.path).collect::<Vec<_>>()},
         "authority": "The selected page is the audit subject. Concept citations are evidence; a document is its own subject without a self-citation. Related pages are context, not automatically support. Reviews and historical archives are assessments/history, not independent corroboration. Join source-declared scope, time and attribution before judging contradictions; unknown context stays unknown.",
     });
@@ -360,7 +491,15 @@ pub(super) fn refresh(root: &Path, config: &Config, context: &Value) -> miette::
     )
     .into_diagnostic()?;
     let prepared = match &subject {
-        Subject::Queue { task_id, .. } => task(root, config, task_id)?,
+        Subject::Queue { task_id, .. } => {
+            if let Some(discovery) = context["purpose"].get("discovery") {
+                let queries: Vec<lk_core::discovery::DiscoveryQuery> =
+                    serde_json::from_value(discovery["queries"].clone()).into_diagnostic()?;
+                task_with_discovery(root, config, task_id, &queries)?
+            } else {
+                task(root, config, task_id)?
+            }
+        }
         Subject::Audit { path, .. } => audit(root, config, path)?,
     };
     if prepared.subject != subject || prepared.context != *context {

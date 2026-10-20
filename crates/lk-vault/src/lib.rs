@@ -3,6 +3,7 @@ mod body_search;
 mod brief;
 mod citations;
 mod context;
+mod discovery;
 mod document;
 mod indexed_links;
 mod knowledge;
@@ -42,6 +43,7 @@ pub use self::context::{
     ContextEvidence, ContextOptions, ContextRelations, ContextReviews, PageContext,
     inspect_page_context,
 };
+pub use self::discovery::{DiscoveryQuery, discover_queries};
 pub use self::document::{
     DocumentContent, DocumentOptions, DocumentSection, DocumentView, inspect_document,
 };
@@ -65,8 +67,8 @@ pub use self::provenance::{
 pub use self::review::{
     EvidenceReport, KnowledgeReview, ReviewEffectiveState, ReviewReport, ReviewStatus,
     archive_evidence, evidence_archive_path, inspect_evidence, is_archived_evidence, list_reviews,
-    load_archived_evidence, publish_document, publish_document_expected,
-    publish_document_expected_with_plan, same_existing_file,
+    load_archived_evidence, plan_document_publication, plan_review_repointing, publish_document,
+    publish_document_expected, publish_document_expected_with_plan, same_existing_file,
 };
 pub use self::rss_evidence::{
     RssEvidencePreview, accumulate_rss_evidence, guard_rss_citation, guard_rss_evidence,
@@ -80,7 +82,7 @@ pub use self::rss_original::{
 };
 pub use self::search::{
     BrowseSort, CreatedStatus, MatchField, SearchHit, SearchOptions, SearchResult,
-    parse_created_date, search,
+    SynthesisFreshness, SynthesisInputStatus, parse_created_date, search,
 };
 pub use self::search_index::{
     SearchSnapshot, inspect_search_snapshot, prepare_search, prepare_search_with_citations,

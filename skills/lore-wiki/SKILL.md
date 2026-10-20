@@ -5,7 +5,7 @@ description: Searches and maintains a Lorekeeper knowledge wiki. Use for grounde
   auditing knowledge and relationships. Repository-wide extraction uses lore-extract;
   ingest queue processing uses lore-process.
 metadata:
-  version: 0.72.0
+  version: 0.73.0
 ---
 
 # Lorekeeper wiki
@@ -20,6 +20,7 @@ Do not run the other modes as part of a lookup.
 | `add <source>` | Capture source files/URLs through native ingestion or author supplied text; reuse concept owners | [Add sources](references/add.md) |
 | `capture [topic]` | Record an observed insight from the current conversation or work | [Capture](references/capture.md) |
 | `audit` | Examine structure, relationships, contradictions, coverage and concept identity | [Audit](references/audit.md) |
+| `discover` | Record explicit related-document search queries for selected audit subjects | [Maintenance](references/maintenance.md#related-document-discovery) |
 | `maintain` | Process one bounded batch of changed and never-reviewed knowledge | [Maintenance](references/maintenance.md) |
 | `bounded inspect/finish` | Execute exactly one native partitioned audit unit | [Bounded work](../lore-process/references/bounded-work.md) |
 | `curate` | Apply authorized evidence-based name, category, tag, lifecycle or review corrections | [Curation](references/curation.md) |

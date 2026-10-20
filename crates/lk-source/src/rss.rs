@@ -11,6 +11,8 @@ use lk_core::event::RawItem;
 
 use crate::{ExtractContext, Source, SourceError};
 
+const MAX_FEED_BYTES: usize = 16 * 1024 * 1024;
+
 pub struct RssSource {
     http: reqwest::Client,
 }
@@ -108,7 +110,7 @@ impl RssSource {
     }
 
     async fn fetch_feed(&self, url: &str) -> Result<feed_rs::model::Feed, SourceError> {
-        let resp = self
+        let mut resp = self
             .http
             .get(url)
             .header(reqwest::header::USER_AGENT, crate::fetch::USER_AGENT)
@@ -120,7 +122,23 @@ impl RssSource {
                 message: format!("fetching feed {url}"),
             });
         }
-        let bytes = resp.bytes().await?;
+        if resp
+            .content_length()
+            .is_some_and(|length| length > MAX_FEED_BYTES as u64)
+        {
+            return Err(SourceError::ResponseTooLarge {
+                max_bytes: MAX_FEED_BYTES,
+            });
+        }
+        let mut bytes = Vec::new();
+        while let Some(chunk) = resp.chunk().await? {
+            if chunk.len() > MAX_FEED_BYTES - bytes.len() {
+                return Err(SourceError::ResponseTooLarge {
+                    max_bytes: MAX_FEED_BYTES,
+                });
+            }
+            bytes.extend_from_slice(&chunk);
+        }
         feed_rs::parser::parse(&bytes[..]).map_err(|e| SourceError::Parse(e.to_string()))
     }
 }
@@ -439,6 +457,55 @@ mod tests {
     /// that one bit — so `lore health`, whose only evidence is that log, would report a
     /// source whose every feed URL has moved as fresh indefinitely.
     #[tokio::test]
+    async fn feed_response_limit_refuses_declared_and_streamed_overflow_without_truncation() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let feed = "<feed xmlns=\"http://www.w3.org/2005/Atom\"><entry><title>Complete evidence</title><id>a</id><updated>2026-05-23T00:00:00Z</updated></entry></feed>";
+        let source = RssSource::new(loopback_client());
+        for mode in ["declared", "streamed", "exact"] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = [0; 1024];
+                let received = stream.read(&mut request).await.unwrap();
+                assert!(received > 0);
+                let result = async {
+                    if mode == "declared" {
+                        stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", MAX_FEED_BYTES + 1).as_bytes()).await?;
+                    } else {
+                        let size = MAX_FEED_BYTES + usize::from(mode == "streamed");
+                        let mut body = feed.as_bytes().to_vec();
+                        body.resize(size, b' ');
+                        stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/atom+xml\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n").await?;
+                        stream.write_all(format!("{:x}\r\n", body.len()).as_bytes()).await?;
+                        stream.write_all(&body).await?;
+                        stream.write_all(b"\r\n0\r\n\r\n").await?;
+                    }
+                    stream.shutdown().await
+                }.await;
+                if mode == "exact" {
+                    result.unwrap();
+                }
+            });
+            let result = source.fetch_feed(&format!("http://{address}/feed")).await;
+            server.await.unwrap();
+            if mode == "exact" {
+                assert_eq!(result.unwrap().entries.len(), 1);
+            } else {
+                assert!(
+                    matches!(
+                        result,
+                        Err(SourceError::ResponseTooLarge {
+                            max_bytes: MAX_FEED_BYTES
+                        })
+                    ),
+                    "{mode}: overflow must be a typed error, even though a truncated prefix would contain a valid complete feed"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn a_source_whose_every_feed_is_unreachable_fails_rather_than_reporting_nothing() {
         // Connection-refused on the discard port: no network egress, no timeout wait.
         let params = serde_json::json!({
@@ -735,6 +802,7 @@ mod tests {
             vault_root: std::path::PathBuf::from("."),
             vault_dirs: Default::default(),
             documents: None,
+            originals: Default::default(),
         }
     }
 

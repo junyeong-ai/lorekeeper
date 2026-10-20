@@ -86,6 +86,10 @@ vault의 `inbox/`에 메모 파일 하나를 넣은 뒤 수집합니다. `inbox_
 DOCX·XLSX·PDF를 넣으려면 `lore input install DIRECTORY`로 선택적 변환 환경을 설치하고
 출력된 설정을 병합합니다. `lore input check`로 의존성을, `lore input inspect FILE.pdf`로
 원본을 옮기지 않고 변환 결과를 확인합니다. 이미지는 별도 OCR 언어 데이터가 필요합니다.
+원본은 기본적으로 파일당 32 MiB이며, 더 큰 입력은 `ingest.originals.max_entry_bytes`를
+명시적으로 높여 허용합니다. 원본을 임시 파일에 보관하므로 전체 바이너리를 메모리에
+복제하지 않습니다. 변환 결과·페이지 수 제한은 별도이며, 변환기 자체의 메모리 사용량은
+파일 형식에 따라 달라집니다.
 [전처리 설정과 지원 범위](skills/lore-setup/references/config.md#document-preprocessing)를 참고하세요.
 
 ```bash
@@ -222,7 +226,7 @@ pgvector를 선택했다. 이 결정의 조건과 첫 메모의 검색 품질 �
 lore wiki snapshot                          # 저장된 검색 판본·마지막 검증 시각 조회
 lore wiki prepare                           # 현재 원본을 검증하고 검색 판본 생성
 lore wiki search "Vector DB" --snapshot <id> --limit 10 --json
-lore wiki context wiki/concepts/vector-db.md --snapshot <id> --limit 10 # 관계별 근거를 나누어 탐색
+lore wiki context wiki/concepts/vector-database.md --snapshot <id> --limit 10 # 관계별 근거를 나누어 탐색
 lore wiki browse --type concept --category ai-ml --limit 20 --json
 lore wiki search "API 토큰" --phrase --snapshot <id> --json
 lore wiki search "인증정보" --spacing --snapshot <id> --json
@@ -341,6 +345,7 @@ flowchart LR
 - **결과물은 평범한 마크다운** — `daily/{소스}/`(원본 타임라인), `wiki/concepts/`(개념), `wiki/documents/`(문서), `me/`(work-log·성과리뷰), `synthesis/`(주간 테마).
 - **자료화된 뷰(materialized view)** — 페이지는 두 층. **구조 층**(frontmatter·원본·헤딩)은 매 수집마다 재생성, **의미 층**(요약·개념·합성)은 LLM 소유이며 재렌더에도 보존됩니다. 입력이 안 바뀌면 LLM 작업 0건(BLAKE3 해시로 판정).
 - **입력과 재처리** — 입력 해시가 같으면 완료된 LLM 결과를 재사용합니다. 재수집은 원격 수정·삭제와 조회 범위의 영향을 받습니다. RSS 이벤트 로그는 피드에서 밀려난 수집 항목을 보존하며, 과거 입력 그대로의 재합성은 보관된 큐 입력이 있을 때만 가능합니다.
+- **수집 실행 예산** — 소스마다 `ingest.source_timeout_seconds`(기본 600초)를 적용하며, 소스의 `collection_timeout_seconds`로 개별 조정합니다. 재시도 대기·페이지네이션·변환을 포함한 운영 예산이며 소스의 생존 여부를 판정하는 기준이 아닙니다. 원격 수집 중에는 vault 쓰기 잠금을 잡지 않고, 수집 후 잠금·복구·현재 페이지 읽기를 거쳐 게시합니다. 비동기 대기는 취소하고, 동기 파일 읽기·변환은 반환 시 초과를 검사하므로 OS 수준의 강제 중단을 보장하지는 않습니다. 시간 초과는 실패로 보고하며 자동 백필을 뜻하지 않습니다.
 - **현재만 실체화** — 미래 날짜는 페이지를 만들지 않음(forecast는 지식이 아님). 날짜가 오면 지식이 됩니다.
 - **vault의 언어는 설정이 정한다** — `vault.locale`(ko | en)은 라벨만 바꾸는 스위치가 아니라 **Lorekeeper가 덧붙이는 모든 문장의 언어**입니다. 요약·주간 테마·개념 정의·탐구 페이지가 그 언어로 쓰이고, 개념의 이름은 그 개념을 쓴 출처가 적은 형태를 그대로 따릅니다 — 번역하지 않으므로, 출처가 다른 언어로 적은 용어는 그 철자를 유지합니다. 원문도 번역하지 않습니다.
 - **그래프가 부기를 한다** — `backlinks-sync`(개념의 인용·카운트·요약 입력 재도출, 근거가 바뀐 요약은 큐로), `lint`(고아·깨진링크·중복개념), `merge`(중복 개념 통합), `cluster`/`suggest-links`(군집·연결 후보 제안).
@@ -410,6 +415,8 @@ lore schema                   # wiki/AGENTS.md(페이지 포맷 스키마) 생�
 
 `lore wiki refresh`는 SQLite 탐색 스냅샷과 작은 `index.md` 진입 안내를 갱신합니다. 지식 목록·날짜순 조회·관계 탐색은 `wiki browse/search/links`로 수행합니다. 생성 마커가 없는 진입 파일은 보존하고 충돌을 보고합니다. 탐색 세션은 `wiki snapshot`으로 저장된 ID와 생성·검증 시각을 조회한 뒤 `wiki browse/search/links --snapshot ID`를 반복하고(`links --direction incoming|both`), `wiki read --revision REV`로 현재 원문을 확인합니다. 현재 문서 목록이 필요하거나 호환되는 판본이 없으면 `wiki prepare`로 전체 원본을 검증합니다. 저장된 판본의 시각은 외부 편집 이후의 최신성을 보장하지 않습니다. refresh도 준비한 ID를 출력합니다.
 
+검색용 SQLite에는 최신 스냅샷 하나만 저장하며, 교체된 ID로는 조회할 수 없습니다. 삭제된 공간은 SQLite가 재사용하므로 파일 크기가 즉시 줄지는 않습니다. 출처 원본·검토 보관본은 별도 증거로 보존하며 나이만으로 삭제하지 않습니다. 저장소 추출본과 작업 캐시의 구분은 [출처 보존 기준](skills/lore-extract/references/manifest.md#source-retention)을 따릅니다.
+
 프로젝트 문서의 `source_record.attributes`는 nodex 공개 응답의 원본 속성을 보존합니다. routine의 `prompt`처럼 본문 밖에 있는 지식도 요약·추출 입력에 포함하며, 속성은 현재 작업을 실행하라는 지시가 아닌 출처의 내용으로 읽습니다.
 
 새 RSS ingest는 분류 전 수집 텍스트를 `.lorekeeper/evidence/rss/`에 불변 해시 주소로 보존하고 daily의 `source_record.rss_original`로 연결합니다. 이는 공급자의 HTTP/XML 원본이 아니라 adapter가 취득한 본문이며, `event_timestamp`는 published 또는 updated에서 온 adapter 시각이며 취득 시각이 아닙니다(`captured_at: null`). `wiki original`은 목록을 먼저 반환하고, 반환된 `revision`과 정확한 `event_id`로 제목·빈 줄·본문을 문자 단위 페이지네이션합니다. 새 원문은 `page_bound_collection`, 과거 이벤트 로그의 읽기 전용 발견은 `legacy_unbound`입니다. 후자는 해당 daily의 과거 입력임을 증명하지 않습니다. 요약은 해석이며 원문의 부재를 증명하지 않습니다. 공급자 URL을 다시 읽은 내용도 당시 수집본과 같다고 볼 수 없습니다. 새 bound RSS 추출의 각 컨셉은 LLM이 명시적으로 선택한 `event_id`와 immutable payload revision을 `concept_evidence`에 저장해야 합니다. 기사 선택이 없으면 게시를 거부하고, 추출 결과가 빈 목록이면 정상 완료할 수 있습니다. 이 선택만 기사 단위 합성 근거가 되어 무관한 일일 요약 변경으로 재합성되지 않습니다. 과거 페이지와 귀속 없는 링크는 기존 페이지 guard를 유지합니다. `wiki original ORIGIN --evidence-concept CONCEPT`로 선택 목록을 읽고 `--event ID --revision PAYLOAD_REV`로 당시 기사를 확인합니다. 최신 manifest와 다른 과거 선택도 읽을 수 있으며, 현재 사실이나 독립 검증을 보장하지는 않습니다. 추출의 누락은 철회가 아니고, `graph retract-citation`의 `--event`/`--event-revision`으로 명시 철회합니다. `source_count`는 계속 원문 페이지 수입니다. 원문 저장 실패 시 페이지는 그 원문을 참조하지 않으며 dry-run은 보관하지 않습니다.
@@ -454,6 +461,12 @@ Claude는 도구와 사용자 확장을 끄고, Codex는 읽기 전용 샌드박
 저장하므로 재실행에서도 이어지며, 손상된 상태를 조용히 초기화하지 않습니다.
 호스트의 기존 인증과 정책을 사용합니다. 두 제품의 권한·샌드박스는 서로 다르며,
 Rust의 게시 검증을 OS 접근 통제와 같은 보장으로 취급하지 않습니다.
+
+컨셉 추출은 검색 후보와 그에 연결된 검토·근거를 읽을 범위로 고정합니다.
+작업자는 새 컨셉 생성과 기존 컨셉의 정확한 판본 재사용을 명시적으로 구분하며,
+같은 이름만으로 자동 병합하지 않습니다. 읽은 범위가 바뀌면 결과 게시를 거부합니다.
+원문은 작아도 관련 근거가 커지면 분할 처리로 넘깁니다. 이 검증은 읽기 범위와
+게시의 일관성을 확인하며, 의미적 정확성 자체를 증명하지는 않습니다.
 
 ```yaml
 llm:
@@ -652,6 +665,11 @@ graph:
 합계는 두 종류를 모두 포함합니다. 문서의 링크는 문맥이며 자동으로 뒷받침 근거가 되지 않습니다.
 `.lorekeeper/knowledge-audit.json`은 최신 검토 판본과 대기 순서를 보관하고 판단·상충 근거는
 Markdown 검토 문서에 남깁니다. 단일 출처나 인용 수만으로 병합·삭제하지 않습니다.
+검수 전에는 선택한 주제의 질의를 `wiki audit-discover --file FILE`로 기록합니다.
+네이티브 실행은 탐색 후 전체 일치 문서를 비교 문맥에 포함해 분할 여부를 결정합니다.
+일치 문서의 추가·삭제·내용 변경은 재검토를 요청하며, 검색 후보가 자동으로 인용이나 의미 관계가 되지는 않습니다.
+질의 밖의 다른 표현까지 검사했다는 뜻은 아닙니다. 수동 절차와 JSON은
+[관련 문서 탐색](skills/lore-wiki/references/maintenance.md#related-document-discovery)을 참고하세요.
 초기 누적분은 `lore run knowledge --profile codex --batches 20 --json`처럼 등록된 프로필과
 실행할 최대 배치 수를 지정해 처리할 수 있습니다. 프로필 이름은 자신의 설정에 맞춥니다.
 각 배치 뒤에는 실행 잠금을 해제하며, 실패·취소 시 중단하고 검증된 검토 기록부터 재개합니다.

@@ -10,7 +10,9 @@ lives in `lk-vault`/`lk-pipeline`.
   flush, begin/rollback source. Classification is deterministic, not an LLM method.
   Backlinks-sync owns automatic citation-set derivation; explicit resynthesize and
   regenerate also use guarded queue publication. Source rollback must
-  discard a failed plan's buffered requests; flush follows target publication.
+  discard a failed plan's buffered requests. CLI producers drain requests with
+  `take_requests` into the same recoverable mutation plan as their target pages;
+  `flush` is only for targets already durably published.
 - `TaskRequest` supplies locale, task input, cache hash and target through one
   builder. Every payload states vault locale and source-specific focus/context;
   concept discovery uses public resolve/search, not an embedded growing registry.
@@ -32,9 +34,10 @@ lives in `lk-vault`/`lk-pipeline`.
 
 ## Pending work (`queue.rs`)
 
-- A pending task must target a published page. `flush` claims the queue and reuses
-  only pending requests with equal kind/hash/full input/target; attempt ID/time do
-  not matter. Processed history cannot suppress fresh work.
+- A pending task must target a published page. Under the queue claim,
+  `new_requests` reuses only pending requests with equal kind/hash/full input/target;
+  attempt ID/time do not matter. Processed history cannot suppress fresh work.
+  Journal newly serialized requests after target edits in the same publication plan.
 - Publish JSONL atomically through shared file primitives; preserve the buffer on
   I/O/lock/publication failure. `QueueIo` is fatal. Preserve malformed pending lines
   byte-for-byte and report them rather than reusing or discarding unknown work.
@@ -57,10 +60,16 @@ lives in `lk-vault`/`lk-pipeline`.
   Bodies and completion publish together. Extraction concept/origin edits share a
   recoverable mutation plan. Lock order is vault mutation session then queue claim;
   external editors do not participate.
-- Orphan extraction recovery is explicit (`--recover-extraction`) and retains
-  revision checks. Permanent malformed results retain bytes plus diagnostics in
+- Extraction requires retained validated input; an orphan result cannot supply its
+  missing read scope. Permanent malformed results retain bytes plus diagnostics in
   quarantine; actual I/O failures remain retryable errors. Do not make one corrupt
   result strand all valid answers or silently delete it.
+- Concept extraction carries a captured `context_revision`, explicit discovery
+  queries and per-concept `new` or revision-pinned `reuse` admission. Discovery
+  supplies candidates, never semantic identity. New owners require nonblank
+  source-grounded synthesis; actual support still requires semantic review.
+  Synthesis also pins its full source/review context. Changed context refuses
+  publication rather than relabeling an old answer.
 
 ## RSS evidence policy
 

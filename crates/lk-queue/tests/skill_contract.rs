@@ -154,6 +154,8 @@ fn skill_documents_the_result_protocol_it_must_produce() {
     let sample = lk_queue::TaskResult {
         concept_policy: lk_core::config::ConceptPolicy::SupportedNew,
         target_revision: "r".into(),
+        context_revision: "scope".into(),
+        discovery: Vec::new(),
         task_id: "t".into(),
         cache_hash: "h".into(),
         target: lk_queue::TaskTarget {

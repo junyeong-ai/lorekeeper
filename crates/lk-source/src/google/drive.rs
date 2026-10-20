@@ -25,8 +25,20 @@ pub struct GoogleDriveSource {
 struct GoogleDriveParams {
     folder_id: String,
     name_prefix: Option<String>,
+    #[serde(default = "default_lookback_days")]
+    lookback_days: u32,
     #[serde(default = "default_max_files")]
     max_files: usize,
+}
+
+impl GoogleDriveParams {
+    fn lookback_hours(&self) -> Result<u32, SourceError> {
+        self.lookback_days.checked_mul(24).ok_or_else(|| {
+            SourceError::InvalidParams(
+                "drive `lookback_days` exceeds the supported day-window range".into(),
+            )
+        })
+    }
 }
 
 pub fn validate_params(params: &serde_json::Value) -> Result<(), SourceError> {
@@ -54,8 +66,13 @@ impl crate::ValidatedParams for GoogleDriveParams {
                 "drive `max_files` must be > 0".into(),
             ));
         }
+        self.lookback_hours()?;
         Ok(())
     }
+}
+
+fn default_lookback_days() -> u32 {
+    1
 }
 
 fn default_max_files() -> usize {
@@ -173,7 +190,7 @@ impl DriveApi<'_> {
                 params.folder_id
             )));
         }
-        let (start, end) = ctx.day_window(0, 0)?;
+        let (start, end) = ctx.day_window(params.lookback_hours()?, 0)?;
         let query = file_query(params, &folder.id, start, end);
         let mut list_params = vec![
             ("q".into(), query),
@@ -489,12 +506,16 @@ mod tests {
         let valid = serde_json::json!({"folder_id": "root"});
         let params: GoogleDriveParams = crate::parse_validated(&valid).unwrap();
         assert_eq!(params.max_files, 200);
+        assert_eq!(params.lookback_days, 1);
         for invalid in [
             serde_json::json!({"folder": "Docs", "file_pattern": "briefing-{date}.md"}),
             serde_json::json!({"folder_id": ""}),
             serde_json::json!({"folder_id": " root"}),
             serde_json::json!({"folder_id": "root", "name_prefix": " "}),
             serde_json::json!({"folder_id": "root", "max_files": 0}),
+            serde_json::json!({"folder_id": "root", "lookback_days": -1}),
+            serde_json::json!({"folder_id": "root", "lookback_days": "1"}),
+            serde_json::json!({"folder_id": "root", "lookback_days": u32::MAX}),
         ] {
             assert!(validate_params(&invalid).is_err());
         }
@@ -597,6 +618,7 @@ mod tests {
             vault_root: ".".into(),
             vault_dirs: Default::default(),
             documents: None,
+            originals: Default::default(),
         }
     }
 
@@ -624,13 +646,15 @@ mod tests {
         GoogleDriveParams {
             folder_id: "folder-id".into(),
             name_prefix: None,
+            lookback_days: default_lookback_days(),
             max_files,
         }
     }
 
     #[tokio::test]
     async fn exports_docs_and_follows_empty_pages_in_the_actual_shared_drive_window() {
-        let doc = file("doc", "application/vnd.google-apps.document", "31");
+        let mut doc = file("doc", "application/vnd.google-apps.document", "31");
+        doc["modifiedTime"] = "2026-10-18T06:00:00Z".into();
         let expected = doc.clone();
         let server = server(move |url| match url.path() {
             "/drive/v3/files/folder-id" => json_response(serde_json::json!({
@@ -662,7 +686,7 @@ mod tests {
         };
         let observation = api.observe(&params(1), &context()).await.unwrap();
         assert_eq!(observation.outcome, crate::ObservationOutcome::Observed);
-        let (start, end) = context().day_window(0, 0).unwrap();
+        let (start, end) = context().day_window(24, 0).unwrap();
         assert_eq!(
             observation.scope,
             crate::ObservationScope::Window { start, end }
@@ -672,6 +696,7 @@ mod tests {
         };
         assert_eq!(item.body, "# 지식\n\n근거 [문서](https://example.com).\n");
         assert_eq!(item.external_id.as_deref(), Some("doc"));
+        assert_eq!(item.timestamp.to_string(), "2026-10-18T06:00:00Z");
         assert_eq!(
             item.metadata["source_identity"],
             serde_json::json!({
@@ -694,7 +719,7 @@ mod tests {
             .find(|url| url.path() == "/drive/v3/files")
             .unwrap();
         let query: BTreeMap<_, _> = listing.query_pairs().into_owned().collect();
-        assert!(query["q"].contains("modifiedTime >= '2026-10-18T15:00:00Z'"));
+        assert!(query["q"].contains("modifiedTime >= '2026-10-17T15:00:00Z'"));
         assert!(query["q"].contains("modifiedTime < '2026-10-19T15:00:00Z'"));
         assert_eq!(query["corpora"], "drive");
         assert_eq!(query["driveId"], "shared-drive-id");
@@ -709,6 +734,64 @@ mod tests {
                 .any(|(key, value)| key == "mimeType" && value == "text/markdown")
         );
         assert!(!export.query_pairs().any(|(key, _)| key == "alt"));
+    }
+
+    #[tokio::test]
+    async fn lookback_override_and_historical_targets_use_exact_reported_query_bounds() {
+        for (target, lookback_days, expected_start, expected_end) in [
+            (
+                jiff::civil::date(2026, 10, 19),
+                0,
+                "2026-10-18T15:00:00Z",
+                "2026-10-19T15:00:00Z",
+            ),
+            (
+                jiff::civil::date(2026, 9, 20),
+                3,
+                "2026-09-16T15:00:00Z",
+                "2026-09-20T15:00:00Z",
+            ),
+        ] {
+            let server = server(|url| match url.path() {
+                "/drive/v3/files/folder-id" => {
+                    json_response(serde_json::json!({"id": "folder-id", "mimeType": FOLDER_MIME}))
+                }
+                "/drive/v3/files" => json_response(serde_json::json!({"files": []})),
+                other => panic!("unexpected request {other}"),
+            })
+            .await;
+            let params: GoogleDriveParams = crate::parse_validated(&serde_json::json!({
+                "folder_id": "folder-id", "lookback_days": lookback_days,
+            }))
+            .unwrap();
+            let mut context = context();
+            context.target_date = target;
+            let http = client();
+            let observation = DriveApi {
+                http: &http,
+                token: "fixture-token",
+                base: server.base.clone(),
+            }
+            .observe(&params, &context)
+            .await
+            .unwrap();
+            assert_eq!(observation.outcome, crate::ObservationOutcome::Observed);
+            assert_eq!(
+                observation.scope,
+                crate::ObservationScope::Window {
+                    start: expected_start.parse().unwrap(),
+                    end: expected_end.parse().unwrap(),
+                }
+            );
+            let requests = server.requests.lock().unwrap();
+            let listing = requests
+                .iter()
+                .find(|url| url.path() == "/drive/v3/files")
+                .unwrap();
+            let query: BTreeMap<_, _> = listing.query_pairs().into_owned().collect();
+            assert!(query["q"].contains(&format!("modifiedTime >= '{expected_start}'")));
+            assert!(query["q"].contains(&format!("modifiedTime < '{expected_end}'")));
+        }
     }
 
     #[tokio::test]

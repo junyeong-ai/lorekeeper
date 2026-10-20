@@ -86,6 +86,10 @@ For DOCX, XLSX and PDF inputs, install the optional decoder with
 `lore input install DIRECTORY` and merge its printed configuration. Verify dependencies
 with `lore input check`, then inspect a file without moving it using
 `lore input inspect FILE.pdf`. Images additionally need explicit OCR language data.
+Original entries default to 32 MiB; raise `ingest.originals.max_entry_bytes` explicitly
+for larger inputs. Originals use temporary files instead of full in-memory binary
+copies. Projection size and page-count limits remain separate; decoder memory usage
+depends on the format.
 See [preprocessing configuration and scope](skills/lore-setup/references/config.md#document-preprocessing).
 
 ```bash
@@ -328,6 +332,7 @@ To add external knowledge, copy the catalog's `ai-news` or `tech-news` block int
 
 - **Output is plain markdown** — `daily/{source}/` (raw timeline), `wiki/concepts/` (concepts), `wiki/documents/` (documents), `me/` (work-log & reviews), `synthesis/` (weekly themes).
 - **Materialized views** — a page has two layers. The **structural layer** (frontmatter, raw items, headings) re-renders every ingest; the **semantic layer** (summary, concepts, synthesis) is LLM-owned and preserved across re-renders. Unchanged input with matching completion markers enqueues zero LLM work (a BLAKE3 hash decides).
+- **Collection budget** — `ingest.source_timeout_seconds` defaults to 600 seconds per source; `collection_timeout_seconds` on a source overrides it. This operating budget includes retry waits, pagination and conversion. Collection runs outside the vault writer lock; publication acquires the lock, recovers pending journals and derives from current pages. Async waits are cancelled; blocking local IO/decoding is checked on return rather than forcibly preempted. Timeout reports failure and does not establish automatic backfill or source completeness.
 - **Inputs and replay** — unchanged input hashes reuse completed LLM results. Refetching can observe remote edits, deletions and different query windows. RSS event logs retain collected entries after they leave the feed; exact-input regeneration requires a retained queue task.
 - **Realized-only** — a future date materializes no page (a forecast isn't knowledge yet). It becomes knowledge once the date arrives.
 - **Config decides the vault's language** — `vault.locale` (ko | en) is not a label switch but **the language of every sentence Lorekeeper adds**: summaries, weekly themes, concept definitions, explorations. A concept's NAME is the form its own source writes, so a term a source writes in another language keeps its spelling. Source content is never translated.
@@ -391,6 +396,12 @@ lore schema                   # generate wiki/AGENTS.md (the page-format schema)
 ```
 
 `lore wiki refresh` refreshes the SQLite navigation snapshot and a small `index.md` entry guide. Use `wiki browse/search/links` for page inventories, date ordering and relationship traversal. An existing entry file without a generation marker is preserved and reported as a collision. Start a retrieval session with `wiki snapshot` to inspect the saved ID and capture/verification times, then repeat `wiki browse/search/links --snapshot ID` (links supports `--direction incoming|both`). Verify originals with `wiki read --revision REV`. Run `wiki prepare` when current inventory is required or no compatible capture exists. Saved times do not certify freshness after external edits. Refresh prints the prepared ID too.
+
+SQLite retains one current search snapshot; replaced IDs cannot be queried. Freed
+pages are reused, so deletion need not shrink the database file immediately.
+Originals and review archives are separate retained evidence, never age-based
+retention targets. See [source retention](skills/lore-extract/references/manifest.md#source-retention)
+for repository captures and expendable working caches.
 
 `wiki context PATH --snapshot ID` groups explicit links, citations, declared source
 relations and scoped reviews separately. Follow each group's `next_offset` in the
@@ -460,6 +471,12 @@ per page. A guarded next-target cursor preserves turns across budget-limited run
 corrupt state is reported rather than silently reset.
 Hosts use their existing authentication and policies. Their permission
 and sandbox models differ; Rust publication guards are not OS access controls.
+
+Concept extraction captures discovery candidates together with their scoped reviews
+and evidence. Workers explicitly choose new admission or reuse of an exact existing
+revision; equal names never authorize automatic merging. Changed read scope refuses
+publication. Small sources hand off to bounded work when their related evidence is
+large. These guards establish processing and publication consistency, not semantic truth.
 
 ```yaml
 llm:
@@ -680,6 +697,12 @@ context, not automatic corroborating evidence.
 `.lorekeeper/knowledge-audit.json` stores current assessments and pending order;
 judgments and conflicting evidence remain in Markdown reviews. Single-source
 status or citation count alone does not justify merging or deleting a concept.
+`wiki audit-discover --file FILE` records revision-guarded search queries before
+assessment. Native jobs discover first, then include every matching knowledge page
+as comparison context before partitioning. Changed query membership or authored
+revisions reopen work; matches create neither citations nor semantic relations.
+This records the searched scope, not consistency outside it. See
+[related-document discovery](skills/lore-wiki/references/maintenance.md#related-document-discovery).
 Run an initial resumable campaign with `lore run knowledge --profile codex --batches 20
 --json`, choosing a registered profile. Each batch releases its workflow lease;
 failures preserve pending work and completed receipts. `batch-limit` means the

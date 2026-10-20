@@ -81,7 +81,7 @@ fn busy_ingest_refuses_by_default_and_waiting_dry_run_remains_read_only() {
 }
 
 #[test]
-fn explicit_ingest_waits_then_collects_after_the_writer_releases() {
+fn explicit_ingest_collects_then_derives_from_pages_after_the_writer_releases() {
     let ws = Workspace::new();
     let held = lk_vault::MutationSession::acquire(&ws.vault()).unwrap();
     let before = snapshot(&ws.vault());
@@ -112,6 +112,11 @@ fn explicit_ingest_waits_then_collects_after_the_writer_releases() {
     }
     assert!(child.try_wait().unwrap().is_none());
     assert_eq!(snapshot(&ws.vault()), before, "waiting must not publish");
+    std::fs::create_dir_all(ws.vault().join("wiki/documents")).unwrap();
+    std::fs::write(ws.vault().join("wiki/documents/note.md"), format!(
+        "---\ntype: document\ntitle: Note\ncreated: 2020-01-01\nsource_file: {}\n---\n## Summary\n\n## Content\n\nA prior source revision.\n",
+        serde_json::to_string(&ws.vault().join("inbox/note.md")).unwrap()
+    )).unwrap();
     drop(held);
 
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -132,5 +137,56 @@ fn explicit_ingest_waits_then_collects_after_the_writer_releases() {
         std::fs::read_to_string(stderr.path()).unwrap()
     );
     assert!(ws.vault().join(".lorekeeper/ingest.jsonl").is_file());
+    let page = lk_vault::parse_page(
+        &std::fs::read_to_string(ws.vault().join("wiki/documents/note.md")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        page.frontmatter
+            .get("created")
+            .and_then(|value| value.as_str()),
+        Some("2020-01-01"),
+        "planning must observe the prior writer's current page after acquiring the lock"
+    );
+}
+
+#[test]
+fn queue_contention_cannot_publish_a_document_without_its_requests() {
+    let ws = Workspace::new();
+    let queue = ws.vault().join(".lorekeeper/queue");
+    std::fs::create_dir_all(&queue).unwrap();
+    let held = lk_queue::claim_queue(&queue).unwrap();
+    assert!(matches!(held, lk_queue::QueueClaim::Held(_)));
+    let result = ws.command().output().unwrap();
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("queue"));
+    assert!(!ws.vault().join("wiki/documents/note.md").exists());
+    assert!(ws.vault().join("inbox/note.md").is_file());
+    drop(held);
+    let result = ws.command().output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
     assert!(ws.vault().join("wiki/documents/note.md").is_file());
+    let files = std::fs::read_dir(&queue)
+        .unwrap()
+        .map(Result::unwrap)
+        .filter(|entry| {
+            entry
+                .path()
+                .extension()
+                .is_some_and(|extension| extension == "jsonl")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(files.len(), 1);
+    let requests = lk_queue::read_tasks(&files[0].path()).unwrap();
+    assert!(!requests.tasks.is_empty());
+    assert!(
+        requests
+            .tasks
+            .iter()
+            .all(|task| task.target.vault_path == "wiki/documents/note.md")
+    );
 }
