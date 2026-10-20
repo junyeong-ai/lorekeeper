@@ -1,14 +1,21 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use base64::Engine;
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
 
 use lk_core::event::RawItem;
 
-use super::{GoogleAuth, check_response};
+use super::GoogleAuth;
 use crate::{ExtractContext, Source, SourceError};
 
 const BASE: &str = "https://gmail.googleapis.com/gmail/v1/users/me";
+const MAX_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
+const MAX_ERROR_BYTES: usize = 64 * 1024;
+const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
+const MAX_MIME_PARTS: usize = 1024;
+const MAX_MIME_DEPTH: usize = 32;
 
 pub struct GmailSource {
     http: reqwest::Client,
@@ -124,8 +131,7 @@ struct MessageReference {
 #[derive(Deserialize)]
 struct Message {
     id: String,
-    snippet: Option<String>,
-    payload: Option<Payload>,
+    payload: Option<MimePart>,
     #[serde(rename = "internalDate")]
     internal_date: Option<String>,
     #[serde(rename = "labelIds")]
@@ -133,18 +139,12 @@ struct Message {
 }
 
 #[derive(Deserialize)]
-struct Payload {
-    #[serde(rename = "mimeType")]
-    mime_type: Option<String>,
-    headers: Option<Vec<Header>>,
-    body: Option<PartBody>,
-    parts: Option<Vec<MimePart>>,
-}
-
-#[derive(Deserialize)]
 struct MimePart {
     #[serde(rename = "mimeType")]
     mime_type: Option<String>,
+    #[serde(default)]
+    filename: String,
+    headers: Option<Vec<Header>>,
     body: Option<PartBody>,
     parts: Option<Vec<MimePart>>,
 }
@@ -152,12 +152,36 @@ struct MimePart {
 #[derive(Deserialize)]
 struct PartBody {
     data: Option<String>,
+    #[serde(rename = "attachmentId")]
+    attachment_id: Option<String>,
+    size: Option<u64>,
 }
 
 #[derive(Deserialize)]
 struct Header {
     name: String,
     value: String,
+}
+
+#[derive(Deserialize, serde::Serialize)]
+struct ApiErrorResponse {
+    error: ApiError,
+}
+
+#[derive(Deserialize, serde::Serialize)]
+struct ApiError {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    status: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    errors: Vec<ApiErrorReason>,
+}
+
+#[derive(Deserialize, serde::Serialize)]
+struct ApiErrorReason {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    domain: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
 }
 
 impl GmailSource {
@@ -207,11 +231,52 @@ impl Source for GmailSource {
         params: &serde_json::Value,
         ctx: &ExtractContext,
     ) -> Result<crate::SourceObservation, SourceError> {
-        let mut partial = false;
         let p: GmailParams = crate::parse_validated(params)?;
-
         let token = self.auth.access_token().await?;
+        GmailApi {
+            http: &self.http,
+            token: &token,
+            base: url::Url::parse(BASE).expect("static Gmail URL"),
+        }
+        .observe(&p, ctx)
+        .await
+    }
+}
 
+struct GmailApi<'a> {
+    http: &'a reqwest::Client,
+    token: &'a str,
+    base: url::Url,
+}
+
+impl GmailApi<'_> {
+    async fn get<T: DeserializeOwned>(
+        &self,
+        segments: &[&str],
+        query: &[(&str, String)],
+    ) -> Result<T, SourceError> {
+        let mut url = self.base.clone();
+        url.path_segments_mut()
+            .expect("Gmail API URL has path segments")
+            .pop_if_empty()
+            .extend(segments);
+        let response = crate::retry::send_with_retry(|| {
+            self.http
+                .get(url.clone())
+                .bearer_auth(self.token)
+                .query(query)
+                .send()
+        })
+        .await?;
+        read_json(response).await
+    }
+
+    async fn observe(
+        &self,
+        p: &GmailParams,
+        ctx: &ExtractContext,
+    ) -> Result<crate::SourceObservation, SourceError> {
+        let mut partial = false;
         // Constrain the query to the target day's window anchored to ctx.target_date so
         // --date backfill fetches the right day instead of "newer_than N hours from now".
         // Gmail's after:/before: accept epoch seconds, which (unlike YYYY/MM/DD) are
@@ -240,25 +305,12 @@ impl Source for GmailSource {
             // The listing GET is idempotent — retry transient 429/5xx so one provider hiccup
             // doesn't abort an unattended ingest (the same guard Jira's search uses). The
             // per-message fetch below stays warn-and-skip (one bad message ≠ whole-run failure).
-            let resp = check_response(
-                crate::retry::send_with_retry(|| {
-                    let mut req = self
-                        .http
-                        .get(format!("{BASE}/messages"))
-                        .bearer_auth(&token)
-                        .query(&[
-                            ("q", query.as_str()),
-                            ("maxResults", &PAGE_SIZE.to_string()),
-                        ]);
-                    if let Some(ref pt) = page_token {
-                        req = req.query(&[("pageToken", pt.as_str())]);
-                    }
-                    req.send()
-                })
-                .await?,
-            )
-            .await?;
-            let list: ListResponse = resp.json().await?;
+            let mut query_params =
+                vec![("q", query.clone()), ("maxResults", PAGE_SIZE.to_string())];
+            if let Some(token) = &page_token {
+                query_params.push(("pageToken", token.clone()));
+            }
+            let list: ListResponse = self.get(&["messages"], &query_params).await?;
 
             refs.extend(list.messages.unwrap_or_default());
             pages_fetched += 1;
@@ -297,43 +349,37 @@ impl Source for GmailSource {
         let mut items = Vec::new();
         let mut observed = 0;
         for r in &refs {
-            let fetch = async {
-                let resp = check_response(
-                    self.http
-                        .get(format!("{BASE}/messages/{}", r.id))
-                        .bearer_auth(&token)
-                        .query(&[("format", "full")])
-                        .send()
-                        .await?,
-                )
+            let result = async {
+                let msg: Message = self
+                    .get(&["messages", &r.id], &[("format", "full".into())])
+                    .await?;
+                if is_filtered(&msg, p.exclude.as_ref()) {
+                    return Ok(None);
+                }
+                let body = load_body(msg.payload.as_ref(), |attachment_id| {
+                    let message_id = msg.id.clone();
+                    async move {
+                        self.get::<PartBody>(
+                            &["messages", &message_id, "attachments", &attachment_id],
+                            &[],
+                        )
+                        .await
+                    }
+                })
                 .await?;
-                resp.json::<Message>().await.map_err(SourceError::Http)
-            };
-
-            let msg = match fetch.await {
-                Ok(m) => {
+                map_message_observed(msg, body, ctx.identity.email.trim(), ctx.locale.strings())
+                    .map(Some)
+            }
+            .await;
+            match result {
+                Ok(item) => {
                     observed += 1;
-                    m
+                    items.extend(item);
                 }
-                Err(e) => {
+                Err(error) => {
                     partial = true;
-                    tracing::warn!(
-                        message_id = %r.id,
-                        error = %e,
-                        "gmail: skipping message (fetch failed)"
-                    );
-                    continue;
+                    tracing::warn!(message_id = %r.id, error = %error, "gmail: skipping unreadable message");
                 }
-            };
-
-            if let Some(item) = map_message_observed(
-                msg,
-                ctx.identity.email.trim(),
-                p.exclude.as_ref(),
-                ctx.locale.strings(),
-                &mut partial,
-            ) {
-                items.push(item);
             }
         }
 
@@ -358,79 +404,34 @@ impl Source for GmailSource {
     }
 }
 
-/// Map one fetched Gmail message to a `RawItem`, or `None` if it is filtered
-/// (matched an `exclude` rule, is a calendar invite) or has no parseable timestamp.
-/// Pure — no I/O — so the exclude logic, snippet body-fallback, ownership match
-/// (`From` vs `identity_email`), and metadata projection are unit-testable against
-/// fixtures. `identity_email` must already be trimmed.
 fn map_message_observed(
     msg: Message,
+    body: String,
     identity_email: &str,
-    exclude: Option<&ExcludeParams>,
     strings: &lk_core::i18n::Strings,
-    partial: &mut bool,
-) -> Option<RawItem> {
-    if let Some(exc) = exclude
-        && GmailSource::is_excluded(&msg, exc)
-    {
-        tracing::debug!(message_id = %msg.id, "gmail: skipping message matched by exclude rule");
-        return None;
-    }
-    if exclude.is_none_or(|e| e.calendar_invites) && has_calendar_attachment(&msg) {
-        tracing::debug!(message_id = %msg.id, "gmail: skipping calendar invite");
-        return None;
-    }
-
-    // An absent or whitespace-only Subject gets the same `untitled` placeholder
-    // every adapter uses (Calendar summary, Jira summary).
+) -> Result<RawItem, SourceError> {
     let subject = GmailSource::header(&msg, "Subject")
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .unwrap_or(strings.untitled);
     let from = GmailSource::header(&msg, "From").unwrap_or_default();
-    let snippet = msg.snippet.as_deref().unwrap_or_default();
-
-    let body = {
-        let extracted = msg.payload.as_ref().map(extract_body).unwrap_or_default();
-        if extracted.is_empty() {
-            // The MIME walk found no text body — fall back to Gmail's short snippet so
-            // the page isn't empty, but make the degradation observable: a silently
-            // truncated body would be summarized by the LLM as if it were complete.
-            tracing::warn!(
-                message_id = %msg.id,
-                "gmail: no text body extracted, falling back to snippet (truncated)"
-            );
-            snippet.to_string()
-        } else {
-            extracted
-        }
-    };
-
-    let Some(ts) = msg
+    let timestamp = msg
         .internal_date
         .as_deref()
         .and_then(|s| s.parse::<i64>().ok())
         .and_then(|ms| jiff::Timestamp::from_millisecond(ms).ok())
-    else {
-        *partial = true;
-        tracing::warn!(message_id = %msg.id, "gmail: skipping message with unparseable timestamp");
-        return None;
-    };
-
+        .ok_or_else(|| SourceError::Parse("Gmail message has no valid internalDate".into()))?;
     let is_self =
         !identity_email.is_empty() && header_email(from).eq_ignore_ascii_case(identity_email);
-
-    Some(RawItem {
+    Ok(RawItem {
         labels: Vec::new(),
         external_id: Some(msg.id.clone()),
         title: subject.to_string(),
         body,
-        // `#all/` rather than `#inbox/`: the link outlives the message's place in the inbox,
-        // and a daily page is read months after the mail was archived or filed under a label,
-        // where an `#inbox/` link resolves to nothing.
+        // #all links survive archiving and label changes.
         url: Some(format!("https://mail.google.com/mail/u/0/#all/{}", msg.id)),
         author: Some(from.to_string()),
-        timestamp: ts,
+        timestamp,
         is_self,
         work: None,
         metadata: serde_json::json!({
@@ -450,149 +451,372 @@ fn header_email(raw: &str) -> &str {
     }
 }
 
-fn extract_body(payload: &Payload) -> String {
-    let mut plain = None;
-    let mut html = None;
-    collect_parts(
-        payload.mime_type.as_deref(),
-        payload.body.as_ref(),
-        payload.parts.as_deref(),
-        &mut plain,
-        &mut html,
-    );
-    if let Some(text) = plain {
-        return text;
+async fn load_body<F, Fut>(
+    payload: Option<&MimePart>,
+    mut load_attachment: F,
+) -> Result<String, SourceError>
+where
+    F: FnMut(String) -> Fut,
+    Fut: std::future::Future<Output = Result<PartBody, SourceError>>,
+{
+    let payload =
+        payload.ok_or_else(|| SourceError::Parse("Gmail message has no payload".into()))?;
+    let mut visited = 0;
+    validate_mime_structure(payload, 0, &mut visited)?;
+    let mut parts = Vec::new();
+    collect_parts(payload, &mut parts)?;
+    if parts.is_empty() {
+        return Err(SourceError::Parse(
+            "Gmail message has no supported text body".into(),
+        ));
     }
-    if let Some(h) = html {
-        return crate::markdown::html_to_markdown(&h);
+    let mut result = String::new();
+    let mut acquired_bytes = 0;
+    for (part, media) in parts {
+        let body = part
+            .body
+            .as_ref()
+            .ok_or_else(|| SourceError::Parse("Gmail text part has no body".into()))?;
+        let expected_size = body.size;
+        let loaded;
+        let body = if let Some(id) = &body.attachment_id {
+            if body.size.is_some_and(|size| size > MAX_BODY_BYTES as u64) {
+                return Err(SourceError::ResponseTooLarge {
+                    max_bytes: MAX_BODY_BYTES,
+                });
+            }
+            loaded = load_attachment(id.clone()).await?;
+            if body
+                .size
+                .zip(loaded.size)
+                .is_some_and(|(expected, actual)| expected != actual)
+            {
+                return Err(SourceError::Parse(
+                    "Gmail body size changed during acquisition".into(),
+                ));
+            }
+            &loaded
+        } else {
+            body
+        };
+        let bytes = decode_base64url(body)?;
+        if expected_size.is_some_and(|size| size != bytes.len() as u64) {
+            return Err(SourceError::Parse(
+                "Gmail body does not match its declared size".into(),
+            ));
+        }
+        if bytes.len() > MAX_BODY_BYTES - acquired_bytes {
+            return Err(SourceError::ResponseTooLarge {
+                max_bytes: MAX_BODY_BYTES,
+            });
+        }
+        acquired_bytes += bytes.len();
+        let encoding = match media.get_param(mime::CHARSET) {
+            Some(charset) => encoding_rs::Encoding::for_label(charset.as_str().as_bytes())
+                .ok_or_else(|| SourceError::Parse("unsupported Gmail body charset".into()))?,
+            None => encoding_rs::UTF_8,
+        };
+        let (text, malformed) = encoding.decode_with_bom_removal(&bytes);
+        if malformed {
+            return Err(SourceError::Parse(
+                "Gmail body cannot be decoded without replacement characters".into(),
+            ));
+        }
+        let text = if media.essence_str() == "text/html" {
+            crate::markdown::html_to_markdown(&text)
+        } else {
+            text.into_owned()
+        };
+        let separator = if result.is_empty() || text.is_empty() {
+            ""
+        } else {
+            "\n\n"
+        };
+        if separator.len() + text.len() > MAX_BODY_BYTES - result.len() {
+            return Err(SourceError::ResponseTooLarge {
+                max_bytes: MAX_BODY_BYTES,
+            });
+        }
+        result.push_str(separator);
+        result.push_str(&text);
     }
-    String::new()
+    Ok(result)
 }
 
-fn collect_parts(
-    mime: Option<&str>,
-    body: Option<&PartBody>,
-    parts: Option<&[MimePart]>,
-    plain: &mut Option<String>,
-    html: &mut Option<String>,
-) {
-    if let Some(parts) = parts {
-        for part in parts {
-            collect_parts(
-                part.mime_type.as_deref(),
-                part.body.as_ref(),
-                part.parts.as_deref(),
-                plain,
-                html,
-            );
-        }
-    } else if let Some(data) = body.and_then(|b| b.data.as_deref()) {
-        let decoded = decode_base64url(data);
-        match mime {
-            Some("text/plain") if plain.is_none() => *plain = Some(decoded),
-            Some("text/html") if html.is_none() => *html = Some(decoded),
-            _ => {}
+fn validate_mime_structure(
+    part: &MimePart,
+    depth: usize,
+    visited: &mut usize,
+) -> Result<(), SourceError> {
+    *visited += 1;
+    if depth > MAX_MIME_DEPTH || *visited > MAX_MIME_PARTS {
+        return Err(SourceError::Parse(
+            "Gmail MIME structure exceeds its part or depth limit".into(),
+        ));
+    }
+    if let Some(children) = &part.parts {
+        for child in children {
+            validate_mime_structure(child, depth + 1, visited)?;
         }
     }
+    Ok(())
+}
+
+fn collect_parts<'a>(
+    part: &'a MimePart,
+    selected: &mut Vec<(&'a MimePart, mime::Mime)>,
+) -> Result<(), SourceError> {
+    let declared = header_value(part, "Content-Type")
+        .or(part.mime_type.as_deref())
+        .ok_or_else(|| SourceError::Parse("Gmail MIME part has no media type".into()))?;
+    let media: mime::Mime = declared
+        .parse()
+        .map_err(|_| SourceError::Parse("Gmail MIME part has an invalid Content-Type".into()))?;
+    if let Some(kind) = &part.mime_type {
+        let kind: mime::Mime = kind
+            .parse()
+            .map_err(|_| SourceError::Parse("Gmail MIME part has an invalid mimeType".into()))?;
+        if kind.essence_str() != media.essence_str() {
+            return Err(SourceError::Parse(
+                "Gmail MIME type disagrees with Content-Type".into(),
+            ));
+        }
+    }
+    if media.type_() == mime::MULTIPART {
+        let children = part
+            .parts
+            .as_deref()
+            .filter(|parts| !parts.is_empty())
+            .ok_or_else(|| SourceError::Parse("Gmail multipart body has no parts".into()))?;
+        match media.subtype().as_str() {
+            "alternative" => {
+                // RFC 2046 alternatives are ordered by increasing faithfulness.
+                for child in children.iter().rev().filter(|child| !is_attachment(child)) {
+                    let before = selected.len();
+                    collect_parts(child, selected)?;
+                    if selected.len() != before {
+                        break;
+                    }
+                }
+            }
+            "related" => {
+                let root = if let Some(start) = media.get_param("start") {
+                    children
+                        .iter()
+                        .find(|child| {
+                            header_value(child, "Content-ID")
+                                .is_some_and(|id| id.trim() == start.as_str())
+                        })
+                        .ok_or_else(|| {
+                            SourceError::Parse("Gmail multipart/related root is absent".into())
+                        })?
+                } else {
+                    &children[0]
+                };
+                collect_parts(root, selected)?;
+            }
+            _ => {
+                for child in children.iter().filter(|child| !is_attachment(child)) {
+                    collect_parts(child, selected)?;
+                }
+            }
+        }
+    } else if matches!(media.essence_str(), "text/plain" | "text/html") {
+        if part.parts.as_ref().is_some_and(|parts| !parts.is_empty()) {
+            return Err(SourceError::Parse(
+                "Gmail text body unexpectedly contains MIME parts".into(),
+            ));
+        }
+        selected.push((part, media));
+    }
+    Ok(())
+}
+
+fn is_attachment(part: &MimePart) -> bool {
+    !part.filename.is_empty()
+        || header_value(part, "Content-Disposition").is_some_and(|value| {
+            value
+                .split(';')
+                .next()
+                .is_some_and(|kind| kind.trim().eq_ignore_ascii_case("attachment"))
+        })
+}
+
+fn header_value<'a>(part: &'a MimePart, name: &str) -> Option<&'a str> {
+    part.headers
+        .as_deref()?
+        .iter()
+        .find(|header| header.name.eq_ignore_ascii_case(name))
+        .map(|header| header.value.as_str())
+}
+
+fn is_filtered(msg: &Message, exclude: Option<&ExcludeParams>) -> bool {
+    exclude.is_some_and(|exclude| GmailSource::is_excluded(msg, exclude))
+        || (exclude.is_none_or(|exclude| exclude.calendar_invites) && has_calendar_attachment(msg))
+}
+
+async fn read_json<T: DeserializeOwned>(mut response: reqwest::Response) -> Result<T, SourceError> {
+    let status = response.status();
+    let max_bytes = if status.is_success() {
+        MAX_RESPONSE_BYTES
+    } else {
+        MAX_ERROR_BYTES
+    };
+    let exceeded_limit = || {
+        if status.is_success() {
+            SourceError::ResponseTooLarge { max_bytes }
+        } else {
+            SourceError::Api {
+                status: status.as_u16(),
+                message: "Gmail request failed; error diagnostics exceed their acquisition limit"
+                    .into(),
+            }
+        }
+    };
+    if response
+        .content_length()
+        .is_some_and(|length| length > max_bytes as u64)
+    {
+        return Err(exceeded_limit());
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        if chunk.len() > max_bytes - bytes.len() {
+            return Err(exceeded_limit());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    if !status.is_success() {
+        let diagnostic = serde_json::from_slice::<ApiErrorResponse>(&bytes)
+            .ok()
+            .filter(|response| {
+                response.error.status.is_some()
+                    || response
+                        .error
+                        .errors
+                        .iter()
+                        .any(|error| error.domain.is_some() || error.reason.is_some())
+            })
+            .and_then(|response| serde_json::to_string(&response.error).ok());
+        return Err(SourceError::Api {
+            status: status.as_u16(),
+            message: diagnostic
+                .map(|diagnostic| format!("Gmail request failed: {diagnostic}"))
+                .unwrap_or_else(|| "Gmail request failed; no structured error diagnostics".into()),
+        });
+    }
+    serde_json::from_slice(&bytes)
+        .map_err(|_| SourceError::Parse("invalid Gmail JSON response".into()))
 }
 
 fn has_calendar_attachment(msg: &Message) -> bool {
-    fn has_calendar_part(parts: Option<&[MimePart]>) -> bool {
-        let Some(parts) = parts else { return false };
-        for part in parts {
-            if part
-                .mime_type
-                .as_deref()
-                .is_some_and(|m| m.starts_with("text/calendar"))
-            {
-                return true;
-            }
-            if has_calendar_part(part.parts.as_deref()) {
-                return true;
-            }
-        }
-        false
-    }
-    msg.payload.as_ref().is_some_and(|p| {
-        p.mime_type
+    fn contains_calendar(part: &MimePart) -> bool {
+        part.mime_type
             .as_deref()
-            .is_some_and(|m| m.starts_with("text/calendar"))
-            || has_calendar_part(p.parts.as_deref())
-    })
+            .and_then(|value| value.parse::<mime::Mime>().ok())
+            .is_some_and(|media| media.essence_str() == "text/calendar")
+            || part
+                .parts
+                .as_deref()
+                .is_some_and(|parts| parts.iter().any(contains_calendar))
+    }
+    msg.payload.as_ref().is_some_and(contains_calendar)
 }
 
-fn decode_base64url(data: &str) -> String {
-    use base64::Engine;
-    base64::engine::general_purpose::URL_SAFE_NO_PAD
+fn decode_base64url(body: &PartBody) -> Result<Vec<u8>, SourceError> {
+    if body.size.is_some_and(|size| size > MAX_BODY_BYTES as u64) {
+        return Err(SourceError::ResponseTooLarge {
+            max_bytes: MAX_BODY_BYTES,
+        });
+    }
+    let Some(data) = &body.data else {
+        return if body.size == Some(0) {
+            Ok(Vec::new())
+        } else {
+            Err(SourceError::Parse("Gmail text body is unavailable".into()))
+        };
+    };
+    if data.len() > MAX_BODY_BYTES.div_ceil(3) * 4 {
+        return Err(SourceError::ResponseTooLarge {
+            max_bytes: MAX_BODY_BYTES,
+        });
+    }
+    let engine = base64::engine::GeneralPurpose::new(
+        &base64::alphabet::URL_SAFE,
+        base64::engine::GeneralPurposeConfig::new()
+            .with_decode_padding_mode(base64::engine::DecodePaddingMode::Indifferent),
+    );
+    let bytes = engine
         .decode(data)
-        .ok()
-        .and_then(|bytes| String::from_utf8(bytes).ok())
-        .unwrap_or_default()
+        .map_err(|_| SourceError::Parse("invalid Gmail base64url body".into()))?;
+    if bytes.len() > MAX_BODY_BYTES {
+        return Err(SourceError::ResponseTooLarge {
+            max_bytes: MAX_BODY_BYTES,
+        });
+    }
+    if body.size.is_some_and(|size| size != bytes.len() as u64) {
+        return Err(SourceError::Parse(
+            "Gmail body does not match its declared size".into(),
+        ));
+    }
+    Ok(bytes)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Message, header_email, map_message_observed as map_message_inner};
+    use super::*;
+    use std::sync::Mutex;
 
     fn msg_from(json: serde_json::Value) -> Message {
         serde_json::from_value(json).expect("message fixture parses")
     }
 
-    fn map_message(
+    async fn map_message(
         msg: Message,
         identity_email: &str,
-        exclude: Option<&super::ExcludeParams>,
-    ) -> Option<lk_core::event::RawItem> {
-        map_message_inner(
+        exclude: Option<&ExcludeParams>,
+    ) -> Result<Option<lk_core::event::RawItem>, SourceError> {
+        if is_filtered(&msg, exclude) {
+            return Ok(None);
+        }
+        let body = load_body(msg.payload.as_ref(), |_| async {
+            panic!("inline fixture must not request an attachment")
+        })
+        .await?;
+        map_message_observed(
             msg,
+            body,
             identity_email,
-            exclude,
             lk_core::i18n::Locale::default().strings(),
-            &mut false,
         )
+        .map(Some)
     }
 
-    #[test]
-    fn observation_marks_bad_timestamp_but_not_explicit_exclusion() {
+    #[tokio::test]
+    async fn invalid_timestamp_is_an_error_but_explicit_exclusion_is_observed() {
         let bad = || {
             msg_from(serde_json::json!({
                 "id": "bad-date", "internalDate": "not-a-date",
-                "payload": {"headers": [{"name": "Subject", "value": "skip this"}]}
+                "payload": {"mimeType": "text/plain", "body": {"size": 0},
+                    "headers": [{"name": "Subject", "value": "skip this"}]}
             }))
         };
-        let mut partial = false;
-        assert!(
-            map_message_inner(
-                bad(),
-                "me@x.com",
-                None,
-                lk_core::i18n::Locale::default().strings(),
-                &mut partial
-            )
-            .is_none()
-        );
-        assert!(partial);
+        assert!(map_message(bad(), "me@x.com", None).await.is_err());
         let exclude =
             serde_json::from_value(serde_json::json!({"subjects": ["skip this"]})).unwrap();
-        let mut partial = false;
         assert!(
-            map_message_inner(
-                bad(),
-                "me@x.com",
-                Some(&exclude),
-                lk_core::i18n::Locale::default().strings(),
-                &mut partial
-            )
-            .is_none()
+            map_message(bad(), "me@x.com", Some(&exclude))
+                .await
+                .unwrap()
+                .is_none()
         );
-        assert!(!partial, "deliberately excluded mail is not lost reach");
     }
 
     // base64url(no-pad) of "Hello body".
     const PLAIN_BODY_B64: &str = "SGVsbG8gYm9keQ";
 
-    #[test]
-    fn map_message_extracts_body_and_self_ownership() {
+    #[tokio::test]
+    async fn map_message_extracts_body_and_self_ownership() {
         let msg = msg_from(serde_json::json!({
             "id": "m1",
             "snippet": "snippet text",
@@ -607,7 +831,10 @@ mod tests {
                 "body": {"data": PLAIN_BODY_B64}
             }
         }));
-        let item = map_message(msg, "me@x.com", None).expect("maps");
+        let item = map_message(msg, "me@x.com", None)
+            .await
+            .unwrap()
+            .expect("maps");
         assert_eq!(item.title, "Weekly update");
         assert_eq!(item.body, "Hello body");
         assert!(item.is_self, "From matches identity case-insensitively");
@@ -617,44 +844,33 @@ mod tests {
         );
     }
 
-    #[test]
-    fn map_message_falls_back_to_snippet_when_no_body() {
+    #[tokio::test]
+    async fn missing_body_never_substitutes_a_snippet() {
         let msg = msg_from(serde_json::json!({
-            "id": "m2",
-            "snippet": "just the snippet",
-            "internalDate": "1769158800000",
-            "payload": {"headers": [{"name": "From", "value": "other@x.com"}]}
+            "id": "m2", "snippet": "incomplete preview", "internalDate": "1769158800000",
+            "payload": {"mimeType": "text/plain", "body": {"size": 42}}
         }));
-        let item = map_message(msg, "me@x.com", None).expect("maps");
-        assert_eq!(item.body, "just the snippet");
-        assert!(!item.is_self);
+        assert!(map_message(msg, "me@x.com", None).await.is_err());
     }
 
-    #[test]
-    fn map_message_blank_subject_gets_untitled_placeholder() {
+    #[tokio::test]
+    async fn map_message_blank_subject_gets_untitled_placeholder() {
         // A whitespace-only Subject header is the same as no Subject at all —
         // both land on the shared i18n `untitled` placeholder, never an empty
         // or whitespace-led title.
         let msg = msg_from(serde_json::json!({
             "id": "m4",
             "internalDate": "1769158800000",
-            "payload": {"headers": [{"name": "Subject", "value": "   "}]}
+            "payload": {"mimeType": "text/plain", "body": {"size": 0}, "headers": [{"name": "Subject", "value": "   "}]}
         }));
-        let item = map_message(msg, "me@x.com", None).expect("maps");
+        let item = map_message(msg, "me@x.com", None)
+            .await
+            .unwrap()
+            .expect("maps");
         assert_eq!(
             item.title,
             lk_core::i18n::Locale::default().strings().untitled
         );
-    }
-
-    #[test]
-    fn map_message_skips_unparseable_timestamp() {
-        let msg = msg_from(serde_json::json!({
-            "id": "m3",
-            "internalDate": "not-a-number",
-            "payload": {"headers": []}
-        }));
-        assert!(map_message(msg, "me@x.com", None).is_none());
     }
 
     #[test]
@@ -696,5 +912,346 @@ mod tests {
                 .is_ok()
         );
         assert!(validate_params(&serde_json::json!({"include_queries": ["label:x"]})).is_ok());
+    }
+    fn text_part(text: &str) -> serde_json::Value {
+        serde_json::json!({
+            "mimeType": "text/plain",
+            "body": {"data": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(text), "size": text.len()},
+        })
+    }
+
+    async fn body(value: serde_json::Value) -> Result<String, SourceError> {
+        let part = serde_json::from_value(value).unwrap();
+        load_body(Some(&part), |_| async {
+            panic!("unexpected attachment request")
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn mime_structure_selects_alternatives_and_preserves_independent_siblings() {
+        let html = "<p>Faithful body</p>";
+        let payload = serde_json::json!({
+            "mimeType": "multipart/mixed",
+            "parts": [
+                {"mimeType": "multipart/alternative", "parts": [text_part("Alternative"), {
+                    "mimeType": "text/html", "body": {
+                        "data": base64::engine::general_purpose::URL_SAFE.encode(html), "size": html.len()
+                    }
+                }]},
+                text_part("Independent sibling"),
+                {"mimeType": "text/plain", "filename": "attachment.txt", "body": {"attachmentId": "skip-file"}},
+                {"mimeType": "text/plain", "headers": [{"name": "Content-Disposition", "value": "attachment"}], "body": {"attachmentId": "skip-disposition"}}
+            ]
+        });
+        assert_eq!(
+            body(payload).await.unwrap(),
+            "Faithful body\n\nIndependent sibling"
+        );
+        assert_eq!(
+            body(serde_json::json!({
+                "mimeType": "multipart/alternative",
+                "parts": [text_part("Supported"), {"mimeType": "application/octet-stream"}]
+            }))
+            .await
+            .unwrap(),
+            "Supported"
+        );
+        let root = serde_json::json!({
+            "mimeType": "text/plain", "filename": "root.txt",
+            "headers": [{"name": "Content-ID", "value": "<body>"}],
+            "body": text_part("Related root")["body"]
+        });
+        assert_eq!(body(serde_json::json!({
+            "mimeType": "multipart/related",
+            "headers": [{"name": "Content-Type", "value": "multipart/related; start=\"<body>\"; type=\"text/plain\""}],
+            "parts": [text_part("Resource, not an independent body"), root]
+        })).await.unwrap(), "Related root");
+    }
+
+    #[tokio::test]
+    async fn text_decoding_is_strict_and_legitimate_empty_bodies_remain_valid() {
+        assert_eq!(
+            body(serde_json::json!({"mimeType": "text/plain", "body": {"size": 0}}))
+                .await
+                .unwrap(),
+            ""
+        );
+        let (bytes, _, _) = encoding_rs::EUC_KR.encode("한글 근거");
+        assert_eq!(body(serde_json::json!({
+            "mimeType": "text/plain", "headers": [{"name": "Content-Type", "value": "text/plain; charset=\"EUC-KR\""}],
+            "body": {"data": base64::engine::general_purpose::URL_SAFE.encode(bytes.as_ref()), "size": bytes.len()}
+        })).await.unwrap(), "한글 근거");
+        for invalid in [
+            serde_json::json!({"mimeType": "text/plain", "body": {"data": "%%%"}}),
+            serde_json::json!({"mimeType": "text/plain", "body": {"data": "_w"}}),
+            serde_json::json!({"mimeType": "text/plain", "body": {"size": 1}}),
+            serde_json::json!({"mimeType": "text/plain", "body": {"data": "YQ", "size": 2}}),
+            serde_json::json!({"mimeType": "text/plain", "headers": [{"name": "Content-Type", "value": "text/plain; charset=unknown"}], "body": {"size": 0}}),
+            serde_json::json!({"mimeType": "text/plain", "headers": [{"name": "Content-Type", "value": "text/html"}], "body": {"size": 0}}),
+            serde_json::json!({"mimeType": "multipart/related", "headers": [{"name": "Content-Type", "value": "multipart/related; start=\"<absent>\""}], "parts": [text_part("Body")]}),
+            serde_json::json!({"mimeType": "multipart/alternative", "parts": [text_part("Earlier alternative"), {"mimeType": "text/plain", "body": {"data": "%%%"}}]}),
+            serde_json::json!({"mimeType": "multipart/mixed", "parts": [text_part("Readable sibling"), {"mimeType": "text/plain", "body": {"size": 3}}]}),
+        ] {
+            assert!(
+                body(invalid.clone()).await.is_err(),
+                "must reject {invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn calendar_filter_uses_the_exact_media_type() {
+        for (media, expected) in [
+            ("text/calendar; method=REQUEST", true),
+            ("text/calendar-extra", false),
+        ] {
+            let msg = msg_from(message(
+                "calendar",
+                serde_json::json!({"mimeType": "multipart/mixed", "parts": [{"mimeType": media}]}),
+            ));
+            assert_eq!(is_filtered(&msg, None), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn mime_and_body_budgets_refuse_overflow_before_fetching() {
+        let oversized = serde_json::json!({"mimeType": "text/plain", "body": {"size": MAX_BODY_BYTES + 1, "attachmentId": "too-large"}});
+        assert!(matches!(
+            body(oversized).await,
+            Err(SourceError::ResponseTooLarge { .. })
+        ));
+        let mut nested = text_part("Body");
+        for _ in 0..=MAX_MIME_DEPTH {
+            nested = serde_json::json!({"mimeType": "multipart/mixed", "parts": [nested]});
+        }
+        assert!(body(nested).await.is_err());
+        assert!(body(serde_json::json!({"mimeType": "multipart/mixed", "parts": vec![text_part(""); MAX_MIME_PARTS]})).await.is_err());
+    }
+
+    struct TestServer {
+        base: url::Url,
+        requests: Arc<Mutex<Vec<url::Url>>>,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl Drop for TestServer {
+        fn drop(&mut self) {
+            self.task.abort();
+        }
+    }
+
+    async fn server(respond: impl Fn(&url::Url) -> Vec<u8> + Send + Sync + 'static) -> TestServer {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base: url::Url = format!(
+            "http://{}/gmail/v1/users/me",
+            listener.local_addr().unwrap()
+        )
+        .parse()
+        .unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let captured = requests.clone();
+        let server_base = base.clone();
+        let task = tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    let mut byte = [0];
+                    if stream.read(&mut byte).await.unwrap() == 0 {
+                        break;
+                    }
+                    request.push(byte[0]);
+                    assert!(request.len() < 16 * 1024);
+                }
+                let target = std::str::from_utf8(&request)
+                    .unwrap()
+                    .lines()
+                    .next()
+                    .unwrap()
+                    .split_whitespace()
+                    .nth(1)
+                    .unwrap();
+                let url = server_base.join(target).unwrap();
+                captured.lock().unwrap().push(url.clone());
+                let _ = stream.write_all(&respond(&url)).await;
+                let _ = stream.shutdown().await;
+            }
+        });
+        TestServer {
+            base,
+            requests,
+            task,
+        }
+    }
+
+    fn json_response(value: serde_json::Value) -> Vec<u8> {
+        let body = serde_json::to_vec(&value).unwrap();
+        let mut response = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).into_bytes();
+        response.extend_from_slice(&body);
+        response
+    }
+
+    fn context() -> ExtractContext {
+        ExtractContext {
+            target_date: jiff::civil::date(2026, 10, 19),
+            timezone: jiff::tz::TimeZone::get("Asia/Seoul").unwrap(),
+            locale: lk_core::i18n::Locale::En,
+            identity: lk_core::config::Identity {
+                name: "Test".into(),
+                email: "test@example.com".into(),
+                slack_id: None,
+            },
+            vault_root: ".".into(),
+            vault_dirs: Default::default(),
+            documents: None,
+            originals: Default::default(),
+        }
+    }
+
+    fn client() -> reqwest::Client {
+        reqwest::Client::builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .unwrap()
+    }
+
+    fn message(id: &str, payload: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({"id": id, "internalDate": "1792378800000", "snippet": "Incomplete preview", "payload": payload})
+    }
+
+    #[tokio::test]
+    async fn external_text_is_fetched_with_safe_paths_and_failures_are_not_observed_as_complete() {
+        let server = server(|url| match url.path() {
+            "/gmail/v1/users/me/messages" => json_response(serde_json::json!({"messages": [{"id": "external"}, {"id": "broken"}, {"id": "empty"}]})),
+            "/gmail/v1/users/me/messages/external" => json_response(message("external", serde_json::json!({"mimeType": "text/plain", "body": {"attachmentId": "part/id", "size": 10}}))),
+            "/gmail/v1/users/me/messages/external/attachments/part%2Fid" => json_response(serde_json::json!({"data": PLAIN_BODY_B64, "size": 10})),
+            "/gmail/v1/users/me/messages/broken" => json_response(message("broken", serde_json::json!({"mimeType": "text/plain", "body": {"attachmentId": "missing", "size": 10}}))),
+            "/gmail/v1/users/me/messages/broken/attachments/missing" => b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec(),
+            "/gmail/v1/users/me/messages/empty" => json_response(message("empty", serde_json::json!({"mimeType": "text/plain", "body": {"size": 0}}))),
+            other => panic!("unexpected request {other}"),
+        }).await;
+        let http = client();
+        let api = GmailApi {
+            http: &http,
+            token: "fixture",
+            base: server.base.clone(),
+        };
+        let params = crate::parse_validated::<GmailParams>(
+            &serde_json::json!({"include_queries": ["label:kept"], "max_messages": 10}),
+        )
+        .unwrap();
+        let result = api.observe(&params, &context()).await.unwrap();
+        assert_eq!(result.outcome, crate::ObservationOutcome::Partial);
+        assert_eq!(result.items.len(), 2);
+        assert_eq!(result.items[0].body, "Hello body");
+        assert_eq!(result.items[1].body, "");
+        assert_eq!(server.requests.lock().unwrap().len(), 6);
+    }
+
+    #[tokio::test]
+    async fn all_unreadable_is_an_error_but_filtered_and_empty_listings_are_valid() {
+        for mode in ["unreadable", "excluded", "calendar", "empty"] {
+            let server = server(move |url| match url.path() {
+                "/gmail/v1/users/me/messages" => json_response(if mode == "empty" {
+                    serde_json::json!({})
+                } else {
+                    serde_json::json!({"messages": [{"id": "one"}]})
+                }),
+                "/gmail/v1/users/me/messages/one" => json_response(message(
+                    "one",
+                    serde_json::json!({
+                        "mimeType": if mode == "calendar" {"text/calendar"} else {"text/plain"},
+                        "headers": [{"name": "Subject", "value": "skip"}],
+                        "body": {"attachmentId": "missing", "size": 1}
+                    }),
+                )),
+                "/gmail/v1/users/me/messages/one/attachments/missing" if mode == "unreadable" => {
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        .to_vec()
+                }
+                other => panic!("unexpected request {other}"),
+            })
+            .await;
+            let http = client();
+            let api = GmailApi {
+                http: &http,
+                token: "fixture",
+                base: server.base.clone(),
+            };
+            let params = crate::parse_validated::<GmailParams>(&serde_json::json!({"include_queries": ["label:kept"], "exclude": {"subjects": if mode == "excluded" { vec!["skip"] } else { vec![] }}})).unwrap();
+            let result = api.observe(&params, &context()).await;
+            if mode == "unreadable" {
+                assert!(matches!(
+                    result,
+                    Err(SourceError::NothingObserved { attempted: 1, .. })
+                ));
+            } else {
+                let result = result.unwrap();
+                assert_eq!(result.outcome, crate::ObservationOutcome::Observed);
+                assert!(result.items.is_empty());
+                assert_eq!(
+                    server.requests.lock().unwrap().len(),
+                    if mode == "empty" { 1 } else { 2 }
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn api_errors_preserve_defined_identifiers_without_provider_text() {
+        for (domain, reason) in [
+            ("usageLimits", "rateLimitExceeded"),
+            ("global", "insufficientPermissions"),
+        ] {
+            let server = server(move |_| {
+                let body = serde_json::to_vec(&serde_json::json!({
+                    "error": {"status": "PERMISSION_DENIED", "message": "private provider text",
+                        "errors": [{"domain": domain, "reason": reason, "message": "private provider text"}]}
+                })).unwrap();
+                let mut response = format!("HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).into_bytes();
+                response.extend_from_slice(&body);
+                response
+            }).await;
+            let http = client();
+            let api = GmailApi {
+                http: &http,
+                token: "fixture",
+                base: server.base.clone(),
+            };
+            let Err(SourceError::Api { status, message }) =
+                api.get::<Message>(&["messages", "one"], &[]).await
+            else {
+                panic!("expected the provider's HTTP error")
+            };
+            assert_eq!(status, 403);
+            assert!(message.contains("PERMISSION_DENIED"));
+            assert!(message.contains(domain));
+            assert!(message.contains(reason));
+            assert!(!message.contains("private provider text"));
+        }
+    }
+
+    #[tokio::test]
+    async fn api_refuses_oversized_json_before_reading_it() {
+        let server = server(|_| {
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                MAX_RESPONSE_BYTES + 1
+            )
+            .into_bytes()
+        })
+        .await;
+        let http = client();
+        let api = GmailApi {
+            http: &http,
+            token: "fixture",
+            base: server.base.clone(),
+        };
+        assert!(matches!(
+            api.get::<Message>(&["messages", "one"], &[]).await,
+            Err(SourceError::ResponseTooLarge { .. })
+        ));
     }
 }
