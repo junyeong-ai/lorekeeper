@@ -90,7 +90,11 @@ their evidence, uses fresh inspection/reduction sessions, then verifies the comp
 work before accepting a final assessment. `execution.work` independently bounds
 serialized request/result bytes and agent sessions per run; exhaustion retains pending
 work and reports failure. Explicit `audit-plan --path` preserves the requested selection.
-These bounds belong to the selected config, not the execution profile. `review_health`
+Each profile's optional `work` fields override `execution.work`; omitted fields inherit.
+The effective combination is validated, including the result/input size relationship.
+Native jobs pin the selected profile for child commands through `LORE_EXECUTION_PROFILE`;
+standalone bounded commands can explicitly set that variable to use the same budget.
+Run JSON reports the effective work limits. `review_health`
 reports global attention separately from the selected batch's completion.
 
 ## Initial setup

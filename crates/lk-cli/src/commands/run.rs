@@ -44,7 +44,9 @@ pub async fn run(
 #[cfg(unix)]
 mod native {
     use super::*;
-    use crate::commands::{CONFIG_REVISION_ENV, GlobalOptions, execution, workflow};
+    use crate::commands::{
+        CONFIG_REVISION_ENV, EXECUTION_PROFILE_ENV, GlobalOptions, execution, workflow,
+    };
     use lk_core::config::Config;
     use lk_core::execution::ExecutionProfile;
     use std::path::PathBuf;
@@ -72,6 +74,7 @@ mod native {
         engine: lk_core::execution::AgentEngine,
         version: String,
         requested_model: Option<String>,
+        work: lk_core::execution::SemanticWorkConfig,
     }
 
     #[derive(Default, Serialize)]
@@ -102,7 +105,6 @@ mod native {
         config_revision: String,
         configuration_failed: bool,
         root: PathBuf,
-        profile: Option<String>,
         supervisor: &'a mut execution::Supervisor,
         lease: Option<workflow::WorkflowLease>,
         selected: Option<ExecutionProfile>,
@@ -180,6 +182,11 @@ mod native {
                 "LORE_CONFIG",
                 self.opts.config.as_ref().expect("resolved config"),
             );
+            if let Some(name) = self.config.execution.selected_profile() {
+                command.env(EXECUTION_PROFILE_ENV, name);
+            } else {
+                command.env_remove(EXECUTION_PROFILE_ENV);
+            }
             let completed = match self.supervisor.run(command, timeout, false).await {
                 Ok(result) => self.record(
                     name,
@@ -237,19 +244,15 @@ mod native {
             let (name, profile) = self
                 .config
                 .execution
-                .resolve_profile(self.result.operation.semantic(), self.profile.as_deref())
+                .resolve_profile(
+                    self.result.operation.semantic(),
+                    self.config.execution.selected_profile(),
+                )
                 .map_err(|e| miette::miette!("{e}"))?;
             let name = name.to_owned();
             let mut profile = profile.clone();
             let executable = execution::executable_path(profile.executable())?;
-            match &mut profile {
-                ExecutionProfile::ClaudeCode {
-                    executable: path, ..
-                }
-                | ExecutionProfile::Codex {
-                    executable: path, ..
-                } => *path = executable.clone(),
-            }
+            profile.set_executable(executable.clone());
             let mut command = tokio::process::Command::new(executable);
             command.arg("--version");
             let version = self
@@ -280,6 +283,11 @@ mod native {
                     .trim()
                     .into(),
                 requested_model: profile.model().map(str::to_owned),
+                work: self
+                    .config
+                    .execution
+                    .effective_work()
+                    .map_err(|error| miette::miette!("{error}"))?,
             });
             self.selected = Some(profile);
             Ok(())
@@ -292,7 +300,11 @@ mod native {
             if self.config.llm.provider == lk_core::config::LlmProvider::Noop {
                 return self.failure(skill, "semantic execution is disabled by llm.provider");
             }
-            if self.calls >= self.config.execution.work.max_calls {
+            let budget = match self.config.execution.effective_work() {
+                Ok(budget) => budget,
+                Err(error) => return self.failure("semantic work budget", error),
+            };
+            if self.calls >= budget.max_calls {
                 return self.failure("semantic call budget", "configured execution.work.max_calls exhausted; unfinished work is retained for the next run");
             }
             if let Err(error) = self.prepare_agent().await {
@@ -766,11 +778,28 @@ mod native {
             ));
         }
         let config_path = crate::commands::find_config(opts)?;
-        let (config, config_revision) = crate::commands::load_config_with_revision(&config_path)?;
-        if let Some(name) = profile.as_deref() {
+        let (mut config, config_revision) =
+            crate::commands::load_config_with_revision(&config_path)?;
+        let explicit = profile
+            .as_deref()
+            .or(config.execution.selected_profile())
+            .map(str::to_owned);
+        if explicit.is_some()
+            || config.execution.default_profile.is_some()
+            || config
+                .execution
+                .operations
+                .contains_key(&operation.semantic())
+        {
+            let name = config
+                .execution
+                .resolve_profile(operation.semantic(), explicit.as_deref())
+                .map_err(|e| miette::miette!("{e}"))?
+                .0
+                .to_owned();
             config
                 .execution
-                .resolve_profile(operation.semantic(), Some(name))
+                .select_profile(&name)
                 .map_err(|e| miette::miette!("{e}"))?;
         }
         let options = GlobalOptions {
@@ -791,7 +820,6 @@ mod native {
                 config.clone(),
                 config_revision.clone(),
                 operation,
-                profile.clone(),
                 wait,
                 &mut supervisor,
             )
@@ -843,7 +871,6 @@ mod native {
         config: Config,
         config_revision: String,
         operation: Operation,
-        profile: Option<String>,
         wait: bool,
         supervisor: &mut execution::Supervisor,
     ) -> JobResult {
@@ -858,7 +885,6 @@ mod native {
             config_revision,
             configuration_failed: false,
             opts: options,
-            profile,
             supervisor,
             lease: None,
             selected: None,

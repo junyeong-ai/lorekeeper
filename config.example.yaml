@@ -499,5 +499,9 @@ execution:
     #   timeout_seconds: 3600
     #   executable: /absolute/path/to/codex
     #   profile: <existing Codex profile name>
+    #   work:                       # only specified fields override execution.work
+    #     max_input_bytes: 131072
+    #     max_result_bytes: 16384
+    #     max_calls: 32
   # operations:
   #   knowledge: reviewer

@@ -798,11 +798,15 @@ async fn apply(
                     "authority":"Current source page only; original retained input and part coverage are unavailable.",
                     "target":result.target, "date":result.date, "source":source,
                 })).map_err(|error| miette::miette!("recovery input: {error}"))?;
-                if envelope.len() > config.execution.work.max_input_bytes {
+                let budget = config
+                    .execution
+                    .effective_work()
+                    .map_err(|error| miette::miette!("{error}"))?;
+                if envelope.len() > budget.max_input_bytes {
                     return Err(miette::miette!(
                         "orphan recovery input is {} bytes, exceeding execution.work.max_input_bytes {}; restore the retained task before bounded processing",
                         envelope.len(),
-                        config.execution.work.max_input_bytes,
+                        budget.max_input_bytes,
                     ));
                 }
                 eprintln!(

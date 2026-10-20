@@ -74,11 +74,12 @@ pub enum WorkCommand {
     },
 }
 
-pub(crate) fn limits(config: &lk_core::config::Config) -> WorkLimits {
-    WorkLimits {
-        max_input_bytes: config.execution.work.max_input_bytes,
-        max_result_bytes: config.execution.work.max_result_bytes,
-    }
+pub(crate) fn limits(config: &lk_core::config::Config) -> miette::Result<WorkLimits> {
+    let work = config.execution.effective_work().into_diagnostic()?;
+    Ok(WorkLimits {
+        max_input_bytes: work.max_input_bytes,
+        max_result_bytes: work.max_result_bytes,
+    })
 }
 
 fn expected(
@@ -90,7 +91,7 @@ fn expected(
         &prepared.resources,
         &prepared.revision(config_revision)?,
         prepared.context.clone(),
-        limits(config),
+        limits(config)?,
     )
 }
 
@@ -206,7 +207,7 @@ pub(super) fn prepare_task(
         &prepared.resources,
         &prepared.revision(config_revision)?,
         prepared.context,
-        limits(config),
+        limits(config)?,
     )?;
     Ok(Some(work.plan.id))
 }
@@ -225,7 +226,7 @@ pub(super) fn prepare_audit(
         &prepared.resources,
         &prepared.revision(config_revision)?,
         prepared.context,
-        limits(config),
+        limits(config)?,
     )?;
     Ok(work.plan.id)
 }
@@ -334,7 +335,7 @@ pub async fn run(opts: &GlobalOptions, command: WorkCommand) -> miette::Result<(
                 &prepared.resources,
                 &prepared.revision(&config_revision)?,
                 prepared.context.clone(),
-                limits(&config),
+                limits(&config)?,
             )?;
             progress(&work, &root, &prepared, 20, 0)?
         }

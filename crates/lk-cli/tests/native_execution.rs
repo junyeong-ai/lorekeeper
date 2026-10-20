@@ -563,6 +563,65 @@ fn bounded_calls(fixture: &Fixture) -> Vec<serde_json::Value> {
         .collect()
 }
 
+#[test]
+fn selected_profile_budget_reaches_controller_and_worker_commands() {
+    for engine in ["claude-code", "codex"] {
+        let fixture = bounded_audit_fixture(engine, 64, RECORD_BOUNDED_AUDIT);
+        let config = std::fs::read_to_string(&fixture.config).unwrap().replace(
+            "      timeout_seconds: 30\n",
+            "      timeout_seconds: 30\n      work: {max_input_bytes: 16384, max_result_bytes: 2048, max_calls: 1}\n",
+        );
+        std::fs::write(&fixture.config, config).unwrap();
+        let (output, result) = fixture.run("knowledge");
+        assert!(
+            !output.status.success(),
+            "one call cannot finish this audit"
+        );
+        assert_eq!(
+            result["execution"]["work"],
+            serde_json::json!({"max_input_bytes":16384,"max_result_bytes":2048,"max_calls":1})
+        );
+        assert!(
+            result["stages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|stage| stage["name"] == "semantic call budget" && stage["state"] == "failed"),
+            "{result}"
+        );
+        let calls = bounded_calls(&fixture);
+        assert_eq!(calls.len(), 1, "{result}");
+        let work_id = calls[0]["work_id"].as_str().unwrap();
+        let output = fixture
+            .command()
+            .env("LORE_EXECUTION_PROFILE", "primary")
+            .args(["work", "status", work_id])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let status: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(status["completed"], 1);
+        assert!(
+            !fixture
+                .root()
+                .join("vault/.lorekeeper/knowledge-audit.json")
+                .exists()
+        );
+        assert!(
+            !fixture
+                .root()
+                .join("vault/.lorekeeper/work")
+                .join(work_id)
+                .join("final.json")
+                .exists()
+        );
+    }
+}
+
 fn explicit_large_audit(fixture: &Fixture) -> serde_json::Value {
     let output = fixture
         .command()

@@ -33,6 +33,7 @@ llm:
 execution:
   default_profile: primary
   # JSON byte limits for bounded workers; calls reset per run/knowledge batch.
+  # A profile's optional work fields override these shared defaults.
   work:
     max_input_bytes: 262144
     max_result_bytes: 32768
