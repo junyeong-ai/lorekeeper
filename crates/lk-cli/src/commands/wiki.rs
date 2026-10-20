@@ -75,7 +75,9 @@ pub enum WikiCommand {
     Snapshot,
     /// Inspect captured links, citations, declared relations and scoped reviews together (JSON)
     Context {
+        /// Exact vault-relative Markdown address
         path: PathBuf,
+        /// Snapshot returned by wiki snapshot or prepare; current pages are not reread
         #[arg(long)]
         snapshot: String,
         /// Maximum entries per relation group (1..100)

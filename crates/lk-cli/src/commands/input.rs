@@ -12,6 +12,7 @@ use super::{GlobalOptions, find_config, load_config};
 pub enum InputCommand {
     /// Install the pinned optional document runtime into a new dedicated directory
     Install {
+        /// New dedicated directory whose parent already exists
         directory: PathBuf,
         /// Python 3.11+ interpreter used only to create the isolated environment
         #[arg(long, default_value = "python3")]
@@ -20,7 +21,10 @@ pub enum InputCommand {
     /// Check configured decoder versions and OCR model availability without reading documents
     Check,
     /// Project one captured file to bounded JSON without publishing or retiring it
-    Inspect { path: PathBuf },
+    Inspect {
+        /// Regular DOCX, XLSX, PDF, PNG, JPEG, TIFF or WebP input file
+        path: PathBuf,
+    },
 }
 
 pub async fn run(opts: &GlobalOptions, command: InputCommand) -> miette::Result<()> {
