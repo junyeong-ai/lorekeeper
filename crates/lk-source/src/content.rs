@@ -842,7 +842,7 @@ first.save(target/'page.webp', lossless=True)
 first.save(target/'scanned.pdf', 'PDF', save_all=True, append_images=[second])
 "#,
             ])
-            .arg(fixtures)
+            .arg(&fixtures)
             .arg(temporary.path())
             .output()
             .unwrap();
@@ -935,5 +935,27 @@ first.save(target/'scanned.pdf', 'PDF', save_all=True, append_images=[second])
         invalid.units[2].representation = UnitRepresentation::Text;
         invalid.units.pop();
         assert!(validate_projection(&invalid, InputFormat::Pdf, &config).is_err());
+
+        let invalid_models = temporary.path().join("invalid-tessdata");
+        std::fs::create_dir(&invalid_models).unwrap();
+        let ocr = config.ocr.as_mut().unwrap();
+        for language in &ocr.languages {
+            let filename = format!("{language}.traineddata");
+            let target = invalid_models.join(&filename);
+            std::fs::copy(ocr.tessdata_dir.join(&filename), &target).unwrap();
+            std::fs::write(target, b"invalid OCR model fixture").unwrap();
+        }
+        ocr.tessdata_dir = invalid_models;
+        for (path, format) in [
+            (fixtures.join("policy.png"), InputFormat::Png),
+            (fixtures.join("policy.pdf"), InputFormat::Pdf),
+            (temporary.path().join("scanned.pdf"), InputFormat::Pdf),
+        ] {
+            let bytes = std::fs::read(path).unwrap();
+            assert!(matches!(
+                project(&bytes, format, Some(&config)).await,
+                Err(ProcessingError::Failed(ProcessingFailure::Decoder))
+            ));
+        }
     }
 }

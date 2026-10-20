@@ -186,7 +186,10 @@ Use parser/token-state behavior, not regex replacement of arbitrary markup.
   and aggregate RGBA/output bounds; never reuse native page text as OCR evidence.
   Kreuzberg v4's [best-effort support](https://docs.kreuzberg.dev/lts/) ends in 2026.
   A decoder replacement must retain supported platform wheels and pass native/OCR
-  page/frame, resource-bound and private-diagnostic contracts.
+  page/frame, resource-bound and private-diagnostic contracts. Replay the real-runtime
+  invalid-model cases: a successful envelope, an OCR method label or complete page
+  inventory does not prove OCR succeeded. Never publish native text as OCR evidence
+  after recognition failed, or infer success by parsing diagnostic prose.
 - Decode all image frames through Pillow before OCR; preserve frame ordinals, apply
   EXIF orientation and composite alpha on white. Bound aggregate RGBA bytes and unit
   counts before accepting a projection. Native and OCR PDF page inventories must match;
