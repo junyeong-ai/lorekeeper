@@ -76,6 +76,10 @@ the work-log), apply the generic guidance without a type bias.
   metadata. Use declared dates, lifecycle and scope to interpret that source; these
   declarations do not certify current truth or override the pipeline's identity and
   completion state. Missing fields remain unknown.
+- `Source record.projection` retains decoder versions, OCR policy and interpretation
+  limits. Preserve page/sheet/frame scope from the input. Native text and OCR of the
+  same source are not independent corroboration. Spreadsheet formulas and stored
+  cached values are distinct evidence; the collector does not recalculate them.
 
 ### `tasks`
 - The user's OWN completed work, one item per task they closed. The title is what

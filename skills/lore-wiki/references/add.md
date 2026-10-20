@@ -1,8 +1,9 @@
 # Add sources and migrate imported identity
 
-## Add a file, folder, pasted text or URL
+## Capture a file, folder or URL
 
-Manual ad-hoc ingest of a file, **folder**, pasted text, or a URL.
+Use native collection for existing source files so original preservation, decoding,
+source identity and semantic publication follow the same contracts as scheduled ingest.
 
 A URL goes through `lore fetch <url>`, which reads the page, keeps its readable core, and
 writes it into the `manual` source's inbox with the address as `source_url` — so the document
@@ -13,11 +14,39 @@ exists twice. A page with no article body (a listing, or one the browser assembl
 refused rather than absorbed: say so and ask for the underlying article's URL, or for the
 page saved as HTML into the inbox.
 
-When given a folder path, scan it recursively for `.md`, `.txt`, and `.pdf` files, process
-each as an independent source, and report the aggregate results.
+Local files must enter the selected configured `manual` inbox. Read the selected
+source configuration; never assume the inbox is `<vault>/inbox` or choose among
+multiple sources silently. Use `/lore-setup` when the user needs a source configured.
+If preparing a copy is authorized and available, preserve its relative dependencies
+without overwriting occupied inputs or moving the external original. Otherwise report
+the required placement. Do not substitute a directly authored page for missing capture.
+
+For a folder, inventory the requested files before collection. The manual adapter
+reads top-level entries; nested directories can supply dependencies but are not
+recursively imported as documents. Preserve that hierarchy, report nested standalone
+files outside the selected reach, and do not flatten paths to make them eligible.
+
+Markdown, text and HTML use native normalization. DOCX/XLSX/PDF and image OCR require
+the explicitly configured runtime in the [preprocessing reference](../../lore-setup/references/config.md#document-preprocessing).
+Use `lore input check` and `lore input inspect FILE` for binary decoder verification;
+inspection alone publishes nothing. Missing decoding, no extracted text or unsupported
+formats must remain visible, without a model-only fallback or a false completion claim.
+
+Once inputs are in the chosen inbox, run `lore ingest SOURCE --dry-run`, inspect its
+selected reach, then `lore ingest SOURCE` and `/lore-process`. Collection covers all
+eligible entries in that source, so unrelated pending inputs require an explicit scope
+decision. Do not also create document or concept pages here. Report original capture,
+semantic publication and any unprocessed files separately.
+
+## Author pasted text or an explicitly requested document
+
+Use this procedure for pasted source text or an explicit request to author a page,
+not as an alternate file decoder. Authored prose does not establish an immutable
+original-file capture; do not claim `wiki original` coverage for it.
 
 1. Read AGENTS.md for the document AND concept page formats.
-2. If `<source>` is a folder, list all readable files and process each below.
+2. Identify the supplied text's source, scope and available evidence. Keep unknown
+   provenance explicit instead of inventing a file capture or acquisition history.
 3. For EACH source, create a **document page** (per AGENTS.md): preserve the
    original content, set `document_type` from the format vocabulary AGENTS.md
    states (the source's nature goes in `tags`), and link the
