@@ -132,8 +132,8 @@ pub async fn run(
                     cutoff_secs,
                 )?;
                 eprintln!(
-                    "{prefix}work: pruned {} published work(s), {} bytes; retained {} unpublished, referenced or unexpired work(s).",
-                    report.removed, report.bytes, report.retained
+                    "{prefix}work: pruned {} published work(s), {} bytes; retained {} unpublished, referenced, unexpired or unowned work(s); cleared {} empty work directories.",
+                    report.removed, report.bytes, report.retained, report.empty_directories
                 );
             } else {
                 eprintln!(

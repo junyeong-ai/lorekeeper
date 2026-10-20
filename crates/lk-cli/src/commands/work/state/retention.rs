@@ -14,6 +14,21 @@ pub(crate) struct WorkRetention {
     pub removed: usize,
     pub retained: usize,
     pub bytes: usize,
+    pub empty_directories: usize,
+}
+
+fn is_empty_work_directory(directory: &Path) -> miette::Result<bool> {
+    for entry in std::fs::read_dir(directory).map_err(fail)? {
+        let entry = entry.map_err(fail)?;
+        if entry.file_name() != "nodes" || !entry.file_type().map_err(fail)?.is_dir() {
+            return Ok(false);
+        }
+        if let Some(entry) = std::fs::read_dir(entry.path()).map_err(fail)?.next() {
+            entry.map_err(fail)?;
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 struct RetentionCapture {
@@ -147,6 +162,7 @@ pub(crate) fn prune_published(
     let root_owned = root.canonicalize().map_err(fail)?;
     let root = root_owned.as_path();
     let mut captures = BTreeMap::new();
+    let mut empty = Vec::new();
     for entry in std::fs::read_dir(directory).map_err(fail)? {
         let entry = entry.map_err(fail)?;
         let id = entry
@@ -156,6 +172,10 @@ pub(crate) fn prune_published(
         require_id(&id)?;
         if !entry.file_type().map_err(fail)?.is_dir() {
             return Err(fail("work entry must be a direct directory"));
+        }
+        if is_empty_work_directory(&entry.path())? {
+            empty.push(id);
+            continue;
         }
         captures.insert(id.clone(), capture_retention(root, &id, cutoff)?);
     }
@@ -178,6 +198,18 @@ pub(crate) fn prune_published(
         return Err(fail("retention session belongs to another vault"));
     }
     let mut report = WorkRetention::default();
+    for id in empty.into_iter().filter(|id| !retained.contains(id)) {
+        report.empty_directories += 1;
+        if session.is_some() {
+            for suffix in ["nodes", ""] {
+                match std::fs::remove_dir(root.join(work_path(&id, suffix)?)) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(fail(error)),
+                }
+            }
+        }
+    }
     for work in captures.values() {
         if retained.contains(&work.id) {
             report.retained += 1;
@@ -236,6 +268,52 @@ mod tests {
         )
         .unwrap();
         session.apply(plan).unwrap();
+    }
+
+    #[test]
+    fn cleanup_resumes_after_the_committed_file_removals_without_deleting_unowned_files() {
+        let root = tempfile::tempdir().unwrap();
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let source = resources();
+        let work = Work::create(
+            &session,
+            &source,
+            "published",
+            context("published"),
+            limits(),
+        )
+        .unwrap();
+        publish(&work, &session, &source);
+        let cutoff = jiff::Timestamp::now().as_second() + 1;
+        let capture = capture_retention(root.path(), &work.plan.id, cutoff).unwrap();
+        let mut plan = MutationPlan::default();
+        for (path, digest) in capture.revisions {
+            plan.remove(&path, read_captured(root.path(), &path, &digest).unwrap());
+        }
+        session.apply(plan).unwrap();
+        let directory = root.path().join(work_path(&work.plan.id, "").unwrap());
+        assert!(directory.exists());
+        assert_eq!(
+            prune_published(root.path(), None, cutoff)
+                .unwrap()
+                .empty_directories,
+            1
+        );
+        assert!(directory.exists());
+        std::fs::write(directory.join("unowned.txt"), "Preserve this file.").unwrap();
+        assert!(prune_published(root.path(), Some(&session), cutoff).is_err());
+        assert_eq!(
+            std::fs::read_to_string(directory.join("unowned.txt")).unwrap(),
+            "Preserve this file."
+        );
+        std::fs::remove_file(directory.join("unowned.txt")).unwrap();
+        assert_eq!(
+            prune_published(root.path(), Some(&session), cutoff)
+                .unwrap()
+                .empty_directories,
+            1
+        );
+        assert!(!directory.exists());
     }
 
     #[test]
