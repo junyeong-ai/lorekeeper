@@ -190,18 +190,34 @@ fn load(
     Ok((work, prepared))
 }
 
+pub(super) enum TaskWork {
+    WholeInput { bytes: usize },
+    Partitioned { id: String },
+}
+
 pub(super) fn prepare_task(
     root: &Path,
     config: &lk_core::config::Config,
     config_revision: &str,
     task_id: &str,
-) -> miette::Result<Option<String>> {
+) -> miette::Result<TaskWork> {
     let root = root.canonicalize().into_diagnostic()?;
     let session = lk_vault::MutationSession::acquire(&root).into_diagnostic()?;
     let prepared = resources::task(&root, config, task_id)?;
     let work = expected(&prepared, config, config_revision)?;
-    if work.plan.parts.len() == 1 {
-        return Ok(None);
+    let stored = root
+        .join(".lorekeeper/work")
+        .join(&work.plan.id)
+        .join("plan.json");
+    let planned = match std::fs::symlink_metadata(stored) {
+        Ok(_) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(miette::miette!("inspect work plan: {error}")),
+    };
+    if work.plan.parts.len() == 1 && !planned {
+        return Ok(TaskWork::WholeInput {
+            bytes: work.whole_input_bytes(&prepared.resources)?,
+        });
     }
     Work::create(
         &session,
@@ -210,7 +226,7 @@ pub(super) fn prepare_task(
         prepared.context,
         limits(config)?,
     )?;
-    Ok(Some(work.plan.id))
+    Ok(TaskWork::Partitioned { id: work.plan.id })
 }
 
 pub(super) fn prepare_audit(
@@ -324,6 +340,69 @@ pub(super) fn is_finished(
         Err(error) => Err(miette::miette!("inspect final result: {error}")),
         Ok(_) => verify_finished(&root, config, config_revision, id).map(|()| true),
     }
+}
+
+fn queue_result_path(kind: lk_queue::TaskKind, result: &Value) -> miette::Result<PathBuf> {
+    let suffix = match kind {
+        lk_queue::TaskKind::ExtractConcepts => ".json",
+        lk_queue::TaskKind::SynthesizeConcept => lk_queue::SYNTHESIS_RESULT_SUFFIX,
+        _ => lk_queue::SECTION_RESULT_SUFFIX,
+    };
+    let digest = blake3::hash(&serde_json::to_vec(result).into_diagnostic()?)
+        .to_hex()
+        .to_string();
+    Ok(PathBuf::from(".lorekeeper/queue/results").join(format!("{digest}{suffix}")))
+}
+
+pub(super) fn restage_finished(
+    root: &Path,
+    config: &lk_core::config::Config,
+    config_revision: &str,
+    id: &str,
+) -> miette::Result<()> {
+    let session = lk_vault::MutationSession::acquire(root).into_diagnostic()?;
+    let (work, prepared) = load(root, config, config_revision, id)?;
+    let final_path = PathBuf::from(".lorekeeper/work")
+        .join(id)
+        .join("final.json");
+    let final_raw =
+        std::fs::read_to_string(lk_vault::page_path(root, &final_path).into_diagnostic()?)
+            .into_diagnostic()?;
+    let result: Value = serde_json::from_str(&final_raw).into_diagnostic()?;
+    let mut mutation = lk_vault::MutationPlan::default();
+    work.guard_completion(&mut mutation, root, &prepared.resources, &result)?;
+    prepared.guard_pages(&mut mutation);
+    mutation.require_unchanged(final_path, final_raw);
+    let path = match &prepared.subject {
+        Subject::Queue { task_id, .. } => {
+            queue_result_path(super::queue::current_task(root, task_id)?.kind, &result)?
+        }
+        Subject::Audit { .. } => PathBuf::from(".lorekeeper/work")
+            .join(id)
+            .join("assessment.json"),
+    };
+    match std::fs::read_to_string(lk_vault::page_path(root, &path).into_diagnostic()?) {
+        Ok(raw) => {
+            let existing: Value = serde_json::from_str(&raw).into_diagnostic()?;
+            if existing != result {
+                return Err(miette::miette!(
+                    "staged result differs from the verified sealed result; retained for inspection"
+                ));
+            }
+            return Ok(());
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(miette::miette!("read staged result: {error}")),
+    }
+    mutation
+        .publish_expected(
+            root,
+            path,
+            None,
+            serde_json::to_string(&result).into_diagnostic()?,
+        )
+        .into_diagnostic()?;
+    session.apply(mutation).into_diagnostic()
 }
 
 fn progress(
@@ -483,36 +562,21 @@ fn finish(
                 ));
             }
             let task = super::queue::current_task(session.root(), task_id)?;
-            let (id, hash, revision, suffix) = match task.kind {
+            let (id, hash, revision) = match task.kind {
                 lk_queue::TaskKind::ExtractConcepts => {
                     let typed: lk_queue::TaskResult =
                         serde_json::from_value(result.clone()).into_diagnostic()?;
-                    (
-                        typed.task_id,
-                        typed.cache_hash,
-                        typed.target_revision,
-                        ".json",
-                    )
+                    (typed.task_id, typed.cache_hash, typed.target_revision)
                 }
                 lk_queue::TaskKind::SynthesizeConcept => {
                     let typed: lk_queue::SynthesisResult =
                         serde_json::from_value(result.clone()).into_diagnostic()?;
-                    (
-                        typed.task_id,
-                        typed.cache_hash,
-                        typed.target_revision,
-                        lk_queue::SYNTHESIS_RESULT_SUFFIX,
-                    )
+                    (typed.task_id, typed.cache_hash, typed.target_revision)
                 }
                 _ => {
                     let typed: lk_queue::SectionResult =
                         serde_json::from_value(result.clone()).into_diagnostic()?;
-                    (
-                        typed.task_id,
-                        typed.cache_hash,
-                        typed.target_revision,
-                        lk_queue::SECTION_RESULT_SUFFIX,
-                    )
+                    (typed.task_id, typed.cache_hash, typed.target_revision)
                 }
             };
             if &id != task_id || &hash != cache_hash || &revision != target_revision {
@@ -520,10 +584,7 @@ fn finish(
                     "final result does not match the exact work subject"
                 ));
             }
-            let digest = blake3::hash(&serde_json::to_vec(&result).into_diagnostic()?)
-                .to_hex()
-                .to_string();
-            PathBuf::from(".lorekeeper/queue/results").join(format!("{digest}{suffix}"))
+            queue_result_path(task.kind, &result)?
         }
         Subject::Audit {
             path,

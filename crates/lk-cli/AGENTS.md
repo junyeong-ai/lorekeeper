@@ -53,6 +53,12 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   observation. Claude disables tools/customizations; Codex uses a read-only sandbox.
   Never fall back to parsing prose/Markdown when structured output is missing or invalid.
   This restriction does not describe the interactive finalizer/maintenance role.
+- Native queue scheduling chooses one task per target so publication cannot invalidate
+  another simultaneous task on the same page. Whole-input tasks share an evidence-bounded
+  batch; oversized work gets one inspection/reduction/finalization turn at a time.
+  `.lorekeeper/execution-cursor.json` stores the next queue/audit target under a guarded
+  short mutation, preserving turns across budget-limited runs. Reserve before external
+  execution, never infer priority or semantic quality from size/progress/citation counts.
 - `commands/schedule.rs` renders native jobs with stable scheduling-slot labels.
   Queue-mode semantic jobs need explicit execution profiles. Capture selected
   absolute config/data paths, anchored PATH and relevant existing host directories;

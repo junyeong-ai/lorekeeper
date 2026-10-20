@@ -277,6 +277,16 @@ pub(super) fn current_tasks(root: &Path) -> miette::Result<Vec<QueueTask>> {
     Ok(selected)
 }
 
+pub(super) fn tasks_completed(root: &Path, tasks: &[QueueTask]) -> miette::Result<bool> {
+    let mut revisions = BTreeMap::new();
+    for task in tasks {
+        if classify_task(root, task, &mut revisions)? != TaskStatus::Done {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 pub(super) fn select_task(
     root: &Path,
     task_id: &str,

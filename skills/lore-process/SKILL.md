@@ -32,6 +32,12 @@ Do not enter the ordinary queue-drain protocol. For manual processing, run
 `lore work plan --task-id TASK` before loading a large retained input; multi-part
 work requires complete guarded reduction before normal result publication.
 
+For a native `selected` request, read the exact JSON task-ID array from the named
+selection manifest. Follow the protocol only for those current tasks, one per
+distinct target, then return. Read metadata before loading each selected retained
+input; do not load unrelated task bodies or drain the remaining queue. Native Rust
+owns global reconciliation, pruning and completion checks after the selected batch.
+
 ## Start the session under the workflow lease
 
 For manual long-running review/publication, start the foreground agent **before reading inputs** with `lore --config /absolute/config.yaml workflow -- claude` or `lore --config /absolute/config.yaml workflow -- codex` (or the foreground agent command in use). Scheduled headless skill calls already wait for this Unix lease; collection and deterministic writer stages retain their short locks. Do not run `workflow` again inside this skill or a guarded pipeline: child CLI writes use their normal short locks. Default contention starts no child; `workflow --wait -- COMMAND` waits only when explicitly requested. Never bypass a busy lease, expire it by age, or delete its file. Existing unguarded sessions require an operator to stop scheduled writers and verify their children have exited before continuing; this skill cannot retrofit the lease. Programs that close inherited descriptors or detach work are outside its lifetime guarantee; Windows is unsupported. Typed task/source guards remain required.

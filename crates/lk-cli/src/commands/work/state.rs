@@ -697,6 +697,21 @@ impl Work {
             .map_err(NodeInputError::report)
     }
 
+    pub fn whole_input_bytes(&self, resources: &[SemanticResource]) -> miette::Result<usize> {
+        if self.plan.parts.len() != 1 {
+            return Err(fail("whole input requires one inspection part"));
+        }
+        let part = &self.plan.parts[0];
+        let input = self
+            .plan
+            .part_input_for_assigned_resources(&part.id, resources)
+            .map_err(fail)?;
+        let request = self
+            .inspect_input(&part.id, input)
+            .map_err(NodeInputError::report)?;
+        Ok(encoded(&request)?.len())
+    }
+
     pub fn result(&self, root: &Path, resources: &[SemanticResource]) -> miette::Result<Value> {
         let evaluated = self.evaluate(root, resources)?;
         let node = evaluated.nodes.last().expect("nonempty tree");

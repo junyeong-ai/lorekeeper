@@ -32,6 +32,12 @@ boundaries with `continued` set. Ranges are half-open Unicode scalar offsets,
 not byte offsets. There is no overlapping or omitted source range. Parts are
 execution units, never new documents or concepts.
 
+Native jobs rotate one inspection/reduction/finalization turn among independent
+targets and retain the next target across runs. Whole-input queue tasks are batched
+within the evidence input budget with at most one task per target; publication
+refreshes selection before another task on that page. The call budget can leave
+pending work, but a resumed large document does not always take the first turn.
+
 ## Inspect or reduce one node
 
 - `kind: inspect`: read every assigned `input.ranges` item, including text. Preserve
@@ -111,3 +117,7 @@ assigned exact resources/ranges match. It never claims a new read. Changed-sourc
 parts and reductions must be performed again; do not copy hashes into old drafts.
 Derived work under `.lorekeeper/work/` supports resumption, not historical proof
 or a second canonical knowledge store. Preserve unfinished work.
+An explicit single-part plan is also resumable work. If a verified sealed final
+result remains but its staging file is missing, native execution restores that
+exact result under current input guards without another model call. Conflicting
+or malformed staging remains an error; it is not silently overwritten.

@@ -1,6 +1,9 @@
 use clap::ValueEnum;
 use serde::Serialize;
 
+#[cfg(unix)]
+mod scheduler;
+
 #[derive(Clone, Copy, Debug, ValueEnum, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Operation {
@@ -43,6 +46,7 @@ pub async fn run(
 
 #[cfg(unix)]
 mod native {
+    use super::scheduler;
     use super::*;
     use crate::commands::{
         CONFIG_REVISION_ENV, EXECUTION_PROFILE_ENV, GlobalOptions, execution, workflow,
@@ -51,6 +55,22 @@ mod native {
     use lk_core::execution::ExecutionProfile;
     use std::path::PathBuf;
     use std::time::Duration;
+
+    enum WorkStep {
+        Pending,
+        Staged,
+        Failed,
+    }
+
+    enum QueueDispatch {
+        Partitioned {
+            id: String,
+            task: lk_queue::QueueTask,
+        },
+        WholeInput {
+            tasks: Vec<lk_queue::QueueTask>,
+        },
+    }
 
     #[derive(Serialize)]
     #[serde(rename_all = "kebab-case")]
@@ -457,32 +477,55 @@ mod native {
             }
         }
 
-        async fn bounded_work(&mut self, id: &str, skill: &str) -> bool {
-            loop {
-                let before = match crate::commands::work::current_progress(
+        fn call_budget_available(&mut self) -> bool {
+            match self.config.execution.effective_work() {
+                Ok(budget) if self.calls < budget.max_calls => true,
+                Ok(_) => self.failure("semantic call budget", "configured execution.work.max_calls exhausted; unfinished work is retained for the next run"),
+                Err(error) => self.failure("semantic work budget", error),
+            }
+        }
+
+        async fn bounded_step(&mut self, id: &str, skill: &str) -> WorkStep {
+            let before = match crate::commands::work::current_progress(
+                &self.root,
+                &self.config,
+                &self.config_revision,
+                id,
+            ) {
+                Ok(status) => status,
+                Err(error) => {
+                    self.failure("bounded work progress", error);
+                    return WorkStep::Failed;
+                }
+            };
+            if !before.complete {
+                let Some(node) = before.ready.first() else {
+                    self.failure("bounded work progress", "incomplete work has no ready node");
+                    return WorkStep::Failed;
+                };
+                if !self.observe(id, node).await {
+                    return WorkStep::Failed;
+                }
+                return match crate::commands::work::current_progress(
                     &self.root,
                     &self.config,
                     &self.config_revision,
                     id,
                 ) {
-                    Ok(status) => status,
-                    Err(error) => return self.failure("bounded work progress", error),
+                    Ok(after)
+                        if after.completed > before.completed && !after.ready.contains(node) =>
+                    {
+                        WorkStep::Pending
+                    }
+                    Ok(_) => {
+                        self.failure("bounded work receipt", "worker exited without completing its selected node; unfinished work retained");
+                        WorkStep::Failed
+                    }
+                    Err(error) => {
+                        self.failure("bounded work receipt", error);
+                        WorkStep::Failed
+                    }
                 };
-                if before.complete {
-                    break;
-                }
-                let Some(node) = before.ready.first() else {
-                    return self
-                        .failure("bounded work progress", "incomplete work has no ready node");
-                };
-                if !self.observe(id, node).await {
-                    return false;
-                }
-                match crate::commands::work::current_progress(&self.root, &self.config, &self.config_revision, id) {
-                    Ok(after) if after.completed > before.completed && !after.ready.contains(node) => {}
-                    Ok(_) => return self.failure("bounded work receipt", "worker exited without completing its selected node; unfinished work retained"),
-                    Err(error) => return self.failure("bounded work receipt", error),
-                }
             }
             match crate::commands::work::is_finished(
                 &self.root,
@@ -491,20 +534,33 @@ mod native {
                 id,
             ) {
                 Ok(true) => {
-                    return self.record(
+                    if let Err(error) = crate::commands::work::restage_finished(
+                        &self.root,
+                        &self.config,
+                        &self.config_revision,
+                        id,
+                    ) {
+                        self.failure("bounded work completion", error);
+                        return WorkStep::Failed;
+                    }
+                    self.record(
                         "bounded work completion",
                         StageState::Skipped,
                         Some("verified sealed result already staged".into()),
                     );
+                    return WorkStep::Staged;
                 }
                 Ok(false) => {}
-                Err(error) => return self.failure("bounded work completion", error),
+                Err(error) => {
+                    self.failure("bounded work completion", error);
+                    return WorkStep::Failed;
+                }
             }
             let operation = format!(
                 "bounded finish {id}. Read the bounded-work reference and lore work result for this exact work. Produce the normal typed final result using its completed root observation and selected generation specification. Submit with lore work finish. Do not read the whole corpus or drain other tasks. Leave the staged queue result or audit assessment for native controller publication. The controller owns global checks. Source uncertainty stays attributed; unresolved work concerns cannot be silently removed or marked reviewed."
             );
             if !self.consumer(skill, &operation).await {
-                return false;
+                return WorkStep::Failed;
             }
             match crate::commands::work::verify_finished(
                 &self.root,
@@ -512,43 +568,161 @@ mod native {
                 &self.config_revision,
                 id,
             ) {
-                Ok(()) => self.record(
-                    "bounded work completion",
-                    StageState::Completed,
-                    Some(id.into()),
-                ),
-                Err(error) => self.failure("bounded work completion", error),
+                Ok(()) => {
+                    self.record(
+                        "bounded work completion",
+                        StageState::Completed,
+                        Some(id.into()),
+                    );
+                    WorkStep::Staged
+                }
+                Err(error) => {
+                    self.failure("bounded work completion", error);
+                    WorkStep::Failed
+                }
             }
         }
 
-        async fn bounded_queue(&mut self) -> bool {
-            let tasks = match crate::commands::queue::current_tasks(&self.root) {
-                Ok(tasks) => tasks,
-                Err(error) => return self.failure("bounded queue discovery", error),
-            };
+        fn queue_dispatches(
+            &self,
+        ) -> miette::Result<std::collections::BTreeMap<String, QueueDispatch>> {
+            fn flush(
+                batch: &mut Vec<lk_queue::QueueTask>,
+                jobs: &mut std::collections::BTreeMap<String, QueueDispatch>,
+            ) {
+                if let Some(last) = batch.last() {
+                    jobs.insert(
+                        last.target.vault_path.clone(),
+                        QueueDispatch::WholeInput {
+                            tasks: std::mem::take(batch),
+                        },
+                    );
+                }
+            }
+            let mut tasks = crate::commands::queue::current_tasks(&self.root)?;
+            tasks.sort_by(|left, right| {
+                (left.created_at, &left.task_id).cmp(&(right.created_at, &right.task_id))
+            });
+            let mut targets = std::collections::BTreeMap::new();
             for task in tasks {
-                let work = match crate::commands::work::prepare_task(
+                targets
+                    .entry(task.target.vault_path.clone())
+                    .or_insert(task);
+            }
+            let limit = self
+                .config
+                .execution
+                .effective_work()
+                .map_err(|error| miette::miette!("{error}"))?
+                .max_input_bytes;
+            let mut jobs = std::collections::BTreeMap::new();
+            let mut batch = Vec::new();
+            let mut batch_bytes = 0usize;
+            for (target, task) in targets {
+                match crate::commands::work::prepare_task(
                     &self.root,
                     &self.config,
                     &self.config_revision,
                     &task.task_id,
-                ) {
-                    Ok(work) => work,
-                    Err(error) => return self.failure("bounded queue planning", error),
+                )? {
+                    crate::commands::work::TaskWork::WholeInput { bytes } => {
+                        if bytes > limit.saturating_sub(batch_bytes) {
+                            flush(&mut batch, &mut jobs);
+                            batch_bytes = 0;
+                        }
+                        batch_bytes += bytes;
+                        batch.push(task);
+                    }
+                    crate::commands::work::TaskWork::Partitioned { id } => {
+                        flush(&mut batch, &mut jobs);
+                        batch_bytes = 0;
+                        jobs.insert(target, QueueDispatch::Partitioned { id, task });
+                    }
+                }
+            }
+            flush(&mut batch, &mut jobs);
+            Ok(jobs)
+        }
+
+        async fn dispatch_queue(&mut self) -> bool {
+            loop {
+                let jobs = match self.queue_dispatches() {
+                    Ok(jobs) => jobs,
+                    Err(error) => return self.failure("queue planning", error),
                 };
-                if let Some(id) = work {
-                    if !self.bounded_work(&id, "lore-process").await {
+                if jobs.is_empty() {
+                    return true;
+                }
+                loop {
+                    if !self.call_budget_available() {
                         return false;
                     }
+                    let keys = jobs.keys().cloned().collect();
+                    let selected =
+                        match scheduler::select(&self.root, scheduler::Stage::Queue, &keys) {
+                            Ok(Some(selected)) => selected,
+                            Ok(None) => return true,
+                            Err(error) => return self.failure("queue scheduling", error),
+                        };
+                    match &jobs[&selected] {
+                        QueueDispatch::Partitioned { id, .. } => {
+                            match self.bounded_step(id, "lore-process").await {
+                                WorkStep::Pending => continue,
+                                WorkStep::Failed => return false,
+                                WorkStep::Staged => {}
+                            }
+                        }
+                        QueueDispatch::WholeInput { tasks } => {
+                            let ids: Vec<_> = tasks.iter().map(|task| &task.task_id).collect();
+                            let directory = match tempfile::Builder::new()
+                                .prefix("lorekeeper-selection-")
+                                .tempdir()
+                            {
+                                Ok(directory) => directory,
+                                Err(error) => return self.failure("queue selection", error),
+                            };
+                            let path = directory.path().join("tasks.json");
+                            if let Err(error) = std::fs::write(
+                                &path,
+                                serde_json::to_vec(&ids).expect("task ids serialize"),
+                            ) {
+                                return self.failure("queue selection", error);
+                            }
+                            let selection = match serde_json::to_string(&path) {
+                                Ok(selection) => selection,
+                                Err(error) => return self.failure("queue selection", error),
+                            };
+                            let context = if matches!(self.result.operation, Operation::Knowledge) {
+                                "Process these tasks as part of this bounded knowledge maintenance job. Read the selected work's review dependencies. Do not enumerate unrelated reviews or expand this batch."
+                            } else {
+                                ""
+                            };
+                            let operation = format!(
+                                "selected. {context} The native controller selected one task per distinct target within the configured evidence input budget. Read the JSON array of exact task IDs from the selection manifest and process only those current tasks, then return. Do not drain the rest of the queue or run global finalization. Follow the ordinary typed staging/publication protocol for these tasks. Selected queue task manifest: {selection}"
+                            );
+                            if !self.consumer("lore-process", &operation).await {
+                                return false;
+                            }
+                        }
+                    }
                     if !self
-                        .native("bounded queue apply", &["queue", "apply"])
+                        .native("selected queue apply", &["queue", "apply"])
                         .await
                     {
                         return false;
                     }
+                    let tasks = match &jobs[&selected] {
+                        QueueDispatch::WholeInput { tasks } => tasks.as_slice(),
+                        QueueDispatch::Partitioned { task, .. } => std::slice::from_ref(task),
+                    };
+                    match crate::commands::queue::tasks_completed(&self.root, tasks) {
+                            Ok(true) => {},
+                            Ok(false) => return self.failure("selected queue receipt", "selected tasks are not completed against their retained inputs; unfinished work retained"),
+                            Err(error) => return self.failure("selected queue receipt", error),
+                        }
+                    break;
                 }
             }
-            true
         }
 
         async fn drain(&mut self) -> bool {
@@ -575,21 +749,7 @@ mod native {
                     false
                 }
                 Ok(_) => {
-                    if !self.bounded_queue().await {
-                        self.drain_blocked = true;
-                        return false;
-                    }
-                    match crate::commands::queue::check::inspect(&self.root) {
-                        Ok(state) if state.current == 0 => return true,
-                        Ok(_) => {}
-                        Err(error) => return self.failure("queue inspection", error),
-                    }
-                    let operation = if matches!(self.result.operation, Operation::Knowledge) {
-                        "Process current queue tasks as part of this bounded knowledge maintenance job. Read the selected work's review dependencies. The native controller inspects and reports global review health after this session; do not enumerate unrelated reviews or expand the batch to repair them."
-                    } else {
-                        ""
-                    };
-                    let completed = self.consumer("lore-process", operation).await;
+                    let completed = self.dispatch_queue().await;
                     self.drain_blocked = !completed;
                     completed
                 }
@@ -821,6 +981,7 @@ mod native {
                 }
             }
             if bounded {
+                let mut jobs = std::collections::BTreeMap::new();
                 for path in &paths {
                     let work = match crate::commands::work::prepare_audit(
                         &self.root,
@@ -834,13 +995,32 @@ mod native {
                             return;
                         }
                     };
-                    if !self.bounded_work(&work, "lore-wiki").await {
+                    jobs.insert(path.clone(), work);
+                }
+                while !jobs.is_empty() {
+                    if !self.call_budget_available() {
                         return;
+                    }
+                    let keys = jobs.keys().cloned().collect();
+                    let selected =
+                        match scheduler::select(&self.root, scheduler::Stage::Audit, &keys) {
+                            Ok(Some(selected)) => selected,
+                            Ok(None) => break,
+                            Err(error) => {
+                                self.failure("audit scheduling", error);
+                                return;
+                            }
+                        };
+                    let work = &jobs[&selected];
+                    match self.bounded_step(work, "lore-wiki").await {
+                        WorkStep::Pending => continue,
+                        WorkStep::Failed => return,
+                        WorkStep::Staged => {}
                     }
                     let assessment = self
                         .root
                         .join(".lorekeeper/work")
-                        .join(&work)
+                        .join(work)
                         .join("assessment.json");
                     let assessment = match assessment.to_str() {
                         Some(path) => path.to_owned(),
@@ -861,6 +1041,7 @@ mod native {
                     {
                         return;
                     }
+                    jobs.remove(&selected);
                 }
             } else {
                 self.consumer("lore-wiki", &format!("maintain. The controller selected this exact batch: {selection}. Start with audit-plan --path for these addresses; do not select another batch. Use bounded work for any subject whose work envelope requires partitioning.")).await;

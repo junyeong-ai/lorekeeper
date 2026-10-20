@@ -175,7 +175,7 @@ fn both_hosts_receive_distinct_contracts_and_exit_zero_does_not_prove_completion
             assert!(arguments.contains("--ephemeral\n"));
             assert!(!arguments.contains("--allowedTools"));
         } else {
-            assert!(arguments.starts_with("-p\n/lore-process:lore-process\n"));
+            assert!(arguments.starts_with("-p\n/lore-process:lore-process selected."));
             assert!(arguments.contains("--permission-prompts\nnone\n"));
         }
         let pending = fixture.command().args(["queue", "count"]).output().unwrap();
@@ -832,6 +832,261 @@ fn native_observation_cannot_record_another_selected_node() {
     assert!(status.status.success());
     let status: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
     assert_eq!(status["completed"], 0);
+}
+
+#[test]
+fn bounded_queue_shares_each_runs_budget_across_independent_documents() {
+    let fixture = Fixture::new("codex", 30, RECORD_BOUNDED_AUDIT);
+    let config = std::fs::read_to_string(&fixture.config).unwrap().replace("concept_policy: supported-new", "concept_policy: disabled")
+        .replace("  default_profile: primary\n", "  default_profile: primary\n  work: {max_input_bytes: 8192, max_result_bytes: 1024, max_calls: 1}\n");
+    std::fs::write(&fixture.config, config).unwrap();
+    for name in ["a-large", "b-large"] {
+        std::fs::write(
+            fixture.root().join(format!("vault/inbox/{name}.md")),
+            format!(
+                "# {name}\n\n{}",
+                "Independent source evidence.\n".repeat(1200)
+            ),
+        )
+        .unwrap();
+    }
+    let collected = fixture.command().arg("ingest").output().unwrap();
+    assert!(
+        collected.status.success(),
+        "{}",
+        String::from_utf8_lossy(&collected.stderr)
+    );
+    for _ in 0..2 {
+        let (output, result) = fixture.run("process");
+        assert!(
+            !output.status.success(),
+            "a one-call budget retains unfinished documents: {result}"
+        );
+    }
+    let calls = bounded_calls(&fixture);
+    assert_eq!(calls.len(), 2);
+    assert_ne!(
+        calls[0]["work_id"], calls[1]["work_id"],
+        "one unfinished document must not consume every resumed run before another independent document gets a turn"
+    );
+}
+
+#[test]
+fn resumed_knowledge_batches_share_budget_across_oversized_subjects() {
+    let fixture = bounded_audit_fixture("codex", 1, RECORD_BOUNDED_AUDIT);
+    let config = std::fs::read_to_string(&fixture.config)
+        .unwrap()
+        .replace("batch_size: 1", "batch_size: 2");
+    std::fs::write(&fixture.config, config).unwrap();
+    let source = fixture.root().join("vault/wiki/concepts/large.md");
+    let second = std::fs::read_to_string(&source)
+        .unwrap()
+        .replace("large", "second");
+    std::fs::write(source.with_file_name("second.md"), second).unwrap();
+    for _ in 0..2 {
+        let (output, result) = fixture.run("knowledge");
+        assert!(!output.status.success(), "{result}");
+        assert!(
+            result["stages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|stage| stage["name"] == "semantic call budget"),
+            "{result}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let calls = bounded_calls(&fixture);
+    assert_eq!(calls.len(), 2);
+    assert_ne!(calls[0]["work_id"], calls[1]["work_id"]);
+}
+
+#[test]
+fn short_documents_finish_between_resumed_parts_of_a_large_document() {
+    let ordinary = r#"
+exec python3 - "$@" <<'SELECTED'
+import json, os, subprocess, sys
+from pathlib import Path
+root=Path(os.environ['TEST_EXECUTION_ROOT'])
+prompt='\n'.join(sys.argv[1:])
+path,_=json.JSONDecoder().raw_decode(prompt.split('Selected queue task manifest: ',1)[1])
+ids=json.loads(Path(path).read_text())
+lore=os.environ['LORE_BIN']
+status=json.loads(subprocess.check_output([lore,'queue','status','--json']))
+rows={row['task_id']:row for row in status['data']['tasks']}
+tasks=[json.loads(line) for path in (root/'vault/.lorekeeper/queue').glob('*.jsonl') for line in path.read_text().splitlines()]
+selected=[task for task in tasks if task['task_id'] in ids]
+assert len(selected)==len(ids)
+assert len({task['target']['vault_path'] for task in selected})==len(selected)
+results=root/'vault/.lorekeeper/queue/results'
+results.mkdir(exist_ok=True)
+for task in selected:
+    assert task['kind']=='summarize'
+    assert 'short' in task['target']['vault_path']
+    result={key:task[key] for key in ['task_id','cache_hash']}
+    result.update(target_revision=rows[task['task_id']]['target_revision'],body='Short source evidence was inspected.')
+    (results/(task['task_id']+'.section.json')).write_text(json.dumps(result))
+(root/'selected-manifest-path').write_text(path)
+SELECTED
+"#;
+    let behavior = format!(
+        "case \"$*\" in\n*--output-schema*|*--safe-mode*)\n{RECORD_BOUNDED_AUDIT}\n;;\n*)\n{ordinary}\n;;\nesac"
+    );
+    let fixture = Fixture::new("codex", 30, &behavior);
+    let config = std::fs::read_to_string(&fixture.config).unwrap().replace("concept_policy: supported-new", "concept_policy: disabled")
+        .replace("  default_profile: primary\n", "  default_profile: primary\n  work: {max_input_bytes: 8192, max_result_bytes: 1024, max_calls: 1}\n");
+    std::fs::write(&fixture.config, config).unwrap();
+    std::fs::write(
+        fixture.root().join("vault/inbox/a-large.md"),
+        format!("# A large\n\n{}", "Source evidence.\n".repeat(1500)),
+    )
+    .unwrap();
+    std::fs::write(
+        fixture.root().join("vault/inbox/z-short.md"),
+        "# Z short\n\nShort source evidence.\n",
+    )
+    .unwrap();
+    assert!(
+        fixture
+            .command()
+            .arg("ingest")
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    for _ in 0..2 {
+        let (output, _) = fixture.run("process");
+        assert!(!output.status.success(), "large work remains pending");
+    }
+    let status = fixture
+        .command()
+        .args(["queue", "status", "--json"])
+        .output()
+        .unwrap();
+    let status: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
+    let rows = status["data"]["tasks"].as_array().unwrap();
+    assert!(
+        rows.iter().any(|row| row["vault_path"]
+            .as_str()
+            .is_some_and(|path| path.contains("short"))
+            && row["status"] == "done"),
+        "{status}"
+    );
+    let manifest = std::fs::read_to_string(fixture.root().join("selected-manifest-path")).unwrap();
+    assert!(
+        !Path::new(&manifest).exists(),
+        "selection metadata is removed after the worker"
+    );
+}
+
+#[test]
+fn native_queue_resumes_an_explicit_single_part_work_plan() {
+    let fixture = Fixture::new("codex", 30, RECORD_BOUNDED_AUDIT);
+    let config = std::fs::read_to_string(&fixture.config).unwrap().replace("concept_policy: supported-new", "concept_policy: disabled")
+        .replace("  default_profile: primary\n", "  default_profile: primary\n  work: {max_input_bytes: 8192, max_result_bytes: 1024, max_calls: 1}\n");
+    std::fs::write(&fixture.config, config).unwrap();
+    fixture.ingest();
+    let status = fixture
+        .command()
+        .args(["queue", "status", "--json"])
+        .output()
+        .unwrap();
+    let status: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
+    let task = status["data"]["tasks"][0]["task_id"].as_str().unwrap();
+    let planned = fixture
+        .command()
+        .args(["work", "plan", "--task-id", task])
+        .output()
+        .unwrap();
+    assert!(
+        planned.status.success(),
+        "{}",
+        String::from_utf8_lossy(&planned.stderr)
+    );
+    let plan: serde_json::Value = serde_json::from_slice(&planned.stdout).unwrap();
+    assert_eq!(plan["parts"], 1);
+    let (output, result) = fixture.run("process");
+    assert!(
+        !output.status.success(),
+        "one call leaves finalization pending: {result}"
+    );
+    let calls = bounded_calls(&fixture);
+    assert_eq!(calls.len(), 1, "{result}");
+    assert_eq!(calls[0]["work_id"], plan["work_id"]);
+}
+
+#[test]
+fn sealed_queue_work_restages_a_missing_result_without_calling_the_model_again() {
+    let start = RECORD_BOUNDED_AUDIT
+        .find("    assert subject['kind']=='audit'")
+        .unwrap();
+    let end = RECORD_BOUNDED_AUDIT[start..]
+        .find("    row={'action':action")
+        .unwrap()
+        + start;
+    let mut behavior = RECORD_BOUNDED_AUDIT.to_string();
+    behavior.replace_range(
+        start..end,
+        r#"    assert subject['kind']=='queue'
+    result={key:subject[key] for key in ['task_id','cache_hash','target_revision']}
+    result['body']='Verified cached section result.'
+    path=root/'section.json'
+    path.write_text(json.dumps(result))
+    staged=cli('work','finish',work_id,'--file',str(path))
+    (root/'vault'/staged['staged_result']).unlink()
+"#,
+    );
+    let fixture = Fixture::new("codex", 30, &behavior);
+    let config = std::fs::read_to_string(&fixture.config)
+        .unwrap()
+        .replace("concept_policy: supported-new", "concept_policy: disabled");
+    std::fs::write(&fixture.config, config).unwrap();
+    fixture.ingest();
+    let status = fixture
+        .command()
+        .args(["queue", "status", "--json"])
+        .output()
+        .unwrap();
+    let status: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
+    let task = status["data"]["tasks"][0]["task_id"].as_str().unwrap();
+    assert!(
+        fixture
+            .command()
+            .args(["work", "plan", "--task-id", task])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    let (first, result) = fixture.run("process");
+    assert!(
+        !first.status.success(),
+        "missing staging cannot count as completed publication: {result}"
+    );
+    let calls = bounded_calls(&fixture);
+    assert_eq!(calls.len(), 2);
+    std::fs::remove_file(fixture.root().join("agent executable")).unwrap();
+    let (second, result) = fixture.run("process");
+    assert!(
+        second.status.success(),
+        "{result}\n{}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert!(
+        result["execution"].is_null(),
+        "verified cache restoration needs no agent preflight"
+    );
+    assert_eq!(bounded_calls(&fixture).len(), 2);
+    assert!(
+        fixture
+            .command()
+            .args(["queue", "check"])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
 }
 
 #[test]
