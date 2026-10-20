@@ -373,6 +373,10 @@ lore wiki reviews --check     # fail on evidence drift or invalid reviews; open 
 lore queue packet --task-id ID # revision-checked evidence (bodies: --include-content)
 lore queue regenerate --task-id ID --dry-run # preview retained-input regeneration
 lore queue count              # current task count as a bare integer (for scripts)
+lore work plan --task-id ID    # plan bounded retained-input reads (audit: --path)
+lore work status WORK_ID      # completed parts and resumable work
+lore work read WORK_ID NODE_ID # read one part or two child observations
+lore work result WORK_ID      # read the completed reduction for final publication
 lore config vault-root        # the vault's absolute path, and nothing else (for scripts)
 lore schema                   # generate wiki/AGENTS.md (the page-format schema)
 ```
@@ -439,6 +443,10 @@ llm:
   provider: queue
 execution:
   default_profile: primary
+  work:
+    max_input_bytes: 262144
+    max_result_bytes: 32768
+    max_calls: 64
   profiles:
     primary:
       engine: claude-code
@@ -453,8 +461,18 @@ execution:
 This selects `primary` for daily and queue processing, and `reviewer` for semantic
 audits. Selection is explicit `--profile`, operation profile, then default profile.
 An unavailable host never switches to another host. `timeout_seconds` is a session
-budget; unfinished work is preserved and reported as failure. Optional `executable`
-and `model` select the CLI and model. Relative executable paths and Claude
+budget; unfinished work is preserved and reported as failure.
+`execution.work` bounds worker-request JSON bytes, observation-result JSON bytes
+and semantic sessions per run. Large inputs are divided into revision-pinned parts
+read in fresh sessions; observations are reduced in further fresh sessions.
+`max_calls` applies per daily/queue run and per knowledge-audit batch. Exhaustion
+stops incomplete work and preserves verified parts for resumption. These limits
+are not the model's total context, token count or spending cap. Input must be at
+least 4096 bytes; results must be at least 1024 bytes and at most one quarter of
+the input bound; calls must be positive. See the
+[bounded evidence protocol](skills/lore-process/references/bounded-work.md)
+for manual resumption and result formats.
+Optional `executable` and `model` select the CLI and model. Relative executable paths and Claude
 `config_directory` resolve against the configuration file. Codex `profile` names a
 profile in that CLI. Changing models does not rewrite existing knowledge.
 
@@ -625,25 +643,35 @@ graph:
     max_input_bytes: 262144
 ```
 
-Changed and first-time concepts rotate fairly; unchanged inputs are not repeatedly
-audited. `.lorekeeper/knowledge-audit.json` stores current assessments and pending
-order; judgments and conflicting evidence remain in Markdown reviews. Single-source
+Changed and first-time subjects rotate fairly; unchanged inputs are not repeatedly
+audited. Subjects include concepts and source documents (`type: document`) in the
+configured wiki; document-only topics can be reviewed without creating concepts.
+`kind` identifies the subject type; `counts_by_kind` separates total, current and
+pending counts by type, and aggregate counts include both. Document links provide
+context, not automatic corroborating evidence.
+`.lorekeeper/knowledge-audit.json` stores current assessments and pending order;
+judgments and conflicting evidence remain in Markdown reviews. Single-source
 status or citation count alone does not justify merging or deleting a concept.
 Run an initial resumable campaign with `lore run knowledge --profile codex --batches 20
 --json`, choosing a registered profile. Each batch releases its workflow lease;
 failures preserve pending work and completed receipts. `batch-limit` means the
-requested batch count was reached; `settled` means the current concept plan is
-empty, not that every source document has been semantically audited.
-Audit plans measure distinct complete concept, evidence, direct related-page and
-scoped review/evidence bytes plus selected RSS payloads. Exceeding `max_input_bytes` retains the exact
-candidates and refuses agent execution and completed receipts. Adjust the batch
-size or explicit bound; never truncate evidence to claim completion. This bounds
-source scope, not aggregate model tokens or cost. Current receipts, clean lint and
-normal termination do not establish semantic consistency of the entire corpus.
+requested batch count was reached; `settled` means the current eligible audit plan
+is empty. Neither implies that every external original or attachment was read,
+or that the entire corpus is semantically consistent.
+Audit plans measure distinct complete subject, evidence, direct context and scoped
+review/evidence bytes plus selected RSS payloads. `graph.audit.max_input_bytes`
+bounds that complete input; exceeding it remains visible as `input.status: oversized`.
+Automatic selection does not skip large subjects; `--path` preserves the selected
+scope. The Rust runner partitions and reduces the complete input under
+`execution.work` limits. Completing an oversized input requires proof of completed
+partitioned work and reduction against its current revision. Evidence is never
+truncated to claim completion; interrupted work remains resumable. `--profile`
+alone changes neither byte bound.
 Missing, invalid or stale scoped reviews prevent completion. Unrelated reassessment
 backlog remains visible in `run knowledge`'s bounded `review_health` counts without
 stopping the next batch. Invalid records or inspection errors fail the job.
 Use `wiki reviews --check` separately for a strict whole-vault health check.
+`follow-up` requires a current open review explicitly scoped to that subject.
 
 Reminders retire only after the OS notifier accepts them. Acceptance does not prove
 the user saw the notification. A crash between acceptance and retirement may cause
