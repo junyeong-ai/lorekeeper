@@ -113,6 +113,8 @@ canonical; SQLite navigation is derived.
 - `prepare_search` atomically commits a reconstructible FTS5 snapshot; failed reads
   preserve old snapshot. Explicit `--snapshot` pins captured corpus/config/paths/full
   revisions; default search is live. External edits aren't frozen during capture.
+  Scope facets and bounded SQLite planner statistics are prepared in that transaction;
+  read-only queries never optimize or refresh the capture.
   Projection/schema changes bump snapshot version. Indexed name/tag/document identities
   and declared relations avoid full vocabulary/collection reads; selected scalar rows use SQL
   filters/LIMIT/OFFSET. FTS narrows candidates only; shared matcher decides hits.
