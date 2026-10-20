@@ -103,6 +103,10 @@ impl Config {
 
     fn validate(&mut self) -> Result<(), ConfigError> {
         self.execution.validate()?;
+        self.ingest
+            .originals
+            .validate()
+            .map_err(ConfigError::Validation)?;
         if let Some(documents) = &self.ingest.documents {
             documents.validate()?;
         }
@@ -1360,6 +1364,7 @@ impl Default for MaintenanceConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct IngestConfig {
     pub documents: Option<crate::content::InputProcessingConfig>,
+    pub originals: crate::manual_original::OriginalCaptureConfig,
     /// Optional cron expression; when set, `lore schedule` emits a single crontab line
     /// running `lore ingest` (all sources). Absent → no scheduled ingest line.
     pub schedule: Option<String>,

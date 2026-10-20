@@ -86,6 +86,10 @@ vault의 `inbox/`에 메모 파일 하나를 넣은 뒤 수집합니다. `inbox_
 DOCX·XLSX·PDF를 넣으려면 `lore input install DIRECTORY`로 선택적 변환 환경을 설치하고
 출력된 설정을 병합합니다. `lore input check`로 의존성을, `lore input inspect FILE.pdf`로
 원본을 옮기지 않고 변환 결과를 확인합니다. 이미지는 별도 OCR 언어 데이터가 필요합니다.
+원본은 기본적으로 파일당 32 MiB이며, 더 큰 입력은 `ingest.originals.max_entry_bytes`를
+명시적으로 높여 허용합니다. 원본을 임시 파일에 보관하므로 전체 바이너리를 메모리에
+복제하지 않습니다. 변환 결과·페이지 수 제한은 별도이며, 변환기 자체의 메모리 사용량은
+파일 형식에 따라 달라집니다.
 [전처리 설정과 지원 범위](skills/lore-setup/references/config.md#document-preprocessing)를 참고하세요.
 
 ```bash

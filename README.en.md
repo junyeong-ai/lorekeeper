@@ -86,6 +86,10 @@ For DOCX, XLSX and PDF inputs, install the optional decoder with
 `lore input install DIRECTORY` and merge its printed configuration. Verify dependencies
 with `lore input check`, then inspect a file without moving it using
 `lore input inspect FILE.pdf`. Images additionally need explicit OCR language data.
+Original entries default to 32 MiB; raise `ingest.originals.max_entry_bytes` explicitly
+for larger inputs. Originals use temporary files instead of full in-memory binary
+copies. Projection size and page-count limits remain separate; decoder memory usage
+depends on the format.
 See [preprocessing configuration and scope](skills/lore-setup/references/config.md#document-preprocessing).
 
 ```bash

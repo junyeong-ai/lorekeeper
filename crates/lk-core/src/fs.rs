@@ -77,6 +77,15 @@ pub fn publish_exclusive(
     contents: &[u8],
     mode: Option<u32>,
 ) -> io::Result<PublishOutcome> {
+    publish_exclusive_from(path, std::io::Cursor::new(contents), mode)
+}
+
+/// Stream a complete source to the same exclusive publication boundary.
+pub fn publish_exclusive_from(
+    path: &Path,
+    mut contents: impl Read,
+    mode: Option<u32>,
+) -> io::Result<PublishOutcome> {
     let (temporary, mut file) = publication_temp(path)?;
     #[cfg(unix)]
     if let Some(mode) = mode {
@@ -85,7 +94,7 @@ pub fn publish_exclusive(
     }
     #[cfg(not(unix))]
     let _ = mode;
-    file.write_all(contents)?;
+    io::copy(&mut contents, &mut file)?;
     file.flush()?;
     file.sync_all()?;
     drop(file);
@@ -99,7 +108,7 @@ pub fn publish_exclusive(
                 return Ok(PublishOutcome::Created);
             }
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                match compare_existing(path, contents)? {
+                match compare_existing(path, &temporary.0)? {
                     Some(true) => {
                         sync_parent(path)?;
                         return Ok(PublishOutcome::Reused);
@@ -164,7 +173,7 @@ fn create_temporary_file(
 // None means the destination disappeared during observation. Pinning is separate
 // from opening: on Unix a hard link can preserve the symlink itself, while other
 // platforms may follow it. Neither case may cause us to read its target bytes.
-fn compare_existing(path: &Path, contents: &[u8]) -> io::Result<Option<bool>> {
+fn compare_existing(path: &Path, contents: &Path) -> io::Result<Option<bool>> {
     let regular = |path: &Path| match std::fs::symlink_metadata(path) {
         Ok(metadata) => Ok(Some(metadata.file_type().is_file())),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
@@ -190,15 +199,31 @@ fn compare_existing(path: &Path, contents: &[u8]) -> io::Result<Option<bool>> {
         return Ok(Some(false));
     }
     // The private pin cannot be redirected by a rename of the public candidate.
-    let file = std::fs::File::open(&pin.0)?;
-    if file.metadata()?.len() != contents.len() as u64 {
+    let mut file = std::fs::File::open(&pin.0)?;
+    let mut contents = std::fs::File::open(contents)?;
+    if file.metadata()?.len() != contents.metadata()?.len() {
         return Ok(Some(false));
     }
-    let mut existing = Vec::new();
-    (&file)
-        .take((contents.len() as u64).saturating_add(1))
-        .read_to_end(&mut existing)?;
-    if existing != contents || regular(path)? != Some(true) {
+    let mut buffer = [0; 65536];
+    let mut expected = [0; 65536];
+    loop {
+        let count = contents.read(&mut expected)?;
+        if count == 0 {
+            if file.read(&mut buffer[..1])? != 0 {
+                return Ok(Some(false));
+            }
+            break;
+        }
+        match file.read_exact(&mut buffer[..count]) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => return Ok(Some(false)),
+            Err(error) => return Err(error),
+        }
+        if buffer[..count] != expected[..count] {
+            return Ok(Some(false));
+        }
+    }
+    if regular(path)? != Some(true) {
         return Ok(Some(false));
     }
     if !same_publication_file(path, &pin.0)? {
@@ -290,6 +315,31 @@ pub fn names_fold_together(a: &str, b: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn streaming_publication_reuses_exact_bytes_and_refuses_incomplete_or_corrupt_input() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("original");
+        let captured = crate::captured_file::CapturedFile::capture(&b"original"[..], 8).unwrap();
+        assert_eq!(
+            publish_exclusive_from(&path, captured.reader().unwrap(), Some(0o600)).unwrap(),
+            PublishOutcome::Created
+        );
+        assert_eq!(
+            publish_exclusive_from(&path, captured.reader().unwrap(), Some(0o600)).unwrap(),
+            PublishOutcome::Reused
+        );
+        assert_eq!(
+            publish_exclusive_from(&path, &b"different"[..], Some(0o600)).unwrap(),
+            PublishOutcome::Occupied
+        );
+        std::fs::write(captured.path(), b"tampered").unwrap();
+        let absent = root.path().join("absent");
+        assert!(publish_exclusive_from(&absent, captured.reader().unwrap(), Some(0o600)).is_err());
+        assert!(!absent.exists());
+        assert_eq!(std::fs::read(&path).unwrap(), b"original");
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+    }
     use tempfile::TempDir;
 
     #[test]

@@ -817,7 +817,9 @@ mod tests {
                 }],
                 unsupported: vec![],
             },
-            contents: vec![raw],
+            contents: vec![
+                lk_core::captured_file::CapturedFile::capture(raw.as_slice(), raw.len()).unwrap(),
+            ],
         };
         let session = lk_vault::MutationSession::acquire(root).unwrap();
         let reference = lk_vault::publish_manual_original(&session, &capture).unwrap();

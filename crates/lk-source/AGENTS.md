@@ -72,6 +72,8 @@ uses validated params and context; do not add per-adapter output pipelines.
 - `rss.rs`: prefer HTML content then summary; use published/updated dates, never
   acquisition-now as publication. Require a title. Author falls back to feed title
   then feed ID. Full-text fallback keeps the summary if extraction is absent/shorter.
+  Feed HTTP bodies are bounded at 16 MiB before parsing, including chunked responses;
+  overflow refuses that feed rather than publishing a parseable truncated prefix.
 
 ## HTML/storage normalization (`markdown.rs`)
 
@@ -122,7 +124,7 @@ Use parser/token-state behavior, not regex replacement of arbitrary markup.
 
 - Capture is a sidechannel, not blob fields on `Source`/`RawItem`. Keep `source_file`
   ownership distinct from typed `manual_original` and preserved `manual_frontmatter`.
-  Read entry bytes once for conversion/hash/preservation. Archive=false still
+  Capture entry bytes once for conversion/hash/preservation. Archive=false still
   preserves originals; it only disables retirement.
 - The configured inbox is the explicit boundary, not an implicit whole-vault copy.
   Reject a vault root/ancestor inbox and overlap with the actual configured managed
@@ -135,11 +137,17 @@ Use parser/token-state behavior, not regex replacement of arbitrary markup.
   than rewrite against a wrong base. HTML URL surfaces not fully supported, external
   CSS/SVG dependency closure, and similar unsupported constructs yield partial
   coverage/no retirement. Preserving their bytes is not proving full closure.
-- Limits are intentional: 32 MiB entry, 64 MiB member, 2 MiB manifest, depth32/2048 bundle members;
-  256 MiB/2048 entries per source, 8192 aggregate member records/256 MiB derived
-  documents; CLI aggregate capture cap512 MiB. Closure overflow is an explicit error,
+- `ingest.originals` defaults to 32 MiB entry, 64 MiB member and 256 MiB per source;
+  configured entry/member budgets fit the source budget, at most512 MiB. Keep the
+  2 MiB manifest, depth32/2048 bundle members, 2048 entries per source,
+  8192 aggregate member records/256 MiB derived documents and CLI aggregate capture
+  cap512 MiB. Closure overflow is an explicit error,
   not silently solved by splitting top-level entries. Binary attachments stay bytes;
   text entry conversion requires supported decoding.
+- `CapturedFile` owns private temporary acquisition files, hashes while streaming,
+  and removes them on drop/error. Inspection and dry runs may use these files but
+  never retained stores or vault writes. Preserve owned captures through publication
+  and retirement; never substitute a mutable source path for captured bytes.
 - Default standalone selection follows configured decoder capabilities. Keep other
   known binary inputs explicitly unprocessed without failing a note's byte-preserving
   attachment capture. An explicit extension selection requires its decoder. Do not
@@ -154,9 +162,12 @@ Use parser/token-state behavior, not regex replacement of arbitrary markup.
 ## Document projection (`content.rs`, `content/`)
 
 - Format decoding is separate from source acquisition and semantic work. The optional
-  pinned Python runtime reads captured bytes through stdin; Rust bounds time/output,
+  pinned Python runtime reads captured private file paths; Rust bounds time/output,
   validates its typed response and owns publication. No runtime installs or OCR model
   downloads during ingestion. Decoder stderr may contain source text; never forward it.
+- File-backed acquisition avoids full raw-byte copies, not native decoder allocations.
+  Projected output remains bounded and materialized; physical pages/sheets/frames are
+  format units, never model split parts or canonical document identities.
 - The interpreter runs the embedded in-process decoders and inherits the caller's
   process group so workflow cancellation includes it. Keep direct-child timeout/reaping;
   do not detach conversion or launch background helper processes from the processor.

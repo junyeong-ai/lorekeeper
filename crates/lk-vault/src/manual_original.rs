@@ -1,10 +1,11 @@
 //! A separate byte-preserving store, not the authored Markdown review archive.
 use crate::{MutationSession, VaultError};
 use lk_core::manual_original::{
-    MAX_ORIGINAL_MEMBER_BYTES, ManualBundleCapture, ManualBundleManifest, ManualBundleMember,
-    ManualOriginalReference, ORIGINAL_STORE, OriginalDigest, UnsupportedOriginalConstruct,
+    ManualBundleCapture, ManualBundleManifest, ManualBundleMember, ManualOriginalReference,
+    ORIGINAL_STORE, OriginalDigest, UnsupportedOriginalConstruct,
 };
 use serde::Serialize;
+use std::io::{Read, Seek};
 use std::path::{Path, PathBuf};
 
 fn error(e: impl std::fmt::Display) -> VaultError {
@@ -24,19 +25,33 @@ fn publish(root: &Path, path: &str, bytes: &[u8]) -> Result<(), VaultError> {
         ))),
     }
 }
-fn publish_member(root: &Path, path: &str, bytes: &[u8]) -> Result<(), VaultError> {
+fn publish_member(
+    root: &Path,
+    path: &str,
+    bytes: &lk_core::captured_file::CapturedFile,
+) -> Result<(), VaultError> {
     // One byte object serves every immutable bundle path through exclusive hard links.
     // There is no full-store search, overwriting rename or cross-filesystem copy fallback.
-    let digest = OriginalDigest::of(bytes);
+    let digest = bytes.revision();
     let object = format!("{ORIGINAL_STORE}/objects/{}", digest.value);
-    publish(root, &object, bytes)?;
+    let full = original_path(root, Path::new(&object), true)?;
+    match lk_core::fs::publish_exclusive_from(&full, bytes.reader()?, Some(0o600))? {
+        lk_core::fs::PublishOutcome::Created | lk_core::fs::PublishOutcome::Reused => {}
+        lk_core::fs::PublishOutcome::Occupied => {
+            return Err(error(format!(
+                "immutable original address occupied: {object}"
+            )));
+        }
+    }
     let source = original_path(root, Path::new(&object), false)?;
     let destination = original_path(root, Path::new(path), true)?;
     match std::fs::hard_link(&source, &destination) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
             if !destination.symlink_metadata()?.file_type().is_file()
-                || read_bytes(&destination, MAX_ORIGINAL_MEMBER_BYTES)? != bytes
+                || lk_core::captured_file::hash_reader(
+                    std::fs::File::open(&destination)?.take(bytes.byte_len() as u64 + 1),
+                )? != (bytes.byte_len(), digest.clone())
             {
                 return Err(crate::VaultError::Original(format!(
                     "immutable bundle member occupied: {path}"
@@ -98,7 +113,7 @@ fn load_member(
     reference: &ManualOriginalReference,
     manifest: &ManualBundleManifest,
     member: &str,
-) -> Result<Vec<u8>, VaultError> {
+) -> Result<std::fs::File, VaultError> {
     lk_core::manual_original::validate_member_path(member).map_err(error)?;
     let recorded = manifest
         .members
@@ -111,11 +126,53 @@ fn load_member(
         .ok_or_else(|| error("manifest address"))?
         .0;
     let full = original_path(root, Path::new(&format!("{base}/files/{member}")), false)?;
-    let bytes = read_bytes(&full, MAX_ORIGINAL_MEMBER_BYTES)?;
-    if bytes.len() != recorded.bytes || OriginalDigest::of(&bytes) != recorded.revision {
+    let mut file = std::fs::File::open(&full)?;
+    if !file.metadata()?.is_file() || file.metadata()?.len() != recorded.bytes as u64 {
         return Err(error("original member digest/length mismatch"));
     }
-    Ok(bytes)
+    let (bytes, digest) =
+        lk_core::captured_file::hash_reader((&mut file).take(recorded.bytes as u64 + 1))?;
+    if bytes != recorded.bytes || digest != recorded.revision {
+        return Err(error("original member digest/length mismatch"));
+    }
+    file.rewind()?;
+    Ok(file)
+}
+
+fn text_preview(mut file: std::fs::File) -> Result<(Option<String>, bool), VaultError> {
+    let mut prefix = Vec::new();
+    let mut remainder = Vec::new();
+    let mut total = 0usize;
+    let mut buffer = [0; 8192];
+    loop {
+        let count = file.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        total += count;
+        prefix
+            .extend_from_slice(&buffer[..count.min((65536usize + 4).saturating_sub(prefix.len()))]);
+        remainder.extend_from_slice(&buffer[..count]);
+        match std::str::from_utf8(&remainder) {
+            Ok(_) => remainder.clear(),
+            Err(error) if error.error_len().is_none() => {
+                remainder.drain(..error.valid_up_to());
+            }
+            Err(_) => return Ok((None, false)),
+        }
+    }
+    if !remainder.is_empty() {
+        return Ok((None, false));
+    }
+    let valid = match std::str::from_utf8(&prefix) {
+        Ok(text) => text,
+        Err(failure) => std::str::from_utf8(&prefix[..failure.valid_up_to()]).map_err(error)?,
+    };
+    let mut end = valid.len().min(65536);
+    while !valid.is_char_boundary(end) {
+        end -= 1;
+    }
+    Ok((Some(valid[..end].into()), end < total))
 }
 
 pub struct OriginalOptions<'a> {
@@ -208,20 +265,13 @@ pub fn inspect_original(
     // Verify the actual entry even for a metadata-only query; never fall back to source_file.
     let entry = load_member(root, &reference, &manifest, &manifest.entry)?;
     let member = options.member.unwrap_or(&manifest.entry);
-    let bytes = if member == manifest.entry {
+    let file = if member == manifest.entry {
         entry
     } else {
         load_member(root, &reference, &manifest, member)?
     };
-    if options.member.is_some()
-        && let Ok(text) = std::str::from_utf8(&bytes)
-    {
-        let mut end = text.len().min(65536);
-        while !text.is_char_boundary(end) {
-            end -= 1;
-        }
-        view.preview = Some(text[..end].into());
-        view.preview_truncated = end < text.len();
+    if options.member.is_some() {
+        (view.preview, view.preview_truncated) = text_preview(file)?;
     }
     let base = reference
         .manifest_path
@@ -309,6 +359,81 @@ mod tests {
     use super::*;
     use lk_core::manual_original::{ManualBundleMember, ORIGINAL_SCHEME};
     use tempfile::TempDir;
+
+    #[test]
+    fn large_file_backed_original_roundtrips_without_current_capture_configuration() {
+        let root = TempDir::new().unwrap();
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let bytes = lk_core::manual_original::MAX_ORIGINAL_ENTRY_BYTES + 1;
+        let file = lk_core::captured_file::CapturedFile::capture(
+            std::io::Read::take(std::io::repeat(255), bytes as u64),
+            bytes,
+        )
+        .unwrap();
+        let scratch = file.path().to_owned();
+        let captured = ManualBundleCapture {
+            source_file: "/removed/inbox/large.pdf".into(),
+            manifest: ManualBundleManifest {
+                schema: ORIGINAL_SCHEME.into(),
+                entry: "large.pdf".into(),
+                members: vec![ManualBundleMember {
+                    path: "large.pdf".into(),
+                    bytes,
+                    revision: file.revision().clone(),
+                }],
+                unsupported: vec![],
+            },
+            contents: vec![file],
+        };
+        let reference = publish_manual_original(&session, &captured).unwrap();
+        assert_eq!(reference.scheme, ORIGINAL_SCHEME);
+        assert_eq!(
+            publish_manual_original(&session, &captured).unwrap(),
+            reference
+        );
+        page(root.path(), &reference);
+        drop(captured);
+        assert!(!scratch.exists());
+        let view = inspect_original(
+            root.path(),
+            Path::new("wiki/documents/n.md"),
+            &OriginalOptions {
+                member: Some("large.pdf"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(view.available);
+        assert_eq!(view.members[0].bytes, bytes);
+        assert!(view.preview.is_none());
+        assert_eq!(
+            view.selected_file.unwrap().metadata().unwrap().len(),
+            bytes as u64
+        );
+    }
+
+    #[test]
+    fn legacy_original_manifest_keeps_its_original_digest_and_reader_contract() {
+        let root = TempDir::new().unwrap();
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let mut captured = capture();
+        captured.manifest.schema = lk_core::manual_original::LEGACY_ORIGINAL_SCHEME.into();
+        let reference = publish_manual_original(&session, &captured).unwrap();
+        assert_eq!(
+            reference.scheme,
+            lk_core::manual_original::LEGACY_ORIGINAL_SCHEME
+        );
+        page(root.path(), &reference);
+        let view = inspect_original(
+            root.path(),
+            Path::new("wiki/documents/n.md"),
+            &OriginalOptions::default(),
+        )
+        .unwrap();
+        assert!(view.available);
+        assert_eq!(view.reference.unwrap(), reference);
+    }
+
     fn capture() -> ManualBundleCapture {
         let raw =
             b"---\r\ntitle: \"original\"\r\n---\r\n# exact raw\r\n![x](figure.png)\r\n".to_vec();
@@ -332,7 +457,11 @@ mod tests {
                 ],
                 unsupported: vec![],
             },
-            contents: vec![image, raw],
+            contents: vec![
+                lk_core::captured_file::CapturedFile::capture(image.as_slice(), image.len())
+                    .unwrap(),
+                lk_core::captured_file::CapturedFile::capture(raw.as_slice(), raw.len()).unwrap(),
+            ],
         }
     }
     fn page(root: &Path, reference: &ManualOriginalReference) {
@@ -347,7 +476,7 @@ mod tests {
         let reference = publish_manual_original(&session, &captured).unwrap();
         assert_eq!(
             std::fs::read(tmp.path().join(reference.entry_vault_path().unwrap())).unwrap(),
-            captured.contents[1]
+            captured.contents[1].read_bytes(1024).unwrap()
         );
         assert_eq!(
             publish_manual_original(&session, &captured).unwrap(),
@@ -365,7 +494,10 @@ mod tests {
         )
         .unwrap();
         assert!(report.available);
-        assert_eq!(report.preview.unwrap().as_bytes(), captured.contents[1]);
+        assert_eq!(
+            report.preview.unwrap().as_bytes(),
+            captured.contents[1].read_bytes(1024).unwrap()
+        );
         assert_eq!(report.total_members, 2);
         assert_eq!(report.members.len(), 1);
         let binary = inspect_original(
@@ -389,7 +521,7 @@ mod tests {
         publish(
             tmp.path(),
             &format!("{base}/files/figure.png"),
-            &captured.contents[0],
+            &captured.contents[0].read_bytes(1024).unwrap(),
         )
         .unwrap();
         assert!(!tmp.path().join(&reference.manifest_path).exists());
@@ -507,7 +639,10 @@ mod reuse_tests {
                 ],
                 unsupported: vec![],
             },
-            contents: vec![image.to_vec(), b"same".to_vec()],
+            contents: vec![
+                lk_core::captured_file::CapturedFile::capture(image, image.len()).unwrap(),
+                lk_core::captured_file::CapturedFile::capture(&b"same"[..], 4).unwrap(),
+            ],
         };
         let a = publish_manual_original(&session, &build(b"image1")).unwrap();
         let b = publish_manual_original(&session, &build(b"image2")).unwrap();

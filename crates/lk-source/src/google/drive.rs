@@ -597,6 +597,7 @@ mod tests {
             vault_root: ".".into(),
             vault_dirs: Default::default(),
             documents: None,
+            originals: Default::default(),
         }
     }
 

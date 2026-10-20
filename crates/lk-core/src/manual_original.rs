@@ -1,17 +1,50 @@
 //! The immutable manual original contract; independent of document location ownership.
 use std::collections::BTreeSet;
+use std::num::NonZeroUsize;
 use std::path::{Component, Path};
 
 use serde::{Deserialize, Serialize};
 
 pub const MANUAL_ORIGINAL_FIELD: &str = "manual_original";
-pub const ORIGINAL_SCHEME: &str = "manual-bundle-v1";
+pub const ORIGINAL_SCHEME: &str = "manual-bundle-v2";
+pub const LEGACY_ORIGINAL_SCHEME: &str = "manual-bundle-v1";
 pub const ORIGINAL_STORE: &str = ".lorekeeper/evidence/manual";
 pub const MAX_MANUAL_BATCH_BYTES: usize = 256 * 1024 * 1024;
 pub const MAX_ORIGINAL_ENTRY_BYTES: usize = 32 * 1024 * 1024;
 pub const MAX_ORIGINAL_MEMBER_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_ORIGINAL_MEMBERS: usize = 2048;
 pub const MAX_ORIGINAL_MANIFEST_BYTES: usize = 2 * 1024 * 1024;
+pub const MAX_CAPTURE_BYTES: usize = 512 * 1024 * 1024;
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct OriginalCaptureConfig {
+    pub max_entry_bytes: NonZeroUsize,
+    pub max_member_bytes: NonZeroUsize,
+    pub max_source_bytes: NonZeroUsize,
+}
+
+impl Default for OriginalCaptureConfig {
+    fn default() -> Self {
+        Self {
+            max_entry_bytes: NonZeroUsize::new(MAX_ORIGINAL_ENTRY_BYTES).unwrap(),
+            max_member_bytes: NonZeroUsize::new(MAX_ORIGINAL_MEMBER_BYTES).unwrap(),
+            max_source_bytes: NonZeroUsize::new(MAX_MANUAL_BATCH_BYTES).unwrap(),
+        }
+    }
+}
+
+impl OriginalCaptureConfig {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.max_entry_bytes > self.max_source_bytes
+            || self.max_member_bytes > self.max_source_bytes
+            || self.max_source_bytes.get() > MAX_CAPTURE_BYTES
+        {
+            return Err("ingest.originals entry/member limits must fit max_source_bytes and the 512 MiB capture envelope".into());
+        }
+        Ok(())
+    }
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -70,12 +103,12 @@ pub struct ManualBundleManifest {
     /// Incomplete dependency discovery is distinct from a complete listed byte inventory.
     pub unsupported: Vec<UnsupportedOriginalConstruct>,
 }
-/// Captured bytes travel beside RawItem, never as JSON/base64 metadata.
+/// Owned captured files travel beside RawItem, never as JSON/base64 metadata.
 #[derive(Debug)]
 pub struct ManualBundleCapture {
     pub source_file: String,
     pub manifest: ManualBundleManifest,
-    pub contents: Vec<Vec<u8>>,
+    pub contents: Vec<crate::captured_file::CapturedFile>,
 }
 
 pub fn validate_member_path(path: &str) -> Result<(), String> {
@@ -94,8 +127,10 @@ pub fn validate_member_path(path: &str) -> Result<(), String> {
 }
 impl ManualBundleManifest {
     pub fn validate(&self) -> Result<(), String> {
-        if self.schema != ORIGINAL_SCHEME
-            || self.members.is_empty()
+        if !matches!(
+            self.schema.as_str(),
+            ORIGINAL_SCHEME | LEGACY_ORIGINAL_SCHEME
+        ) || self.members.is_empty()
             || self.members.len() > MAX_ORIGINAL_MEMBERS
         {
             return Err("invalid original manifest schema/member count".into());
@@ -103,12 +138,25 @@ impl ManualBundleManifest {
         validate_member_path(&self.entry)?;
         let mut paths = BTreeSet::new();
         let mut total = 0usize;
+        let (entry_limit, member_limit, total_limit) = if self.schema == LEGACY_ORIGINAL_SCHEME {
+            (
+                MAX_ORIGINAL_ENTRY_BYTES,
+                MAX_ORIGINAL_MEMBER_BYTES,
+                MAX_MANUAL_BATCH_BYTES,
+            )
+        } else {
+            (MAX_CAPTURE_BYTES, MAX_CAPTURE_BYTES, MAX_CAPTURE_BYTES)
+        };
         for member in &self.members {
             validate_member_path(&member.path)?;
             member.revision.validate("blake3-256")?;
             if !paths.insert(&member.path)
-                || member.bytes > MAX_ORIGINAL_MEMBER_BYTES
-                || (member.path == self.entry && member.bytes > MAX_ORIGINAL_ENTRY_BYTES)
+                || member.bytes
+                    > if member.path == self.entry {
+                        entry_limit
+                    } else {
+                        member_limit
+                    }
             {
                 return Err("duplicate/oversize original member".into());
             }
@@ -116,7 +164,7 @@ impl ManualBundleManifest {
                 .checked_add(member.bytes)
                 .ok_or("original size overflow")?;
         }
-        if total > MAX_MANUAL_BATCH_BYTES
+        if total > total_limit
             || !paths.contains(&self.entry)
             || self.members.windows(2).any(|w| w[0].path >= w[1].path)
         {
@@ -151,17 +199,21 @@ impl ManualBundleManifest {
     }
     pub fn revision(&self) -> Result<OriginalDigest, String> {
         let mut hash = blake3::Hasher::new();
-        hash.update(b"lore-manual-bundle-v1\0");
+        hash.update(if self.schema == LEGACY_ORIGINAL_SCHEME {
+            b"lore-manual-bundle-v1\0"
+        } else {
+            b"lore-manual-bundle-v2\0"
+        });
         hash.update(&self.bytes()?);
         Ok(OriginalDigest {
-            scheme: "manual-bundle-v1-blake3-256".into(),
+            scheme: format!("{}-blake3-256", self.schema),
             value: hash.finalize().to_hex().to_string(),
         })
     }
     pub fn reference(&self) -> Result<ManualOriginalReference, String> {
         let revision = self.revision()?;
         Ok(ManualOriginalReference {
-            scheme: ORIGINAL_SCHEME.into(),
+            scheme: self.schema.clone(),
             manifest_path: format!("{ORIGINAL_STORE}/{}/manifest.json", revision.value),
             manifest_revision: revision,
             entry_path: format!("files/{}", self.entry),
@@ -178,14 +230,16 @@ impl ManualBundleManifest {
 impl ManualOriginalReference {
     pub fn validate(&self) -> Result<(), String> {
         self.manifest_revision
-            .validate("manual-bundle-v1-blake3-256")?;
+            .validate(&format!("{}-blake3-256", self.scheme))?;
         self.entry_revision.validate("blake3-256")?;
-        if self.scheme != ORIGINAL_SCHEME
-            || self.manifest_path
-                != format!(
-                    "{ORIGINAL_STORE}/{}/manifest.json",
-                    self.manifest_revision.value
-                )
+        if !matches!(
+            self.scheme.as_str(),
+            ORIGINAL_SCHEME | LEGACY_ORIGINAL_SCHEME
+        ) || self.manifest_path
+            != format!(
+                "{ORIGINAL_STORE}/{}/manifest.json",
+                self.manifest_revision.value
+            )
             || !self.entry_path.starts_with("files/")
         {
             return Err("invalid original reference address".into());
@@ -207,20 +261,57 @@ impl ManualBundleCapture {
             return Err("incomplete captured original inventory".into());
         }
         for (member, bytes) in self.manifest.members.iter().zip(&self.contents) {
-            if bytes.len() != member.bytes || OriginalDigest::of(bytes) != member.revision {
+            if bytes.byte_len() != member.bytes || bytes.revision() != &member.revision {
                 return Err("captured original bytes mismatch".into());
             }
+            bytes.verify().map_err(|error| error.to_string())?;
         }
         Ok(())
     }
     pub fn byte_len(&self) -> usize {
-        self.contents.iter().map(Vec::len).sum()
+        self.contents
+            .iter()
+            .map(crate::captured_file::CapturedFile::byte_len)
+            .sum()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capture_limits_and_versioned_storage_bounds_are_independent() {
+        let mut legacy = manifest();
+        legacy.schema = LEGACY_ORIGINAL_SCHEME.into();
+        let mut hash = blake3::Hasher::new();
+        hash.update(b"lore-manual-bundle-v1\0");
+        hash.update(&legacy.bytes().unwrap());
+        assert_eq!(
+            legacy.revision().unwrap().value,
+            hash.finalize().to_hex().to_string()
+        );
+        legacy.reference().unwrap().validate().unwrap();
+        legacy.members[0].bytes = MAX_ORIGINAL_ENTRY_BYTES + 1;
+        assert!(legacy.validate().is_err());
+        legacy.schema = ORIGINAL_SCHEME.into();
+        legacy.validate().unwrap();
+        legacy.reference().unwrap().validate().unwrap();
+        assert_eq!(
+            OriginalCaptureConfig::default().max_entry_bytes.get(),
+            MAX_ORIGINAL_ENTRY_BYTES
+        );
+        let mut limits = OriginalCaptureConfig {
+            max_entry_bytes: NonZeroUsize::new(MAX_CAPTURE_BYTES).unwrap(),
+            ..Default::default()
+        };
+        assert!(limits.validate().is_err());
+        limits.max_source_bytes = NonZeroUsize::new(MAX_CAPTURE_BYTES).unwrap();
+        limits.validate().unwrap();
+        limits.max_source_bytes = NonZeroUsize::new(MAX_CAPTURE_BYTES + 1).unwrap();
+        assert!(limits.validate().is_err());
+    }
+
     fn manifest() -> ManualBundleManifest {
         ManualBundleManifest {
             schema: ORIGINAL_SCHEME.into(),

@@ -1,3 +1,4 @@
+pub mod captured_file;
 pub mod concept;
 pub mod config;
 pub mod content;

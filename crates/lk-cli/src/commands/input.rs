@@ -1,4 +1,3 @@
-use std::io::Read;
 use std::path::{Path, PathBuf};
 #[cfg(not(unix))]
 use std::process::Stdio;
@@ -55,11 +54,14 @@ pub async fn run(opts: &GlobalOptions, command: InputCommand) -> miette::Result<
                         "input inspect supports DOCX, XLSX, PDF, PNG, JPEG, TIFF and WebP"
                     )
                 })?;
-            let bytes = read_input(&path)?;
-            let projection =
-                lk_source::content::project(&bytes, format, config.ingest.documents.as_ref())
-                    .await
-                    .map_err(|error| miette::miette!("{error}"))?;
+            let captured = read_input(&path, config.ingest.originals.max_entry_bytes.get())?;
+            let projection = lk_source::content::project_file(
+                &captured,
+                format,
+                config.ingest.documents.as_ref(),
+            )
+            .await
+            .map_err(|error| miette::miette!("{error}"))?;
             println!(
                 "{}",
                 serde_json::to_string_pretty(&projection)
@@ -70,8 +72,7 @@ pub async fn run(opts: &GlobalOptions, command: InputCommand) -> miette::Result<
     }
 }
 
-fn read_input(path: &Path) -> miette::Result<Vec<u8>> {
-    let mut bytes = Vec::new();
+fn read_input(path: &Path, limit: usize) -> miette::Result<lk_core::captured_file::CapturedFile> {
     let file = std::fs::File::open(path).map_err(|error| miette::miette!("open input: {error}"))?;
     if !file
         .metadata()
@@ -80,13 +81,8 @@ fn read_input(path: &Path) -> miette::Result<Vec<u8>> {
     {
         return Err(miette::miette!("input must be a regular file"));
     }
-    file.take(32 * 1024 * 1024 + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|error| miette::miette!("read input: {error}"))?;
-    if bytes.len() > 32 * 1024 * 1024 {
-        return Err(miette::miette!("input exceeds 32 MiB"));
-    }
-    Ok(bytes)
+    lk_core::captured_file::CapturedFile::capture(file, limit)
+        .map_err(|error| miette::miette!("capture input: {error}"))
 }
 
 async fn install(directory: &Path, python: &Path) -> miette::Result<()> {
@@ -223,13 +219,19 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("file.pdf");
         std::fs::write(&path, b"fixture").unwrap();
-        assert_eq!(read_input(&path).unwrap(), b"fixture");
-        assert!(read_input(root.path()).is_err());
+        assert_eq!(
+            read_input(&path, 32 * 1024 * 1024)
+                .unwrap()
+                .read_bytes(1024)
+                .unwrap(),
+            b"fixture"
+        );
+        assert!(read_input(root.path(), 32 * 1024 * 1024).is_err());
         std::fs::File::create(&path)
             .unwrap()
             .set_len(32 * 1024 * 1024 + 1)
             .unwrap();
-        assert!(read_input(&path).is_err());
+        assert!(read_input(&path, 32 * 1024 * 1024).is_err());
     }
 
     #[tokio::test]

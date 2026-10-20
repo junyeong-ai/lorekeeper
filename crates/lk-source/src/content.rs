@@ -8,7 +8,7 @@ use lk_core::content::{
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt};
 
 pub const REQUIREMENTS: &str = include_str!("content/requirements.txt");
 const PROCESSOR: &str = include_str!("content/processor.py");
@@ -33,7 +33,7 @@ pub enum ProcessingError {
 #[derive(Clone, Copy, Debug, Deserialize, Error)]
 #[serde(rename_all = "kebab-case")]
 pub enum ProcessingFailure {
-    #[error("input exceeds 32 MiB")]
+    #[error("input exceeds the configured capture limit")]
     InputLimit,
     #[error("decoded content exceeds configured limits")]
     DecodedLimit,
@@ -68,6 +68,7 @@ struct Options<'a> {
     check: bool,
     format: InputFormat,
     max_input_bytes: usize,
+    input_path: Option<&'a std::path::Path>,
     max_decoded_bytes: usize,
     max_units: usize,
     timeout_seconds: u64,
@@ -110,17 +111,33 @@ pub struct ProcessingRuntime {
 }
 
 pub async fn check(config: &InputProcessingConfig) -> Result<ProcessingRuntime, ProcessingError> {
-    match run_processor(&[], InputFormat::Pdf, config, true).await? {
+    match run_processor(None, InputFormat::Pdf, config, true).await? {
         Response::Ready { runtime } => Ok(runtime),
         Response::Failed { code } => Err(ProcessingError::Failed(code)),
         Response::Projected { .. } => Err(ProcessingError::Protocol),
     }
 }
 
-/// Converts captured bytes without writing source, vault or cache files. The selected
+/// Converts bounded bytes through a private captured file. The selected
 /// interpreter is a trusted local installation, never a document-provided executable.
 pub async fn project(
     bytes: &[u8],
+    format: InputFormat,
+    config: Option<&InputProcessingConfig>,
+) -> Result<InputProjection, ProcessingError> {
+    if bytes.len() > MAX_INPUT_BYTES {
+        return Err(ProcessingError::Failed(ProcessingFailure::InputLimit));
+    }
+    let captured = lk_core::captured_file::CapturedFile::capture(
+        std::io::Cursor::new(bytes),
+        MAX_INPUT_BYTES,
+    )?;
+    project_file(&captured, format, config).await
+}
+
+/// Convert the exact owned acquisition without retaining or piping the full raw file.
+pub async fn project_file(
+    captured: &lk_core::captured_file::CapturedFile,
     format: InputFormat,
     config: Option<&InputProcessingConfig>,
 ) -> Result<InputProjection, ProcessingError> {
@@ -129,11 +146,11 @@ pub async fn project(
             ProcessingFailure::UnsupportedFormat,
         ));
     }
-    if bytes.len() > MAX_INPUT_BYTES {
-        return Err(ProcessingError::Failed(ProcessingFailure::InputLimit));
-    }
     let config = config.ok_or(ProcessingError::NotConfigured)?;
-    match run_processor(bytes, format, config, false).await? {
+    captured.verify()?;
+    let response = run_processor(Some(captured), format, config, false).await?;
+    captured.verify()?;
+    match response {
         Response::Failed { code } => Err(ProcessingError::Failed(code)),
         Response::Projected { projection } => {
             validate_projection(&projection, format, config)?;
@@ -144,7 +161,7 @@ pub async fn project(
 }
 
 async fn run_processor(
-    bytes: &[u8],
+    captured: Option<&lk_core::captured_file::CapturedFile>,
     format: InputFormat,
     config: &InputProcessingConfig,
     check: bool,
@@ -152,7 +169,8 @@ async fn run_processor(
     let options = Options {
         check,
         format,
-        max_input_bytes: MAX_INPUT_BYTES,
+        max_input_bytes: captured.map_or(0, |file| file.byte_len()),
+        input_path: captured.map(|file| file.path()),
         max_decoded_bytes: config.max_decoded_bytes.get(),
         max_units: config.max_units.get(),
         timeout_seconds: config.timeout_seconds.get(),
@@ -169,23 +187,15 @@ async fn run_processor(
         .env("PYTHONIOENCODING", "utf-8")
         .args(["-I", "-X", "utf8", "-c", PROCESSOR])
         .arg(serde_json::to_string(&options).map_err(|_| ProcessingError::Protocol)?)
-        .stdin(Stdio::piped())
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
     let mut child = command.spawn()?;
-    let mut stdin = child.stdin.take().ok_or(ProcessingError::Protocol)?;
     let stdout = child.stdout.take().ok_or(ProcessingError::Protocol)?;
     let stderr = child.stderr.take().ok_or(ProcessingError::Protocol)?;
-    let send = async move {
-        stdin.write_all(bytes).await?;
-        stdin.shutdown().await?;
-        drop(stdin);
-        Ok::<_, std::io::Error>(())
-    };
     let operation = async {
         tokio::try_join!(
-            send,
             read_limited(stdout, config.max_output_bytes.get()),
             drain(stderr),
             child.wait()
@@ -193,7 +203,7 @@ async fn run_processor(
     };
     let result =
         tokio::time::timeout(Duration::from_secs(config.timeout_seconds.get()), operation).await;
-    let ((), output, (), status) = match result {
+    let (output, (), status) = match result {
         Ok(Ok(value)) => value,
         failure => {
             let _ = child.kill().await;
@@ -440,6 +450,44 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn file_projection_accepts_explicit_large_capture_without_piping_raw_bytes() {
+        let root = tempfile::tempdir().unwrap();
+        let python = executable(
+            root.path(),
+            "/bin/cat > \"$0.stdin\"\nprintf '%s' \"$6\" > \"$0.options\"\nprintf '%s' '{\"status\":\"failed\",\"code\":\"no-text\"}'",
+        );
+        let bytes = MAX_INPUT_BYTES + 1;
+        let captured = lk_core::captured_file::CapturedFile::capture(
+            std::io::Read::take(std::io::repeat(0), bytes as u64),
+            bytes,
+        )
+        .unwrap();
+        let error = project_file(&captured, InputFormat::Pdf, Some(&configuration(&python)))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            ProcessingError::Failed(ProcessingFailure::NoText)
+        ));
+        let options: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(python.with_extension("options")).unwrap())
+                .unwrap();
+        assert_eq!(
+            options["input_path"],
+            captured.path().to_string_lossy().as_ref()
+        );
+        assert_eq!(options["max_input_bytes"], bytes);
+        assert_eq!(
+            std::fs::metadata(python.with_extension("stdin"))
+                .unwrap()
+                .len(),
+            0
+        );
+        captured.verify().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn processor_failures_are_typed_and_diagnostics_are_private() {
         let root = tempfile::tempdir().unwrap();
         let python = executable(
@@ -511,7 +559,12 @@ mod tests {
             ),
         ];
         for (format, bytes) in cases {
-            let value = project(bytes, format, Some(&config)).await.unwrap();
+            let captured =
+                lk_core::captured_file::CapturedFile::capture(bytes, bytes.len()).unwrap();
+            assert!(captured.path().extension().is_none());
+            let value = project_file(&captured, format, Some(&config))
+                .await
+                .unwrap();
             match format {
                 InputFormat::Pdf => {
                     assert_eq!(value.units.len(), 2);

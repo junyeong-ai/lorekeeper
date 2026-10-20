@@ -4,8 +4,8 @@
 //! extraction, work-log routing.
 //!
 //! Archival is deferred to `archive_consumed_files()`, which the CLI calls only
-//! once this source's vault writes and the queue flush have succeeded — so a
-//! write/flush failure leaves files in the inbox for safe retry. Each file's
+//! after this source's page/request publication succeeds — so a
+//! publication failure leaves files in the inbox for safe retry. Each file's
 //! content-fingerprinted id makes a re-render idempotent.
 
 use std::path::{Path, PathBuf};
@@ -36,9 +36,8 @@ struct ManualParams {
     /// pipeline has written its pages.
     ///
     /// **Default: true** — archival is deferred to `archive_consumed_files()`,
-    /// which the CLI calls only after every vault write and the queue flush
-    /// succeeded. A write/flush failure leaves files in the inbox for safe
-    /// retry; the idempotent re-render absorbs any re-runs.
+    /// which the CLI calls only after durable page/request publication.
+    /// Publication failure leaves entries available for an idempotent retry.
     #[serde(default = "default_archive")]
     archive_after_ingest: bool,
 }
@@ -241,6 +240,7 @@ async fn read_item(path: &Path) -> Result<RawItem, SourceError> {
         vault_root: root,
         vault_dirs: Default::default(),
         documents: None,
+        originals: Default::default(),
     };
     read_captured_item(path, &capture, &ctx).await
 }
@@ -256,13 +256,13 @@ async fn read_captured_item(
         .iter()
         .position(|m| m.path == capture.manifest.entry)
         .ok_or_else(|| SourceError::Parse("missing manual entry".into()))?;
-    let bytes = &capture.contents[at];
+    let captured = &capture.contents[at];
     // Integrity hash of the file's raw bytes AS READ HERE. `archive_consumed_files` re-reads
     // the file and re-hashes before moving it: a mismatch means the file was swapped (same
     // name, new content) between extract and archive, so the new content has NOT been
     // materialized into the vault yet and must be left in the inbox for the next ingest —
     // never archived away on the strength of the path merely still existing.
-    let source_hash = blake3::hash(bytes).to_hex().to_string();
+    let source_hash = captured.revision().value.clone();
 
     // Convert HTML to Markdown so the vault stores clean content, not raw tags.
     // The user dropped this file deliberately, so when readability can't isolate an
@@ -276,14 +276,17 @@ async fn read_captured_item(
         .and_then(lk_core::content::InputFormat::from_extension)
         .ok_or_else(|| SourceError::Parse("unsupported manual entry format".into()))?;
     let projection = if format.requires_processor() {
-        Some(crate::content::project(bytes, format, ctx.documents.as_ref()).await?)
+        Some(crate::content::project_file(captured, format, ctx.documents.as_ref()).await?)
     } else {
         None
     };
     let raw = if projection.is_none() {
-        std::str::from_utf8(bytes)
-            .map_err(|_| SourceError::Parse("manual text requires UTF-8".into()))?
-            .to_owned()
+        String::from_utf8(
+            captured
+                .read_bytes(projection_limit(ctx))
+                .map_err(|error| SourceError::Parse(error.to_string()))?,
+        )
+        .map_err(|_| SourceError::Parse("manual text requires UTF-8".into()))?
     } else {
         String::new()
     };
@@ -309,9 +312,9 @@ async fn read_captured_item(
         _ => raw,
     };
 
-    if body.len() > lk_core::manual_original::MAX_ORIGINAL_ENTRY_BYTES {
+    if body.len() > projection_limit(ctx) {
         return Err(SourceError::Parse(
-            "manual derived Markdown exceeds 32 MiB".into(),
+            "manual derived Markdown exceeds the configured projection limit".into(),
         ));
     }
     let Some(mtime) = path
@@ -448,14 +451,20 @@ fn split_title(body: &str, path: &Path) -> (String, String) {
 }
 
 /// Move every consumed inbox file into `<inbox>/archived/{date}/` after the pipeline
-/// has written the vault pages. The CLI calls this only once this source's vault writes
-/// and the queue flush have succeeded, so a write/flush failure leaves the inbox intact
-/// for safe retry. Each scanned file maps to one event (its content-fingerprinted id is
-/// unique per file), so archiving the run's `events` clears the whole batch — a file
-/// left behind would be re-scanned every run.
+/// durably published pages and their semantic requests. Unchanged-byte checks preserve
+/// edited inputs; any publication failure leaves entries available for retry.
 pub fn archive_consumed_files(
     params: &serde_json::Value,
     events: &[lk_core::event::Event],
+    ctx: &ExtractContext,
+) -> Result<(), SourceError> {
+    archive_consumed_with_captures(params, events, &[], ctx)
+}
+
+fn archive_consumed_with_captures(
+    params: &serde_json::Value,
+    events: &[lk_core::event::Event],
+    captures: &[lk_core::manual_original::ManualBundleCapture],
     ctx: &ExtractContext,
 ) -> Result<(), SourceError> {
     let p: ManualParams = crate::parse_validated(params)?;
@@ -498,12 +507,38 @@ pub fn archive_consumed_files(
         // unreadable, or its content changed since extract (a same-name mid-run swap), skip it —
         // the next ingest will pick up whatever is there now. This is what makes "archive only
         // after the vault write succeeded" honest: we never evict content we didn't materialize.
-        let Ok(current) = std::fs::read(&src) else {
-            continue;
+        let borrowed = captures
+            .iter()
+            .find(|capture| capture.source_file == src_str)
+            .and_then(|capture| {
+                capture
+                    .manifest
+                    .members
+                    .iter()
+                    .position(|member| member.path == capture.manifest.entry)
+                    .map(|index| &capture.contents[index])
+            });
+        let owned = if borrowed.is_none() {
+            let Ok(file) = std::fs::File::open(&src) else {
+                continue;
+            };
+            let Ok(captured) = lk_core::captured_file::CapturedFile::capture(
+                file,
+                ctx.originals.max_entry_bytes.get(),
+            ) else {
+                continue;
+            };
+            Some(captured)
+        } else {
+            None
         };
+        let current = borrowed
+            .or(owned.as_ref())
+            .expect("entry has borrowed or owned capture");
         let expected_hash = event.metadata.get("source_hash").and_then(|v| v.as_str());
-        let current_hash = blake3::hash(&current).to_hex();
-        if expected_hash != Some(current_hash.as_str()) {
+        if expected_hash != Some(current.revision().value.as_str())
+            || !original_unchanged(&src, current)
+        {
             tracing::warn!(
                 file = %src.display(),
                 "manual: inbox file changed since extract; leaving it for the next ingest"
@@ -513,17 +548,14 @@ pub fn archive_consumed_files(
         let Some(name) = src.file_name() else {
             continue;
         };
-        if let Err(e) = preserve_archive(&archive_dir, name, &current) {
+        if let Err(e) = preserve_captured_archive(&archive_dir, name, current) {
             tracing::warn!(file = %src.display(), error = %e, "manual: archive failed; retaining inbox original");
             continue;
         }
         // Publication can take time: do not clear a replacement that arrived while preserving
         // the extracted bytes. The archive is already durable, so retaining the input on an
         // uncertain read is safe and a later ingest can retry.
-        let still_consumed = src
-            .symlink_metadata()
-            .is_ok_and(|m| m.file_type().is_file())
-            && std::fs::read(&src).is_ok_and(|bytes| bytes == current);
+        let still_consumed = original_unchanged(&src, current);
         if still_consumed {
             if let Err(e) = std::fs::remove_file(&src) {
                 tracing::warn!(file = %src.display(), error = %e, "manual: failed to remove archived inbox file");
@@ -535,14 +567,37 @@ pub fn archive_consumed_files(
     Ok(())
 }
 
-/// Every candidate is checked by exclusive publication, including suffix candidates. A hash
-/// narrows a name; it never authorizes overwriting bytes already held at that address.
+fn original_unchanged(path: &Path, captured: &lk_core::captured_file::CapturedFile) -> bool {
+    use std::io::Read;
+    path.symlink_metadata().is_ok_and(|metadata| {
+        metadata.file_type().is_file() && metadata.len() == captured.byte_len() as u64
+    }) && std::fs::File::open(path)
+        .and_then(|file| {
+            lk_core::captured_file::hash_reader(file.take(captured.byte_len() as u64 + 1))
+        })
+        .is_ok_and(|(bytes, revision)| {
+            bytes == captured.byte_len() && &revision == captured.revision()
+        })
+}
+
+#[cfg(test)]
 fn preserve_archive(
     archive_dir: &Path,
     name: &std::ffi::OsStr,
     contents: &[u8],
 ) -> std::io::Result<PathBuf> {
-    let hash = blake3::hash(contents).to_hex();
+    let captured = lk_core::captured_file::CapturedFile::capture(contents, contents.len())?;
+    preserve_captured_archive(archive_dir, name, &captured)
+}
+
+/// Every candidate is checked by exclusive publication, including suffix candidates. A hash
+/// narrows a name; it never authorizes overwriting bytes already held at that address.
+fn preserve_captured_archive(
+    archive_dir: &Path,
+    name: &std::ffi::OsStr,
+    contents: &lk_core::captured_file::CapturedFile,
+) -> std::io::Result<PathBuf> {
+    let hash = &contents.revision().value;
     let name_path = Path::new(name);
     let stem = name_path.file_stem().unwrap_or(name).to_string_lossy();
     let extension = name_path.extension().map(|ext| ext.to_string_lossy());
@@ -575,7 +630,7 @@ fn preserve_archive(
                 archive_dir.join(candidate)
             }
         };
-        match lk_core::fs::publish_exclusive(&dest, contents, Some(0o600))? {
+        match lk_core::fs::publish_exclusive_from(&dest, contents.reader()?, Some(0o600))? {
             lk_core::fs::PublishOutcome::Created | lk_core::fs::PublishOutcome::Reused => {
                 return Ok(dest);
             }
@@ -593,6 +648,7 @@ pub struct ManualExtraction {
     /// Per-entry refusal remains visible to the CLI even when other entries succeeded.
     pub failures: Vec<String>,
     pub unprocessed: Vec<UnprocessedInput>,
+    projection_limit: usize,
 }
 
 pub struct UnprocessedInput {
@@ -612,8 +668,14 @@ impl ManualExtraction {
                 path.file_name()
                     .ok_or_else(|| SourceError::Parse("manual filename".into()))?,
             );
-            item.body =
-                crate::manual_bundle::project_links(&item.body, &root, &entry, capture, documents)?;
+            item.body = crate::manual_bundle::project_links(
+                &item.body,
+                &root,
+                &entry,
+                capture,
+                documents,
+                self.projection_limit,
+            )?;
         }
         if self.items.iter().map(|item| item.body.len()).sum::<usize>()
             > lk_core::manual_original::MAX_MANUAL_BATCH_BYTES
@@ -633,6 +695,13 @@ impl ManualExtraction {
     }
 }
 
+fn projection_limit(ctx: &ExtractContext) -> usize {
+    ctx.documents
+        .as_ref()
+        .map(|config| config.max_output_bytes.get())
+        .unwrap_or(lk_core::manual_original::MAX_ORIGINAL_ENTRY_BYTES)
+}
+
 pub async fn capture_manual(
     params: &serde_json::Value,
     ctx: &ExtractContext,
@@ -647,6 +716,7 @@ pub async fn capture_manual(
         originals: Vec::new(),
         failures: Vec::new(),
         unprocessed: Vec::new(),
+        projection_limit: projection_limit(ctx),
     };
     let mut total = 0usize;
     let mut total_members = 0usize;
@@ -686,10 +756,12 @@ pub async fn capture_manual(
         }
         let canonical = root.join(entry.file_name());
         let observation: Result<_, SourceError> = async {
-            let mut capture = crate::manual_bundle::capture_limited(
+            let mut capture = crate::manual_bundle::capture_with_limits(
                 &root,
                 &canonical,
-                lk_core::manual_original::MAX_MANUAL_BATCH_BYTES.saturating_sub(total),
+                ctx.originals.max_source_bytes.get().saturating_sub(total),
+                &ctx.originals,
+                projection_limit(ctx),
             )?;
             capture.source_file = path.display().to_string();
             let item = read_captured_item(&path, &capture, ctx).await?;
@@ -708,9 +780,9 @@ pub async fn capture_manual(
                 total = total.checked_add(capture.byte_len()).ok_or_else(|| {
                     SourceError::Parse("manual source batch size overflow".into())
                 })?;
-                if total > lk_core::manual_original::MAX_MANUAL_BATCH_BYTES {
+                if total > ctx.originals.max_source_bytes.get() {
                     return Err(SourceError::Parse(
-                        "manual source batch exceeds 256 MiB; split the inbox batch".into(),
+                        "manual source batch exceeds ingest.originals.max_source_bytes".into(),
                     ));
                 }
                 result.items.push(item);
@@ -770,7 +842,7 @@ pub fn archive_manual_originals(
         })
         .cloned()
         .collect();
-    archive_consumed_files(params, &filtered, ctx)
+    archive_consumed_with_captures(params, &filtered, captures, ctx)
 }
 
 #[cfg(test)]
@@ -791,6 +863,7 @@ mod tests {
             vault_root: std::path::PathBuf::new(),
             vault_dirs: Default::default(),
             documents: None,
+            originals: Default::default(),
         };
         let params = serde_json::json!({ "inbox_dir": dir, "archive_after_ingest": false });
         let mut items = ManualSource::new().extract(&params, &ctx).await.unwrap();
@@ -827,6 +900,7 @@ mod tests {
                 vault_root: vault,
                 vault_dirs: Default::default(),
                 documents: None,
+                originals: Default::default(),
             };
             let direct_params =
                 serde_json::json!({"inbox_dir": "inbox", "archive_after_ingest": archive});
@@ -1007,6 +1081,7 @@ mod tests {
             vault_root: PathBuf::new(),
             vault_dirs: Default::default(),
             documents: None,
+            originals: Default::default(),
         };
         assert!(matches!(
             ManualSource::new().extract(&params, &ctx).await,
@@ -1169,6 +1244,7 @@ mod tests {
             vault_root: std::path::PathBuf::new(),
             vault_dirs: Default::default(),
             documents: None,
+            originals: Default::default(),
         };
         let items = src.extract(&params, &ctx).await.unwrap();
         assert_eq!(items.len(), 1);
@@ -1193,6 +1269,7 @@ mod tests {
             vault_root: std::path::PathBuf::new(),
             vault_dirs: Default::default(),
             documents: None,
+            originals: Default::default(),
         };
         let items = src.extract(&params, &ctx).await.unwrap();
         assert_eq!(items.len(), 1);
@@ -1215,6 +1292,7 @@ mod tests {
             vault_root: std::path::PathBuf::new(),
             vault_dirs: Default::default(),
             documents: None,
+            originals: Default::default(),
         };
         let err = src.extract(&params, &ctx).await.unwrap_err();
         assert!(
@@ -1240,6 +1318,7 @@ mod tests {
             vault_root: std::path::PathBuf::new(),
             vault_dirs: Default::default(),
             documents: None,
+            originals: Default::default(),
         };
         let items = src.extract(&params, &ctx).await.unwrap();
         // After extract(), file is still in inbox (archival is deferred).
@@ -1292,6 +1371,7 @@ mod tests {
             vault_root: std::path::PathBuf::new(),
             vault_dirs: Default::default(),
             documents: None,
+            originals: Default::default(),
         };
         let items = src.extract(&params, &ctx).await.unwrap();
         let events: Vec<lk_core::event::Event> = items
@@ -1344,6 +1424,7 @@ mod tests {
             vault_root: std::path::PathBuf::new(),
             vault_dirs: Default::default(),
             documents: None,
+            originals: Default::default(),
         };
         let items = src.extract(&params, &ctx).await.unwrap();
         let events: Vec<lk_core::event::Event> = items
@@ -1407,6 +1488,7 @@ mod tests {
             vault_root: std::path::PathBuf::new(),
             vault_dirs: Default::default(),
             documents: None,
+            originals: Default::default(),
         };
         let items = src.extract(&params, &ctx).await.unwrap();
         let events: Vec<lk_core::event::Event> = items
@@ -1466,6 +1548,7 @@ mod tests {
             vault_root: std::path::PathBuf::new(),
             vault_dirs: Default::default(),
             documents: None,
+            originals: Default::default(),
         };
         let items = src.extract(&params, &ctx).await.unwrap();
         let events: Vec<lk_core::event::Event> = items
@@ -1669,6 +1752,7 @@ mod tests {
             vault_root: vault,
             vault_dirs: Default::default(),
             documents: None,
+            originals: Default::default(),
         };
         let params = serde_json::json!({"inbox_dir": "inbox"});
         let capture = capture_manual(&params, &ctx).await.unwrap();
@@ -1788,6 +1872,7 @@ mod tests {
             vault_root: tmp.path().to_path_buf(),
             vault_dirs: Default::default(),
             documents: None,
+            originals: Default::default(),
         };
         let items = src.extract(&params, &ctx).await.unwrap();
         assert_eq!(

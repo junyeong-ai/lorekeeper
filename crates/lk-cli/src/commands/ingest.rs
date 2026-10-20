@@ -201,6 +201,7 @@ pub async fn run(
         vault_root: vault_root.clone(),
         vault_dirs: config.vault.dirs.clone(),
         documents: config.ingest.documents.clone(),
+        originals: config.ingest.originals.clone(),
     };
 
     // Phase 1: Plan all sources (no vault writes yet).
