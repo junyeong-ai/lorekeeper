@@ -129,7 +129,13 @@ fn resolve_concept(
         || path
             .components()
             .any(|part| !matches!(part, std::path::Component::Normal(_)))
-        || path.components().collect::<PathBuf>().to_str() != Some(slug)
+        || path
+            .components()
+            .collect::<PathBuf>()
+            .to_str()
+            .map(|value| value.replace(std::path::MAIN_SEPARATOR, "/"))
+            .as_deref()
+            != Some(slug)
     {
         return Err(GraphError::Io(format!(
             "expected an exact collection-relative concept address: {slug}"
@@ -149,7 +155,7 @@ fn resolve_concept(
         .with_extension("")
         .to_str()
         .ok_or_else(|| GraphError::Io("concept address must be UTF-8".into()))?
-        .to_owned();
+        .replace(std::path::MAIN_SEPARATOR, "/");
     Ok((slug, actual))
 }
 
