@@ -212,6 +212,7 @@ impl QueueTask {
 /// code own the merge, which keeps one implementation of it and leaves the extraction
 /// itself a pure function of the page it read.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TaskResult {
     pub concept_policy: lk_core::config::ConceptPolicy,
     pub task_id: String,
@@ -219,6 +220,8 @@ pub struct TaskResult {
     /// the target page: the page may have been re-rendered while the drain was running.
     pub cache_hash: String,
     pub target_revision: String,
+    pub context_revision: String,
+    pub discovery: Vec<lk_core::discovery::DiscoveryQuery>,
     pub target: TaskTarget,
     pub date: jiff::civil::Date,
     pub concepts: Vec<ReportedConcept>,
@@ -231,6 +234,8 @@ pub struct SynthesisResult {
     pub task_id: String,
     pub cache_hash: String,
     pub target_revision: String,
+    /// Canonical source/context scope captured before drafting, including scoped reviews.
+    pub context_revision: String,
     pub synthesis: String,
     pub related: Option<String>,
 }
@@ -249,15 +254,26 @@ pub struct SectionResult {
     pub body: String,
 }
 
-/// One concept an extraction named, with the grounding sentence that makes its page worth
-/// having.
-///
-/// The synthesis travels with the extraction because only the reader of the source page can
-/// write it, and a concept page created without one is an empty heading nobody can act on.
-/// It applies on CREATION only — an established page's synthesis is its accumulated meaning
-/// and outranks any single mention.
+/// Exact existing owner selected from the worker's revision-pinned discovery context.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConceptOwner {
+    pub path: String,
+    pub revision: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "decision", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum ConceptAdmission {
+    New,
+    Reuse { owner: ConceptOwner },
+}
+
+/// A concept decision with source grounding for a new owner. Reusing an owner retains
+/// its accumulated prose rather than replacing it with this source's interpretation.
 #[derive(Debug, Clone, Serialize)]
 pub struct ReportedConcept {
+    pub admission: ConceptAdmission,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rss_evidence: Vec<lk_core::rss_evidence::RssEventSelection>,
     #[serde(flatten)]
@@ -271,6 +287,7 @@ impl<'de> Deserialize<'de> for ReportedConcept {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct Wire {
+            admission: ConceptAdmission,
             name: String,
             #[serde(default)]
             category: Option<String>,
@@ -283,6 +300,7 @@ impl<'de> Deserialize<'de> for ReportedConcept {
         }
         let wire = Wire::deserialize(deserializer)?;
         Ok(Self {
+            admission: wire.admission,
             concept: ExtractedConcept {
                 name: wire.name,
                 category: wire.category,
@@ -875,16 +893,22 @@ mod tests {
         }
         assert!(
             serde_json::from_value::<ReportedConcept>(
-                serde_json::json!({"name":"Alpha","rss_evidenc":[]})
+                serde_json::json!({"name":"Alpha","admission":{"decision":"new"},"rss_evidenc":[]})
             )
             .is_err()
         );
-        let legacy: ReportedConcept = serde_json::from_value(
-            serde_json::json!({"name":"Alpha","aliases":[],"synthesis":"Definition"}),
+        assert!(
+            serde_json::from_value::<ReportedConcept>(
+                serde_json::json!({"name":"Alpha","aliases":[],"synthesis":"Definition"}),
+            )
+            .is_err()
+        );
+        let current: ReportedConcept = serde_json::from_value(
+            serde_json::json!({"name":"Alpha","admission":{"decision":"new"},"aliases":[],"synthesis":"Definition"}),
         )
         .unwrap();
         assert!(
-            !serde_json::to_value(legacy)
+            !serde_json::to_value(current)
                 .unwrap()
                 .as_object()
                 .unwrap()
@@ -941,6 +965,8 @@ mod tests {
         let good = TaskResult {
             concept_policy: lk_core::config::ConceptPolicy::SupportedNew,
             target_revision: String::new(),
+            context_revision: "fixture-scope".into(),
+            discovery: Vec::new(),
             task_id: "ext-1".into(),
             cache_hash: "h".into(),
             target: crate::TaskTarget {

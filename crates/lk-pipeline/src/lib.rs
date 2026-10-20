@@ -730,6 +730,19 @@ impl Pipeline {
         page: &str,
         manifest: Option<&lk_core::rss_original::RssOriginalManifest>,
     ) -> Result<String, PipelineError> {
+        let outcome = self.stage_concept_result(result, page, manifest).await;
+        if outcome.is_err() {
+            self.concept_drafts.discard_staging();
+        }
+        outcome
+    }
+
+    async fn stage_concept_result(
+        &mut self,
+        result: &lk_queue::TaskResult,
+        page: &str,
+        manifest: Option<&lk_core::rss_original::RssOriginalManifest>,
+    ) -> Result<String, PipelineError> {
         if !result.concept_policy.is_enabled() {
             return Err(PipelineError::Render(
                 "concept extraction is disabled".into(),
@@ -798,23 +811,41 @@ impl Pipeline {
                 }
             }
 
-            // The same filter the synchronous path applies: an unslugifiable name is
-            // dropped, an invented category stripped.
-            let Some(concept) =
+            // Categories share the allowlist; invalid names refuse the entire typed result.
+            let concept =
                 filter_valid_concepts(vec![reported.concept.clone()], &self.ctx.concept_categories)
                     .pop()
-            else {
-                continue;
+                    .ok_or_else(|| {
+                        PipelineError::Render("reported concept has no valid name".into())
+                    })?;
+            let selected = match &reported.admission {
+                lk_queue::ConceptAdmission::New => {
+                    if reported
+                        .synthesis
+                        .as_deref()
+                        .is_none_or(|text| text.trim().is_empty())
+                    {
+                        return Err(PipelineError::Render(
+                            "a new concept requires a nonempty source-grounded synthesis".into(),
+                        ));
+                    }
+                    self.concept_drafts
+                        .stage_new(
+                            &concept,
+                            self.reader.as_ref(),
+                            &self.ctx.dirs,
+                            result.concept_policy,
+                        )
+                        .await?
+                }
+                lk_queue::ConceptAdmission::Reuse { owner } => {
+                    self.concept_drafts
+                        .stage_reuse(&concept, owner, self.reader.as_ref(), &self.ctx.dirs)
+                        .await?
+                }
             };
             staged.push((
-                self.concept_drafts
-                    .stage(
-                        &concept,
-                        self.reader.as_ref(),
-                        &self.ctx.dirs,
-                        result.concept_policy,
-                    )
-                    .await?,
+                selected,
                 reported.synthesis.as_deref(),
                 reported.rss_evidence.clone(),
             ));

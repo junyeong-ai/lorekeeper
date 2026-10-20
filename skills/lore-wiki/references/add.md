@@ -58,14 +58,15 @@ original-file capture; do not claim `wiki original` coverage for it.
 4. Extract durable, independently reusable concepts. A name's appearance alone does not
    justify a page: the source must establish something worth retrieving about it. Keep
    incidental mentions in the document; an empty extraction is valid. Reuse an existing
-   broader concept when it faithfully covers the material. Converge each one through the **Concept convergence**
-   section of the vault's `AGENTS.md` — `lore resolve` for EVERY form the source writes,
-   since a hit on any of them names the page that already owns the concept, the
-   `proposed_path` from `lore resolve --json` for absent names (never derive a filename from the name),
-   created-this-run set for pages this add minted, `lore wiki search` on two or three
-   distinguishing terms of each form for the equivalences no rule about spelling can
-   see, then alias registration and the machine-owned sources
-   section/`source_count` fields. Fill the Synthesis section with a 1-2 sentence
+   broader concept when it faithfully covers the material. Follow **Concept convergence**
+   in the vault's `AGENTS.md`: run `lore resolve` for EVERY form the source writes,
+   then `lore wiki search` with meaningful distinguishing terms. A lookup hit identifies
+   a declared name owner; read its subject and scope before reuse. A matching homonym
+   does not establish equivalence. For absent names use `proposed_path` from
+   `lore resolve --json`, and track pages created in this run. Follow AGENTS.md for
+   source-grounded homonym qualification without claiming an owned bare alias.
+   Register equivalent aliases and preserve the machine-owned sources section and
+   `source_count`. Fill the Synthesis section with a 1-2 sentence
    definition for a new concept; the document's forward concept link from step 3
    is what `backlinks-sync` counts as the citation. A concept whose evidence later
    moves is rewritten by the queue, not here — `lore graph backlinks-sync` queues

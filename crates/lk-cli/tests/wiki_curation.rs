@@ -141,9 +141,10 @@ fn reviewed_curation_is_read_only_in_preview_guarded_and_discoverable_after_publ
         ],
     );
     let audit = ok(&config, &["wiki", "audit-plan", "--path", concept]);
-    assert_eq!(audit["unreviewed"], 2);
+    assert_eq!(audit["coverage_scope"], "selection");
+    assert_eq!(audit["unreviewed"], 1);
     assert_eq!(audit["counts_by_kind"]["concept"]["unreviewed"], 1);
-    assert_eq!(audit["counts_by_kind"]["document"]["unreviewed"], 1);
+    assert_eq!(audit["counts_by_kind"]["document"]["unreviewed"], 0);
     let candidate = &audit["candidates"][0];
     assert_eq!(candidate["path"], concept);
     assert_eq!(candidate["kind"], "concept");
@@ -160,6 +161,7 @@ fn reviewed_curation_is_read_only_in_preview_guarded_and_discoverable_after_publ
     );
     assert_eq!(recorded["recorded"], json!([concept]));
     let coverage = ok(&config, &["wiki", "audit-plan"]);
+    assert_eq!(coverage["coverage_scope"], "corpus");
     assert_eq!(coverage["reviewed_current"], 1);
     assert_eq!(coverage["counts_by_kind"]["concept"]["reviewed_current"], 1);
     assert_eq!(coverage["counts_by_kind"]["document"]["unreviewed"], 1);

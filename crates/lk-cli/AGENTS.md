@@ -39,6 +39,8 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   Native consumers own selected semantic reads and guarded publication; the controller
   owns final global reconciliation/checks. Keep this boundary explicit in the host
   instruction and shared skills; standalone skills still perform their own final checks.
+  Grant each temporary selection manifest's directory explicitly to the selected host;
+  keep it alive through the foreground consumer and remove it afterward.
   `commands/work.rs` binds retained input and audit dependencies to resumable derived
   work. Oversized requests use a fresh configured agent per inspection/reduction and
   a bounded finalizer; small requests retain ordinary batching. `execution.work` limits
@@ -130,7 +132,15 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   atomic writer; do not add another UTF-8/JSONL interpretation.
 - Extraction result application may ignore a prior done marker while retaining exact
   input/target guards. Already-done section/synthesis tasks can retire normally.
-  Stage matching task/result pairs; no orphan application except explicit recovery.
+  Stage matching task/result pairs; missing retained input refuses application.
+  Extraction and synthesis pin the worker's full read scope. Extraction also
+  carries explicit discovery recipes and new/reuse admission. Native oversized
+  extraction records discovery before planning bounded evidence work; discovery
+  never marks extraction complete. Retire successful recipes in the publication
+  journal; prune only owned valid recipes with no retained pending identity.
+  Compose batch read guards against the actual publication set and matching original
+  bytes; owned edits guard themselves during recovery. Distinct publication addresses
+  resolving to one physical page refuse before any write, including in dry runs.
 - Hold the vault claim for each apply, not an entire LLM session; vault→queue is the
   lock order. Distinguish a page-local failure, quarantined malformed result, and
   fatal IO. Aggregate output honestly reports all/some/none applied.

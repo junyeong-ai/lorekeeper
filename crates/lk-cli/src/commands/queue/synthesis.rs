@@ -63,6 +63,7 @@ pub(super) fn apply(
                     task_id: result.task_id,
                     cache_hash: result.cache_hash,
                     target_revision: result.target_revision,
+                    context_revision: String::new(),
                     synthesis: result.body,
                     related: None,
                 })

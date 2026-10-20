@@ -472,6 +472,12 @@ corrupt state is reported rather than silently reset.
 Hosts use their existing authentication and policies. Their permission
 and sandbox models differ; Rust publication guards are not OS access controls.
 
+Concept extraction captures discovery candidates together with their scoped reviews
+and evidence. Workers explicitly choose new admission or reuse of an exact existing
+revision; equal names never authorize automatic merging. Changed read scope refuses
+publication. Small sources hand off to bounded work when their related evidence is
+large. These guards establish processing and publication consistency, not semantic truth.
+
 ```yaml
 llm:
   provider: queue

@@ -53,7 +53,7 @@ mod native {
     };
     use lk_core::config::Config;
     use lk_core::execution::ExecutionProfile;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::time::Duration;
 
     enum WorkStep {
@@ -63,6 +63,9 @@ mod native {
     }
 
     enum QueueDispatch {
+        Discovery {
+            task: lk_queue::QueueTask,
+        },
         Partitioned {
             id: String,
             task: lk_queue::QueueTask,
@@ -320,7 +323,12 @@ mod native {
             Ok(())
         }
 
-        async fn consumer(&mut self, skill: &str, operation: &str) -> bool {
+        async fn consumer(
+            &mut self,
+            skill: &str,
+            operation: &str,
+            input_directory: Option<&Path>,
+        ) -> bool {
             if self.result.cancelled || !self.configuration_is_current() {
                 return false;
             }
@@ -352,6 +360,7 @@ mod native {
                         operation,
                         &installation,
                         self.opts.config.as_ref().expect("resolved config"),
+                        input_directory,
                     )
                 });
             match command {
@@ -566,7 +575,7 @@ mod native {
             let operation = format!(
                 "bounded finish {id}. Read the bounded-work reference and lore work result for this exact work. Produce the normal typed final result using its completed root observation and selected generation specification. Submit with lore work finish. Do not read the whole corpus or drain other tasks. Leave the staged queue result or audit assessment for native controller publication. The controller owns global checks. Preserve source_questions as attributed uncertainty in the final prose; do not invent answers. Material conflicts need a scoped open review and follow-up audit disposition. Processing blockers in unresolved cannot be silently removed or marked reviewed."
             );
-            if !self.consumer(skill, &operation).await {
+            if !self.consumer(skill, &operation, None).await {
                 return WorkStep::Failed;
             }
             match crate::commands::work::verify_finished(
@@ -626,6 +635,17 @@ mod native {
             let mut batch = Vec::new();
             let mut batch_bytes = 0usize;
             for (target, task) in targets {
+                if crate::commands::work::needs_discovery(
+                    &self.root,
+                    &self.config,
+                    &self.config_revision,
+                    &task,
+                )? {
+                    flush(&mut batch, &mut jobs);
+                    batch_bytes = 0;
+                    jobs.insert(target, QueueDispatch::Discovery { task });
+                    continue;
+                }
                 match crate::commands::work::prepare_task(
                     &self.root,
                     &self.config,
@@ -651,8 +671,45 @@ mod native {
             Ok(jobs)
         }
 
+        fn expanded_extraction_handoff(
+            &self,
+            tasks: &[lk_queue::QueueTask],
+        ) -> miette::Result<bool> {
+            let mut unfinished = false;
+            for task in tasks {
+                if crate::commands::queue::tasks_completed(&self.root, std::slice::from_ref(task))?
+                {
+                    continue;
+                }
+                unfinished = true;
+                if task.kind != lk_queue::TaskKind::ExtractConcepts {
+                    return Ok(false);
+                }
+                let current = crate::commands::queue::current_task(&self.root, &task.task_id)?;
+                if current.kind != task.kind
+                    || current.cache_hash != task.cache_hash
+                    || current.target != task.target
+                    || current.input != task.input
+                    || current.created_at != task.created_at
+                    || !crate::commands::work::has_current_discovery(&self.root, &current)?
+                    || !matches!(
+                        crate::commands::work::prepare_task(
+                            &self.root,
+                            &self.config,
+                            &self.config_revision,
+                            &task.task_id,
+                        )?,
+                        crate::commands::work::TaskWork::Partitioned { .. }
+                    )
+                {
+                    return Ok(false);
+                }
+            }
+            Ok(unfinished)
+        }
+
         async fn dispatch_queue(&mut self) -> bool {
-            loop {
+            'planning: loop {
                 let jobs = match self.queue_dispatches() {
                     Ok(jobs) => jobs,
                     Err(error) => return self.failure("queue planning", error),
@@ -672,6 +729,45 @@ mod native {
                             Err(error) => return self.failure("queue scheduling", error),
                         };
                     match &jobs[&selected] {
+                        QueueDispatch::Discovery { task } => {
+                            let directory = match tempfile::Builder::new()
+                                .prefix("lorekeeper-discovery-")
+                                .tempdir()
+                            {
+                                Ok(directory) => directory,
+                                Err(error) => {
+                                    return self.failure("extraction discovery selection", error);
+                                }
+                            };
+                            let path = directory.path().join("tasks.json");
+                            if let Err(error) = std::fs::write(
+                                &path,
+                                serde_json::to_vec(&[&task.task_id]).expect("task ids serialize"),
+                            ) {
+                                return self.failure("extraction discovery selection", error);
+                            }
+                            let selection = match serde_json::to_string(&path) {
+                                Ok(selection) => selection,
+                                Err(error) => {
+                                    return self.failure("extraction discovery selection", error);
+                                }
+                            };
+                            if !self
+                                .consumer(
+                                    "lore-process",
+                                    &format!("discover {selection}"),
+                                    Some(directory.path()),
+                                )
+                                .await
+                            {
+                                return false;
+                            }
+                            match crate::commands::work::has_current_discovery(&self.root, task) {
+                                Ok(true) => continue 'planning,
+                                Ok(false) => return self.failure("extraction discovery receipt", "selected extraction has no current discovery recipe; unfinished work retained"),
+                                Err(error) => return self.failure("extraction discovery receipt", error),
+                            }
+                        }
                         QueueDispatch::Partitioned { id, .. } => {
                             match self.bounded_step(id, "lore-process").await {
                                 WorkStep::Pending => continue,
@@ -705,9 +801,12 @@ mod native {
                                 ""
                             };
                             let operation = format!(
-                                "selected. {context} The native controller selected one task per distinct target within the configured evidence input budget. Read the JSON array of exact task IDs from the selection manifest and process only those current tasks, then return. Do not drain the rest of the queue or run global finalization. Follow the ordinary typed staging/publication protocol for these tasks. Selected queue task manifest: {selection}"
+                                "selected. {context} The native controller selected one task per distinct target within the configured evidence input budget. Read the JSON array of exact task IDs from the selection manifest and process only those current tasks, then return. Do not drain the rest of the queue or run global finalization. Follow the ordinary typed staging/publication protocol for these tasks. For extraction, record exact discovery recipes and inspect lore work context before loading the expanded candidate corpus. If requires_bounded_work is true, execute its plan_command and stage no result for that task; finish other selected tasks and return so the controller can schedule its bounded inspections. Selected queue task manifest: {selection}"
                             );
-                            if !self.consumer("lore-process", &operation).await {
+                            if !self
+                                .consumer("lore-process", &operation, Some(directory.path()))
+                                .await
+                            {
                                 return false;
                             }
                         }
@@ -721,12 +820,29 @@ mod native {
                     let tasks = match &jobs[&selected] {
                         QueueDispatch::WholeInput { tasks } => tasks.as_slice(),
                         QueueDispatch::Partitioned { task, .. } => std::slice::from_ref(task),
+                        QueueDispatch::Discovery { .. } => {
+                            unreachable!("discovery restarts planning")
+                        }
                     };
                     match crate::commands::queue::tasks_completed(&self.root, tasks) {
-                            Ok(true) => {},
-                            Ok(false) => return self.failure("selected queue receipt", "selected tasks are not completed against their retained inputs; unfinished work retained"),
-                            Err(error) => return self.failure("selected queue receipt", error),
+                        Ok(true) => {}
+                        Ok(false) => {
+                            if matches!(jobs[&selected], QueueDispatch::WholeInput { .. }) {
+                                match self.expanded_extraction_handoff(tasks) {
+                                    Ok(true) => {
+                                        self.record("expanded extraction work", StageState::Completed, Some("discovery expanded unfinished extraction beyond the whole-input budget; replanning bounded inspections".into()));
+                                        continue 'planning;
+                                    }
+                                    Ok(false) => {}
+                                    Err(error) => {
+                                        return self.failure("selected queue receipt", error);
+                                    }
+                                }
+                            }
+                            return self.failure("selected queue receipt", "selected tasks are not completed against their retained inputs; unfinished work retained");
                         }
+                        Err(error) => return self.failure("selected queue receipt", error),
+                    }
                     break;
                 }
             }
@@ -987,7 +1103,7 @@ mod native {
                 .collect::<Vec<_>>();
             if !missing.is_empty() {
                 let missing = serde_json::to_string(&missing).expect("string paths serialize");
-                if !self.consumer("lore-wiki", &format!("discover. Plan related-document search only for these exact audit subjects: {missing}. Read their names, scope and outline, choose explicit search queries and record each through wiki audit-discover. Do not audit, repair, synthesize or record completed assessments in this discovery session.")).await {
+                if !self.consumer("lore-wiki", &format!("discover. Plan related-document search only for these exact audit subjects: {missing}. Read their names, scope and outline, choose explicit search queries and record each through wiki audit-discover. Do not audit, repair, synthesize or record completed assessments in this discovery session."), None).await {
                     return;
                 }
                 plan = match self.audit_plan(&paths) {
@@ -1089,7 +1205,7 @@ mod native {
                     jobs.remove(&selected);
                 }
             } else {
-                self.consumer("lore-wiki", &format!("maintain. The controller selected this exact batch: {selection}. Start with audit-plan --path for these addresses; do not select another batch. Use bounded work for any subject whose work envelope requires partitioning.")).await;
+                self.consumer("lore-wiki", &format!("maintain. The controller selected this exact batch: {selection}. Start with audit-plan --path for these addresses; do not select another batch. Use bounded work for any subject whose work envelope requires partitioning."), None).await;
             }
             self.reconcile().await;
             if !self.inspect_review_health() {

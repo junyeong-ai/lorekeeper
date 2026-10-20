@@ -226,7 +226,7 @@ pgvector를 선택했다. 이 결정의 조건과 첫 메모의 검색 품질 �
 lore wiki snapshot                          # 저장된 검색 판본·마지막 검증 시각 조회
 lore wiki prepare                           # 현재 원본을 검증하고 검색 판본 생성
 lore wiki search "Vector DB" --snapshot <id> --limit 10 --json
-lore wiki context wiki/concepts/vector-db.md --snapshot <id> --limit 10 # 관계별 근거를 나누어 탐색
+lore wiki context wiki/concepts/vector-database.md --snapshot <id> --limit 10 # 관계별 근거를 나누어 탐색
 lore wiki browse --type concept --category ai-ml --limit 20 --json
 lore wiki search "API 토큰" --phrase --snapshot <id> --json
 lore wiki search "인증정보" --spacing --snapshot <id> --json
@@ -461,6 +461,12 @@ Claude는 도구와 사용자 확장을 끄고, Codex는 읽기 전용 샌드박
 저장하므로 재실행에서도 이어지며, 손상된 상태를 조용히 초기화하지 않습니다.
 호스트의 기존 인증과 정책을 사용합니다. 두 제품의 권한·샌드박스는 서로 다르며,
 Rust의 게시 검증을 OS 접근 통제와 같은 보장으로 취급하지 않습니다.
+
+컨셉 추출은 검색 후보와 그에 연결된 검토·근거를 읽을 범위로 고정합니다.
+작업자는 새 컨셉 생성과 기존 컨셉의 정확한 판본 재사용을 명시적으로 구분하며,
+같은 이름만으로 자동 병합하지 않습니다. 읽은 범위가 바뀌면 결과 게시를 거부합니다.
+원문은 작아도 관련 근거가 커지면 분할 처리로 넘깁니다. 이 검증은 읽기 범위와
+게시의 일관성을 확인하며, 의미적 정확성 자체를 증명하지는 않습니다.
 
 ```yaml
 llm:

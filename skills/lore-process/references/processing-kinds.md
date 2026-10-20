@@ -35,7 +35,7 @@ the target: a vault that stays in its language by inference stays in it only whi
 something to infer from, and the first page a new vault writes has nothing.
 
 Two things it does not reach. Source content is never translated — a quoted line, a title
-you preserve, a link stay as they are. And a NAME is not prose: a concept's name is the form
+you preserve, a link stay as they are. And a NAME is not prose: a concept's base name is the form
 the source writes, so an English term keeps its spelling on a page written in Korean and a
 Korean product name keeps its on one written in English (see `kind: extract-concepts`).
 
@@ -121,7 +121,10 @@ keep historical/provider-attributed claims scoped. Current manifest changes do n
 that selected observation current truth. A citation without `rss_event` retains the full
 page authored-revision contract. Mixed page/event citations require both kinds of reads.
 
-1. Open `target.vault_path`. Read each page citation's exact source page under the vault
+1. Capture `lore work context --task-id TASK` before drafting and retain its
+   `context_revision` and `subject.target_revision`. Read its selected resource roster,
+   including scoped reviews and related context; a scope hash is not a read receipt.
+   Open `target.vault_path`. Read each page citation's exact source page under the vault
    root; for event citations, read the packet's selected immutable articles. Read both
    when the dependency set mixes page and event evidence.
 2. Draft the `synthesis` result body for `target.anchor`: what the vault now knows about this concept,
@@ -266,8 +269,9 @@ here. Your output is judgement — which concepts the page names — and nothing
 Capture `target_revision` from `lore queue status --json` before reading the target.
 Read its current content alongside the task input. If the target changes before apply,
 read it again and regenerate the extraction; never copy a new revision onto an old answer.
-The applier also requires a matching pending task, target and date. A lost task requires
-explicit recovery as described in `queue-format.md`; normal draining never opts into recovery.
+The applier also requires a matching retained task, target and date. A lost request
+must be restored from retained history or backup before processing, or its preserved
+original must be collected into a new task as described in `queue-format.md`.
 
 `input.concept_policy` controls admission. `existing-only` permits links to subjects
 already owned by a concept: resolve every name, read its scope, and omit unsupported
@@ -278,17 +282,57 @@ input hash and is enforced by the native applier, not inferred from source type.
 
 Write one file per task to `<vault>/.lorekeeper/queue/results/{task_id}.json`:
 
+Before drafting, choose retrieval recipes through [extraction discovery](discovery.md)
+and capture `lore work context --task-id TASK`. Read the returned candidate resources
+and source evidence under their exact revisions. Lexical candidates are context, not
+automatic duplicates or support. Return the captured `context_revision` and exact
+`discovery` recipes. An empty result can use an empty recipe list; a nonempty result
+requires at least one meaningful query. Bounded work plans those same candidates before
+inspection, not after its final answer has been written.
+The scope also includes reviews declared for the target or discovered candidates,
+their explicit review pointers and retained audit dependencies, and current or verified
+archived review evidence. Review text need not match the query. Open reviews are
+assessments to consider, not automatic proof of a contradiction.
+When `requires_bounded_work` is true, `resources` is null: use `plan_command` and the
+bounded-work protocol. A native selected worker records the recipe, plans that work,
+finishes the other selected tasks and returns without drafting this extraction.
+
 ```json
 {
   "task_id": "<task.task_id>",
   "cache_hash": "<task.cache_hash>",
   "concept_policy": "<task.input.concept_policy>",
   "target_revision": "<queue status target_revision captured before reading>",
+  "context_revision": "<work context or plan revision captured before drafting>",
+  "discovery": [{"query":"source-written subject", "phrase":true, "spacing":false}],
   "target": <task.target verbatim>,
   "date": "<task.input.date>",
-  "concepts": [{ "name": "…", "category": "…", "aliases": ["…"], "synthesis": "…" }]
+  "concepts": [{ "name": "…", "category": "…", "aliases": ["…"], "admission":{"decision":"new"}, "synthesis": "…" }]
 }
 ```
+
+Each concept declares `admission`: `{"decision":"new"}` requires a nonempty
+source-grounded synthesis and no owner for its declared name or aliases, including
+another new proposal staged in the same batch. Equal titles do not establish equal
+meaning. For a distinct homonym, preserve the source-written base name and qualify it
+with scope established by the source, even if that combined title is not written verbatim.
+For example, property-contract evidence can support `Lease — property contracts` beside
+an existing distributed-coordination `Lease`. Explain the distinction in its synthesis
+and omit the already-owned bare homonym from aliases. Uncertain scope does not justify
+inventing a new subject. Consolidate one intended new subject before submission; after another result
+publishes an owner, rediscover and redraft explicit reuse. Use
+`{"decision":"reuse","owner":{"path":"<exact concept path>","revision":"<full file revision read>"}}`
+to select an existing owner explicitly, including a matching homonym whose scope you
+verified. The owner must occur among the captured discovery resources at that exact
+full file revision; add an appropriate query and recapture scope before drafting if
+the selected owner is absent. Reuse preserves its canonical title, lifecycle and accumulated prose.
+An exact address and revision do not prove equivalence; judge the complete scope before
+selecting it. The context also binds declared reviews of the target and discovered
+candidates, their current pointers/prior assessment dependencies and verified current or
+archived evidence. Read these even when their prose did not match a search query. Open
+reviews inform judgment; their presence alone does not prove contradiction.
+Uncertain identity can remain an empty extraction with a durable scoped
+review when a conflict warrants one. Never manufacture a new owner to bypass ambiguity.
 
 When `input.rss_original` is present under `concept-extraction-rss-v3`, discover the
 bound original and compare discovery `page_revision` to the captured target revision.
@@ -302,8 +346,8 @@ Existing selections accumulate even if omitted; explicit retraction is a separat
 
 `synthesis` is one or two sentences grounding the concept, and is used only when the page
 is being CREATED — an established page's synthesis is its accumulated meaning across every
-source that cited it, so a single mention never overwrites it. Omit it and a new page is an
-empty heading.
+source that cited it, so a single mention never overwrites it. Missing or blank grounding
+refuses new-owner admission; reuse may omit it.
 
 **`name` and `aliases` follow § Concept convergence in the vault's `AGENTS.md`**
 (`lore config schema-path`), which states what a name may be, which form is the name where the
@@ -319,9 +363,8 @@ the page is CALLED, `synthesis` is what it SAYS. A finding written into `name` a
 the wrong subject — later extractions will not reuse a whole finding as a name. Keep the
 claim in the synthesis; the registry allocates a bounded filename independently of the name.
 
-An alias an established page already answers to is dropped with a warning rather than taken —
-the extraction is one source's reading, and the page that earned the name by being cited under
-it keeps it.
+A new proposal cannot claim an alias owned elsewhere. On explicit reuse, conflicting
+alias proposals are reported and not adopted; an extraction never takes another owner's name.
 
 `concepts` may be empty — that is a valid answer for a page with nothing durable in it, and
 it still records that the task was answered. Copy `target` and `cache_hash` through
@@ -345,7 +388,8 @@ what counts as a concept (per-type scoping: see
 
 **Concept dedup** follows the **Concept convergence** section of the vault's
 `AGENTS.md`: `lore resolve` for EVERY form the text writes, read the lexical owner's
-complete scope before reuse (an owned homonym can name a different subject), plus the created-this-run set, plus `lore wiki search` on two or three distinguishing
+complete scope before reuse (an owned homonym can name a different subject), track newly
+proposed subjects without automatically merging them, and use `lore wiki search` on distinguishing
 terms of each form for the equivalences no rule about spelling can see. The queue task carries
 no concept registry of its own. Reuse the resolved canonical title in `name` and keep the
 source's equivalent spelling in `aliases`; a spelling difference alone does not justify a

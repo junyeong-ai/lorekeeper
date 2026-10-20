@@ -79,6 +79,15 @@ const SWEEP: &[&[&str]] = &[
     &["queue", "check"],
     &["queue", "count"],
     &["queue", "prune"],
+    &["work", "context", "--task-id", "missing-task"],
+    &[
+        "work",
+        "discover",
+        "--task-id",
+        "missing-task",
+        "--file",
+        "corpus/extraction-discovery.json",
+    ],
     // Pending status is a read-only empty-state contract, not a calendar-dependent resume.
     &["synthesis", "pending", "--status", "--json"],
     &["task", "list"],

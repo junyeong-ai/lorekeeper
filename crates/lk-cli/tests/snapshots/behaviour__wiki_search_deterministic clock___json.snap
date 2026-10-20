@@ -31,6 +31,9 @@ exit: 0
       "reviews": [],
       "source_count": 2,
       "spacing_match": false,
+      "synthesis": {
+        "status": "not-captured"
+      },
       "tags": [],
       "title": "Deterministic clock"
     }

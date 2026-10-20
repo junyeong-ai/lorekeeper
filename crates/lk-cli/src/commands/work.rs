@@ -5,6 +5,7 @@ use serde_json::{Value, json};
 
 use super::{GlobalOptions, find_config, load_config_with_revision};
 
+mod discovery;
 mod resources;
 pub(crate) mod state;
 
@@ -13,6 +14,24 @@ use state::{Work, WorkLimits, WorkOutput};
 
 #[derive(clap::Subcommand)]
 pub enum WorkCommand {
+    /// Record extraction discovery recipes against the exact target revision read
+    Discover {
+        /// Exact retained concept-extraction task identifier
+        #[arg(long)]
+        task_id: String,
+        /// JSON {"target_revision":"...","queries":[...]}
+        #[arg(long)]
+        file: PathBuf,
+    },
+    /// Capture the exact current queue read scope before drafting, without writing
+    Context {
+        /// Exact current queue task identifier
+        #[arg(long)]
+        task_id: String,
+        /// JSON {"queries":[...]} selected before concept extraction
+        #[arg(long)]
+        discovery_file: Option<PathBuf>,
+    },
     /// Plan bounded evidence inspections without changing knowledge pages
     Plan {
         /// Exact current queue task identifier; mutually exclusive with --path
@@ -21,6 +40,9 @@ pub enum WorkCommand {
         /// Exact vault-relative concept or document address to audit
         #[arg(long, required_unless_present = "task_id")]
         path: Option<String>,
+        /// Extraction discovery JSON captured before planning its complete read scope
+        #[arg(long, requires = "task_id")]
+        discovery_file: Option<PathBuf>,
     },
     /// Read one revision-pinned inspection or reduction request
     Read {
@@ -134,6 +156,36 @@ fn guard_prepared(
     Ok(true)
 }
 
+pub(super) struct QueuePublicationGuard {
+    work: lk_vault::MutationPlan,
+    pages: std::collections::BTreeMap<PathBuf, String>,
+    owned_pages: std::collections::BTreeSet<PathBuf>,
+    bounded: bool,
+}
+
+impl QueuePublicationGuard {
+    pub(super) fn append_to(
+        self,
+        mutation: &mut lk_vault::MutationPlan,
+        owned: &std::collections::BTreeMap<PathBuf, String>,
+    ) -> miette::Result<bool> {
+        for (path, captured) in self.pages {
+            if let Some(original) = owned.get(&path) {
+                if original != &captured {
+                    return Err(miette::miette!(
+                        "publication input differs from captured read context: {}",
+                        path.display()
+                    ));
+                }
+            } else {
+                mutation.require_unchanged(path, captured);
+            }
+        }
+        mutation.extend(self.work);
+        Ok(self.bounded)
+    }
+}
+
 pub(super) fn guard_queue(
     root: &Path,
     config: &lk_core::config::Config,
@@ -142,18 +194,194 @@ pub(super) fn guard_queue(
     result: Value,
     mutation: &mut lk_vault::MutationPlan,
 ) -> miette::Result<bool> {
+    let guard = prepare_queue_publication(root, config, config_revision, task_id, result)?;
+    let owned = guard
+        .pages
+        .iter()
+        .filter(|(path, _)| guard.owned_pages.contains(*path))
+        .map(|(path, raw)| (path.clone(), raw.clone()))
+        .collect();
+    guard.append_to(mutation, &owned)
+}
+
+pub(super) fn prepare_queue_publication(
+    root: &Path,
+    config: &lk_core::config::Config,
+    config_revision: &str,
+    task_id: &str,
+    result: Value,
+) -> miette::Result<QueuePublicationGuard> {
     let root = root.canonicalize().into_diagnostic()?;
     let mut prepared = resources::task_for_publication(&root, config, task_id)?;
+    let mut owned_pages = std::collections::BTreeSet::new();
+    let scoped_extraction = prepared.context["purpose"]["task_kind"]
+        == serde_json::to_value(lk_queue::TaskKind::ExtractConcepts).into_diagnostic()?;
+    if scoped_extraction {
+        let typed: lk_queue::TaskResult =
+            serde_json::from_value(result.clone()).into_diagnostic()?;
+        if !typed.concepts.is_empty() && typed.discovery.is_empty() {
+            return Err(miette::miette!(
+                "nonempty concept extraction requires discovery before drafting"
+            ));
+        }
+        prepared = resources::with_discovery(&root, config, prepared, &typed.discovery)?;
+        for concept in &typed.concepts {
+            if let lk_queue::ConceptAdmission::Reuse { owner } = &concept.admission {
+                let canonical = lk_vault::page_path(&root, Path::new(&owner.path))
+                    .into_diagnostic()?
+                    .canonicalize()
+                    .into_diagnostic()?;
+                let address = canonical
+                    .strip_prefix(&root)
+                    .into_diagnostic()?
+                    .to_string_lossy();
+                if !prepared.resources.iter().any(|resource| {
+                    resource.authority == lk_core::semantic::SemanticAuthority::Context
+                        && resource.address == address
+                        && resource.revision == owner.revision
+                }) {
+                    return Err(miette::miette!(
+                        "selected concept owner is outside the captured discovery context or its read revision changed"
+                    ));
+                }
+                owned_pages.insert(
+                    canonical
+                        .strip_prefix(&root)
+                        .into_diagnostic()?
+                        .to_path_buf(),
+                );
+            }
+        }
+    }
+    let scoped_synthesis = prepared.context["purpose"]["task_kind"]
+        == serde_json::to_value(lk_queue::TaskKind::SynthesizeConcept).into_diagnostic()?;
+    if scoped_synthesis || scoped_extraction {
+        let revision = prepared.revision(config_revision)?;
+        if result.get("context_revision").and_then(Value::as_str) != Some(revision.as_str()) {
+            return Err(miette::miette!(
+                "semantic read scope changed or was not captured before drafting; reread current context and regenerate the result"
+            ));
+        }
+    }
     if let Subject::Queue { target, .. } = &prepared.subject {
         let target = lk_vault::page_path(&root, Path::new(target))
             .into_diagnostic()?
             .canonicalize()
             .into_diagnostic()?;
-        prepared
-            .pages
-            .remove(target.strip_prefix(&root).into_diagnostic()?);
+        owned_pages.insert(target.strip_prefix(&root).into_diagnostic()?.to_path_buf());
     }
-    guard_prepared(&root, config, config_revision, prepared, result, mutation)
+    let pages = std::mem::take(&mut prepared.pages);
+    let mut work = lk_vault::MutationPlan::default();
+    let bounded = guard_prepared(&root, config, config_revision, prepared, result, &mut work)?;
+    Ok(QueuePublicationGuard {
+        work,
+        pages,
+        owned_pages,
+        bounded,
+    })
+}
+
+pub(super) fn task_context(
+    root: &Path,
+    config: &lk_core::config::Config,
+    config_revision: &str,
+    task_id: &str,
+    discovery: Option<&[lk_core::discovery::DiscoveryQuery]>,
+    discovery_file: Option<&Path>,
+) -> miette::Result<Value> {
+    let root = root.canonicalize().into_diagnostic()?;
+    let prepared = match discovery {
+        Some(queries) => resources::task_with_discovery(&root, config, task_id, queries)?,
+        None => resources::task(&root, config, task_id)?,
+    };
+    let work = expected(&prepared, config, config_revision)?;
+    let requires_bounded_work = work.plan.parts.len() > 1;
+    let plan_command = if requires_bounded_work {
+        let mut command = vec![
+            json!("lore"),
+            json!("work"),
+            json!("plan"),
+            json!("--task-id"),
+            json!(task_id),
+        ];
+        if let Some(path) = discovery_file {
+            command.push(json!("--discovery-file"));
+            command.push(
+                serde_json::to_value(path.canonicalize().into_diagnostic()?).into_diagnostic()?,
+            );
+        }
+        Value::Array(command)
+    } else {
+        Value::Null
+    };
+    let resources = if requires_bounded_work {
+        Value::Null
+    } else {
+        json!(prepared.resources.iter().map(|resource| json!({
+            "address":resource.address,"revision":resource.revision,"authority":resource.authority,
+        })).collect::<Vec<_>>())
+    };
+    Ok(json!({
+        "context_revision": prepared.revision(config_revision)?,
+        "subject": prepared.subject,
+        "context": prepared.context,
+        "resource_count":prepared.resources.len(),
+        "part_count":work.plan.parts.len(),
+        "requires_bounded_work":requires_bounded_work,
+        "resources":resources,
+        "plan_command":plan_command,
+        "authority":"This binds the selected read scope, not a read receipt or semantic verification. Capture it before drafting; changed scope requires rereading and regenerating the result. Multi-part resources are not listed here: execute plan_command and complete the exact bounded inspections before publication.",
+    }))
+}
+
+pub(super) fn has_current_discovery(
+    root: &Path,
+    task: &lk_queue::QueueTask,
+) -> miette::Result<bool> {
+    discovery::current(root, task).map(|queries| queries.is_some())
+}
+
+pub(super) fn retire_discovery(
+    root: &Path,
+    task: &lk_queue::QueueTask,
+    plan: &mut lk_vault::MutationPlan,
+) -> miette::Result<()> {
+    discovery::retire(root, task, plan)
+}
+
+pub(super) fn prune_discovery(
+    session: &lk_vault::MutationSession,
+    pending: &std::collections::BTreeSet<(String, String)>,
+) -> miette::Result<usize> {
+    discovery::prune(session, pending)
+}
+
+pub(super) fn needs_discovery(
+    root: &Path,
+    config: &lk_core::config::Config,
+    config_revision: &str,
+    task: &lk_queue::QueueTask,
+) -> miette::Result<bool> {
+    if task.kind != lk_queue::TaskKind::ExtractConcepts || has_current_discovery(root, task)? {
+        return Ok(false);
+    }
+    let prepared = resources::task(root, config, &task.task_id)?;
+    Ok(expected(&prepared, config, config_revision)?
+        .plan
+        .parts
+        .len()
+        > 1)
+}
+
+fn load_discovery(path: &Path) -> miette::Result<Vec<lk_core::discovery::DiscoveryQuery>> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Discovery {
+        queries: Vec<lk_core::discovery::DiscoveryQuery>,
+    }
+    let value: Discovery =
+        serde_json::from_slice(&std::fs::read(path).into_diagnostic()?).into_diagnostic()?;
+    Ok(value.queries)
 }
 
 pub(super) fn guard_audit(
@@ -423,6 +651,7 @@ fn progress(
     let next_offset = (offset.saturating_add(ready.len()) < total_ready)
         .then_some(offset.saturating_add(ready.len()));
     Ok(json!({"work_id":work.plan.id,"subject":prepared.subject,
+        "context_revision":work.plan.subject_revision,
         "resources":work.plan.resources.len(),"parts":work.plan.parts.len(),
         "completed":status.completed,"total":status.total,"complete":status.complete,
         "root_node":status.root_node,"ready_total":total_ready,"ready":ready,
@@ -433,10 +662,39 @@ pub async fn run(opts: &GlobalOptions, command: WorkCommand) -> miette::Result<(
     let (config, config_revision) = load_config_with_revision(&find_config(opts)?)?;
     let root = config.vault.root_path().canonicalize().into_diagnostic()?;
     let output = match command {
-        WorkCommand::Plan { task_id, path } => {
+        WorkCommand::Discover { task_id, file } => {
+            let request = serde_json::from_slice(&std::fs::read(file).into_diagnostic()?)
+                .into_diagnostic()?;
             let session = lk_vault::MutationSession::acquire(&root).into_diagnostic()?;
+            discovery::record(&session, &task_id, request)?;
+            json!({"recorded":true,"task_id":task_id})
+        }
+        WorkCommand::Context {
+            task_id,
+            discovery_file,
+        } => {
+            let discovery = discovery_file.as_deref().map(load_discovery).transpose()?;
+            task_context(
+                &root,
+                &config,
+                &config_revision,
+                &task_id,
+                discovery.as_deref(),
+                discovery_file.as_deref(),
+            )?
+        }
+        WorkCommand::Plan {
+            task_id,
+            path,
+            discovery_file,
+        } => {
+            let session = lk_vault::MutationSession::acquire(&root).into_diagnostic()?;
+            let discovery = discovery_file.as_deref().map(load_discovery).transpose()?;
             let prepared = match (task_id, path) {
-                (Some(id), None) => resources::task(&root, &config, &id)?,
+                (Some(id), None) => match discovery.as_deref() {
+                    Some(queries) => resources::task_with_discovery(&root, &config, &id, queries)?,
+                    None => resources::task(&root, &config, &id)?,
+                },
                 (None, Some(path)) => resources::audit(&root, &config, &path)?,
                 _ => return Err(miette::miette!("select exactly one task or audit path")),
             };
@@ -566,11 +824,21 @@ fn finish(
                 lk_queue::TaskKind::ExtractConcepts => {
                     let typed: lk_queue::TaskResult =
                         serde_json::from_value(result.clone()).into_diagnostic()?;
+                    if typed.context_revision != work.plan.subject_revision {
+                        return Err(miette::miette!(
+                            "extraction context revision does not match the work read scope"
+                        ));
+                    }
                     (typed.task_id, typed.cache_hash, typed.target_revision)
                 }
                 lk_queue::TaskKind::SynthesizeConcept => {
                     let typed: lk_queue::SynthesisResult =
                         serde_json::from_value(result.clone()).into_diagnostic()?;
+                    if typed.context_revision != work.plan.subject_revision {
+                        return Err(miette::miette!(
+                            "synthesis context revision does not match the work read scope"
+                        ));
+                    }
                     (typed.task_id, typed.cache_hash, typed.target_revision)
                 }
                 _ => {
@@ -640,4 +908,235 @@ fn finish(
         .into_diagnostic()?;
     session.apply(mutation).into_diagnostic()?;
     Ok(json!({"work_id":work.plan.id,"staged_result":path,"canonical_published":false}))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lk_core::concept::file_revision;
+    use lk_vault::{MutationPlan, MutationSession};
+
+    fn write(root: &Path, path: &str, raw: &str) {
+        let path = root.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, raw).unwrap();
+    }
+
+    #[test]
+    fn batch_reuse_scopes_recover_owned_origins_and_preserve_external_read_guards() {
+        for (accepted, changed_context, changed_unpublished) in
+            [(2, false, false), (2, true, false), (1, false, true)]
+        {
+            let directory = tempfile::tempdir().unwrap();
+            let config_path = directory.path().join("config.yaml");
+            std::fs::write(&config_path, "vault:\n  root: vault\n  locale: en\nidentity:\n  name: Tester\n  email: tester@example.com\nsources:\n  notes:\n    type: manual\n    params: {inbox_dir: inbox}\n").unwrap();
+            let (config, config_revision) =
+                lk_core::config::Config::load_with_revision(&config_path).unwrap();
+            std::fs::create_dir_all(directory.path().join("vault")).unwrap();
+            let root = directory.path().join("vault").canonicalize().unwrap();
+            let owner = "wiki/concepts/canonical.md";
+            let context = "wiki/documents/context.md";
+            let queue = root.join(".lorekeeper/queue");
+            let client = lk_queue::QueueLlmClient::new(queue.clone());
+            let mut sources = Vec::new();
+            let mut tasks = Vec::new();
+            for target in ["wiki/documents/source-a.md", "wiki/documents/source-b.md"] {
+                let task = client.build_task(
+                    "ext",
+                    lk_queue::TaskKind::ExtractConcepts,
+                    lk_queue::ExtractConceptsRequest {
+                        concept_policy: lk_core::config::ConceptPolicy::SupportedNew,
+                        rss_original: None,
+                        text: format!("Selected Candidate has source-scoped evidence in {target}."),
+                        source_id: "notes".into(),
+                        source_type: lk_core::config::SourceType::Manual,
+                        date: jiff::civil::date(2026, 10, 20),
+                        focus: None,
+                        locale: lk_core::i18n::Locale::En,
+                        categories: vec![],
+                        target: lk_queue::TaskTarget {
+                            vault_path: target.into(),
+                            kind: lk_queue::TargetKind::DocumentConcepts,
+                            anchor: "## Related Concepts".into(),
+                        },
+                    },
+                );
+                let before = format!(
+                    "---\ntype: document\nllm_inputs:\n  concepts: {}\n---\n## Content\nSelected Candidate has attributed source material.\n\n## Related Concepts\n",
+                    task.cache_hash
+                );
+                let linked = format!("{before}\n[Selected Candidate](../concepts/canonical.md)\n");
+                let after = lk_vault::set_llm_input(
+                    &linked,
+                    "concepts_done",
+                    &serde_json::to_string(&task.cache_hash).unwrap(),
+                )
+                .unwrap();
+                write(&root, target, &before);
+                sources.push((target, before, after));
+                tasks.push(task);
+            }
+            let owner_before = "---\ntype: concept\ntitle: Selected Candidate\n---\n## Synthesis\nExisting scoped interpretation.\n";
+            let context_before =
+                "---\ntype: document\n---\nSelected Candidate has separate context.\n";
+            write(&root, owner, owner_before);
+            write(&root, context, context_before);
+            write(
+                &root,
+                ".lorekeeper/queue/fixture.jsonl",
+                &tasks
+                    .iter()
+                    .map(|task| serde_json::to_string(task).unwrap())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            );
+            let discovery = vec![lk_core::discovery::DiscoveryQuery {
+                query: "Selected Candidate".into(),
+                phrase: true,
+                spacing: false,
+            }];
+            let session = MutationSession::acquire(&root).unwrap();
+            let mut guards = Vec::new();
+            for (index, task) in tasks.iter().take(accepted).enumerate() {
+                let prepared =
+                    resources::task_with_discovery(&root, &config, &task.task_id, &discovery)
+                        .unwrap();
+                assert!(
+                    prepared
+                        .resources
+                        .iter()
+                        .any(|resource| resource.address == sources[1 - index].0),
+                    "each origin is in the other result's discovery scope"
+                );
+                let result = lk_queue::TaskResult {
+                    concept_policy: lk_core::config::ConceptPolicy::SupportedNew,
+                    task_id: task.task_id.clone(),
+                    cache_hash: task.cache_hash.clone(),
+                    target_revision: file_revision(&sources[index].1),
+                    context_revision: prepared.revision(&config_revision).unwrap(),
+                    discovery: discovery.clone(),
+                    target: task.target.clone(),
+                    date: jiff::civil::date(2026, 10, 20),
+                    concepts: vec![lk_queue::ReportedConcept {
+                        admission: lk_queue::ConceptAdmission::Reuse {
+                            owner: lk_queue::ConceptOwner {
+                                path: owner.into(),
+                                revision: file_revision(owner_before),
+                            },
+                        },
+                        concept: lk_core::concept::ExtractedConcept {
+                            name: "Selected Candidate".into(),
+                            category: None,
+                            aliases: vec![],
+                        },
+                        synthesis: None,
+                        rss_evidence: vec![],
+                    }],
+                };
+                guards.push(
+                    prepare_queue_publication(
+                        &root,
+                        &config,
+                        &config_revision,
+                        &task.task_id,
+                        serde_json::to_value(result).unwrap(),
+                    )
+                    .unwrap(),
+                );
+            }
+            let mut owned =
+                std::collections::BTreeMap::from([(PathBuf::from(owner), owner_before.to_owned())]);
+            for (target, before, _) in sources.iter().take(accepted) {
+                owned.insert(PathBuf::from(target), before.clone());
+            }
+            let mut plan = MutationPlan::default();
+            for guard in guards {
+                assert!(!guard.append_to(&mut plan, &owned).unwrap());
+            }
+            let owner_after = format!("{owner_before}\nAdditional attributed source context.\n");
+            plan.edit(owner, owner_before.into(), owner_after.clone());
+            for (target, before, after) in sources.iter().take(accepted) {
+                plan.edit(target, before.clone(), after.clone());
+            }
+            let encoded = serde_json::to_value(&plan).unwrap();
+            let steps = encoded["steps"].as_array().unwrap();
+            let crash_step = steps
+                .iter()
+                .position(|step| {
+                    step["path"] == sources[0].0
+                        && step["kind"] == "edit"
+                        && step["before"] != step["after"]
+                })
+                .unwrap();
+            assert!(crash_step > 0);
+            assert!(
+                steps
+                    .iter()
+                    .any(|step| step["path"] == context && step["before"] == step["after"])
+            );
+            let revision = file_revision(&serde_json::to_string(&plan).unwrap());
+            let progress = json!({"plan_revision":revision,"completed":crash_step,"checksum":file_revision(&format!("{revision}:{crash_step}"))});
+            write(
+                &root,
+                ".lorekeeper/mutation/pending.json",
+                &json!({"version":1,"plan":plan}).to_string(),
+            );
+            write(
+                &root,
+                ".lorekeeper/mutation/progress.json",
+                &progress.to_string(),
+            );
+            write(&root, owner, &owner_after);
+            write(&root, sources[0].0, &sources[0].2);
+            if changed_context {
+                write(
+                    &root,
+                    context,
+                    "External context changed after the guarded read.\n",
+                );
+            }
+            if changed_unpublished {
+                write(
+                    &root,
+                    sources[1].0,
+                    "An unpublished task's target changed externally.\n",
+                );
+            }
+            drop(session);
+            let recovered = MutationSession::acquire(&root);
+            if changed_context || changed_unpublished {
+                let error = recovered
+                    .err()
+                    .expect("changed unowned context must refuse recovery");
+                assert!(error.to_string().contains(if changed_context {
+                    context
+                } else {
+                    sources[1].0
+                }));
+                if changed_context {
+                    assert_eq!(
+                        std::fs::read_to_string(root.join(sources[1].0)).unwrap(),
+                        sources[1].1
+                    );
+                }
+                assert!(root.join(".lorekeeper/mutation/pending.json").exists());
+                write(&root, context, context_before);
+                write(&root, sources[1].0, &sources[1].1);
+                let _recovered = MutationSession::acquire(&root).unwrap();
+            } else {
+                drop(recovered.unwrap());
+            }
+            assert_eq!(
+                std::fs::read_to_string(root.join(owner)).unwrap(),
+                owner_after
+            );
+            for (index, (target, before, after)) in sources.iter().enumerate() {
+                assert_eq!(
+                    std::fs::read_to_string(root.join(target)).unwrap(),
+                    if index < accepted { after } else { before }.as_str()
+                );
+            }
+            assert!(!root.join(".lorekeeper/mutation/pending.json").exists());
+        }
+    }
 }

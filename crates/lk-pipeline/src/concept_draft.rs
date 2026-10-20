@@ -202,6 +202,43 @@ impl ConceptCategory {
 }
 
 impl ConceptDrafts {
+    async fn ensure_registry(
+        &mut self,
+        reader: &dyn VaultStore,
+        dirs: &VaultDirs,
+    ) -> Result<(), PipelineError> {
+        if self.registry.is_none() {
+            let mut registry = lk_vault::load_concept_registry(reader, dirs).await?;
+            for draft in self.drafts.values() {
+                registry.register(
+                    ConceptIdentity {
+                        slug: draft.slug.clone(),
+                        title: draft.name.clone(),
+                    },
+                    &draft.aliases,
+                );
+            }
+            self.registry = Some(registry);
+        }
+        Ok(())
+    }
+
+    pub fn discard_staging(&mut self) {
+        self.registry = None;
+        self.claimed = self
+            .drafts
+            .values()
+            .filter(|draft| draft.original.is_none())
+            .map(|draft| draft.slug.clone())
+            .collect();
+        self.established = self
+            .drafts
+            .values()
+            .filter(|draft| draft.original.is_some())
+            .map(|draft| draft.slug.clone())
+            .collect();
+    }
+
     /// Resolve a declared name, refusing ambiguous ownership before staging any writes.
     pub async fn resolve_identity(
         &mut self,
@@ -215,10 +252,8 @@ impl ConceptDrafts {
                 "concept extraction is disabled".into(),
             ));
         }
-        let registry = match &mut self.registry {
-            Some(registry) => registry,
-            slot => slot.insert(lk_vault::load_concept_registry(reader, dirs).await?),
-        };
+        self.ensure_registry(reader, dirs).await?;
+        let registry = self.registry.as_mut().unwrap();
         match registry.resolve(name) {
             Resolution::Owned(identity) => {
                 if policy == ConceptPolicy::ExistingOnly
@@ -286,16 +321,9 @@ impl ConceptDrafts {
     /// [`Self::render_pages`] emits the accumulator unconditionally — a half-folded result
     /// would write concept pages whose origin page was never updated to cite them.
     ///
-    /// The drafts are what that protects. Resolving a name — and adopting the extraction's
-    /// other names — does record them in the alias index (see [`Self::resolve_identity`]), so
-    /// a `stage` that fails afterwards leaves those entries behind. Deliberately, but it is not a no-op: the entry fixes the SLUG for the rest of
-    /// the run, so a run whose first mention was `VectorDB` writes `vectordb.md` where one
-    /// that saw `Vector DB` first would write `vector-db.md`. Only the address is inherited
-    /// — the page's title is whichever spelling created the draft, and the display name in a
-    /// link is the resolved one only where a caller renders from [`Self::resolve_identity`]
-    /// rather than from [`Self::commit`]. So a link may read `[VectorDB]` beside a page
-    /// titled `Vector DB`: one concept, one address, deterministic for a given input, and
-    /// the next run rebuilds the index from disk where address and title key alike.
+    /// Staging reserves names before all reads complete. An aborted extraction calls
+    /// `discard_staging`; its next lookup rebuilds from published pages and committed
+    /// drafts without retaining the abandoned result's names or aliases.
     pub async fn stage(
         &mut self,
         concept: &ExtractedConcept,
@@ -315,6 +343,104 @@ impl ConceptDrafts {
                 .read_page(VaultPath::concept(dirs, &identity.slug).as_ref())
                 .await?
         };
+        self.stage_loaded(concept, identity, existing)
+    }
+
+    pub async fn stage_new(
+        &mut self,
+        concept: &ExtractedConcept,
+        reader: &dyn VaultStore,
+        dirs: &VaultDirs,
+        policy: ConceptPolicy,
+    ) -> Result<StagedConcept, PipelineError> {
+        self.ensure_registry(reader, dirs).await?;
+        let resolution = self.registry.as_ref().unwrap().resolve(&concept.name);
+        if !matches!(resolution, Resolution::Absent) {
+            return Err(PipelineError::Render(format!(
+                "new admission requires an unowned name; select an exact existing owner for `{}`",
+                concept.name
+            )));
+        }
+        for alias in &concept.aliases {
+            match self.registry.as_ref().unwrap().resolve(alias) {
+                Resolution::Absent => {}
+                _ => {
+                    return Err(PipelineError::Render(format!(
+                        "new concept alias `{alias}` has another owner; resolve it before admission"
+                    )));
+                }
+            }
+        }
+        self.stage(concept, reader, dirs, policy).await
+    }
+
+    pub async fn stage_reuse(
+        &mut self,
+        concept: &ExtractedConcept,
+        owner: &lk_queue::ConceptOwner,
+        reader: &dyn VaultStore,
+        dirs: &VaultDirs,
+    ) -> Result<StagedConcept, PipelineError> {
+        let path = std::path::Path::new(&owner.path);
+        let directory = lk_core::vault_path::concepts_dir(dirs);
+        let relative = path.strip_prefix(&directory).map_err(|_| {
+            PipelineError::Render(
+                "concept owner must be an exact address in the configured concepts collection"
+                    .into(),
+            )
+        })?;
+        if path.extension().is_none_or(|extension| extension != "md")
+            || relative
+                .components()
+                .any(|component| !matches!(component, std::path::Component::Normal(_)))
+        {
+            return Err(PipelineError::Render(
+                "invalid concept owner address".into(),
+            ));
+        }
+        let page = reader.read_page(path).await?.ok_or_else(|| {
+            PipelineError::Render(format!("selected concept owner is absent: {}", owner.path))
+        })?;
+        let original = page.original.as_ref().ok_or_else(|| {
+            PipelineError::Render("concept reader omitted its original input snapshot".into())
+        })?;
+        if lk_core::concept::file_revision(original) != owner.revision {
+            return Err(PipelineError::Render(
+                "selected concept owner changed; rediscover before reuse".into(),
+            ));
+        }
+        if page
+            .frontmatter
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            != Some("concept")
+        {
+            return Err(PipelineError::Render(
+                "selected owner is not a concept page".into(),
+            ));
+        }
+        let slug = relative
+            .with_extension("")
+            .to_str()
+            .ok_or_else(|| PipelineError::Render("concept owner address is not UTF-8".into()))?
+            .replace(std::path::MAIN_SEPARATOR, "/");
+        let title = page
+            .frontmatter
+            .get("title")
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| path.file_stem().and_then(|stem| stem.to_str()))
+            .ok_or_else(|| PipelineError::Render("concept owner has no declared name".into()))?
+            .to_owned();
+        self.ensure_registry(reader, dirs).await?;
+        self.stage_loaded(concept, ConceptIdentity { slug, title }, Some(page))
+    }
+
+    fn stage_loaded(
+        &mut self,
+        concept: &ExtractedConcept,
+        identity: ConceptIdentity,
+        existing: Option<lk_core::frontmatter::VaultPage>,
+    ) -> Result<StagedConcept, PipelineError> {
         if existing
             .as_ref()
             .is_some_and(|page| page.original.is_none())

@@ -85,9 +85,8 @@ Unknown requested policy versions require a compatible processor. Policy provena
 is separate from the unchanged data cache hash. Explicit regeneration records a
 policy request for this input so an old legacy task cannot satisfy the new request.
 
-Explicit `queue apply --recover-extraction TASK` is a separate operator recovery
-for a staged extraction whose retained task is unavailable. It retains the exact
-current-page and publication guards, but cannot establish original retained-input
-or partitioned-read coverage. The complete current page must fit the configured
-work input bound; an oversized orphan requires restoring its retained task.
-Never use this option to bypass missing or incomplete bounded work.
+A staged extraction without its retained request cannot establish the original input
+or read scope and is refused, regardless of source size. Restore the exact request from
+retained history or backup, or collect the preserved original into a new valid task.
+Never fabricate a request/context revision from the current interpretation to publish
+an old result. Rejected bytes and their diagnostic remain available for investigation.

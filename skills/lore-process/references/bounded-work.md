@@ -25,6 +25,12 @@ Planning does not create knowledge pages or certify a read. Use
 one selected node with `lore work read WORK NODE`. Never load the entire manifest
 or all intermediate files into one context.
 
+Plan/status includes `context_revision`, binding exact selected resources, review
+membership, semantic purpose and configuration. A synthesis final result must carry
+that revision; ordinary synthesis obtains the same scope through read-only
+`lore work context --task-id TASK`. Changed scope requires rereading and regenerating,
+not copying a new revision onto an existing answer.
+
 The compact JSON request is bounded by `execution.work.max_input_bytes`. This is
 not the model's token window, whole session size or a money limit. Markdown blocks
 are preferred boundaries; a single oversized block is split at Unicode character

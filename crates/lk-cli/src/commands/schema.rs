@@ -365,18 +365,16 @@ fn page_schemas(
     schemas
 }
 
-/// The first statement of the naming rule an agent reads, and the one it anchors on: a
-/// concept's name is copied from the source rather than chosen. Named beside the two rules
-/// of `## Concept convergence` because it is the same rule said earlier, and a check that
-/// reached only the section left this sentence free to say the opposite.
+/// Shared language and naming policy, including source-grounded homonym qualification.
 fn language_banner(language: &str) -> String {
     format!(
         "**This vault is written in {language}.** Every word added to a page goes in that \
          language — a summary, a theme, a concept's synthesis, an exploration — whatever \
          language the source arrived in. Two things are not translated by it. Source content \
-         is quoted as it stands, and a NAME is not prose: a concept's name is the form its \
+         is quoted as it stands, and a NAME is not prose: a concept's base name is the form its \
          own source writes, so a term a source writes in another language keeps its spelling \
-         here (§ Concept convergence says what follows from that)."
+         here. Distinct subjects sharing that name need a source-grounded scope qualifier \
+         (§ Concept convergence)."
     )
 }
 
@@ -384,24 +382,24 @@ fn language_banner(language: &str) -> String {
 /// boundary a check could slice the rendered paragraph at — a blank line, a bolded lead-in —
 /// is a token the rule's own prose may carry, so each one ends the rule early and lets a
 /// reworded judgment ship past.
-const TITLE_RULE: &str = "**A concept's title is its name and nothing else.** The title is a declared \
-         lookup key, and the lookup is exact — so a title carrying a parenthetical gloss \
-         — `Agent Capability (the unit an agent can call)` — answers to neither the term nor \
-         the gloss, and the next mention of the bare term \
-         mints a rival page beside it. The name is COPIED from the material you just read, \
-         never composed: whether a field has settled on a form in one language or another is a \
-         judgment with no stable answer for a term the material is introducing, and two \
-         answers to it in one batch is exactly how one concept becomes two pages. Where the \
-         material writes several forms, the title is the one it uses AS the term and every \
-         other — the gloss, the translation, the expanded acronym, the abbreviation — goes in \
-         `aliases`, which is what makes a citation written in any of them resolve here. A form \
-         the material does not write is a name no later extraction reproduces.";
+const TITLE_RULE: &str = "**A concept's title names one subject.** Its base name is COPIED from the \
+         material, preserving its spelling and language; do not invent a translation or add \
+         an explanatory gloss to an otherwise unambiguous name. When that name already \
+         belongs to a different subject, qualify it with scope established by the source. \
+         For example, a source describing property contracts may support `Lease — property \
+         contracts` when `Lease` already names distributed coordination. This narrow \
+         disambiguation exception does not require the source to write the combined title \
+         verbatim. Explain that scope in the grounded synthesis; if it is uncertain, retain \
+         the uncertainty instead of inventing a distinction. Other source-written forms may \
+         be aliases only when they denote the same subject and do not claim another owner. \
+         Never add the ambiguous bare homonym as an alias of the new qualified subject.";
 
 /// Shared alias contract for every generated page format.
 fn alias_rule(language: &str) -> String {
     format!(
-        "**This vault is written in {language}, and where the material writes the concept in \
-         {language} too that form is not optional in `aliases`.** Propose a new alias only for \
+        "**This vault is written in {language}.** Include the material's equivalent \
+         {language} form in `aliases` when it is unowned or belongs to the selected same \
+         subject; an already-owned homonym is excluded. Propose a new alias only for \
          a name the material WRITES for the same concept in the same scope. A method, \
          component, broader category, narrower application or distinct version is a \
          relationship, not an alternative name. Co-occurrence or a conditional claim does not \
@@ -453,23 +451,22 @@ fn convergence_body(language: &str, strings: &Strings) -> Vec<String> {
          homonym is not semantic equivalence. Use a source-grounded qualified name when the senses differ, \
          and remove an ambiguous bare alias through reviewed curation rather than assigning it to another sense. \
          Reuse the exact address/title only after that check. Asking only the \
-         title is what mints a rival beside the page that already holds the subject: a name an \
-         established page answers to is REFUSED as an alias on a new page, so the one form \
-         that would have joined them is dropped by the act of creating the rival."
+         title can miss a different declared form. A new extraction proposal may not claim \
+         an owned name or alias: select the verified exact owner or a source-grounded qualified \
+         name for a distinct subject."
             .to_string(),
-        "2. **Keep a created-this-run set, and keep it small.** `lore resolve` reads what is \
-         on disk, so a page this run has minted but not yet materialized is one it answers \
-         `absent` for — and two items then mint `RAG` and `Retrieval-Augmented-Generation` \
-         independently. That set is a second answer to the question `lore resolve` exists to \
-         answer, which is why it is kept short-lived rather than accumulated: materialize \
-         each batch as it lands, and the set carries only the batch in hand. Written down \
-         rather than remembered — a long run is compacted mid-way, and a set held in context \
-         goes with it."
+        "2. **Keep a created-this-run set, and keep it small.** Track proposed subjects and \
+         declared names for the current batch. Equal titles alone do not establish equal meaning: \
+         separate new proposals never coalesce automatically, even before publication. Consolidate \
+         one intended subject only after comparing its scope. Queue extraction uses explicit new or \
+         revision-pinned reuse admission. Publish a selected new owner, then rediscover and capture \
+         the current context before another result reuses it. Keep the set in a bounded artifact \
+         rather than relying on session memory."
             .to_string(),
         "3. **Judge the names `resolve` cannot.** An exit 1 is the answer for a name nothing \
          answers to, not for a concept the vault lacks: an acronym and its expansion, a \
          plural, a team's shorthand are DIFFERENT names for one thing, and no rule about \
-         spelling can see it. Ask `lore wiki search` for two or three distinguishing terms of \
+         spelling can see it. Ask `lore wiki search` for distinguishing source terms of \
          EACH form the material writes, and also ask the complete declared name so its \
          registered aliases participate in retrieval. Other multi-term queries require \
          every term to appear, so split them when they narrow past useful candidates. Read the hits and \
