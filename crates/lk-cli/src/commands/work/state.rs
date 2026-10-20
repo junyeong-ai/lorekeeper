@@ -2,7 +2,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use lk_core::semantic::{SemanticPartInput, SemanticPlan, SemanticRange, SemanticResource};
+use lk_core::semantic::{
+    SemanticInputs, SemanticPartInput, SemanticPlan, SemanticRange, SemanticResource,
+};
 use lk_vault::{MutationPlan, MutationSession};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -146,7 +148,8 @@ struct Publication {
     published_at: jiff::Timestamp,
 }
 
-struct Evaluation {
+struct Evaluation<'a> {
+    inputs: SemanticInputs<'a>,
     nodes: Vec<Node>,
     current: BTreeMap<String, StoredOutput>,
     raw: BTreeMap<PathBuf, String>,
@@ -518,17 +521,12 @@ impl Work {
     fn node_input(
         &self,
         node: &Node,
-        resources: &[SemanticResource],
+        inputs: &SemanticInputs<'_>,
         outputs: &BTreeMap<String, StoredOutput>,
     ) -> Result<Value, NodeInputError> {
         let mut input = match &node.kind {
             NodeKind::Inspect { part_id } => {
-                return self.inspect_input(
-                    &node.id,
-                    self.plan
-                        .part_input_for_assigned_resources(part_id, resources)
-                        .map_err(fail)?,
-                );
+                return self.inspect_input(&node.id, inputs.part_input(part_id).map_err(fail)?);
             }
             NodeKind::Reduce { children } => {
                 let outputs = children
@@ -618,11 +616,15 @@ impl Work {
         Ok(input)
     }
 
-    fn evaluate(&self, root: &Path, resources: &[SemanticResource]) -> miette::Result<Evaluation> {
+    fn evaluate<'a>(
+        &'a self,
+        root: &Path,
+        resources: &'a [SemanticResource],
+    ) -> miette::Result<Evaluation<'a>> {
         require_settled(root)?;
         self.verify_context()?;
         self.manifest(root)?;
-        self.plan.verify_resources(resources).map_err(fail)?;
+        let inputs = self.plan.build_inputs(resources).map_err(fail)?;
         let nodes = self.nodes()?;
         let mut current: BTreeMap<String, StoredOutput> = BTreeMap::new();
         let mut raw = BTreeMap::new();
@@ -655,7 +657,11 @@ impl Work {
                     .collect::<Option<Vec<_>>>(),
             };
             let Some(children) = children else { continue };
-            let input = match self.node_input(node, resources, &current) {
+            let Some(stored) = stored else {
+                ready.push(node.id.clone());
+                continue;
+            };
+            let input = match self.node_input(node, &inputs, &current) {
                 Ok(input) => input,
                 Err(NodeInputError::Bound) => {
                     ready.push(node.id.clone());
@@ -663,9 +669,7 @@ impl Work {
                 }
                 Err(error) => return Err(error.report()),
             };
-            if let Some(stored) = stored
-                && input["input_revision"].as_str() == Some(stored.output.input_revision.as_str())
-            {
+            if input["input_revision"].as_str() == Some(stored.output.input_revision.as_str()) {
                 let child_outputs = children
                     .iter()
                     .map(|child| &child.output)
@@ -677,6 +681,7 @@ impl Work {
             }
         }
         Ok(Evaluation {
+            inputs,
             nodes,
             current,
             raw,
@@ -713,7 +718,7 @@ impl Work {
             .iter()
             .find(|node| node.id == node_id)
             .ok_or_else(|| fail("unknown work node"))?;
-        self.node_input(node, resources, &evaluated.current)
+        self.node_input(node, &evaluated.inputs, &evaluated.current)
             .map_err(NodeInputError::report)
     }
 
@@ -798,7 +803,7 @@ impl Work {
             .find(|node| node.id == output.node_id)
             .ok_or_else(|| fail("unknown output node"))?;
         let input = self
-            .node_input(node, resources, &evaluated.current)
+            .node_input(node, &evaluated.inputs, &evaluated.current)
             .map_err(NodeInputError::report)?;
         if input["input_revision"].as_str() != Some(output.input_revision.as_str()) {
             return Err(fail("output was written from stale or different inputs"));

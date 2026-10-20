@@ -1,6 +1,7 @@
 //! Exact text coverage for bounded semantic execution; coverage is not a truth verdict.
 
 use std::collections::BTreeSet;
+use std::io::Write;
 
 use pulldown_cmark::{Event, Options, Parser};
 use serde::{Deserialize, Serialize};
@@ -95,6 +96,35 @@ pub struct SemanticPlan {
     pub parts: Vec<SemanticPart>,
 }
 
+/// One verified view of exact resources for reconstructing several bounded inputs.
+pub struct SemanticInputs<'a> {
+    plan: &'a SemanticPlan,
+    texts: Vec<TextIndex<'a>>,
+}
+
+impl SemanticInputs<'_> {
+    pub fn part_input(&self, part_id: &str) -> Result<SemanticPartInput> {
+        let part = self
+            .plan
+            .parts
+            .iter()
+            .find(|part| part.id == part_id)
+            .ok_or_else(|| error("unknown part id"))?;
+        self.context().input(part)
+    }
+
+    fn context(&self) -> InputContext<'_> {
+        InputContext {
+            plan_id: &self.plan.id,
+            subject_revision: &self.plan.subject_revision,
+            max_input_bytes: self.plan.max_input_bytes,
+            max_result_bytes: self.plan.max_result_bytes,
+            resources: &self.plan.resources,
+            texts: &self.texts,
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 #[error("semantic evidence plan: {0}")]
 pub struct SemanticError(String);
@@ -111,19 +141,50 @@ fn digest(value: &impl Serialize) -> Result<String> {
         .map_err(|_| error("cannot serialize evidence metadata"))
 }
 
+#[derive(Default)]
+struct JsonBytes(usize);
+
+impl Write for JsonBytes {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0 = self
+            .0
+            .checked_add(bytes.len())
+            .ok_or_else(|| std::io::Error::other("serialized evidence size overflow"))?;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn json_bytes(value: &impl Serialize) -> Result<usize> {
+    let mut bytes = JsonBytes::default();
+    serde_json::to_writer(&mut bytes, value)
+        .map_err(|_| error("cannot serialize evidence metadata"))?;
+    Ok(bytes.0)
+}
+
 struct TextIndex<'a> {
     resource: &'a SemanticResource,
     offsets: Vec<usize>,
     boundaries: Vec<usize>,
+    escaping: Vec<(usize, usize)>,
 }
 
 impl<'a> TextIndex<'a> {
-    fn build(resource: &'a SemanticResource) -> Self {
-        let mut offsets: Vec<_> = resource
-            .text
-            .char_indices()
-            .map(|(offset, _)| offset)
-            .collect();
+    fn build(resource: &'a SemanticResource) -> Result<Self> {
+        let mut offsets = Vec::new();
+        let mut escaping = Vec::new();
+        let mut extra = 0;
+        for (index, (offset, character)) in resource.text.char_indices().enumerate() {
+            offsets.push(offset);
+            let overhead = json_bytes(&character)? - 2 - character.len_utf8();
+            if overhead != 0 {
+                extra += overhead;
+                escaping.push((index + 1, extra));
+            }
+        }
         offsets.push(resource.text.len());
         let mut ends = BTreeSet::from([0, resource.text.len()]);
         let mut depth = 0usize;
@@ -148,11 +209,12 @@ impl<'a> TextIndex<'a> {
             .into_iter()
             .filter_map(|offset| offsets.binary_search(&offset).ok())
             .collect();
-        Self {
+        Ok(Self {
             resource,
             offsets,
             boundaries,
-        }
+            escaping,
+        })
     }
 
     fn text(&self, range: &SemanticRange) -> &str {
@@ -162,6 +224,16 @@ impl<'a> TextIndex<'a> {
     fn continued(&self, range: &SemanticRange) -> bool {
         self.boundaries.binary_search(&range.start).is_err()
             || self.boundaries.binary_search(&range.end).is_err()
+    }
+
+    fn serialized_text_bytes(&self, range: &SemanticRange) -> usize {
+        let extra = |offset| {
+            let index = self.escaping.partition_point(|(end, _)| *end <= offset);
+            index
+                .checked_sub(1)
+                .map_or(0, |index| self.escaping[index].1)
+        };
+        self.text(range).len() + extra(range.end) - extra(range.start)
     }
 }
 
@@ -175,24 +247,25 @@ struct InputContext<'a> {
 }
 
 impl InputContext<'_> {
+    fn range_input(&self, range: &SemanticRange, text: String) -> SemanticRangeInput {
+        let guard = &self.resources[range.resource];
+        SemanticRangeInput {
+            range: range.clone(),
+            address: guard.address.clone(),
+            revision: guard.revision.clone(),
+            authority: guard.authority,
+            text_digest: guard.text_digest.clone(),
+            total_characters: guard.characters,
+            continued: self.texts[range.resource].continued(range),
+            text,
+        }
+    }
+
     fn input(&self, part: &SemanticPart) -> Result<SemanticPartInput> {
         let ranges = part
             .ranges
             .iter()
-            .map(|range| {
-                let guard = &self.resources[range.resource];
-                let text = &self.texts[range.resource];
-                SemanticRangeInput {
-                    range: range.clone(),
-                    address: guard.address.clone(),
-                    revision: guard.revision.clone(),
-                    authority: guard.authority,
-                    text_digest: guard.text_digest.clone(),
-                    total_characters: guard.characters,
-                    continued: text.continued(range),
-                    text: text.text(range).into(),
-                }
-            })
+            .map(|range| self.range_input(range, self.texts[range.resource].text(range).into()))
             .collect::<Vec<_>>();
         let input_revision = digest(&(
             SEMANTIC_POLICY,
@@ -220,13 +293,31 @@ impl InputContext<'_> {
         if raw_bytes.is_none_or(|bytes| bytes > self.max_input_bytes) {
             return Ok(false);
         }
-        let part = SemanticPart {
-            id: "0".repeat(DIGEST_WIDTH),
-            ranges: ranges.to_vec(),
+        Ok(self.input_bytes(ranges)? <= self.max_input_bytes)
+    }
+
+    fn input_bytes(&self, ranges: &[SemanticRange]) -> Result<usize> {
+        let placeholder = "0".repeat(DIGEST_WIDTH);
+        let input = SemanticPartInput {
+            policy: SEMANTIC_POLICY.into(),
+            plan_id: self.plan_id.into(),
+            part_id: placeholder.clone(),
+            subject_revision: self.subject_revision.into(),
+            max_result_bytes: self.max_result_bytes,
+            ranges: Vec::new(),
+            input_revision: placeholder,
         };
-        let bytes = serde_json::to_vec(&self.input(&part)?)
-            .map_err(|_| error("cannot serialize part input"))?;
-        Ok(bytes.len() <= self.max_input_bytes)
+        let mut bytes = json_bytes(&input)?;
+        for (index, range) in ranges.iter().enumerate() {
+            let text = &self.texts[range.resource];
+            let metadata = self.range_input(range, String::new());
+            bytes = bytes
+                .checked_add(json_bytes(&metadata)?)
+                .and_then(|bytes| bytes.checked_add(text.serialized_text_bytes(range)))
+                .and_then(|bytes| bytes.checked_add(usize::from(index != 0)))
+                .ok_or_else(|| error("serialized evidence size overflow"))?;
+        }
+        Ok(bytes)
     }
 }
 
@@ -291,7 +382,10 @@ impl SemanticPlan {
             ));
         }
         let resource_guards = guards(resources)?;
-        let texts: Vec<_> = resources.iter().map(TextIndex::build).collect();
+        let texts = resources
+            .iter()
+            .map(TextIndex::build)
+            .collect::<Result<Vec<_>>>()?;
         let placeholder = "0".repeat(DIGEST_WIDTH);
         let context = InputContext {
             plan_id: &placeholder,
@@ -461,25 +555,30 @@ impl SemanticPlan {
     }
 
     pub fn verify_resources(&self, resources: &[SemanticResource]) -> Result<()> {
+        self.build_inputs(resources).map(|_| ())
+    }
+
+    pub fn build_inputs<'a>(
+        &'a self,
+        resources: &'a [SemanticResource],
+    ) -> Result<SemanticInputs<'a>> {
         self.verify_structure()?;
         if self.resources != guards(resources)? {
             return Err(error("exact resource guards changed"));
         }
-        let texts: Vec<_> = resources.iter().map(TextIndex::build).collect();
-        let context = InputContext {
-            plan_id: &self.id,
-            subject_revision: &self.subject_revision,
-            max_input_bytes: self.max_input_bytes,
-            max_result_bytes: self.max_result_bytes,
-            resources: &self.resources,
-            texts: &texts,
+        let inputs = SemanticInputs {
+            plan: self,
+            texts: resources
+                .iter()
+                .map(TextIndex::build)
+                .collect::<Result<Vec<_>>>()?,
         };
         for part in &self.parts {
-            if !context.fits(&part.ranges)? {
+            if !inputs.context().fits(&part.ranges)? {
                 return Err(error("serialized part input exceeds its bound"));
             }
         }
-        Ok(())
+        Ok(inputs)
     }
 
     /// Reconstruct one prior leaf from its exact assigned resources, not a whole-plan read.
@@ -523,7 +622,7 @@ impl SemanticPlan {
         let texts = positions
             .iter()
             .map(|position| TextIndex::build(position.map_or(&empty, |index| &resources[index])))
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>>>()?;
         let input = InputContext {
             plan_id: &self.id,
             subject_revision: &self.subject_revision,
@@ -548,22 +647,7 @@ impl SemanticPlan {
         part_id: &str,
         resources: &[SemanticResource],
     ) -> Result<SemanticPartInput> {
-        self.verify_resources(resources)?;
-        let part = self
-            .parts
-            .iter()
-            .find(|part| part.id == part_id)
-            .ok_or_else(|| error("unknown part id"))?;
-        let texts: Vec<_> = resources.iter().map(TextIndex::build).collect();
-        InputContext {
-            plan_id: &self.id,
-            subject_revision: &self.subject_revision,
-            max_input_bytes: self.max_input_bytes,
-            max_result_bytes: self.max_result_bytes,
-            resources: &self.resources,
-            texts: &texts,
-        }
-        .input(part)
+        self.build_inputs(resources)?.part_input(part_id)
     }
 }
 
@@ -682,6 +766,82 @@ mod tests {
         reconstruct(&plan, &resources);
         assert!(SemanticPlan::build("subject", &resources, 200, 100).is_err());
         assert!(SemanticPlan::build("subject", &[resource("empty", "")], 1, 100).is_err());
+    }
+
+    #[test]
+    fn indexed_input_sizes_match_json_at_scalar_boundaries_and_exact_limits() {
+        let text: String = (0..=127)
+            .filter_map(char::from_u32)
+            .chain("가🙂e\u{301}\u{2028}\u{2029}\u{10ffff}".chars())
+            .collect();
+        let resources = vec![resource("주소\"\\", &text), resource("empty", "")];
+        let resource_guards = guards(&resources).unwrap();
+        let texts = resources
+            .iter()
+            .map(TextIndex::build)
+            .collect::<Result<Vec<_>>>()
+            .unwrap();
+        let mut context = InputContext {
+            plan_id: &"0".repeat(DIGEST_WIDTH),
+            subject_revision: "revision\"\\\n🙂",
+            max_input_bytes: usize::MAX,
+            max_result_bytes: 1000,
+            resources: &resource_guards,
+            texts: &texts,
+        };
+        for start in 0..=resource_guards[0].characters {
+            for end in start..=resource_guards[0].characters {
+                let ranges = vec![
+                    SemanticRange {
+                        resource: 0,
+                        start,
+                        end,
+                    },
+                    SemanticRange {
+                        resource: 1,
+                        start: 0,
+                        end: 0,
+                    },
+                ];
+                let input = context
+                    .input(&SemanticPart {
+                        id: "a".repeat(DIGEST_WIDTH),
+                        ranges: ranges.clone(),
+                    })
+                    .unwrap();
+                let actual = serde_json::to_vec(&input).unwrap().len();
+                assert_eq!(context.input_bytes(&ranges).unwrap(), actual);
+                context.max_input_bytes = actual;
+                assert!(context.fits(&ranges).unwrap());
+                context.max_input_bytes = actual - 1;
+                assert!(!context.fits(&ranges).unwrap());
+            }
+        }
+    }
+
+    #[test]
+    fn prepared_inputs_reject_changed_sources_incomplete_coverage_and_oversized_parts() {
+        let resources = vec![resource("one", &"한🙂\"\\\n".repeat(100))];
+        let plan = SemanticPlan::build("subject", &resources, 1400, 100).unwrap();
+        let inputs = plan.build_inputs(&resources).unwrap();
+        for part in &plan.parts {
+            assert_eq!(
+                inputs.part_input(&part.id).unwrap(),
+                plan.part_input_for_assigned_resources(&part.id, &resources)
+                    .unwrap()
+            );
+        }
+        let mut changed = resources.clone();
+        changed[0].text.replace_range(0.."한".len(), "글");
+        assert!(plan.build_inputs(&changed).is_err());
+        let mut incomplete = plan.clone();
+        incomplete.parts.pop();
+        incomplete.id = incomplete.identity().unwrap();
+        assert!(incomplete.build_inputs(&resources).is_err());
+        let mut oversized = plan;
+        oversized.max_input_bytes = 100;
+        oversized.id = oversized.identity().unwrap();
+        assert!(oversized.build_inputs(&resources).is_err());
     }
 
     #[test]
