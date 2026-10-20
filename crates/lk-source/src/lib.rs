@@ -228,6 +228,7 @@ pub enum ObservationOutcome {
     Unverified,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct SourceObservation {
     pub items: Vec<RawItem>,
     pub scope: ObservationScope,

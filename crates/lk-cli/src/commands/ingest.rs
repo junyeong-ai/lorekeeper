@@ -2,6 +2,8 @@ use std::sync::Arc;
 
 use super::{build_llm_client, find_config, load_config_with_revision, parse_date};
 
+mod capture;
+
 /// The number of events the page states about itself, as ` (N events)`.
 ///
 ///
@@ -192,7 +194,7 @@ pub async fn run(
     struct Acquired {
         id: String,
         started_at: std::time::Instant,
-        result: Result<(lk_source::Selection, SourceCapture), lk_source::SourceError>,
+        result: Result<(lk_source::Selection, capture::CapturedSource), lk_source::SourceError>,
     }
     let mut acquired = Vec::new();
     let mut planned: Vec<Planned> = Vec::new();
@@ -290,6 +292,16 @@ pub async fn run(
                 .map(lk_core::manual_original::ManualBundleCapture::byte_len)
                 .sum::<usize>();
         }
+        let result = match result {
+            Ok(capture) => collect_with_budget(started_at, timeout, async move {
+                tokio::task::spawn_blocking(move || capture::CapturedSource::capture(capture))
+                    .await
+                    .map_err(|error| lk_source::SourceError::Parse(format!("capture source: {error}")))
+                    .and_then(std::convert::identity)
+            })
+            .await,
+            Err(error) => Err(error),
+        };
         acquired.push(Acquired {
             id: id.clone(),
             started_at,
@@ -375,7 +387,9 @@ pub async fn run(
                 originals: manual_originals,
                 retirement_blocked: manual_retirement_blocked,
             },
-        ) = match acquisition.result {
+        ) = match acquisition.result.and_then(|(selection, capture)| {
+            capture.restore().map(|source| (selection, source))
+        }) {
             Ok(capture) => capture,
             Err(error) => {
                 eprintln!("  ✗ {id} extract: {error}");
