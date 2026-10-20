@@ -290,7 +290,9 @@ impl MutationSession {
     }
 
     fn preflight(&self, plan: &MutationPlan) -> Result<(), VaultError> {
+        self.validate_addresses(plan)?;
         let mut state: HashMap<PathBuf, Option<String>> = HashMap::new();
+        let mut retained: HashMap<&Path, Option<&str>> = HashMap::new();
         for step in &plan.steps {
             let paths: Vec<&Path> = match step {
                 Step::RequireAbsent { path }
@@ -301,7 +303,7 @@ impl MutationSession {
                 }
                 Step::Rename { from, to, .. } => vec![from, to],
             };
-            for path in paths {
+            for &path in &paths {
                 if !state.contains_key(path) {
                     state.insert(path.to_owned(), self.read(path)?);
                 }
@@ -345,6 +347,66 @@ impl MutationSession {
                     state.insert(path.clone(), None);
                 }
             }
+            for &path in &paths {
+                if let Some(expected) = retained.get(path)
+                    && state[path].as_deref() != *expected
+                {
+                    return Err(Self::conflict(path));
+                }
+            }
+            match step {
+                Step::RequireAbsent { path } => {
+                    retained.insert(path, None);
+                }
+                Step::Edit {
+                    path,
+                    before,
+                    after,
+                } if before == after => {
+                    retained.insert(path, Some(before));
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_addresses(&self, plan: &MutationPlan) -> Result<(), VaultError> {
+        use std::collections::BTreeSet;
+        let mut owners: HashMap<PathBuf, (BTreeSet<PathBuf>, bool)> = HashMap::new();
+        for step in &plan.steps {
+            let (paths, writes): (Vec<&Path>, bool) = match step {
+                Step::RequireAbsent { path } => (vec![path], false),
+                Step::Edit {
+                    path,
+                    before,
+                    after,
+                } => (vec![path], before != after),
+                Step::Create { path, .. } | Step::Remove { path, .. } => (vec![path], true),
+                Step::Rename { from, to, .. } => (vec![from, to], true),
+            };
+            let mut previous = None;
+            for path in paths {
+                let resolved = crate::address::destination(&self.path(path)?)?;
+                if matches!(step, Step::Rename { .. }) && previous.as_ref() == Some(&resolved) {
+                    let owner = owners.get_mut(&resolved).expect("registered rename source");
+                    owner.0.clear();
+                    owner.0.insert(path.to_owned());
+                    continue;
+                }
+                let (addresses, has_writes) = owners.entry(resolved.clone()).or_default();
+                if let Some(prior) = addresses.iter().find(|prior| prior.as_path() != path)
+                    && (writes || *has_writes)
+                {
+                    return Err(io::Error::other(format!(
+                        "mutation paths {} and {} address the same file entry; use one exact address",
+                        prior.display(), path.display()
+                    )).into());
+                }
+                addresses.insert(path.to_owned());
+                *has_writes |= writes;
+                previous = Some(resolved);
+            }
         }
         Ok(())
     }
@@ -357,6 +419,7 @@ impl MutationSession {
     }
 
     fn finish(&self, journal: &Journal) -> Result<(), VaultError> {
+        self.validate_addresses(&journal.plan)?;
         let plan = serde_json::to_string(&journal.plan)
             .map_err(|e| VaultError::Serialization(e.to_string()))?;
         let plan_revision = lk_core::concept::file_revision(&plan);
@@ -514,6 +577,107 @@ mod tests {
         p.rename("Old.md", "new.md", "original".into());
         p.edit("links.md", "Old.md".into(), "new.md".into());
         p
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn alias_writes_refuse_before_journaling_but_read_guards_can_share_an_entry() {
+        for scenario in ["edits", "guard-edit", "create", "guards"] {
+            let root = tempfile::tempdir().unwrap();
+            fs::create_dir(root.path().join("real")).unwrap();
+            std::os::unix::fs::symlink("real", root.path().join("alias")).unwrap();
+            fs::write(root.path().join("real/page.md"), "before").unwrap();
+            let session = MutationSession::acquire(root.path()).unwrap();
+            let mut plan = MutationPlan::default();
+            match scenario {
+                "edits" => {
+                    plan.edit("alias/page.md", "before".into(), "first".into());
+                    plan.edit("real/page.md", "before".into(), "second".into());
+                }
+                "guard-edit" => {
+                    plan.require_unchanged("alias/page.md", "before".into());
+                    plan.edit("real/page.md", "before".into(), "after".into());
+                }
+                "create" => {
+                    plan.create("alias/new/deep.md", "first".into());
+                    plan.create("real/new/deep.md", "second".into());
+                }
+                "guards" => {
+                    plan.require_unchanged("alias/page.md", "before".into());
+                    plan.require_unchanged("real/page.md", "before".into());
+                }
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                session.apply(plan).is_ok(),
+                scenario == "guards",
+                "{scenario}"
+            );
+            assert_eq!(
+                fs::read_to_string(root.path().join("real/page.md")).unwrap(),
+                "before"
+            );
+            assert!(!root.path().join("real/new").exists());
+            assert!(!session.journal.exists());
+            assert!(!session.journal.with_file_name("progress.json").exists());
+        }
+    }
+
+    #[test]
+    fn preflight_preserves_sequential_edits_renames_and_distinct_hard_links() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("Old.md"), "before").unwrap();
+        fs::hard_link(root.path().join("Old.md"), root.path().join("hard.md")).unwrap();
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let mut plan = MutationPlan::default();
+        plan.edit("Old.md", "before".into(), "first".into());
+        plan.rename("Old.md", "old.md", "first".into());
+        plan.edit("old.md", "first".into(), "second".into());
+        plan.edit("hard.md", "before".into(), "independent".into());
+        plan.create("new.md", "retained".into());
+        plan.require_unchanged("new.md", "retained".into());
+        session.apply(plan).unwrap();
+        assert_eq!(
+            fs::read_to_string(root.path().join("old.md")).unwrap(),
+            "second"
+        );
+        assert_eq!(
+            fs::read_to_string(root.path().join("hard.md")).unwrap(),
+            "independent"
+        );
+        assert!(!session.journal.exists());
+    }
+
+    #[test]
+    fn retained_guards_cannot_be_invalidated_by_later_owned_writes() {
+        for scenario in ["edit", "restore", "create"] {
+            let root = tempfile::tempdir().unwrap();
+            let session = MutationSession::acquire(root.path()).unwrap();
+            let mut plan = MutationPlan::default();
+            if scenario != "create" {
+                fs::write(root.path().join("page.md"), "before").unwrap();
+                plan.require_unchanged("page.md", "before".into());
+                plan.edit("page.md", "before".into(), "after".into());
+                if scenario == "restore" {
+                    plan.edit("page.md", "after".into(), "before".into());
+                }
+            } else {
+                plan.require_absent("page.md");
+                plan.create("page.md", "after".into());
+            }
+            assert!(session.apply(plan).is_err());
+            assert!(!session.journal.exists());
+            assert_eq!(
+                fs::read_to_string(root.path().join("page.md"))
+                    .ok()
+                    .as_deref(),
+                if scenario != "create" {
+                    Some("before")
+                } else {
+                    None
+                }
+            );
+        }
     }
 
     #[test]

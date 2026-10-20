@@ -675,6 +675,31 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn merge_with_sibling_alias_writes_refuses_without_partial_publication() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let old = "---\ntype: concept\ntitle: Old\n---\n# Old\n";
+        let keep = "---\ntype: concept\ntitle: Keep\naliases: [Keep]\n---\n# Keep\n\n[Old](/wiki/concepts/old.md)\n";
+        write(root, "wiki/concepts/old.md", old);
+        write(root, "wiki/concepts/group/keep.md", keep);
+        std::os::unix::fs::symlink("group", root.join("wiki/concepts/alias")).unwrap();
+        let pages = crate::scan::scan_vault(root, true).unwrap();
+        let error =
+            merge_concepts(&pages, root, "wiki", "old", "group/keep", false, false).unwrap_err();
+        assert!(error.to_string().contains("same file entry"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(root.join("wiki/concepts/old.md")).unwrap(),
+            old
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("wiki/concepts/group/keep.md")).unwrap(),
+            keep
+        );
+        assert!(!root.join(".lorekeeper/mutation/pending.json").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn merge_rejects_two_addresses_of_one_entry_but_keeps_distinct_hard_links() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();

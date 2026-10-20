@@ -36,6 +36,10 @@ canonical; SQLite navigation is derived.
   and publish one guarded `MutationPlan`. Preflight every expected file; persist
   full before/after steps before edits. Recovery accepts expected states only and
   preserves conflicts. Lock order is mutation session before narrower queue locks.
+- Preflight rejects conflicting publication addresses resolving to one file entry,
+  including missing descendants under directory aliases. Pure repeated read guards
+  and explicit spelling renames remain valid; hard links are distinct entries.
+  After a retained guard is evaluated, later owned steps must preserve it.
 - Persist plan once; progress receipts bind its revision. Remove/sync plan before
   clearing progress to avoid replaying earlier steps over later same-file state.
   Journal private data and durable directory creation use shared primitives.

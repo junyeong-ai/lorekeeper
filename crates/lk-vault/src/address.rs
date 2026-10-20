@@ -39,7 +39,7 @@ pub fn writable_page_path(root: &Path, relative: &Path) -> std::io::Result<PathB
     }
 }
 
-fn destination(path: &Path) -> std::io::Result<PathBuf> {
+pub(crate) fn destination(path: &Path) -> std::io::Result<PathBuf> {
     let absolute = std::path::absolute(path)?;
     let mut ancestor = absolute.as_path();
     let mut missing = Vec::new();
