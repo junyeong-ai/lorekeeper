@@ -653,7 +653,6 @@ pub fn record_collection(
                                 .personal_inputs
                                 .as_ref()
                                 .is_some_and(|inputs| inputs.days.contains_key(day))
-                                || (batch.targeted && batch.requested_day == *day)
                                 || accepted.iter().any(|(id, window)| {
                                     id == &source.source_id
                                         && window.start <= *day
@@ -1294,13 +1293,10 @@ fn latest_personal_receipt<'a>(
             || (source.outcome == ResponseOutcome::Partial && source.personal_inputs.is_none()) {
             return None;
         }
-        let applies = if batch.targeted {
-            batch.requested_day == day
-        } else {
-            source.personal_inputs.as_ref().is_some_and(|inputs| inputs.days.contains_key(&day))
+        let applies = (!batch.targeted || batch.requested_day == day)
+            && (source.personal_inputs.as_ref().is_some_and(|inputs| inputs.days.contains_key(&day))
                 || (batch.started_at.is_some_and(|at| at >= end && at <= batch.at)
-                    && matches!(source.scope, ObservedScope::Window { start: min, end: max } if min <= start && max >= end))
-        };
+                    && matches!(source.scope, ObservedScope::Window { start: min, end: max } if min <= start && max >= end)));
         applies.then_some((batch, source))
     })
 }
@@ -1391,6 +1387,20 @@ fn personal_work_logs_ready(
             .rev()
             .find(|batch| batch.full_ingest && batch.work_logs.get(day) == Some(input))
             .ok_or_else(|| remedy(*day, "no bound full-source publication"))?;
+        let mut has_publication_policy = false;
+        for inputs in baseline
+            .sources
+            .iter()
+            .filter_map(|source| source.personal_inputs.as_ref())
+        {
+            has_publication_policy = true;
+            if inputs.scope != scope {
+                return Err(remedy(*day, "personal publication policy changed"));
+            }
+        }
+        if !has_publication_policy {
+            return Err(remedy(*day, "personal publication policy is unbound"));
+        }
         for id in &sources {
             let original = baseline
                 .sources
@@ -2237,6 +2247,91 @@ mod tests {
         ObservedScope::Window {
             start: "2026-09-30T00:00:00Z".parse().unwrap(),
             end: "2026-10-01T00:00:00Z".parse().unwrap(),
+        }
+    }
+
+    #[test]
+    fn personal_receipts_preserve_positive_configured_query_days_after_empty_targeted_requery() {
+        let (_temp, mut config) = config();
+        config.sources.get_mut("mail").unwrap().source_type = SourceType::Jira;
+        let root = config.vault.root_path();
+        std::fs::create_dir_all(&root).unwrap();
+        let session = MutationSession::acquire(&root).unwrap();
+        let day = date(2026, 9, 30);
+        let mut positive = batch(
+            &config,
+            ResponseOutcome::Observed,
+            ObservedScope::ConfiguredQuery,
+        );
+        positive.full_ingest = false;
+        positive.targeted = true;
+        positive.sources[0].personal_inputs = Some(lk_pipeline::WorkLogInputs {
+            scope: lk_pipeline::work_log_scope(
+                config.personal.as_ref().unwrap(),
+                config.vault.locale(),
+            ),
+            days: BTreeMap::from([(day, "known-positive".into())]),
+        });
+        let mut empty = positive.clone();
+        empty.sources[0]
+            .personal_inputs
+            .as_mut()
+            .unwrap()
+            .days
+            .clear();
+        let absent = BTreeMap::from([(day, WorkLogInput::Absent)]);
+        let before = personal_work_logs_ready(&[positive.clone(), empty.clone()], &config, &absent)
+            .is_err_and(|reason| reason.contains("no published work-log"));
+        for receipt in [positive, empty] {
+            record_collection(
+                &config,
+                &session,
+                CollectionPublication {
+                    requested_day: day,
+                    full_ingest: false,
+                    started_at: receipt.started_at.unwrap(),
+                    targeted: true,
+                    work_logs: BTreeMap::new(),
+                },
+                receipt.sources,
+            )
+            .unwrap();
+        }
+        let (state, _) = load(&root).unwrap();
+        let after = personal_work_logs_ready(&state.batches, &config, &absent)
+            .is_err_and(|reason| reason.contains("no published work-log"));
+        assert_eq!((before, state.batches.len(), after), (true, 2, true));
+    }
+
+    #[test]
+    fn personal_receipts_check_publication_policy_after_all_contributing_sources_are_removed() {
+        let (_temp, config) = config();
+        let day = date(2026, 9, 30);
+        let mut publication = batch(&config, ResponseOutcome::Observed, window());
+        publication.work_logs.insert(day, "published-input".into());
+        publication.sources[0].personal_inputs = Some(lk_pipeline::WorkLogInputs {
+            scope: lk_pipeline::work_log_scope(
+                config.personal.as_ref().unwrap(),
+                config.vault.locale(),
+            ),
+            days: BTreeMap::from([(day, "personal-input".into())]),
+        });
+        let logs = BTreeMap::from([(day, WorkLogInput::Bound("published-input".into()))]);
+        for clear_tracking in [true, false] {
+            let mut changed = config.clone();
+            if clear_tracking {
+                changed.personal.as_mut().unwrap().tracked_sources.clear();
+            } else {
+                changed.sources.get_mut("mail").unwrap().enabled = false;
+                changed.personal.as_mut().unwrap().uncategorized_label =
+                    Some("Changed category".into());
+            }
+            assert!(personal_sources(&changed).is_empty());
+            assert!(
+                personal_work_logs_ready(&[publication.clone()], &changed, &logs)
+                    .unwrap_err()
+                    .contains("publication policy")
+            );
         }
     }
 
