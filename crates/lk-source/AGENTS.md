@@ -60,7 +60,10 @@ uses validated params and context; do not add per-adapter output pipelines.
 - `calendar.rs`: construct URL path segments safely. All-day civil dates use the
   vault timezone; skip invalid timestamps diagnostically.
 - `drive.rs`: select direct children by explicit `folder_id`, never a folder name.
-  Query the actual modified-time day window; `name_prefix` uses Drive's literal
+  Query the actual modified-time day window: `lookback_days` defaults to1 prior civil
+  day plus the target day; explicit0 selects only the target day. Query and reported
+  observation bounds agree, including historical targets. This overlap does not
+  establish automatic outage recovery or revision-history coverage. `name_prefix` uses Drive's literal
   prefix matching, not a date template, glob or arbitrary substring. Files use
   provider identity independent of folder/title and become document pages.
   Recheck selected metadata/version

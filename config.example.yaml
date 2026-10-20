@@ -81,6 +81,7 @@ sources:
     enabled: false
     params:
       folder_id: "YOUR_DRIVE_FOLDER_ID" # copy the ID from the Drive folder URL; "root" is valid
+      lookback_days: 1                 # target civil day plus previous day; increase for longer gaps
       # name_prefix: "briefing-"       # optional filename prefix, not a date or glob pattern
       # max_files: 200                 # a reached cap is a partial observation
     labels: [ai-industry]

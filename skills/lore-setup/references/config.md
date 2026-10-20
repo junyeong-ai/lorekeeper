@@ -72,7 +72,10 @@ execution:
 
 A Drive source uses the exact `folder_id` from its folder URL (or `root`), an
 optional `name_prefix`, and `max_files` (default 200). It queries actual modification
-time and imports independent documents. A folder name, date filename or glob is not
+time over the target civil day plus `lookback_days` earlier days (default 1; 0 means
+only the target day) and imports independent documents. The overlap includes edits
+after the previous daily run; longer outages need a wider window or explicit date
+backfill. It does not reconstruct provider revision history. A folder name, date filename or glob is not
 a selector. Google Docs and Slides have explicit text exports; unsupported formats
 are partial coverage. Inventory absence does not authorize retiring existing pages.
 
