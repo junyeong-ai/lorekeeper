@@ -77,18 +77,20 @@ are partial coverage. Inventory absence does not authorize retiring existing pag
 
 Semantic maintenance is optional and separate from weekly synthesis and retention.
 Enable `graph.audit.schedule` deliberately: each run uses the LLM to review at most
-`batch_size` changed/first-time concepts. `lore run knowledge` uses the configured
+`batch_size` changed/first-time concepts or declared source documents. `lore run knowledge` uses the configured
 execution profile; structural lint alone cannot perform the semantic read.
 For an explicitly requested initial campaign, `lore run knowledge --batches N`
 repeats bounded batches, releasing the lease between them and resuming from current
 receipts. A failed/cancelled batch stops the campaign and preserves unfinished work.
 `batch-limit` is a completed execution budget, not full-corpus semantic completion.
 `max_input_bytes` includes scoped reviews, their evidence and available prior archives;
-it bounds distinct source bytes rather than accumulated model usage. Automatic batches
-retain individually oversized concepts as visible pending blockers while selecting later
-fitting work. No fitting work with blockers remaining yields `stop_reason: blocked`,
-not `settled`. Explicit `audit-plan --path` preserves the complete requested selection.
-The input bound belongs to the selected config, not the execution profile. `review_health`
+it measures distinct source bytes rather than accumulated model usage. Oversized subjects
+remain selected with their actual footprint diagnostic. Native execution partitions
+their evidence, uses fresh inspection/reduction sessions, then verifies the complete
+work before accepting a final assessment. `execution.work` independently bounds
+serialized request/result bytes and agent sessions per run; exhaustion retains pending
+work and reports failure. Explicit `audit-plan --path` preserves the requested selection.
+These bounds belong to the selected config, not the execution profile. `review_health`
 reports global attention separately from the selected batch's completion.
 
 ## Initial setup

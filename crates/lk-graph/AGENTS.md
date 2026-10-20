@@ -54,9 +54,12 @@ and CLI discovery, not a second graph authority.
   evidence that was not actually read. Aggregate and per-kind counts retain this scope.
 - Preserve pending first-discovery order and rotate changed/first-time work. A bounded
   weekly batch must not starve old work or grow into an unbounded full-corpus audit.
-  Individually oversized inputs remain visible pending blockers; they do not consume
-  a class turn or prevent later fitting work. Combined batch capacity is distinct
-  from an individual blocker. Exact selections retain their complete requested scope.
+  Whole-input library planning defers individually oversized inputs without consuming
+  a class turn, allowing later fitting work. Partitioned CLI/native planning admits
+  them fairly and preserves the measured oversized status. Recording/completion then
+  requires exact completed-work proof for each exempted subject in the same guarded
+  publication plan; ordinary subjects retain their combined whole-input bound.
+  Exact selections retain their complete requested scope.
 - Scope reviews by their declared subjects, the subject's `knowledge_review` pointer,
   and prior receipt review paths. Omitting result review paths cannot bypass a missing,
   invalid or stale scoped review. Valid open findings remain durable follow-up.
