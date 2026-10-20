@@ -594,8 +594,10 @@ For an initial backlog, select a registered profile and execution budget:
 `lore run knowledge --profile reviewer --batches 20 --json`. `batch-limit` means
 the budget was reached; `settled` means the current eligible plan has no pending
 subjects. Neither proves universal truth or review of every external original.
-`audit_progress` reports before/after counts; `semantic_calls` counts invocation
-attempts, not tokens or billing. `duration_ms` measures elapsed wall time including
+`audit_progress` reports before/after counts; `semantic_calls` counts agent invocation
+attempts. Each invocation can make multiple model requests and tool calls, so
+`max_calls` does not cap provider requests, tokens or billing.
+`duration_ms` measures elapsed wall time including
 waiting and cleanup; campaigns report both total and per-batch time.
 `semantic_duration_ms` measures that batch's agent invocations, including failed or
 cancelled attempts. These are not provider processing time or billed cost.

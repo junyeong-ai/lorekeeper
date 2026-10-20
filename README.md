@@ -569,7 +569,9 @@ graph:
 초기 누적분은 등록된 프로필로 `lore run knowledge --profile reviewer --batches 20 --json`처럼
 실행량을 명시해 재개할 수 있습니다. `batch-limit`는 실행량 도달, `settled`는 현재 검사 범위의
 대기 대상이 없다는 뜻입니다. 전체 지식의 진실이나 모든 외부 원본 검수를 보장하지 않습니다.
-`audit_progress`는 검수 전후 건수, `semantic_calls`는 실행 시도 수이며 토큰 수·요금이 아닙니다.
+`audit_progress`는 검수 전후 건수, `semantic_calls`는 에이전트 실행 시도 수입니다.
+한 실행 안에서도 여러 모델 요청과 도구 호출이 발생하므로, `max_calls`는 모델 요청 수나
+토큰 수·요금의 상한이 아닙니다.
 `duration_ms`는 대기·정리까지 포함한 실행 시간이며, 여러 배치를 요청하면 전체 시간과 각 배치
 시간을 함께 제공합니다. `semantic_duration_ms`는 해당 배치의 에이전트 실행에 소요된 시간입니다.
 실패·취소한 실행 시간도 포함하며, 제공자의 처리 시간이나 청구 금액을 뜻하지 않습니다.
