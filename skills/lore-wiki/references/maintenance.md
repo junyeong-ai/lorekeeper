@@ -99,8 +99,13 @@ assessments or performs repairs.
    Do not rewrite an imported source to make competing claims agree or manufacture
    a concept to hold a document-only finding. A scoped review may assess document
    paths directly and explicitly pin the actual sources supporting its judgment.
-5. Resolve tasks created by this batch through lore-process. Use `wiki audit-plan
-   --path SUBJECT` (repeat `--path` for surviving original addresses) to obtain their
+5. Resolve tasks created by this batch through lore-process. Run `lore wiki refresh`
+   once after those repairs, before the final audit plan or assessment recording.
+   This explicitly prepares complete lexical discovery; recording checks corpus-wide
+   pending order, while `--path` plans evaluate only selected discovery recipes and
+   report `coverage_scope: selection`. Automatic plans report corpus coverage.
+   Use `wiki audit-plan --path SUBJECT` (repeat `--path` for surviving original
+   addresses) to obtain their
    final fingerprints without expanding the batch. For concept subjects after a
    verified merge, confirm
    the old address was retired by that exact merge and its evidence reached the

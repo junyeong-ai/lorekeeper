@@ -1761,6 +1761,18 @@ mod tests {
                     serde_json::to_value(&full).unwrap(),
                     "{query:?} {tags:?}"
                 );
+                for (captured, current) in incremental.hits.iter_mut().zip(&live.hits) {
+                    if current.synthesis.status == crate::SynthesisInputStatus::NotCaptured {
+                        assert!(captured.synthesis.evidence_digest.is_some());
+                        assert_ne!(
+                            captured.synthesis.status,
+                            crate::SynthesisInputStatus::NotCaptured
+                        );
+                    } else {
+                        assert_eq!(captured.synthesis, current.synthesis);
+                    }
+                    captured.synthesis = current.synthesis.clone();
+                }
                 assert_eq!(
                     serde_json::to_value(&incremental.hits).unwrap(),
                     serde_json::to_value(&live.hits).unwrap(),

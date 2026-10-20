@@ -99,14 +99,8 @@ pub fn record_discovery(
 ) -> Result<(), GraphError> {
     let root = session.root();
     let (before, mut receipts) = load(root)?;
-    let candidate = inputs(root, dirs, pages, &receipts)?
-        .into_iter()
-        .find(|candidate| candidate.path == request.path)
-        .ok_or_else(|| error("discovery requires an exact audit subject"))?;
-    if candidate.file_revision != request.file_revision {
-        return Err(error(
-            "discovery subject changed; reread before selecting queries",
-        ));
+    if !subject_kinds(pages, dirs).contains_key(Path::new(&request.path)) {
+        return Err(error("discovery requires an exact audit subject"));
     }
     if request.queries.is_empty() || request.queries.len() > 16 {
         return Err(error("discovery requires 1..16 explicit queries"));
@@ -121,13 +115,18 @@ pub fn record_discovery(
         lk_vault::page_path(root, Path::new(&request.path)).map_err(error)?,
     )
     .map_err(error)?;
-    if file_revision(&raw) != request.file_revision {
+    let revision = source_revision(&lk_vault::parse_page(&raw).map_err(error)?);
+    if file_revision(&raw) != request.file_revision
+        || !pages.iter().any(|page| {
+            page.path == Path::new(&request.path) && page.revision.as_deref() == Some(&revision)
+        })
+    {
         return Err(error("discovery subject changed during recording"));
     }
     receipts.discovery.insert(
         request.path.clone(),
         DiscoveryPlan {
-            subject_revision: source_revision(&lk_vault::parse_page(&raw).map_err(error)?),
+            subject_revision: revision,
             queries,
         },
     );
@@ -316,7 +315,10 @@ pub fn verify_batch_with_guard(
     }
     Ok(AuditVerification {
         completed: verified,
-        coverage: AuditCoverage::build(counts(candidates.values(), &receipts)),
+        coverage: AuditCoverage::build(
+            counts(candidates.values(), &receipts),
+            AuditCoverageScope::Corpus,
+        ),
     })
 }
 
@@ -418,8 +420,16 @@ pub struct AuditCandidate {
     pub reason: &'static str,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AuditCoverageScope {
+    Corpus,
+    Selection,
+}
+
 #[derive(Serialize)]
 pub struct AuditPlan {
+    pub coverage_scope: AuditCoverageScope,
     pub candidates: Vec<AuditCandidate>,
     /// Individually oversized inputs encountered while selecting this automatic batch.
     /// At most 100 details, in selection order; exact selections do not defer inputs.
@@ -448,6 +458,7 @@ pub struct AuditCounts {
 /// Corpus coverage describes current assessment receipts, not factual confidence.
 #[derive(Clone, Debug, Serialize)]
 pub struct AuditCoverage {
+    pub coverage_scope: AuditCoverageScope,
     pub total: usize,
     pub reviewed_current: usize,
     pub follow_up_current: usize,
@@ -457,8 +468,12 @@ pub struct AuditCoverage {
 }
 
 impl AuditCoverage {
-    fn build(counts_by_kind: BTreeMap<AuditSubjectKind, AuditCounts>) -> Self {
+    fn build(
+        counts_by_kind: BTreeMap<AuditSubjectKind, AuditCounts>,
+        coverage_scope: AuditCoverageScope,
+    ) -> Self {
         Self {
+            coverage_scope,
             total: counts_by_kind.values().map(|count| count.total).sum(),
             reviewed_current: counts_by_kind
                 .values()
@@ -477,7 +492,7 @@ impl AuditCoverage {
 
 impl AuditPlan {
     pub fn coverage(&self) -> AuditCoverage {
-        AuditCoverage::build(self.counts_by_kind.clone())
+        AuditCoverage::build(self.counts_by_kind.clone(), self.coverage_scope)
     }
 }
 
@@ -730,6 +745,81 @@ fn load_page_input(
     Ok(Some((raw, input)))
 }
 
+struct ReviewDependencyIndex {
+    reports: BTreeMap<String, lk_vault::ReviewReport>,
+    subjects: BTreeMap<String, Vec<String>>,
+    by_subject: BTreeMap<String, BTreeSet<String>>,
+    dependencies: BTreeMap<(String, bool), AuditReviewDependency>,
+}
+
+impl ReviewDependencyIndex {
+    fn load(root: &Path, dirs: &VaultDirs) -> Result<Self, GraphError> {
+        let reports = lk_vault::list_reviews(root, dirs).map_err(error)?;
+        let subjects = review_subjects(root, &reports)?;
+        let mut by_subject: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        for (path, declared) in &subjects {
+            for subject in declared {
+                by_subject
+                    .entry(subject.clone())
+                    .or_default()
+                    .insert(path.clone());
+            }
+        }
+        Ok(Self {
+            reports: reports
+                .into_iter()
+                .map(|report| (report.path.clone(), report))
+                .collect(),
+            subjects,
+            by_subject,
+            dependencies: BTreeMap::new(),
+        })
+    }
+
+    fn dependency(
+        &mut self,
+        root: &Path,
+        subject: &str,
+        path: &str,
+    ) -> Result<AuditReviewDependency, GraphError> {
+        let declares_subject = self
+            .subjects
+            .get(path)
+            .is_some_and(|subjects| subjects.iter().any(|declared| declared == subject));
+        let key = (path.to_owned(), declares_subject);
+        if let Some(dependency) = self.dependencies.get(&key) {
+            return Ok(dependency.clone());
+        }
+        let dependency = review_dependency(
+            root,
+            subject,
+            path,
+            self.reports.get(path),
+            self.subjects.get(path),
+        )?;
+        self.dependencies.insert(key, dependency.clone());
+        Ok(dependency)
+    }
+}
+
+/// Capture review scopes for already selected, revision-guarded pages without a graph scan.
+/// Shared reviews and their evidence are loaded once per distinct scope validity.
+pub fn review_dependencies(
+    root: &Path,
+    dirs: &VaultDirs,
+    pages: &BTreeMap<String, lk_vault::VaultPage>,
+) -> Result<BTreeMap<String, Vec<AuditReviewDependency>>, GraphError> {
+    let (_, receipts) = load(root)?;
+    let mut index = ReviewDependencyIndex::load(root, dirs)?;
+    pages
+        .iter()
+        .map(|(path, page)| {
+            scoped_reviews(root, Path::new(path), page, &mut index, &receipts)
+                .map(|reviews| (path.clone(), reviews))
+        })
+        .collect()
+}
+
 /// Retain explicit subjects even when another review metadata field is invalid.
 /// Unreadable prose and malformed subjects cannot establish a semantic association.
 fn review_subjects(
@@ -765,16 +855,15 @@ fn scoped_reviews(
     root: &Path,
     subject: &Path,
     page: &lk_vault::VaultPage,
-    reviews: &[lk_vault::ReviewReport],
-    subjects: &BTreeMap<String, Vec<String>>,
+    index: &mut ReviewDependencyIndex,
     receipts: &Receipts,
 ) -> Result<Vec<AuditReviewDependency>, GraphError> {
     let subject = subject.to_string_lossy();
-    let mut paths = subjects
-        .iter()
-        .filter(|(_, subjects)| subjects.iter().any(|declared| declared == subject.as_ref()))
-        .map(|(path, _)| path.clone())
-        .collect::<BTreeSet<_>>();
+    let mut paths = index
+        .by_subject
+        .get(subject.as_ref())
+        .cloned()
+        .unwrap_or_default();
     // Preserve dependencies recorded by earlier assessments, including now missing reviews.
     if let Some(receipt) = receipts.entries.get(subject.as_ref()) {
         paths.extend(receipt.reviews.iter().cloned());
@@ -797,14 +886,7 @@ fn scoped_reviews(
         }
     }
     for path in paths {
-        let report = reviews.iter().find(|review| review.path == path);
-        result.push(review_dependency(
-            root,
-            &subject,
-            &path,
-            report,
-            subjects.get(&path),
-        )?);
+        result.push(index.dependency(root, &subject, &path)?);
     }
     result.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(result)
@@ -945,20 +1027,14 @@ fn review_dependency(
     Ok(result)
 }
 
-fn inputs(
-    root: &Path,
-    dirs: &VaultDirs,
-    pages: &[ScannedPage],
-    receipts: &Receipts,
-) -> Result<Vec<AuditCandidate>, GraphError> {
-    let reviews = lk_vault::list_reviews(root, dirs).map_err(error)?;
-    let subjects = review_subjects(root, &reviews)?;
-    let evidence = crate::backlinks::concept_evidence(pages, root, dirs)?;
+fn subject_kinds(pages: &[ScannedPage], dirs: &VaultDirs) -> BTreeMap<PathBuf, AuditSubjectKind> {
     let documents = lk_core::vault_path::documents_dir(dirs);
-    let kinds = pages
+    pages
         .iter()
         .filter_map(|page| {
-            let kind = if evidence.contains_key(&page.path) {
+            let kind = if crate::scan::is_concept_page(&page.path, dirs)
+                && page.format.as_deref() == Some("concept")
+            {
                 AuditSubjectKind::Concept
             } else if page.format.as_deref() == Some("document")
                 && page
@@ -973,12 +1049,43 @@ fn inputs(
             };
             Some((page.path.clone(), kind))
         })
-        .collect::<BTreeMap<_, _>>();
+        .collect()
+}
+
+fn inputs(
+    root: &Path,
+    dirs: &VaultDirs,
+    pages: &[ScannedPage],
+    receipts: &Receipts,
+) -> Result<Vec<AuditCandidate>, GraphError> {
+    inputs_selected(root, dirs, pages, receipts, None)
+}
+
+fn inputs_selected(
+    root: &Path,
+    dirs: &VaultDirs,
+    pages: &[ScannedPage],
+    receipts: &Receipts,
+    selection: Option<&BTreeSet<&str>>,
+) -> Result<Vec<AuditCandidate>, GraphError> {
+    let mut review_index = ReviewDependencyIndex::load(root, dirs)?;
+    let evidence = crate::backlinks::concept_evidence(pages, root, dirs)?;
+    let kinds = subject_kinds(pages, dirs);
+    let selected = |path: &Path| {
+        selection.is_none_or(|selection| selection.contains(path.to_string_lossy().as_ref()))
+    };
     let by_id: BTreeMap<_, _> = pages.iter().map(|page| (page.id.as_str(), page)).collect();
+    let by_path = pages
+        .iter()
+        .map(|page| (page.path.as_path(), page))
+        .collect::<BTreeMap<_, _>>();
     let existence = crate::scan::VaultExistence::build_at(root, pages, dirs)?;
     let mut queries = Vec::new();
     for (path, plan) in &receipts.discovery {
-        if !kinds.contains_key(Path::new(path)) {
+        if !kinds.contains_key(Path::new(path))
+            || !selected(Path::new(path))
+            || by_path[Path::new(path)].revision.as_deref() != Some(&plan.subject_revision)
+        {
             continue;
         }
         if plan.queries.is_empty() || plan.queries.len() > 16 {
@@ -988,7 +1095,10 @@ fn inputs(
     }
     let discovered = lk_vault::discover_queries(root, dirs, &queries).map_err(error)?;
     let mut result = Vec::new();
-    for page in pages.iter().filter(|page| kinds.contains_key(&page.path)) {
+    for page in pages
+        .iter()
+        .filter(|page| kinds.contains_key(&page.path) && selected(&page.path))
+    {
         let kind = kinds[&page.path];
         let raw = std::fs::read_to_string(lk_vault::page_path(root, &page.path).map_err(error)?)
             .map_err(error)?;
@@ -1048,7 +1158,7 @@ fn inputs(
             AuditSubjectKind::Document => Vec::new(),
         };
         let scoped_reviews =
-            scoped_reviews(root, &page.path, &parsed, &reviews, &subjects, receipts)?;
+            scoped_reviews(root, &page.path, &parsed, &mut review_index, receipts)?;
         let review_identity = scoped_reviews
             .iter()
             .map(AuditReviewDependency::identity)
@@ -1215,16 +1325,30 @@ fn plan_selected_inner(
     if !(1..=100).contains(&limit) {
         return Err(error("audit limit must be 1..100"));
     }
-    let (_, receipts) = load(root)?;
-    let candidates = inputs(root, dirs, pages, &receipts)?;
-    let total = candidates.len();
-    let mut selected = Vec::new();
-    let unique: BTreeSet<_> = selection.iter().collect();
+    let unique = selection
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
     if unique.len() != selection.len() || selection.len() > limit {
         return Err(error(
             "audit selection requires distinct paths within the batch limit",
         ));
     }
+    let (_, receipts) = load(root)?;
+    let coverage_scope = if selection.is_empty() {
+        AuditCoverageScope::Corpus
+    } else {
+        AuditCoverageScope::Selection
+    };
+    let candidates = inputs_selected(
+        root,
+        dirs,
+        pages,
+        &receipts,
+        (!selection.is_empty()).then_some(&unique),
+    )?;
+    let total = candidates.len();
+    let mut selected = Vec::new();
     for path in selection {
         let mut candidate = candidates
             .iter()
@@ -1304,6 +1428,7 @@ fn plan_selected_inner(
         }
     }
     Ok(AuditPlan {
+        coverage_scope,
         candidates,
         blocked,
         blocked_count,
@@ -1547,6 +1672,104 @@ mod tests {
             "---\ntype: exploration\nupdated: 2026-01-01\nreview: {}\n---\n## Judgment\nThe claim needs a documented follow-up.\n",
             json!({"status":"open","subjects":[subject],"evidence":[{"path":evidence,"revision":revision}],"resolution":null})
         )
+    }
+
+    #[test]
+    fn selected_discovery_does_not_evaluate_unrelated_recipes_or_claim_corpus_coverage() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let a = "wiki/documents/a.md";
+        let b = "wiki/documents/b.md";
+        write(
+            root.path(),
+            a,
+            "---\ntype: document\n---\nProduction order retention is 30 days.\n",
+        );
+        write(
+            root.path(),
+            b,
+            "---\ntype: document\n---\nDifferent knowledge.\n",
+        );
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let files = scan(root.path());
+        let initial = plan_selected(root.path(), &dirs, &files, 1, &[a.into()], u64::MAX).unwrap();
+        record_discovery(
+            &session,
+            &dirs,
+            &files,
+            AuditDiscoveryRequest {
+                path: a.into(),
+                file_revision: initial.candidates[0].file_revision.clone(),
+                queries: vec![lk_vault::DiscoveryQuery {
+                    query: "production order retention".into(),
+                    phrase: false,
+                    spacing: false,
+                }],
+            },
+        )
+        .unwrap();
+        let (_, mut receipts) = load(root.path()).unwrap();
+        receipts.discovery.insert(
+            b.into(),
+            DiscoveryPlan {
+                subject_revision: files
+                    .iter()
+                    .find(|page| page.path == Path::new(b))
+                    .unwrap()
+                    .revision
+                    .clone()
+                    .unwrap(),
+                queries: vec![lk_vault::DiscoveryQuery {
+                    query: "different knowledge".into(),
+                    phrase: false,
+                    spacing: false,
+                }],
+            },
+        );
+        write(
+            root.path(),
+            STATE,
+            &serde_json::to_string(&receipts).unwrap(),
+        );
+        let selected = plan_selected(root.path(), &dirs, &files, 1, &[a.into()], u64::MAX).unwrap();
+        assert_eq!(selected.coverage_scope, AuditCoverageScope::Selection);
+        assert_eq!(selected.total, 1);
+        assert_eq!(selected.unreviewed, 1);
+        assert_eq!(selected.candidates[0].path, a);
+        assert!(selected.candidates[0].discovery.is_some());
+        record(
+            &session,
+            &dirs,
+            &files,
+            AuditResults {
+                assessments: vec![assessment(&selected.candidates[0])],
+            },
+            u64::MAX,
+        )
+        .unwrap();
+        let (_, mut receipts) = load(root.path()).unwrap();
+        assert!(
+            receipts.discovery.contains_key(b),
+            "assessment publication must preserve other subjects' discovery plans"
+        );
+        assert_eq!(receipts.pending, [b]);
+        receipts.discovery.get_mut(b).unwrap().queries.clear();
+        write(
+            root.path(),
+            STATE,
+            &serde_json::to_string(&receipts).unwrap(),
+        );
+        let selected = plan_selected(root.path(), &dirs, &files, 1, &[a.into()], u64::MAX).unwrap();
+        assert_eq!(selected.coverage_scope, AuditCoverageScope::Selection);
+        assert_eq!(selected.total, 1);
+        assert_eq!(selected.reviewed_current, 1);
+        assert!(
+            plan(root.path(), &dirs, &files, 1, u64::MAX)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("stored discovery")
+        );
     }
 
     #[test]
@@ -2025,10 +2248,19 @@ mod tests {
             vec!["wiki/concepts/a.md", "wiki/documents/other.md"]
         );
         assert_eq!(selected.input.pages, 3);
-        assert_eq!(selected.total, 4);
-        assert_eq!(selected.counts_by_kind[&AuditSubjectKind::Concept].total, 1);
+        assert_eq!(selected.coverage_scope, AuditCoverageScope::Selection);
+        assert_eq!(selected.total, 1);
+        assert_eq!(selected.counts_by_kind[&AuditSubjectKind::Concept].total, 0);
         assert_eq!(
             selected.counts_by_kind[&AuditSubjectKind::Document].unreviewed,
+            1
+        );
+        let corpus = plan(root.path(), &dirs, &scan(root.path()), 1, u64::MAX).unwrap();
+        assert_eq!(corpus.coverage_scope, AuditCoverageScope::Corpus);
+        assert_eq!(corpus.total, 4);
+        assert_eq!(corpus.counts_by_kind[&AuditSubjectKind::Concept].total, 1);
+        assert_eq!(
+            corpus.counts_by_kind[&AuditSubjectKind::Document].unreviewed,
             3
         );
         let session = MutationSession::acquire(root.path()).unwrap();
@@ -2150,8 +2382,12 @@ mod tests {
         assert!(candidate.related_pages.is_empty());
         assert_eq!(candidate.reviews.len(), 1);
         assert_eq!(candidate.reviews[0].evidence.len(), 2);
+        assert_eq!(ready.coverage_scope, AuditCoverageScope::Selection);
         assert_eq!(ready.counts_by_kind[&AuditSubjectKind::Concept].total, 0);
-        assert_eq!(ready.counts_by_kind[&AuditSubjectKind::Document].total, 2);
+        assert_eq!(ready.counts_by_kind[&AuditSubjectKind::Document].total, 1);
+        let corpus = plan(root.path(), &dirs, &scan(root.path()), 1, u64::MAX).unwrap();
+        assert_eq!(corpus.coverage_scope, AuditCoverageScope::Corpus);
+        assert_eq!(corpus.counts_by_kind[&AuditSubjectKind::Document].total, 2);
         assert_eq!(ready.input.pages, 3);
         let session = MutationSession::acquire(root.path()).unwrap();
         let mut completed = assessment(candidate);

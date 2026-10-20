@@ -52,6 +52,12 @@ and CLI discovery, not a second graph authority.
   or a transitive audit. Scoped reviews retain explicit evidence for either kind.
   Receipts describe completed reads, never factual confidence or original/provider
   evidence that was not actually read. Aggregate and per-kind counts retain this scope.
+- Exact selected planning evaluates only selected discovery recipes;
+  `coverage_scope` distinguishes selection counts from complete corpus accounting.
+  Assessment recording evaluates current corpus inputs to preserve exact pending
+  first-discovery order. Reuse prepared lexical discovery only after verifying its
+  complete live knowledge inventory and exact file bytes. Missing or stale captures
+  use the same complete live matcher without preparing or mutating navigation.
 - Preserve pending first-discovery order and rotate changed/first-time work. A bounded
   weekly batch must not starve old work or grow into an unbounded full-corpus audit.
   Whole-input library planning defers individually oversized inputs without consuming
