@@ -11,6 +11,8 @@ canonical; SQLite navigation is derived.
 - `lk_core::frontmatter::parse_page`: parse frontmatter only at standalone first-line/closing `---`
   delimiters (BOM/CRLF supported). `VaultPage.original` retains exact input for
   optimistic guards; never reconstruct it from parsed fields.
+- `VaultStore::read_frontmatter` projects metadata without validating the body. Use it
+  for name/address inventories; publication still reads and guards the complete page.
 - `section.rs`: section reads/replacements share fence-aware heading boundaries.
   Read with `resolve_section` across locales, preferring nonblank when both exist;
   legitimate blank remains present. Write current locale headings only.
@@ -111,6 +113,8 @@ canonical; SQLite navigation is derived.
 - `prepare_search` atomically commits a reconstructible FTS5 snapshot; failed reads
   preserve old snapshot. Explicit `--snapshot` pins captured corpus/config/paths/full
   revisions; default search is live. External edits aren't frozen during capture.
+  Scope facets and bounded SQLite planner statistics are prepared in that transaction;
+  read-only queries never optimize or refresh the capture.
   Projection/schema changes bump snapshot version. Indexed name/tag/document identities
   and declared relations avoid full vocabulary/collection reads; selected scalar rows use SQL
   filters/LIMIT/OFFSET. FTS narrows candidates only; shared matcher decides hits.

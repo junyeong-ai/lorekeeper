@@ -107,7 +107,7 @@ impl std::fmt::Display for EventId {
 /// This is the "an observation may PROPOSE a task" half of the intent plane's first joint. It
 /// proposes and nothing here creates: `lore task propose` writes a line into the board's
 /// proposed section, and only a person moves it out.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OpenWork {
     /// What the proposed line reads as.
     pub summary: String,
@@ -123,7 +123,8 @@ pub struct OpenWork {
 /// is no longer open, never by its absence from a fetch: a query bounded by time returns
 /// nothing on a quiet day, and reading that as "everything is finished" retires every proposal
 /// the source still holds open.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum WorkState {
     /// The user's, and unfinished.
     Open(OpenWork),
@@ -165,7 +166,7 @@ impl WorkObserved {
 /// Intermediate representation produced by source adapters before normalization.
 /// Each adapter maps its API response into one or more `RawItem`s, which
 /// `lk-pipeline::normalize` then converts into `Event`s (assigning date and id).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RawItem {
     pub external_id: Option<String>,
     pub title: String,

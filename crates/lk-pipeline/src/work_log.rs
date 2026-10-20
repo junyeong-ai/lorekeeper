@@ -8,11 +8,69 @@ use lk_core::i18n::Locale;
 use lk_core::vault_path::VaultPath;
 use lk_queue::{SummarizeRequest, TargetKind, TaskRequest, TaskTarget};
 use lk_vault::VaultStore;
+use serde::{Deserialize, Serialize};
 
 use crate::PipelineContext;
 use crate::PipelineError;
 use crate::llm_cache::{self, SectionDecision};
 use crate::render::{RenderResult, llm_inputs_map, splice_preserved_sections};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkLogInputs {
+    pub scope: String,
+    pub days: BTreeMap<jiff::civil::Date, String>,
+}
+
+pub fn work_log_scope(personal: &PersonalConfig, locale: Locale) -> String {
+    let mut tracked = personal.tracked_sources.clone();
+    tracked.sort();
+    tracked.dedup();
+    hash_input(serde_json::json!({
+        "format": 1, "locale": locale.tag(), "tracked_sources": tracked,
+        "performance_categories": personal.performance_categories,
+        "source_category_map": personal.source_category_map,
+        "source_type_category_map": personal.source_type_category_map,
+        "uncategorized_label": personal.uncategorized_label(locale),
+    }))
+}
+
+fn hash_input(value: serde_json::Value) -> String {
+    lk_core::concept::file_revision(&value.to_string())
+}
+
+pub fn empty_work_log_input(source_id: &str, date: jiff::civil::Date) -> String {
+    hash_input(serde_json::json!({"format": 1, "source": source_id, "date": date, "events": []}))
+}
+
+pub fn work_log_inputs(
+    source_id: &str,
+    events: &[Event],
+    personal: &PersonalConfig,
+    locale: Locale,
+    today: jiff::civil::Date,
+) -> WorkLogInputs {
+    let mut days: BTreeMap<_, Vec<&Event>> = BTreeMap::new();
+    for event in events.iter().filter(|event| event.date <= today) {
+        let values = days.entry(event.date).or_default();
+        if event.is_personal {
+            values.push(event);
+        }
+    }
+    WorkLogInputs {
+        scope: work_log_scope(personal, locale),
+        days: days.into_iter().map(|(date, mut events)| {
+            events.sort_by(|left, right| left.canonical_cmp(right));
+            let inputs = events.into_iter().map(|event| serde_json::json!({
+                "id": event.id, "timestamp": event.timestamp,
+                "title": event.title, "body": event.body,
+                "category": personal.resolve_category(source_id, event.source_type,
+                    event.performance_category.as_deref()).filter(|category| personal.performance_categories.contains(category)),
+            })).collect::<Vec<_>>();
+            (date, hash_input(serde_json::json!({"format": 1, "source": source_id, "date": date, "events": inputs})))
+        }).collect(),
+    }
+}
 
 pub async fn render_work_log(
     events: &[Event],
@@ -243,6 +301,68 @@ mod tests {
             performance_categories: categories.iter().map(|c| (*c).to_string()).collect(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn personal_input_fingerprints_follow_resolved_contributions_and_canonical_order() {
+        let personal = personal(&["project-delivery", "innovation"]);
+        let mut first = event(Some("project-delivery"));
+        let mut second = first.clone();
+        second.id = EventId::new("my-tasks", first.date, "second");
+        second.body = "second contribution".into();
+        let scope = work_log_inputs(
+            "my-tasks",
+            &[first.clone(), second.clone()],
+            &personal,
+            Locale::En,
+            first.date,
+        );
+        let reverse = work_log_inputs(
+            "my-tasks",
+            &[second, first.clone()],
+            &personal,
+            Locale::En,
+            first.date,
+        );
+        assert_eq!(scope.days, reverse.days);
+        first.metadata = serde_json::json!({"unrelated": "metadata"});
+        let original = work_log_inputs(
+            "my-tasks",
+            &[first.clone()],
+            &personal,
+            Locale::En,
+            first.date,
+        );
+        first.performance_category = Some("innovation".into());
+        assert_ne!(
+            original.days,
+            work_log_inputs(
+                "my-tasks",
+                &[first.clone()],
+                &personal,
+                Locale::En,
+                first.date
+            )
+            .days
+        );
+        first.is_personal = false;
+        let empty = work_log_inputs(
+            "my-tasks",
+            &[first.clone()],
+            &personal,
+            Locale::En,
+            first.date,
+        );
+        assert_eq!(
+            empty.days[&first.date],
+            empty_work_log_input("my-tasks", first.date)
+        );
+        assert!(
+            work_log_inputs("my-tasks", &[], &personal, Locale::En, first.date)
+                .days
+                .is_empty()
+        );
+        assert_eq!(empty.scope, original.scope);
     }
 
     #[test]

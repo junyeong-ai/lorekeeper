@@ -73,8 +73,8 @@ path patterns from AGENTS.md.
 `quarterly-review-narrative` | `annual-review-narrative` | `work-log-synthesis` |
 `concept-synthesis`
 
-`input.locale` is on EVERY task, whatever its kind: it is `vault.locale`, the language the
-vault is authored in, and it is what every word the drain adds gets written in. See
+`input.locale` is on every task and supplies the configured language for generated prose.
+Established concept bodies retain their existing language under the per-kind policy. See
 [processing-kinds.md](processing-kinds.md) § Output language.
 
 `target.anchor`: the exact section heading (e.g. `"## Summary"`, or its localized form per
@@ -110,9 +110,9 @@ pending work `stale`, and an unreadable source leaves it `unreadable` until repa
 
 New bound RSS extraction uses `concept-extraction-rss-v3` with a typed
 `input.rss_original` manifest. Read selected originals from that inventory; return an
-optional `rss_evidence: [{"event_id":"...","revision":"<payload revision>"}]` on each
-reported concept only after verifying that article supports it. Omission accumulates no
-new event attribution and never retracts an existing one. Legacy/page-only tasks keep
+nonempty `rss_evidence: [{"event_id":"...","revision":"<payload revision>"}]` on every
+reported concept after verifying that the selected articles support it. A result with
+no concepts is valid; omitting a concept never retracts its prior selections. Legacy/page-only tasks keep
 their original schema and policy; never invent an RSS binding from a title, URL or date.
 
 `concept-synthesis-rss-v2` may mix old page citations with event citations:

@@ -27,12 +27,10 @@ knowledge without polluting the graph. No `focus` → no filtering.
 
 ## Output language (all kinds)
 
-`input.locale` is the language the vault is authored in — `vault.locale`, carried on every
-task — and everything you WRITE goes in it: a summary, a refined event body, a theme title
-and its description, a concept's grounding sentence, a synthesis. It is always present. A
-task arriving without one is a defect to report, not a case to guess from the pages around
-the target: a vault that stays in its language by inference stays in it only while there is
-something to infer from, and the first page a new vault writes has nothing.
+`input.locale` carries `vault.locale` on every task. Use it for summaries, refined events,
+themes and new concept prose. An established concept body retains its existing prose
+language under the concept-synthesis policy below. A missing locale is a defect to report,
+not an invitation to infer the configured language from nearby pages.
 
 Two things it does not reach. Source content is never translated — a quoted line, a title
 you preserve, a link stay as they are. And a NAME is not prose: a concept's base name is the form

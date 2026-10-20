@@ -2,6 +2,9 @@ use std::sync::Arc;
 
 use super::{build_llm_client, find_config, load_config_with_revision, parse_date};
 
+mod capture;
+pub mod recovery;
+
 /// The number of events the page states about itself, as ` (N events)`.
 ///
 ///
@@ -181,6 +184,7 @@ pub async fn run(
     };
 
     // Capture source observations before acquiring the vault writer.
+    let collection_started_at = jiff::Timestamp::now();
     struct Planned {
         id: String,
         result: lk_pipeline::IngestResult,
@@ -192,7 +196,7 @@ pub async fn run(
     struct Acquired {
         id: String,
         started_at: std::time::Instant,
-        result: Result<(lk_source::Selection, SourceCapture), lk_source::SourceError>,
+        result: Result<(lk_source::Selection, capture::CapturedSource), lk_source::SourceError>,
     }
     let mut acquired = Vec::new();
     let mut planned: Vec<Planned> = Vec::new();
@@ -290,6 +294,20 @@ pub async fn run(
                 .map(lk_core::manual_original::ManualBundleCapture::byte_len)
                 .sum::<usize>();
         }
+        let result = match result {
+            Ok(capture) => {
+                collect_with_budget(started_at, timeout, async move {
+                    tokio::task::spawn_blocking(move || capture::CapturedSource::capture(capture))
+                        .await
+                        .map_err(|error| {
+                            lk_source::SourceError::Parse(format!("capture source: {error}"))
+                        })
+                        .and_then(std::convert::identity)
+                })
+                .await
+            }
+            Err(error) => Err(error),
+        };
         acquired.push(Acquired {
             id: id.clone(),
             started_at,
@@ -375,7 +393,10 @@ pub async fn run(
                 originals: manual_originals,
                 retirement_blocked: manual_retirement_blocked,
             },
-        ) = match acquisition.result {
+        ) = match acquisition
+            .result
+            .and_then(|(selection, capture)| capture.restore().map(|source| (selection, source)))
+        {
             Ok(capture) => capture,
             Err(error) => {
                 eprintln!("  ✗ {id} extract: {error}");
@@ -388,7 +409,7 @@ pub async fn run(
             }
         };
         eprintln!("▸ plan {id} ({})", sc.source_type);
-        let observed =
+        let mut observed =
             super::synthesis::pending::ObservedSource::from_observation(id, &observation);
         let observation_outcome = observation.outcome;
         if observation_outcome == lk_source::ObservationOutcome::Partial {
@@ -436,6 +457,9 @@ pub async fn run(
             }
         };
 
+        observed.personal_inputs = config.personal.as_ref().map(|personal| {
+            lk_pipeline::work_log_inputs(id, &result.events, personal, config.vault.locale(), today)
+        });
         observations.insert(id.clone(), observed);
 
         // Keep ALL captures for dependency/retirement guards, including entries the
@@ -443,7 +467,10 @@ pub async fn run(
         // Written BEFORE the empty-pages skip, and written even when the list is empty: a
         // source can be open-work-only in a run that renders nothing, and an empty answer is
         // what retires proposals whose work is now finished. `--dry-run` writes nothing at all.
-        if !dry_run && config.personal.as_ref().is_some_and(|p| p.tasks.is_some()) {
+        let records_current_intent = !dry_run
+            && target_date.is_none_or(|date| date == today)
+            && config.personal.as_ref().is_some_and(|p| p.tasks.is_some());
+        if records_current_intent {
             // Held for the write and no longer. These are the intent plane's files, so the
             // command writing them holds the plane whoever it is — scoped to `lore task`, the
             // guard was named for the first writer that needed it and left every other one
@@ -462,10 +489,7 @@ pub async fn run(
         // day's tasks and nothing ever proposes. One SNAPSHOT per source, replaced whole and
         // written even when EMPTY — that is the answer that clears a day whose every meeting
         // was cancelled, which a file per date could not say.
-        if !dry_run
-            && sc.source_type.descriptor().scheduled
-            && config.personal.as_ref().is_some_and(|p| p.tasks.is_some())
-        {
+        if records_current_intent && sc.source_type.descriptor().scheduled {
             let appointments: Vec<_> = result
                 .appointments
                 .iter()
@@ -707,6 +731,7 @@ pub async fn run(
     // trade that self-healing one-day gap for a work-log frozen by any persistently
     // failing source, news feeds included.
     // (`render_work_log` separately gates the whole subsystem on `config.personal` being set.)
+    let mut published_work_logs = std::collections::BTreeMap::new();
     if !any_write_failed && source.is_none() && !all_personal.is_empty() {
         let work_logs = pipeline
             .render_work_log(&all_personal, today)
@@ -715,10 +740,35 @@ pub async fn run(
         for out in &work_logs {
             report_discards(out, false);
         }
+        let mut bindings = std::collections::BTreeMap::new();
+        for out in &work_logs {
+            let page = lk_core::frontmatter::parse_page(&out.content)
+                .map_err(|e| miette::miette!("work-log publication binding: {e}"))?;
+            let day = out
+                .path
+                .as_ref()
+                .file_stem()
+                .and_then(|name| name.to_str())
+                .and_then(|name| name.parse::<jiff::civil::Date>().ok())
+                .ok_or_else(|| miette::miette!("work-log publication has no exact day"))?;
+            let input = page
+                .frontmatter
+                .get(lk_core::frontmatter::field::LLM_INPUTS)
+                .and_then(|value| {
+                    value.get(lk_queue::TargetKind::WorkLogSynthesis.llm_inputs_key())
+                })
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| {
+                    miette::miette!("work-log publication lacks its typed synthesis input")
+                })?;
+            bindings.insert(day, input.to_owned());
+        }
         if let Err(error) = publication.publish(&work_logs).await {
             eprintln!("✗ work-log publication: {error}");
             any_write_failed = true;
         } else {
+            published_work_logs = bindings;
             for out in &work_logs {
                 total_pages += 1;
                 eprintln!("▸ work-log → {}", out.path);
@@ -738,8 +788,13 @@ pub async fn run(
             _mutation
                 .as_ref()
                 .expect("writing ingest holds mutation session"),
-            extract_target,
-            source.is_none(),
+            super::synthesis::pending::CollectionPublication {
+                requested_day: extract_target,
+                full_ingest: source.is_none(),
+                started_at: collection_started_at,
+                targeted: target_date.is_some(),
+                work_logs: published_work_logs,
+            },
             observations.into_values().collect(),
         )?;
     }

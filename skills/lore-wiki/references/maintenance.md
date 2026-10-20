@@ -53,6 +53,12 @@ assessments or performs repairs.
    declared source documents under the configured wiki documents collection, including
    nested addresses. Aggregate counts cover both kinds; `counts_by_kind` separates
    their coverage. A document needs no corresponding concept to be selectable.
+   Native selection defers subjects with unfinished semantic work in their actual
+   subject/evidence/context/review pages and can select later ready subjects without
+   draining unrelated queue work. Newly discovered context can also block a selected
+   assessment. `audit-record` rechecks these inputs under the publication locks.
+   Complete authored pages need no synthetic completion markers. Do not clear an
+   owned input or bypass a blocker to record a receipt; report it for later processing.
    Check `input.status` before reading: `oversized` retains the exact candidates
    because their complete page, scoped review/evidence and selected RSS payload bytes exceed
    `graph.audit.max_input_bytes`. Report the measured bytes and configured bound;
@@ -156,6 +162,10 @@ processing. Standalone sessions then run `lore wiki refresh`, `lore graph lint`,
 controller owns final global checks and reports review health after the semantic
 session. Do not repeat these checks or inventory unrelated reviews; all selected
 review dependencies still require complete reads and guarded assessment.
+The controller verifies the selected receipts again after global reconciliation;
+later queued publications can invalidate a draft or reopen an assessment. Reported
+audit progress can coexist with unrelated unfinished queue work; only the controller
+determines the overall job outcome.
 Unrelated `needs-reassessment` records remain backlog without expanding this batch.
 Invalid records or a blocked repair are failures; preserve their tasks and report
 them. The native audit verifier requires current scoped reviews; an unchanged open

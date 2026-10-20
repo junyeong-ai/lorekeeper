@@ -35,8 +35,8 @@ from the conversation's most recent troubleshooting thread.
 
 Ask which page already owns each name this capture will write — `lore resolve` for
 EVERY form the material writes, then `lore wiki search` on two or three distinguishing terms
-of each for the equivalences no rule about spelling can see. A capture that finds an owner
-MERGES into it rather than creating a duplicate page.
+of each for equivalences spelling cannot decide. Read the candidate's subject and scope
+before reusing it; matching names alone do not authorize a merge.
 
 If an extraction manifest exists for the current project
 (`<vault>/.lorekeeper/extracts/<project>/manifest.yaml`), load
@@ -76,7 +76,7 @@ each value means — read it there rather than from memory —
 the insight's nature (troubleshooting, constraint, pattern) belongs in
 `tags`, never in `document_type`.
 
-### 5. Create/merge concepts
+### 5. Create or reuse concepts
 
 For each technology, pattern, or constraint, follow the **Concept convergence**
 section of the vault's `AGENTS.md` — matching
@@ -104,12 +104,12 @@ checks pass:
 ```bash
 lore graph backlinks-sync   # re-derive every concept's ## Sources + source_count
 lore wiki refresh           # refresh SQLite navigation and the entry guide
-lore graph lint             # non-zero means the vault contradicts itself somewhere — a link to a page that is not there, a category outside the configured vocabulary, or a name answering to two pages. Resolve every violation naming a page THIS capture wrote; a violation elsewhere in the vault predates you, so report it rather than fixing it silently. Orphans and open conflicts are reported as observations and never gate
+lore graph lint             # repair violations in pages this capture wrote; report unrelated findings separately. Orphans/open conflicts are observations, not failures
 ```
 
 ### 7. Report
 
-Show created/merged paths, concept count, and transferability level. Run
+Show created/reused paths, concept count, and transferability level. Run
 `lore queue status --json` and report synthesis queued by Finalize as pending;
 use `/lore-process` to complete it when requested as part of this work. A successful
 capture means the authored pages and reconciliation passed; do not call pending

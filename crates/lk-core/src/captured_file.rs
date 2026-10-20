@@ -13,6 +13,16 @@ pub struct CapturedFile {
 }
 
 impl CapturedFile {
+    pub fn from_file(mut file: tempfile::NamedTempFile) -> io::Result<Self> {
+        file.flush()?;
+        let (bytes, revision) = hash_reader(io::BufReader::new(file.reopen()?))?;
+        Ok(Self {
+            file,
+            bytes,
+            revision,
+        })
+    }
+
     pub fn capture(mut reader: impl Read, limit: usize) -> io::Result<Self> {
         let mut file = tempfile::Builder::new()
             .prefix("lorekeeper-input-")

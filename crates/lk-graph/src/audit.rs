@@ -1287,7 +1287,15 @@ pub fn plan_selected(
     selection: &[String],
     max_input_bytes: u64,
 ) -> Result<AuditPlan, GraphError> {
-    plan_selected_inner(root, dirs, pages, limit, selection, max_input_bytes, false)
+    plan_selected_inner(
+        root,
+        dirs,
+        pages,
+        limit,
+        selection,
+        max_input_bytes,
+        Planning::WholeInput,
+    )
 }
 
 /// Select fair work for bounded partitioned execution. Complete footprint/status
@@ -1310,7 +1318,40 @@ pub fn plan_selected_partitioned(
     selection: &[String],
     max_input_bytes: u64,
 ) -> Result<AuditPlan, GraphError> {
-    plan_selected_inner(root, dirs, pages, limit, selection, max_input_bytes, true)
+    plan_selected_inner(
+        root,
+        dirs,
+        pages,
+        limit,
+        selection,
+        max_input_bytes,
+        Planning::Partitioned,
+    )
+}
+
+pub fn plan_available_partitioned(
+    root: &Path,
+    dirs: &VaultDirs,
+    pages: &[ScannedPage],
+    limit: usize,
+    max_input_bytes: u64,
+    available: &mut dyn FnMut(&AuditCandidate) -> Result<bool, GraphError>,
+) -> Result<AuditPlan, GraphError> {
+    plan_selected_inner(
+        root,
+        dirs,
+        pages,
+        limit,
+        &[],
+        max_input_bytes,
+        Planning::Available(available),
+    )
+}
+
+enum Planning<'a> {
+    WholeInput,
+    Partitioned,
+    Available(&'a mut dyn FnMut(&AuditCandidate) -> Result<bool, GraphError>),
 }
 
 fn plan_selected_inner(
@@ -1320,7 +1361,7 @@ fn plan_selected_inner(
     limit: usize,
     selection: &[String],
     max_input_bytes: u64,
-    partitioned: bool,
+    mut planning: Planning<'_>,
 ) -> Result<AuditPlan, GraphError> {
     if !(1..=100).contains(&limit) {
         return Err(error("audit limit must be 1..100"));
@@ -1347,6 +1388,14 @@ fn plan_selected_inner(
         &receipts,
         (!selection.is_empty()).then_some(&unique),
     )?;
+    let mut unavailable = BTreeSet::new();
+    if let Planning::Available(available) = &mut planning {
+        for candidate in &candidates {
+            if !available(candidate)? {
+                unavailable.insert(candidate.path.clone());
+            }
+        }
+    }
     let total = candidates.len();
     let mut selected = Vec::new();
     for path in selection {
@@ -1392,10 +1441,13 @@ fn plan_selected_inner(
             AuditClass::Unreviewed => unreviewed.pop_front().or_else(|| changed.pop_front()),
         };
         let Some(candidate) = next else { break };
+        if unavailable.contains(&candidate.path) {
+            continue;
+        }
         let mut prospective = resources.clone();
         prospective.include_candidate(root, &candidate)?;
         let combined = prospective.bound(max_input_bytes)?;
-        if partitioned || combined.status == AuditInputStatus::Ready {
+        if !matches!(planning, Planning::WholeInput) || combined.status == AuditInputStatus::Ready {
             next_class = if candidate.reason == "changed" {
                 AuditClass::Unreviewed
             } else {
@@ -1672,6 +1724,36 @@ mod tests {
             "---\ntype: exploration\nupdated: 2026-01-01\nreview: {}\n---\n## Judgment\nThe claim needs a documented follow-up.\n",
             json!({"status":"open","subjects":[subject],"evidence":[{"path":evidence,"revision":revision}],"resolution":null})
         )
+    }
+
+    #[test]
+    fn unavailable_pending_subjects_do_not_block_later_ready_work_or_claim_completion() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        for name in ["a", "b", "c"] {
+            write(
+                root.path(),
+                &format!("wiki/documents/{name}.md"),
+                "---\ntype: document\n---\nRetained source.\n",
+            );
+        }
+        let files = scan(root.path());
+        let selected =
+            plan_available_partitioned(root.path(), &dirs, &files, 1, u64::MAX, &mut |candidate| {
+                Ok(candidate.path.ends_with("/c.md"))
+            })
+            .unwrap();
+        assert_eq!(selected.total, 3);
+        assert_eq!(selected.unreviewed, 3);
+        assert_eq!(selected.reviewed_current, 0);
+        assert_eq!(selected.candidates.len(), 1);
+        assert_eq!(selected.candidates[0].path, "wiki/documents/c.md");
+        assert!(
+            !root.path().join(STATE).exists(),
+            "planning must not move durable pending order or create receipts"
+        );
+        let resumed = plan_partitioned(root.path(), &dirs, &files, 1, u64::MAX).unwrap();
+        assert_eq!(resumed.candidates[0].path, "wiki/documents/a.md");
     }
 
     #[test]

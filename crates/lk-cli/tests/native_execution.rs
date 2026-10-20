@@ -369,6 +369,175 @@ fn knowledge_queue_consumer_receives_bounded_maintenance_context() {
 }
 
 #[test]
+fn knowledge_audit_progresses_before_unrelated_queue_backlog_and_reports_it_unfinished() {
+    let behavior = RECORD_FIRST_AUDIT.replace(
+        "wiki audit-plan >",
+        "wiki audit-plan --path wiki/concepts/stable.md >",
+    );
+    let fixture = Fixture::new("codex", 30, &behavior);
+    fixture.ingest();
+    write_audit_concept(&fixture, "stable");
+    let config = std::fs::read_to_string(&fixture.config).unwrap()
+        .replace("  default_profile: primary\n", "  default_profile: primary\n  work: {max_input_bytes: 262144, max_result_bytes: 65536, max_calls: 1}\n");
+    std::fs::write(&fixture.config, config).unwrap();
+    let (output, result) = fixture.run("knowledge");
+    assert!(
+        !output.status.success(),
+        "global pending work must remain unfinished: {result}"
+    );
+    assert_eq!(result["semantic_calls"], 1, "{result}");
+    assert_eq!(
+        result["audit"].as_array().unwrap().len(),
+        1,
+        "{result}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        result["audit"][0]["assessed_path"],
+        "wiki/concepts/stable.md"
+    );
+    assert!(
+        result["audit_deferred"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["path"]
+                .as_str()
+                .unwrap()
+                .starts_with("wiki/documents/"))
+    );
+    assert!(
+        result["stages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|stage| stage["name"] == "queue completion" && stage["state"] == "failed")
+    );
+    let status = fixture
+        .command()
+        .args(["wiki", "audit-plan", "--path", "wiki/concepts/stable.md"])
+        .output()
+        .unwrap();
+    let status: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(status["reviewed_current"], 1);
+}
+
+#[test]
+fn knowledge_defers_selected_evidence_with_unfinished_semantics_and_record_rechecks_it() {
+    let fixture = Fixture::new("codex", 30, "exit 0");
+    write_audit_concept(&fixture, "stable");
+    let source = fixture.root().join("vault/wiki/documents/source.md");
+    std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+    std::fs::write(&source, "---\ntype: document\ntitle: Supporting evidence\nllm_inputs: {summary: pending}\n---\n[stable](../concepts/stable.md)\n\n## Summary\nUnfinished interpretation.\n").unwrap();
+    let (output, result) = fixture.run("knowledge");
+    assert!(!output.status.success(), "{result}");
+    assert!(result["audit"].is_null());
+    if let Ok(arguments) = std::fs::read_to_string(fixture.root().join("arguments")) {
+        assert!(
+            !arguments.contains("maintain."),
+            "blocked inputs must not be assessed: {arguments}"
+        );
+    }
+    assert!(
+        result["audit_deferred"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["path"] == "wiki/concepts/stable.md"
+                && item["reasons"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|reason| reason
+                        .as_str()
+                        .unwrap()
+                        .contains("source.md: unfinished summary")))
+    );
+    let planned = fixture
+        .command()
+        .args(["wiki", "audit-plan", "--path", "wiki/concepts/stable.md"])
+        .output()
+        .unwrap();
+    let planned: serde_json::Value = serde_json::from_slice(&planned.stdout).unwrap();
+    let candidate = &planned["candidates"][0];
+    let request = fixture.root().join("assessment.json");
+    std::fs::write(&request, serde_json::to_vec(&serde_json::json!({"assessments":[{
+        "path":candidate["path"], "file_revision":candidate["file_revision"], "input_revision":candidate["input_revision"],
+        "disposition":"reviewed", "reason":"Attempted assessment of unfinished evidence.", "reviews":[]
+    }]})).unwrap()).unwrap();
+    let refused = fixture
+        .command()
+        .args(["wiki", "audit-record", "--file"])
+        .arg(request)
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("unfinished semantic work"));
+    let retained: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(
+            fixture
+                .root()
+                .join("vault/.lorekeeper/knowledge-audit.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(retained["entries"].as_object().unwrap().is_empty());
+}
+
+#[test]
+fn current_authored_assessment_does_not_hide_unfinished_bookkeeping_or_force_a_reread() {
+    let fixture = Fixture::new("codex", 30, RECORD_FIRST_AUDIT);
+    let path = fixture.root().join("vault/wiki/documents/subject.md");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let ready = "---\ntype: document\ntitle: Subject\nllm_inputs: {summary: captured, summary_done: captured}\n---\n## Summary\nA completed interpretation.\n";
+    std::fs::write(&path, ready).unwrap();
+    let (first, report) = fixture.run("knowledge");
+    assert!(
+        first.status.success(),
+        "{report}\n{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let receipt_path = fixture
+        .root()
+        .join("vault/.lorekeeper/knowledge-audit.json");
+    let receipt = std::fs::read(&receipt_path).unwrap();
+    let pending = ready.replace(", summary_done: captured", "");
+    assert_eq!(
+        lk_core::concept::source_revision(&lk_vault::parse_page(ready).unwrap()),
+        lk_core::concept::source_revision(&lk_vault::parse_page(&pending).unwrap())
+    );
+    std::fs::write(&path, pending).unwrap();
+    let (second, report) = fixture.run("knowledge");
+    assert!(
+        !second.status.success(),
+        "an unchanged receipt must not hide unfinished inputs: {report}"
+    );
+    assert_eq!(report["semantic_calls"], 0);
+    assert!(
+        report["audit_deferred"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["path"] == "wiki/documents/subject.md")
+    );
+    assert_eq!(std::fs::read(&receipt_path).unwrap(), receipt);
+    std::fs::write(&path, ready).unwrap();
+    let (third, report) = fixture.run("knowledge");
+    assert!(
+        third.status.success(),
+        "{report}\n{}",
+        String::from_utf8_lossy(&third.stderr)
+    );
+    assert_eq!(
+        report["semantic_calls"], 0,
+        "restored bookkeeping does not require a new semantic judgment"
+    );
+    assert!(report["audit"].as_array().unwrap().is_empty());
+    assert_eq!(std::fs::read(receipt_path).unwrap(), receipt);
+}
+
+#[test]
 fn daily_preserves_collection_when_the_selected_agent_is_unavailable() {
     let fixture = Fixture::new("codex", 30, "exit 0");
     std::fs::remove_file(fixture.root().join("agent executable")).unwrap();

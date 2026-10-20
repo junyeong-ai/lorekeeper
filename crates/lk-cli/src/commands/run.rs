@@ -115,6 +115,12 @@ mod native {
     }
 
     #[derive(Serialize)]
+    struct DeferredAudit {
+        path: String,
+        reasons: Vec<String>,
+    }
+
+    #[derive(Serialize)]
     struct JobResult {
         operation: Operation,
         ok: bool,
@@ -126,6 +132,7 @@ mod native {
         audit_progress: Option<AuditProgress>,
         audit_blocked: Vec<lk_graph::audit::AuditBlockedInput>,
         audit_blocked_count: usize,
+        audit_deferred: Vec<DeferredAudit>,
         review_health: Option<ReviewHealth>,
         stages: Vec<StageResult>,
     }
@@ -140,6 +147,7 @@ mod native {
         lease: Option<workflow::WorkflowLease>,
         selected: Option<ExecutionProfile>,
         drain_blocked: bool,
+        audit_batch: Option<Vec<lk_graph::audit::AuditCandidate>>,
         result: JobResult,
     }
 
@@ -901,6 +909,16 @@ mod native {
         }
 
         async fn resume_periods(&mut self) {
+            if self.config.synthesis.recovery.is_some()
+                && !self
+                    .native(
+                        "period recovery",
+                        &["synthesis", "pending", "--reconcile", "--wait-for-vault"],
+                    )
+                    .await
+            {
+                return;
+            }
             for stage in ["base", "quarter", "annual"] {
                 if self.result.cancelled {
                     return;
@@ -944,11 +962,38 @@ mod native {
                 .count()
         }
 
-        fn audit_plan(&self, paths: &[String]) -> miette::Result<lk_graph::audit::AuditPlan> {
+        fn audit_plan(&mut self, paths: &[String]) -> miette::Result<lk_graph::audit::AuditPlan> {
             let pages =
                 lk_graph::scan::scan_vault(&self.root, self.config.graph.scope.follow_links)
                     .map_err(|e| miette::miette!("{e}"))?;
-            lk_graph::audit::plan_selected_partitioned(
+            let mut readiness = super::super::queue::readiness::AuditReadiness::load(&self.root)?;
+            if paths.is_empty() {
+                let mut deferred = Vec::new();
+                let plan = lk_graph::audit::plan_available_partitioned(
+                    &self.root,
+                    &self.config.vault.dirs,
+                    &pages,
+                    self.config.graph.audit.batch_size,
+                    self.config.graph.audit.max_input_bytes,
+                    &mut |candidate| {
+                        let reasons = readiness
+                            .unfinished(&self.root, candidate)
+                            .map_err(|error| lk_graph::GraphError::Io(error.to_string()))?;
+                        if reasons.is_empty() {
+                            return Ok(true);
+                        }
+                        deferred.push(DeferredAudit {
+                            path: candidate.path.clone(),
+                            reasons,
+                        });
+                        Ok(false)
+                    },
+                )
+                .map_err(|error| miette::miette!("{error}"))?;
+                self.result.audit_deferred = deferred;
+                return Ok(plan);
+            }
+            let plan = lk_graph::audit::plan_selected_partitioned(
                 &self.root,
                 &self.config.vault.dirs,
                 &pages,
@@ -956,7 +1001,11 @@ mod native {
                 paths,
                 self.config.graph.audit.max_input_bytes,
             )
-            .map_err(|e| miette::miette!("{e}"))
+            .map_err(|e| miette::miette!("{e}"))?;
+            for candidate in &plan.candidates {
+                readiness.require_ready(&self.root, candidate)?;
+            }
+            Ok(plan)
         }
 
         fn verify_audit(
@@ -970,7 +1019,7 @@ mod native {
                 .lease
                 .as_ref()
                 .ok_or_else(|| miette::miette!("audit has no workflow lease"))?;
-            lk_graph::audit::verify_batch_with_guard(
+            let verified = lk_graph::audit::verify_batch_with_guard(
                 &self.root,
                 &self.config.vault.dirs,
                 &pages,
@@ -995,7 +1044,28 @@ mod native {
                     .map_err(|error| lk_graph::GraphError::Io(error.to_string()))
                 },
             )
-            .map_err(|e| miette::miette!("{e}"))
+            .map_err(|e| miette::miette!("{e}"))?;
+            let paths = verified
+                .completed
+                .iter()
+                .map(|completed| completed.assessed_path.clone())
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>();
+            let selected = lk_graph::audit::plan_selected_partitioned(
+                &self.root,
+                &self.config.vault.dirs,
+                &pages,
+                paths.len(),
+                &paths,
+                self.config.graph.audit.max_input_bytes,
+            )
+            .map_err(|error| miette::miette!("{error}"))?;
+            let mut readiness = super::super::queue::readiness::AuditReadiness::load(&self.root)?;
+            for candidate in &selected.candidates {
+                readiness.require_ready(&self.root, candidate)?;
+            }
+            Ok(verified)
         }
 
         fn inspect_review_health(&mut self) -> bool {
@@ -1039,10 +1109,55 @@ mod native {
         }
 
         async fn knowledge(&mut self) {
-            self.reconcile().await;
+            self.reconcile_audit_inputs().await;
             if !self.result.ok || self.result.cancelled {
                 return;
             }
+            self.audit().await;
+            self.reconcile().await;
+            if !self.inspect_review_health() {
+                return;
+            }
+            if let Some(batch) = self.audit_batch.take() {
+                match self.verify_audit(&batch) {
+                    Ok(verified) => {
+                        self.result.audit = Some(verified.completed);
+                        if let Some(progress) = &mut self.result.audit_progress {
+                            progress.after = Some(verified.coverage);
+                        }
+                        self.record("audit completion", StageState::Completed, None);
+                    }
+                    Err(error) => {
+                        self.failure("audit completion", error);
+                    }
+                }
+            } else if self.result.audit.as_ref().is_some_and(Vec::is_empty) {
+                match self.audit_plan(&[]) {
+                    Ok(plan) => {
+                        if let Some(progress) = &mut self.result.audit_progress {
+                            progress.after = Some(plan.coverage());
+                        }
+                    }
+                    Err(error) => {
+                        self.failure("audit final coverage", error);
+                    }
+                }
+            }
+        }
+
+        async fn reconcile_audit_inputs(&mut self) {
+            for (name, args) in [
+                ("schema", vec!["schema"]),
+                ("queue apply", vec!["queue", "apply"]),
+                ("backlinks-sync", vec!["graph", "backlinks-sync"]),
+                ("wiki refresh", vec!["wiki", "refresh"]),
+                ("graph lint", vec!["graph", "lint"]),
+            ] {
+                self.native(name, &args).await;
+            }
+        }
+
+        async fn audit(&mut self) {
             if !self.inspect_review_health() {
                 return;
             }
@@ -1075,6 +1190,10 @@ mod native {
                 );
             }
             if plan.candidates.is_empty() {
+                if !self.result.audit_deferred.is_empty() {
+                    self.failure("audit dependencies", "pending subjects have unfinished semantic inputs; retained for later assessment");
+                    return;
+                }
                 self.result.audit = Some(Vec::new());
                 if plan.blocked_count > 0 {
                     return;
@@ -1207,22 +1326,7 @@ mod native {
             } else {
                 self.consumer("lore-wiki", &format!("maintain. The controller selected this exact batch: {selection}. Start with audit-plan --path for these addresses; do not select another batch. Use bounded work for any subject whose work envelope requires partitioning."), None).await;
             }
-            self.reconcile().await;
-            if !self.inspect_review_health() {
-                return;
-            }
-            match self.verify_audit(&plan.candidates) {
-                Ok(verified) => {
-                    self.result.audit = Some(verified.completed);
-                    if let Some(progress) = &mut self.result.audit_progress {
-                        progress.after = Some(verified.coverage);
-                    }
-                    self.record("audit completion", StageState::Completed, None);
-                }
-                Err(error) => {
-                    self.failure("audit completion", error);
-                }
-            }
+            self.audit_batch = Some(plan.candidates);
         }
     }
 
@@ -1294,7 +1398,13 @@ mod native {
                 "blocked"
             } else if !result.ok {
                 "failed"
-            } else if result.audit.as_ref().is_some_and(Vec::is_empty) {
+            } else if result.audit.as_ref().is_some_and(Vec::is_empty)
+                && result
+                    .audit_progress
+                    .as_ref()
+                    .and_then(|progress| progress.after.as_ref())
+                    .is_some_and(|coverage| coverage.unreviewed == 0 && coverage.changed == 0)
+            {
                 "settled"
             } else {
                 "batch-limit"
@@ -1351,6 +1461,7 @@ mod native {
             lease: None,
             selected: None,
             drain_blocked: false,
+            audit_batch: None,
             result: JobResult {
                 operation,
                 ok: true,
@@ -1362,6 +1473,7 @@ mod native {
                 audit_progress: None,
                 audit_blocked: Vec::new(),
                 audit_blocked_count: 0,
+                audit_deferred: Vec::new(),
                 review_health: None,
                 stages: Vec::new(),
             },
@@ -1375,6 +1487,14 @@ mod native {
                     .native(
                         "task rollover",
                         &["task", "rollover", "--closing", "yesterday"],
+                    )
+                    .await;
+            }
+            if runner.config.ingest.recovery.is_some() {
+                runner
+                    .native(
+                        "source recovery",
+                        &["ingest", "--recover", "--wait-for-vault"],
                     )
                     .await;
             }

@@ -5,7 +5,7 @@ description: Manages the Lorekeeper task board and daily knowledge brief through
   and reports source freshness. Use for this board or its brief, not unrelated questions
   or external task services.
 metadata:
-  version: 0.73.1
+  version: 0.74.0
 ---
 
 # Lorekeeper working day
@@ -37,8 +37,9 @@ user's motives or invent a priority. Avoid flooding the user with every item.
 Run `lore brief --date yesterday --json` for the morning or a requested brief.
 `learned` contains new concepts with an opening line; `revisited` deliberately
 contains names only. Select relevant groups against the agenda and expand on request.
-The brief follows pages written that day, not every concept in the vault; uncited
-concepts are a graph audit concern.
+The brief selects daily pages by their address date and documents/explorations by
+declared `created`. A cited concept's `created` separates learned from revisited.
+This is not an ingestion or modification changefeed; uncited concepts are outside it.
 
 Check `lore health --json`: a thin brief may reflect stale collection. Name stale
 sources with the reported age. Health measures source freshness, not whether a

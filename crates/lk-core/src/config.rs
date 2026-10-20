@@ -978,8 +978,19 @@ pub enum ObservationUnit {
     Document,
 }
 
+/// Whether a historical target can select an adapter's actual dated query.
+/// Date-window replay observes the provider's current records, not deleted or
+/// intermediate revisions that the provider no longer returns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceRecovery {
+    DateWindow,
+    ConfiguredQuery,
+    CurrentSnapshot,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct SourceDescriptor {
+    pub recovery: SourceRecovery,
     /// A rolling/capped feed that CANNOT completely re-fetch a past day (RSS). Such a
     /// source projects its daily pages from the per-date event log (accumulate, never
     /// deplete): an item observed on day N is gone from the feed before a later run
@@ -1008,6 +1019,7 @@ impl SourceType {
     pub const fn descriptor(self) -> SourceDescriptor {
         match self {
             SourceType::GoogleDrive => SourceDescriptor {
+                recovery: SourceRecovery::DateWindow,
                 streaming: false,
                 default_template: "document.md.jinja",
                 scheduled: false,
@@ -1015,6 +1027,7 @@ impl SourceType {
                 unit: ObservationUnit::Document,
             },
             SourceType::Gmail => SourceDescriptor {
+                recovery: SourceRecovery::DateWindow,
                 streaming: false,
                 default_template: "gmail.md.jinja",
                 scheduled: false,
@@ -1022,6 +1035,7 @@ impl SourceType {
                 unit: ObservationUnit::Day,
             },
             SourceType::SlackChannel => SourceDescriptor {
+                recovery: SourceRecovery::DateWindow,
                 streaming: false,
                 default_template: "slack-channel.md.jinja",
                 scheduled: false,
@@ -1029,6 +1043,7 @@ impl SourceType {
                 unit: ObservationUnit::Day,
             },
             SourceType::SlackSearch => SourceDescriptor {
+                recovery: SourceRecovery::ConfiguredQuery,
                 streaming: false,
                 default_template: "slack-search.md.jinja",
                 scheduled: false,
@@ -1036,6 +1051,7 @@ impl SourceType {
                 unit: ObservationUnit::Day,
             },
             SourceType::Jira => SourceDescriptor {
+                recovery: SourceRecovery::ConfiguredQuery,
                 streaming: false,
                 default_template: "jira.md.jinja",
                 scheduled: false,
@@ -1045,6 +1061,7 @@ impl SourceType {
             // Not streaming: a CQL window re-queries any past day completely, so a daily
             // page rebuilds from the fetch alone — no event-log projection needed.
             SourceType::Confluence => SourceDescriptor {
+                recovery: SourceRecovery::DateWindow,
                 streaming: false,
                 default_template: "confluence.md.jinja",
                 scheduled: false,
@@ -1052,6 +1069,7 @@ impl SourceType {
                 unit: ObservationUnit::Day,
             },
             SourceType::GoogleCalendar => SourceDescriptor {
+                recovery: SourceRecovery::DateWindow,
                 streaming: false,
                 default_template: "google-calendar.md.jinja",
                 scheduled: true,
@@ -1059,6 +1077,7 @@ impl SourceType {
                 unit: ObservationUnit::Day,
             },
             SourceType::Rss => SourceDescriptor {
+                recovery: SourceRecovery::ConfiguredQuery,
                 streaming: true,
                 default_template: "rss.md.jinja",
                 scheduled: false,
@@ -1066,6 +1085,7 @@ impl SourceType {
                 unit: ObservationUnit::Day,
             },
             SourceType::Manual => SourceDescriptor {
+                recovery: SourceRecovery::CurrentSnapshot,
                 streaming: false,
                 default_template: "document.md.jinja",
                 scheduled: false,
@@ -1075,6 +1095,7 @@ impl SourceType {
             // Not streaming: a repository's documents declare their own dates and stay where
             // they are, so a past day re-queries complete.
             SourceType::Nodex => SourceDescriptor {
+                recovery: SourceRecovery::CurrentSnapshot,
                 streaming: false,
                 default_template: "document.md.jinja",
                 scheduled: false,
@@ -1084,6 +1105,7 @@ impl SourceType {
             // Not streaming: a date's transition log is a closed, durable record, so a past
             // day re-reads complete and the page rebuilds from the read alone.
             SourceType::Tasks => SourceDescriptor {
+                recovery: SourceRecovery::DateWindow,
                 streaming: false,
                 default_template: "tasks.md.jinja",
                 scheduled: false,
@@ -1255,6 +1277,19 @@ impl Default for PersonalConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct SynthesisConfig {
     pub weekly: WeeklySynthesisConfig,
+    pub recovery: Option<PeriodRecoveryConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PeriodRecoveryConfig {
+    pub start_date: jiff::civil::Date,
+    #[serde(default = "default_period_recovery_budget")]
+    pub max_periods_per_run: std::num::NonZeroUsize,
+}
+
+fn default_period_recovery_budget() -> std::num::NonZeroUsize {
+    std::num::NonZeroUsize::new(8).unwrap()
 }
 
 /// Weekly synthesis carries the cross-source themes page on top of the weekly review
@@ -1368,6 +1403,7 @@ impl Default for MaintenanceConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct IngestConfig {
     pub source_timeout_seconds: NonZeroU64,
+    pub recovery: Option<IngestRecoveryConfig>,
     pub documents: Option<crate::content::InputProcessingConfig>,
     pub originals: crate::manual_original::OriginalCaptureConfig,
     /// Optional cron expression; when set, `lore schedule` emits a single crontab line
@@ -1379,11 +1415,24 @@ impl Default for IngestConfig {
     fn default() -> Self {
         Self {
             source_timeout_seconds: NonZeroU64::new(600).unwrap(),
+            recovery: None,
             documents: None,
             originals: Default::default(),
             schedule: None,
         }
     }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IngestRecoveryConfig {
+    pub start_date: jiff::civil::Date,
+    #[serde(default = "default_ingest_recovery_budget")]
+    pub max_days_per_source_per_run: std::num::NonZeroUsize,
+}
+
+fn default_ingest_recovery_budget() -> std::num::NonZeroUsize {
+    std::num::NonZeroUsize::new(3).unwrap()
 }
 
 /// Link graph analysis configuration, consumed by `lore graph` / `lk-graph`.
@@ -1650,6 +1699,40 @@ mod tests {
         assert!(starter.credentials.file.is_none());
         assert!(starter.ingest.schedule.is_some());
         assert_eq!(starter.llm.provider, LlmProvider::Queue);
+    }
+
+    #[test]
+    fn recovery_requires_explicit_dates_and_positive_independent_budgets() {
+        let yaml = "vault: {root: /tmp/vault}\nidentity: {name: Test, email: test@example.invalid}\nsources: {}\n";
+        let config: Config = crate::yaml::from_str(yaml).unwrap();
+        assert!(config.ingest.recovery.is_none());
+        assert!(config.synthesis.recovery.is_none());
+        let config: Config = crate::yaml::from_str(&format!("{yaml}ingest:\n  recovery: {{start_date: '2026-10-17'}}\nsynthesis:\n  recovery: {{start_date: '2026-09-01'}}\n")).unwrap();
+        assert_eq!(
+            config
+                .ingest
+                .recovery
+                .unwrap()
+                .max_days_per_source_per_run
+                .get(),
+            3
+        );
+        assert_eq!(
+            config.synthesis.recovery.unwrap().max_periods_per_run.get(),
+            8
+        );
+        for extra in [
+            "ingest: {recovery: {max_days_per_source_per_run: 3}}",
+            "ingest: {recovery: {start_date: '2026-02-30'}}",
+            "ingest: {recovery: {start_date: '2026-10-17', max_days_per_source_per_run: 0}}",
+            "synthesis: {recovery: {max_periods_per_run: 8}}",
+            "synthesis: {recovery: {start_date: '2026-10-17', max_periods_per_run: 0}}",
+        ] {
+            assert!(
+                crate::yaml::from_str::<Config>(&format!("{yaml}{extra}\n")).is_err(),
+                "{extra}"
+            );
+        }
     }
 
     #[test]

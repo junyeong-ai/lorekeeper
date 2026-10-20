@@ -484,8 +484,7 @@ fn map_issue(
         .and_then(|f| issue.fields.extra.get(f))
         .and_then(serde_json::Value::as_str)
         .map(str::to_string);
-    // Snapshot the status + planned window as a header. These are the values *as of this
-    // run* — the page is a daily record, so a later schedule change doesn't rewrite history.
+    // Status and planned dates describe acquisition time, not a reconstructed target day.
     let body = with_status_header(
         strings,
         status.as_deref(),

@@ -108,7 +108,7 @@ Extract knowledge using the manifest. Requires a prior scan.
    ```bash
    lore graph backlinks-sync   # re-derive every concept's ## Sources + source_count
    lore wiki refresh           # refresh SQLite navigation and the entry guide
-   lore graph lint             # resolve every violation naming a page this run wrote; one elsewhere in the vault predates you — report it. Observations (orphans, open conflicts) never gate
+   lore graph lint             # repair violations in pages this run wrote; report unrelated findings separately. Observations never gate
    ```
 8. Run `lore queue status --json`; report created/merged/skipped counts and any
    pending concept synthesis. Document extraction is complete, but queued concept

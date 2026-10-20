@@ -5,6 +5,7 @@
 - [Configuration outline](#configuration-outline)
 - [Initial setup](#initial-setup)
 - [Location and validation](#location-and-validation)
+- [Execution profiles](#execution-profiles)
 - [Document preprocessing](#document-preprocessing)
 - [Nodex binary selection](#nodex-binary-selection)
 
@@ -30,9 +31,9 @@ identity:                            # basis for ownership (the personal split, 
                                      # (Jira self-detects from the authenticated account — no config)
 
 ingest:
-  schedule: "0 9 * * *"              # ONE daily `lore ingest` over every enabled source
-                                     # (never per source: the work-log is a cross-source
-                                     # daily aggregate, so one run keeps it complete)
+  schedule: "0 9 * * *"              # one native `lore run daily` over enabled sources
+                                     # personal work-logs aggregate across sources;
+                                     # failures remain explicit and may block reviews
 
 sources:                             # key = source id; document sources use wiki/documents
   <id>:
@@ -94,12 +95,8 @@ their evidence, uses fresh inspection/reduction sessions, then verifies the comp
 work before accepting a final assessment. `execution.work` independently bounds
 serialized request/result bytes and agent sessions per run; exhaustion retains pending
 work and reports failure. Explicit `audit-plan --path` preserves the requested selection.
-Each profile's optional `work` fields override `execution.work`; omitted fields inherit.
-The effective combination is validated, including the result/input size relationship.
-Native jobs pin the selected profile for child commands through `LORE_EXECUTION_PROFILE`;
-standalone bounded commands can explicitly set that variable to use the same budget.
-Run JSON reports the effective work limits. `review_health`
-reports global attention separately from the selected batch's completion.
+Run JSON's `review_health` reports global attention separately from the selected
+batch's completion. Execution budgets are configured below.
 
 ## Initial setup
 
@@ -161,25 +158,28 @@ freshness; `self status` is installation coherence. Neither proves semantic qual
 
 Scheduled jobs capture the selected config and runtime data directory. Interactive
 skill deployment is separate: Claude uses `.claude/skills`, Codex `.agents/skills`.
+
+## Execution profiles
+
 Choose the authenticated CLI in a named `execution.profiles` entry using
 `engine: claude-code` or `engine: codex`, then set `execution.default_profile`
-to that profile name. Optional operation profiles and explicit `--profile` override it. A session deadline preserves
-unfinished work rather than marking it complete. Regenerate and reload schedules
-after changing paths or relevant host/proxy environment.
+to that profile name. Selection is explicit `--profile`, operation-specific
+`execution.operations`, then default profile. Failure never switches hosts silently.
+Optional `executable` and `model` select the CLI and model. Relative executable paths
+and Claude's `config_directory` resolve against the config file; Codex's `profile`
+names an existing profile in that CLI. Credentials remain with the host.
 
-The optional `nodex` adapter requires a current index (`nodex build` after edits).
-`params.document_ids` selects exact source IDs within the configured kinds and date
-window; every selected document must be present and readable. `reconcile: true`
-selects current documents independently of authored dates and requires a stable
-`repository_id` namespace. It preserves authored dates rather than treating import
-as a new publication. `max_documents` refuses oversized selections, never truncates.
-Use temporary configurations for selected batches, not scheduled `document_ids`.
-
-A namespace identifies a repository, not its checkout or source configuration name.
-An existing imported document keeps its vault address when its title or path changes.
-Legacy pages without verified document identity require explicit migration; a matching
-path alone cannot authorize overwriting a curated synthesis. Missing inventory entries
-do not imply deletion, archival or false claims.
+`timeout_seconds` is a per-session wall-clock budget. `execution.work` defaults to
+262144 request bytes, 32768 result bytes and 64 semantic calls per native run or
+knowledge batch. These bound serialized JSON and invocation attempts, not total
+context, tokens or billing. Large requests are inspected/reduced in fresh sessions;
+exhaustion preserves verified work and reports incompletion.
+Input must be at least 4096 bytes; results at least 1024 bytes and at most one quarter
+of the input limit; calls must be positive. A profile's optional `work` overrides
+only specified fields, and the effective combination is validated. Native children
+inherit the pinned profile through `LORE_EXECUTION_PROFILE`; standalone bounded
+commands can set that variable explicitly. Run JSON reports effective limits.
+Regenerate and reload schedules after changing paths or host/proxy environment.
 
 ## Document preprocessing
 
@@ -259,7 +259,21 @@ document rather than generating independent concepts. Source metadata records fo
 projection policy, decoder versions and limitations. Drive still uses its documented
 provider text exports; adding an inbox decoder does not expand a remote adapter's reach.
 
-### Nodex binary selection
+## Nodex binary selection
+
+The optional `nodex` adapter requires a current index (`nodex build` after edits).
+`params.document_ids` selects exact source IDs within the configured kinds and date
+window; every selected document must be present and readable. `reconcile: true`
+selects current documents independently of authored dates and requires a stable
+`repository_id` namespace. It preserves authored dates rather than treating import
+as a new publication. `max_documents` refuses oversized selections, never truncates.
+Use temporary configurations for selected batches, not scheduled `document_ids`.
+
+A namespace identifies a repository, not its checkout or source configuration name.
+An existing imported document keeps its vault address when its title or path changes.
+Legacy pages without verified document identity require explicit migration; a matching
+path alone cannot authorize overwriting a curated synthesis. Missing inventory entries
+do not imply deletion, archival or false claims.
 
 The adapter supports nodex `>=0.60, <0.61`. Lore's installer and
 `lore self update --version` select Lore versions, not nodex versions.

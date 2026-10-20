@@ -29,6 +29,28 @@ closed interval, not proof of completion. The daily job resumes base, quarter an
 annual obligations in order. Inspect `lore synthesis pending --status --json` for
 blocked evidence; backfill missed source dates explicitly.
 
+Optional `synthesis.recovery` requires an explicit `start_date` and defaults
+`max_periods_per_run` to 8. The daily job runs `synthesis pending --reconcile` once
+before resuming periods. It registers only enabled modes' closed periods whose
+start is on or after that boundary; an overlapping earlier period is excluded.
+The budget counts examined slots, including existing intents, and the saved cursor
+resumes fairly across modes. Disabling a mode pauses its cursor. Re-enabling it
+continues that backlog. Registration supplies no source coverage or personal
+work-log proof; existing readiness checks can still block processing. Explicit
+historical `--date ... --defer` remains separate. Without recovery configuration,
+calendar invocations alone do not reconstruct every missed period request.
+Changing the activation date or vault timezone restarts only the recovery cursor;
+existing intents remain. A prior intent in another timezone still requires an
+explicit request under the intended timezone before it can process.
+
+Knowledge jobs reserve their semantic budget for ready audit subjects before
+draining unrelated queue work. The selected subject's actual evidence, context and
+review inputs must have completed owned semantic work; unfinished scoped tasks or
+unpublished results defer it. Unknown targets in malformed queue data remain a
+blocker. `audit_deferred` reports encountered blockers. The runner verifies selected
+assessments after final global reconciliation; completed audits do not turn an
+unfinished global queue into a successful job.
+
 The native runner holds the cooperative Unix workflow lease through semantic
 reading and publication. Do not reacquire it inside a skill. Cancellation and
 session deadlines terminate the foreground process group and preserve unfinished

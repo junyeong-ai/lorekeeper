@@ -30,8 +30,10 @@ What is left is what needs a reader:
    commands are silent over a file git ignores, and reading that silence as "current" is what
    the note exists to prevent.
 
-2. **Quality** — per-document: empty sections, missing concept links,
-   leaked project identifiers (grep for `strip_patterns` in vault).
+2. **Quality** — inspect each document for incomplete sections, unsupported or missing
+   concept links, and irrelevant project detail in generalized prose. Scoped searches
+   for manifest `strip_patterns` identify review candidates, not leakage findings.
+   Preserve source paths, IDs, citations and technology names needed to verify evidence.
 3. **Cross-project** — concepts appearing in multiple project
    manifests. Suggest synthesis enrichment.
 4. **Unharvested sources** — which declared sources have no `extracted`

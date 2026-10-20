@@ -40,11 +40,11 @@ preserves unfinished or blocked work. Failure rules:
 
 ## When NOT to invoke
 
-`lore ingest` writes the queue file atomically (temp + rename) after all
-vault pages are written, so a concurrent ingest cannot produce a partial
-`.jsonl` you might consume mid-write. There is no append-while-reading
-hazard. Atomic queue publication does not freeze target pages: serialize ingest
-and other page writers with a processing wave so they do not invalidate drafts.
+Ingest publishes each page/request batch through a recoverable journal and replaces
+queue files atomically; the entire ingest is not one transaction. Readers do not
+consume an append-in-progress queue file, but an interrupted journal can still
+require recovery before processing. Atomic replacement does not freeze target
+pages: preserve workflow coordination and exact revision guards during a worker wave.
 
 ## Regenerating a section
 

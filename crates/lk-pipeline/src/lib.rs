@@ -15,6 +15,7 @@ pub use context::PipelineContext;
 pub use normalize::normalize_events;
 pub use render::RenderResult;
 pub use synthesis::{Synthesizer, completed_input, iso_week_range, month_range, quarter_range};
+pub use work_log::{WorkLogInputs, empty_work_log_input, work_log_inputs, work_log_scope};
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -935,13 +936,13 @@ impl Pipeline {
             .list_markdown_recursive(&lk_core::vault_path::documents_dir(&self.ctx.dirs))
             .await?
         {
-            let page = self.reader.read_page(&path).await?.ok_or_else(|| {
+            let metadata = self.reader.read_frontmatter(&path).await?.ok_or_else(|| {
                 PipelineError::Render(format!(
                     "document disappeared during address lookup: {}",
                     path.display()
                 ))
             })?;
-            if let Some(identity) = DocumentIdentity::from_page(&page.frontmatter)? {
+            if let Some(identity) = DocumentIdentity::from_page(&metadata)? {
                 let address = path
                     .strip_prefix(lk_core::vault_path::documents_dir(&self.ctx.dirs))
                     .map_err(|error| PipelineError::Render(error.to_string()))?

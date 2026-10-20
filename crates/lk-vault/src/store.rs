@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
-use lk_core::frontmatter::{self, VaultPage};
+use lk_core::frontmatter::{self, Frontmatter, VaultPage};
 
 use crate::VaultError;
 
@@ -97,6 +97,30 @@ pub(crate) fn read_page(root: &Path, path: &Path) -> Result<VaultPage, VaultErro
         .map_err(|error| VaultError::Frontmatter(format!("{}: {error}", path.display())))
 }
 
+fn load_frontmatter(mut input: impl std::io::BufRead) -> Result<Frontmatter, VaultError> {
+    use std::io::{BufRead, Read};
+
+    let mut opening = Vec::new();
+    // BOM + delimiter + CRLF fit in eight bytes; the extra byte rejects longer first lines.
+    input.by_ref().take(9).read_until(b'\n', &mut opening)?;
+    let first = opening.strip_prefix(b"\xef\xbb\xbf").unwrap_or(&opening);
+    if first != b"---\n" && first != b"---\r\n" {
+        return Ok(Frontmatter::default());
+    }
+    let mut header = String::from_utf8(opening).map_err(std::io::Error::other)?;
+    loop {
+        let start = header.len();
+        if input.read_line(&mut header)? == 0 {
+            return Err(VaultError::Frontmatter("unclosed frontmatter block".into()));
+        }
+        if frontmatter::is_delimiter_line(&header[start..]) {
+            return frontmatter::parse_page(&header)
+                .map(|page| page.frontmatter)
+                .map_err(VaultError::Frontmatter);
+        }
+    }
+}
+
 /// Read access to a knowledge vault, abstracted from its storage backend.
 ///
 /// The pipeline's materialized-view logic (read the previous render, decide whether the
@@ -109,6 +133,11 @@ pub trait VaultStore: Send + Sync {
     /// Read and parse a vault page by its vault-relative path. `Ok(None)` means the page
     /// doesn't exist (a legitimate "never written" state, not an error).
     async fn read_page(&self, rel_path: &Path) -> Result<Option<VaultPage>, VaultError>;
+
+    /// Read declared metadata only. Body validity and publication revisions require `read_page`.
+    async fn read_frontmatter(&self, rel_path: &Path) -> Result<Option<Frontmatter>, VaultError> {
+        Ok(self.read_page(rel_path).await?.map(|page| page.frontmatter))
+    }
 
     /// Vault-relative paths of every `.md` file directly under `rel_dir`, sorted. A
     /// missing directory is the legitimate empty state and yields an empty list.
@@ -167,19 +196,17 @@ pub async fn load_concept_registry(
                 std::io::Error::other(format!("concept address is not UTF-8: {}", path.display()))
             })?
             .replace(std::path::MAIN_SEPARATOR, "/");
-        let page = reader.read_page(&path).await?.ok_or_else(|| {
+        let metadata = reader.read_frontmatter(&path).await?.ok_or_else(|| {
             std::io::Error::other(format!(
                 "concept disappeared during registry read: {}",
                 path.display()
             ))
         })?;
-        let title = page
-            .frontmatter
+        let title = metadata
             .get("title")
             .and_then(|value| value.as_str())
             .unwrap_or(stem);
-        let aliases = page
-            .frontmatter
+        let aliases = metadata
             .get("aliases")
             .and_then(|value| value.as_array())
             .into_iter()
@@ -211,6 +238,22 @@ impl FsVault {
 
 #[async_trait]
 impl VaultStore for FsVault {
+    async fn read_frontmatter(&self, rel_path: &Path) -> Result<Option<Frontmatter>, VaultError> {
+        let root = self.root.clone();
+        let path = rel_path.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let full = crate::page_path(&root, &path)?;
+            let file = match std::fs::File::open(full) {
+                Ok(file) => file,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                Err(error) => return Err(error.into()),
+            };
+            load_frontmatter(std::io::BufReader::new(file)).map(Some)
+        })
+        .await
+        .map_err(std::io::Error::other)?
+    }
+
     async fn list_markdown_recursive(&self, rel_dir: &Path) -> Result<Vec<PathBuf>, VaultError> {
         Ok(self.markdown_inventory(rel_dir).await?.owners)
     }
@@ -290,6 +333,13 @@ impl InMemoryVault {
 
 #[async_trait]
 impl VaultStore for InMemoryVault {
+    async fn read_frontmatter(&self, rel_path: &Path) -> Result<Option<Frontmatter>, VaultError> {
+        self.pages
+            .get(rel_path)
+            .map(|content| load_frontmatter(content.as_bytes()))
+            .transpose()
+    }
+
     async fn list_markdown_recursive(&self, rel_dir: &Path) -> Result<Vec<PathBuf>, VaultError> {
         Ok(self
             .pages
@@ -326,6 +376,70 @@ impl VaultStore for InMemoryVault {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn metadata_projection_matches_page_delimiters_without_consuming_the_body() {
+        for header in [
+            "---\ntitle: Example\naliases: [Other]\n---\n",
+            "\u{feff}---\r\ntitle: Example\r\n---\r\n",
+            "---\nnote: |\n  ---\n  still metadata\ntitle: Example\n---\n",
+        ] {
+            let mut bytes = header.as_bytes().to_vec();
+            bytes.extend_from_slice(&[0xff; 128]);
+            let mut input = std::io::Cursor::new(bytes);
+            let actual = load_frontmatter(&mut input).unwrap();
+            let expected = frontmatter::parse_page(header).unwrap().frontmatter;
+            assert_eq!(actual.fields, expected.fields);
+            assert_eq!(input.position() as usize, header.len());
+        }
+        assert!(load_frontmatter(b"---\ntitle: Example\n---".as_slice()).is_ok());
+        for body in [
+            "--- ",
+            "---",
+            "  ---\n",
+            "# Ordinary text",
+            "\u{feff}heading",
+        ] {
+            let content = body.repeat(4096);
+            let mut input = std::io::Cursor::new(content);
+            assert!(load_frontmatter(&mut input).unwrap().fields.is_empty());
+            assert!(input.position() <= 9);
+        }
+        for invalid in [
+            "---\ntitle: Unclosed\n",
+            "---\ntitle: A\ntitle: B\n---\n",
+            "---\ntitle: [unfinished\n---\n",
+        ] {
+            assert!(load_frontmatter(invalid.as_bytes()).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn metadata_readers_preserve_absence_and_boundary_errors() {
+        let root = tempfile::tempdir().unwrap();
+        let vault = FsVault::new(root.path());
+        let path = Path::new("page.md");
+        assert!(vault.read_frontmatter(path).await.unwrap().is_none());
+        assert!(
+            vault
+                .read_frontmatter(Path::new("../page.md"))
+                .await
+                .is_err()
+        );
+        std::fs::write(root.path().join(path), "---\ntitle: Title\n---\nBody.").unwrap();
+        assert_eq!(
+            vault.read_frontmatter(path).await.unwrap().unwrap().fields,
+            vault
+                .read_page(path)
+                .await
+                .unwrap()
+                .unwrap()
+                .frontmatter
+                .fields
+        );
+        std::fs::write(root.path().join(path), "---\ntitle: Unclosed").unwrap();
+        assert!(vault.read_frontmatter(path).await.is_err());
+    }
 
     #[cfg(unix)]
     #[tokio::test]

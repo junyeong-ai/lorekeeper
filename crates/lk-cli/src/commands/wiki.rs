@@ -554,6 +554,12 @@ pub async fn run(opts: &super::GlobalOptions, cmd: WikiCommand) -> miette::Resul
                     "audit requires current related-document discovery; run wiki audit-discover, then reread the expanded audit-plan"
                 ));
             }
+            let _queue_claim = super::queue::claim_writer(&root.join(".lorekeeper/queue"), false)?;
+            let mut readiness = super::queue::readiness::AuditReadiness::load(&root)?;
+            for candidate in &selected.candidates {
+                readiness.require_ready(&root, candidate)?;
+            }
+            let mut readiness = Some(readiness);
             let recorded = lk_graph::audit::record_with_guard(
                 &session,
                 &config.vault.dirs,
@@ -561,6 +567,11 @@ pub async fn run(opts: &super::GlobalOptions, cmd: WikiCommand) -> miette::Resul
                 results,
                 config.graph.audit.max_input_bytes,
                 |assessment, plan| {
+                    if let Some(readiness) = readiness.take() {
+                        readiness
+                            .guard(&root, plan)
+                            .map_err(|error| lk_graph::GraphError::Io(error.to_string()))?;
+                    }
                     super::work::guard_audit(&root, &config, &config_revision, assessment, plan)
                         .map(|completed| {
                             if completed {

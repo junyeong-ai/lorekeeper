@@ -69,7 +69,10 @@ its prior archive in a dated reassessment; curation preserves its bytes automati
 
 Curation changes metadata and an optional leading title, never synthesis/related/source
 sections or queue completion markers. Use `graph resynthesize` and `/lore-process` for
-semantic corrections. Use revision-checked `graph merge --dry-run` only after comparing
+semantic corrections: preview `lore graph resynthesize wiki/concepts/subject.md --dry-run`,
+then omit `--dry-run` to queue current-evidence synthesis. Unlike retained-input
+`queue regenerate`, this does not require the original extraction task.
+Use revision-checked `graph merge --dry-run` only after comparing
 both complete concepts and their sources; shared words or source count are insufficient.
 Finish through lore-process's reconciliation and verification protocol, then refresh
 retrieval snapshots. New citations do not automatically reactivate retired knowledge.

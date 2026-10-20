@@ -3,13 +3,22 @@ use std::path::{Path, PathBuf};
 
 use lk_core::config::VaultDirs;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::search::{MatchProjection, Page, SearchOptions, SearchResult, fold_name, spacing_key};
 use crate::{MutationSession, VaultError};
 
 pub(super) const INDEX_PATH: &str = ".lorekeeper/search.sqlite";
-const VERSION: i32 = 14;
+const VERSION: i32 = 15;
+
+#[derive(Serialize, Deserialize)]
+struct BrowseFacets {
+    categories: BTreeMap<String, usize>,
+    formats: BTreeMap<String, usize>,
+    source_statuses: BTreeMap<String, usize>,
+    knowledge_statuses: BTreeMap<String, usize>,
+    tags: BTreeMap<String, usize>,
+}
 
 #[derive(Serialize)]
 pub struct SearchSnapshot {
@@ -171,6 +180,7 @@ fn prepare_search_inner(
         DROP TABLE IF EXISTS terms;
         DROP TABLE IF EXISTS names;
         DROP TABLE IF EXISTS tags;
+        DROP TABLE IF EXISTS browse_facets;
         DROP TABLE IF EXISTS pages;
         DROP TABLE IF EXISTS snapshot;
         CREATE TABLE snapshot (id TEXT NOT NULL, context TEXT NOT NULL, version INTEGER NOT NULL,
@@ -192,6 +202,7 @@ fn prepare_search_inner(
         CREATE INDEX names_spacing ON names(spacing_key, page_id);
         CREATE TABLE tags (page_id INTEGER NOT NULL, tag TEXT NOT NULL, PRIMARY KEY(page_id, tag));
         CREATE INDEX tags_tag ON tags(tag, page_id);
+        CREATE TABLE browse_facets(include_sources INTEGER PRIMARY KEY, payload TEXT NOT NULL);
         CREATE TABLE links (source TEXT NOT NULL, ordinal INTEGER NOT NULL,
             source_revision TEXT NOT NULL, line INTEGER NOT NULL, label TEXT NOT NULL,
             destination TEXT NOT NULL, target TEXT, context TEXT NOT NULL,
@@ -403,6 +414,8 @@ fn prepare_search_inner(
     }
     crate::provenance_index::write(&transaction, &provenance)?;
     crate::citations::write(&transaction, citations)?;
+    write_browse_facets(&transaction)?;
+    transaction.execute_batch("PRAGMA optimize=0x10002;")?;
     if citations.is_some() {
         verify_selected_capture(root, dirs, &selected_revisions)?;
     }
@@ -544,10 +557,40 @@ pub(super) fn visit_query_candidates(
         owners = vocabulary("spacing_key", &spacing_key(query))?;
     }
     let spellings = super::search::spellings_of(identity.as_deref(), &owners);
+    let (sql, arguments) = build_candidate_query(options, &spellings, &terms);
+    let mut statement = connection.prepare(&sql)?;
+    let rows = statement.query_map(rusqlite::params_from_iter(&arguments), |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+        ))
+    })?;
+    for row in rows {
+        let (metadata, summary, text, spacing_text) = row?;
+        let mut page: Page = serde_json::from_str(&metadata)
+            .map_err(|error| VaultError::Serialization(error.to_string()))?;
+        page.projection = Some(MatchProjection {
+            summary,
+            text,
+            spacing_text,
+        });
+        visit(page, &spellings, &terms, identity.as_deref())?;
+    }
+    Ok((spellings, terms))
+}
+
+fn build_candidate_query(
+    options: &SearchOptions<'_>,
+    spellings: &[String],
+    terms: &[String],
+) -> (String, Vec<String>) {
+    let query = options.query.unwrap_or_default();
     let needles = if spellings.is_empty() {
-        &terms
+        terms
     } else {
-        &spellings
+        spellings
     };
     let mut predicates = Vec::new();
     let mut arguments = Vec::new();
@@ -599,27 +642,7 @@ pub(super) fn visit_query_candidates(
     let sql = format!(
         "SELECT metadata, summary, text, spacing_text FROM pages WHERE {scope} AND {filter} ORDER BY traversal_rank"
     );
-    let mut statement = connection.prepare(&sql)?;
-    let rows = statement.query_map(rusqlite::params_from_iter(&arguments), |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, String>(2)?,
-            row.get::<_, String>(3)?,
-        ))
-    })?;
-    for row in rows {
-        let (metadata, summary, text, spacing_text) = row?;
-        let mut page: Page = serde_json::from_str(&metadata)
-            .map_err(|error| VaultError::Serialization(error.to_string()))?;
-        page.projection = Some(MatchProjection {
-            summary,
-            text,
-            spacing_text,
-        });
-        visit(page, &spellings, &terms, identity.as_deref())?;
-    }
-    Ok((spellings, terms))
+    (sql, arguments)
 }
 
 fn attach_synthesis(connection: &Connection, result: &mut SearchResult) -> Result<(), VaultError> {
@@ -688,12 +711,11 @@ fn scalar_filter(options: &SearchOptions<'_>) -> (String, Vec<rusqlite::types::V
     (filter, arguments)
 }
 
-/// Browse scalar metadata in SQLite; deserialize only the requested page of hits.
-fn browse(
+fn capture_browse_facets(
     connection: &Connection,
-    options: &SearchOptions<'_>,
-) -> Result<SearchResult, VaultError> {
-    let scope = if options.include_sources {
+    include_sources: bool,
+) -> Result<BrowseFacets, VaultError> {
+    let scope = if include_sources {
         "1"
     } else {
         "knowledge = 1"
@@ -719,6 +741,41 @@ fn browse(
             Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as usize))
         })?
         .collect::<Result<_, _>>()?;
+    Ok(BrowseFacets {
+        categories,
+        formats,
+        source_statuses,
+        knowledge_statuses,
+        tags,
+    })
+}
+
+fn write_browse_facets(connection: &Connection) -> Result<(), VaultError> {
+    for include_sources in [false, true] {
+        let captured = capture_browse_facets(connection, include_sources)?;
+        let payload = serde_json::to_string(&captured)
+            .map_err(|error| VaultError::Serialization(error.to_string()))?;
+        connection.execute(
+            "INSERT INTO browse_facets VALUES (?1, ?2)
+             ON CONFLICT(include_sources) DO UPDATE SET payload=excluded.payload",
+            params![include_sources, payload],
+        )?;
+    }
+    Ok(())
+}
+
+/// Browse scalar metadata in SQLite; deserialize only the requested page of hits.
+fn browse(
+    connection: &Connection,
+    options: &SearchOptions<'_>,
+) -> Result<SearchResult, VaultError> {
+    let payload: String = connection.query_row(
+        "SELECT payload FROM browse_facets WHERE include_sources=?1",
+        [options.include_sources],
+        |row| row.get(0),
+    )?;
+    let facets: BrowseFacets = serde_json::from_str(&payload)
+        .map_err(|error| VaultError::Serialization(error.to_string()))?;
     let (filter, mut arguments) = scalar_filter(options);
     let total: i64 = connection.query_row(
         &format!("SELECT COUNT(*) FROM pages WHERE {filter}"),
@@ -762,11 +819,11 @@ fn browse(
     result.offset = options.offset;
     let end = options.offset.saturating_add(result.hits.len());
     result.next_offset = (end < total).then_some(end);
-    result.categories = categories;
-    result.formats = formats;
-    result.source_statuses = source_statuses;
-    result.knowledge_statuses = knowledge_statuses;
-    result.tags = tags;
+    result.categories = facets.categories;
+    result.formats = facets.formats;
+    result.source_statuses = facets.source_statuses;
+    result.knowledge_statuses = facets.knowledge_statuses;
+    result.tags = facets.tags;
     attach_synthesis(connection, &mut result)?;
     Ok(result)
 }
@@ -821,6 +878,181 @@ pub(super) fn visit_body_pages(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn captured_browse_facets_preserve_scope_filters_and_refresh_membership() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let assert_parity = |snapshot: &str| {
+            for include_sources in [false, true] {
+                for (offset, category, knowledge_status) in [
+                    (0, None, None),
+                    (
+                        1,
+                        Some("security"),
+                        Some(lk_core::frontmatter::KnowledgeStatus::Retired),
+                    ),
+                    (0, Some("absent"), None),
+                ] {
+                    let mut options = SearchOptions {
+                        include_sources,
+                        category,
+                        knowledge_status,
+                        limit: 1,
+                        offset,
+                        ..Default::default()
+                    };
+                    let mut live = crate::search(root.path(), &dirs, &options).unwrap();
+                    live.snapshot = Some(snapshot.to_owned());
+                    options.snapshot = Some(snapshot);
+                    let captured = crate::search(root.path(), &dirs, &options).unwrap();
+                    assert_eq!(
+                        serde_json::to_value(live).unwrap(),
+                        serde_json::to_value(captured).unwrap(),
+                        "include_sources={include_sources}, category={category:?}, offset={offset}"
+                    );
+                }
+            }
+        };
+        let empty = prepare_search(&session, &dirs).unwrap();
+        assert_parity(&empty.snapshot);
+        for (path, content) in [
+            (
+                "wiki/concepts/a.md",
+                "---\ntype: concept\ntitle: A\ncategory: security\ntags: [Security, 공유태그]\ncreated: 2026-10-10\n---\n## Summary\nFirst meaning.\n",
+            ),
+            (
+                "wiki/concepts/b.md",
+                "---\ntype: concept\ntitle: B\ncategory: security\ntags: [security]\nknowledge_status: retired\ncreated: 2026-09-01\n---\n## Summary\nHistorical meaning.\n",
+            ),
+            (
+                "wiki/documents/c.md",
+                "---\ntype: document\ntitle: C\ncategory: engineering\ntags: [security]\nsource_record:\n  status: archived\n  manual_frontmatter:\n    tags: [Security, legacy]\n---\n## Summary\nSource meaning.\n",
+            ),
+            (
+                "daily/rss/day.md",
+                "---\ntype: rss\ntitle: D\ncategory: observations\ntags: [security]\n---\n## Summary\nDaily meaning.\n",
+            ),
+        ] {
+            write(root.path(), path, content);
+        }
+        let captured = prepare_search(&session, &dirs).unwrap();
+        assert_parity(&captured.snapshot);
+        let tags = vec!["SECURITY".to_owned()];
+        let options = SearchOptions {
+            snapshot: Some(&captured.snapshot),
+            tags: &tags,
+            created_from: Some("2026-10-01".parse().unwrap()),
+            format: Some("concept"),
+            ..Default::default()
+        };
+        let filtered = crate::search(root.path(), &dirs, &options).unwrap();
+        assert_eq!(filtered.total, 1);
+        assert_eq!(filtered.categories["security"], 2);
+        assert_eq!(filtered.tags["security"], 3);
+        assert_eq!(filtered.tags["legacy"], 1);
+        let prior = serde_json::to_value(&filtered).unwrap();
+        std::fs::remove_file(root.path().join("wiki/concepts/b.md")).unwrap();
+        write(
+            root.path(),
+            "wiki/concepts/a.md",
+            "---\ntype: concept\ntitle: A\ncategory: engineering\ntags: [new]\n---\n## Summary\nReassessed meaning.\n",
+        );
+        write(
+            root.path(),
+            "wiki/documents/new.md",
+            "---\ntype: document\ntitle: New\ncategory: newly-added\n---\n## Summary\nNew source.\n",
+        );
+        assert_eq!(
+            serde_json::to_value(crate::search(root.path(), &dirs, &options).unwrap()).unwrap(),
+            prior
+        );
+        let refreshed = prepare_search(&session, &dirs).unwrap();
+        assert_ne!(refreshed.snapshot, captured.snapshot);
+        assert!(crate::search(root.path(), &dirs, &options).is_err());
+        assert_parity(&refreshed.snapshot);
+    }
+
+    #[test]
+    fn prepared_statistics_keep_selective_queries_candidate_driven_and_broad_queries_complete() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        for index in 0..512 {
+            let text = if index % 128 == 0 {
+                "Commonword selectiveterm."
+            } else {
+                "Commonword ordinary evidence."
+            };
+            write(
+                root.path(),
+                &format!("wiki/documents/{index:04}.md"),
+                &format!("---\ntype: document\ntitle: Note {index}\n---\n## Summary\n{text}\n"),
+            );
+        }
+        for index in 0..64 {
+            write(
+                root.path(),
+                &format!("daily/rss/{index:04}.md"),
+                "---\ntype: rss\ntitle: Observation\n---\n## Summary\nCommonword source evidence.\n",
+            );
+        }
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let snapshot = prepare_search(&session, &dirs).unwrap();
+        let connection = Connection::open(root.path().join(INDEX_PATH)).unwrap();
+        let statistics: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_stat1 WHERE tbl='pages'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(statistics > 0);
+        let options = SearchOptions {
+            query: Some("selectiveterm"),
+            ..Default::default()
+        };
+        let terms = super::super::search::query_terms("selectiveterm", false);
+        let (query, arguments) = build_candidate_query(&options, &[], &terms);
+        let mut statement = connection.prepare(&query).unwrap();
+        let candidates: usize = {
+            let mut rows = statement
+                .query(rusqlite::params_from_iter(&arguments))
+                .unwrap();
+            let mut count = 0;
+            while rows.next().unwrap().is_some() {
+                count += 1;
+            }
+            count
+        };
+        assert_eq!(candidates, 4);
+        let steps = statement.get_status(rusqlite::StatementStatus::VmStep);
+        assert!(steps < 512, "selective query traversed its corpus: {steps}");
+        for include_sources in [false, true] {
+            for (query, total) in [
+                ("selectiveterm", 4),
+                ("commonword", if include_sources { 576 } else { 512 }),
+            ] {
+                let mut options = SearchOptions {
+                    query: Some(query),
+                    include_sources,
+                    limit: 3,
+                    offset: 1,
+                    ..Default::default()
+                };
+                let mut live = crate::search(root.path(), &dirs, &options).unwrap();
+                assert_eq!(live.total, total);
+                live.snapshot = Some(snapshot.snapshot.clone());
+                options.snapshot = Some(&snapshot.snapshot);
+                let captured = crate::search(root.path(), &dirs, &options).unwrap();
+                assert_eq!(
+                    serde_json::to_value(live).unwrap(),
+                    serde_json::to_value(captured).unwrap(),
+                    "query={query}, include_sources={include_sources}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn snapshot_inspection_is_read_only_and_does_not_certify_current_pages() {
@@ -1878,6 +2110,7 @@ mod tests {
             "pages",
             "names",
             "tags",
+            "browse_facets",
             "links",
             "provenance_documents",
             "provenance_addresses",

@@ -14,6 +14,9 @@ identity:
 ingest:
   source_timeout_seconds: 600  # acquisition budget per source, excluding writer-lock waiting
   schedule: "0 7 * * *"
+  # Date-window sources can opt in to outage recovery; choose an explicit start date:
+  # recovery: {start_date: "2026-10-01", max_days_per_source_per_run: 3}
+  # The manual inbox below uses retained current files, not historical date replay.
   originals:
     max_entry_bytes: 33554432
     max_member_bytes: 67108864
