@@ -27,6 +27,8 @@ budgets are real limits: exhaustion must report incomplete work, never success.
 Inspect the resulting pages, not just exit codes:
 
 - Five source documents and one existing concept retain exact original evidence.
+- Existing declared aliases remain lookup keys when the selected citations do not
+  attest them; removal requires evidence of wrong or ambiguous identity.
 - Production's 30-day and 7-day requirements share an effective date and conflict.
 - Development and historical production scopes do not establish that conflict.
 - The copied 30-day statement supplies no independent corroboration.

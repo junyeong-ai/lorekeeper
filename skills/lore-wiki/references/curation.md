@@ -44,7 +44,9 @@ The JSON contract is:
 
 `evidence` is nonempty and guards the exact files read (`wiki read.file_revision`).
 Concept fields other than path/revision are optional; aliases replace the complete
-list, so retain valid existing forms. Omit `category` to keep it, use a configured
+list, so retain existing forms unless read evidence establishes a wrong or ambiguous
+identity. Absence from selected citations is not such evidence; record the uncertainty
+without deleting the lookup key. Omit `category` to keep it, use a configured
 category ID to replace it, or `null` to clear it. `tags` replaces the complete list;
 `[]` clears it. Tags must be unique nonblank single lines. Assign only themes the
 concept itself supports; do not copy every source tag onto every extracted concept.

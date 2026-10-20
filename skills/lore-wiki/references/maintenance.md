@@ -46,8 +46,10 @@ publication contracts in SKILL.md and read the curation reference before repairs
    from the submitted `reviews` cannot bypass it. Scope includes declared subjects,
    the subject's `knowledge_review` and reviews retained in its prior receipt.
 3. Examine subject, definitions, conditions, effective time and observation vs claim.
-   For concepts, verify declared aliases denote the same subject. Read direct related
-   context and
+   For concepts, verify declared aliases denote the same subject using AGENTS.md's
+   Concept convergence rules for existing mappings. Absence from the current citations
+   is not a reason to remove an alias; preserve uncertainty unless read evidence
+   establishes a wrong or ambiguous identity. Read direct related context and
    check whether their stated relationship helps answer a concrete future question.
    Similar words, co-citation, one source or a high degree do not decide these issues.
 4. Apply supported repairs through `wiki curate` for concept metadata and authored
