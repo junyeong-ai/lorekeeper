@@ -81,8 +81,14 @@ current. Missing retained input is a refusal, not permission to remotely re-fetc
 expired source or reconstruct raw events from refined prose.
 
 The command preserves authored bodies, clears only completion/provenance for that
-section, and publishes a new unique task through the mutation journal. Process it
-normally. Never manually clear a marker and re-ingest as a substitute for this operation.
+section, and publishes a replacement through the mutation journal. A selected pending
+request moves to processed history with its exact bytes; sibling pending lines remain
+unchanged. Retirement, completion invalidation and replacement share that journal.
+Malformed retained queue lines require repair before regeneration. Process the replacement
+normally; never manually clear a marker and re-ingest as a substitute for this operation.
+Equivalent pending work must finish and be pruned before another historical request;
+selecting that pending task itself remains an explicit replacement. Processed history
+permits later regeneration.
 
 New tasks carry `input.generation_policy`, a per-kind semantic policy identifier.
 Only apply writes `llm_inputs.<key>_policy_done` from the matched task. Missing policy
