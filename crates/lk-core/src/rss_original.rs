@@ -53,7 +53,6 @@ impl RssEntryIdentity {
         let identity: Self = serde_json::from_value(value.clone())
             .map_err(|_| "invalid RSS entry identity".to_owned())?;
         if identity.feed_id.trim().is_empty()
-            || identity.entry_id.trim().is_empty()
             || metadata.get("feed_id").and_then(Value::as_str) != Some(identity.feed_id.as_str())
         {
             return Err("RSS entry identity does not match its feed provenance".into());
@@ -348,9 +347,17 @@ mod tests {
             RssEntryIdentity::from_metadata(&serde_json::json!({"feed_id":"legacy"})).unwrap(),
             None
         );
+        let empty = RssEntryIdentity::new("feed", "");
+        assert_eq!(
+            RssEntryIdentity::from_metadata(
+                &serde_json::json!({"feed_id":"feed", "rss_identity":empty})
+            )
+            .unwrap(),
+            Some(empty)
+        );
         for invalid in [
             serde_json::json!({"feed_id":"other", "rss_identity":{"feed_id":"one","entry_id":"a"}}),
-            serde_json::json!({"feed_id":"one", "rss_identity":{"feed_id":"one","entry_id":""}}),
+            serde_json::json!({"feed_id":"one", "rss_identity":{"feed_id":"one","entry_id":false}}),
             serde_json::json!({"feed_id":"one", "rss_identity":{"feed_id":"one","entry_id":"a","unknown":true}}),
             serde_json::json!({"feed_id":"one", "rss_identity":null}),
         ] {

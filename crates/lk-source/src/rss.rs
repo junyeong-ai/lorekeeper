@@ -370,9 +370,7 @@ fn map_entry(
     // not across feeds, and one source polls many feeds — without the prefix two
     // feeds sharing an id on the same day would collapse to a single EventId.
     let raw_id = if entry.id.trim().is_empty() {
-        url.clone()
-            .filter(|url| !url.trim().is_empty())
-            .unwrap_or_else(|| title.clone())
+        url.clone().unwrap_or_else(|| title.clone())
     } else {
         entry.id
     };
