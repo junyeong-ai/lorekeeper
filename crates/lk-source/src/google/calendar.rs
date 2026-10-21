@@ -329,13 +329,7 @@ impl Source for GoogleCalendarSource {
                     match fetch_drive_content(&self.http, &token, &file_id).await {
                         Ok(content) if !content.trim().is_empty() => {
                             let header = att_title.as_deref().unwrap_or(s.meeting_notes);
-                            let note = format!("**{header}:**\n\n{}", content.trim());
-                            if mapped.item.body.is_empty() {
-                                mapped.item.body = note;
-                            } else {
-                                mapped.item.body.push_str("\n\n");
-                                mapped.item.body.push_str(&note);
-                            }
+                            append_meeting_notes(&mut mapped.item.body, header, &content);
                         }
                         Ok(_) => {}
                         Err(e) => {
@@ -373,6 +367,16 @@ impl Source for GoogleCalendarSource {
 struct MappedEvent {
     item: RawItem,
     drive_files: Vec<(String, Option<String>)>,
+}
+
+fn append_meeting_notes(body: &mut String, header: &str, content: &str) {
+    let note = format!("**{header}:**\n\n{content}");
+    if body.is_empty() {
+        *body = note;
+    } else {
+        body.push_str("\n\n");
+        body.push_str(&note);
+    }
 }
 
 /// Map one Calendar event to a `RawItem` (and its Drive-file candidates), or `None`
@@ -487,6 +491,25 @@ fn map_event(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn meeting_note_fragments_preserve_leading_code_and_remaining_bytes() {
+        for content in [
+            "    [literal](ghost.md)\n    next line\n\n<pre>\nkept\n</pre>\n\n",
+            "    [literal](ghost.md)\r\n    next line\r\n\r\n<pre>\r\nkept\r\n</pre>\r\n\r\n",
+        ] {
+            for prefix in ["", "Existing description.\n"] {
+                let mut body = prefix.to_owned();
+                append_meeting_notes(&mut body, "Notes", content);
+                assert!(
+                    lk_core::link::extract_page_links(&body).is_empty(),
+                    "{body:?}"
+                );
+                let separator = if prefix.is_empty() { "" } else { "\n\n" };
+                assert_eq!(body, format!("{prefix}{separator}**Notes:**\n\n{content}"));
+            }
+        }
+    }
 
     async fn meeting_notes_response(
         fallback: bool,

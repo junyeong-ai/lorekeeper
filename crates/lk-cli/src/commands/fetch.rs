@@ -39,7 +39,7 @@ pub async fn run(opts: &GlobalOptions, url: &str, source: Option<String>) -> mie
         "---\ntitle: {}\nsource_url: {}\n---\n\n{}\n",
         serde_json::to_string(&title).unwrap_or_else(|_| "\"\"".into()),
         serde_json::to_string(url).unwrap_or_else(|_| "\"\"".into()),
-        article.markdown.trim()
+        article.markdown
     );
     tokio::fs::create_dir_all(&inbox)
         .await
@@ -184,6 +184,58 @@ fn bounded(stem: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn fetched_markdown_preserves_leading_code_and_remaining_body_bytes() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        for source in [
+            "    [literal](ghost.md)\n    next line\n\n<pre>\nkept\n</pre>\n\n",
+            "    [literal](ghost.md)\r\n    next line\r\n\r\n<pre>\r\nkept\r\n</pre>\r\n\r\n",
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}/note.md", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    let mut byte = [0];
+                    assert_ne!(stream.read(&mut byte).await.unwrap(), 0);
+                    request.push(byte[0]);
+                    assert!(request.len() < 16 * 1024);
+                }
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/markdown\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{source}",
+                    source.len()
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+                stream.shutdown().await.unwrap();
+            });
+            let temp = tempfile::tempdir().unwrap();
+            let config = temp.path().join("config.yaml");
+            std::fs::write(&config, "vault: {root: vault}\nidentity: {name: Test, email: test@example.invalid}\nsources:\n  notes:\n    type: manual\n    params: {inbox_dir: inbox}\n").unwrap();
+            let opts = GlobalOptions {
+                config: Some(config),
+                template_dir: None,
+            };
+            run(&opts, &url, None).await.unwrap();
+            server.await.unwrap();
+            let path = std::fs::read_dir(temp.path().join("vault/inbox"))
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap()
+                .path();
+            let stored = std::fs::read_to_string(path).unwrap();
+            let offset = lk_core::frontmatter::body_offset(&stored).unwrap();
+            let body = &stored[offset..];
+            assert!(
+                lk_core::link::extract_page_links(body).is_empty(),
+                "{body:?}"
+            );
+            assert_eq!(body, format!("\n{source}\n"));
+        }
+    }
 
     #[test]
     fn publication_checks_every_suffix_and_reuses_the_existing_article() {
