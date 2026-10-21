@@ -125,6 +125,105 @@ pub fn merge_by_id(stored: Vec<Event>, fresh: Vec<Event>) -> Vec<Event> {
     merged
 }
 
+pub fn merge_streaming_events(
+    stored: Vec<Event>,
+    mut fresh: Vec<Event>,
+) -> Result<Vec<Event>, PipelineError> {
+    use lk_core::{config::SourceType, rss_original::RssEntryIdentity};
+    use std::collections::HashMap;
+
+    let failure =
+        |reason: &str| PipelineError::EventLog(format!("ambiguous RSS entry ownership: {reason}"));
+    let mut by_id = HashMap::new();
+    let mut owners = HashMap::new();
+    for event in &stored {
+        if let Some(previous) = by_id.insert(event.id.as_str(), event)
+            && previous != event
+        {
+            return Err(failure("retained event id has different observations"));
+        }
+        let Some(identity) =
+            RssEntryIdentity::from_metadata(&event.metadata).map_err(PipelineError::EventLog)?
+        else {
+            continue;
+        };
+        if event.source_type != SourceType::Rss
+            || (event.id != identity.event_id(&event.source_id, event.date)
+                && event.id != identity.legacy_event_id(&event.source_id, event.date))
+        {
+            return Err(failure("retained identity does not name its event"));
+        }
+        let key = (event.source_id.clone(), event.date, identity);
+        if let Some(previous) = owners.insert(key, event.id.clone())
+            && previous != event.id
+        {
+            return Err(failure("one entry has multiple retained event ids"));
+        }
+    }
+
+    let mut selected = HashMap::new();
+    for event in &mut fresh {
+        let Some(identity) =
+            RssEntryIdentity::from_metadata(&event.metadata).map_err(PipelineError::EventLog)?
+        else {
+            continue;
+        };
+        if event.source_type != SourceType::Rss
+            || event.id != identity.event_id(&event.source_id, event.date)
+        {
+            return Err(failure("fresh identity does not name its event"));
+        }
+        let key = (event.source_id.clone(), event.date, identity.clone());
+        let mut owner = owners.get(&key).cloned();
+        let modern = by_id.get(event.id.as_str());
+        if let Some(retained) = modern {
+            if RssEntryIdentity::from_metadata(&retained.metadata)
+                .map_err(PipelineError::EventLog)?
+                .as_ref()
+                != Some(&identity)
+            {
+                return Err(failure("modern event id has different retained provenance"));
+            }
+            owner = Some(retained.id.clone());
+        }
+        let legacy = identity.legacy_event_id(&event.source_id, event.date);
+        if let Some(retained) = by_id.get(legacy.as_str()) {
+            match retained
+                .metadata
+                .get("feed_id")
+                .and_then(serde_json::Value::as_str)
+            {
+                Some(feed_id) if feed_id == identity.feed_id => {
+                    if retained.source_type != SourceType::Rss
+                        || retained.source_id != event.source_id
+                        || retained.date != event.date
+                        || RssEntryIdentity::from_metadata(&retained.metadata)
+                            .map_err(PipelineError::EventLog)?
+                            .is_some_and(|other| other != identity)
+                        || owner.as_ref().is_some_and(|owner| *owner != retained.id)
+                    {
+                        return Err(failure("entry has conflicting modern and retained owners"));
+                    }
+                    owner = Some(retained.id.clone());
+                }
+                Some(_) => {}
+                None => return Err(failure("legacy event lacks a verified feed id")),
+            }
+        }
+        if let Some(owner) = owner {
+            event.id = owner;
+        }
+        if let Some(previous) = selected.insert(event.id.clone(), identity.clone())
+            && previous != identity
+        {
+            return Err(failure(
+                "distinct fresh entries selected one retained event",
+            ));
+        }
+    }
+    Ok(merge_by_id(stored, fresh))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -212,5 +311,124 @@ mod tests {
         let merged = merge_by_id(vec![], vec![ev("a", "A", 100), ev("b", "B", 300)]);
         let titles: Vec<_> = merged.iter().map(|e| e.title.as_str()).collect();
         assert_eq!(titles, vec!["B", "A"], "sorted by timestamp descending");
+    }
+
+    fn rss_event(feed: &str, entry: &str, title: &str, legacy: bool) -> Event {
+        let identity = lk_core::rss_original::RssEntryIdentity::new(feed, entry);
+        let mut event = ev(&identity.external_id(), title, 100);
+        event.timestamp = "2026-05-23T00:00:00Z".parse().unwrap();
+        event.body = title.into();
+        event.url = None;
+        event.metadata = serde_json::json!({"feed_id":feed});
+        if legacy {
+            event.id = identity.legacy_event_id(&event.source_id, event.date);
+        } else {
+            event.metadata["rss_identity"] = serde_json::to_value(identity).unwrap();
+        }
+        event
+    }
+
+    #[test]
+    fn framed_rss_entries_remain_distinct_and_reingestion_is_stable() {
+        let first = rss_event("org:news", "item1", "First", false);
+        let second = rss_event("org", "news:item1", "Second", false);
+        let merged = merge_streaming_events(vec![], vec![first.clone(), second.clone()]).unwrap();
+        assert_eq!(merged.len(), 2);
+        assert_ne!(merged[0].id, merged[1].id);
+        assert_eq!(
+            merge_streaming_events(merged.clone(), vec![second, first]).unwrap(),
+            merged
+        );
+    }
+
+    #[test]
+    fn retained_rss_identity_preserves_prior_originals_and_exact_selectors() {
+        use lk_core::rss_original::RssOriginalCapture;
+        let temp = TempDir::new().unwrap();
+        let log = EventLog::new(temp.path());
+        let old = rss_event("org:news", "item1", "Old body", true);
+        let stored_only = rss_event("other", "off-feed", "Retained", true);
+        let original = RssOriginalCapture::from_events(&[&old, &stored_only]).unwrap();
+        let session = lk_vault::MutationSession::acquire(temp.path()).unwrap();
+        let reference = lk_vault::publish_rss_original(&session, &original).unwrap();
+        let manifest_path = temp.path().join(&reference.manifest_path);
+        let manifest_bytes = std::fs::read(&manifest_path).unwrap();
+        let selection = lk_core::rss_evidence::RssEventSelection {
+            event_id: original.manifest.events[0].event_id.clone(),
+            revision: original.manifest.events[0].revision.clone(),
+        };
+        let selected_before =
+            lk_vault::load_rss_selected_payload(temp.path(), &original.manifest, &selection)
+                .unwrap();
+        log.write("ai-news", old.date, &[old.clone(), stored_only.clone()])
+            .unwrap();
+
+        let updated = rss_event("org:news", "item1", "Updated body", false);
+        let other = rss_event("org", "news:item1", "Independent", false);
+        let merged = merge_streaming_events(
+            log.read("ai-news", old.date).unwrap(),
+            vec![other.clone(), updated.clone()],
+        )
+        .unwrap();
+        assert_eq!(merged.len(), 3);
+        assert_eq!(
+            merged
+                .iter()
+                .find(|event| event.title == "Updated body")
+                .unwrap()
+                .id,
+            old.id
+        );
+        assert_eq!(
+            merged
+                .iter()
+                .find(|event| event.title == "Independent")
+                .unwrap()
+                .id,
+            other.id
+        );
+        assert!(merged.contains(&stored_only));
+        log.write("ai-news", old.date, &merged).unwrap();
+        let repeated =
+            merge_streaming_events(log.read("ai-news", old.date).unwrap(), vec![updated, other])
+                .unwrap();
+        assert_eq!(repeated, merged);
+        let new_capture =
+            RssOriginalCapture::from_events(&repeated.iter().collect::<Vec<_>>()).unwrap();
+        lk_vault::publish_rss_original(&session, &new_capture).unwrap();
+        assert_eq!(std::fs::read(manifest_path).unwrap(), manifest_bytes);
+        assert_eq!(
+            lk_vault::load_rss_selected_payload(temp.path(), &original.manifest, &selection)
+                .unwrap(),
+            selected_before
+        );
+    }
+
+    #[test]
+    fn uncertain_or_competing_retained_rss_owners_refuse_reconciliation() {
+        let modern = rss_event("org:news", "item1", "Modern", false);
+        let legacy = rss_event("org:news", "item1", "Legacy", true);
+        let cases = [
+            vec![legacy.clone(), modern.clone()],
+            vec![{
+                let mut event = legacy.clone();
+                event.id = modern.id.clone();
+                event.metadata["feed_id"] = "different-feed".into();
+                event
+            }],
+            vec![{
+                let mut event = legacy.clone();
+                event.metadata = serde_json::Value::Null;
+                event
+            }],
+            vec![{
+                let mut event = modern.clone();
+                event.metadata["rss_identity"]["entry_id"] = "other".into();
+                event
+            }],
+        ];
+        for stored in cases {
+            assert!(merge_streaming_events(stored, vec![modern.clone()]).is_err());
+        }
     }
 }

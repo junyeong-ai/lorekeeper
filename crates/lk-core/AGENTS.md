@@ -116,3 +116,5 @@ article/feed metadata; exclude labels/ownership/classification. Unknown acquisit
 time is `captured_at: null`, never mtime. Recursive object-key ordering plus
 serde_json scalar encoding is this format, not RFC8785. Exact bytes determine full
 BLAKE3 revisions; source/day/event identity alone does not identify content.
+`RssEntryIdentity` frames feed/entry strings separately. Its retained metadata is
+identity evidence; provenance checks never infer that tuple from title, URL or body.

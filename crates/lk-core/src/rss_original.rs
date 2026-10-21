@@ -5,7 +5,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{config::SourceType, event::Event};
+use crate::{
+    config::SourceType,
+    event::{Event, EventId},
+};
 
 pub const RSS_ORIGINAL_FIELD: &str = "rss_original";
 pub const RSS_ORIGINAL_SCHEME: &str = "rss-events-v1";
@@ -14,6 +17,50 @@ pub const MAX_RSS_EVENT_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_RSS_CAPTURE_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_RSS_EVENTS: usize = 10_000;
 pub const MAX_RSS_MANIFEST_BYTES: usize = 2 * 1024 * 1024;
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RssEntryIdentity {
+    pub feed_id: String,
+    pub entry_id: String,
+}
+
+impl RssEntryIdentity {
+    pub fn new(feed_id: &str, entry_id: &str) -> Self {
+        Self {
+            feed_id: feed_id.into(),
+            entry_id: entry_id.into(),
+        }
+    }
+
+    pub fn external_id(&self) -> String {
+        serde_json::to_string(&(&self.feed_id, &self.entry_id))
+            .expect("RSS identity strings serialize")
+    }
+
+    pub fn event_id(&self, source: &str, date: jiff::civil::Date) -> EventId {
+        EventId::new(source, date, &self.external_id())
+    }
+
+    pub fn legacy_event_id(&self, source: &str, date: jiff::civil::Date) -> EventId {
+        EventId::new(source, date, &format!("{}:{}", self.feed_id, self.entry_id))
+    }
+
+    pub fn from_metadata(metadata: &Value) -> Result<Option<Self>, String> {
+        let Some(value) = metadata.get("rss_identity") else {
+            return Ok(None);
+        };
+        let identity: Self = serde_json::from_value(value.clone())
+            .map_err(|_| "invalid RSS entry identity".to_owned())?;
+        if identity.feed_id.trim().is_empty()
+            || identity.entry_id.trim().is_empty()
+            || metadata.get("feed_id").and_then(Value::as_str) != Some(identity.feed_id.as_str())
+        {
+            return Err("RSS entry identity does not match its feed provenance".into());
+        }
+        Ok(Some(identity))
+    }
+}
 
 /// v1 serialization: JSON without whitespace; object keys recursively ordered by Rust
 /// String Ord, arrays in their declared order, serde_json scalar serialization. Not JCS.
@@ -276,6 +323,41 @@ pub fn verify_payload(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn entry_identity_frames_feed_and_entry_without_delimiter_collisions() {
+        let date = "2026-10-18".parse().unwrap();
+        let first = RssEntryIdentity::new("org:news", "item1");
+        let second = RssEntryIdentity::new("org", "news:item1");
+        assert_eq!(
+            first.legacy_event_id("rss", date),
+            second.legacy_event_id("rss", date)
+        );
+        assert_ne!(first.event_id("rss", date), second.event_id("rss", date));
+        let opaque = RssEntryIdentity::new("한글:\"feed\"", "[entry]:\\id\nnext");
+        assert_eq!(
+            serde_json::from_str::<(String, String)>(&opaque.external_id()).unwrap(),
+            (opaque.feed_id.clone(), opaque.entry_id.clone())
+        );
+        let metadata = serde_json::json!({"feed_id": first.feed_id, "rss_identity": first});
+        assert_eq!(
+            RssEntryIdentity::from_metadata(&metadata).unwrap(),
+            Some(first)
+        );
+        assert_eq!(
+            RssEntryIdentity::from_metadata(&serde_json::json!({"feed_id":"legacy"})).unwrap(),
+            None
+        );
+        for invalid in [
+            serde_json::json!({"feed_id":"other", "rss_identity":{"feed_id":"one","entry_id":"a"}}),
+            serde_json::json!({"feed_id":"one", "rss_identity":{"feed_id":"one","entry_id":""}}),
+            serde_json::json!({"feed_id":"one", "rss_identity":{"feed_id":"one","entry_id":"a","unknown":true}}),
+            serde_json::json!({"feed_id":"one", "rss_identity":null}),
+        ] {
+            assert!(RssEntryIdentity::from_metadata(&invalid).is_err());
+        }
+    }
+
     fn event() -> Event {
         let date = "2026-10-18".parse().unwrap();
         Event {

@@ -694,7 +694,7 @@ impl Pipeline {
         for date in dates {
             let stored = self.event_log.read(source_id, date)?;
             let fresh_for_date = fresh_by_date.remove(&date).unwrap_or_default();
-            let merged = event_log::merge_by_id(stored, fresh_for_date);
+            let merged = event_log::merge_streaming_events(stored, fresh_for_date)?;
             if !dry_run && !merged.is_empty() {
                 self.event_log.write(source_id, date, &merged)?;
             }

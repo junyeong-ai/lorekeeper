@@ -79,6 +79,8 @@ uses validated params and context; do not add per-adapter output pipelines.
 - `rss.rs`: prefer HTML content then summary; use published/updated dates, never
   acquisition-now as publication. Require a title. Author falls back to feed title
   then feed ID. Full-text fallback keeps the summary if extraction is absent/shorter.
+  Frame feed/entry identity through `RssEntryIdentity`, retaining both parts in
+  metadata; delimiter concatenation cannot distinguish arbitrary feed IDs and GUIDs.
   Feed HTTP bodies are bounded at 16 MiB before parsing, including chunked responses;
   overflow refuses that feed rather than publishing a parseable truncated prefix.
 
