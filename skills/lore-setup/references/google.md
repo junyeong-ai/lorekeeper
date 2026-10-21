@@ -44,7 +44,7 @@ email-digest:
     lookback_hours: 24
     include_queries: ["category:primary"]   # primary mail only; include other categories when relevant
   classify:                                   # optional: ordered keyword→category rules (first match wins)
-    # keyword values may be in any language — they match the source body verbatim
+    # keywords group title/body text case-insensitively; they do not judge meaning
     - category: action_required
       keywords: ["검토 요청", "확인 부탁", "please review"]
     - category: decisions
