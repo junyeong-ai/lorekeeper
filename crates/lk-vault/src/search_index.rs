@@ -9,7 +9,7 @@ use crate::search::{MatchProjection, Page, SearchOptions, SearchResult, fold_nam
 use crate::{MutationSession, VaultError};
 
 pub(super) const INDEX_PATH: &str = ".lorekeeper/search.sqlite";
-const VERSION: i32 = 19;
+const VERSION: i32 = 20;
 
 #[derive(Serialize)]
 pub struct SearchSnapshot {

@@ -15,15 +15,37 @@ pub enum ReviewStatus {
     Resolved,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Serialize)]
 pub struct KnowledgeReview {
     pub status: ReviewStatus,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub subjects: Vec<String>,
-    #[serde(deserialize_with = "deserialize_page_evidence")]
     pub evidence: Vec<Citation>,
     pub resolution: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for KnowledgeReview {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Fields {
+            status: ReviewStatus,
+            #[serde(default)]
+            subjects: Vec<String>,
+            #[serde(deserialize_with = "deserialize_page_evidence")]
+            evidence: Vec<Citation>,
+            resolution: Option<String>,
+        }
+        let mapping = serde_json::Map::<String, serde_json::Value>::deserialize(deserializer)?;
+        let fields: Fields = serde_json::from_value(serde_json::Value::Object(mapping))
+            .map_err(serde::de::Error::custom)?;
+        Ok(Self {
+            status: fields.status,
+            subjects: fields.subjects,
+            evidence: fields.evidence,
+            resolution: fields.resolution,
+        })
+    }
 }
 
 fn deserialize_page_evidence<'de, D: serde::Deserializer<'de>>(
@@ -339,15 +361,13 @@ pub(crate) fn review_previews(
 ) -> Result<BTreeMap<String, Vec<ReviewPreview>>, VaultError> {
     let mut result: BTreeMap<String, Vec<ReviewPreview>> = BTreeMap::new();
     for report in list_reviews(root, dirs)? {
-        let Some(review) = &report.review else {
-            continue;
-        };
         let mut subjects = BTreeSet::new();
         let mut evidence = BTreeSet::new();
-        for (address, subject) in review.subjects.iter().map(|path| (path, true)).chain(
-            review
-                .evidence
+        for (address, subject) in report.subjects().iter().map(|path| (path, true)).chain(
+            report
+                .review
                 .iter()
+                .flat_map(|review| &review.evidence)
                 .map(|citation| (&citation.path, false)),
         ) {
             let Some(path) = lk_core::link::resolve_dest(Path::new(""), address).filter(|path| {
@@ -393,6 +413,22 @@ impl ReviewEffectiveState {
     }
 }
 
+#[derive(Default)]
+struct ReviewScope {
+    subjects: Vec<String>,
+}
+
+impl ReviewScope {
+    fn from_metadata(value: &serde_json::Value) -> Self {
+        let subjects = value
+            .as_object()
+            .and_then(|mapping| mapping.get("subjects"))
+            .and_then(|value| serde_json::from_value::<Vec<String>>(value.clone()).ok())
+            .unwrap_or_default();
+        Self { subjects }
+    }
+}
+
 #[derive(Serialize)]
 pub struct ReviewReport {
     pub path: String,
@@ -402,9 +438,17 @@ pub struct ReviewReport {
     pub archived_evidence: Vec<String>,
     pub missing_evidence: Vec<String>,
     pub errors: Vec<String>,
+    #[serde(skip)]
+    scope: ReviewScope,
 }
 
 impl ReviewReport {
+    /// Explicit subjects from the same parsed metadata as this report's diagnostics.
+    /// Other invalid fields do not erase scope or establish a valid assessment.
+    pub fn subjects(&self) -> &[String] {
+        &self.scope.subjects
+    }
+
     fn classify(&self) -> ReviewEffectiveState {
         let Some(review) = &self.review else {
             return ReviewEffectiveState::Invalid;
@@ -737,6 +781,7 @@ pub fn list_reviews(root: &Path, dirs: &VaultDirs) -> Result<Vec<ReviewReport>, 
             archived_evidence: Vec::new(),
             missing_evidence: Vec::new(),
             errors: Vec::new(),
+            scope: ReviewScope::default(),
         };
         let page = match crate::page_path(root, path.strip_prefix(root).unwrap_or(&path))
             .and_then(std::fs::read_to_string)
@@ -754,6 +799,12 @@ pub fn list_reviews(root: &Path, dirs: &VaultDirs) -> Result<Vec<ReviewReport>, 
         let Some(value) = page.frontmatter.get("review") else {
             continue;
         };
+        report.scope = ReviewScope::from_metadata(value);
+        for subject in &report.scope.subjects {
+            if let Err(error) = crate::find_page_owner(root, Path::new(subject)) {
+                report.errors.push(format!("{subject}: {error}"));
+            }
+        }
         match serde_json::from_value::<KnowledgeReview>(value.clone()) {
             Err(error) => report.errors.push(error.to_string()),
             Ok(review) => {
@@ -761,11 +812,6 @@ pub fn list_reviews(root: &Path, dirs: &VaultDirs) -> Result<Vec<ReviewReport>, 
                     path.strip_prefix(root).expect("review belongs to vault"),
                     &page,
                 ));
-                for subject in &review.subjects {
-                    if let Err(error) = crate::find_page_owner(root, Path::new(subject)) {
-                        report.errors.push(format!("{subject}: {error}"));
-                    }
-                }
                 for citation in &review.evidence {
                     if lk_core::link::resolve_dest(Path::new(""), &citation.path).as_deref()
                         == path.strip_prefix(root).ok()

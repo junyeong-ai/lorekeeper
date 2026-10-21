@@ -78,6 +78,9 @@ canonical; SQLite navigation is derived.
   Evidence pins the current assessment, not a union of all historical revisions.
   Associate subjects/evidence by verified page owners while preserving declared
   addresses. Symlink aliases share a review scope; hard-link entries remain distinct.
+  Recover typed subjects from the same metadata even when other review fields are
+  invalid; discovery and audit share that scope without accepting the assessment.
+  Review metadata is a mapping with named fields, never a positional array.
 - Before reassessment archive the review itself; read changed evidence and record a
   dated judgment, preserving archive paths/revisions. Explicitly replace current
   evidence after review. Never retag stale prose, delete history or count a review

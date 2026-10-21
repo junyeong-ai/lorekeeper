@@ -840,31 +840,14 @@ fn review_subjects(
     root: &Path,
     reviews: &[lk_vault::ReviewReport],
 ) -> Result<BTreeMap<String, Vec<String>>, GraphError> {
-    #[derive(Deserialize)]
-    struct Subjects {
-        #[serde(default)]
-        subjects: Vec<String>,
-    }
     let mut subjects = BTreeMap::new();
     for review in reviews {
-        let scoped = if let Some(metadata) = &review.review {
-            metadata.subjects.clone()
-        } else {
-            let raw = std::fs::read_to_string(
-                lk_vault::page_path(root, Path::new(&review.path)).map_err(error)?,
-            );
-            raw.ok()
-                .and_then(|raw| lk_vault::parse_page(&raw).ok())
-                .and_then(|page| page.frontmatter.get("review").cloned())
-                .and_then(|value| serde_json::from_value::<Subjects>(value).ok())
-                .map(|scope| scope.subjects)
-                .unwrap_or_default()
-        };
-        let owners = scoped
-            .into_iter()
+        let owners = review
+            .subjects()
+            .iter()
             .filter(|path| exact_page_address(path))
             .map(
-                |path| match lk_vault::find_page_owner(root, Path::new(&path)) {
+                |path| match lk_vault::find_page_owner(root, Path::new(path)) {
                     Ok(owner) => Ok(owner.map(|owner| owner.to_string_lossy().into_owned())),
                     Err(_) if review.effective_state == lk_vault::ReviewEffectiveState::Invalid => {
                         Ok(None)

@@ -463,3 +463,105 @@ fn review_scopes_follow_verified_symlink_owners_without_merging_hardlink_address
         }
     }
 }
+
+#[test]
+fn invalid_reviews_preserve_typed_subject_scope_across_discovery_and_audit() {
+    let root = tempfile::tempdir().unwrap();
+    let vault = root.path().join("vault");
+    for directory in ["concepts", "documents", "explorations"] {
+        std::fs::create_dir_all(vault.join("wiki").join(directory)).unwrap();
+    }
+    let config = root.path().join("config.yaml");
+    std::fs::write(&config, "vault:\n  root: vault\n  locale: en\nidentity:\n  name: Test\n  email: test@example.com\nsources:\n  notes:\n    type: manual\n    params:\n      inbox_dir: inbox\n").unwrap();
+    let subject = "wiki/concepts/topic.md";
+    let source = "wiki/documents/source.md";
+    let review = "wiki/explorations/review.md";
+    for (path, content) in [
+        (subject, "---\ntype: concept\ntitle: Topic\n---\nA claim.\n"),
+        (
+            "wiki/concepts/unrelated.md",
+            "---\ntype: concept\ntitle: Unrelated\n---\nAn independent claim.\n",
+        ),
+        (source, "---\ntype: document\n---\nSource evidence.\n"),
+    ] {
+        std::fs::write(vault.join(path), content).unwrap();
+    }
+    let evidence = ok(&config, &["wiki", "evidence", source]);
+    let base = json!({"status":"open", "subjects":[subject], "evidence":evidence["citations"]});
+    let mut cases = Vec::new();
+    cases.push(("positional-scope", json!([[subject]]), 0));
+    cases.push((
+        "positional-review",
+        json!(["open", [subject], evidence["citations"], null]),
+        0,
+    ));
+    let mut invalid = base.clone();
+    invalid["status"] = "unresolved".into();
+    cases.push(("status", invalid, 1));
+    let mut invalid = base.clone();
+    invalid["unexpected"] = true.into();
+    cases.push(("unknown-field", invalid, 1));
+    let mut invalid = base.clone();
+    invalid["evidence"] = json!([{"path":source,"revision":42}]);
+    cases.push(("evidence", invalid, 1));
+    let mut invalid = base.clone();
+    invalid["subjects"] = subject.into();
+    cases.push(("unreadable-scope", invalid, 0));
+    let mut invalid = base.clone();
+    invalid["status"] = "unresolved".into();
+    invalid["subjects"] = json!([subject, "../escaped.md"]);
+    cases.push(("invalid-address", invalid, 1));
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink("topic.md", vault.join("wiki/concepts/alias.md")).unwrap();
+        let mut invalid = base.clone();
+        invalid["status"] = "unresolved".into();
+        invalid["subjects"] = json!(["wiki/concepts/alias.md"]);
+        cases.push(("symlink-scope", invalid, 1));
+    }
+    for (kind, metadata, expected) in cases {
+        let content = format!(
+            "---\ntype: exploration\ntitle: Assessment\nreview: {metadata}\n---\nReview prose may mention Topic without declaring it.\n"
+        );
+        std::fs::write(vault.join(review), content).unwrap();
+        let reports = ok(&config, &["wiki", "reviews"]);
+        assert_eq!(
+            reports[0]["effective_state"], "invalid",
+            "{kind}: {reports}"
+        );
+        assert!(reports[0]["review"].is_null());
+        assert!(!reports[0]["errors"].as_array().unwrap().is_empty());
+        let snapshot = ok(&config, &["wiki", "prepare"]);
+        let id = snapshot["snapshot"].as_str().unwrap();
+        for capture in [None, Some(id)] {
+            let mut args = vec!["wiki", "search", "Topic", "--json"];
+            if let Some(id) = capture {
+                args.extend(["--snapshot", id]);
+            }
+            let search = ok(&config, &args);
+            let hit = search["hits"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|hit| hit["path"] == subject)
+                .unwrap();
+            assert_eq!(hit["reviews"]["total"], expected, "{kind}: {search}");
+            assert_eq!(hit["reviews"]["states"]["invalid"], expected);
+        }
+        let context = ok(&config, &["wiki", "context", subject, "--snapshot", id]);
+        assert_eq!(context["reviews"]["total"], expected, "{kind}: {context}");
+        assert_eq!(context["reviews"]["states"]["invalid"], expected);
+        let audit = ok(&config, &["wiki", "audit-plan", "--path", subject]);
+        let dependencies = audit["candidates"][0]["reviews"].as_array().unwrap();
+        assert_eq!(dependencies.len(), expected, "{kind}: {audit}");
+        for dependency in dependencies {
+            assert_eq!(dependency["state"], "invalid");
+            assert!(!dependency["errors"].as_array().unwrap().is_empty());
+        }
+        let unrelated = ok(
+            &config,
+            &["wiki", "audit-plan", "--path", "wiki/concepts/unrelated.md"],
+        );
+        assert_eq!(unrelated["candidates"][0]["reviews"], json!([]));
+    }
+}
