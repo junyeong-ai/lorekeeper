@@ -468,7 +468,7 @@ pub(super) fn visit_collections(
     let reserved = crate::navigation::ReservedNavigationPaths::load(vault_root, dirs)?;
     let mut visited = std::collections::BTreeSet::new();
     for rel_dir in directories {
-        let concept = rel_dir == concepts_dir(dirs);
+        let concept_collection = rel_dir == concepts_dir(dirs);
         for path in markdown_files(vault_root, &vault_root.join(&rel_dir))? {
             if !visited.insert(path.clone()) {
                 continue;
@@ -490,6 +490,11 @@ pub(super) fn visit_collections(
             if page.frontmatter.get("type").and_then(|v| v.as_str()) == Some("task-board") {
                 continue;
             }
+            let concept = concept_collection
+                && page
+                    .frontmatter
+                    .get("type")
+                    .is_none_or(|value| value.as_str() == Some("concept"));
             let id = path
                 .file_stem()
                 .map(|s| s.to_string_lossy().into_owned())
@@ -513,6 +518,7 @@ pub(super) fn visit_collections(
                     id,
                     title,
                     concept,
+                    citations_captured: false,
                     page,
                     knowledge_status,
                     reviews: Vec::new(),
@@ -872,6 +878,8 @@ pub(super) struct Page {
     /// Whether this page is a concept. Concepts are the vault's vocabulary — the pages a name
     /// addresses, and the only ones [`spellings_of`] reads a query's other spellings from.
     pub(super) concept: bool,
+    /// Exact graph projection membership, independent of whether its evidence row remains intact.
+    pub(super) citations_captured: bool,
     pub(super) page: lk_core::frontmatter::VaultPage,
     pub(super) knowledge_status: KnowledgeStatus,
     pub(super) reviews: Vec<crate::review::ReviewPreview>,
@@ -1579,6 +1587,7 @@ mod tests {
                 aliases: vec![],
                 rel_path: PathBuf::from(format!("wiki/documents/{count}.md")),
                 concept: false,
+                citations_captured: false,
                 page: crate::parse_page(&format!(
                     "---\ntype: document\ncategory: {category}\nsource_count: {count}\n---\n"
                 ))

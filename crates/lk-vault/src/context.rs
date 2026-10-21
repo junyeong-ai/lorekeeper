@@ -116,7 +116,7 @@ pub fn inspect_page_context(
     )?;
     let evidence = if !page.concept {
         ContextEvidence::NotApplicable
-    } else if !capture.citations_available {
+    } else if !page.citations_captured {
         ContextEvidence::NotCaptured
     } else {
         ContextEvidence::Available(crate::citations::inspect_captured(

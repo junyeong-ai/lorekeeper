@@ -87,7 +87,8 @@ canonical; SQLite navigation is derived.
   raw body matching rejects them. Tags and authored knowledge lifecycle filter separately
   from source lifecycle. Review subjects are scoped assessments, not citations. Summary means opening statement, not whole synthesis.
   Default scope concepts/documents/explorations; source scope adds managed pages,
-  never task boards. Resolve aliases across scope before metadata filtering;
+  never task boards. Concept vocabulary honors declared non-concept types, retaining
+  untyped legacy concepts. Resolve aliases across scope before metadata filtering;
   ambiguity doesn't expand. Declared names match phrases, other queries every term.
 - Matching/excerpts share CommonMark visible-text projection: formatting/soft breaks
   preserve phrases; blocks/list items/table cells separate; link destinations and
@@ -123,9 +124,12 @@ canonical; SQLite navigation is derived.
   revisions; default search is live. External edits aren't frozen during capture.
   Scope facets and bounded SQLite planner statistics are prepared in that transaction;
   read-only queries never optimize or refresh the capture.
-  Projection/schema changes bump snapshot version. Indexed name/tag/document identities
-  and declared relations avoid full vocabulary/collection reads; selected scalar rows use SQL
-  filters/LIMIT/OFFSET. FTS narrows candidates only; shared matcher decides hits.
+  Projection/schema changes bump snapshot version.
+  Per-page graph capture membership distinguishes uncaptured concepts from captured empty
+  evidence; missing evidence rows for captured concepts remain errors.
+  Indexed name/tag/document identities and declared relations avoid full vocabulary/collection
+  reads; selected scalar rows use SQL filters/LIMIT/OFFSET. FTS narrows candidates only;
+  shared matcher decides hits.
   Body search scans captured full scope without visible-text FTS omissions.
 - Refresh prepares SQLite and publishes only the small configured `index.md` guide.
   `plan_navigation_entry` captures exact prior bytes/absence for the mutation journal;

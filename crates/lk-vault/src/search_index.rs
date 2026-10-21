@@ -2,14 +2,14 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use lk_core::config::VaultDirs;
-use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
+use rusqlite::{Connection, OpenFlags, params};
 use serde::{Deserialize, Serialize};
 
 use crate::search::{MatchProjection, Page, SearchOptions, SearchResult, fold_name, spacing_key};
 use crate::{MutationSession, VaultError};
 
 pub(super) const INDEX_PATH: &str = ".lorekeeper/search.sqlite";
-const VERSION: i32 = 15;
+const VERSION: i32 = 16;
 
 #[derive(Serialize, Deserialize)]
 struct BrowseFacets {
@@ -121,6 +121,11 @@ fn prepare_search_inner(
     let root = session.root();
     let mut pages = Vec::new();
     let mut authored_revisions = BTreeMap::new();
+    let captured_concepts = citations
+        .into_iter()
+        .flat_map(|projection| &projection.concepts)
+        .map(|concept| concept.path.as_path())
+        .collect::<std::collections::BTreeSet<_>>();
     super::search::visit_pages(root, dirs, true, |mut page, _| {
         authored_revisions.insert(
             page.rel_path.clone(),
@@ -128,6 +133,7 @@ fn prepare_search_inner(
         );
         page.page.body = String::new();
         page.page.original = None;
+        page.citations_captured = captured_concepts.contains(page.rel_path.as_path());
         pages.push(page);
         Ok(())
     })?;
@@ -270,8 +276,13 @@ fn prepare_search_inner(
                 BTreeMap::new()
             };
             let input_revision = lk_core::concept::file_revision(
-                &serde_json::to_string(&(&page.file_revision, &page.reviews, &evidence_previews))
-                    .map_err(|error| VaultError::Serialization(error.to_string()))?,
+                &serde_json::to_string(&(
+                    &page.file_revision,
+                    &page.reviews,
+                    &evidence_previews,
+                    page.citations_captured,
+                ))
+                .map_err(|error| VaultError::Serialization(error.to_string()))?,
             );
             let id = if let Some((id, previous, old_path_rank, old_traversal_rank)) =
                 stored.remove(page_path.as_ref())
@@ -653,16 +664,23 @@ fn attach_synthesis(connection: &Connection, result: &mut SearchResult) -> Resul
     if !available {
         return Ok(());
     }
-    let mut evidence = connection
-        .prepare("SELECT citation_count, digest FROM concept_evidence WHERE path = ?1")?;
+    let mut evidence = connection.prepare(
+        "SELECT json_extract(metadata, '$.citations_captured'), citation_count, digest
+         FROM pages LEFT JOIN concept_evidence ON concept_evidence.path = pages.path
+         WHERE pages.path = ?1",
+    )?;
     for hit in &mut result.hits {
         if hit.synthesis.status == crate::SynthesisInputStatus::NotApplicable {
             continue;
         }
-        let header: Option<(i64, String)> = evidence
-            .query_row([&hit.path], |row| Ok((row.get(0)?, row.get(1)?)))
-            .optional()?;
-        let (count, digest) = header.ok_or_else(|| {
+        let (captured, count, digest): (bool, Option<i64>, Option<String>) = evidence
+            .query_row([&hit.path], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })?;
+        if !captured {
+            continue;
+        }
+        let (count, digest) = count.zip(digest).ok_or_else(|| {
             invalid("exact concept page is absent from the selected evidence snapshot")
         })?;
         let count = usize::try_from(count).map_err(|error| invalid(error.to_string()))?;
@@ -1683,6 +1701,115 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    #[test]
+    fn page_evidence_capture_tracks_membership_and_rejects_missing_expected_rows() {
+        use crate::SynthesisInputStatus as Status;
+
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let concept = "wiki/concepts/topic.md";
+        write(
+            root.path(),
+            concept,
+            "---\ntype: concept\ntitle: Topic\n---\nScoped knowledge.\n",
+        );
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let inspect = |snapshot: &str, status: Status| {
+            for query in [None, Some("Topic")] {
+                let result = crate::search(
+                    root.path(),
+                    &dirs,
+                    &SearchOptions {
+                        snapshot: Some(snapshot),
+                        query,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                assert_eq!(result.hits[0].synthesis.status, status);
+            }
+            let context = crate::inspect_page_context(
+                root.path(),
+                &dirs,
+                Path::new(concept),
+                &crate::ContextOptions {
+                    snapshot,
+                    limit: 1,
+                    offset: 0,
+                },
+            )
+            .unwrap();
+            assert_eq!(context.synthesis.status, status);
+            match context.evidence {
+                crate::ContextEvidence::Available(evidence) => {
+                    assert_eq!(status, Status::EmptyEvidence);
+                    assert_eq!(evidence.total, 0);
+                }
+                crate::ContextEvidence::NotCaptured => assert_eq!(status, Status::NotCaptured),
+                crate::ContextEvidence::NotApplicable => panic!("concept evidence is applicable"),
+            }
+        };
+        let mut prior = None;
+        for captured in [false, true, false, true] {
+            let projection = if captured {
+                citation_projection(&[(concept, &[])])
+            } else {
+                citation_projection(&[])
+            };
+            let snapshot =
+                prepare_search_with_citations(&session, &dirs, &projection, |_| Ok(())).unwrap();
+            assert!(snapshot.citations_available);
+            assert_ne!(prior.as_deref(), Some(snapshot.snapshot.as_str()));
+            inspect(
+                &snapshot.snapshot,
+                if captured {
+                    Status::EmptyEvidence
+                } else {
+                    Status::NotCaptured
+                },
+            );
+            prior = Some(snapshot.snapshot);
+        }
+        let snapshot = prior.unwrap();
+        let connection = Connection::open(root.path().join(INDEX_PATH)).unwrap();
+        connection
+            .execute("DELETE FROM concept_evidence WHERE path=?1", [concept])
+            .unwrap();
+        for query in [None, Some("Topic")] {
+            assert!(
+                crate::search(
+                    root.path(),
+                    &dirs,
+                    &SearchOptions {
+                        snapshot: Some(&snapshot),
+                        query,
+                        ..Default::default()
+                    },
+                )
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("absent from the selected evidence snapshot")
+            );
+        }
+        assert!(
+            crate::inspect_page_context(
+                root.path(),
+                &dirs,
+                Path::new(concept),
+                &crate::ContextOptions {
+                    snapshot: &snapshot,
+                    limit: 1,
+                    offset: 0,
+                },
+            )
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("absent from the selected evidence snapshot")
+        );
     }
 
     #[test]

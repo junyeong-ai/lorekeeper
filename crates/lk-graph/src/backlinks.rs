@@ -1479,6 +1479,133 @@ mod tests {
     }
 
     #[test]
+    fn prepared_discovery_preserves_page_roles_and_uncaptured_concept_evidence() {
+        use lk_vault::SynthesisInputStatus as Status;
+
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let fixtures = [
+            (
+                "wiki/concepts/topic.md",
+                "type: concept\n",
+                "Topic",
+                Status::EmptyEvidence,
+            ),
+            (
+                "wiki/concepts/.drafts/hidden.md",
+                "type: concept\n",
+                "Hidden",
+                Status::NotCaptured,
+            ),
+            ("wiki/concepts/legacy.md", "", "Legacy", Status::NotCaptured),
+            (
+                "wiki/concepts/document.md",
+                "type: document\n",
+                "Document",
+                Status::NotApplicable,
+            ),
+        ];
+        for (path, format, title, _) in fixtures {
+            let full = root.path().join(path);
+            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+            std::fs::write(
+                full,
+                format!(
+                    "---\n{format}title: {title}\naliases: [{title}Alias]\n---\nScoped knowledge.\n"
+                ),
+            )
+            .unwrap();
+        }
+        let documents = root.path().join("wiki/documents");
+        std::fs::create_dir_all(&documents).unwrap();
+        std::fs::write(
+            documents.join("mentions.md"),
+            "---\ntype: document\ntitle: Mentions\n---\nDocumentAlias LegacyAlias\n",
+        )
+        .unwrap();
+        let captured = capture_concept_citations(root.path(), &dirs, false).unwrap();
+        assert_eq!(captured.projection().concepts.len(), 1);
+        let session = lk_vault::MutationSession::acquire(root.path()).unwrap();
+        let snapshot = lk_vault::prepare_search_with_citations(
+            &session,
+            &dirs,
+            captured.projection(),
+            |selected| {
+                captured
+                    .verify(selected)
+                    .map_err(|error| std::io::Error::other(error.to_string()).into())
+            },
+        )
+        .unwrap();
+        let browse = lk_vault::search(
+            root.path(),
+            &dirs,
+            &lk_vault::SearchOptions {
+                snapshot: Some(&snapshot.snapshot),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(browse.total, 5);
+        for (path, _, title, status) in fixtures {
+            assert_eq!(
+                browse
+                    .hits
+                    .iter()
+                    .find(|hit| hit.path == path)
+                    .unwrap()
+                    .synthesis
+                    .status,
+                status
+            );
+            for selected_snapshot in [None, Some(snapshot.snapshot.as_str())] {
+                let search = lk_vault::search(
+                    root.path(),
+                    &dirs,
+                    &lk_vault::SearchOptions {
+                        query: Some(title),
+                        snapshot: selected_snapshot,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                let hit = search.hits.iter().find(|hit| hit.path == path).unwrap();
+                assert_eq!(
+                    hit.synthesis.status,
+                    if selected_snapshot.is_none() && status == Status::EmptyEvidence {
+                        Status::NotCaptured
+                    } else {
+                        status
+                    }
+                );
+                assert_eq!(search.total, if title == "Legacy" { 2 } else { 1 });
+            }
+            let context = lk_vault::inspect_page_context(
+                root.path(),
+                &dirs,
+                Path::new(path),
+                &lk_vault::ContextOptions {
+                    snapshot: &snapshot.snapshot,
+                    limit: 1,
+                    offset: 0,
+                },
+            )
+            .unwrap();
+            assert_eq!(context.synthesis.status, status);
+            match context.evidence {
+                lk_vault::ContextEvidence::Available(evidence) => {
+                    assert_eq!(status, Status::EmptyEvidence);
+                    assert_eq!(evidence.total, 0);
+                }
+                lk_vault::ContextEvidence::NotCaptured => assert_eq!(status, Status::NotCaptured),
+                lk_vault::ContextEvidence::NotApplicable => {
+                    assert_eq!(status, Status::NotApplicable)
+                }
+            }
+        }
+    }
+
+    #[test]
     fn captured_citations_share_authority_and_reject_input_or_inventory_drift() {
         let root = tempfile::tempdir().unwrap();
         let dirs = VaultDirs::default();
