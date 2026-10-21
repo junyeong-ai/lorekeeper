@@ -978,8 +978,8 @@ async fn run_search(
             "`lore wiki search` needs a query; use `lore wiki browse` to explore metadata"
         ));
     }
-    if options.limit == 0 {
-        return Err(miette::miette!("`--limit` must be > 0"));
+    if !(1..=100).contains(&options.limit) {
+        return Err(miette::miette!("`--limit` must be between 1 and 100"));
     }
     let config = load_config(&find_config(opts)?)?;
     let result = lk_vault::search(

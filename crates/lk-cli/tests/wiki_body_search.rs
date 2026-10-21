@@ -42,6 +42,28 @@ fn report(output: &Output) -> Value {
 }
 
 #[test]
+fn public_search_and_browse_hit_limits_match_the_declared_range_without_writes() {
+    let root = fixture();
+    for command in [vec!["wiki", "browse"], vec!["wiki", "search", "Example"]] {
+        for limit in ["0", "100", "101"] {
+            let mut args = command.clone();
+            args.extend(["--limit", limit, "--json"]);
+            let output = run(root.path(), &args);
+            if limit == "100" {
+                assert_eq!(report(&output)["hits"].as_array().unwrap().len(), 1);
+            } else {
+                assert!(!output.status.success(), "{args:?}");
+                assert!(
+                    String::from_utf8_lossy(&output.stderr)
+                        .contains("`--limit` must be between 1 and 100")
+                );
+            }
+            assert!(!root.path().join("vault/.lorekeeper").exists());
+        }
+    }
+}
+
+#[test]
 fn metadata_facet_options_are_validated_without_vault_writes() {
     let root = fixture();
     for args in [

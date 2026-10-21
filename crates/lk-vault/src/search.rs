@@ -213,6 +213,7 @@ pub struct SearchOptions<'a> {
     pub created_from: Option<jiff::civil::Date>,
     pub created_to: Option<jiff::civil::Date>,
     pub snapshot: Option<&'a str>,
+    /// Maximum returned hits, between 1 and 100 for public search and browse.
     pub limit: usize,
     pub offset: usize,
     /// Maximum distinct values per metadata facet, ordered by their exact value.
@@ -440,9 +441,16 @@ pub fn search(
     options: &SearchOptions<'_>,
 ) -> Result<SearchResult, VaultError> {
     options.validate_browse()?;
+    if !(1..=100).contains(&options.limit) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "search limit must be between 1 and 100",
+        )
+        .into());
+    }
     let query = options.query.unwrap_or_default();
     let terms = query_terms(query, options.phrase);
-    if options.limit == 0 || options.query.is_some_and(|query| query.trim().is_empty()) {
+    if options.query.is_some_and(|query| query.trim().is_empty()) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             "search requires a nonempty query and positive limit; omit query to browse",
@@ -1728,6 +1736,45 @@ mod tests {
             "<select><optgroup label=\"Group\"><option>alpha</option><option>beta</option></optgroup></select>",
         ] {
             assert_eq!(search_text(body), "alpha\nbeta");
+        }
+    }
+
+    #[test]
+    fn public_hit_limit_is_bounded_for_search_and_browse_in_live_and_snapshot_modes() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let docs = root.path().join(documents_dir(&dirs));
+        for index in 0..101 {
+            write(
+                &docs,
+                &format!("needle-{index:03}.md"),
+                "---\ntype: document\ntitle: Needle\n---\nRecorded evidence.\n",
+            );
+        }
+        let session = crate::MutationSession::acquire(root.path()).unwrap();
+        let snapshot = crate::prepare_search(&session, &dirs).unwrap();
+        drop(session);
+        for captured in [None, Some(snapshot.snapshot.as_str())] {
+            for query in [None, Some("Needle")] {
+                let mut options = SearchOptions {
+                    query,
+                    snapshot: captured,
+                    limit: 100,
+                    ..Default::default()
+                };
+                let result = super::search(root.path(), &dirs, &options).unwrap();
+                assert_eq!(result.hits.len(), 100);
+                assert_eq!(result.total, 101);
+                assert_eq!(result.next_offset, Some(100));
+                for limit in [0, 101] {
+                    options.limit = limit;
+                    let error = super::search(root.path(), &dirs, &options)
+                        .err()
+                        .unwrap()
+                        .to_string();
+                    assert!(error.contains("limit must be between 1 and 100"), "{error}");
+                }
+            }
         }
     }
 

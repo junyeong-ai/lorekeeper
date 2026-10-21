@@ -172,7 +172,7 @@ mod tests {
             "---\ntype: concept\ntitle: Retention policy\naliases: [보존 정책]\n---\nA production order retention policy.\n",
         );
         write(root.path(), subject, body);
-        for index in 0..80 {
+        for index in 0..120 {
             write(
                 root.path(),
                 &format!("wiki/documents/retired-{index:02}.md"),
@@ -203,7 +203,7 @@ mod tests {
         ];
         let live = discover_queries(root.path(), &dirs, &queries).unwrap();
         assert!(
-            live[&queries[0]].len() > 50,
+            live[&queries[0]].len() > 100,
             "discovery is not ranked top-K retrieval"
         );
         let session = crate::MutationSession::acquire(root.path()).unwrap();
