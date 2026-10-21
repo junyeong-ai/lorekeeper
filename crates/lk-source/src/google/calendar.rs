@@ -130,34 +130,40 @@ fn extract_drive_file_ids(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// Fetch a Google Drive file's content as plain text.
+/// Fetch a Google Drive file's supported text content as Markdown.
 ///
-/// First attempts an export as `text/plain` (works for Google-native Docs/Sheets/Slides).
-/// Falls back to direct download (`alt=media`) for non-native files (uploaded PDFs, txt, etc.).
+/// First attempts a `text/plain` export (Google-native Docs/Slides). A failed export
+/// falls back to `alt=media`; binary/unknown media stays unexpanded. Both paths use
+/// the standalone Drive adapter's bounded, strict text decoder.
 async fn fetch_drive_content(
     http: &reqwest::Client,
     token: &str,
     file_id: &str,
 ) -> Result<String, SourceError> {
-    // Try export as text/plain (for Google Docs / Sheets / Slides).
+    fetch_drive_content_from(http, token, file_id, "https://www.googleapis.com/drive/v3").await
+}
+
+async fn fetch_drive_content_from(
+    http: &reqwest::Client,
+    token: &str,
+    file_id: &str,
+    base: &str,
+) -> Result<String, SourceError> {
+    // Try export as text/plain (for Google-native Docs/Slides).
     let export_resp = http
-        .get(format!(
-            "https://www.googleapis.com/drive/v3/files/{file_id}/export"
-        ))
+        .get(format!("{base}/files/{file_id}/export"))
         .bearer_auth(token)
         .query(&[("mimeType", "text/plain")])
         .send()
         .await?;
 
     if export_resp.status().is_success() {
-        return export_resp.text().await.map_err(SourceError::Http);
+        return drive_markdown(export_resp).await;
     }
 
     // Fallback: direct download (for non-Google-native files).
     let resp = http
-        .get(format!(
-            "https://www.googleapis.com/drive/v3/files/{file_id}"
-        ))
+        .get(format!("{base}/files/{file_id}"))
         .bearer_auth(token)
         .query(&[("alt", "media")])
         .send()
@@ -169,7 +175,21 @@ async fn fetch_drive_content(
             message: format!("drive file {file_id}"),
         });
     }
-    resp.text().await.map_err(SourceError::Http)
+    drive_markdown(resp).await
+}
+
+async fn drive_markdown(response: reqwest::Response) -> Result<String, SourceError> {
+    let media = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<mime::Mime>().ok())
+        .ok_or_else(|| {
+            SourceError::Parse("Drive meeting notes need a valid Content-Type".into())
+        })?;
+    let format = super::drive::ContentFormat::from_mime(media.essence_str())?;
+    let (content, _) = super::drive::read_content(response).await?;
+    format.markdown(&content)
 }
 
 impl GoogleCalendarSource {
@@ -464,6 +484,138 @@ fn map_event(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn meeting_notes_response(
+        fallback: bool,
+        response: Vec<u8>,
+    ) -> Result<String, SourceError> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}/drive/v3", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            let mut responses = Vec::new();
+            if fallback {
+                responses.push(
+                    b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        .to_vec(),
+                );
+            }
+            responses.push(response);
+            for response in responses {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    let mut byte = [0];
+                    assert_ne!(stream.read(&mut byte).await.unwrap(), 0);
+                    request.push(byte[0]);
+                    assert!(request.len() < 16 * 1024);
+                }
+                let _ = stream.write_all(&response).await;
+                let _ = stream.shutdown().await;
+            }
+        });
+        let http = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .unwrap();
+        let result = fetch_drive_content_from(&http, "fixture", "notes", &base).await;
+        task.await.unwrap();
+        result
+    }
+
+    fn text_response(media: &str, body: &[u8]) -> Vec<u8> {
+        let mut response = format!("HTTP/1.1 200 OK\r\nContent-Type: {media}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).into_bytes();
+        response.extend_from_slice(body);
+        response
+    }
+
+    #[tokio::test]
+    async fn meeting_notes_refuse_binary_fallback_and_preserve_plain_text_literals() {
+        for media in [
+            "application/pdf",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "application/octet-stream",
+        ] {
+            let result =
+                meeting_notes_response(true, text_response(media, b"binary fixture")).await;
+            assert!(
+                matches!(result, Err(SourceError::Parse(_))),
+                "{media}: {result:?}"
+            );
+        }
+        for fallback in [false, true] {
+            let original = "[Literal](ghost.md) <em>tag</em>";
+            let text =
+                meeting_notes_response(fallback, text_response("text/plain", original.as_bytes()))
+                    .await
+                    .unwrap();
+            assert!(lk_core::link::extract_dests(&text).is_empty(), "{text}");
+            let visible = pulldown_cmark::Parser::new(&text)
+                .filter_map(|event| match event {
+                    pulldown_cmark::Event::Text(text) => Some(text.into_string()),
+                    _ => None,
+                })
+                .collect::<String>();
+            assert_eq!(visible, original);
+        }
+    }
+
+    #[tokio::test]
+    async fn meeting_notes_validate_text_encoding_and_bound_both_response_paths() {
+        for fallback in [false, true] {
+            for response in [
+                text_response("text/plain; charset=UTF-8", &[0xff]),
+                text_response("text/plain; charset=unsupported", b"text"),
+                b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\ntext".to_vec(),
+                format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", super::super::drive::MAX_CONTENT_BYTES + 1).into_bytes(),
+            ] {
+                let result = meeting_notes_response(fallback, response).await;
+                assert!(matches!(result, Err(SourceError::Parse(_))), "{result:?}");
+            }
+            let bytes = vec![b'x'; super::super::drive::MAX_CONTENT_BYTES + 1];
+            let mut response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{:x}\r\n", bytes.len()).into_bytes();
+            response.extend(bytes);
+            response.extend_from_slice(b"\r\n0\r\n\r\n");
+            let result = meeting_notes_response(fallback, response).await;
+            assert!(
+                matches!(result, Err(SourceError::Parse(ref message)) if message.contains("exceeds")),
+                "{result:?}"
+            );
+            let (korean, _, _) = encoding_rs::EUC_KR.encode("한글 근거");
+            let text = meeting_notes_response(
+                fallback,
+                text_response("text/plain; charset=EUC-KR", &korean),
+            )
+            .await
+            .unwrap();
+            assert_eq!(text, "한글 근거");
+        }
+    }
+
+    #[tokio::test]
+    async fn meeting_notes_keep_explicit_markdown_and_html_structured() {
+        let markdown = "[Related](related.md)";
+        let projected =
+            meeting_notes_response(true, text_response("text/markdown", markdown.as_bytes()))
+                .await
+                .unwrap();
+        assert_eq!(projected, markdown);
+        let html = meeting_notes_response(
+            true,
+            text_response(
+                "text/html",
+                b"<p>Read <a href=\"https://example.com\">source</a>.</p>",
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            lk_core::link::first_external_dest(&html).as_deref(),
+            Some("https://example.com")
+        );
+    }
 
     fn event_from(json: serde_json::Value) -> CalEvent {
         serde_json::from_value(json).expect("event fixture parses")

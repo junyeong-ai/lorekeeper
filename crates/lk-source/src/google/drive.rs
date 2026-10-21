@@ -13,7 +13,7 @@ const BASE: &str = "https://www.googleapis.com/drive/v3/";
 const FOLDER_MIME: &str = "application/vnd.google-apps.folder";
 const FILE_FIELDS: &str =
     "id,name,mimeType,modifiedTime,createdTime,version,parents,trashed,headRevisionId";
-const MAX_CONTENT_BYTES: usize = 16 * 1024 * 1024;
+pub(super) const MAX_CONTENT_BYTES: usize = 16 * 1024 * 1024;
 
 pub struct GoogleDriveSource {
     http: reqwest::Client,
@@ -326,6 +326,11 @@ impl DriveApi<'_> {
             segments.push("export");
         }
         let response = self.get(&segments, &params).await?;
+        let response_content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
         let (content, digest) = read_content(response).await?;
         let after = self.metadata(&file.id).await?;
         if *file != after {
@@ -333,11 +338,7 @@ impl DriveApi<'_> {
                 "Drive file metadata/version changed during capture; rerun ingestion".into(),
             ));
         }
-        let body = if projection.html {
-            crate::markdown::html_to_markdown(&content)
-        } else {
-            content
-        };
+        let body = projection.format.markdown(&content)?;
         let identity = lk_core::source_identity::SourceIdentity::Provider {
             provider: lk_core::config::SourceType::GoogleDrive,
             namespace: "files".into(),
@@ -368,6 +369,7 @@ impl DriveApi<'_> {
                     "extraction": {
                         "method": if projection.export_mime.is_some() { "export" } else { "media" },
                         "mime_type": projection.export_mime.or(file.mime_type.as_deref()),
+                        "response_content_type": response_content_type,
                         "scope": "document-text",
                         "omissions": ["embedded-media", "comments", "revision-history"],
                     },
@@ -399,27 +401,65 @@ fn file_query(
 
 struct ContentProjection {
     export_mime: Option<&'static str>,
-    html: bool,
+    format: ContentFormat,
+}
+
+/// The declared text format, independent of filename and HTTP charset metadata.
+pub(super) enum ContentFormat {
+    Plain,
+    Markdown,
+    Html,
+}
+
+impl ContentFormat {
+    pub(super) fn from_mime(mime_type: &str) -> Result<Self, SourceError> {
+        match mime_type {
+            "text/plain" => Ok(Self::Plain),
+            "text/markdown" | "text/x-markdown" => Ok(Self::Markdown),
+            "text/html" => Ok(Self::Html),
+            _ => Err(SourceError::Parse(format!(
+                "unsupported Drive text MIME type {mime_type:?}"
+            ))),
+        }
+    }
+
+    pub(super) fn markdown(&self, content: &str) -> Result<String, SourceError> {
+        match self {
+            Self::Plain => crate::fetch::literal_markdown(content),
+            Self::Markdown => Ok(content.to_owned()),
+            Self::Html => Ok(crate::markdown::html_to_markdown(content)),
+        }
+    }
 }
 
 impl ContentProjection {
     fn for_file(file: &FileMeta) -> Result<Self, SourceError> {
-        let (export_mime, html) = match file.mime_type.as_deref() {
-            Some("application/vnd.google-apps.document") => (Some("text/markdown"), false),
-            Some("application/vnd.google-apps.presentation") => (Some("text/plain"), false),
-            Some("text/plain" | "text/markdown" | "text/x-markdown") => (None, false),
-            Some("text/html") => (None, true),
+        let (export_mime, format) = match file.mime_type.as_deref() {
+            Some("application/vnd.google-apps.document") => {
+                (Some("text/markdown"), ContentFormat::Markdown)
+            }
+            Some("application/vnd.google-apps.presentation") => {
+                (Some("text/plain"), ContentFormat::Plain)
+            }
+            Some(
+                mime_type @ ("text/plain" | "text/markdown" | "text/x-markdown" | "text/html"),
+            ) => (None, ContentFormat::from_mime(mime_type)?),
             mime_type => {
                 return Err(SourceError::Parse(format!(
                     "unsupported Drive MIME type {mime_type:?}; use an explicit supported text export for binary files, spreadsheets, shortcuts, or media"
                 )));
             }
         };
-        Ok(Self { export_mime, html })
+        Ok(Self {
+            export_mime,
+            format,
+        })
     }
 }
 
-async fn read_content(mut response: reqwest::Response) -> Result<(String, String), SourceError> {
+pub(super) async fn read_content(
+    mut response: reqwest::Response,
+) -> Result<(String, String), SourceError> {
     if response
         .content_length()
         .is_some_and(|length| length > MAX_CONTENT_BYTES as u64)
@@ -653,6 +693,91 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn plain_projection_keeps_markdown_and_html_as_literal_source_text() {
+        let original = "[Literal](ghost.md) <em>tag</em>";
+        for mime in ["application/vnd.google-apps.presentation", "text/plain"] {
+            let doc = file("doc", mime, "1");
+            let metadata = doc.clone();
+            let server = server(move |url| {
+                if url.path().ends_with("/export")
+                    || url
+                        .query_pairs()
+                        .any(|(key, value)| key == "alt" && value == "media")
+                {
+                    response("text/plain", original)
+                } else {
+                    json_response(metadata.clone())
+                }
+            })
+            .await;
+            let http = client();
+            let api = DriveApi {
+                http: &http,
+                token: "fixture",
+                base: server.base.clone(),
+            };
+            let file: FileMeta = serde_json::from_value(doc).unwrap();
+            let (start, end) = context().day_window(24, 0).unwrap();
+            let item = api.capture(&file, "folder-id", start, end).await.unwrap();
+            assert!(
+                lk_core::link::extract_dests(&item.body).is_empty(),
+                "{mime}: {}",
+                item.body
+            );
+            let visible = pulldown_cmark::Parser::new(&item.body)
+                .filter_map(|event| match event {
+                    pulldown_cmark::Event::Text(text) => Some(text.into_string()),
+                    _ => None,
+                })
+                .collect::<String>();
+            assert_eq!(visible, original);
+            assert_eq!(
+                item.metadata["source_record"]["content_digest"]["value"],
+                blake3::hash(original.as_bytes()).to_hex().to_string()
+            );
+            assert_eq!(
+                item.metadata["source_record"]["extraction"]["mime_type"],
+                "text/plain"
+            );
+            assert_eq!(
+                item.metadata["source_record"]["extraction"]["response_content_type"],
+                "text/plain"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn requested_markdown_export_remains_distinct_from_response_content_type() {
+        let doc = file("doc", "application/vnd.google-apps.document", "1");
+        let metadata = doc.clone();
+        let original = "# Heading\n\n[Related](related.md)\n";
+        let server = server(move |url| {
+            if url.path().ends_with("/export") {
+                response("text/plain; charset=UTF-8", original)
+            } else {
+                json_response(metadata.clone())
+            }
+        })
+        .await;
+        let http = client();
+        let api = DriveApi {
+            http: &http,
+            token: "fixture",
+            base: server.base.clone(),
+        };
+        let file: FileMeta = serde_json::from_value(doc).unwrap();
+        let (start, end) = context().day_window(24, 0).unwrap();
+        let item = api.capture(&file, "folder-id", start, end).await.unwrap();
+        assert_eq!(item.body, original);
+        let extraction = &item.metadata["source_record"]["extraction"];
+        assert_eq!(extraction["mime_type"], "text/markdown");
+        assert_eq!(
+            extraction["response_content_type"],
+            "text/plain; charset=UTF-8"
+        );
+    }
+
+    #[tokio::test]
     async fn exports_docs_and_follows_empty_pages_in_the_actual_shared_drive_window() {
         let mut doc = file("doc", "application/vnd.google-apps.document", "31");
         doc["modifiedTime"] = "2026-10-18T06:00:00Z".into();
@@ -708,6 +833,10 @@ mod tests {
         assert_eq!(record["version"], expected["version"]);
         assert_eq!(record["extraction"]["method"], "export");
         assert_eq!(record["extraction"]["mime_type"], "text/markdown");
+        assert_eq!(
+            record["extraction"]["response_content_type"],
+            "text/markdown; charset=UTF-8"
+        );
         assert_eq!(record["extraction"]["scope"], "document-text");
         assert_eq!(
             record["content_digest"]["value"],

@@ -525,7 +525,7 @@ where
         let text = if media.essence_str() == "text/html" {
             crate::markdown::html_to_markdown(&text)
         } else {
-            text.into_owned()
+            crate::fetch::literal_markdown(&text)?
         };
         let separator = if result.is_empty() || text.is_empty() {
             ""
@@ -766,6 +766,23 @@ fn decode_base64url(body: &PartBody) -> Result<Vec<u8>, SourceError> {
 mod tests {
     use super::*;
     use std::sync::Mutex;
+
+    #[tokio::test]
+    async fn plain_body_keeps_markdown_and_html_as_literal_source_text() {
+        let original = "[Literal](ghost.md) <em>tag</em>";
+        let part: MimePart = serde_json::from_value(text_part(original)).unwrap();
+        let body = load_body(Some(&part), |_| async { panic!("inline body") })
+            .await
+            .unwrap();
+        assert!(lk_core::link::extract_dests(&body).is_empty(), "{body}");
+        let visible = pulldown_cmark::Parser::new(&body)
+            .filter_map(|event| match event {
+                pulldown_cmark::Event::Text(text) => Some(text.into_string()),
+                _ => None,
+            })
+            .collect::<String>();
+        assert_eq!(visible, original);
+    }
 
     fn msg_from(json: serde_json::Value) -> Message {
         serde_json::from_value(json).expect("message fixture parses")

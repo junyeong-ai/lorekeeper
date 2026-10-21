@@ -57,12 +57,16 @@ uses validated params and context; do not add per-adapter output pipelines.
   exclude a known other editor before validating content needed only for selected pages.
 - `gmail.rs`: epoch bounds and parenthesized OR terms; queries are required/nonblank.
   An unread-only filter is an explicit user choice, not an implicit default.
+  MIME plain text is literal prose; only declared HTML is converted as markup.
 - `slack.rs`: form-encode API calls. Cursor pagination is authoritative, not
   `has_more`; distinguish bare channel IDs from `#` lookup. Watch-user author/mention
   semantics, thread/bot filters, and user-token search remain explicit. Split only
   headings, not code, mentions, or URLs.
 - `calendar.rs`: construct URL path segments safely. All-day civil dates use the
-  vault timezone; skip invalid timestamps diagnostically.
+  vault timezone; skip invalid timestamps diagnostically. Optional Drive notes
+  require a supported textual Content-Type and share Drive's 16 MiB strict-decoding
+  reader on export and media paths. Unsupported attachments remain unexpanded;
+  their warnings do not change complete Calendar listing coverage.
 - `drive.rs`: select direct children by explicit `folder_id`, never a folder name.
   Query the actual modified-time day window: `lookback_days` defaults to1 prior civil
   day plus the target day; explicit0 selects only the target day. Query and reported
@@ -75,7 +79,9 @@ uses validated params and context; do not add per-adapter output pipelines.
   unobserved. Report provider gaps, unfinished pagination and per-file failures as
   partial reach. Docs use Markdown export, Slides plain-text export; neither claims
   embedded media, comments or revision-history preservation. A received-byte digest
-  identifies the captured text payload, not an archived provider original.
+  identifies the captured text payload, not an archived provider original. Plain
+  text, including Slides output and `.md`-named files declared plain, remains literal.
+  Preserve the selected/export MIME separately from the actual HTTP Content-Type.
 - `rss.rs`: prefer HTML content then summary; use published/updated dates, never
   acquisition-now as publication. Require a title. Author falls back to feed title
   then feed ID. Full-text fallback keeps the summary if extraction is absent/shorter.
