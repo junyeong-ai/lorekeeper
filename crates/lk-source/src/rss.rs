@@ -1,6 +1,6 @@
 //! RSS/Atom feed source. Polls one or more public feeds (vendor blogs, news
 //! aggregators) and maps each entry to a [`RawItem`]. No credentials — feeds are
-//! public HTTP. Each entry's `external_id` is namespaced by feed (`{feed_id}:{guid}`),
+//! public HTTP. Each entry's `external_id` frames its feed and entry identity as a tuple,
 //! so the same article carried by two of this source's feeds stays two distinct
 //! observations (each feed is its own provenance) rather than being merged.
 
@@ -374,7 +374,8 @@ fn map_entry(
     } else {
         entry.id
     };
-    let external_id = format!("{feed_id}:{raw_id}");
+    let identity = lk_core::rss_original::RssEntryIdentity::new(feed_id, &raw_id);
+    let external_id = identity.external_id();
 
     let categories: Vec<String> = entry.categories.into_iter().map(|c| c.term).collect();
 
@@ -392,6 +393,7 @@ fn map_entry(
             work: None,
             metadata: serde_json::json!({
                 "feed_id": feed_id,
+                "rss_identity": identity,
                 "feed_title": feed_title,
                 "categories": categories,
             }),
@@ -936,7 +938,10 @@ mod tests {
 </item></channel></rss>"#;
         let item = map_entry("fixture", &Some("Publication".into()), parse_one(xml)).unwrap();
         assert_eq!(item.author.as_deref(), Some("editor@example.com"));
-        assert_eq!(item.external_id.as_deref(), Some("fixture:stable-guid"));
+        assert_eq!(
+            item.external_id.as_deref(),
+            Some(r#"["fixture","stable-guid"]"#)
+        );
         assert_eq!(item.timestamp.to_string(), "2026-05-21T08:00:00Z");
     }
 
@@ -959,11 +964,43 @@ mod tests {
         // external id is namespaced by feed id to avoid cross-feed collisions.
         assert_eq!(
             item.external_id.as_deref(),
-            Some("vendor:tag:vendor,2026:1")
+            Some(r#"["vendor","tag:vendor,2026:1"]"#)
         );
         assert_eq!(item.url.as_deref(), Some("https://vendor.example/post/1"));
         assert!(item.body.contains("**big**")); // HTML → Markdown
         assert_eq!(item.timestamp.to_string(), "2026-05-21T08:00:00Z");
+    }
+
+    #[tokio::test]
+    async fn distinct_feed_entry_tuples_survive_collection_and_normalization_identity() {
+        let first = tiny_feed_server(r#"<feed xmlns="http://www.w3.org/2005/Atom"><entry><title>First</title><id>item1</id><updated>2026-05-23T01:00:00Z</updated><summary>First evidence</summary></entry></feed>"#).await;
+        let second = tiny_feed_server(r#"<feed xmlns="http://www.w3.org/2005/Atom"><entry><title>Second</title><id>news:item1</id><updated>2026-05-23T01:00:00Z</updated><summary>Second evidence</summary></entry></feed>"#).await;
+        let params = serde_json::json!({"feeds":[
+            {"id":"org:news", "url":format!("http://{}/feed",first.addr)},
+            {"id":"org", "url":format!("http://{}/feed",second.addr)},
+        ]});
+        let observed = RssSource::new(loopback_client())
+            .observe(&params, &test_ctx())
+            .await
+            .unwrap();
+        assert_eq!(observed.items.len(), 2);
+        assert_ne!(observed.items[0].external_id, observed.items[1].external_id);
+        let identities = observed
+            .items
+            .iter()
+            .map(|item| {
+                let identity =
+                    lk_core::rss_original::RssEntryIdentity::from_metadata(&item.metadata)
+                        .unwrap()
+                        .unwrap();
+                assert_eq!(
+                    item.external_id.as_deref(),
+                    Some(identity.external_id().as_str())
+                );
+                identity.event_id("rss", test_ctx().target_date)
+            })
+            .collect::<Vec<_>>();
+        assert_ne!(identities[0], identities[1]);
     }
 
     #[test]

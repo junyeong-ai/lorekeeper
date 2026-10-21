@@ -28,9 +28,9 @@ lives in `lk-vault`/`lk-pipeline`.
 - `TaskTarget.anchor` is the rendered heading, not a worker-inferred kind table.
   Synthesis optionally includes `related_anchor`: both sections share one input
   and marker. `QueueTask::anchors` must enumerate every owned section.
-- `TargetKind::{llm_inputs_key,completion_key,page_format}` own markers and declared
-  page formats for every kind. Unfinished publication requires the matching format;
-  historical Done classification still permits retirement without another write.
+- `TargetKind::{page_format,llm_inputs_key,completion_key}` own page formats and
+  marker names for every kind. Incompatible declared formats stay unreadable;
+  matching markers never authorize their publication, pruning or cache reuse.
   Completion is matching `_done`, including empty results, never body fullness.
   Keep `tests/skill_contract.rs` exhaustive through `EnumIter`, not a hand list.
 

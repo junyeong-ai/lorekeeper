@@ -30,6 +30,7 @@
 //! together with a new request through the CLI publication journal.
 
 use lk_core::frontmatter::{VaultPage, field};
+use lk_queue::TargetKind;
 use lk_vault::{SectionKey, resolve_section};
 
 /// Per-section cache decision. The pipeline computes one of these for every LLM
@@ -77,7 +78,7 @@ pub fn stored_hash<'a>(existing: Option<&'a VaultPage>, key: &str) -> Option<&'a
 }
 
 /// Decide whether the LLM task for this section can be skipped because the existing
-/// page already carries the `completion_key` marker equal to the current input `hash`.
+/// page declares the task's format and carries its completion marker for this `hash`.
 /// `heading` names the section as a [`Heading`] selector, so the existing body is found
 /// under whichever locale the page was authored in.
 ///
@@ -87,19 +88,25 @@ pub fn stored_hash<'a>(existing: Option<&'a VaultPage>, key: &str) -> Option<&'a
 /// On a hit the existing body is preserved and spliced over the fresh render.
 pub fn lookup(
     existing: Option<&VaultPage>,
-    completion_key: &str,
+    kind: TargetKind,
     heading: impl SectionKey,
     hash: String,
 ) -> SectionDecision {
     let existing_body =
         existing.and_then(|page| resolve_section(&page.body, heading).map(|s| s.body));
-    let input_key = completion_key
-        .strip_suffix("_done")
-        .unwrap_or(completion_key);
+    let input_key = kind.llm_inputs_key();
+    let completion_key = kind.completion_key();
+    let compatible = existing.is_some_and(|page| {
+        page.frontmatter
+            .get("type")
+            .and_then(|value| value.as_str())
+            == Some(kind.page_format())
+    });
     let mut provenance = std::collections::BTreeMap::new();
     let request_input = format!("{input_key}_policy_requested_input");
     let request = format!("{input_key}_policy_requested");
-    if stored_hash(existing, input_key) == Some(&hash)
+    if compatible
+        && stored_hash(existing, input_key) == Some(&hash)
         && stored_hash(existing, &request_input) == Some(&hash)
         && let Some(policy) = stored_hash(existing, &request)
     {
@@ -107,7 +114,7 @@ pub fn lookup(
         provenance.insert(request_input, hash.clone());
     }
 
-    if stored_hash(existing, completion_key) != Some(&hash) {
+    if !compatible || stored_hash(existing, &completion_key) != Some(&hash) {
         return SectionDecision {
             provenance,
             hash,
@@ -127,7 +134,7 @@ pub fn lookup(
         // forever (the task is never re-enqueued, and with no preserved body the
         // splice-site drift warning never fires either). Force a re-run and surface it.
         tracing::warn!(
-            completion_key,
+            completion_key = %completion_key,
             "section marked done but heading not found (custom-template drift?); re-enqueueing"
         );
         return SectionDecision {
@@ -158,13 +165,13 @@ mod tests {
     use lk_core::frontmatter::parse_page;
 
     fn page_with(frontmatter: &str, body: &str) -> VaultPage {
-        let content = format!("---\n{frontmatter}---\n\n{body}");
+        let content = format!("---\ntype: daily\n{frontmatter}---\n\n{body}");
         parse_page(&content).expect("test fixture parses")
     }
 
     #[test]
     fn missing_page_is_uncached() {
-        let d = lookup(None, "summary_done", |s| s.summary, "abc".into());
+        let d = lookup(None, TargetKind::DailySummary, |s| s.summary, "abc".into());
         assert!(d.enqueue());
         assert!(d.preserved_body.is_none());
     }
@@ -174,7 +181,12 @@ mod tests {
         // Input hash present but the `*_done` marker absent — the skill hasn't
         // finished this input yet.
         let page = page_with("id: x\nllm_inputs:\n  summary: abc\n", "## 요약\n\nbody\n");
-        let d = lookup(Some(&page), "summary_done", |s| s.summary, "abc".into());
+        let d = lookup(
+            Some(&page),
+            TargetKind::DailySummary,
+            |s| s.summary,
+            "abc".into(),
+        );
         assert!(d.enqueue());
     }
 
@@ -184,7 +196,12 @@ mod tests {
             "id: x\nllm_inputs:\n  summary: fresh\n  summary_done: stale\n",
             "## 요약\n\nbody\n",
         );
-        let d = lookup(Some(&page), "summary_done", |s| s.summary, "fresh".into());
+        let d = lookup(
+            Some(&page),
+            TargetKind::DailySummary,
+            |s| s.summary,
+            "fresh".into(),
+        );
         assert!(d.enqueue());
     }
 
@@ -194,7 +211,12 @@ mod tests {
             "id: x\nllm_inputs:\n  summary: abc\n  summary_done: abc\n",
             "## 요약\n\nreal content\n\n## 출처\n",
         );
-        let d = lookup(Some(&page), "summary_done", |s| s.summary, "abc".into());
+        let d = lookup(
+            Some(&page),
+            TargetKind::DailySummary,
+            |s| s.summary,
+            "abc".into(),
+        );
         assert!(!d.enqueue());
         assert_eq!(d.preserved_body.as_deref(), Some("real content"));
     }
@@ -211,12 +233,46 @@ mod tests {
         );
         let d = lookup(
             Some(&page),
-            "concepts_done",
+            TargetKind::DailyConcepts,
             |s| s.related_concepts,
             "abc".into(),
         );
         assert!(!d.enqueue(), "empty-but-done section must stay cached");
         assert_eq!(d.preserved_body.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn cache_reuse_requires_the_tasks_declared_page_format() {
+        for kind in [
+            TargetKind::DailySummary,
+            TargetKind::DocumentSummary,
+            TargetKind::WeeklyReviewNarrative,
+            TargetKind::AnnualReviewNarrative,
+        ] {
+            for declaration in [
+                String::new(),
+                "type: null\n".into(),
+                "type: [document]\n".into(),
+                "type: exploration\n".into(),
+                format!("type: {}\n", kind.page_format()),
+            ] {
+                let key = kind.llm_inputs_key();
+                let done = kind.completion_key();
+                let page = parse_page(&format!(
+                    "---\n{declaration}llm_inputs:\n  {key}: current\n  {done}: current\n  {key}_policy_done: historical\n---\n## Summary\n"
+                ))
+                .unwrap();
+                let decision = lookup(Some(&page), kind, |s| s.summary, "current".into());
+                let compatible = declaration == format!("type: {}\n", kind.page_format());
+                assert_eq!(decision.cached, compatible, "{kind:?}: {declaration}");
+                assert_eq!(
+                    decision.preserved_body.as_deref(),
+                    compatible.then_some(""),
+                    "{kind:?}: {declaration}"
+                );
+                assert_eq!(decision.provenance.is_empty(), !compatible);
+            }
+        }
     }
 
     #[test]
@@ -230,7 +286,7 @@ mod tests {
         );
         let d = lookup(
             Some(&page),
-            "refine_events_done",
+            TargetKind::DailyRefineEvents,
             |s| s.key_events,
             "abc".into(),
         );
@@ -251,14 +307,24 @@ mod tests {
             "id: x\nllm_inputs:\n  summary: abc\n  summary_done: abc\n",
             "## 요약\n\nThe durable record.\n\n## 내용\n",
         );
-        let hit = lookup(Some(&ko_page), "summary_done", |s| s.summary, "abc".into());
+        let hit = lookup(
+            Some(&ko_page),
+            TargetKind::DailySummary,
+            |s| s.summary,
+            "abc".into(),
+        );
         assert!(!hit.enqueue(), "the same input is still answered");
         assert_eq!(hit.preserved_body.as_deref(), Some("The durable record."));
 
         // A locale is part of the request, so the switch also changes the hash: the section is
         // legitimately re-enqueued to be rewritten in the new language — and what that costs
         // is now reported instead of discovered.
-        let miss = lookup(Some(&ko_page), "summary_done", |s| s.summary, "new".into());
+        let miss = lookup(
+            Some(&ko_page),
+            TargetKind::DailySummary,
+            |s| s.summary,
+            "new".into(),
+        );
         assert!(miss.enqueue());
         assert_eq!(miss.discarding.as_deref(), Some("The durable record."));
     }
@@ -271,7 +337,7 @@ mod tests {
         );
         let d = lookup(
             Some(&page),
-            "refine_events_done",
+            TargetKind::DailyRefineEvents,
             |s| s.key_events,
             "abc".into(),
         );

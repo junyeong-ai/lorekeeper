@@ -199,7 +199,9 @@ fn repoint_renamed_links(
     root: &Path,
 ) -> Result<String, GraphError> {
     let mut error = None;
-    let updated = link::rewrite_links_outside_code(content, |text, raw_dest| {
+    let body_offset = lk_core::frontmatter::body_offset(content)
+        .ok_or_else(|| GraphError::Io("cannot rewrite links in unclosed frontmatter".into()))?;
+    let updated = link::rewrite_links_outside_code(&content[body_offset..], |text, raw_dest| {
         let (dest, anchor) = link::split_raw_dest(raw_dest);
         let decoded = link::decode_dest(dest);
         if !Path::new(&decoded).extension().is_some_and(|e| e == "md") {
@@ -223,7 +225,7 @@ fn repoint_renamed_links(
     });
     match error {
         Some(e) => Err(GraphError::Io(e.to_string())),
-        None => Ok(updated),
+        None => Ok(format!("{}{updated}", &content[..body_offset])),
     }
 }
 
@@ -418,6 +420,35 @@ mod tests {
         assert_eq!(
             updated,
             "See [A](concept-a.md) and [A](concept-a.md#part) and [B](other.md) here."
+        );
+    }
+
+    #[test]
+    fn normalization_rewrites_body_links_without_editing_frontmatter_or_html() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir(root.join("wiki")).unwrap();
+        std::fs::write(root.join("wiki/Old_Name.md"), "# Old\n").unwrap();
+        let prefix = "\u{feff}---\r\ntype: document\r\nliteral: |\r\n  ```\r\n  [Metadata](Old_Name.md)\r\n---\r\n\r\n";
+        let html = "<div>\r\n[HTML](Old_Name.md)\r\n</div>\r\n\r\n<!--\r\n```\r\n-->\r\n\r\n";
+        let source = format!("{prefix}{html}[Body](Old_Name.md#claim)\r\n");
+        std::fs::write(root.join("wiki/source.md"), source).unwrap();
+        let pages = crate::scan::scan_vault(root, false).unwrap();
+        assert_eq!(apply(&scan(&pages), &pages, root).unwrap(), 1);
+        assert_eq!(
+            std::fs::read_to_string(root.join("wiki/source.md")).unwrap(),
+            format!("{prefix}{html}[Body](old-name.md#claim)\r\n")
+        );
+        assert!(!root.join("wiki/Old_Name.md").exists());
+        assert!(root.join("wiki/old-name.md").exists());
+        assert!(
+            repoint_renamed_links(
+                "---\ntitle: unclosed\n",
+                Path::new("wiki/source.md"),
+                &HashMap::new(),
+                root,
+            )
+            .is_err()
         );
     }
 

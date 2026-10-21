@@ -8,7 +8,7 @@
 //!
 //! - **construction**: [`md_link`] + [`relative_dest`] (destination percent-encoding
 //!   included) — every Rust emitter builds links through these;
-//! - **extraction**: [`extract_dests`] — fence- and inline-code-aware, images and
+//! - **extraction**: [`extract_dests`] — CommonMark-aware, images and
 //!   external destinations excluded — the one parser `lk-graph` builds edges from;
 //! - **rewriting**: [`rewrite_links_outside_code`] — merge/normalize repoint
 //!   destinations without touching code regions;
@@ -19,12 +19,14 @@
 //! plain text to this parser). Link text with literal `[`/`]`/`\` is escaped by
 //! [`md_link`] and matched by the shared regex.
 
+use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
 use std::sync::LazyLock;
 
+use pulldown_cmark::{Event, LinkType, Parser, Tag, TagEnd};
 use regex::{Captures, Regex};
 
-use crate::markdown::FenceState;
+use crate::markdown::OPTIONS;
 
 /// Matches an inline markdown link (or image embed): optional `!`, `[text](dest)`.
 /// Group 1 = the `!` of an image embed (empty for links), group 2 = the link text
@@ -199,13 +201,13 @@ pub fn parse_standalone_page_link(text: &str) -> Option<PageLink> {
     if matched.start() != 0 || matched.end() != text.len() {
         return None;
     }
-    internal_page_link(&captures)
+    internal_page_link(&captures, &captures[3])
 }
 
 /// Extract every internal inline page link in `body`, in first-appearance order
-/// (duplicates preserved — callers dedup as needed). Skips links inside fenced code
-/// blocks and inline code spans, image embeds, external destinations, and anchor-only
-/// links.
+/// (duplicates preserved — callers dedup as needed). CommonMark excludes code and raw
+/// HTML; image embeds, external destinations and anchor-only links are also skipped.
+/// Input is a Markdown body without YAML frontmatter.
 ///
 /// The text-carrying counterpart of [`extract_dests`], for a consumer that must keep a
 /// link it read rather than merely observe where it points — re-deriving the display
@@ -237,20 +239,55 @@ pub fn extract_page_link_occurrences(body: &str) -> Vec<PageLinkOccurrence<'_>> 
 }
 
 fn visit_page_links<'a>(body: &'a str, mut visit: impl FnMut(PageLink, usize, &'a str)) {
-    let mut fence = FenceState::new();
-    for (index, line) in body.split_inclusive('\n').enumerate() {
-        let stripped = line.trim_end_matches(['\r', '\n']);
-        let is_marker = fence.apply(stripped);
-        if is_marker || !fence.is_closed() {
-            continue;
+    let mut line = 1;
+    let mut line_start = 0;
+    let mut scanned = 0;
+    visit_inline_links(body, |captures, raw_dest, range| {
+        for (offset, _) in body[scanned..range.start].match_indices('\n') {
+            line += 1;
+            line_start = scanned + offset + 1;
         }
-        for_each_code_free_segment(line, |segment| {
-            for cap in MD_LINK_RE.captures_iter(segment) {
-                if let Some(link) = internal_page_link(&cap) {
-                    visit(link, index + 1, stripped);
+        scanned = range.start;
+        let end = body[range.start..]
+            .find('\n')
+            .map_or(body.len(), |offset| range.start + offset);
+        let context = body[line_start..end].trim_end_matches('\r');
+        if let Some(link) = internal_page_link(&captures, raw_dest) {
+            visit(link, line, context);
+        }
+    });
+}
+
+/// CommonMark owns structural visibility and the complete replacement span; the
+/// existing regex keeps the single-line label grammar. Reference links and autolinks
+/// do not become new graph edges, and image alt text is never a citation.
+fn visit_inline_links<'a>(
+    body: &'a str,
+    mut visit: impl FnMut(Captures<'a>, &'a str, Range<usize>),
+) {
+    let mut image_depth = 0;
+    for (event, range) in Parser::new_ext(body, OPTIONS).into_offset_iter() {
+        match event {
+            Event::Start(Tag::Image { .. }) => image_depth += 1,
+            Event::End(TagEnd::Image) => image_depth -= 1,
+            Event::Start(Tag::Link {
+                link_type: LinkType::Inline,
+                ..
+            }) if image_depth == 0 => {
+                let source = &body[range.clone()];
+                if !source.contains(['\r', '\n'])
+                    && source.ends_with(')')
+                    && let Some(captures) = MD_LINK_RE.captures(source)
+                    && let Some(matched) = captures.get(0)
+                    && matched.start() == 0
+                {
+                    let raw_start = captures.get(3).expect("destination capture").start();
+                    let raw_dest = &source[raw_start..source.len() - 1];
+                    visit(captures, raw_dest, range);
                 }
             }
-        });
+            _ => {}
+        }
     }
 }
 
@@ -283,11 +320,11 @@ pub fn first_external_dest(text: &str) -> Option<String> {
 
 /// A captured link as a [`PageLink`] — `None` for image embeds and
 /// external/empty/anchor-only destinations.
-fn internal_page_link(cap: &Captures) -> Option<PageLink> {
+fn internal_page_link(cap: &Captures, raw_dest: &str) -> Option<PageLink> {
     if !cap[1].is_empty() {
         return None; // image embed
     }
-    let (page, _anchor) = split_raw_dest(&cap[3]);
+    let (page, _anchor) = split_raw_dest(raw_dest);
     if page.is_empty() || is_external(page) {
         return None;
     }
@@ -304,8 +341,9 @@ fn unescape_text(text: &str) -> String {
         .replace("\\\\", "\\")
 }
 
-/// Rewrite inline links that sit OUTSIDE code (block fences AND inline spans),
-/// copying every code region — and every image embed — verbatim. `rewrite` receives
+/// Rewrite inline links in a Markdown body outside CommonMark code and raw HTML,
+/// copying those regions and every image embed verbatim. Full-page callers retain
+/// their frontmatter prefix separately. `rewrite` receives
 /// each link's `(text, raw dest)` — both exactly as written, escapes and encoding
 /// included — and returns the full replacement link, or `None` to keep the original.
 /// A rewriter that only repoints the destination must reassemble with the text
@@ -319,26 +357,16 @@ pub fn rewrite_links_outside_code(
     mut rewrite: impl FnMut(&str, &str) -> Option<String>,
 ) -> String {
     let mut out = String::with_capacity(body.len());
-    let mut fence = FenceState::new();
-
-    for line in body.split_inclusive('\n') {
-        let stripped = line.strip_suffix('\n').unwrap_or(line);
-        let is_marker = fence.apply(stripped);
-        if is_marker || !fence.is_closed() {
-            out.push_str(line);
-            continue;
+    let mut copied = 0;
+    visit_inline_links(body, |captures, raw_dest, range| {
+        out.push_str(&body[copied..range.start]);
+        match rewrite(&captures[2], raw_dest) {
+            Some(replacement) => out.push_str(&replacement),
+            None => out.push_str(&body[range.clone()]),
         }
-        for_each_line_region(line, &mut out, |segment, out| {
-            out.push_str(&MD_LINK_RE.replace_all(segment, |cap: &Captures| {
-                let full = cap.get(0).unwrap().as_str();
-                if !cap[1].is_empty() {
-                    return full.to_owned();
-                }
-                rewrite(&cap[2], &cap[3]).unwrap_or_else(|| full.to_owned())
-            }));
-        });
-    }
-
+        copied = range.end;
+    });
+    out.push_str(&body[copied..]);
     out
 }
 
@@ -352,63 +380,6 @@ pub fn strip_links(text: &str) -> String {
         unescape_text(&cap[2])
     });
     stripped.into_owned()
-}
-
-/// Invoke `f` on each segment of `line` that lies outside inline code spans.
-fn for_each_code_free_segment(line: &str, mut f: impl FnMut(&str)) {
-    for_each_line_region(line, &mut String::new(), |segment, _| f(segment));
-}
-
-/// Walk `line` splitting it at inline code spans: non-code segments go through `f`
-/// (which may transform them into `out`); code spans (backticks included) are copied
-/// to `out` verbatim. Shares the backtick-run matching rule with extraction so the
-/// two can never disagree about what is code.
-fn for_each_line_region(line: &str, out: &mut String, mut f: impl FnMut(&str, &mut String)) {
-    let bytes = line.as_bytes();
-    let mut outside_start = 0;
-    let mut cursor = 0;
-
-    while cursor < bytes.len() {
-        if bytes[cursor] != b'`' {
-            cursor += 1;
-            continue;
-        }
-        let run_len = count_repeated(bytes, cursor, b'`');
-        let search_start = cursor + run_len;
-        let Some(close_start) = find_matching_backtick_run(line, search_start, run_len) else {
-            cursor = search_start;
-            continue;
-        };
-        f(&line[outside_start..cursor], out);
-        out.push_str(&line[cursor..close_start + run_len]);
-        cursor = close_start + run_len;
-        outside_start = cursor;
-    }
-
-    f(&line[outside_start..], out);
-}
-
-fn find_matching_backtick_run(line: &str, start: usize, run_len: usize) -> Option<usize> {
-    let bytes = line.as_bytes();
-    let mut cursor = start;
-
-    while cursor < bytes.len() {
-        if bytes[cursor] != b'`' {
-            cursor += 1;
-            continue;
-        }
-        let candidate_len = count_repeated(bytes, cursor, b'`');
-        if candidate_len == run_len {
-            return Some(cursor);
-        }
-        cursor += candidate_len;
-    }
-
-    None
-}
-
-fn count_repeated(bytes: &[u8], start: usize, byte: u8) -> usize {
-    bytes[start..].iter().take_while(|&&b| b == byte).count()
 }
 
 #[cfg(test)]
@@ -477,6 +448,82 @@ mod tests {
 Inline `[span](c.md)` and [live2](d.md).
 ";
         assert_eq!(extract_dests(text), vec!["a.md", "d.md"]);
+    }
+
+    #[test]
+    fn html_literal_fences_do_not_hide_following_links_or_become_links() {
+        for block in [
+            "<pre>\n```\n[Literal](literal.md)\n</pre>",
+            "<!--\n```\n[Literal](literal.md)\n-->",
+        ] {
+            let body = format!("{block}\n\n- [Retry](../concepts/retry.md)\n");
+            assert_eq!(extract_dests(&body), ["../concepts/retry.md"]);
+            let rewritten = rewrite_links_outside_code(&body, |text, _| {
+                Some(md_link(text, "../concepts/revised.md"))
+            });
+            assert_eq!(
+                rewritten,
+                format!("{block}\n\n- [Retry](../concepts/revised.md)\n")
+            );
+        }
+    }
+
+    #[test]
+    fn commonmark_code_and_noninline_links_remain_outside_the_link_contract() {
+        let body = "    [Indented](indented.md)\n\n`multiline\n[Literal](literal.md)\ncode`\n\n\\[Escaped](escaped.md)\n\n![Image](image.md)\n[Reference][r]\n\n[r]: reference.md\n\n[Live](live.md)\n";
+        assert_eq!(extract_dests(body), ["live.md"]);
+        assert_eq!(
+            rewrite_links_outside_code(body, |text, _| Some(md_link(text, "revised.md"))),
+            body.replace("[Live](live.md)", "[Live](revised.md)")
+        );
+    }
+
+    #[test]
+    fn parser_backed_occurrences_preserve_physical_lines_context_and_raw_bytes() {
+        let body = "한글\r\n\r\n<pre>\r\n```\r\n</pre>\r\n\r\n- [First](a%20b.md#section)\r\n- [Again](a%20b.md \"title\")";
+        let links = extract_page_link_occurrences(body);
+        assert_eq!(links.len(), 2);
+        assert_eq!((links[0].line, links[1].line), (7, 8));
+        assert_eq!(links[0].context, "- [First](a%20b.md#section)");
+        assert_eq!(links[1].context, "- [Again](a%20b.md \"title\")");
+        assert_eq!(links[0].link.dest, "a b.md");
+        assert_eq!(links[1].link.dest, "a b.md");
+        assert_eq!(rewrite_links_outside_code(body, |_, _| None), body);
+        assert_eq!(
+            rewrite_links_outside_code(body, |text, raw| Some(format!("[{text}](new/{raw})"))),
+            body.replace("a%20b.md", "new/a%20b.md")
+        );
+    }
+
+    #[test]
+    fn rewrite_consumes_the_complete_inline_link_with_parentheses_in_its_title() {
+        for raw in [
+            r#"retry.md "A (condition)""#,
+            r#"retry.md "A \) condition""#,
+        ] {
+            let body = format!("Before [Retry]({raw}) after.");
+            assert_eq!(extract_dests(&body), ["retry.md"]);
+            assert_eq!(rewrite_links_outside_code(&body, |_, _| None), body);
+            let mut seen = Vec::new();
+            let rewritten = rewrite_links_outside_code(&body, |text, destination| {
+                seen.push((text.to_string(), destination.to_string()));
+                Some(md_link(text, "revised.md"))
+            });
+            assert_eq!(seen, [("Retry".to_string(), raw.to_string())]);
+            assert_eq!(rewritten, "Before [Retry](revised.md) after.");
+        }
+        let multiline = "[Retry](retry.md\n\"multiline title\")";
+        assert!(extract_dests(multiline).is_empty());
+        assert_eq!(
+            rewrite_links_outside_code(multiline, |text, _| Some(md_link(text, "revised.md"))),
+            multiline
+        );
+    }
+
+    #[test]
+    fn supplied_body_is_not_interpreted_as_yaml_frontmatter() {
+        let body = "---\n[First](first.md)\n---\n\n[Second](second.md)\n";
+        assert_eq!(extract_dests(body), ["first.md", "second.md"]);
     }
 
     #[test]

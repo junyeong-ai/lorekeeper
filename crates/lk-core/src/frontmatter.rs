@@ -151,6 +151,28 @@ pub struct PageParts {
     pub closed: bool,
 }
 
+/// Locate the original Markdown body without normalizing its bytes or parsing YAML.
+/// A recognized but unclosed frontmatter block has no safe body offset.
+pub fn body_offset(content: &str) -> Option<usize> {
+    let markdown = content.strip_prefix('\u{feff}').unwrap_or(content);
+    let bom = content.len() - markdown.len();
+    let mut lines = markdown.split_inclusive('\n');
+    let Some(first) = lines.next() else {
+        return Some(bom);
+    };
+    if !first.ends_with('\n') || !is_delimiter_line(first) {
+        return Some(bom);
+    }
+    let mut offset = bom + first.len();
+    for line in lines {
+        offset += line.len();
+        if is_delimiter_line(line) {
+            return Some(offset);
+        }
+    }
+    None
+}
+
 /// Split a markdown page on its frontmatter delimiters.
 ///
 /// Frontmatter is recognized only when the document's FIRST line is exactly `---` and a later
@@ -222,6 +244,25 @@ pub fn parse_page(content: &str) -> Result<VaultPage, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn raw_body_offsets_preserve_separators_and_literal_yaml() {
+        let body = "\r\n## Related\r\n[Link](target.md)\r\n";
+        for prefix in [
+            "",
+            "\u{feff}",
+            "---\ntype: document\n---\n",
+            "\u{feff}---\r\nnotes: |\r\n  ```\r\n---\r\n",
+        ] {
+            let content = format!("{prefix}{body}");
+            assert_eq!(body_offset(&content), Some(prefix.len()));
+            assert_eq!(&content[body_offset(&content).unwrap()..], body);
+        }
+        assert_eq!(body_offset("---"), Some(0));
+        assert_eq!(body_offset("---\n---"), Some(7));
+        assert_eq!(body_offset(" ---\ntext\n---\n"), Some(0));
+        assert_eq!(body_offset("---\nnotes: unclosed\n"), None);
+    }
 
     #[test]
     fn roundtrip() {

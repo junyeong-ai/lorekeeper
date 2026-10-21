@@ -91,6 +91,62 @@ fn far_future() -> jiff::civil::Date {
 }
 
 #[tokio::test]
+async fn literal_source_content_reaches_pages_and_semantic_requests() {
+    let code = "value = \"\"\"first\n\n\nsecond\"\"\"\n";
+    let body = format!("```python\n{code}```\n\n<pre>\n# literal heading\n\n\ntext\n</pre>\n");
+    for source_type in [SourceType::Gmail, SourceType::Manual] {
+        let directory = TempDir::new().unwrap();
+        let mut config = base_config(directory.path());
+        config.sources.get_mut("test-source").unwrap().source_type = source_type;
+        let llm: Arc<dyn LlmClient> = Arc::new(lk_queue::QueueLlmClient::new(
+            directory.path().join(".lorekeeper/queue"),
+        ));
+        let mut pipeline = Pipeline::new(directory.path(), build_ctx(&config, llm.clone()));
+        let result = pipeline
+            .plan(
+                "test-source",
+                &config.sources["test-source"],
+                vec![raw_item(
+                    "Source example",
+                    &body,
+                    "example",
+                    "2026-05-23T10:00:00Z".parse().unwrap(),
+                )],
+                &IngestOptions {
+                    target_date: None,
+                    today: far_future(),
+                    dry_run: false,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.events[0].body, body);
+        let page = result
+            .daily_pages
+            .iter()
+            .chain(&result.document_pages)
+            .next()
+            .unwrap();
+        assert!(page.content.contains(code), "{}", page.content);
+        assert!(
+            page.content
+                .contains("<pre>\n# literal heading\n\n\ntext\n</pre>")
+        );
+        let requests = llm.take_requests().await;
+        assert!(!requests.is_empty());
+        for request in requests {
+            assert!(
+                request.input["text"]
+                    .as_str()
+                    .is_some_and(|text| text.contains(&body)),
+                "{:?}",
+                request.input
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn concept_pages_written_with_merge() {
     let dir = TempDir::new().unwrap();
     let vault = dir.path();
@@ -3198,6 +3254,14 @@ async fn new_concept_grounding_is_required_before_staging_and_can_be_retried() {
             .await
             .unwrap_err();
         assert!(error.to_string().contains("source-grounded synthesis"));
+        assert!(pipeline.render_concept_pages().await.unwrap().is_empty());
+    }
+    for grounding in ["<!--", "Injected\n---\n", "```text\nunclosed"] {
+        let error = pipeline
+            .apply_concept_result(&result("daily/a/2026-05-23.md", Some(grounding)), page)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("section content"));
         assert!(pipeline.render_concept_pages().await.unwrap().is_empty());
     }
     pipeline

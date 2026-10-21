@@ -293,8 +293,16 @@ fn plan_merge(
                 (content.clone(), content)
             }
         };
-        let (mut updated, count) =
-            rewrite_links(&typed, &page.path, &from_rel, &into_rel, vault_root)?;
+        let (mut updated, count) = if dry_run && lk_core::frontmatter::body_offset(&typed).is_none()
+        {
+            tracing::warn!(path = %page.path.display(), "unclosed frontmatter: preview counts diagnostic body links; publication requires repair");
+            let diagnostic = lk_core::frontmatter::split_page(&typed).body;
+            let (_, count) =
+                rewrite_links(&diagnostic, &page.path, &from_rel, &into_rel, vault_root)?;
+            (typed.clone(), count)
+        } else {
+            rewrite_links(&typed, &page.path, &from_rel, &into_rel, vault_root)?
+        };
         if count > 0 && page.rss_evidence {
             lk_vault::rss_concept_citations(vault_root, &page.path, &content)
                 .map_err(|e| GraphError::Io(e.to_string()))?;
@@ -431,11 +439,10 @@ fn rewrite_links(
 ) -> Result<(String, usize), GraphError> {
     let mut count = 0;
     let mut failure = None;
-    // Rewrite OUTSIDE code only (shared helper): a from-link shown inside a code
-    // fence/span is a code example, not a graph edge — `extract_dests`/`broken` ignore
-    // it, so it never dangles after the from page is deleted, and rewriting it would
-    // corrupt the doc.
-    let out = link::rewrite_links_outside_code(content, |text, raw_dest| {
+    let body_offset = lk_core::frontmatter::body_offset(content)
+        .ok_or_else(|| GraphError::Io("cannot rewrite links in unclosed frontmatter".into()))?;
+    // Frontmatter and code/HTML examples do not contribute graph edges.
+    let out = link::rewrite_links_outside_code(&content[body_offset..], |text, raw_dest| {
         // Does this link target the from concept? Resolve the destination the SAME way
         // the graph does — `.md` destinations only, resolved against this page's
         // location, then checked against the actual filesystem — so exactly the spellings scan
@@ -464,7 +471,7 @@ fn rewrite_links(
     if let Some(error) = failure {
         return Err(error);
     }
-    Ok((out, count))
+    Ok((format!("{}{out}", &content[..body_offset]), count))
 }
 
 /// Recognize only the template title, owned section headings and generated Sources.
@@ -1256,6 +1263,43 @@ mod tests {
     }
 
     #[test]
+    fn merge_rewrites_body_links_without_editing_frontmatter_or_html() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        for name in ["old", "new"] {
+            write(
+                root,
+                &format!("wiki/concepts/{name}.md"),
+                &format!("---\ntype: concept\ntitle: {name}\n---\n# {name}\n"),
+            );
+        }
+        let prefix = "\u{feff}---\r\ntype: document\r\nliteral: |\r\n  ```\r\n  [Metadata](../concepts/old.md)\r\n---\r\n\r\n";
+        let html =
+            "<div>\r\n[HTML](../concepts/old.md)\r\n</div>\r\n\r\n<!--\r\n```\r\n-->\r\n\r\n";
+        let source = format!("{prefix}{html}[Body](../concepts/old.md#claim)\r\n");
+        write(root, "wiki/documents/source.md", &source);
+        let pages = crate::scan::scan_vault(root, false).unwrap();
+        let merged = merge_concepts(&pages, root, "wiki", "old", "new", false, false).unwrap();
+        assert_eq!(merged.rewritten.len(), 1);
+        assert_eq!(merged.rewritten[0].links, 1);
+        assert_eq!(
+            std::fs::read_to_string(root.join("wiki/documents/source.md")).unwrap(),
+            format!("{prefix}{html}[Body](../concepts/new.md#claim)\r\n")
+        );
+        assert!(!root.join("wiki/concepts/old.md").exists());
+        assert!(
+            rewrite_links(
+                "---\ntitle: unclosed\n",
+                Path::new("wiki/documents/source.md"),
+                Path::new("wiki/concepts/old.md"),
+                Path::new("wiki/concepts/new.md"),
+                root,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn links_inside_code_are_not_rewritten() {
         // A from-link shown inside a code fence or inline span is a code example, not a
         // citation edge (`broken` ignores it too, so it never dangles after deletion). Merge
@@ -1729,6 +1773,7 @@ mod tests {
         let before = std::fs::read_to_string(&citing).unwrap();
         let preview = merge_concepts(&pages, root, "wiki", "from", "into", true, false).unwrap();
         assert_eq!(preview.rewritten.len(), 1);
+        assert_eq!(preview.rewritten[0].links, 1);
         let error = merge_concepts(&pages, root, "wiki", "from", "into", false, false).unwrap_err();
         assert!(
             error

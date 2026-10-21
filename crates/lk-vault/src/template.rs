@@ -105,6 +105,12 @@ impl TemplateEngine {
     /// the embedded copies are the source of truth.
     pub fn build(user_dir: Option<&Path>) -> Result<Self, VaultError> {
         let mut env = Environment::new();
+        env.add_filter("markdown_text", crate::fragment::inline_text);
+        env.add_filter(
+            "markdown_fragment",
+            crate::fragment::render_markdown_fragment,
+        );
+        env.add_filter("markdown_link", crate::fragment::link);
         let user_dir = user_dir.map(Path::to_path_buf);
         let dir = user_dir.clone();
         env.set_loader(move |name| {
@@ -131,8 +137,7 @@ impl TemplateEngine {
         context: &serde_json::Value,
     ) -> Result<String, VaultError> {
         let tmpl = self.env.get_template(template_name)?;
-        let rendered = tmpl.render(Serde(context))?;
-        Ok(lk_core::text::collapse_blank_lines(&rendered))
+        Ok(tmpl.render(Serde(context))?)
     }
 
     /// `Ok(true)` only if `name` exists as a USER-provided override file (not an
@@ -160,6 +165,53 @@ impl TemplateEngine {
 mod tests {
     use super::*;
 
+    #[test]
+    fn rendering_preserves_injected_text_and_line_endings() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("literal.md.jinja"), "{{ content }}").unwrap();
+        let engine = TemplateEngine::build(Some(directory.path())).unwrap();
+        for content in [
+            "```python\nvalue = \"\"\"first\n\n\nsecond\"\"\"\n```\n",
+            "<pre>\n# literal heading\n\n\ntext\n</pre>\n",
+            "---\nnote: |\n  first\n\n\n  second\n---\n",
+            "line one\r\n\r\n\r\nline two\r",
+        ] {
+            let context = serde_json::json!({"content": content});
+            let rendered = engine.render("literal.md.jinja", &context).unwrap();
+            assert_eq!(rendered, content);
+            assert_eq!(
+                engine.render("literal.md.jinja", &context).unwrap(),
+                rendered
+            );
+        }
+    }
+
+    #[test]
+    fn daily_templates_preserve_literal_source_and_semantic_code() {
+        let engine = TemplateEngine::build(None).unwrap();
+        let code = "value = \"\"\"first\n\n\nsecond\"\"\"\n";
+        let body = format!("```python\n{code}```\n\n<pre>\n# literal heading\n\n\ntext\n</pre>\n");
+        let summary = format!("```python\n{code}```");
+        let i18n = serde_json::to_value(lk_core::i18n::Locale::En.strings()).unwrap();
+        let mut context = daily_context(&i18n);
+        context["events"][0]["body"] = body.into();
+        context["summary"] = summary.clone().into();
+        for (name, source) in EMBEDDED {
+            if !source.contains(DAILY_BASE) {
+                continue;
+            }
+            let output = engine.render(name, &context).unwrap();
+            assert!(output.contains(code), "{name}: {output}");
+            assert!(output.contains("<pre>\n# literal heading\n\n\ntext\n</pre>"));
+            assert_eq!(
+                crate::section_body(&output, "Summary").unwrap().trim(),
+                summary,
+                "{name}: {output}"
+            );
+            assert_eq!(engine.render(name, &context).unwrap(), output);
+        }
+    }
+
     /// Page templates the pipeline renders by name, as opposed to the per-source ones a
     /// `SourceType` descriptor selects.
     const RENDERED_BY_NAME: &[&str] = &[
@@ -177,7 +229,7 @@ mod tests {
     fn concept_and_document_addresses_round_trip_through_native_frontmatter() {
         let engine = TemplateEngine::build(None).unwrap();
         let i18n = serde_json::to_value(lk_core::i18n::Locale::En.strings()).unwrap();
-        let title = "주제: \"인용\"\n둘째 줄";
+        let title = "주제: \"인용\"\n\n## Summary\n\n둘째 줄";
         for address in [
             "AI: Agents/owner",
             "지식/소유자",
@@ -220,6 +272,22 @@ mod tests {
                         .get("title")
                         .and_then(|value| value.as_str()),
                     Some(title)
+                );
+                let headings = pulldown_cmark::Parser::new(&page.body)
+                    .filter(|event| {
+                        matches!(
+                            event,
+                            pulldown_cmark::Event::Start(pulldown_cmark::Tag::Heading {
+                                level: pulldown_cmark::HeadingLevel::H2,
+                                ..
+                            })
+                        )
+                    })
+                    .count();
+                assert_eq!(
+                    headings,
+                    if template == "concept.md.jinja" { 3 } else { 2 },
+                    "{output}"
                 );
             }
         }

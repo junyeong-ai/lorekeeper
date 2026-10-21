@@ -5,9 +5,9 @@
    the same way work read does. #}
 {% block events %}
 {% for item in events -%}
-### {{ item.title }}
+### {{ item.title | markdown_text }}
 
-{{ item.body }}
+{{ item.body | markdown_fragment }}
 
 {% endfor %}
 {% endblock %}

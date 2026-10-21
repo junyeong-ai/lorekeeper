@@ -110,22 +110,23 @@ pub enum QueueCommand {
 }
 
 /// Where a queued task stands against its target page. Two independent questions decide
-/// it: is the page still the one this task was made for (input hash, existence), and has
+/// it: is the page still the one this task was made for (declared format, input hash,
+/// existence), and has
 /// the work already been done (completion marker). Only a task that passes the first and
 /// fails the second is work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TaskStatus {
-    /// `llm_inputs.<key>` on the page equals the task's `cache_hash` and no completion
+    /// The page declares the expected format, its input equals the task's hash, and no completion
     /// marker matches it — process it.
     Current,
-    /// `llm_inputs.<key>_done` already equals the task's `cache_hash`: this exact input
+    /// On the expected page format, `llm_inputs.<key>_done` equals the task's hash: this exact input
     /// has been answered. Nothing is left to do, and nothing was lost.
     Done,
     /// The page was re-rendered with a different input after this task was queued —
     /// drop it; a newer task carries the current hash.
     Stale,
-    /// The target page cannot be read as a page — unreadable bytes, or frontmatter that will
-    /// not parse. Nothing can be decided about the task, so it is neither work nor dead.
+    /// The target has unreadable bytes, malformed frontmatter or an incompatible declared
+    /// format. Nothing can be decided about the task, so it is neither work nor dead.
     ///
     /// Reported and RETAINED. A repair of the page brings it back, which is what separates
     /// this from `MissingTarget`; dropping it would discard work a one-line fix restores.
@@ -1014,6 +1015,14 @@ fn policy_request_status(root: &Path, task: &QueueTask) -> Option<TaskStatus> {
     let path = resolve_target_path(&task.target.vault_path)?;
     let content = read_page(root, &path).ok()?;
     let page = lk_core::frontmatter::parse_page(&content).ok()?;
+    if page
+        .frontmatter
+        .get("type")
+        .and_then(|value| value.as_str())
+        != Some(task.target.kind.page_format())
+    {
+        return None;
+    }
     let inputs = page.frontmatter.get("llm_inputs")?;
     let key = task.target.kind.llm_inputs_key();
     if inputs
@@ -1050,18 +1059,15 @@ fn stamp_policy(
         &serde_json::to_string(policy).expect("policy serializes"),
     )
     .ok_or_else(|| miette::miette!("cannot stamp generation policy"))?;
-    let content = lk_vault::set_llm_input(
-        &content,
-        &format!("{}_policy_requested", kind.llm_inputs_key()),
-        "null",
-    )
-    .ok_or_else(|| miette::miette!("cannot clear policy request"))?;
-    lk_vault::set_llm_input(
-        &content,
-        &format!("{}_policy_requested_input", kind.llm_inputs_key()),
-        "null",
-    )
-    .ok_or_else(|| miette::miette!("cannot clear policy request input"))
+    let mut content = content;
+    for suffix in ["policy_requested", "policy_requested_input"] {
+        if let Some(updated) =
+            lk_vault::clear_llm_input(&content, &format!("{}_{}", kind.llm_inputs_key(), suffix))
+        {
+            content = updated;
+        }
+    }
+    Ok(content)
 }
 
 /// Move each unreadable result into `corrupt_dir`, returning how many actually moved.
@@ -1832,6 +1838,14 @@ fn classify_against_page(
     let Ok(page) = lk_core::frontmatter::parse_page(&content) else {
         return Ok(TaskStatus::Unreadable);
     };
+    if page
+        .frontmatter
+        .get("type")
+        .and_then(|value| value.as_str())
+        != Some(kind.page_format())
+    {
+        return Ok(TaskStatus::Unreadable);
+    }
     let llm_inputs = page
         .frontmatter
         .get(lk_core::frontmatter::field::LLM_INPUTS);
@@ -1846,16 +1860,6 @@ fn classify_against_page(
     }
     if artifact == Artifact::Task && field(&kind.completion_key()).as_deref() == Some(cache_hash) {
         return Ok(TaskStatus::Done);
-    }
-    if page
-        .frontmatter
-        .get("type")
-        .and_then(|value| value.as_str())
-        != Some(kind.page_format())
-    {
-        // Preserve unfinished requests and answers until the declared format is repaired.
-        // Historical Done tasks may still retire without authorizing another publication.
-        return Ok(TaskStatus::Unreadable);
     }
     // Asked last, because it only decides the fate of work still to be written: EVERY
     // section the task names must exist on the page to receive it. An anchor the page does
@@ -1983,7 +1987,7 @@ mod tests {
         std::fs::write(
             dir.path().join("daily/s/2026-05-23.md"),
             format!(
-                "---\nllm_inputs:\n  summary: {}\ntitle: Notes: today\n---\n\n## 요약\n\nbody\n",
+                "---\ntype: daily\nllm_inputs:\n  summary: {}\ntitle: Notes: today\n---\n\n## 요약\n\nbody\n",
                 summary_hash("live")
             ),
         )
@@ -2252,7 +2256,7 @@ mod tests {
     }
 
     #[test]
-    fn unfinished_publication_requires_the_targets_declared_page_format() {
+    fn publication_and_completion_require_the_targets_declared_page_format() {
         let dir = TempDir::new().unwrap();
         let path = Path::new("page.md");
         for kind in TargetKind::iter() {
@@ -2302,8 +2306,8 @@ mod tests {
                             Artifact::Task
                         )
                         .unwrap(),
-                        TaskStatus::Done,
-                        "historical completion still permits retirement"
+                        TaskStatus::Unreadable,
+                        "matching completion cannot authorize wrong-format retirement"
                     );
                     assert_eq!(
                         classify_against_page(
@@ -2321,6 +2325,62 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn incompatible_page_formats_remain_unreadable_with_current_or_done_markers() {
+        for declaration in [
+            "",
+            "type: null\n",
+            "type: 42\n",
+            "type: [daily]\n",
+            "type: document\n",
+            "type: weekly-review\n",
+        ] {
+            for done in [false, true] {
+                let dir = TempDir::new().unwrap();
+                let path = "daily/s/day.md";
+                let task = task(path, "live");
+                let marker = if done {
+                    format!("  summary_done: {}\n", task.cache_hash)
+                } else {
+                    String::new()
+                };
+                let raw = format!(
+                    "---\n{declaration}llm_inputs:\n  summary: {}\n{marker}  summary_policy_requested: summary-v1\n  summary_policy_requested_input: {}\n---\n## 요약\n",
+                    task.cache_hash, task.cache_hash
+                );
+                std::fs::create_dir_all(dir.path().join("daily/s")).unwrap();
+                std::fs::write(dir.path().join(path), &raw).unwrap();
+                assert_eq!(
+                    classify_task(dir.path(), &task).unwrap(),
+                    TaskStatus::Unreadable,
+                    "{declaration}, done={done}"
+                );
+                let queue = dir.path().join(".lorekeeper/queue");
+                let pending = write_queue_file(&queue, "run.jsonl", &[task]);
+                let before = std::fs::read(&pending).unwrap();
+                let report = prune_queue(dir.path(), &queue, false).unwrap();
+                assert_eq!(report.kept_unreadable, 1);
+                assert_eq!(report.files_archived, 0);
+                assert_eq!(report.files_deleted, 0);
+                assert_eq!(std::fs::read(&pending).unwrap(), before);
+                assert_eq!(std::fs::read_to_string(dir.path().join(path)).unwrap(), raw);
+            }
+        }
+    }
+
+    #[test]
+    fn an_empty_answer_on_the_declared_format_is_done() {
+        let dir = TempDir::new().unwrap();
+        let task = task("daily/s/day.md", "live");
+        let page = format!(
+            "---\ntype: daily\nllm_inputs:\n  summary: {}\n  summary_done: {}\n---\n## 요약\n",
+            task.cache_hash, task.cache_hash
+        );
+        std::fs::create_dir_all(dir.path().join("daily/s")).unwrap();
+        std::fs::write(dir.path().join(&task.target.vault_path), page).unwrap();
+        assert_eq!(classify_task(dir.path(), &task).unwrap(), TaskStatus::Done);
     }
 
     #[test]
@@ -2450,7 +2510,7 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(
             &path,
-            format!("---\nid: x\nllm_inputs:\n  summary: {hash}\n  summary_done: {hash}\n---\n\n## Summary\n\nbody\n", hash = summary_hash("newhash")),
+            format!("---\nid: x\ntype: daily\nllm_inputs:\n  summary: {hash}\n  summary_done: {hash}\n---\n\n## Summary\n\nbody\n", hash = summary_hash("newhash")),
         )
         .unwrap();
         assert_eq!(
@@ -2786,7 +2846,7 @@ mod tests {
         std::fs::write(
             dir.path().join("daily/s/2026-05-23.md"),
             format!(
-                "---\nllm_inputs:\n  summary: {}\ntitle: Notes: today\n---\n\n## 요약\n\nbody\n",
+                "---\ntype: daily\nllm_inputs:\n  summary: {}\ntitle: Notes: today\n---\n\n## 요약\n\nbody\n",
                 summary_hash("live")
             ),
         )

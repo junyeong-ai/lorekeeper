@@ -1486,23 +1486,14 @@ pub(super) fn search_tags(page: &crate::VaultPage) -> Vec<String> {
         .collect()
 }
 
-/// What the page says it is: the body of its first `## ` section.
+/// What the page says it is: the body of its first root-level H2 section.
 ///
 /// Read by POSITION, which is type- and locale-independent on purpose. A concept leads with
 /// its synthesis, a document with its summary, an exploration with its question — the
 /// section's name differs with both the format and `vault.locale`, its position with neither,
 /// so nothing here has a table to keep in step with either.
 fn first_section(body: &str) -> Option<&str> {
-    let mut fence = lk_core::markdown::FenceState::new();
-    for line in body.lines() {
-        if fence.apply(line) || !fence.is_closed() {
-            continue;
-        }
-        if let Some(heading) = line.trim_end().strip_prefix("## ") {
-            return crate::section_body(body, heading);
-        }
-    }
-    None
+    crate::section::first_section(body)
 }
 
 /// The page's opening statement: the first paragraph of [`first_section`].
@@ -2176,6 +2167,8 @@ mod tests {
             "",
             "\n# Topic\n\n",
             "```markdown\n## Example\nquoted\n```\n",
+            "<!--\n```\n-->\n\n",
+            "<div>\n## Fake\n</div>\n\n",
         ] {
             write(
                 &concepts,
@@ -2191,6 +2184,24 @@ mod tests {
             assert_eq!(summary[0].excerpt, "A quasar emits radiation.");
             let citation = search(tmp.path(), &dirs, "Observation", 10).unwrap();
             assert_eq!(citation[0].matched, MatchField::Text);
+            let session = crate::MutationSession::acquire(tmp.path()).unwrap();
+            let snapshot = crate::prepare_search(&session, &dirs).unwrap();
+            for query in [None, Some("quasar")] {
+                let captured = super::search(
+                    tmp.path(),
+                    &dirs,
+                    &SearchOptions {
+                        query,
+                        snapshot: Some(&snapshot.snapshot),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                assert_eq!(captured.hits[0].excerpt, "A quasar emits radiation.");
+                if query.is_some() {
+                    assert_eq!(captured.hits[0].matched, MatchField::Summary);
+                }
+            }
         }
         assert_eq!(
             first_section(

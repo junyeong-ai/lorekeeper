@@ -369,7 +369,7 @@ impl Pipeline {
             };
             let summary_decision = llm_cache::lookup(
                 existing.as_ref(),
-                &summary_req.target.kind.completion_key(),
+                summary_req.target.kind,
                 |s| s.summary,
                 summary_req.cache_hash(),
             );
@@ -392,7 +392,7 @@ impl Pipeline {
             };
             let refine_decision = llm_cache::lookup(
                 existing.as_ref(),
-                &refine_req.target.kind.completion_key(),
+                refine_req.target.kind,
                 |s| item_kind.heading(s),
                 refine_req.cache_hash(),
             );
@@ -448,7 +448,7 @@ impl Pipeline {
                 };
                 let decision = llm_cache::lookup(
                     existing.as_ref(),
-                    &concepts_req.target.kind.completion_key(),
+                    concepts_req.target.kind,
                     |s| s.related_concepts,
                     concepts_req.cache_hash(),
                 );
@@ -694,7 +694,7 @@ impl Pipeline {
         for date in dates {
             let stored = self.event_log.read(source_id, date)?;
             let fresh_for_date = fresh_by_date.remove(&date).unwrap_or_default();
-            let merged = event_log::merge_by_id(stored, fresh_for_date);
+            let merged = event_log::merge_streaming_events(stored, fresh_for_date)?;
             if !dry_run && !merged.is_empty() {
                 self.event_log.write(source_id, date, &merged)?;
             }
@@ -795,6 +795,14 @@ impl Pipeline {
         // the run's drafts — `render_concept_pages` emits that accumulator unconditionally,
         // and a half-folded result would write concept pages this origin page was never
         // updated to cite.
+        for body in result
+            .concepts
+            .iter()
+            .filter_map(|concept| concept.synthesis.as_deref())
+        {
+            lk_core::markdown::validate_section_body(body)
+                .map_err(|error| PipelineError::Render(error.to_string()))?;
+        }
         let mut staged = Vec::with_capacity(result.concepts.len());
         for reported in &result.concepts {
             if manifest.is_some() && reported.rss_evidence.is_empty() {
@@ -1238,7 +1246,7 @@ impl Pipeline {
             };
             let summary_decision = llm_cache::lookup(
                 existing.as_ref(),
-                &summary_req.target.kind.completion_key(),
+                summary_req.target.kind,
                 |s| s.summary,
                 summary_req.cache_hash(),
             );
@@ -1281,7 +1289,7 @@ impl Pipeline {
                 };
                 let decision = llm_cache::lookup(
                     existing.as_ref(),
-                    &concepts_req.target.kind.completion_key(),
+                    concepts_req.target.kind,
                     |s| s.related_concepts,
                     concepts_req.cache_hash(),
                 );

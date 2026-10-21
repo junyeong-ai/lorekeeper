@@ -13,9 +13,13 @@ canonical; SQLite navigation is derived.
   optimistic guards; never reconstruct it from parsed fields.
 - `VaultStore::read_frontmatter` projects metadata without validating the body. Use it
   for name/address inventories; publication still reads and guards the complete page.
-- `section.rs`: section reads/replacements share fence-aware heading boundaries.
+- `section.rs`: section reads/replacements use root-level CommonMark H2 boundaries,
+  excluding frontmatter, nested blocks, code and HTML. Only exact ATX headings are
+  owned anchors; duplicates refuse reads/replacement. Preserve surrounding bytes.
   Read with `resolve_section` across locales, preferring nonblank when both exist;
   legitimate blank remains present. Write current locale headings only.
+  Semantic bodies use `replace_section_checked`, including cached and grounding prose;
+  checked replacement preserves all page boundaries or refuses the write.
 - Frontmatter setters stay within the real block: `set_frontmatter_field` changes
   a top-level key; `set_llm_input` changes a child of block-style `llm_inputs`;
   `record_llm_input` may establish that mapping. Missing placement returns `None`,
@@ -29,6 +33,12 @@ canonical; SQLite navigation is derived.
   include bullets: emit `{{ c }}`, not `- {{ c }}`. LLM-derived YAML strings use JSON
   serialization. Only NotFound means no user override; parse/I/O errors propagate.
   Keep the exhaustive daily-template render contract test when adding a child.
+  Scalar titles/authors use `markdown_text`; source bodies use `markdown_fragment`,
+  source links `markdown_link`. Fragment rendering owns heading containment,
+  reference/footnote isolation and code closure without changing event identity.
+  EOF-terminated raw HTML displays as literal `html` code; balanced HTML stays markup.
+  Templates own generated separators; rendering never collapses whitespace across
+  injected source, semantic bodies or frontmatter.
 
 ## Publication and paths (`mutation.rs`, `address.rs`, `review.rs`)
 

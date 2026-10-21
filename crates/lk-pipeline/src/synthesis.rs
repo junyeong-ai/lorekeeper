@@ -182,7 +182,11 @@ impl Synthesizer {
             return Ok(SynthesisSection::cached(decision));
         }
         match self.ctx.llm.summarize(req).await {
-            Ok(narrative) => Ok(SynthesisSection::fresh(decision, narrative)),
+            Ok(narrative) => {
+                lk_core::markdown::validate_section_body(&narrative)
+                    .map_err(|error| PipelineError::Render(error.to_string()))?;
+                Ok(SynthesisSection::fresh(decision, narrative))
+            }
             Err(e) if e.is_fatal() => Err(PipelineError::Queue(e)),
             Err(e) => {
                 tracing::warn!(error = %e, what, "synthesis summarize failed; skipping page");
@@ -203,12 +207,7 @@ impl Synthesizer {
         hash: String,
     ) -> Result<SectionDecision, PipelineError> {
         let existing = self.reader.read_page(path.as_ref()).await?;
-        Ok(llm_cache::lookup(
-            existing.as_ref(),
-            &kind.completion_key(),
-            heading,
-            hash,
-        ))
+        Ok(llm_cache::lookup(existing.as_ref(), kind, heading, hash))
     }
 
     /// Render a synthesis/personal template, injecting localized labels as `i18n.*`
@@ -312,6 +311,10 @@ impl Synthesizer {
         } else {
             Vec::new()
         };
+        for theme in &themes {
+            lk_core::markdown::validate_section_body(&theme.description)
+                .map_err(|error| PipelineError::Render(error.to_string()))?;
+        }
 
         // Weekly synthesis observes concepts already materialized during daily ingest;
         // it does not extract new ones here (which would not be persisted to wiki/concepts).

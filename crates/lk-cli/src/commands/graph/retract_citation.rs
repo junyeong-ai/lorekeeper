@@ -227,15 +227,13 @@ fn remove_generated_links(
     scope: RetractionScope,
 ) -> Result<String, String> {
     let headings: Vec<_> = lk_vault::section_headings(|s| s.related_concepts).collect();
-    let mut fence = lk_core::markdown::FenceState::new();
-    let count = before
-        .lines()
-        .filter(|line| {
-            !fence.apply(line)
-                && fence.is_closed()
-                && headings
-                    .iter()
-                    .any(|heading| line.trim_end() == format!("## {heading}"))
+    let page = lk_vault::parse_page(before).map_err(|error| error.to_string())?;
+    let count = lk_core::markdown::root_headings(&page.body)
+        .iter()
+        .filter(|section| {
+            headings.iter().any(|heading| {
+                page.body[section.range.clone()].trim_end() == format!("## {heading}")
+            })
         })
         .count();
     if count != 1 {
@@ -253,7 +251,13 @@ fn remove_generated_links(
         offset += line.len();
     }
     let mut removed = BTreeSet::new();
-    for occurrence in lk_core::link::extract_page_link_occurrences(before) {
+    let body_offset =
+        lk_core::frontmatter::body_offset(before).ok_or("origin has unclosed frontmatter")?;
+    let first_body_line = before[..body_offset]
+        .bytes()
+        .filter(|byte| *byte == b'\n')
+        .count();
+    for occurrence in lk_core::link::extract_page_link_occurrences(&before[body_offset..]) {
         let Some(dest) = lk_core::link::resolve_dest(origin, &occurrence.link.dest) else {
             continue;
         };
@@ -266,7 +270,7 @@ fn remove_generated_links(
         if !addresses_target {
             continue;
         }
-        let index = occurrence.line - 1;
+        let index = first_body_line + occurrence.line - 1;
         let line = lines[index];
         if offsets[index] < start || offsets[index] + line.len() > end {
             if scope == RetractionScope::GeneratedOnly {
@@ -470,6 +474,31 @@ mod tests {
         assert!(after.contains("```md\n## Related Concepts\n- [Retry](../concepts/retry.md)\n```"));
         let ko = RAW.replace("Related Concepts", "관련 개념");
         assert!(retract(&config.root, Path::new(ORIGIN), Path::new(CONCEPT), &ko).is_ok());
+    }
+    #[test]
+    fn citation_section_ownership_uses_commonmark_outside_html_and_frontmatter() {
+        for raw in [
+            RAW.replace(
+                "Original claim.",
+                "<div>\n## Related Concepts\n</div>\n\nOriginal claim.",
+            ),
+            RAW.replace(
+                "Original claim.",
+                "<pre>\n```\n## Related Concepts\n</pre>\n\nOriginal claim.",
+            ),
+            RAW.replace(
+                "Original claim.",
+                "<!--\n```\n## Related Concepts\n-->\n\nOriginal claim.",
+            ),
+            RAW.replace(
+                "title: Evidence",
+                "title: Evidence\nnotes: |\n  ```\n  ## Related Concepts",
+            ),
+        ] {
+            let (_dir, config) = fixture(&raw);
+            let after = retract(&config.root, Path::new(ORIGIN), Path::new(CONCEPT), &raw).unwrap();
+            assert_eq!(after, raw.replace("- [Retry](../concepts/retry.md)\n", ""));
+        }
     }
     #[test]
     fn queue_collision_and_unpublished_result_refuse_without_edit() {

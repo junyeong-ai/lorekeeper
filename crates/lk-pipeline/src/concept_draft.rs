@@ -8,7 +8,7 @@ use lk_core::config::{ConceptPolicy, VaultDirs};
 use lk_core::frontmatter::field;
 use lk_core::i18n::Locale;
 use lk_core::vault_path::VaultPath;
-use lk_vault::{TemplateEngine, VaultStore, replace_section};
+use lk_vault::{TemplateEngine, VaultStore, replace_section_checked};
 
 use crate::PipelineError;
 use crate::render::RenderResult;
@@ -900,7 +900,7 @@ impl ConceptDraft {
             (strings.related, &self.preserved_related),
         ] {
             if let Some(body) = body {
-                content = replace_section(&content, heading, body);
+                content = replace_section_checked(&content, heading, body)?;
             }
         }
 

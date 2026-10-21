@@ -13,11 +13,16 @@ configuration. Publication is guarded, not a second uncoordinated render path.
 - Normalize event identity from external_id or JSON `[title, body]`. Dedup only
   exact `EventId` within one fetch, first wins; URL/title/body similarity is not
   identity. Cross-source observations remain separate provenance.
+  Trim title padding but retain the exact body, including code, raw HTML and line
+  endings. The render boundary owns heading containment and presentation syntax.
 - Canonicalize through `Event::canonical_cmp` (newest, then id) before bucketing,
   hashing and rendering. Adapter return order must not change bytes/cache hashes.
 - Streaming sources union fetched and stored raw events per date, fresh ID wins.
   Corrupt event-log lines fail without rewriting: skipping would destroy retained
   observations. Complete-refetch sources render their fetched full civil days.
+  RSS retains an established event ID only from exact framed identity or a fresh
+  entry's computed legacy ID plus matching recorded feed. Competing owners fail;
+  stored-only observations and prior immutable event selectors remain unchanged.
 - Derive dates in configured timezone; future events never materialize. Adapters
   own `is_self`; `assign_personal` additionally requires configured tracked sources.
   Keyword classification is ordered first-match; bounded Latin matching and CJK

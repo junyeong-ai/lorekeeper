@@ -6,7 +6,6 @@
 
 use std::collections::HashMap;
 
-use lk_core::text::collapse_blank_lines;
 use serde_json::Value;
 
 /// Convert an HTML fragment to Markdown via `htmd`. `htmd::convert` reads from an
@@ -928,7 +927,7 @@ pub fn readable_article(html: &str, base_url: &url::Url) -> Option<crate::fetch:
 pub fn adf_to_markdown(node: &Value) -> String {
     let mut out = String::new();
     render_adf(node, &mut out);
-    collapse_blank_lines(out.trim())
+    out.trim().to_string()
 }
 
 fn render_adf(node: &Value, out: &mut String) {
@@ -2033,6 +2032,34 @@ mod tests {
             }]
         });
         assert_eq!(adf_to_markdown(&adf), "```rust\nlet x = 1;\n```");
+    }
+
+    #[test]
+    fn adf_code_block_preserves_literal_blank_lines() {
+        let code = "value = \"\"\"first\n\n\nsecond\"\"\"\n";
+        let adf = json!({
+            "type": "doc",
+            "content": [{
+                "type": "codeBlock", "attrs": {"language": "python"},
+                "content": [{"type": "text", "text": code}]
+            }, {
+                "type": "paragraph",
+                "content": [{"type": "text", "text": "Following prose."}]
+            }]
+        });
+        let output = adf_to_markdown(&adf);
+        let mut in_code = false;
+        let mut literal = String::new();
+        for event in pulldown_cmark::Parser::new(&output) {
+            match event {
+                pulldown_cmark::Event::Start(pulldown_cmark::Tag::CodeBlock(_)) => in_code = true,
+                pulldown_cmark::Event::End(pulldown_cmark::TagEnd::CodeBlock) => in_code = false,
+                pulldown_cmark::Event::Text(text) if in_code => literal.push_str(&text),
+                _ => {}
+            }
+        }
+        assert_eq!(literal, code);
+        assert!(output.ends_with("Following prose."));
     }
 
     #[test]

@@ -53,7 +53,7 @@ pub fn rss_link_previews(
         offsets.push((offset, line.trim_end_matches(['\r', '\n'])));
         offset += line.len();
     }
-    for occurrence in lk_core::link::extract_page_link_occurrences(raw) {
+    for occurrence in page_link_occurrences(raw)? {
         let (offset, line) = offsets[occurrence.line - 1];
         if offset < start
             || offset + line.len() > start + section.body.len()
@@ -86,6 +86,20 @@ pub fn rss_link_previews(
         );
     }
     Ok(result)
+}
+
+/// Preserve physical page lines while treating only the original Markdown body as links.
+fn page_link_occurrences(
+    raw: &str,
+) -> Result<Vec<lk_core::link::PageLinkOccurrence<'_>>, VaultError> {
+    let offset = lk_core::frontmatter::body_offset(raw)
+        .ok_or_else(|| err("RSS evidence page has unclosed frontmatter"))?;
+    let lines = raw[..offset].bytes().filter(|byte| *byte == b'\n').count();
+    let mut occurrences = lk_core::link::extract_page_link_occurrences(&raw[offset..]);
+    for occurrence in &mut occurrences {
+        occurrence.line += lines;
+    }
+    Ok(occurrences)
 }
 
 fn is_generated_link(line: &str, link: &lk_core::link::PageLink) -> bool {
@@ -218,7 +232,7 @@ fn rss_concept_citations_mode(
         offset += line.len();
     }
     let mut occurrences: BTreeMap<std::path::PathBuf, (usize, bool)> = BTreeMap::new();
-    for occurrence in lk_core::link::extract_page_link_occurrences(raw) {
+    for occurrence in page_link_occurrences(raw)? {
         let Some(target) = lk_core::link::resolve_dest(origin, &occurrence.link.dest) else {
             continue;
         };
@@ -647,4 +661,65 @@ pub fn inspect_rss_evidence_inventory(
         limit,
         next_offset: (end < total).then_some(end),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rss_body_links_preserve_selected_evidence_and_physical_lines_after_yaml_fences() {
+        let root = tempfile::tempdir().unwrap();
+        let session = crate::MutationSession::acquire(root.path()).unwrap();
+        let event: lk_core::event::Event = serde_json::from_value(serde_json::json!({
+            "id":"rss:2026-10-18:0000000000000001", "source_id":"rss", "source_type":"rss",
+            "timestamp":"2026-10-18T00:00:00Z", "date":"2026-10-18", "title":"Title", "body":"Original evidence.",
+            "url":"https://example.com", "author":null, "labels":[], "category":null,
+            "performance_category":null, "is_self":false, "is_personal":false, "metadata":{}
+        })).unwrap();
+        let capture = lk_core::rss_original::RssOriginalCapture::from_events(&[&event]).unwrap();
+        let reference = crate::publish_rss_original(&session, &capture).unwrap();
+        let selected = &capture.manifest.events[0];
+        let bindings = serde_json::json!([{
+            "schema":RSS_EVIDENCE_SCHEMA, "concept":"wiki/concepts/topic.md", "manifest":reference,
+            "events":[{"event_id":selected.event_id,"revision":selected.revision}]
+        }]);
+        let prefix = format!(
+            "\u{feff}---\r\ntype: daily\r\nsource: rss\r\ncreated: 2026-10-18\r\nsource_record: {{rss_original: {}}}\r\nconcept_evidence: {bindings}\r\nliteral: |\r\n  ```\r\n  [Metadata](../wiki/concepts/topic.md)\r\n---\r\n\r\n",
+            serde_json::to_string(&reference).unwrap()
+        );
+        let raw = format!(
+            "{prefix}<div>\r\n[HTML](../wiki/concepts/topic.md)\r\n</div>\r\n\r\n<!--\r\n```\r\n-->\r\n\r\n## Related Concepts\r\n- [Topic](../wiki/concepts/topic.md)\r\n"
+        );
+        let origin = Path::new("daily/rss.md");
+        let line = raw
+            .lines()
+            .position(|line| line == "- [Topic](../wiki/concepts/topic.md)")
+            .unwrap()
+            + 1;
+        for authored in [false, true] {
+            let raw = if authored {
+                format!("{raw}\r\nAn authored [Topic](../wiki/concepts/topic.md) reference.\r\n")
+            } else {
+                raw.clone()
+            };
+            let previews = rss_link_previews(root.path(), origin, &raw).unwrap();
+            assert_eq!(previews.len(), 1);
+            assert_eq!(previews[&line].total, 1);
+            assert_eq!(previews[&line].events[0].revision, selected.revision);
+            let citations = rss_concept_citations(root.path(), origin, &raw).unwrap();
+            let citations = &citations["wiki/concepts/topic.md"];
+            assert_eq!(citations.len(), 1 + usize::from(authored));
+            assert_eq!(
+                citations
+                    .iter()
+                    .filter(|citation| citation.rss_event.is_some())
+                    .count(),
+                1
+            );
+            let mut plan = crate::MutationPlan::default();
+            guard_rss_evidence(&mut plan, root.path(), origin, &raw).unwrap();
+            session.apply(plan).unwrap();
+        }
+    }
 }

@@ -3,11 +3,11 @@
 {% block items_heading %}{{ i18n.key_messages }}{% endblock %}
 {% block events %}
 {% for event in events %}
-### {{ event.title }}
+### {{ event.title | markdown_text }}
 
-{{ event.body }}
+{{ event.body | markdown_fragment }}
 {% if event.url %}
-[{{ i18n.original_message }}]({{ event.url }})
+{{ event.url | markdown_link(i18n.original_message) }}
 {% endif %}
 
 {% endfor %}

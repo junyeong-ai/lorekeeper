@@ -3,11 +3,11 @@
 {# Feed entries lead with provenance (author · link), then the body. #}
 {% block events %}
 {% for item in events -%}
-### {{ item.title }}
+### {{ item.title | markdown_text }}
 
-{% if item.author %}*{{ item.author }}*{% endif %}{% if item.url %} · 🔗 {{ item.url }}{% endif %}
+{% if item.author %}*{{ item.author | markdown_text }}*{% endif %}{% if item.url %} · {{ item.url | markdown_link("🔗 " ~ i18n.original_link) }}{% endif %}
 
-{{ item.body }}
+{{ item.body | markdown_fragment }}
 
 {% endfor %}
 {% endblock %}

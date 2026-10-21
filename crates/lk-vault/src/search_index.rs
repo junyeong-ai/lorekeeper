@@ -9,7 +9,7 @@ use crate::search::{MatchProjection, Page, SearchOptions, SearchResult, fold_nam
 use crate::{MutationSession, VaultError};
 
 pub(super) const INDEX_PATH: &str = ".lorekeeper/search.sqlite";
-const VERSION: i32 = 16;
+const VERSION: i32 = 17;
 
 #[derive(Serialize, Deserialize)]
 struct BrowseFacets {
@@ -1713,7 +1713,7 @@ mod tests {
         write(
             root.path(),
             concept,
-            "---\ntype: concept\ntitle: Topic\n---\nScoped knowledge.\n",
+            "---\ntype: concept\ntitle: Topic\n---\n<!--\n```\n-->\n\n<div>\n## False heading\n</div>\n\n## Synthesis\nScoped knowledge.\n\n## Sources\n",
         );
         let session = MutationSession::acquire(root.path()).unwrap();
         let inspect = |snapshot: &str, status: Status| {
@@ -1729,6 +1729,7 @@ mod tests {
                 )
                 .unwrap();
                 assert_eq!(result.hits[0].synthesis.status, status);
+                assert_eq!(result.hits[0].excerpt, "Scoped knowledge.");
             }
             let context = crate::inspect_page_context(
                 root.path(),
@@ -1742,6 +1743,7 @@ mod tests {
             )
             .unwrap();
             assert_eq!(context.synthesis.status, status);
+            assert_eq!(context.summary, "Scoped knowledge.");
             match context.evidence {
                 crate::ContextEvidence::Available(evidence) => {
                     assert_eq!(status, Status::EmptyEvidence);

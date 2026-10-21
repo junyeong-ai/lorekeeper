@@ -52,6 +52,11 @@ config loading and the shared filesystem primitives intentionally perform I/O.
 
 ## Markdown and links (`link.rs`, `markdown.rs`, `text.rs`)
 
+- `markdown::root_headings` owns CommonMark root structure. Semantic section bodies
+  use `validate_section_body`: reject parent/sibling headings and syntax consuming
+  the next section; preserve valid HTML and literal code without rewriting prose.
+- Whole-page link consumers use `frontmatter::body_offset` to exclude metadata while
+  preserving original bytes and physical line positions. Body parsers do not infer YAML.
 - Use `link` for construction, extraction, rewrite and resolution. Links are
   CommonMark relative `.md` destinations; escape/percent-encode through shared
   helpers. Extraction excludes code/images/external schemes; preserving a link
@@ -66,7 +71,8 @@ config loading and the shared filesystem primitives intentionally perform I/O.
   and every occurrence per line. Read the grammar comments and positive/negative
   tests in `markdown.rs` before adding/narrowing a form; dropping an unsupported
   grammar is better than false coverage. Another scanner's threshold is not proof.
-- Use `text::collapse_blank_lines` for shared CR/blank-line normalization.
+- Source Markdown and literal code retain their content. Normalize generator-owned
+  separators where they are produced, never whole source bodies or rendered pages.
 
 ## Semantic ranges (`semantic.rs`)
 
@@ -116,3 +122,5 @@ article/feed metadata; exclude labels/ownership/classification. Unknown acquisit
 time is `captured_at: null`, never mtime. Recursive object-key ordering plus
 serde_json scalar encoding is this format, not RFC8785. Exact bytes determine full
 BLAKE3 revisions; source/day/event identity alone does not identify content.
+`RssEntryIdentity` frames feed/entry strings separately. Its retained metadata is
+identity evidence; provenance checks never infer that tuple from title, URL or body.

@@ -183,6 +183,8 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   observation, including full commit refs, blob/document identity, manifest, and
   remote ownership. A blocked mismatch is not adoption. Archival source identity
   does not itself decide lifecycle state.
+  Current and historical Content proofs use the same Markdown fragment renderer;
+  do not approximate prior lossy formatting or infer provenance from similar text.
 
 ## Task intent (`commands/task.rs`, delegated to lk-task)
 

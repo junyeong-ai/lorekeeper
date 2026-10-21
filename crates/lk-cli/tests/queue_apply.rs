@@ -1782,7 +1782,11 @@ fn duplicate_sections_fold_once_and_conflicting_typed_proposals_remain_for_revie
                 assert_eq!(ws.read(&original_path), original);
                 assert_eq!(ws.read(&alias_path), alias);
             } else {
-                assert!(ws.read(target).contains(&format!("{key}_done: {hash}")));
+                let answered = lk_vault::parse_page(&ws.read(target)).unwrap();
+                assert_eq!(
+                    answered.frontmatter.get("llm_inputs").unwrap()[format!("{key}_done")],
+                    hash
+                );
                 assert!(!ws.vault().join(&original_path).exists());
                 assert!(!ws.vault().join(&alias_path).exists());
                 assert!(
@@ -2176,7 +2180,11 @@ fn staged_sections_are_snapshot_guarded_and_only_the_applier_stamps_completion()
         );
         if accepted {
             let after = ws.read("daily/source/page.md");
-            assert!(after.contains(&format!("{key}_done: {hash}")));
+            let parsed = lk_vault::parse_page(&after).unwrap();
+            assert_eq!(
+                parsed.frontmatter.get("llm_inputs").unwrap()[format!("{key}_done")],
+                hash
+            );
             assert!(after.contains("Preserve."));
             assert!(after.contains(body));
             assert!(ws.run(&["queue", "apply"]).status.success());
@@ -2195,6 +2203,64 @@ fn staged_sections_are_snapshot_guarded_and_only_the_applier_stamps_completion()
             assert!(!ws.run(&["queue", "prune"]).status.success());
             assert!(ws.vault().join(".lorekeeper/queue/tasks.jsonl").exists());
         }
+    }
+}
+
+#[test]
+fn staged_sections_retain_work_when_the_target_declares_an_incompatible_format() {
+    for completed in [false, true] {
+        let ws = Workspace::new();
+        let request = lk_queue::SummarizeRequest {
+            text: "Retained source evidence.".into(),
+            max_sentences: 3,
+            focus: None,
+            locale: lk_core::i18n::Locale::En,
+            source_type: None,
+            target: lk_queue::TaskTarget {
+                vault_path: "wiki/documents/source.md".into(),
+                kind: lk_queue::TargetKind::DocumentSummary,
+                anchor: "## Summary".into(),
+            },
+        };
+        let task = lk_queue::QueueLlmClient::new(ws.vault().join(".lorekeeper/queue")).build_task(
+            "fixture",
+            lk_queue::TaskKind::Summarize,
+            request,
+        );
+        let marker = if completed {
+            format!("  summary_done: {}\n", task.cache_hash)
+        } else {
+            String::new()
+        };
+        let page = format!(
+            "---\ntype: weekly-review\nllm_inputs:\n  summary: {}\n{marker}---\n## Summary\nPreserve this body.\n",
+            task.cache_hash
+        );
+        ws.write(&task.target.vault_path, &page);
+        let pending = serde_json::to_string(&task).unwrap();
+        ws.write(".lorekeeper/queue/run.jsonl", &pending);
+        let result = lk_queue::SectionResult {
+            task_id: task.task_id.clone(),
+            cache_hash: task.cache_hash.clone(),
+            target_revision: lk_core::concept::file_revision(&page),
+            body: "A freshly generated interpretation.".into(),
+        };
+        let staged = serde_json::to_string(&result).unwrap();
+        let result_path = ".lorekeeper/queue/results/result.section.json";
+        ws.write(result_path, &staged);
+
+        let status: serde_json::Value =
+            serde_json::from_slice(&ws.run(&["queue", "status", "--json"]).stdout).unwrap();
+        assert_eq!(status["data"]["tasks"][0]["status"], "unreadable");
+        for args in [vec!["queue", "apply", "--dry-run"], vec!["queue", "apply"]] {
+            assert!(!ws.run(&args).status.success());
+            assert_eq!(ws.read(&task.target.vault_path), page);
+            assert_eq!(ws.read(result_path), staged);
+        }
+        assert!(!ws.run(&["queue", "check"]).status.success());
+        assert!(!ws.run(&["queue", "prune"]).status.success());
+        assert_eq!(ws.read(".lorekeeper/queue/run.jsonl"), pending);
+        assert_eq!(ws.read(result_path), staged);
     }
 }
 
@@ -2226,6 +2292,8 @@ fn explicit_regeneration_reuses_retained_input_and_stamps_policy_without_global_
         "historical-policy",
         "pending",
         "pending-historical-policy",
+        "wrong-page-format",
+        "pending-wrong-page-format",
         "changed-input",
         "missing",
         "ambiguous",
@@ -2272,6 +2340,12 @@ fn explicit_regeneration_reuses_retained_input_and_stamps_policy_without_global_
         if scenario == "changed-input" {
             ws.write("daily/source/day.md", &page.replace(&hash, "changed"));
         }
+        if matches!(scenario, "wrong-page-format" | "pending-wrong-page-format") {
+            ws.write(
+                "daily/source/day.md",
+                &page.replace("type: daily", "type: weekly-review"),
+            );
+        }
         let before = ws.read("daily/source/day.md");
         let args = ["queue", "regenerate", "--task-id", "retained"];
         let preview = ws.run(&[args.as_slice(), &["--dry-run"]].concat());
@@ -2295,6 +2369,9 @@ fn explicit_regeneration_reuses_retained_input_and_stamps_policy_without_global_
         );
         if !accepted {
             assert_eq!(ws.read("daily/source/day.md"), before);
+            if scenario.starts_with("pending") {
+                assert_eq!(ws.read(retained), task.to_string());
+            }
             continue;
         }
         let selected: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
@@ -2597,7 +2674,11 @@ fn staged_section_links_must_resolve_inside_the_vault() {
                 } else {
                     let published = ws.read(&task.target.vault_path);
                     assert!(published.contains(&body));
-                    assert!(published.contains(&format!("summary_done: {}", task.cache_hash)));
+                    let page = lk_vault::parse_page(&published).unwrap();
+                    assert_eq!(
+                        page.frontmatter.get("llm_inputs").unwrap()["summary_done"],
+                        task.cache_hash
+                    );
                 }
             }
         }
