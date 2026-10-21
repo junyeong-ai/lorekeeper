@@ -36,7 +36,7 @@ fn serialize(events: &[Event<'_>]) -> Result<String, Error> {
 }
 
 /// A root heading at this exact byte offset proves the preceding fragment has ended.
-fn contains_boundary(fragment: &str) -> bool {
+fn has_sibling_boundary(fragment: &str) -> bool {
     let offset = fragment.len() + 2;
     let probe = format!("{fragment}\n\n## boundary\n");
     let mut depth = 0;
@@ -64,7 +64,7 @@ fn contains_boundary(fragment: &str) -> bool {
     false
 }
 
-fn level(level: HeadingLevel, shift: usize) -> HeadingLevel {
+fn shift_heading_level(level: HeadingLevel, shift: usize) -> HeadingLevel {
     match (level as usize + shift).min(6) {
         1 => HeadingLevel::H1,
         2 => HeadingLevel::H2,
@@ -99,14 +99,14 @@ pub(crate) fn render(value: &str) -> Result<String, Error> {
                 attrs,
             }) => {
                 events.push(Event::Start(Tag::Heading {
-                    level: level(old, shift),
+                    level: shift_heading_level(old, shift),
                     id,
                     classes,
                     attrs,
                 }));
             }
             Event::End(TagEnd::Heading(old)) => {
-                events.push(Event::End(TagEnd::Heading(level(old, shift))))
+                events.push(Event::End(TagEnd::Heading(shift_heading_level(old, shift))))
             }
             Event::Start(Tag::Link {
                 dest_url, title, ..
@@ -150,7 +150,7 @@ pub(crate) fn render(value: &str) -> Result<String, Error> {
                         }
                     }
                 }
-                if contains_boundary(&block) {
+                if has_sibling_boundary(&block) {
                     events.extend([
                         Event::Start(Tag::HtmlBlock),
                         Event::Html(block.into()),
@@ -172,7 +172,7 @@ pub(crate) fn render(value: &str) -> Result<String, Error> {
         }
     }
     let output = serialize(&events)?;
-    if !contains_boundary(&output) {
+    if !has_sibling_boundary(&output) {
         return Err(Error::new(
             ErrorKind::InvalidOperation,
             "source Markdown does not preserve the surrounding page boundary",
@@ -234,7 +234,7 @@ mod tests {
             "ordinary **text**",
         ] {
             let output = render(value).unwrap_or_else(|error| panic!("{value:?}: {error}"));
-            assert!(contains_boundary(&output), "{value:?}: {output}");
+            assert!(has_sibling_boundary(&output), "{value:?}: {output}");
             let page = format!("## Source\n\n{output}\n\n## Related\n\nowned\n");
             assert_eq!(
                 crate::section_body(&page, "Related").unwrap().trim(),
