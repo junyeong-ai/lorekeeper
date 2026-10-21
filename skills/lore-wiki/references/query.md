@@ -68,6 +68,8 @@ For a body hit, `excerpt_kind` distinguishes a matching block from a `partial-ma
 whose terms occur in separate locations. The bounded excerpt may clip that block;
 use its `excerpt_section` with revision-pinned `wiki read --section` to inspect it.
 An opening preview introduces a named page; it is not automatically claim evidence.
+When the whole-document HTML projection has no verified source range, the section
+locator is null; inspect the outline instead of inferring an occurrence from equal text.
 Inspect its outline, then read relevant `--section ID` content and follow `next_offset`.
 Carry `--revision` through pagination; a mismatch requires fresh retrieval. A section
 includes nested subsections. Read the sources behind the claim, not only its synthesis.

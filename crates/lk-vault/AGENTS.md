@@ -111,6 +111,9 @@ canonical; SQLite navigation is derived.
   scripts, styles, head metadata, templates and embedded-content fallback containers
   (`noscript`, `iframe`, `noembed`, `noframes`) do not contribute text. Form choices
   and legends remain separate text blocks; this projection does not evaluate CSS.
+- Excerpt locations use the selected visible block's original parser range from one
+  complete document parse. Section slices lose global references; equal text does not
+  identify an occurrence. HTML DOM text without a source map has no inferred locator.
   ASCII-alphanumeric term edges require boundaries, CJK allows attached particles.
 - Browse filters/facets/pagination have distinct counts: facets before metadata/date
   filters, total after, pagination last. Each facet pages distinct values in exact-value
