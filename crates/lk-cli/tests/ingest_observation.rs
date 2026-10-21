@@ -121,6 +121,185 @@ fn assert_success(output: &Output) {
 }
 
 #[test]
+fn source_recovery_binds_observed_site_and_principal_instead_of_rotating_credentials() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("vault");
+    let config = temp.path().join("config.yaml");
+    let credentials = temp.path().join("credentials.json");
+    let principal = Arc::new(AtomicUsize::new(1));
+    let searches = Arc::new(AtomicUsize::new(0));
+    let make_server = || {
+        let principal = principal.clone();
+        let searches = searches.clone();
+        LocalServer::new(move |url| {
+            let body = match url.path() {
+                "/rest/api/user/current" => match principal.load(Ordering::Relaxed) {
+                    0 => serde_json::json!({}),
+                    id => serde_json::json!({"username": format!("principal-{id}")}),
+                },
+                "/rest/api/content/search" => {
+                    searches.fetch_add(1, Ordering::Relaxed);
+                    serde_json::json!({"results": []})
+                }
+                path => panic!("unexpected identity fixture path {path}"),
+            };
+            ("application/json", body.to_string())
+        })
+    };
+    let old_site = make_server();
+    let new_site = make_server();
+    let day = jiff::Timestamp::now()
+        .to_zoned(jiff::tz::TimeZone::UTC)
+        .date()
+        .yesterday()
+        .unwrap();
+    std::fs::write(&config, format!(
+        "vault: {{root: {}, timezone: UTC, locale: en}}\nidentity: {{name: Test, email: test@example.invalid}}\ncredentials: {{file: {}}}\nllm: {{provider: noop}}\ningest:\n  recovery: {{start_date: '{day}', max_days_per_source_per_run: 1}}\nsources:\n  docs:\n    type: confluence\n    instance: fixture\n    params: {{cql: 'type = page'}}\n",
+        root.display(), credentials.display()
+    )).unwrap();
+    let change_credentials = |site: &str, token: &str| {
+        let mut creds = lk_source::credentials::Credentials::default();
+        creds.atlassian.insert(
+            "fixture".into(),
+            lk_source::credentials::AtlassianCredentials {
+                site_url: site.into(),
+                auth: lk_source::credentials::AtlassianAuthMethod::PersonalAccessToken {
+                    token: token.into(),
+                },
+            },
+        );
+        lk_source::credentials::CredentialStore::new(&credentials)
+            .unwrap()
+            .lock()
+            .unwrap()
+            .save(&creds)
+            .unwrap();
+    };
+    change_credentials(&old_site.base, "first-fixture-token");
+    assert_success(&run(
+        &config,
+        &["ingest", "docs", "--date", &day.to_string()],
+    ));
+    let state = root.join(".lorekeeper/periods/state.json");
+    let before = std::fs::read(&state).unwrap();
+    let receipt: serde_json::Value = serde_json::from_slice(&before).unwrap();
+    assert_eq!(receipt["version"], 2);
+    assert_eq!(
+        receipt["batches"][0]["sources"][0]["collection_identity"]["authority"],
+        old_site.base
+    );
+    let search_count = searches.load(Ordering::Relaxed);
+    let preview = |expected: usize| {
+        let output = run(&config, &["ingest", "--recover", "--dry-run"]);
+        assert_success(&output);
+        let diagnostic = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            diagnostic.contains(&format!("{expected} source-day selections")),
+            "{diagnostic}"
+        );
+        assert_eq!(std::fs::read(&state).unwrap(), before);
+        assert_eq!(searches.load(Ordering::Relaxed), search_count);
+    };
+    preview(0);
+    change_credentials(&old_site.base, "rotated-fixture-token");
+    preview(0);
+    change_credentials(&new_site.base, "rotated-fixture-token");
+    preview(1);
+    change_credentials(&old_site.base, "rotated-fixture-token");
+    principal.store(2, Ordering::Relaxed);
+    preview(1);
+
+    principal.store(0, Ordering::Relaxed);
+    let original_config = std::fs::read_to_string(&config).unwrap();
+    std::fs::write(
+        &config,
+        format!("{original_config}  tasks: {{type: tasks}}\npersonal: {{tasks: {{}}}}\n"),
+    )
+    .unwrap();
+    let failed = run(&config, &["ingest", "--recover", "--dry-run"]);
+    assert!(!failed.status.success());
+    let diagnostic = String::from_utf8_lossy(&failed.stderr);
+    assert!(
+        diagnostic.contains("collection identity unavailable"),
+        "{diagnostic}"
+    );
+    assert!(
+        diagnostic.contains("[recovery] tasks") && diagnostic.contains("would collect"),
+        "{diagnostic}"
+    );
+    assert_eq!(std::fs::read(&state).unwrap(), before);
+    assert_eq!(searches.load(Ordering::Relaxed), search_count);
+}
+
+#[test]
+fn source_recovery_refuses_a_different_collection_than_its_planned_identity() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("vault");
+    let config = temp.path().join("config.yaml");
+    let credentials = temp.path().join("credentials.json");
+    let lookups = Arc::new(AtomicUsize::new(0));
+    let identity_lookups = lookups.clone();
+    let server = LocalServer::new(move |url| {
+        let body = match url.path() {
+            "/rest/api/user/current" => {
+                let principal = if identity_lookups.fetch_add(1, Ordering::Relaxed) == 0 {
+                    "planned-account"
+                } else {
+                    "collected-account"
+                };
+                serde_json::json!({"username": principal})
+            }
+            "/rest/api/content/search" => serde_json::json!({"results": []}),
+            path => panic!("unexpected identity fixture path {path}"),
+        };
+        ("application/json", body.to_string())
+    });
+    let day = jiff::Timestamp::now()
+        .to_zoned(jiff::tz::TimeZone::UTC)
+        .date()
+        .yesterday()
+        .unwrap();
+    let original = root.join(format!("daily/docs/{day}.md"));
+    std::fs::create_dir_all(original.parent().unwrap()).unwrap();
+    let before = "---\ntype: daily\nsource: docs\n---\n## Summary\nRetained original knowledge.\n";
+    std::fs::write(&original, before).unwrap();
+    let mut creds = lk_source::credentials::Credentials::default();
+    creds.atlassian.insert(
+        "fixture".into(),
+        lk_source::credentials::AtlassianCredentials {
+            site_url: server.base.clone(),
+            auth: lk_source::credentials::AtlassianAuthMethod::PersonalAccessToken {
+                token: "fixture-token".into(),
+            },
+        },
+    );
+    lk_source::credentials::CredentialStore::new(&credentials)
+        .unwrap()
+        .lock()
+        .unwrap()
+        .save(&creds)
+        .unwrap();
+    std::fs::write(&config, format!(
+        "vault: {{root: {}, timezone: UTC}}\nidentity: {{name: Test, email: test@example.invalid}}\ncredentials: {{file: {}}}\ningest:\n  recovery: {{start_date: '{day}', max_days_per_source_per_run: 1}}\nsources:\n  docs: {{type: confluence, instance: fixture, params: {{cql: 'type = page'}}}}\n",
+        root.display(), credentials.display()
+    )).unwrap();
+    let output = run(&config, &["ingest", "--recover"]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("collection identity changed"));
+    assert_eq!(std::fs::read_to_string(&original).unwrap(), before);
+    assert!(!root.join(".lorekeeper/queue").exists());
+    let receipts: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(root.join(".lorekeeper/periods/state.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(receipts["batches"].as_array().unwrap().iter().all(|batch| {
+        batch["sources"].as_array().unwrap().iter().all(|source| {
+            source.get("collection_identity").is_none() && source["outcome"] == "failed"
+        })
+    }));
+}
+
+#[test]
 fn disabled_extraction_retains_document_and_rss_evidence_until_reactivated() {
     use lk_core::rss_evidence::{
         ConceptEvidence, RSS_EVIDENCE_SCHEMA, RssEventSelection, bindings,

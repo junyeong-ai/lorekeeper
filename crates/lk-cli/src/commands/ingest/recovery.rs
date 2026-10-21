@@ -72,7 +72,16 @@ pub async fn run(opts: &GlobalOptions, dry_run: bool, wait_for_vault: bool) -> m
     let today = jiff::Timestamp::now()
         .to_zoned(config.vault.timezone())
         .date();
-    let coverage = source_coverage(&config)?;
+    // Validate opt-in before provider authentication or identity requests.
+    let unverified = plan(&config, today, &BTreeMap::new())?;
+    let (identities, identity_failure) = if unverified.iter().any(|source| !source.dates.is_empty())
+    {
+        current_identities(&config).await?
+    } else {
+        (BTreeMap::new(), false)
+    };
+    super::ensure_config_current(&config_path, &revision)?;
+    let coverage = source_coverage(&config, &identities)?;
     let plans = plan(&config, today, &coverage)?;
     let pinned_opts = GlobalOptions {
         config: Some(config_path.clone()),
@@ -89,9 +98,12 @@ pub async fn run(opts: &GlobalOptions, dry_run: bool, wait_for_vault: bool) -> m
             ),
         }
     }
-    let mut failed = false;
+    let mut failed = identity_failure;
     let mut attempts = 0;
     for source in plans {
+        let Some(identity) = identities.get(&source.id) else {
+            continue;
+        };
         if source.dates.is_empty() {
             eprintln!("[recovery] {}: no uncovered closed query days", source.id);
         }
@@ -110,12 +122,14 @@ pub async fn run(opts: &GlobalOptions, dry_run: bool, wait_for_vault: bool) -> m
             if dry_run {
                 continue;
             }
-            let result = super::run(
+            let result = super::run_with_identity(
                 &pinned_opts,
                 Some(source.id.clone()),
                 Some(date.to_string()),
                 false,
                 wait_for_vault,
+                Some(identity),
+                Some(&revision),
             )
             .await;
             super::ensure_config_current(&config_path, &revision)?;
@@ -138,6 +152,77 @@ pub async fn run(opts: &GlobalOptions, dry_run: bool, wait_for_vault: bool) -> m
         ));
     }
     Ok(())
+}
+
+async fn current_identities(
+    config: &Config,
+) -> miette::Result<(BTreeMap<String, lk_source::CollectionIdentity>, bool)> {
+    let sources = config
+        .enabled_sources()
+        .filter(|(_, source)| {
+            source.source_type.descriptor().recovery == SourceRecovery::DateWindow
+        })
+        .collect::<Vec<_>>();
+    if sources.is_empty() {
+        return Ok((BTreeMap::new(), false));
+    }
+    let http = lk_source::build_http_client().map_err(|error| miette::miette!("{error}"))?;
+    let credentials = lk_source::credentials::CredentialStore::new(&config.credentials_path())
+        .and_then(|store| store.load().map(|credentials| (store, credentials)));
+    let atlassian = credentials
+        .as_ref()
+        .map(|(store, credentials)| {
+            lk_source::build_atlassian_registry_with_store(credentials, &http, store)
+        })
+        .unwrap_or_default();
+    let mut identities = BTreeMap::new();
+    let mut failed = false;
+    for (id, source) in sources {
+        let started_at = std::time::Instant::now();
+        let result = async {
+            lk_source::validate_params(source.source_type, &source.params)?;
+            let empty = lk_source::credentials::Credentials::default();
+            let credentials = if source.source_type == lk_core::config::SourceType::Tasks {
+                &empty
+            } else {
+                &credentials
+                    .as_ref()
+                    .map_err(|error| lk_source::SourceError::Auth(error.to_string()))?
+                    .1
+            };
+            let adapter = lk_source::build_source(
+                source.source_type,
+                http.clone(),
+                credentials,
+                &atlassian,
+                source.instance.as_deref(),
+            )?;
+            adapter
+                .collection_identity()
+                .await?
+                .ok_or(lk_source::SourceError::CollectionIdentityUnavailable)
+        };
+        match super::collect_with_budget(
+            started_at,
+            source
+                .collection_timeout_seconds
+                .unwrap_or(config.ingest.source_timeout_seconds),
+            result,
+        )
+        .await
+        {
+            Ok(identity) => {
+                identities.insert(id.to_owned(), identity);
+            }
+            Err(error) => {
+                failed = true;
+                eprintln!(
+                    "[recovery] {id}: collection identity unavailable; previous coverage is unverified and this source was not replayed: {error}. Check the intended provider account, dataset and identity-read permissions; explicit dated ingest remains available."
+                );
+            }
+        }
+    }
+    Ok((identities, failed))
 }
 
 #[cfg(test)]

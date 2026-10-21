@@ -17,6 +17,29 @@ fn invoke_command(config: &std::path::Path, args: &[&str]) -> Output {
     command.output().unwrap()
 }
 
+#[test]
+fn source_recovery_does_not_authenticate_without_eligible_closed_days() {
+    let temp = tempfile::tempdir().unwrap();
+    let today = jiff::Timestamp::now()
+        .to_zoned(jiff::tz::TimeZone::UTC)
+        .date();
+    let config = temp.path().join("config.yaml");
+    std::fs::write(&config, format!(
+        "vault: {{root: vault, timezone: UTC}}\nidentity: {{name: Test, email: test@example.invalid}}\ncredentials: {{file: credentials.json}}\ningest:\n  recovery: {{start_date: '{today}'}}\nsources:\n  mail: {{type: gmail, params: {{queries: ['in:anywhere']}}}}\n"
+    )).unwrap();
+    std::fs::write(temp.path().join("credentials.json"), "malformed fixture").unwrap();
+    for args in [vec!["--recover", "--dry-run"], vec!["--recover"]] {
+        let result = invoke(&config, &args);
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(String::from_utf8_lossy(&result.stderr).contains("0 source-day"));
+        assert!(!temp.path().join("vault").exists());
+    }
+}
+
 fn complete_inputs(path: &std::path::Path) {
     let raw = std::fs::read_to_string(path).unwrap();
     let mut page = lk_core::frontmatter::parse_page(&raw).unwrap();

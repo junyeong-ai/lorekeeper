@@ -99,8 +99,9 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   it. Deadlines include retries/pagination/conversion, cancel async waits and reject
   over-budget blocking returns; they are not OS preemption or source completeness.
   `--wait-for-vault` permits publication waiting; dry run never takes that lock.
-- Dry run creates no vault files, tmp results, logs, or queue writes; real source
-  errors still return nonzero. A noop provider makes no promise to queue work.
+- Dry run publishes no pages, receipts, cursors, logs or queue writes; real source
+  errors still return nonzero. Authentication may persist a required rotated OAuth
+  successor. A noop provider makes no promise to queue work.
   Document projection caches are read-only during dry run and input inspection;
   real collection may checkpoint verified units under source-owned cache claims.
 - Work-log generation belongs to full ingest only, not filtered runs. A full run
@@ -113,9 +114,14 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   legacy bindings are not adopted, and unknown history is not observed empty.
 - Historical date replay never replaces current candidate or appointment snapshots.
   Source recovery needs an explicit start date and per-source day budget. Only
-  config-matching observed windows, closed before acquisition and durably published,
+  config-matching observed windows with the same source-observed collection identity,
+  closed before acquisition and durably published,
   establish query-day coverage; current snapshots and configured queries remain
   distinct from historical replay. Coverage is not deleted/revision-history proof.
+  Resolve current identities per source before replay selection; unavailable identities
+  block only that source, while legacy unbound receipts remain unverified. Recovery
+  previews may authenticate but never collect content or change canonical state;
+  rotating OAuth successors still require durable credential persistence.
 - Manual original publication is immutable bytes→complete manifest→page/request
   journal→optional retirement. Keep source ownership separate from original
   references; archive=false still preserves original bytes. Capture limits are

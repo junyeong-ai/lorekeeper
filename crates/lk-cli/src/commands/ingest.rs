@@ -96,8 +96,25 @@ pub async fn run(
     dry_run: bool,
     wait_for_vault: bool,
 ) -> miette::Result<()> {
+    run_with_identity(opts, source, date_str, dry_run, wait_for_vault, None, None).await
+}
+
+async fn run_with_identity(
+    opts: &super::GlobalOptions,
+    source: Option<String>,
+    date_str: Option<String>,
+    dry_run: bool,
+    wait_for_vault: bool,
+    expected_identity: Option<&lk_source::CollectionIdentity>,
+    expected_config_revision: Option<&str>,
+) -> miette::Result<()> {
     let config_path = find_config(opts)?;
     let (config, config_revision) = load_config_with_revision(&config_path)?;
+    if expected_config_revision.is_some_and(|expected| expected != config_revision) {
+        return Err(miette::miette!(
+            "selected configuration changed since recovery planning; no source acquisition or publication was started"
+        ));
+    }
     let vault_root = config.vault.root_path();
 
     let credential_store = lk_source::credentials::CredentialStore::new(&config.credentials_path())
@@ -296,6 +313,7 @@ pub async fn run(
                     Ok(SourceCapture {
                         observation: lk_source::SourceObservation {
                             items: capture.items,
+                            collection_identity: None,
                             scope: lk_source::ObservationScope::Unverified,
                             outcome: if retirement_blocked {
                                 lk_source::ObservationOutcome::Partial
@@ -309,7 +327,7 @@ pub async fn run(
                 })
             } else {
                 adapter
-                    .observe(&sc.params, &source_ctx)
+                    .observe_bound(&sc.params, &source_ctx)
                     .await
                     .map(|observation| SourceCapture {
                         observation,
@@ -324,6 +342,14 @@ pub async fn run(
         let result = collect_with_budget(started_at, timeout, collection).await;
         let mut next_inputs = acquired_inputs.clone();
         let result = result.and_then(|capture| {
+            if expected_identity.is_some()
+                && capture.observation.collection_identity.as_ref() != expected_identity
+            {
+                if capture.observation.collection_identity.is_none() {
+                    return Err(lk_source::SourceError::CollectionIdentityUnavailable);
+                }
+                return Err(lk_source::SourceError::CollectionIdentityChanged);
+            }
             // Recheck final projections (including manual link relocation) before
             // retaining the source. Failed sources do not reserve run capacity.
             let mut source_inputs = lk_core::input::InputBudget::new(source_ctx.max_input_bytes);
@@ -1035,6 +1061,42 @@ mod observation_log_tests {
     use super::source_log_outcome;
     use lk_source::ObservationOutcome;
     use lk_vault::LogStatus;
+
+    #[tokio::test]
+    async fn recovery_refuses_configuration_drift_before_source_acquisition() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.yaml");
+        let original = "vault: {root: original, timezone: UTC}\nidentity: {name: Test, email: test@example.invalid}\nsources:\n  notes: {type: manual, params: {inbox_dir: inbox}}\n";
+        std::fs::write(&path, original).unwrap();
+        let (_, expected) = super::load_config_with_revision(&path).unwrap();
+        std::fs::write(
+            &path,
+            original.replace("root: original", "root: redirected"),
+        )
+        .unwrap();
+        let options = crate::commands::GlobalOptions {
+            config: Some(path),
+            template_dir: None,
+        };
+        let result = super::run_with_identity(
+            &options,
+            Some("notes".into()),
+            Some("2020-01-01".into()),
+            false,
+            false,
+            None,
+            Some(&expected),
+        )
+        .await;
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("configuration changed since recovery planning")
+        );
+        assert!(!temp.path().join("original").exists());
+        assert!(!temp.path().join("redirected").exists());
+    }
 
     #[tokio::test]
     async fn collection_deadline_cancels_waiting_work_and_retains_source_errors() {

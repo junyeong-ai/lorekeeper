@@ -595,6 +595,9 @@ Its budget counts examined slots, including existing requests, and resumes a
 persisted cursor. Neither setting invents historical originals or semantic completion.
 Inspect `lore ingest --recover --dry-run` and `lore synthesis pending --status --json`
 for selected reach and blockers.
+Collection recovery previews also verify the provider account and dataset. Token
+rotation preserves coverage; another account/site or an unbound historical receipt
+cannot establish that the current selection was already collected.
 
 ### Recurring semantic review
 

@@ -190,6 +190,8 @@ pub struct ObservedSource {
     pub scope: ObservedScope,
     pub outcome: ResponseOutcome,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collection_identity: Option<lk_source::CollectionIdentity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub personal_inputs: Option<lk_pipeline::WorkLogInputs>,
 }
 
@@ -198,6 +200,7 @@ impl ObservedSource {
         Self {
             source_id: source_id.into(),
             personal_inputs: None,
+            collection_identity: observation.collection_identity.clone(),
             scope: match &observation.scope {
                 lk_source::ObservationScope::Window { start, end } => ObservedScope::Window {
                     start: *start,
@@ -218,6 +221,7 @@ impl ObservedSource {
         Self {
             source_id: source_id.into(),
             personal_inputs: None,
+            collection_identity: None,
             scope: ObservedScope::Unverified,
             outcome: ResponseOutcome::Failed,
         }
@@ -485,7 +489,7 @@ fn load(root: &Path) -> miette::Result<(State, Option<String>)> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return Ok((
                 State {
-                    version: 1,
+                    version: 2,
                     ..Default::default()
                 },
                 None,
@@ -493,11 +497,12 @@ fn load(root: &Path) -> miette::Result<(State, Option<String>)> {
         }
         Err(e) => return Err(miette::miette!("read period state: {e}")),
     };
-    let state: State =
+    let mut state: State =
         serde_json::from_str(&original).map_err(|e| miette::miette!("decode period state: {e}"))?;
-    if state.version != 1 {
+    if !matches!(state.version, 1 | 2) {
         return Err(miette::miette!("unsupported period state version"));
     }
+    state.version = 2;
     for (key, intent) in &state.intents {
         intent.period.validate()?;
         if *key != intent.period.key() {
@@ -631,13 +636,15 @@ pub fn record_collection(
         sources,
     };
     let scopes = current_source_scopes(config)?;
-    let accepted = accepted_windows(&batch, config, &scopes)?;
+    let identities = collection_identities(&batch.sources);
+    let published = published_windows(&batch, config, &scopes)?;
     let mut retained = Vec::with_capacity(state.batches.len() + 1);
     for old in state.batches {
         let same_selection = old.requested_day == batch.requested_day
             && old.full_ingest == batch.full_ingest
             && old.source_scopes.keys().eq(batch.source_scopes.keys());
-        let old_accepted = accepted_windows(&old, config, &scopes)?;
+        let old_identities = collection_identities(&old.sources);
+        let old_published = published_windows(&old, config, &scopes)?;
         let unpublished_work_logs = old
             .work_logs
             .keys()
@@ -653,8 +660,9 @@ pub fn record_collection(
                                 .personal_inputs
                                 .as_ref()
                                 .is_some_and(|inputs| inputs.days.contains_key(day))
-                                || accepted.iter().any(|(id, window)| {
+                                || published.iter().any(|(id, window)| {
                                     id == &source.source_id
+                                        && old_identities.get(id) == identities.get(id)
                                         && window.start <= *day
                                         && window.end > *day
                                 }))
@@ -665,9 +673,10 @@ pub fn record_collection(
         if !same_selection
             || unpublished_work_logs
             || retained_personal_days
-            || old_accepted.iter().any(|(id, old_window)| {
-                !accepted.iter().any(|(new_id, new_window)| {
+            || old_published.iter().any(|(id, old_window)| {
+                !published.iter().any(|(new_id, new_window)| {
                     id == new_id
+                        && old_identities.get(id) == identities.get(new_id)
                         && new_window.start <= old_window.start
                         && new_window.end >= old_window.end
                 })
@@ -696,7 +705,40 @@ fn current_source_scopes(config: &Config) -> miette::Result<BTreeMap<String, Str
         .collect()
 }
 
+fn collection_identities(
+    sources: &[ObservedSource],
+) -> BTreeMap<String, lk_source::CollectionIdentity> {
+    sources
+        .iter()
+        .filter_map(|source| {
+            source
+                .collection_identity
+                .as_ref()
+                .map(|identity| (source.source_id.clone(), identity.clone()))
+        })
+        .collect()
+}
+
 fn accepted_windows(
+    batch: &CollectionBatch,
+    config: &Config,
+    scopes: &BTreeMap<String, String>,
+    identities: &BTreeMap<String, lk_source::CollectionIdentity>,
+) -> miette::Result<Vec<(String, CollectionWindow)>> {
+    let recorded = collection_identities(&batch.sources);
+    Ok(published_windows(batch, config, scopes)?
+        .into_iter()
+        .filter(|(id, _)| {
+            recorded
+                .get(id)
+                .is_some_and(|identity| identities.get(id) == Some(identity))
+        })
+        .collect())
+}
+
+/// Post-close retained publications, without asserting the current provider account.
+/// Period synthesis reads these retained inputs; automatic replay also requires binding.
+fn published_windows(
     batch: &CollectionBatch,
     config: &Config,
     scopes: &BTreeMap<String, String>,
@@ -762,12 +804,15 @@ fn accepted_windows(
 /// Load once per recovery run; accepted intervals use the exact current source
 /// selection and were already closed when acquisition began. Legacy batches
 /// without acquisition time cannot establish this coverage.
-pub fn source_coverage(config: &Config) -> miette::Result<BTreeMap<String, Vec<CollectionWindow>>> {
+pub fn source_coverage(
+    config: &Config,
+    identities: &BTreeMap<String, lk_source::CollectionIdentity>,
+) -> miette::Result<BTreeMap<String, Vec<CollectionWindow>>> {
     let (state, _) = load(&config.vault.root_path())?;
     let scopes = current_source_scopes(config)?;
     let mut windows: BTreeMap<String, Vec<CollectionWindow>> = BTreeMap::new();
     for batch in &state.batches {
-        for (id, window) in accepted_windows(batch, config, &scopes)? {
+        for (id, window) in accepted_windows(batch, config, &scopes, identities)? {
             windows.entry(id).or_default().push(window);
         }
     }
@@ -793,6 +838,18 @@ mod collection_coverage_tests {
     use super::*;
     use jiff::civil::date;
 
+    fn identities() -> BTreeMap<String, lk_source::CollectionIdentity> {
+        ["mail", "other"]
+            .into_iter()
+            .map(|id| {
+                (
+                    id.into(),
+                    lk_source::CollectionIdentity::new("mail.example.invalid", id).unwrap(),
+                )
+            })
+            .collect()
+    }
+
     fn config() -> (tempfile::TempDir, Config) {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("config.yaml");
@@ -804,6 +861,7 @@ mod collection_coverage_tests {
         ObservedSource {
             source_id: id.into(),
             personal_inputs: None,
+            collection_identity: identities().remove(id),
             scope: ObservedScope::Window {
                 start: start.parse().unwrap(),
                 end: end.parse().unwrap(),
@@ -835,7 +893,7 @@ mod collection_coverage_tests {
         let scopes = current_source_scopes(&config).unwrap();
         let mut batch = receipt(&config, "2026-10-20T07:00:00Z");
         assert_eq!(
-            accepted_windows(&batch, &config, &scopes).unwrap(),
+            accepted_windows(&batch, &config, &scopes, &identities()).unwrap(),
             vec![(
                 "mail".into(),
                 CollectionWindow {
@@ -846,7 +904,7 @@ mod collection_coverage_tests {
         );
         batch.targeted = true;
         assert_eq!(
-            accepted_windows(&batch, &config, &scopes).unwrap(),
+            accepted_windows(&batch, &config, &scopes, &identities()).unwrap(),
             vec![(
                 "mail".into(),
                 CollectionWindow {
@@ -857,13 +915,13 @@ mod collection_coverage_tests {
         );
         batch.started_at = Some("2026-10-19T23:59:59Z".parse().unwrap());
         assert!(
-            accepted_windows(&batch, &config, &scopes)
+            accepted_windows(&batch, &config, &scopes, &identities())
                 .unwrap()
                 .is_empty()
         );
         batch.started_at = None;
         assert!(
-            accepted_windows(&batch, &config, &scopes)
+            accepted_windows(&batch, &config, &scopes, &identities())
                 .unwrap()
                 .is_empty()
         );
@@ -881,7 +939,7 @@ mod collection_coverage_tests {
         ] {
             batch.sources[0].outcome = outcome;
             assert!(
-                accepted_windows(&batch, &config, &scopes)
+                accepted_windows(&batch, &config, &scopes, &identities())
                     .unwrap()
                     .is_empty()
             );
@@ -889,17 +947,80 @@ mod collection_coverage_tests {
         batch.sources[0].outcome = ResponseOutcome::Observed;
         batch.sources[0].scope = ObservedScope::ConfiguredQuery;
         assert!(
-            accepted_windows(&batch, &config, &scopes)
+            accepted_windows(&batch, &config, &scopes, &identities())
                 .unwrap()
                 .is_empty()
         );
         batch.sources[0] = observed("mail", "2026-10-17T00:00:00Z", "2026-10-20T00:00:00Z");
         batch.source_scopes.insert("mail".into(), "changed".into());
         assert!(
-            accepted_windows(&batch, &config, &scopes)
+            accepted_windows(&batch, &config, &scopes, &identities())
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn coverage_requires_the_same_observed_dataset_and_principal() {
+        let (_temp, config) = config();
+        let scopes = current_source_scopes(&config).unwrap();
+        let mut batch = receipt(&config, "2026-10-20T07:00:00Z");
+        let mut current = identities();
+        assert_eq!(
+            accepted_windows(&batch, &config, &scopes, &current)
+                .unwrap()
+                .len(),
+            1
+        );
+
+        for identity in [
+            lk_source::CollectionIdentity::new("other.example.invalid", "mail").unwrap(),
+            lk_source::CollectionIdentity::new("mail.example.invalid", "other-account").unwrap(),
+        ] {
+            current.insert("mail".into(), identity);
+            assert!(
+                accepted_windows(&batch, &config, &scopes, &current)
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+        current = identities();
+        current.remove("mail");
+        assert!(
+            accepted_windows(&batch, &config, &scopes, &current)
+                .unwrap()
+                .is_empty()
+        );
+
+        batch.sources[0].collection_identity = None;
+        assert!(
+            accepted_windows(&batch, &config, &scopes, &identities())
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn legacy_receipts_remain_readable_without_inventing_collection_identity() {
+        let (_temp, config) = config();
+        let root = config.vault.root_path();
+        let mut batch = receipt(&config, "2026-10-20T07:00:00Z");
+        batch.sources[0].collection_identity = None;
+        let raw = serde_json::to_string(&State {
+            version: 1,
+            batches: vec![batch],
+            ..Default::default()
+        })
+        .unwrap();
+        let path = root.join(STATE_PATH);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, &raw).unwrap();
+        assert!(source_coverage(&config, &identities()).unwrap().is_empty());
+        let (state, before) = load(&root).unwrap();
+        assert_eq!(state.version, 2);
+        assert!(state.batches[0].sources[0].collection_identity.is_none());
+        assert_eq!(before.as_deref(), Some(raw.as_str()));
+        assert_eq!(std::fs::read_to_string(path).unwrap(), raw);
     }
 
     #[test]
@@ -911,7 +1032,7 @@ mod collection_coverage_tests {
         batch.at = "2026-11-02T13:00:00Z".parse().unwrap();
         batch.sources[0] = observed("mail", "2026-11-01T04:00:00Z", "2026-11-02T05:00:00Z");
         assert_eq!(
-            accepted_windows(&batch, &config, &scopes).unwrap(),
+            accepted_windows(&batch, &config, &scopes, &identities()).unwrap(),
             vec![(
                 "mail".into(),
                 CollectionWindow {
@@ -959,7 +1080,7 @@ mod collection_coverage_tests {
             vec![partial],
         )
         .unwrap();
-        let coverage = source_coverage(&config).unwrap();
+        let coverage = source_coverage(&config, &identities()).unwrap();
         assert_eq!(coverage.len(), 2);
         assert_eq!(
             coverage["mail"],
@@ -969,9 +1090,72 @@ mod collection_coverage_tests {
             }]
         );
         config.sources.get_mut("mail").unwrap().params = serde_json::json!({"queries":["changed"]});
-        let coverage = source_coverage(&config).unwrap();
+        let coverage = source_coverage(&config, &identities()).unwrap();
         assert!(!coverage.contains_key("mail"));
         assert!(coverage.contains_key("other"));
+    }
+
+    #[test]
+    fn retries_preserve_bound_coverage_and_unbound_retained_period_inputs() {
+        for (bound, replacement) in [
+            (true, "failed"),
+            (true, "unbound"),
+            (true, "other-dataset"),
+            (false, "failed"),
+            (false, "other-dataset"),
+        ] {
+            let (_temp, mut config) = config();
+            config.synthesis.weekly.include_sources = vec!["mail".into()];
+            let root = config.vault.root_path();
+            std::fs::create_dir_all(&root).unwrap();
+            let session = MutationSession::acquire(&root).unwrap();
+            let publish = |source| {
+                record_collection(
+                    &config,
+                    &session,
+                    CollectionPublication {
+                        requested_day: date(2020, 1, 5),
+                        full_ingest: false,
+                        started_at: "2020-01-06T07:00:00Z".parse().unwrap(),
+                        targeted: true,
+                        work_logs: BTreeMap::new(),
+                    },
+                    vec![source],
+                )
+                .unwrap();
+            };
+            let mut original = observed("mail", "2020-01-05T00:00:00Z", "2020-01-06T00:00:00Z");
+            if !bound {
+                original.collection_identity = None;
+            }
+            publish(original.clone());
+            let mut retry = original;
+            match replacement {
+                "failed" => retry = ObservedSource::failed("mail"),
+                "unbound" => retry.collection_identity = None,
+                "other-dataset" => {
+                    retry.collection_identity = Some(
+                        lk_source::CollectionIdentity::new("another.example.invalid", "mail")
+                            .unwrap(),
+                    )
+                }
+                _ => unreachable!(),
+            }
+            publish(retry);
+            let coverage = source_coverage(&config, &identities()).unwrap();
+            assert_eq!(
+                coverage.get("mail").map_or(0, Vec::len),
+                usize::from(bound),
+                "{bound} {replacement}"
+            );
+            let state = load(&root).unwrap().0;
+            assert_eq!(state.batches.len(), 2, "{bound} {replacement}");
+            let period = ClosedPeriod::containing(Kind::WeeklyThemes, date(2020, 1, 5)).unwrap();
+            assert!(
+                closing_day_ready(&state, &config, &period).is_ok(),
+                "{bound} {replacement}"
+            );
+        }
     }
 
     #[test]
@@ -1167,7 +1351,7 @@ fn closing_day_ready(
                     })
         }).ok_or_else(|| format!("unobserved closing day {}; collect its actual window with `lore ingest --date {}` (full-source) and finish semantic processing before resuming", period.end, period.end))?;
         let accepted =
-            accepted_windows(candidate, config, &scopes).map_err(|error| error.to_string())?;
+            published_windows(candidate, config, &scopes).map_err(|error| error.to_string())?;
         for id in &sources {
             check(candidate, &accepted, id)?;
         }
@@ -1180,7 +1364,7 @@ fn closing_day_ready(
     let mut reasons = BTreeMap::new();
     for batch in state.batches.iter().rev().filter(|batch| batch.at >= end) {
         let accepted =
-            accepted_windows(batch, config, &scopes).map_err(|error| error.to_string())?;
+            published_windows(batch, config, &scopes).map_err(|error| error.to_string())?;
         for id in &sources {
             if ready.contains_key(id) || !batch.sources.iter().any(|source| source.source_id == *id)
             {
@@ -2236,6 +2420,7 @@ mod tests {
             sources: vec![ObservedSource {
                 source_id: "mail".into(),
                 personal_inputs: None,
+                collection_identity: None,
                 scope,
                 outcome,
             }],
@@ -2444,6 +2629,7 @@ mod tests {
         });
         full.sources.push(ObservedSource {
             source_id: "other".into(),
+            collection_identity: None,
             outcome: ResponseOutcome::Observed,
             scope: ObservedScope::Window {
                 start: "2026-10-20T00:00:00Z".parse().unwrap(),
@@ -2729,6 +2915,7 @@ mod tests {
             vec![ObservedSource {
                 source_id: "mail".into(),
                 personal_inputs: None,
+                collection_identity: None,
                 scope: window(),
                 outcome: ResponseOutcome::Partial,
             }],

@@ -124,12 +124,22 @@ empty historical input does not authorize adopting or deleting retained logs.
 ## Missing-date recovery
 
 Configure `ingest.recovery` with an explicit `start_date` and a positive
-`max_days_per_source_per_run` (default 3). `lore ingest --recover --dry-run` previews
-the oldest missing closed dates without network or writes. `lore ingest --recover`
+`max_days_per_source_per_run` (default 3). `lore ingest --recover --dry-run` resolves
+current provider identity and previews the oldest missing closed dates without
+collecting content or changing pages, receipts, queues or cursors. Authentication
+may persist a rotated OAuth successor in the credential store. `lore ingest --recover`
 requeries them within each source's budget; it cannot combine a source or `--date`.
 Native daily runs recovery before ordinary collection. Only matching accepted
 publications establish closed query-day coverage; failed/partial attempts remain
 pending, and changing source selection does not inherit another selection's proof.
+Coverage also requires the same observed provider namespace and account/resource key;
+token rotation alone does not change it. Legacy receipts without that binding remain
+unverified. Identity failures block only that source's automatic replay and report the
+required account/permission check. Limited-scope grants may still collect unbound
+through ordinary or explicit dated ingest, but those observations cannot establish
+automatic recovery coverage. A changed identity during collection refuses publication.
+Retained published inputs remain period-synthesis evidence without asserting the
+current provider account.
 
 Gmail, Slack channels, Drive, Calendar, Confluence and Tasks support dated replay.
 RSS, Slack search and arbitrary Jira JQL do not establish historical date coverage;

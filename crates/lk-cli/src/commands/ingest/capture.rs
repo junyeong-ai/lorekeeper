@@ -53,6 +53,9 @@ mod tests {
     fn source() -> SourceCapture {
         SourceCapture {
             observation: SourceObservation {
+                collection_identity: Some(
+                    lk_source::CollectionIdentity::new("fixture", "owner").unwrap(),
+                ),
                 items: vec![RawItem {
                     external_id: Some("versioned-identity".into()),
                     title: "운영 정책".into(),
