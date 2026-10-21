@@ -369,6 +369,19 @@ fn review_scopes_follow_verified_symlink_owners_without_merging_hardlink_address
         assert_eq!(reports[0]["effective_state"], "open", "{kind}: {reports}");
         assert_eq!(reports[0]["errors"], json!([]));
         assert_eq!(reports[0]["archived_evidence"], json!([source_alias]));
+        let refused = run(&config, &["wiki", "search", "Topic", "--json"]);
+        assert!(!refused.status.success());
+        let refused = run(&config, &["wiki", "prepare"]);
+        assert!(!refused.status.success());
+        let retained = ok(&config, &["wiki", "context", concept, "--snapshot", id]);
+        assert_eq!(retained["reviews"]["total"], expected);
+        std::fs::remove_file(vault.join(source_alias)).unwrap();
+        let reports = ok(&config, &["wiki", "reviews"]);
+        assert_eq!(reports[0]["effective_state"], "open", "{kind}: {reports}");
+        assert_eq!(reports[0]["errors"], json!([]));
+        assert_eq!(reports[0]["archived_evidence"], json!([source_alias]));
+        assert_eq!(reports[0]["missing_evidence"], json!([source_alias]));
+        assert_eq!(reports[0]["review"]["evidence"], evidence["citations"]);
         let search = ok(&config, &["wiki", "search", "Topic", "--json"]);
         let canonical = search["hits"]
             .as_array()
@@ -381,11 +394,6 @@ fn review_scopes_follow_verified_symlink_owners_without_merging_hardlink_address
             expected,
             "{kind}: {search}"
         );
-        let refused = run(&config, &["wiki", "prepare"]);
-        assert!(!refused.status.success());
-        let retained = ok(&config, &["wiki", "context", concept, "--snapshot", id]);
-        assert_eq!(retained["reviews"]["total"], expected);
-        std::fs::remove_file(vault.join(source_alias)).unwrap();
         let snapshot = ok(&config, &["wiki", "prepare"]);
         let context = ok(
             &config,
