@@ -167,10 +167,18 @@ async fn current_identities(
         return Ok((BTreeMap::new(), false));
     }
     let http = lk_source::build_http_client().map_err(|error| miette::miette!("{error}"))?;
-    let credentials = lk_source::credentials::CredentialStore::new(&config.credentials_path())
-        .and_then(|store| store.load().map(|credentials| (store, credentials)));
+    let credentials = sources
+        .iter()
+        .any(|(_, source)| lk_source::is_credential_dependent(source.source_type))
+        .then(|| {
+            lk_source::credentials::CredentialStore::new(&config.credentials_path())
+                .and_then(|store| store.load().map(|credentials| (store, credentials)))
+        })
+        .transpose();
     let atlassian = credentials
         .as_ref()
+        .ok()
+        .and_then(Option::as_ref)
         .map(|(store, credentials)| {
             lk_source::build_atlassian_registry_with_store(credentials, &http, store)
         })
@@ -182,13 +190,15 @@ async fn current_identities(
         let result = async {
             lk_source::validate_params(source.source_type, &source.params)?;
             let empty = lk_source::credentials::Credentials::default();
-            let credentials = if source.source_type == lk_core::config::SourceType::Tasks {
-                &empty
-            } else {
+            let credentials = if lk_source::is_credential_dependent(source.source_type) {
                 &credentials
                     .as_ref()
                     .map_err(|error| lk_source::SourceError::Auth(error.to_string()))?
+                    .as_ref()
+                    .expect("credential-dependent selected source loads credentials")
                     .1
+            } else {
+                &empty
             };
             let adapter = lk_source::build_source(
                 source.source_type,

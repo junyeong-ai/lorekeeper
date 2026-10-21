@@ -25,7 +25,7 @@ fn source_recovery_does_not_authenticate_without_eligible_closed_days() {
         .date();
     let config = temp.path().join("config.yaml");
     std::fs::write(&config, format!(
-        "vault: {{root: vault, timezone: UTC}}\nidentity: {{name: Test, email: test@example.invalid}}\ncredentials: {{file: credentials.json}}\ningest:\n  recovery: {{start_date: '{today}'}}\nsources:\n  mail: {{type: gmail, params: {{queries: ['in:anywhere']}}}}\n"
+        "vault: {{root: vault, timezone: UTC}}\nidentity: {{name: Test, email: test@example.invalid}}\ncredentials: {{file: credentials.json}}\ningest:\n  recovery: {{start_date: '{today}'}}\nsources:\n  mail: {{type: gmail, params: {{include_queries: ['in:anywhere']}}}}\n"
     )).unwrap();
     std::fs::write(temp.path().join("credentials.json"), "malformed fixture").unwrap();
     for args in [vec!["--recover", "--dry-run"], vec!["--recover"]] {
@@ -37,6 +37,98 @@ fn source_recovery_does_not_authenticate_without_eligible_closed_days() {
         );
         assert!(String::from_utf8_lossy(&result.stderr).contains("0 source-day"));
         assert!(!temp.path().join("vault").exists());
+    }
+}
+
+fn credential_failure_fixture(include_mail: bool) -> (tempfile::TempDir, std::path::PathBuf) {
+    let temp = tempfile::tempdir().unwrap();
+    let start = jiff::Timestamp::now()
+        .to_zoned(jiff::tz::TimeZone::UTC)
+        .date()
+        .yesterday()
+        .unwrap();
+    let config = temp.path().join("config.yaml");
+    let mail = if include_mail {
+        "  mail: {type: gmail, params: {include_queries: ['from:test@example.invalid']}}\n"
+    } else {
+        ""
+    };
+    std::fs::write(&config, format!("vault: {{root: vault, timezone: UTC}}\nidentity: {{name: Test, email: test@example.invalid}}\ncredentials: {{file: credentials.json}}\nllm: {{provider: noop}}\npersonal: {{tasks: {{}}}}\ningest:\n  recovery: {{start_date: '{start}', max_days_per_source_per_run: 1}}\nsources:\n{mail}  tasks: {{type: tasks}}\n")).unwrap();
+    let credentials = temp.path().join("credentials.json");
+    std::fs::write(&credentials, "malformed credential fixture").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&credentials, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    (temp, config)
+}
+
+fn assert_tasks_collection_receipt(root: &std::path::Path) {
+    let state: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(root.join("vault/.lorekeeper/periods/state.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        state["batches"].as_array().unwrap().iter().any(|batch| {
+            batch["sources"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|source| source["source_id"] == "tasks" && source["outcome"] == "observed")
+        }),
+        "{state}"
+    );
+}
+
+#[test]
+fn tasks_ingest_and_recovery_do_not_require_unused_malformed_credentials() {
+    for (include_mail, args) in [
+        (false, vec![]),
+        (false, vec!["--recover"]),
+        (true, vec!["tasks"]),
+    ] {
+        let (temp, config) = credential_failure_fixture(include_mail);
+        let mut preview_args = args.clone();
+        preview_args.push("--dry-run");
+        for invocation in [&preview_args, &args] {
+            let output = invoke(&config, invocation);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(output.status.success(), "{stderr}");
+            assert_eq!(
+                std::fs::read(temp.path().join("credentials.json")).unwrap(),
+                b"malformed credential fixture"
+            );
+            if invocation == &preview_args {
+                assert!(!temp.path().join("vault").exists());
+            }
+        }
+        assert_tasks_collection_receipt(temp.path());
+    }
+}
+
+#[test]
+fn malformed_credentials_fail_authenticated_sources_without_blocking_tasks() {
+    for recover in [false, true] {
+        let (temp, config) = credential_failure_fixture(true);
+        let args = if recover { vec!["--recover"] } else { vec![] };
+        let mut preview_args = args.clone();
+        preview_args.push("--dry-run");
+        for invocation in [&preview_args, &args] {
+            let output = invoke(&config, invocation);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(!output.status.success(), "{stderr}");
+            assert!(stderr.contains("failed to parse credentials"), "{stderr}");
+            assert!(!stderr.contains("unknown field"), "{stderr}");
+            assert_eq!(
+                std::fs::read(temp.path().join("credentials.json")).unwrap(),
+                b"malformed credential fixture"
+            );
+            if invocation == &preview_args {
+                assert!(!temp.path().join("vault").exists());
+            }
+        }
+        assert_tasks_collection_receipt(temp.path());
     }
 }
 
@@ -259,7 +351,7 @@ fn failed_source_does_not_prevent_independent_coverage_and_unsupported_sources_a
         .date();
     let start = today.yesterday().unwrap();
     let config = temp.path().join("config.yaml");
-    std::fs::write(&config, format!("vault: {{root: vault, timezone: UTC}}\nidentity: {{name: Test, email: test@example.invalid}}\nllm: {{provider: noop}}\npersonal: {{tasks: {{}}}}\ningest:\n  recovery: {{start_date: '{start}', max_days_per_source_per_run: 1}}\nsources:\n  mail: {{type: gmail, params: {{queries: ['from:test@example.invalid']}}}}\n  tasks: {{type: tasks}}\n  news: {{type: rss, params: {{feeds: [{{id: example, url: 'https://example.invalid/feed'}}]}}}}\n")).unwrap();
+    std::fs::write(&config, format!("vault: {{root: vault, timezone: UTC}}\nidentity: {{name: Test, email: test@example.invalid}}\nllm: {{provider: noop}}\npersonal: {{tasks: {{}}}}\ningest:\n  recovery: {{start_date: '{start}', max_days_per_source_per_run: 1}}\nsources:\n  mail: {{type: gmail, params: {{include_queries: ['from:test@example.invalid']}}}}\n  tasks: {{type: tasks}}\n  news: {{type: rss, params: {{feeds: [{{id: example, url: 'https://example.invalid/feed'}}]}}}}\n")).unwrap();
     let output = invoke(&config, &["--recover"]);
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);

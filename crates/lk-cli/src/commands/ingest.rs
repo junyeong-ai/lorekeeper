@@ -117,12 +117,6 @@ async fn run_with_identity(
     }
     let vault_root = config.vault.root_path();
 
-    let credential_store = lk_source::credentials::CredentialStore::new(&config.credentials_path())
-        .map_err(|e| miette::miette!("{e}"))?;
-    let creds = credential_store
-        .load()
-        .map_err(|e| miette::miette!("{e}"))?;
-
     // Dry-run must NOT mutate filesystem. In queue mode the LLM client buffers tasks
     // during planning and writes a queue file on `flush()`; rather than thread dry-run
     // suppression through the flush path, we force NoopLlmClient for dry-run so no queue
@@ -190,10 +184,24 @@ async fn run_with_identity(
     }
 
     let http = lk_source::build_http_client().map_err(|e| miette::miette!("{e}"))?;
+    let credentials = sources
+        .iter()
+        .any(|(_, source)| lk_source::is_credential_dependent(source.source_type))
+        .then(|| {
+            lk_source::credentials::CredentialStore::new(&config.credentials_path())
+                .and_then(|store| store.load().map(|credentials| (store, credentials)))
+        })
+        .transpose();
     // Share each instance's in-memory access-token cache. Store-wide locking also
     // serializes refresh and successor persistence across cooperating processes.
-    let atlassian =
-        lk_source::build_atlassian_registry_with_store(&creds, &http, &credential_store);
+    let atlassian = credentials
+        .as_ref()
+        .ok()
+        .and_then(Option::as_ref)
+        .map(|(store, credentials)| {
+            lk_source::build_atlassian_registry_with_store(credentials, &http, store)
+        })
+        .unwrap_or_default();
     let extract_ctx = lk_source::ExtractContext {
         target_date: extract_target,
         timezone: tz,
@@ -262,18 +270,29 @@ async fn run_with_identity(
         let mut source_ctx = extract_ctx.clone();
         source_ctx.max_input_bytes = source_ctx.max_input_bytes.min(acquired_inputs.remaining());
         eprintln!("▸ collect {id} ({})", sc.source_type);
-        let adapter = match lk_source::build_source(
-            sc.source_type,
-            http.clone(),
-            &creds,
-            &atlassian,
-            sc.instance.as_deref(),
-        )
-        .and_then(|adapter| {
+        let adapter = match (|| {
+            let empty = lk_source::credentials::Credentials::default();
+            let credentials = if lk_source::is_credential_dependent(sc.source_type) {
+                &credentials
+                    .as_ref()
+                    .map_err(|error| lk_source::SourceError::Auth(error.to_string()))?
+                    .as_ref()
+                    .expect("credential-dependent selected source loads credentials")
+                    .1
+            } else {
+                &empty
+            };
+            let adapter = lk_source::build_source(
+                sc.source_type,
+                http.clone(),
+                credentials,
+                &atlassian,
+                sc.instance.as_deref(),
+            )?;
             adapter
                 .selection(&sc.params)
                 .map(|selection| (adapter, selection))
-        }) {
+        })() {
             Ok(adapter) => adapter,
             Err(error) => {
                 acquired.push(Acquired {

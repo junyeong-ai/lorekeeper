@@ -16,6 +16,9 @@ uses validated params and context; do not add per-adapter output pipelines.
   A configured query is not proof of date coverage. Optional enrichment warnings
   do not turn a complete source listing into missing observations. Adapters without
   an observation contract remain explicitly unverified.
+- `is_credential_dependent` declares each adapter's credential-store dependency beside
+  `build_source`. Read the store only for selected adapters that require it; loading
+  failures refuse those adapters without blocking public HTTP or local sources.
 - `Source::observe_bound` attaches only a nonsecret collection authority/principal
   observed before and after acquisition. Keep this separate from document identity.
   Refresh identity responses rather than reusing an in-memory principal cache.

@@ -563,6 +563,21 @@ fn resolve_atlassian(
         .ok_or_else(|| SourceError::Auth(format!("Atlassian instance `{name}` was not built")))
 }
 
+/// Whether this adapter depends on configured provider credentials.
+/// Public HTTP and local sources do not use the shared credential store.
+pub const fn is_credential_dependent(source_type: SourceType) -> bool {
+    match source_type {
+        SourceType::Gmail
+        | SourceType::GoogleDrive
+        | SourceType::GoogleCalendar
+        | SourceType::SlackChannel
+        | SourceType::SlackSearch
+        | SourceType::Jira
+        | SourceType::Confluence => true,
+        SourceType::Rss | SourceType::Manual | SourceType::Nodex | SourceType::Tasks => false,
+    }
+}
+
 pub fn build_source(
     source_type: SourceType,
     http: reqwest::Client,
@@ -629,6 +644,23 @@ pub fn build_source(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn credential_dependency_matches_empty_credential_construction() {
+        use strum::IntoEnumIterator;
+
+        let http = build_http_client().unwrap();
+        let credentials = Credentials::default();
+        let registry = AtlassianRegistry::default();
+        for source_type in SourceType::iter() {
+            let result = build_source(source_type, http.clone(), &credentials, &registry, None);
+            assert_eq!(
+                is_credential_dependent(source_type),
+                result.is_err(),
+                "{source_type}"
+            );
+        }
+    }
 
     #[test]
     fn collection_identity_requires_named_nonblank_fields() {
