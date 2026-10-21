@@ -255,9 +255,8 @@ impl Source for ManualSource {
     }
 }
 
-/// Read one inbox file into a `RawItem`. The title is derived from the
-/// first non-blank line if the body starts with a markdown H1, otherwise from
-/// the file stem.
+/// Read one inbox file into a `RawItem`, promoting its first root Markdown H1
+/// when present and otherwise using the file stem.
 #[cfg(test)]
 async fn read_item(path: &Path) -> Result<RawItem, SourceError> {
     let root = path
@@ -474,7 +473,11 @@ pub(super) fn split_frontmatter(
         return (None, raw.to_string());
     }
     match lk_core::frontmatter::parse_page(raw) {
-        Ok(page) => (Some(page.frontmatter), page.body),
+        Ok(page) => {
+            let offset = lk_core::frontmatter::body_offset(raw)
+                .expect("parsed frontmatter has a closed original block");
+            (Some(page.frontmatter), raw[offset..].to_owned())
+        }
         Err(e) => {
             tracing::warn!(
                 file = %path.display(),
@@ -486,14 +489,41 @@ pub(super) fn split_frontmatter(
     }
 }
 
-/// Split a markdown body into (title, content) — the leading `# Title` line is
-/// promoted to the title, or the file stem is used if no H1 is present.
+/// Promote a first-block root H1 to a scalar title, preserving all other source bytes.
 fn split_title(body: &str, path: &Path) -> (String, String) {
-    let trimmed = body.trim_start();
-    if let Some(rest) = trimmed.strip_prefix("# ")
-        && let Some((first, remaining)) = rest.split_once('\n')
+    use pulldown_cmark::{Event, HeadingLevel, Parser, Tag, TagEnd};
+
+    let mut events = Parser::new_ext(body, lk_core::markdown::OPTIONS).into_offset_iter();
+    if let Some((
+        Event::Start(Tag::Heading {
+            level: HeadingLevel::H1,
+            ..
+        }),
+        range,
+    )) = events.next()
     {
-        return (first.trim().to_string(), remaining.trim_start().to_string());
+        // Match document-outline titles: inline text/code supply the scalar value;
+        // markup and destinations do not. Multiline Setext headings remain one scalar.
+        let mut title = String::new();
+        for (event, _) in events {
+            match event {
+                Event::Text(text) | Event::Code(text) => title.push_str(&text),
+                Event::SoftBreak | Event::HardBreak => title.push(' '),
+                Event::End(TagEnd::Heading(_)) => break,
+                _ => {}
+            }
+        }
+        let title = title.split_whitespace().collect::<Vec<_>>().join(" ");
+        if !title.is_empty() {
+            // The parser starts at the heading marker/text after its legal indentation.
+            // That indentation belongs to the removed heading, not the next source block.
+            let start = body[..range.start]
+                .rfind(['\r', '\n'])
+                .map_or(0, |line_end| line_end + 1);
+            let mut content = body[..start].to_owned();
+            content.push_str(&body[range.end..]);
+            return (title, content);
+        }
     }
     let stem = path
         .file_stem()
@@ -1489,6 +1519,117 @@ mod tests {
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].title, "My Note");
         assert!(items[0].body.contains("body line"));
+    }
+
+    #[test]
+    fn title_promotion_preserves_remaining_source_bytes() {
+        for (source, expected_title, expected_body) in [
+            (
+                "# Title\n\n    [literal](missing.md)\n    second line\n",
+                "Title",
+                "\n    [literal](missing.md)\n    second line\n",
+            ),
+            (
+                "\r\n  # **운영** `Title` &amp; [label](https://example.com) ###\r\n\r\n\tcode\r\n\r\n<pre>\n\nkept\n</pre>\r",
+                "운영 Title & label",
+                "\r\n\r\n\tcode\r\n\r\n<pre>\n\nkept\n</pre>\r",
+            ),
+            ("# EOF", "EOF", ""),
+            ("# EOF ###", "EOF", ""),
+            ("#\tTabbed\nBody\n", "Tabbed", "Body\n"),
+            ("Title\n=====\n\n    code\n", "Title", "\n    code\n"),
+            (
+                "First *line*\r\nsecond `line`\r\n======\r\n\r\n    code\r\n",
+                "First line second line",
+                "\r\n    code\r\n",
+            ),
+            ("Title\n=====", "Title", ""),
+            ("\r# CR\r\r    code\r", "CR", "\r\r    code\r"),
+            ("# One&#10;Two\nBody", "One Two", "Body"),
+        ] {
+            let (title, body) = split_title(source, Path::new("fallback_note.md"));
+            assert_eq!(title, expected_title, "{source:?}");
+            assert_eq!(body, expected_body, "{source:?}");
+        }
+    }
+
+    #[test]
+    fn title_promotion_requires_a_nonempty_first_root_h1() {
+        for source in [
+            "    # This is code, not a title\n    print(1)\n",
+            "```markdown\n# Literal\n```\n",
+            "> # Quoted\n> paragraph\n",
+            "- # Listed\n  paragraph\n",
+            "Opening paragraph.\n\n# Later\nBody\n",
+            "<!-- before -->\n# Later\nBody\n",
+            "## H2\nBody\n",
+            "# \n\nBody\n",
+        ] {
+            let (title, body) = split_title(source, Path::new("fallback_note.md"));
+            assert_eq!(title, "fallback note", "{source:?}");
+            assert_eq!(body, source, "{source:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn title_promotion_respects_literal_text_html_and_decoder_structure() {
+        let temp = TempDir::new().unwrap();
+        let text = temp.path().join("plain_note.txt");
+        write(&text, "# Literal title\n\n    [literal](missing.md)\n");
+        let item = read_item(&text).await.unwrap();
+        assert_eq!(item.title, "plain note");
+        assert!(lk_core::link::extract_page_links(&item.body).is_empty());
+
+        let html = temp.path().join("converted.html");
+        let source = "<h1>Converted <em>title</em></h1><pre><code># literal\n\nkept\n</code></pre>";
+        let converted = crate::markdown::html_to_markdown(source);
+        let (title, body) = split_title(&converted, &html);
+        assert_eq!(title, "Converted title");
+        assert!(body.contains("# literal\n\nkept\n"));
+        write(&html, source);
+        let item = read_item(&html).await.unwrap();
+        // Readability may remove the HTML title; its remaining code is never a title.
+        assert_eq!(item.title, "converted");
+        assert!(item.body.contains("# literal\n\nkept\n"));
+
+        let projection = serde_json::from_value(serde_json::json!({
+            "policy": lk_core::content::PROJECTION_POLICY,
+            "format": "docx", "packages": {}, "warnings": [],
+            "units": [{"location": {"kind": "document"}, "method": "native",
+                "representation": "markdown", "text": "# Decoded heading\n\nBody\n"}],
+        }))
+        .unwrap();
+        let decoded = crate::content::render_markdown(&projection).unwrap();
+        let (title, body) = split_title(&decoded, Path::new("native_note.docx"));
+        assert_eq!(title, "native note");
+        assert_eq!(body, decoded);
+    }
+
+    #[tokio::test]
+    async fn frontmatter_separation_preserves_original_body_bytes() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("source.md");
+        for prefix in [
+            "---\ntitle: Stated\nexample: |\n  # YAML heading\n  ```\n---\n",
+            "\u{feff}---\r\ntitle: Stated\r\nexample: |\r\n  # YAML heading\r\n  ```\r\n---\r\n",
+        ] {
+            let body = "\r\n    # Code heading\r\n    [literal](missing.md)\r\n\r\n<pre>\n\nkept\r\n</pre>\r";
+            let raw = format!("{prefix}{body}");
+            let (frontmatter, content) = split_frontmatter(&raw, &path);
+            assert_eq!(content, body);
+            assert_eq!(
+                frontmatter.unwrap().get("title").and_then(|v| v.as_str()),
+                Some("Stated")
+            );
+            write(&path, &raw);
+            let item = read_item(&path).await.unwrap();
+            assert_eq!(item.body, body);
+            assert_eq!(item.title, "Stated");
+            assert_eq!(
+                item.metadata["source_hash"],
+                blake3::hash(raw.as_bytes()).to_hex().to_string()
+            );
+        }
     }
 
     #[tokio::test]

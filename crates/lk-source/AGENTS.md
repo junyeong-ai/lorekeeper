@@ -151,6 +151,9 @@ Use parser/token-state behavior, not regex replacement of arbitrary markup.
   ownership distinct from typed `manual_original` and preserved `manual_frontmatter`.
   Capture entry bytes once for conversion/hash/preservation. Archive=false still
   preserves originals; it only disables retirement.
+- Promote only a nonempty first-block root CommonMark H1 to a scalar title. Remove its
+  exact source span, retaining all other body bytes; code/nested/later headings are content.
+  Parse original frontmatter as metadata, but slice its body from the original raw offset.
 - The configured inbox is the explicit boundary, not an implicit whole-vault copy.
   Reject a vault root/ancestor inbox and overlap with the actual configured managed
   roots or `.lorekeeper`; compare canonical prefixes, including uncreated paths.

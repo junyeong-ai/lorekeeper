@@ -108,6 +108,71 @@ fn dry_run_is_side_effect_free() {
 }
 
 #[test]
+fn manual_titles_preserve_literal_code_and_original_bytes() {
+    for (source, expected_title, expected_code) in [
+        (
+            "# Title\n\n    [literal](missing.md)\n    second line\n",
+            "Title",
+            "    [literal](missing.md)\n    second line\n",
+        ),
+        (
+            "# Title\r\n\r\n    first code line\r\n    second code line\r\n",
+            "Title",
+            "    first code line\n    second code line\n",
+        ),
+        (
+            "    # This is code, not a title\n    print(1)\n",
+            "note",
+            "    # This is code, not a title\n    print(1)\n",
+        ),
+        (
+            "Setext title\n============\n\n    code\n",
+            "Setext title",
+            "    code\n",
+        ),
+        (
+            "\u{feff}---\r\ntitle: Stated title\r\nexample: |\r\n  # YAML heading\r\n  ```\r\n---\r\n\r\n    [literal](missing.md)\r\n    second line\r\n",
+            "Stated title",
+            "    [literal](missing.md)\n    second line\n",
+        ),
+    ] {
+        let ws = Workspace::new("");
+        ws.drop_note("note.md", source);
+        let output = ws.run(&["ingest"]);
+        assert!(
+            output.status.success(),
+            "{source:?}: {}",
+            stderr_of(&output)
+        );
+        let pages = files_under(&ws.vault().join("wiki/documents"));
+        assert_eq!(pages.len(), 1);
+        let page =
+            lk_core::frontmatter::parse_page(&std::fs::read_to_string(&pages[0]).unwrap()).unwrap();
+        assert_eq!(
+            page.frontmatter.get("title").and_then(|v| v.as_str()),
+            Some(expected_title)
+        );
+        let content = lk_vault::resolve_section(&page.body, |s| s.document_content).unwrap();
+        assert!(lk_core::link::extract_page_links(content.body).is_empty());
+        assert!(
+            content.body.contains(expected_code),
+            "{source:?}: {}",
+            content.body
+        );
+        let archived = files_under(&ws.vault().join("inbox/archived"));
+        assert_eq!(archived.len(), 1);
+        assert_eq!(std::fs::read_to_string(&archived[0]).unwrap(), source);
+        let relative = pages[0].strip_prefix(ws.vault()).unwrap().to_str().unwrap();
+        let original = ws.run(&[
+            "wiki", "original", relative, "--member", "note.md", "--limit", "1",
+        ]);
+        assert!(original.status.success(), "{}", stderr_of(&original));
+        let original: serde_json::Value = serde_json::from_slice(&original.stdout).unwrap();
+        assert_eq!(original["preview"], source);
+    }
+}
+
+#[test]
 #[ignore = "requires LORE_TEST_DOCUMENT_PYTHON and LORE_TEST_TESSDATA for the pinned optional runtime"]
 fn binary_documents_preserve_exact_originals_through_publication_and_retirement() {
     let ws = Workspace::with_notes_options("    concept_policy: supported-new\n", "");
