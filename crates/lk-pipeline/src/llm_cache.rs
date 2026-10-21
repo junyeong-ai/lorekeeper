@@ -11,10 +11,10 @@
 //! each ingest the pipeline pre-stamps `llm_inputs.<key>` with the hash of the LLM input
 //! it WOULD send — the stale-task reference point — and `/lore-process` stamps the
 //! companion `llm_inputs.<key>_done` once it has finished, even when the result is empty.
-//! [`lookup`] returns cached exactly when that `*_done` marker equals the current input
-//! hash, **never consulting the body**: so an empty-but-done result (an extraction that
-//! found nothing, a focus-filtered summary, a trivial-only work-log) stays cached instead
-//! of re-enqueueing forever. There is no body-emptiness completion signal anywhere — that
+//! [`lookup`] returns cached when that `*_done` marker equals the current input hash
+//! and the owned section exists, regardless of its body: an empty-but-done result
+//! (an extraction that found nothing, a focus-filtered summary, a trivial-only work-log)
+//! stays cached instead of re-enqueueing forever. There is no body-emptiness completion signal anywhere — that
 //! would require a per-kind "can this be empty?" judgment, and any kind misjudged
 //! "always non-empty" would re-enqueue every empty result forever.
 //!
@@ -26,8 +26,8 @@
 //! re-rendered the page) and is dropped — never a window where a stale task is
 //! indistinguishable from a current one.
 //!
-//! Manual re-processing is mechanism-free: delete the `*_done` line to force a re-enqueue
-//! on the next ingest. No `--force-llm` flag, no out-of-band cache invalidation API.
+//! Explicit regeneration retains the validated task input and invalidates completion
+//! together with a new request through the CLI publication journal.
 
 use lk_core::frontmatter::{VaultPage, field};
 use lk_vault::{SectionKey, resolve_section};
@@ -42,9 +42,8 @@ pub struct SectionDecision {
     /// the new render's `llm_inputs.<key>` frontmatter regardless of whether the task
     /// is enqueued, so subsequent runs have a reference point.
     pub hash: String,
-    /// True when the existing page's `*_done` completion marker equals this hash,
-    /// meaning the section is already finished for this input and the LLM task is
-    /// redundant. The body is never consulted — an empty-but-done section is cached.
+    /// True when the completion marker equals this hash and the owned section exists.
+    /// The body may be empty; its presence does not establish completion.
     pub cached: bool,
     /// Existing section body to splice back into the freshly rendered page when
     /// `cached`. Stripped of section framing whitespace so it can be handed to
@@ -82,11 +81,10 @@ pub fn stored_hash<'a>(existing: Option<&'a VaultPage>, key: &str) -> Option<&'a
 /// `heading` names the section as a [`Heading`] selector, so the existing body is found
 /// under whichever locale the page was authored in.
 ///
-/// Body emptiness is deliberately NOT consulted: completion is the marker alone, so a
-/// legitimately-empty result (an extraction that found nothing, a focus-filtered
-/// summary, a trivial-only work-log) stays cached instead of re-enqueueing forever.
-/// The single re-run lever is deleting the marker line, which lands in the uncached
-/// branch. On a hit the existing body is preserved and spliced over the fresh render.
+/// Body emptiness is deliberately NOT consulted: a matching marker and an existing
+/// section complete even an empty result (an extraction that found nothing, a
+/// focus-filtered summary, a trivial-only work-log), avoiding repeated enqueueing.
+/// On a hit the existing body is preserved and spliced over the fresh render.
 pub fn lookup(
     existing: Option<&VaultPage>,
     completion_key: &str,

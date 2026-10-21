@@ -46,7 +46,7 @@ pub async fn run(opts: &super::GlobalOptions) -> miette::Result<()> {
             eprintln!("    L{line}: {}", defect.description());
         }
         for section in &page.unanswered {
-            eprintln!("    `{section}` records an input nothing has answered");
+            eprintln!("    `{section}` has an unfinished semantic input");
         }
         for (line, credential) in &page.credentials {
             eprintln!(
@@ -96,8 +96,8 @@ pub async fn run(opts: &super::GlobalOptions) -> miette::Result<()> {
     }
     if !report.in_flight.is_empty() {
         eprintln!(
-            "\n{} section(s) are queued for a drain and not counted above — run `/lore-process`. \
-             A re-render empties each of these too, so they are named:",
+            "\n{} section(s) have current queued work and are not counted above — \
+             process those retained requests through `/lore-process`:",
             report.in_flight.len()
         );
         for (path, section) in &report.in_flight {
@@ -106,15 +106,14 @@ pub async fn run(opts: &super::GlobalOptions) -> miette::Result<()> {
     }
     if report.pages.iter().any(|page| !page.defects.is_empty()) {
         eprintln!(
-            "\nA cleanliness defect predates a tightened contract, and WHERE the line sits\n\
-             decides the repair. In a section the pipeline renders — frontmatter, headings, the\n\
-             event list — re-ingesting that page's source reproduces it clean, because the\n\
-             contract is upheld at conversion. In a section an LLM or a human wrote, a\n\
-             re-render splices the existing body through unchanged and the defect survives: fix\n\
-             the line in place, or delete that section's `llm_inputs.<key>_done` marker so the\n\
-             next re-render enqueues it to be written again. A page with no ingestible source\n\
-             behind it at all — a concept, an exploration, a review narrative — is only ever\n\
-             fixed in place."
+            "\nInspect the finding against the preserved source and the page's section ownership.\n\
+             For a semantic section, regenerate its exact retained task or resynthesize a\n\
+             concept from its current citations through the guarded commands below. Re-ingestion\n\
+             rebuilds generated structure, but a remote refetch may return different evidence;\n\
+             use preserved originals when historical source recovery is needed. For authored\n\
+             knowledge reviews, preserve the prior judgment and publish a dated reassessment\n\
+             through `lore wiki curate`. Never repair a semantic section by editing completion\n\
+             markers or silently replacing its evidence."
         );
     }
     if report.pages.iter().any(|page| !page.credentials.is_empty()) {
@@ -137,55 +136,30 @@ pub async fn run(opts: &super::GlobalOptions) -> miette::Result<()> {
              means no page carries one of THOSE, never that no page carries a secret."
         );
     }
-    if report.pages.iter().any(|page| !page.unanswered.is_empty()) {
+    if report
+        .pages
+        .iter()
+        .any(|page| !page.unanswered.is_empty() || !page.defects.is_empty())
+    {
         eprintln!(
-            "\nThese sections record an input hash with no matching answer. A section is enqueued\n\
-             again only when its page is RE-RENDERED, and a scheduled run re-renders the current\n\
-             date alone, so this does not come back on its own.\n\
-             \n\
-             Read the marker before choosing a repair:\n\
-             \x20 `<key>_done` DIFFERENT   a later render superseded the answer. Deleting that one\n\
-             \x20                          line is the whole fix — the next re-render enqueues it.\n\
-             \x20 `<key>_done` ABSENT      nothing recorded an answer. Whether one EXISTS is the\n\
-             \x20                          question: stamping the hash beside it claims the\n\
-             \x20                          section's content was produced from THIS input, and a\n\
-             \x20                          filled body never establishes that — which is the whole\n\
-             \x20                          reason the marker exists. Stamp only what you can show.\n\
-             \x20 the input is not a string  nothing can equal it; only a re-render restores the pair.\n\
-             \n\
-             A re-render EMPTIES the section. Nothing recorded an answer for the input the page\n\
-             now carries, so there is nothing to splice back — the task is enqueued again and a\n\
-             drain writes the section from scratch. If the section holds something already, that\n\
-             is exactly the case this report cannot tell from an unanswered one, and rewriting\n\
-             the page is not reversible: copy the body out first. `lore ingest` and `lore\n\
-             synthesis` each name the sections they are about to empty before they write —\n\
-             a synthesis page is re-rendered by the latter, never by an ingest.\n\
-             \n\
-             Re-rendering costs more than it looks. `lore ingest --date <date>` re-renders EVERY\n\
-             daily page for that date from a fresh fetch BEFORE it reaches the work-log, and a\n\
-             source whose window has passed returns fewer events than the page holds — so\n\
-             repairing a work-log truncates the daily pages it aggregates. Measured on this\n\
-             author's vault: a date the RSS event log covers came back 8 of 8 events; one older\n\
-             than the log, 6 of 18. `--dry-run` reports the event count it would write for each\n\
-             daily page — compare it with the count the page states, and read `extracted: N\n\
-             items` above it as the whole fetch window rather than that page.\n\
-             \x20 daily, document   `lore ingest <source> --date <date>`. A manual document whose\n\
-             \x20                   inbox file was archived after ingest has no input left to\n\
-             \x20                   re-read, so it is only ever filled in place.\n\
-             \x20 work-log          `lore ingest --date <date>` — every source, hence the cost\n\
-             \x20                   above; and a date whose sources return no personal events\n\
-             \x20                   re-renders nothing at all, silently.\n\
-             \x20 synthesis, review `lore synthesis <period>` (`--date`, or `--year` for annual)\n\
-             \x20                   — reads persisted pages, fetches nothing, so it is safe.\n\
-             \n\
-             `concepts` is the exception, and it needs no re-fetch at all. Never stamp its marker\n\
-             by hand — that claims an empty section is answered and loses the extraction for\n\
-             good. Restore the exact retained request from queue history or backup, then capture\n\
-             discovery and the exact read scope before drafting a typed result. `lore queue apply`\n\
-             writes concepts, links and completion together; a current page cannot establish a lost\n\
-             retained input. Results without their original validated request are refused. See\n\
-             `/lore-process` references/processing-kinds.md. A partial result cannot be applied; one whose\n\
-             `anchor` or `cache_hash` does not match the page is dropped as dead with exit 0."
+            "\nSemantic recovery:\n\
+             - Inspect `lore queue status --json` before choosing a repair. Current requests\n\
+               are unfinished work; a filled body alone never establishes completion.\n\
+             - For one task retained in pending or processed history, preview\n\
+               `lore queue regenerate --task-id TASK_ID --dry-run`. If its exact input and\n\
+               owned headings still agree, omit `--dry-run` to request it again. This keeps\n\
+               existing prose and journals the new request without a remote fetch.\n\
+             - For a concept rewrite from its current nonempty citations, preview\n\
+               `lore graph resynthesize CONCEPT_PATH.md --dry-run`, then omit `--dry-run`.\n\
+               This uses current evidence and does not require the old extraction task.\n\
+             - Missing headings or malformed input metadata require restoration from the\n\
+               page schema and verified retained state before guarded regeneration.\n\
+               Missing original extraction input cannot be reconstructed from the current\n\
+               interpretation: restore the exact request from history or backup, or collect\n\
+               the preserved original into a new valid task. Refusal is not permission to\n\
+               fabricate a request or stamp a marker.\n\
+             Process accepted requests through `/lore-process`; only guarded application\n\
+             publishes their bodies and completion markers together."
         );
     }
     if !in_flight.unread.is_empty() {
@@ -254,51 +228,6 @@ struct PageDefects {
     /// not this tool's: a rendering defect is fixed by re-rendering, while a live key is
     /// fixed at its issuer and nowhere else.
     credentials: Vec<(usize, CredentialForm)>,
-}
-
-/// The `llm_inputs` sections this page records an input for and no answer to.
-///
-/// The pipeline stamps `llm_inputs.<key>` when it enqueues the work and whoever does the work
-/// stamps `<key>_done` with the same hash; a cache hit is the two being equal, and emptiness
-/// signals neither way. So a page carrying the input without a matching answer holds work that
-/// was enqueued and lost — `lore queue count` reports nothing pending, and nothing re-enqueues
-/// it on its own, because `llm_cache::lookup` runs when a page is RE-RENDERED and a scheduled
-/// run only re-renders the current date. `lore ingest --date <that day>` is the recovery: the
-/// lookup keys on the `_done` marker, so an absent or mismatched one is a miss.
-///
-/// Three states are outstanding, and each is a way the marker cannot answer the input: absent,
-/// carrying a different hash (an input the page no longer has), or an input recorded as anything
-/// but a string, which the pipeline never writes and nothing can equal.
-///
-/// Read as frontmatter, never as text: the pair is a frontmatter record, so a body discussing the
-/// format is prose. `parse_page` owns that boundary — the first line is exactly `---`, a
-/// delimiter stands alone on its line, CRLF and a BOM are handled — and is the only reader of it.
-///
-/// Both keys come from `TargetKind`: `llm_inputs_key` and the `completion_key` derived from it,
-/// so a new task kind is covered without being listed here and the `_done` suffix rule stays
-/// with the type that owns it.
-fn unanswered_sections(page: &lk_core::frontmatter::VaultPage) -> Vec<&'static str> {
-    use strum::IntoEnumIterator;
-
-    let inputs = page
-        .frontmatter
-        .get(lk_core::frontmatter::field::LLM_INPUTS);
-    let recorded = |key: &str| inputs.and_then(|v| v.get(key)).and_then(|v| v.as_str());
-    let mut found: Vec<&'static str> = lk_queue::TargetKind::iter()
-        .filter(|kind| {
-            inputs
-                .and_then(|v| v.get(kind.llm_inputs_key()))
-                .is_some_and(|input| {
-                    input
-                        .as_str()
-                        .is_none_or(|hash| recorded(&kind.completion_key()) != Some(hash))
-                })
-        })
-        .map(|kind| kind.llm_inputs_key())
-        .collect();
-    found.sort_unstable();
-    found.dedup();
-    found
 }
 
 /// The outcome of a vault audit: pages scanned, which ones carry defects, and how many
@@ -381,14 +310,21 @@ pub(crate) fn audit(
             let defects = scan_defects(&text);
             let credentials = scan_credentials(&text);
             let unanswered = match lk_core::frontmatter::parse_page(&text) {
-                Ok(page) => {
-                    let rel = path.strip_prefix(vault_root).unwrap_or(path).to_path_buf();
-                    let (queued, outstanding): (Vec<_>, Vec<_>) = unanswered_sections(&page)
-                        .into_iter()
-                        .partition(|key| in_flight_keys.contains(&(rel.clone(), *key)));
-                    in_flight.extend(queued.into_iter().map(|key| (rel.clone(), key)));
-                    outstanding
-                }
+                Ok(page) => match super::queue::readiness::unfinished_inputs(&page) {
+                    Ok(keys) => {
+                        let rel = path.strip_prefix(vault_root).unwrap_or(path).to_path_buf();
+                        let (queued, outstanding): (Vec<_>, Vec<_>) = keys
+                            .into_iter()
+                            .partition(|key| in_flight_keys.contains(&(rel.clone(), *key)));
+                        in_flight.extend(queued.into_iter().map(|key| (rel.clone(), key)));
+                        outstanding
+                    }
+                    Err(error) => {
+                        eprintln!("⚠ {}: semantic inputs: {error}", path.display());
+                        errors += 1;
+                        Vec::new()
+                    }
+                },
                 Err(e) => {
                     eprintln!("⚠ {}: frontmatter: {e}", path.display());
                     errors += 1;
@@ -493,7 +429,53 @@ mod tests {
     }
 
     fn unanswered(text: &str) -> Vec<&'static str> {
-        unanswered_sections(&lk_core::frontmatter::parse_page(text).expect("frontmatter"))
+        super::super::queue::readiness::unfinished_inputs(
+            &lk_core::frontmatter::parse_page(text).expect("frontmatter"),
+        )
+        .expect("valid semantic inputs")
+    }
+
+    #[test]
+    fn audit_distinguishes_untracked_completed_and_invalid_semantic_inputs() {
+        for (inputs, body, outstanding, errors) in [
+            ("", "Source.", false, 0),
+            ("llm_inputs: null\n", "Source.", false, 0),
+            ("llm_inputs: {summary: null}\n", "Source.", false, 0),
+            ("llm_inputs: unstructured\n", "Source.", false, 1),
+            ("llm_inputs: {summary: current}\n", "## Summary\n", true, 0),
+            (
+                "llm_inputs: {summary: current, summary_done: current}\n",
+                "## Summary\n",
+                false,
+                0,
+            ),
+            (
+                "llm_inputs: {summary: current, summary_done: current}\n",
+                "Source.",
+                true,
+                0,
+            ),
+            (
+                "llm_inputs: {summary: '', summary_done: ''}\n",
+                "## Summary\n",
+                true,
+                0,
+            ),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            fs::write(
+                root.path().join("subject.md"),
+                format!("---\ntype: document\n{inputs}---\n{body}\n"),
+            )
+            .unwrap();
+            let report = audit_with_empty_queue(&[root.path().to_owned()]);
+            assert_eq!(report.scanned, 1, "{inputs}");
+            assert_eq!(report.errors, errors, "{inputs}");
+            assert_eq!(report.pages.len(), usize::from(outstanding), "{inputs}");
+            if outstanding {
+                assert_eq!(report.pages[0].unanswered, ["summary"], "{inputs}");
+            }
+        }
     }
 
     #[test]
@@ -504,7 +486,7 @@ mod tests {
             "an answered section is not a defect, even with an empty body"
         );
 
-        let pending = "---\nid: a\nllm_inputs:\n  summary: \"h1\"\n  concepts: \"h2\"\n  concepts_done: \"h2\"\n---\n\n## Summary\n";
+        let pending = "---\nid: a\nllm_inputs:\n  summary: \"h1\"\n  concepts: \"h2\"\n  concepts_done: \"h2\"\n---\n\n## Summary\n\n## Related Concepts\n";
         assert_eq!(
             unanswered(pending),
             vec!["summary"],
@@ -567,20 +549,15 @@ mod tests {
         assert!(unanswered(matching).is_empty());
     }
 
-    /// A key that merely LOOKS like a record is not one: a top-level `summary:` is a sibling of
-    /// `llm_inputs` rather than an entry in it, and an `llm_inputs` that is a scalar records
-    /// nothing at all.
+    /// Top-level keys are not semantic input declarations.
     #[test]
     fn only_entries_inside_the_llm_inputs_mapping_count() {
-        let sibling = "---\nid: a\nsummary: \"h1\"\nllm_inputs:\n  concepts: \"h2\"\n  concepts_done: \"h2\"\n---\n\n## Summary\n";
+        let sibling = "---\nid: a\nsummary: \"h1\"\nllm_inputs:\n  concepts: \"h2\"\n  concepts_done: \"h2\"\n---\n\n## Related Concepts\n";
         assert!(
             unanswered(sibling).is_empty(),
             "a top-level key is not an llm_inputs entry: {:?}",
             unanswered(sibling)
         );
-
-        let scalar = "---\nid: a\nllm_inputs: \"summary: h1\"\n---\n\n## Summary\n";
-        assert!(unanswered(scalar).is_empty(), "a scalar records nothing");
     }
 
     /// An input hash recorded as anything but a string is malformed — the pipeline writes hex —
