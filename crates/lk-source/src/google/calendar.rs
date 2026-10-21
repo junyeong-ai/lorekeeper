@@ -370,6 +370,7 @@ struct MappedEvent {
 }
 
 fn append_meeting_notes(body: &mut String, header: &str, content: &str) {
+    let header = lk_core::markdown::inline_text(header);
     let note = format!("**{header}:**\n\n{content}");
     if body.is_empty() {
         *body = note;
@@ -439,10 +440,18 @@ fn map_event(
         body_parts.push(description.clone());
     }
     if let Some(loc) = ev.location.as_deref().filter(|l| !l.is_empty()) {
-        body_parts.push(format!("{}: {loc}", s.location));
+        body_parts.push(format!(
+            "{}: {}",
+            s.location,
+            lk_core::markdown::inline_text(loc)
+        ));
     }
     if !attendee_names.is_empty() {
-        body_parts.push(format!("{}: {}", s.attendees, attendee_names.join(", ")));
+        body_parts.push(format!(
+            "{}: {}",
+            s.attendees,
+            lk_core::markdown::inline_text(&attendee_names.join(", "))
+        ));
     }
 
     // Drive-file candidates: links in the description, then attachments (deduped).
@@ -509,6 +518,62 @@ mod tests {
                 assert_eq!(body, format!("{prefix}{separator}**Notes:**\n\n{content}"));
             }
         }
+    }
+
+    #[test]
+    fn plain_scalar_fields_preserve_metadata_without_creating_links() {
+        let ev = event_from(serde_json::json!({
+            "id": "scalar-event",
+            "summary": "[Title](title.md)",
+            "start": {"dateTime": "2026-05-23T09:00:00Z"},
+            "description": "<p><a href='https://example.com/description'>Description</a></p>",
+            "location": "[Room](room.md)",
+            "attendees": [{"displayName": "[Person](person.md)", "email": "person@example.com"}],
+            "attachments": [{"fileId": "deck", "title": "[Deck](deck.md)"}]
+        }));
+        let mut mapped = map_event(
+            ev,
+            "",
+            &jiff::tz::TimeZone::UTC,
+            lk_core::i18n::Locale::En.strings(),
+        )
+        .unwrap();
+        assert_eq!(mapped.item.title, "[Title](title.md)");
+        assert_eq!(
+            mapped.item.metadata["attendees"],
+            serde_json::json!(["[Person](person.md)"])
+        );
+        let header = mapped.drive_files[0].1.as_deref().unwrap();
+        append_meeting_notes(
+            &mut mapped.item.body,
+            header,
+            "[Note](https://example.com/notes)\n",
+        );
+        let input = lk_core::markdown::MarkdownInput::from_text(&mapped.item.body);
+        let links: Vec<_> = input
+            .events(lk_core::markdown::OPTIONS)
+            .filter_map(|event| match event {
+                pulldown_cmark::Event::Start(pulldown_cmark::Tag::Link { dest_url, .. }) => {
+                    Some(dest_url.into_string())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            links,
+            [
+                "https://example.com/description",
+                "https://example.com/notes"
+            ],
+            "{}",
+            mapped.item.body
+        );
+        assert!(
+            mapped
+                .item
+                .body
+                .ends_with("[Note](https://example.com/notes)\n")
+        );
     }
 
     async fn meeting_notes_response(

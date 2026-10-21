@@ -7,22 +7,7 @@ use std::path::Path;
 
 /// Scalar fields are literal inline text; their original values remain in metadata.
 pub(crate) fn inline_text(value: &str) -> String {
-    let mut output = String::new();
-    for word in value.split_whitespace() {
-        if !output.is_empty() {
-            output.push(' ');
-        }
-        for c in word.chars() {
-            if matches!(
-                c,
-                '\\' | '`' | '*' | '_' | '[' | ']' | '<' | '>' | '&' | '#' | '!' | '|'
-            ) {
-                output.push('\\');
-            }
-            output.push(c);
-        }
-    }
-    output
+    lk_core::markdown::inline_text(value)
 }
 
 fn serialize(events: &[Event<'_>]) -> Result<String, Error> {

@@ -11,6 +11,26 @@ pub const OPTIONS: Options = Options::ENABLE_TABLES
     .union(Options::ENABLE_STRIKETHROUGH)
     .union(Options::ENABLE_FOOTNOTES);
 
+/// Render a plain scalar as single-line Markdown text.
+pub fn inline_text(value: &str) -> String {
+    let mut output = String::new();
+    for word in value.split_whitespace() {
+        if !output.is_empty() {
+            output.push(' ');
+        }
+        for c in word.chars() {
+            if matches!(
+                c,
+                '\\' | '`' | '*' | '_' | '[' | ']' | '<' | '>' | '&' | '#' | '!' | '|' | '~'
+            ) {
+                output.push('\\');
+            }
+            output.push(c);
+        }
+    }
+    output
+}
+
 /// Raw CommonMark lines, including LF, CRLF or CR terminators without normalizing bytes.
 pub fn lines_with_endings(mut text: &str) -> impl Iterator<Item = &str> {
     std::iter::from_fn(move || {
@@ -791,6 +811,23 @@ pub fn parse_fence(line: &str) -> Option<(char, usize, &str)> {
 #[cfg(test)]
 mod tests {
     use super::{CredentialForm, scan_credentials};
+
+    #[test]
+    fn plain_scalar_strikethrough_is_literal_with_all_supported_options() {
+        use pulldown_cmark::{Event, Tag};
+
+        let rendered = super::inline_text("~~literal~~");
+        let input = super::MarkdownInput::from_text(&rendered);
+        let mut text = String::new();
+        for event in input.events(super::OPTIONS) {
+            match event {
+                Event::Start(Tag::Paragraph) | Event::End(_) => {}
+                Event::Text(value) => text.push_str(&value),
+                _ => panic!("plain scalar became markup: {rendered}"),
+            }
+        }
+        assert_eq!(text, "~~literal~~");
+    }
 
     #[test]
     fn commonmark_lines_preserve_mixed_terminators_and_original_bytes() {

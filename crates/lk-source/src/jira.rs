@@ -533,8 +533,14 @@ fn with_status_header(
 ) -> String {
     let mut header = String::new();
     if let Some(st) = status {
-        header.push_str(&format!("**{}**: {st}", s.status));
+        header.push_str(&format!(
+            "**{}**: {}",
+            s.status,
+            lk_core::markdown::inline_text(st)
+        ));
     }
+    let start = start.map(lk_core::markdown::inline_text);
+    let due = due.map(lk_core::markdown::inline_text);
     let period = match (start, due) {
         (Some(a), Some(b)) => Some(format!("{a} ~ {b}")),
         (Some(a), None) => Some(format!("{a} ~")),
@@ -639,6 +645,38 @@ mod tests {
             with_status_header(s, None, None, Some("2026-05-22"), "x"),
             "**기간**: ~ 2026-05-22\n\nx"
         );
+    }
+
+    #[test]
+    fn plain_scalar_header_fields_do_not_create_links_or_headings() {
+        let description = "[Description](https://example.com/description) ~~intentional~~\n";
+        let body = with_status_header(
+            lk_core::i18n::Locale::En.strings(),
+            Some("[Review](status.md) <b>pending</b> ~~literal~~"),
+            Some("2026-05-18 [start](start.md)\n\n## literal"),
+            Some("2026-05-22 [due](due.md)"),
+            description,
+        );
+        let input = lk_core::markdown::MarkdownInput::from_text(&body);
+        let mut links = Vec::new();
+        let mut strikethroughs = 0;
+        for event in input.events(lk_core::markdown::OPTIONS) {
+            match event {
+                pulldown_cmark::Event::Start(pulldown_cmark::Tag::Link { dest_url, .. }) => {
+                    links.push(dest_url.into_string())
+                }
+                pulldown_cmark::Event::Start(pulldown_cmark::Tag::Heading { .. })
+                | pulldown_cmark::Event::Html(_)
+                | pulldown_cmark::Event::InlineHtml(_) => panic!("scalar became markup: {body}"),
+                pulldown_cmark::Event::Start(pulldown_cmark::Tag::Strikethrough) => {
+                    strikethroughs += 1
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(links, ["https://example.com/description"], "{body}");
+        assert_eq!(strikethroughs, 1, "{body}");
+        assert!(body.ends_with(&format!("\n\n{description}")));
     }
 
     #[test]
