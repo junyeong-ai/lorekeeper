@@ -13,7 +13,9 @@ canonical; SQLite navigation is derived.
   optimistic guards; never reconstruct it from parsed fields.
 - `VaultStore::read_frontmatter` projects metadata without validating the body. Use it
   for name/address inventories; publication still reads and guards the complete page.
-- `section.rs`: section reads/replacements share fence-aware heading boundaries.
+- `section.rs`: section reads/replacements use root-level CommonMark H2 boundaries,
+  excluding frontmatter, nested blocks, code and HTML. Only exact ATX headings are
+  owned anchors; duplicates refuse reads/replacement. Preserve surrounding bytes.
   Read with `resolve_section` across locales, preferring nonblank when both exist;
   legitimate blank remains present. Write current locale headings only.
 - Frontmatter setters stay within the real block: `set_frontmatter_field` changes

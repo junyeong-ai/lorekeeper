@@ -3,56 +3,67 @@
 //! Used by structural maintenance commands (e.g. `lore graph backlinks-sync`) that
 //! need to rewrite one section of a page in place without touching others, and by
 //! the pipeline's two-phase render that preserves LLM-filled sections across
-//! re-ingests. The "body" of a section is everything between its `## <heading>`
-//! line and the next `## ` heading (or end of file).
-//!
-//! Both operations (`replace_section`, `section_body`)
-//! share `find_section`, which tracks fenced-code state via
-//! `lk_core::markdown::FenceState` — a `## ` line inside an open fence is quoted
-//! content, not document structure. Heading lines are trimmed of trailing
-//! whitespace before matching.
+//! re-ingests. Owned sections use exact ATX headings; their bodies end at the next
+//! root-level CommonMark H2, including Setext headings. Frontmatter, nested blocks,
+//! code and raw HTML do not introduce owned headings. Duplicate anchors are ambiguous.
 
 use lk_core::i18n::{Locale, Strings};
-use lk_core::markdown::FenceState;
+use pulldown_cmark::{Event, HeadingLevel, Parser, Tag};
 
-/// Locate the H2 section whose heading line is exactly `## {heading}`. Returns
-/// `(heading_line_idx, section_end_idx)` over the line array — `heading_line_idx`
-/// points at the `## {heading}` line itself; `section_end_idx` is the first line
-/// outside the section (the next `## ` heading or `lines.len()`).
-///
-/// Tracks fenced-code state so a `## ` line inside a code fence (e.g. a quoted
-/// four-backtick block containing a three-backtick snippet) is not mistaken for a
-/// section boundary.
-fn find_section(lines: &[&str], heading: &str) -> Option<(usize, usize)> {
+/// Locate one unambiguous owned section in the original bytes. Heading syntax is
+/// checked only after CommonMark establishes a root-level H2.
+fn find_section(content: &str, heading: &str) -> Option<std::ops::Range<usize>> {
+    let (bom, markdown) = split_bom(content);
+    let lines: Vec<_> = markdown.split_inclusive('\n').collect();
+    let offset = match frontmatter_block(&lines) {
+        Some(block) => lines[..=block.end].iter().map(|line| line.len()).sum(),
+        None if lines
+            .first()
+            .is_some_and(|line| lk_core::frontmatter::is_delimiter_line(line)) =>
+        {
+            return None;
+        }
+        None => 0,
+    } + bom.len();
     let target = format!("## {heading}");
-    let mut fence = FenceState::new();
-
-    let mut start_idx = None;
-    for (i, line) in lines.iter().enumerate() {
-        let stripped = line.strip_suffix('\n').unwrap_or(line);
-        if fence.apply(stripped) {
-            continue;
-        }
-        if fence.is_closed() && stripped.trim_end() == target {
-            start_idx = Some(i);
-            break;
+    let mut found: Option<std::ops::Range<usize>> = None;
+    let mut depth = 0;
+    for (event, range) in Parser::new(&content[offset..]).into_offset_iter() {
+        match event {
+            Event::Start(tag) => {
+                if depth == 0
+                    && matches!(
+                        tag,
+                        Tag::Heading {
+                            level: HeadingLevel::H2,
+                            ..
+                        }
+                    )
+                {
+                    let start = offset + range.start;
+                    let line_start = content[..start].rfind('\n').map_or(offset, |end| end + 1);
+                    let line_end = content[start..]
+                        .find('\n')
+                        .map_or(content.len(), |end| start + end + 1);
+                    if let Some(section) = &mut found
+                        && section.end == content.len()
+                    {
+                        section.end = line_start;
+                    }
+                    if content[line_start..line_end].trim_end() == target {
+                        if found.is_some() {
+                            return None;
+                        }
+                        found = Some(line_end..content.len());
+                    }
+                }
+                depth += 1;
+            }
+            Event::End(_) => depth -= 1,
+            _ => {}
         }
     }
-    let start_idx = start_idx?;
-
-    let mut end_idx = lines.len();
-    for (rel, line) in lines[start_idx + 1..].iter().enumerate() {
-        let stripped = line.strip_suffix('\n').unwrap_or(line);
-        if fence.apply(stripped) {
-            continue;
-        }
-        if fence.is_closed() && stripped.trim_end().starts_with("## ") {
-            end_idx = rel + start_idx + 1;
-            break;
-        }
-    }
-
-    Some((start_idx, end_idx))
+    found
 }
 
 /// Replace the body of the H2 section whose heading line is exactly `## {heading}`
@@ -70,37 +81,34 @@ fn find_section(lines: &[&str], heading: &str) -> Option<(usize, usize)> {
 /// section is empty" makes each run undo the other's, and every sweep reports a page nothing
 /// changed about as changed.
 ///
-/// If no line matches `## {heading}`, the document is returned unchanged. This is
-/// the documented contract so callers can run the function unconditionally.
+/// Missing or duplicate owned headings leave the document unchanged. Original
+/// bytes outside the body are preserved; generated separators use the heading's
+/// line terminator.
 pub fn replace_section(content: &str, heading: &str, new_body: &str) -> String {
-    let lines: Vec<&str> = content.split_inclusive('\n').collect();
-    let Some((start_idx, end_idx)) = find_section(&lines, heading) else {
+    let Some(body) = find_section(content, heading) else {
         return content.to_string();
     };
-
+    let newline = terminator(&content[..body.start]);
     let mut out = String::with_capacity(content.len());
-    for line in &lines[..=start_idx] {
-        out.push_str(line);
+    out.push_str(&content[..body.start]);
+    if !out.ends_with('\n') {
+        out.push_str(newline);
     }
 
     // Body block: blank line, body text, blank line before the next H2. If we're
-    // at EOF (`end_idx == lines.len()`) the trailing blank would create a phantom
+    // at EOF the trailing blank would create a phantom
     // empty line — collapse it to a single final newline instead.
-    out.push('\n');
+    out.push_str(newline);
     if !new_body.is_empty() {
         out.push_str(new_body);
         if !new_body.ends_with('\n') {
-            out.push('\n');
+            out.push_str(newline);
         }
-        if end_idx < lines.len() {
-            out.push('\n');
+        if body.end < content.len() {
+            out.push_str(newline);
         }
     }
-
-    for line in &lines[end_idx..] {
-        out.push_str(line);
-    }
-
+    out.push_str(&content[body.end..]);
     out
 }
 
@@ -163,18 +171,11 @@ pub fn resolve_section(content: &str, section: impl SectionKey) -> Option<PageSe
 }
 
 /// Read the body of the H2 section whose heading line is exactly `## {heading}`.
-/// Returns the substring between the heading line and the next `## ` (or EOF),
-/// or `None` if the heading is missing. The body includes leading/trailing
+/// Returns the substring between the heading line and the next root H2 (or EOF),
+/// or `None` if the owned heading is missing or duplicated. The body includes leading/trailing
 /// whitespace verbatim — callers usually `.trim()`.
 pub fn section_body<'a>(content: &'a str, heading: &str) -> Option<&'a str> {
-    let lines: Vec<&str> = content.split_inclusive('\n').collect();
-    let (start_idx, end_idx) = find_section(&lines, heading)?;
-
-    // Slice indices into the original string by accumulating line lengths. The
-    // body starts after the heading line and ends at end_idx's line start.
-    let body_start: usize = lines[..=start_idx].iter().map(|l| l.len()).sum();
-    let body_end: usize = lines[..end_idx].iter().map(|l| l.len()).sum();
-    Some(&content[body_start..body_end])
+    Some(&content[find_section(content, heading)?])
 }
 
 /// Split off a leading BOM the way `parse_page` does, so it can be restored and the page
@@ -710,6 +711,23 @@ mod tests {
         assert_eq!(out, "# Title\n\n## Sources\n\n- [new](new.md)\n");
     }
 
+    #[test]
+    fn unterminated_heading_line_receives_body_separators() {
+        let doc = "## Sources";
+        assert_eq!(section_body(doc, "Sources"), Some(""));
+        assert_eq!(
+            replace_section(doc, "Sources", "body"),
+            "## Sources\n\nbody\n"
+        );
+    }
+
+    #[test]
+    fn unclosed_frontmatter_refuses_section_operations() {
+        let doc = "---\nnote: |\n  value\n## Summary\n\nbody\n";
+        assert_eq!(section_body(doc, "Summary"), None);
+        assert_eq!(replace_section(doc, "Summary", "replacement"), doc);
+    }
+
     /// A flow mapping is REFUSED, never replaced. `set_llm_input` cannot write into
     /// `llm_inputs: {summary: "abc"}`, and creating the key there would drop every entry it
     /// holds — so the two reasons that writer refuses are kept apart: absence creates, an
@@ -866,13 +884,85 @@ mod tests {
     }
 
     #[test]
-    fn setext_underline_in_body_is_not_a_section_boundary() {
-        // A source body can carry setext headings (`Subhead\n---`). Section boundaries
-        // are ATX `## ` lines only, so a setext underline is ordinary body content —
-        // the real boundary is `## Meta`. The whole body is replaced as one span.
+    fn root_setext_heading_bounds_the_owned_section() {
         let doc = "## Key Events\n\nSubhead\n---\n\nbody\n\n## Meta\n\nm\n";
         let out = replace_section(doc, "Key Events", "rewritten");
-        assert_eq!(out, "## Key Events\n\nrewritten\n\n## Meta\n\nm\n");
+        assert_eq!(
+            out,
+            "## Key Events\n\nrewritten\n\nSubhead\n---\n\nbody\n\n## Meta\n\nm\n"
+        );
+        assert_eq!(section_body(doc, "Key Events"), Some("\n"));
+        assert_eq!(section_body(doc, "Subhead"), None);
+    }
+
+    #[test]
+    fn html_content_does_not_create_or_hide_owned_sections() {
+        for html in [
+            "<!--\n```\n## Summary\n-->",
+            "<pre>\n```\n## Summary\n</pre>",
+            "<table>\n<tr><td>\n## Summary\n</td></tr>\n</table>",
+        ] {
+            let prefix = format!("## Sources\n\n{html}\n\n");
+            let doc = format!("{prefix}## Summary\n\nreal body\n\n## Meta\nkept\n");
+            assert_eq!(section_body(&doc, "Sources"), Some(&prefix[11..]));
+            assert_eq!(section_body(&doc, "Summary"), Some("\nreal body\n\n"));
+            assert_eq!(
+                replace_section(&doc, "Summary", "replacement"),
+                format!("{prefix}## Summary\n\nreplacement\n\n## Meta\nkept\n")
+            );
+        }
+    }
+
+    #[test]
+    fn frontmatter_is_not_markdown_section_content() {
+        let prefix =
+            "\u{feff}---\r\nnote: |\r\n  ```\r\n  ## Summary\r\n# ## Summary\r\n---\r\n\r\n";
+        let doc = format!("{prefix}## Summary\r\n\r\nreal body\r\n\r\n## Meta\r\nkept\r\n");
+        assert_eq!(section_body(&doc, "Summary"), Some("\r\nreal body\r\n\r\n"));
+        assert_eq!(
+            replace_section(&doc, "Summary", "replacement"),
+            format!("{prefix}## Summary\r\n\r\nreplacement\r\n\r\n## Meta\r\nkept\r\n")
+        );
+    }
+
+    #[test]
+    fn nested_headings_are_not_owned_section_boundaries() {
+        for nested in [
+            "> ## Summary\n> quoted\n",
+            "- item\n\n  ## Summary\n\n  nested\n",
+            "    ## Summary\n    indented code\n",
+        ] {
+            let body = format!("\n{nested}\n");
+            let doc = format!("## Sources\n{body}## Meta\nkept\n");
+            assert_eq!(section_body(&doc, "Sources"), Some(body.as_str()));
+            assert_eq!(section_body(&doc, "Summary"), None);
+            assert_eq!(replace_section(&doc, "Summary", "wrong"), doc);
+            assert_eq!(
+                replace_section(&doc, "Sources", "replacement"),
+                "## Sources\n\nreplacement\n\n## Meta\nkept\n"
+            );
+        }
+    }
+
+    #[test]
+    fn duplicate_owned_headings_refuse_ambiguous_reads_and_writes() {
+        let doc = "## Summary\n\nfirst\n\n## Meta\nkept\n\n## Summary  \n\nsecond\n";
+        assert_eq!(section_body(doc, "Summary"), None);
+        assert_eq!(replace_section(doc, "Summary", "replacement"), doc);
+        assert_eq!(resolve_section(doc, |s| s.summary), None);
+    }
+
+    #[test]
+    fn only_exact_atx_headings_are_owned_but_other_h2_headings_bound_them() {
+        for heading in [" ## Next", "## Next ##", "## **Next**", "Next\n---"] {
+            let doc = format!("## Summary\n\nbody\n\n{heading}\n\nkept\n");
+            assert_eq!(section_body(&doc, "Summary"), Some("\nbody\n\n"));
+            assert_eq!(section_body(&doc, "Next"), None);
+            assert_eq!(
+                replace_section(&doc, "Summary", "replacement"),
+                format!("## Summary\n\nreplacement\n\n{heading}\n\nkept\n")
+            );
+        }
     }
 
     #[test]
