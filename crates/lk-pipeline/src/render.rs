@@ -671,7 +671,7 @@ mod tests {
                 "old"
             };
             let previous = format!(
-                "---\nllm_inputs:\n  summary: old\n{done}  summary_policy_done: summary-v0\n  summary_policy_requested: summary-v1\n  summary_policy_requested_input: {request_input}\n---\n## Summary\nPreserved knowledge.\n"
+                "---\ntype: daily\nllm_inputs:\n  summary: old\n{done}  summary_policy_done: summary-v0\n  summary_policy_requested: summary-v1\n  summary_policy_requested_input: {request_input}\n---\n## Summary\nPreserved knowledge.\n"
             );
             let page = lk_core::frontmatter::parse_page(&previous).unwrap();
             let hash = if scenario == "changed-input" {
@@ -679,8 +679,12 @@ mod tests {
             } else {
                 "old"
             };
-            let decision =
-                crate::llm_cache::lookup(Some(&page), "summary_done", |s| s.summary, hash.into());
+            let decision = crate::llm_cache::lookup(
+                Some(&page),
+                lk_queue::TargetKind::DailySummary,
+                |s| s.summary,
+                hash.into(),
+            );
             let fresh = format!("---\nllm_inputs:\n  summary: {hash}\n---\n## Summary\n\n");
             let output = splice_preserved_sections(fresh, [("Summary", &decision)])
                 .unwrap()

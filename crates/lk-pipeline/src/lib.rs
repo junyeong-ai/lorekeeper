@@ -369,7 +369,7 @@ impl Pipeline {
             };
             let summary_decision = llm_cache::lookup(
                 existing.as_ref(),
-                &summary_req.target.kind.completion_key(),
+                summary_req.target.kind,
                 |s| s.summary,
                 summary_req.cache_hash(),
             );
@@ -392,7 +392,7 @@ impl Pipeline {
             };
             let refine_decision = llm_cache::lookup(
                 existing.as_ref(),
-                &refine_req.target.kind.completion_key(),
+                refine_req.target.kind,
                 |s| item_kind.heading(s),
                 refine_req.cache_hash(),
             );
@@ -448,7 +448,7 @@ impl Pipeline {
                 };
                 let decision = llm_cache::lookup(
                     existing.as_ref(),
-                    &concepts_req.target.kind.completion_key(),
+                    concepts_req.target.kind,
                     |s| s.related_concepts,
                     concepts_req.cache_hash(),
                 );
@@ -1238,7 +1238,7 @@ impl Pipeline {
             };
             let summary_decision = llm_cache::lookup(
                 existing.as_ref(),
-                &summary_req.target.kind.completion_key(),
+                summary_req.target.kind,
                 |s| s.summary,
                 summary_req.cache_hash(),
             );
@@ -1281,7 +1281,7 @@ impl Pipeline {
                 };
                 let decision = llm_cache::lookup(
                     existing.as_ref(),
-                    &concepts_req.target.kind.completion_key(),
+                    concepts_req.target.kind,
                     |s| s.related_concepts,
                     concepts_req.cache_hash(),
                 );

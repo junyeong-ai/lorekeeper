@@ -29,24 +29,11 @@ pub struct Synthesizer {
 
 /// Completion of a captured semantic input on its declared page format, including an empty answer.
 pub fn completed_input(page: &VaultPage, kind: TargetKind) -> Option<&str> {
-    let page_format = match kind {
-        TargetKind::DailySummary | TargetKind::DailyConcepts | TargetKind::DailyRefineEvents => {
-            "daily"
-        }
-        TargetKind::DocumentSummary | TargetKind::DocumentConcepts => "document",
-        TargetKind::WeeklySynthesisThemes => "weekly-synthesis",
-        TargetKind::WeeklyReviewNarrative => "weekly-review",
-        TargetKind::MonthlyReviewNarrative => "monthly-review",
-        TargetKind::QuarterlyReviewNarrative => "quarterly-review",
-        TargetKind::AnnualReviewNarrative => "annual-review",
-        TargetKind::WorkLogSynthesis => "work-log",
-        TargetKind::ConceptSynthesis => "concept",
-    };
     if page
         .frontmatter
         .get("type")
         .and_then(|value| value.as_str())
-        != Some(page_format)
+        != Some(kind.page_format())
     {
         return None;
     }
@@ -216,12 +203,7 @@ impl Synthesizer {
         hash: String,
     ) -> Result<SectionDecision, PipelineError> {
         let existing = self.reader.read_page(path.as_ref()).await?;
-        Ok(llm_cache::lookup(
-            existing.as_ref(),
-            &kind.completion_key(),
-            heading,
-            hash,
-        ))
+        Ok(llm_cache::lookup(existing.as_ref(), kind, heading, hash))
     }
 
     /// Render a synthesis/personal template, injecting localized labels as `i18n.*`

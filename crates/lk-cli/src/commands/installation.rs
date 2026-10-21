@@ -743,7 +743,9 @@ mod update_boundary_tests {
             };
             std::fs::write(
                 &target,
-                format!("---\nllm_inputs:\n  summary: {hash}\n{done}---\n## Summary\n\n"),
+                format!(
+                    "---\ntype: document\nllm_inputs:\n  summary: {hash}\n{done}---\n## Summary\n\n"
+                ),
             )
             .unwrap();
             assert_eq!(refuse_while_work_is_queued(&opts, false).is_ok(), completed);

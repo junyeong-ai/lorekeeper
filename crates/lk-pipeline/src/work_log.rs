@@ -157,12 +157,8 @@ pub async fn render_work_log(
         // LLM section, never inferred from an empty body.
         let completion_key = kind.completion_key();
         let existing = reader.read_page(Path::new(&vault_path)).await?;
-        let decision: SectionDecision = llm_cache::lookup(
-            existing.as_ref(),
-            &completion_key,
-            |s| s.topic_summary,
-            hash.clone(),
-        );
+        let decision: SectionDecision =
+            llm_cache::lookup(existing.as_ref(), kind, |s| s.topic_summary, hash.clone());
 
         if decision.enqueue() {
             match ctx.llm.summarize(req).await {

@@ -34,7 +34,7 @@ fn fixture() -> tempfile::TempDir {
     let mut queue = String::new();
     for id in ["first", "second"] {
         let target = format!("wiki/concepts/{id}.md");
-        std::fs::write(dir.path().join(&target),format!("---\ntitle: {id}\nllm_inputs:\n  synthesis: {hash}\n---\n\n## Synthesis\n\nExisting definition.\n")).unwrap();
+        std::fs::write(dir.path().join(&target),format!("---\ntype: concept\ntitle: {id}\nllm_inputs:\n  synthesis: {hash}\n---\n\n## Synthesis\n\nExisting definition.\n")).unwrap();
         let task = json!({"task_id":id,"kind":"synthesize-concept","created_at":"2026-10-15T12:00:00Z","cache_hash":hash,"input":{"locale":"en","citations":citations,"generation_policy":lk_queue::TaskKind::SynthesizeConcept.generation_policy()},"target":{"vault_path":target,"kind":"concept-synthesis","anchor":"## Synthesis"}});
         queue.push_str(&serde_json::to_string(&task).unwrap());
         queue.push('\n');
