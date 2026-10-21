@@ -67,6 +67,9 @@ one source to infer that distinction.
   are outside that lock. Read-only queries never write or recover. Publication
   previews never publish or recover; missing-address validation uses disposable
   private directory probes in the destination filesystem, without page payloads.
+  Derived document projections use separate per-identity cache claims before
+  publication; they are disposable computation, never canonical evidence. Inspection
+  and dry runs may reuse them read-only without renewing retention.
 - **Long workflows use a separate cooperative lease.** `lore workflow -- COMMAND`
   owns the canonical vault's Unix `workflow.lock` across evidence reading and
   publication; short mutation/queue locks remain inside commands, never across an

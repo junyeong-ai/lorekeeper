@@ -40,9 +40,35 @@ struct ManualParams {
     /// Publication failure leaves entries available for an idempotent retry.
     #[serde(default = "default_archive")]
     archive_after_ingest: bool,
+    #[serde(default)]
+    pdf: Option<lk_core::content::PdfProjectionPolicy>,
 }
 
 impl ManualParams {
+    fn build_processing_config(
+        &self,
+        configured: Option<&lk_core::content::InputProcessingConfig>,
+    ) -> Result<Option<lk_core::content::InputProcessingConfig>, SourceError> {
+        let mut effective = configured.cloned();
+        if let Some(policy) = &self.pdf {
+            let documents = effective.as_mut().ok_or_else(|| {
+                SourceError::InvalidParams("manual PDF policy requires ingest.documents".into())
+            })?;
+            if matches!(policy, lk_core::content::PdfProjectionPolicy::Visual { .. })
+                && documents.vision.is_none()
+            {
+                return Err(SourceError::InvalidParams(
+                    "manual PDF visual policy requires ingest.documents.vision".into(),
+                ));
+            }
+            documents.pdf = Some(policy.clone());
+            if let Some(ocr) = documents.ocr.as_mut() {
+                ocr.pdf = false;
+            }
+        }
+        Ok(effective)
+    }
+
     fn selects(&self, extension: &str, ctx: &ExtractContext) -> bool {
         if let Some(extensions) = &self.extensions {
             return extensions
@@ -51,10 +77,9 @@ impl ManualParams {
         }
         lk_core::content::InputFormat::from_extension(extension).is_some_and(|format| {
             !format.requires_processor()
-                || ctx
-                    .documents
-                    .as_ref()
-                    .is_some_and(|config| !format.is_image() || config.ocr.is_some())
+                || ctx.documents.as_ref().is_some_and(|config| {
+                    !format.is_image() || config.ocr.is_some() || config.vision.is_some()
+                })
         })
     }
 }
@@ -66,6 +91,14 @@ fn default_archive() -> bool {
 /// Validate this source's params at config-load time, before any I/O.
 pub fn validate_params(params: &serde_json::Value) -> Result<(), SourceError> {
     crate::parse_validated::<ManualParams>(params).map(|_| ())
+}
+
+pub fn validate_processing(
+    params: &serde_json::Value,
+    documents: Option<&lk_core::content::InputProcessingConfig>,
+) -> Result<(), SourceError> {
+    let params: ManualParams = crate::parse_validated(params)?;
+    params.build_processing_config(documents).map(|_| ())
 }
 
 /// Where a `manual` source reads from, resolved the way the adapter itself resolves it.
@@ -85,6 +118,11 @@ pub fn inbox_dir(
 
 impl crate::ValidatedParams for ManualParams {
     fn validate(&self) -> Result<(), SourceError> {
+        if let Some(policy) = &self.pdf {
+            policy
+                .validate()
+                .map_err(|error| SourceError::InvalidParams(error.to_string()))?;
+        }
         // Enforced at consumption (both `extract` and `archive_consumed_files` route through
         // `parse_validated`), not just at the config boundary: an `inbox_dir` of `.` would
         // otherwise resolve to the vault root and the adapter would scan — and archive — vault
@@ -240,6 +278,7 @@ async fn read_item(path: &Path) -> Result<RawItem, SourceError> {
         vault_root: root,
         vault_dirs: Default::default(),
         documents: None,
+        projection_cache: None,
         originals: Default::default(),
     };
     read_captured_item(path, &capture, &ctx).await
@@ -276,7 +315,15 @@ async fn read_captured_item(
         .and_then(lk_core::content::InputFormat::from_extension)
         .ok_or_else(|| SourceError::Parse("unsupported manual entry format".into()))?;
     let projection = if format.requires_processor() {
-        Some(crate::content::project_file(captured, format, ctx.documents.as_ref()).await?)
+        Some(
+            crate::content::project_file_with_cache(
+                captured,
+                format,
+                ctx.documents.as_ref(),
+                ctx.projection_cache.as_ref(),
+            )
+            .await?,
+        )
     } else {
         None
     };
@@ -340,9 +387,15 @@ async fn read_captured_item(
     let fingerprint_input = serde_json::to_vec(&(
         &body,
         format,
-        projection
-            .as_ref()
-            .map(|projection| (&projection.policy, &projection.packages, &projection.ocr)),
+        projection.as_ref().map(|projection| {
+            (
+                &projection.policy,
+                &projection.packages,
+                &projection.ocr,
+                &projection.vision,
+                &projection.pdf,
+            )
+        }),
     ))
     .map_err(|error| SourceError::Parse(error.to_string()))?;
     let fingerprint = blake3::hash(&fingerprint_input).to_hex().to_string();
@@ -374,7 +427,7 @@ async fn read_captured_item(
     metadata["source_record"]["input_format"] =
         serde_json::to_value(format).map_err(|error| SourceError::Parse(error.to_string()))?;
     if let Some(projection) = projection {
-        metadata["source_record"]["projection"] = serde_json::json!({"policy": projection.policy, "packages": projection.packages, "ocr": projection.ocr, "warnings": projection.warnings});
+        metadata["source_record"]["projection"] = serde_json::json!({"policy": projection.policy, "packages": projection.packages, "ocr": projection.ocr, "vision": projection.vision, "pdf": projection.pdf, "warnings": projection.warnings});
     }
     metadata["source_record"][lk_core::manual_original::MANUAL_ORIGINAL_FIELD] =
         serde_json::to_value(capture.manifest.reference().map_err(SourceError::Parse)?)
@@ -707,6 +760,9 @@ pub async fn capture_manual(
     ctx: &ExtractContext,
 ) -> Result<ManualExtraction, SourceError> {
     let p: ManualParams = crate::parse_validated(params)?;
+    let mut effective_context = ctx.clone();
+    effective_context.documents = p.build_processing_config(ctx.documents.as_ref())?;
+    let ctx = &effective_context;
     let inbox = resolve_inbox_dir(&p.inbox_dir, &ctx.vault_root, &ctx.vault_dirs)?;
     let root = inbox
         .canonicalize()
@@ -863,6 +919,7 @@ mod tests {
             vault_root: std::path::PathBuf::new(),
             vault_dirs: Default::default(),
             documents: None,
+            projection_cache: None,
             originals: Default::default(),
         };
         let params = serde_json::json!({ "inbox_dir": dir, "archive_after_ingest": false });
@@ -900,6 +957,7 @@ mod tests {
                 vault_root: vault,
                 vault_dirs: Default::default(),
                 documents: None,
+                projection_cache: None,
                 originals: Default::default(),
             };
             let direct_params =
@@ -1081,6 +1139,7 @@ mod tests {
             vault_root: PathBuf::new(),
             vault_dirs: Default::default(),
             documents: None,
+            projection_cache: None,
             originals: Default::default(),
         };
         assert!(matches!(
@@ -1244,6 +1303,7 @@ mod tests {
             vault_root: std::path::PathBuf::new(),
             vault_dirs: Default::default(),
             documents: None,
+            projection_cache: None,
             originals: Default::default(),
         };
         let items = src.extract(&params, &ctx).await.unwrap();
@@ -1269,6 +1329,7 @@ mod tests {
             vault_root: std::path::PathBuf::new(),
             vault_dirs: Default::default(),
             documents: None,
+            projection_cache: None,
             originals: Default::default(),
         };
         let items = src.extract(&params, &ctx).await.unwrap();
@@ -1292,6 +1353,7 @@ mod tests {
             vault_root: std::path::PathBuf::new(),
             vault_dirs: Default::default(),
             documents: None,
+            projection_cache: None,
             originals: Default::default(),
         };
         let err = src.extract(&params, &ctx).await.unwrap_err();
@@ -1318,6 +1380,7 @@ mod tests {
             vault_root: std::path::PathBuf::new(),
             vault_dirs: Default::default(),
             documents: None,
+            projection_cache: None,
             originals: Default::default(),
         };
         let items = src.extract(&params, &ctx).await.unwrap();
@@ -1371,6 +1434,7 @@ mod tests {
             vault_root: std::path::PathBuf::new(),
             vault_dirs: Default::default(),
             documents: None,
+            projection_cache: None,
             originals: Default::default(),
         };
         let items = src.extract(&params, &ctx).await.unwrap();
@@ -1424,6 +1488,7 @@ mod tests {
             vault_root: std::path::PathBuf::new(),
             vault_dirs: Default::default(),
             documents: None,
+            projection_cache: None,
             originals: Default::default(),
         };
         let items = src.extract(&params, &ctx).await.unwrap();
@@ -1488,6 +1553,7 @@ mod tests {
             vault_root: std::path::PathBuf::new(),
             vault_dirs: Default::default(),
             documents: None,
+            projection_cache: None,
             originals: Default::default(),
         };
         let items = src.extract(&params, &ctx).await.unwrap();
@@ -1548,6 +1614,7 @@ mod tests {
             vault_root: std::path::PathBuf::new(),
             vault_dirs: Default::default(),
             documents: None,
+            projection_cache: None,
             originals: Default::default(),
         };
         let items = src.extract(&params, &ctx).await.unwrap();
@@ -1752,6 +1819,7 @@ mod tests {
             vault_root: vault,
             vault_dirs: Default::default(),
             documents: None,
+            projection_cache: None,
             originals: Default::default(),
         };
         let params = serde_json::json!({"inbox_dir": "inbox"});
@@ -1872,6 +1940,7 @@ mod tests {
             vault_root: tmp.path().to_path_buf(),
             vault_dirs: Default::default(),
             documents: None,
+            projection_cache: None,
             originals: Default::default(),
         };
         let items = src.extract(&params, &ctx).await.unwrap();

@@ -60,15 +60,28 @@ ingest:
     max_entry_bytes: 33554432     # 32 MiB per inbox entry; raise explicitly for larger inputs
     max_member_bytes: 67108864    # 64 MiB per locally referenced attachment
     max_source_bytes: 268435456   # 256 MiB captured originals per manual source
-  # Optional local DOCX/XLSX/PDF/image decoder. `lore input install DIRECTORY`
-  # creates an isolated, pinned environment and prints its python path.
+  # Optional native DOCX/XLSX/PDF decoder: `lore input install DIRECTORY`.
+  # Add visual PDF/image recognition on Apple Silicon macOS 14+ with
+  # `lore input install-vision VISION_DIRECTORY --python python3.12`.
+  # Both installers use new directories and print configuration to merge here.
   # Relative paths here resolve against this config file, not vault.root.
   # documents:
   #   python: ~/.local/share/lorekeeper/documents/venv/bin/python
-  #   timeout_seconds: 120
-  #   max_output_bytes: 33554432
-  #   max_decoded_bytes: 134217728
-  #   max_units: 10000              # projected pages/sheets/frames, including extra PDF OCR
+  #   timeout_seconds: 120            # whole projection; source acquisition has a separate budget
+  #   max_output_bytes: 33554432       # aggregate serialized decoder output
+  #   max_decoded_bytes: 134217728     # aggregate projected text/structure; literal OCR also bounds RGBA
+  #   max_raster_bytes: 67108864       # per pending physical page/frame; excludes decoder/model overhead
+  #   max_units: 10000                 # native and visual/OCR units count separately for PDF
+  #   vision:
+  #     engine: paddle-ocr-vl
+  #     python: ~/.local/share/lorekeeper/vision/layout/venv/bin/python
+  #     vlm_python: ~/.local/share/lorekeeper/vision/vlm/venv/bin/python
+  #     models_dir: ~/.local/share/lorekeeper/vision/models
+  #   # With vision, omitted pdf means visual recognition of every page plus native text.
+  #   # Explicit native skips visual work; selected visual pages are ascending, 1-based:
+  #   # pdf: {mode: native}
+  #   # pdf: {mode: visual, pages: [1, 3]}
+  # For native-only documents, omit vision. For literal OCR, replace vision with:
   #   ocr:
   #     tessdata_dir: ~/.local/share/lorekeeper/tessdata
   #     languages: [kor, eng]     # explicitly installed <language>.traineddata files
@@ -370,6 +383,9 @@ sources:
       # are retained with a diagnostic; explicit selection requires its decoder.
       # An explicit list narrows selection; unsupported files remain untouched.
       # extensions: [md, txt, markdown, html, htm, docx, xlsx, pdf, png, jpg, tiff, webp]
+      # Override the global PDF policy for this source; visual requires documents.vision.
+      # pdf: {mode: visual, pages: [1, 3]}
+      # pdf: {mode: native}
       archive_after_ingest: true  # auto-archive after processing (default true)
     labels: [knowledge]
     concept_policy: supported-new
@@ -500,7 +516,9 @@ concepts:
 #     suggest_min_shared_neighbors: 2  # suggest-links floor: min shared neighbors per pair (cuts co-citation noise)
 
 # ─── Maintenance ──────────────────────────────────────────
-# Retention for ingest history, drained queue files and verified published work caches.
+# Retention for ingest history, drained queue files, verified published work and
+# derived projection caches. Successful read/write cache reuse renews its last-use time;
+# inspect/dry-run reads do not. Active claims, originals and malformed cache data are preserved.
 # Unpublished, referenced or unowned work artifacts are preserved; work cleanup requires
 # exclusive workflow access and a settled queue. Sealing alone is not publication.
 # Streaming event logs (`.lorekeeper/events/`) are the permanent raw layer — never pruned.

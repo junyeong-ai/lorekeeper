@@ -1105,6 +1105,7 @@ mod tests {
             vault_root: ".".into(),
             vault_dirs: Default::default(),
             documents: None,
+            projection_cache: None,
             originals: Default::default(),
         }
     }

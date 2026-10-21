@@ -15,7 +15,7 @@ import sys
 import warnings
 import zipfile
 
-POLICY = "document-projection-v3"
+POLICY = "document-projection-v4"
 PACKAGES = {"kreuzberg": "4.10.4", "openpyxl": "3.1.5", "defusedxml": "0.7.1", "et-xmlfile": "2.0.0", "pillow": "13.0.0"}
 MIMES = {
     "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -257,7 +257,7 @@ def spreadsheet(data, limit, max_units):
 def image_frames(data, options):
     from PIL import Image, ImageOps, ImageSequence
 
-    Image.MAX_IMAGE_PIXELS = max(1, options["max_decoded_bytes"] // 4)
+    Image.MAX_IMAGE_PIXELS = max(1, min(options["max_decoded_bytes"], options["max_raster_bytes"]) // 4)
     remaining = options["max_decoded_bytes"]
     try:
         with warnings.catch_warnings():
@@ -270,7 +270,7 @@ def image_frames(data, options):
                     if number > options["max_units"]:
                         raise ProjectionError("unit-limit")
                     remaining -= source.width * source.height * 4
-                    if remaining < 0:
+                    if remaining < 0 or source.width * source.height * 4 > options["max_raster_bytes"]:
                         raise ProjectionError("decoded-limit")
                     frame = ImageOps.exif_transpose(source).convert("RGBA")
                     background = Image.new("RGBA", frame.size, "white")
@@ -290,7 +290,7 @@ def pdf_pages(result):
     return pages
 
 
-def validate_pdf_raster_budget(result, limit, dpi):
+def validate_pdf_raster_budget(result, limit, dpi, raster_limit):
     pages = result.metadata.get("pages", {}).get("pages")
     if not isinstance(pages, list) or len(pages) != len(result.pages):
         raise ProjectionError("invalid-projection")
@@ -303,7 +303,7 @@ def validate_pdf_raster_budget(result, limit, dpi):
         width, height = [math.ceil(value * scale) for value in dimensions]
         # The pinned renderer rescales larger dimensions; refuse that change to
         # the declared DPI rather than silently using a lower resolution.
-        if width > 65536 or height > 65536:
+        if width > 65536 or height > 65536 or width * height * 4 > raster_limit:
             raise ProjectionError("decoded-limit")
         limit -= width * height * 4
         if limit < 0:
@@ -376,7 +376,7 @@ def extraction(data, options):
         warnings.append("PDF native text follows the decoder's reading order; diagrams and image content require separate inspection.")
         if ocr is not None and ocr["pdf"]:
             dpi = 150
-            validate_pdf_raster_budget(result, limit, dpi)
+            validate_pdf_raster_budget(result, limit, dpi, options["max_raster_bytes"])
             enable_ocr()
             size = sum(len(part["text"].encode("utf-8")) for part in units)
             remaining_raster = limit
@@ -435,7 +435,7 @@ def project(options, data):
             changed = True
         if changed:
             raise ProjectionError("ocr-data-changed")
-    if not any(part["text"].strip() for part in units):
+    if not options.get("allow_empty", False) and not any(part["text"].strip() for part in units):
         raise ProjectionError("no-text")
     return {"policy": POLICY, "format": options["format"], "packages": PACKAGES, "ocr": {"languages": ocr["languages"], "layout": ocr["layout"], "models": models} if ocr is not None else None, "units": units, "warnings": warnings}
 

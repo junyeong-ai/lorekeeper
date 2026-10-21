@@ -13,6 +13,8 @@ pub async fn run(opts: &super::GlobalOptions) -> miette::Result<()> {
         lk_source::validate_params(sc.source_type, &sc.params)
             .map_err(|e| miette::miette!("sources.{id} ({}): {e}", sc.source_type))?;
         if sc.source_type == lk_core::config::SourceType::Manual {
+            lk_source::validate_manual_processing(&sc.params, config.ingest.documents.as_ref())
+                .map_err(|error| miette::miette!("sources.{id} ({}): {error}", sc.source_type))?;
             lk_source::manual_inbox_dir(&sc.params, &config.vault.root_path(), &config.vault.dirs)
                 .map_err(|e| miette::miette!("sources.{id} ({}): {e}", sc.source_type))?;
         }

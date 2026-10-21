@@ -311,6 +311,16 @@ pub async fn run(
             super::queue::prune(opts, None, false, true).await?;
         }
     }
+    if !dry_run {
+        let cutoff = std::time::UNIX_EPOCH
+            .checked_add(std::time::Duration::from_secs(cutoff_secs as u64))
+            .ok_or_else(|| miette::miette!("invalid projection cache retention cutoff"))?;
+        let removed = lk_source::content::prune_projection_cache(&vault_root, cutoff)
+            .map_err(|error| miette::miette!("{error}"))?;
+        if removed != 0 {
+            eprintln!("projection cache: pruned {removed} expired derived entries.");
+        }
+    }
     Ok(())
 }
 

@@ -22,6 +22,7 @@ mod tasks;
 pub use manual::{
     ManualExtraction, UnprocessedInput, archive_consumed_files, archive_manual_originals,
     capture_manual, inbox_dir as manual_inbox_dir,
+    validate_processing as validate_manual_processing,
 };
 
 use std::sync::Arc;
@@ -154,6 +155,7 @@ pub struct ExtractContext {
     /// Managed output namespaces, kept separate from raw input directories.
     pub vault_dirs: lk_core::config::VaultDirs,
     pub documents: Option<lk_core::content::InputProcessingConfig>,
+    pub projection_cache: Option<crate::content::ProjectionCache>,
     pub originals: lk_core::manual_original::OriginalCaptureConfig,
 }
 
@@ -490,6 +492,7 @@ mod tests {
             vault_root: std::path::PathBuf::new(),
             vault_dirs: Default::default(),
             documents: None,
+            projection_cache: None,
             originals: Default::default(),
         }
     }

@@ -22,8 +22,11 @@ ingest:
     max_member_bytes: 67108864
     max_source_bytes: 268435456
   # Raise entry limits explicitly for larger originals; all source limits fit 512 MiB.
-  # DOCX/XLSX/PDF: `lore input install DIRECTORY`, then add its printed documents block.
-  # Image OCR additionally needs explicit traineddata/languages; see config.example.yaml.
+  # DOCX/XLSX/PDF: `lore input install DIRECTORY`, then merge its documents block.
+  # Apple Silicon macOS 14+: `lore input install-vision VISION_DIRECTORY --python python3.12`.
+  # Adding vision defaults PDFs to native text + visual recognition of all pages.
+  # Use pdf: {mode: native} for native-only PDFs; see config.example.yaml for page selection
+  # and the mutually exclusive Tesseract literal-text OCR option.
 
 sources:
   manual-inbox:

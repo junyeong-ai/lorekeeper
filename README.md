@@ -89,12 +89,19 @@ vault의 `inbox/`에 메모 파일 하나를 넣은 뒤 수집합니다. `inbox_
 `vault.root`를 따라갑니다. 기본 설정에는 공급자 인증 마법사가 필요하지 않습니다.
 
 DOCX·XLSX·PDF를 넣으려면 `lore input install DIRECTORY`로 선택적 변환 환경을 설치하고
-출력된 설정을 병합합니다. `lore input check`로 의존성을, `lore input inspect FILE.pdf`로
-원본을 옮기지 않고 변환 결과를 확인합니다. 이미지는 별도 OCR 언어 데이터가 필요합니다.
+출력된 설정을 병합합니다. macOS 14 이상 Apple Silicon에서는
+`lore input install-vision VISION_DIRECTORY --python python3.12`로 PaddleOCR-VL 1.6의
+별도 실행 환경과 고정된 모델을 설치해 이미지·스캔 PDF·표를 인식할 수 있습니다.
+`vision`을 설정하면 PDF는 기본적으로 모든 페이지의 내장 텍스트와 시각 인식을 함께
+보존합니다. `pdf: {mode: native}`로 비용을 줄이거나 인식할 물리 페이지를 지정할 수 있습니다.
+시각 인식은 정확성이나 의미 검수의 승인이 아니므로 중요한 값은 보존 원본과 대조합니다.
+`lore input check`로 의존성을, `lore input inspect FILE.pdf`로 원본을 옮기지 않고 결과를
+확인합니다. Tesseract의 언어 데이터를 직접 지정하는 일반 텍스트 OCR도 선택할 수 있습니다.
 원본은 기본적으로 파일당 32 MiB이며, 더 큰 입력은 `ingest.originals.max_entry_bytes`를
 명시적으로 높여 허용합니다. 원본을 임시 파일에 보관하므로 전체 바이너리를 메모리에
 복제하지 않습니다. 변환 결과·페이지 수 제한은 별도이며, 변환기 자체의 메모리 사용량은
-파일 형식에 따라 달라집니다.
+파일 형식에 따라 달라집니다. 실제 수집은 완료된 페이지와 변환 결과를 비공개 파생 캐시에 보존해
+재시도에 재사용하며, `inspect`와 `--dry-run`은 캐시를 기록하지 않습니다.
 [전처리 설정과 지원 범위](skills/lore-setup/references/config.md#document-preprocessing)를 참고하세요.
 
 ```bash

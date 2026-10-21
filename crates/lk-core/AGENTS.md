@@ -102,6 +102,12 @@ config loading and the shared filesystem primitives intentionally perform I/O.
 - Acquisition budgets are configuration, not immutable evidence validation rules.
   New manual-bundle-v2 manifests use the fixed512 MiB storage envelope; existing v1
   manifests keep their original digest domain and 32/64/256 MiB bounds.
+- `content.rs` separates native decoding, visual engine configuration and explicit
+  PDF scope. With vision configured, an omitted PDF policy selects all physical
+  pages; native-only or selected-page processing is an explicit override. Projection
+  provenance records packages, model artifacts and recipe independently of paths.
+  New engines extend typed configuration and the source execution adapter, not
+  document identity, citations or graph rules.
 
 ## RSS original serialization (`rss_original.rs`)
 

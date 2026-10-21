@@ -93,6 +93,8 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   `--wait-for-vault` permits publication waiting; dry run never takes that lock.
 - Dry run creates no vault files, tmp results, logs, or queue writes; real source
   errors still return nonzero. A noop provider makes no promise to queue work.
+  Document projection caches are read-only during dry run and input inspection;
+  real collection may checkpoint verified units under source-owned cache claims.
 - Work-log generation belongs to full ingest only, not filtered runs. A full run
   with partial source failure still writes its work-log and reports failure.
   Startup tmp sweeping/pending diagnostics must preserve recoverable work.
@@ -221,5 +223,9 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
 `commands/installation.rs` performs artifact/schema synchronization using the NEW
 binary and refuses unsafe update over pending queue work. Uninstall never removes
 user vaults. Delegate byte coherence/target/release validation to lk-dist.
+`input install` owns the optional native decoder environment. `input install-vision`
+owns separate Paddle layout and MLX recognition environments plus verified models;
+their dependencies must not share an environment. Installation is explicit, never
+an ingest fallback. Engine platform/version checks belong to the source adapter.
 Credential wizard requires a TTY/dialoguer flow; persist shared credentials through
 atomic mode0600 writes. Avoid command-specific alternate credential stores.

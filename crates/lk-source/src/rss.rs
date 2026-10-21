@@ -845,6 +845,7 @@ mod tests {
             vault_root: std::path::PathBuf::from("."),
             vault_dirs: Default::default(),
             documents: None,
+            projection_cache: None,
             originals: Default::default(),
         }
     }

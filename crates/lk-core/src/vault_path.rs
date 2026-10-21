@@ -53,6 +53,7 @@ pub const CONCEPTS_SUBDIR: &str = "concepts";
 pub const DOCUMENTS_SUBDIR: &str = "documents";
 pub const EXPLORATIONS_SUBDIR: &str = "explorations";
 pub const WORK_LOG_SUBDIR: &str = "work-log";
+pub const PROJECTION_CACHE_DIR: &str = ".lorekeeper/cache/projections";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VaultPath(PathBuf);

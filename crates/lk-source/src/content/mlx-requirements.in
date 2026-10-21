@@ -1,0 +1,6 @@
+# Optional Apple Silicon recognition runtime; separate from Paddle layout.
+mlx-vlm==0.7.9
+mlx==0.32.4
+transformers==5.20.2
+pillow==13.0.0
+opencv-python==5.0.0.93

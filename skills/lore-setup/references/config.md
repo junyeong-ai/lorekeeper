@@ -192,76 +192,111 @@ replacing its existing `ingest.schedule`. Missing platform wheels fail explicitl
 the installer does not build native dependencies from source. A failed installation
 retains its incomplete directory for inspection and never overwrites existing data.
 
-Then run `lore input check`, `lore input inspect /path/to/file.pdf` and a selected
-`lore ingest --dry-run SOURCE`. Inspect emits the projection without publishing or
-moving the input. Runtime paths resolve against the config file. Ingestion never
-installs packages or downloads models. Acquisition defaults are 32 MiB per entry,
-64 MiB per locally referenced member and 256 MiB per
-manual source. Raise `ingest.originals` budgets explicitly for larger originals;
-entry/member limits must fit `max_source_bytes`, and all captures in one ingest
-must fit 512 MiB. Captured originals use private, automatically removed temporary
-files, including inspection and dry runs; retained evidence is published only by
-real ingestion. Decoder peak memory is format-dependent. Time, decoded-content,
-unit and serialized-output bounds refuse overflow without truncation.
-
-OCR requires explicitly installed Tesseract `<language>.traineddata` files:
+For visual PDF and image recognition on Apple Silicon macOS 14+, also run
+`lore input install-vision VISION_DIRECTORY --python python3.12`. This explicitly
+installs separate hash-locked Paddle layout and MLX recognition environments and
+verified PaddleOCR-VL 1.6 model artifacts. Merge its printed `vision` block into
+`ingest.documents`, retaining the native runtime's `python`:
 
 ```yaml
 ingest:
-  originals:
-    max_entry_bytes: 33554432
-    max_member_bytes: 67108864
-    max_source_bytes: 268435456
   documents:
     python: /path/to/runtime/venv/bin/python
     timeout_seconds: 120
     max_output_bytes: 33554432
     max_decoded_bytes: 134217728
+    max_raster_bytes: 67108864
     max_units: 10000
-    ocr:
-      tessdata_dir: /path/to/tessdata
-      languages: [kor, eng]
-      layout: auto
-      pdf: false
+    vision:
+      engine: paddle-ocr-vl
+      python: /path/to/vision/layout/venv/bin/python
+      vlm_python: /path/to/vision/vlm/venv/bin/python
+      models_dir: /path/to/vision/models
 ```
 
-Use the official [tessdata_fast](https://github.com/tesseract-ocr/tessdata_fast)
-models at a pinned revision; keep model provenance with the installation.
-`lore input check` reports installed model SHA-256 digests. `pdf: true` renders every
-physical PDF page at 150 DPI for OCR while retaining native text separately. OCR
-preserves literal recognized text without dictionary-based line deletion or table
-reconstruction; it does not interpret diagrams. Native PDF text follows the decoder's reading
-order. DOCX has no reliable physical page labels. XLSX preserves formulas and their
-stored cached values without recalculation. Typed sheet structure includes merged
-rectangles, default row visibility and ordered row/column visibility intervals;
-hidden values remain included. Drawings, comments and linked workbooks are outside
-that projection. `.doc`, `.xls`, audio and video are unsupported.
+With `vision` configured, an omitted `documents.pdf` means native PDF text plus visual
+recognition of every physical page. Select `pdf: {mode: native}` for native text only,
+or `pdf: {mode: visual, pages: [1, 3]}` to recognize selected pages while retaining
+native text for all pages. Page numbers are physical, 1-based and strictly increasing.
+Without `vision`, native text is the default; explicit `ocr.pdf` below can add literal
+OCR. A manual source's `params.pdf`
+overrides the global PDF policy for that source; visual mode requires `vision`.
+DOCX/XLSX stay native, while supported image formats use visual recognition.
 
-OCR `layout` is explicit: `auto` for page layout, `single-block` for one text block,
-or `sparse-text` for scattered text without a reading-order guarantee. These map
-to Tesseract's documented [page segmentation modes](https://tesseract-ocr.github.io/tessdoc/ImproveQuality.html#page-segmentation-method).
-An empty result never triggers another mode silently; inspect the original and
-select the intended policy. Published projection metadata retains language order,
-layout and model hashes, as well as decoder versions.
-Images are decoded frame by frame, including multipage TIFF, with EXIF orientation
-and white-background transparency composition before OCR. Every frame has a distinct
-ordinal inside one source document. The decoded-byte budget bounds aggregate RGBA
-frame bytes, including rendered PDF OCR pages, as well as projected text;
-`max_units` bounds projected pages/sheets/frames
-(native plus additional OCR count separately for PDF). Overflow refuses the projection
-instead of dropping later frames/pages. Model files must stay unchanged during OCR.
+```sh
+lore input check
+lore input inspect /path/to/file.pdf --pdf-mode native
+lore input inspect /path/to/file.pdf --pdf-mode visual --visual-pages 1,3
+lore ingest --dry-run SOURCE
+```
 
-The inbox defaults to text plus formats enabled by `ingest.documents`/OCR.
+Inspection emits bounded JSON without publishing or moving the input. PDF flags
+override only that inspection, not a source's configuration. Runtime paths resolve
+against the config file. Ingestion never installs packages or downloads models.
+PDF visual pages render at 150 DPI. Output keeps physical page/frame locations,
+recognized blocks and their coordinates, rotation, runtime/model identity and selected
+scope. Native text remains distinct. Image frames, including multipage TIFF, retain
+stored order with EXIF orientation and white-background transparency composition.
+There is no cross-page merging, document unwarping or chart/seal captioning. Recognition
+is a derived interpretation, not semantic approval; verify consequential identifiers,
+quantities, formulas and operators against the preserved original.
+
+For literal-text OCR, configure `ocr` instead of `vision`; they are mutually exclusive:
+
+```yaml
+ocr:  # within ingest.documents
+  tessdata_dir: /path/to/tessdata
+  languages: [kor, eng]
+  layout: auto
+  pdf: false
+```
+
+Install official [tessdata_fast](https://github.com/tesseract-ocr/tessdata_fast) models
+at a pinned revision. `lore input check` reports model digests. `ocr.pdf: true` adds
+literal OCR for every PDF page while retaining native text. Explicit `documents.pdf`
+or source `params.pdf` takes precedence over `ocr.pdf`. Layout is
+`auto`, `single-block` or `sparse-text`, matching Tesseract's
+[page segmentation modes](https://tesseract-ocr.github.io/tessdoc/ImproveQuality.html#page-segmentation-method).
+This path does not reconstruct tables, interpret diagrams or delete lines through
+dictionary filtering. Empty results never trigger another engine or layout silently.
+
+`max_raster_bytes` defaults to 64 MiB per pending page/frame. `max_decoded_bytes`
+bounds aggregate projected text/structure; literal OCR also bounds aggregate RGBA
+frame bytes. `max_output_bytes` bounds serialized output, and `max_units` counts
+native plus visual/OCR units separately for PDFs. Overflow refuses the projection
+without dropping later pages. `timeout_seconds` covers the whole projection; the
+source acquisition timeout separately covers its collection of entries. Measure a
+representative input before raising both budgets. Metadata readers can allocate
+codec buffers before pending-unit preflight, including WebP's canvas. These bounds
+do not cap the decoder/model process's total memory.
+
+Real ingestion checkpoints validated native components and completed visual units in
+the private, derived `.lorekeeper/cache/projections/` store. Exact source bytes,
+decoder/worker policy, dependency and model identity govern reuse; current output
+and unit limits still apply. Cached units skip rendering and recognition. Inspection and dry
+runs read caches without writing or renewing retention. Successful read/write reuse
+renews last use; maintenance prunes expired derived entries, preserving active claims
+and malformed data. Cache removal does not remove originals or completed knowledge.
+
+Original acquisition defaults are 32 MiB per entry, 64 MiB per referenced member and
+256 MiB per manual source. Raise `ingest.originals` budgets explicitly for larger
+files; entry/member limits must fit `max_source_bytes`, and one ingest's captures
+must fit 512 MiB. Private acquisition files are automatically removed, including
+after inspection and dry runs; real ingestion publishes preserved originals before
+knowledge pages or inbox retirement.
+
+The inbox defaults to text plus formats enabled by `ingest.documents`/OCR/vision.
 Known binary files without that capability stay in the inbox and are counted as
 unprocessed for standalone interpretation. Their bytes can still be preserved as
 dependencies of a selected note. This does not declare them independently processed.
 An explicit `params.extensions` list narrows selection. Unknown extensions remain
 untouched; explicitly selected binary input without its decoder fails. Failed/no-text
-entries stay in the inbox. Original bytes are preserved
-before publication; PDF pages and spreadsheet sheets remain units of one source
-document rather than generating independent concepts. Source metadata records format,
-projection policy, decoder versions and limitations. Drive still uses its documented
-provider text exports; adding an inbox decoder does not expand a remote adapter's reach.
+entries stay in the inbox. Pages/sheets/frames remain units of one source document.
+DOCX has no reliable physical page labels. XLSX retains formulas, stored cached values,
+merged ranges and declared visibility without recalculation or excluding hidden values;
+drawings, comments and linked workbooks are outside that projection. `.doc`, `.xls`,
+audio and video are unsupported. Drive retains its provider text exports; configuring
+an inbox decoder does not expand a remote adapter's reach.
 
 ## Nodex binary selection
 

@@ -171,29 +171,50 @@ Use parser/token-state behavior, not regex replacement of arbitrary markup.
 - File-backed acquisition avoids full raw-byte copies, not native decoder allocations.
   Projected output remains bounded and materialized; physical pages/sheets/frames are
   format units, never model split parts or canonical document identities.
-- The interpreter runs the embedded in-process decoders and inherits the caller's
-  process group so workflow cancellation includes it. Keep direct-child timeout/reaping;
-  do not detach conversion or launch background helper processes from the processor.
+- Rust owns foreground decoder children in the caller's process group, including
+  separate Paddle layout and MLX recognition workers. Rust brokers their bounded
+  protocol; Python workers must not spawn helpers, detach or run an HTTP service.
+  Keep timeout, cancellation and direct-child reaping explicit.
 - XLSX preserves sheet state, cell coordinates, formulas and stored cached values without
   calculation. Typed sheet structure retains merged rectangles, default row visibility
   and declared row/column visibility intervals without expanding sparse geometry or
   excluding hidden values. The locked openpyxl sparse parser is part of this boundary;
   decoder upgrades must replay the optional runtime tests. PDF physical page numbers differ
-  from DOCX flow content. OCR is explicit literal text, distinct from native Markdown;
-  dictionary-based line deletion and table reconstruction are disabled. Empty
-  extraction is unprocessed, never completed knowledge.
-  PDF OCR renders and recognizes each physical page at 150 DPI with geometry preflight
-  and aggregate RGBA/output bounds; never reuse native page text as OCR evidence.
+  from DOCX flow content. Legacy Tesseract OCR is literal text with dictionary-based
+  line deletion and table reconstruction disabled. Visual recognition retains typed
+  block geometry, order, table markup and formula content as an interpretation,
+  separate from native Markdown. Empty extraction is unprocessed, never knowledge.
+  PDF vision scope is explicit native/all/selected physical pages, not a text-length
+  or keyword quality heuristic. Render pending visual pages at 150 DPI with a
+  per-page RGBA cap and aggregate text/output bounds; legacy PDF OCR also retains
+  its aggregate RGBA cap. Never reuse native page text as recognition evidence.
   Kreuzberg v4's [best-effort support](https://docs.kreuzberg.dev/lts/) ends in 2026.
   A decoder replacement must retain supported platform wheels and pass native/OCR
   page/frame, resource-bound and private-diagnostic contracts. Replay the real-runtime
   invalid-model cases: a successful envelope, an OCR method label or complete page
   inventory does not prove OCR succeeded. Never publish native text as OCR evidence
   after recognition failed, or infer success by parsing diagnostic prose.
-- Decode all image frames through Pillow before OCR; preserve frame ordinals, apply
-  EXIF orientation and composite alpha on white. Bound aggregate RGBA bytes and unit
-  counts before accepting a projection. Native and OCR PDF page inventories must match;
-  missing later frames/pages is an error, not a successful partial document.
+- Decode image frames through Pillow, preserving ordinals, EXIF orientation and
+  alpha compositing on white. Visual block coordinates follow EXIF and the recorded
+  counterclockwise document correction. Verify physical inventory and exact selected
+  unit coverage; missing later frames/pages, nonterminal token generation or an
+  unsuccessful worker exit cannot complete a document.
+  Image inventory uses encoded canvas sizes without decoding PNG/APNG pixels;
+  EXIF can transpose those sizes during selected-frame rendering. Library metadata
+  readers may still allocate buffers, notably WebP's canvas, so the pending raster
+  limit is not a whole-process memory cap.
+- `vision.rs` owns the engine execution boundary; `vision_common.py`, `paddle.py`
+  and `mlx.py` isolate the pinned Paddle adapter. A replacement must preserve typed
+  units, provenance, coverage and resource/failure contracts without changing graph
+  semantics. Package locks, model revisions, artifact digests and recipe determine
+  cache identity; paths, selection and resource ceilings do not imply new meaning.
+  Inference is offline; model downloads belong only to explicit installation.
+- `cache.rs` checkpoints verified units and native projections before canonical
+  publication under separate per-identity claims. Partial units are reusable work,
+  never a completed source. Read-only inspection/dry run neither create cache files
+  nor refresh their lifetime. Successful normal reuse renews operational mtime;
+  maintenance prunes expired payloads under the same claims without removing originals
+  or stable lock inodes. Current output/decoded limits still apply on cache hits.
 - Decoder-generated links are original references, not canonical wiki edges. Render
   them as literal destinations. Preserve raw input before optional inbox retirement.
 - Update the embedded requirements/hash lock and package protocol together. The ignored

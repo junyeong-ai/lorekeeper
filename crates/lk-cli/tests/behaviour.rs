@@ -163,6 +163,10 @@ const EXEMPT: &[(&[&str], &str)] = &[
         "installs the optional external runtime; input tests refuse existing directories, first-user proof verifies pinned installation",
     ),
     (
+        &["input", "install-vision"],
+        "installs platform-specific external runtimes and model artifacts; input tests preserve occupied directories and optional visual runtime tests verify the installed adapter",
+    ),
+    (
         &["input", "check"],
         "requires an explicitly installed optional Python runtime and OCR data; content tests verify typed decoder responses and the optional runtime suite exercises real formats",
     ),

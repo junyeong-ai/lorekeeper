@@ -1089,6 +1089,7 @@ template = "{kind}-{path_slug}"
             vault_root: root.path().join("unused-vault"),
             vault_dirs: Default::default(),
             documents: None,
+            projection_cache: None,
             originals: Default::default(),
         };
         let selected = serde_json::json!({"repo":root.path(), "executable":supported, "reconcile":true, "repository_id":"fixture/repo", "document_ids":["a"]});
@@ -1329,6 +1330,7 @@ exit "$rc"
             vault_root: root.path().to_owned(),
             vault_dirs: Default::default(),
             documents: None,
+            projection_cache: None,
             originals: Default::default(),
         };
         verify_selection(&selected, &detail.node, true).unwrap();

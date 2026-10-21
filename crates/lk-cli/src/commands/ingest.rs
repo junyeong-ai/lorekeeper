@@ -156,6 +156,10 @@ pub async fn run(
     for (id, sc) in &sources {
         lk_source::validate_params(sc.source_type, &sc.params)
             .map_err(|e| miette::miette!("sources.{id} ({}): {e}", sc.source_type))?;
+        if sc.source_type == lk_core::config::SourceType::Manual {
+            lk_source::validate_manual_processing(&sc.params, config.ingest.documents.as_ref())
+                .map_err(|error| miette::miette!("sources.{id} ({}): {error}", sc.source_type))?;
+        }
     }
 
     if dry_run {
@@ -180,6 +184,14 @@ pub async fn run(
         vault_root: vault_root.clone(),
         vault_dirs: config.vault.dirs.clone(),
         documents: config.ingest.documents.clone(),
+        projection_cache: Some(lk_source::content::ProjectionCache::for_vault(
+            &vault_root,
+            if dry_run {
+                lk_source::content::CacheAccess::ReadOnly
+            } else {
+                lk_source::content::CacheAccess::ReadWrite
+            },
+        )),
         originals: config.ingest.originals.clone(),
     };
 
