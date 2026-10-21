@@ -2069,7 +2069,7 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let heading = config.vault.locale().strings().summary;
         let ready = format!(
-            "---\ntype: gmail-daily\nllm_inputs: {{summary: captured, summary_done: captured}}\n---\n## {heading}\nRead interpretation.\n"
+            "---\ntype: daily\nllm_inputs: {{summary: captured, summary_done: captured}}\n---\n## {heading}\nRead interpretation.\n"
         );
         let pending = ready.replace(", summary_done: captured", "");
         std::fs::write(&path, &ready).unwrap();
@@ -2628,12 +2628,12 @@ mod tests {
         let done = TargetKind::WorkLogSynthesis.completion_key();
         let heading = lk_core::i18n::Locale::default().strings().topic_summary;
         let pending = lk_core::frontmatter::parse_page(&format!(
-            "---\nllm_inputs:\n  {key}: abc\n---\n## {heading}\n\nAlready written.\n"
+            "---\ntype: work-log\nllm_inputs:\n  {key}: abc\n---\n## {heading}\n\nAlready written.\n"
         ))
         .unwrap();
         assert!(!page_semantics_ready(&pending));
         let completed = lk_core::frontmatter::parse_page(&format!(
-            "---\nllm_inputs:\n  {key}: abc\n  {done}: abc\n---\n## {heading}\n"
+            "---\ntype: work-log\nllm_inputs:\n  {key}: abc\n  {done}: abc\n---\n## {heading}\n"
         ))
         .unwrap();
         assert!(page_semantics_ready(&completed));
@@ -2642,7 +2642,7 @@ mod tests {
             Some("abc")
         );
         let missing = lk_core::frontmatter::parse_page(&format!(
-            "---\nllm_inputs:\n  {key}: abc\n  {done}: abc\n---\n"
+            "---\ntype: work-log\nllm_inputs:\n  {key}: abc\n  {done}: abc\n---\n"
         ))
         .unwrap();
         assert!(!page_semantics_ready(&missing));
@@ -2660,10 +2660,10 @@ mod tests {
         let key = kind.llm_inputs_key();
         let done = kind.completion_key();
         let heading = lk_core::i18n::Locale::default().strings().summary;
-        std::fs::write(&path,format!("---\nllm_inputs:\n  {key}: captured\n---\n## {heading}\n\nTeam activity; no own events.\n")).unwrap();
+        std::fs::write(&path,format!("---\ntype: daily\nllm_inputs:\n  {key}: captured\n---\n## {heading}\n\nTeam activity; no own events.\n")).unwrap();
         let mut intent = Intent::new(period(), &config).unwrap();
         assert!(input_pages(&config, &intent, &[]).await.unwrap().is_err());
-        std::fs::write(&path,format!("---\nllm_inputs:\n  {key}: captured\n  {done}: captured\n---\n## {heading}\n\nTeam activity; no own events.\n")).unwrap();
+        std::fs::write(&path,format!("---\ntype: daily\nllm_inputs:\n  {key}: captured\n  {done}: captured\n---\n## {heading}\n\nTeam activity; no own events.\n")).unwrap();
         let captured = input_pages(&config, &intent, &[])
             .await
             .unwrap()

@@ -5070,7 +5070,7 @@ async fn closed_parent_requires_each_captured_child_marker_even_with_filled_pros
     std::fs::write(
         temp.path().join(&child),
         format!(
-            "---\nllm_inputs:\n  {key}: captured\n---\n## {heading}\n\nOld filled narrative.\n"
+            "---\ntype: monthly-review\nllm_inputs:\n  {key}: captured\n---\n## {heading}\n\nOld filled narrative.\n"
         ),
     )
     .unwrap();
@@ -5094,7 +5094,7 @@ async fn closed_parent_accepts_empty_but_completed_child_without_dropping_it() {
     let key = kind.llm_inputs_key();
     let done = kind.completion_key();
     let heading = lk_core::i18n::Locale::default().strings().key_summary;
-    std::fs::write(temp.path().join(&child), format!("---\ntitle: April\nllm_inputs:\n  {key}: captured\n  {done}: captured\n---\n## {heading}\n")).unwrap();
+    std::fs::write(temp.path().join(&child), format!("---\ntype: monthly-review\ntitle: April\nllm_inputs:\n  {key}: captured\n  {done}: captured\n---\n## {heading}\n")).unwrap();
     let ctx = build_ctx(&config, Arc::new(MockLlmClient::default()));
     let synth = Synthesizer::new(temp.path(), ctx, &config, far_future());
     assert!(

@@ -479,14 +479,53 @@ mod tests {
     }
 
     #[test]
+    fn review_completion_requires_its_declared_formats_heading() {
+        for (page_type, annual) in [
+            ("weekly-review", false),
+            ("monthly-review", false),
+            ("quarterly-review", false),
+            ("annual-review", true),
+        ] {
+            for strings in [lk_core::i18n::Locale::En, lk_core::i18n::Locale::Ko]
+                .map(|locale| locale.strings())
+            {
+                for (heading, expected_complete) in [
+                    (strings.key_summary, !annual),
+                    (strings.overall_summary, annual),
+                ] {
+                    let root = tempfile::tempdir().unwrap();
+                    fs::write(
+                        root.path().join("review.md"),
+                        format!(
+                            "---\ntype: {page_type}\nllm_inputs:\n  narrative: current\n  narrative_done: current\n---\n## {heading}\n"
+                        ),
+                    )
+                    .unwrap();
+                    let report = audit_with_empty_queue(&[root.path().to_owned()]);
+                    assert_eq!(report.scanned, 1);
+                    assert_eq!(report.errors, 0);
+                    assert_eq!(
+                        report.pages.is_empty(),
+                        expected_complete,
+                        "{page_type}: {heading}"
+                    );
+                    if !expected_complete {
+                        assert_eq!(report.pages[0].unanswered, vec!["narrative"]);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn audit_flags_a_section_whose_work_was_enqueued_and_never_answered() {
-        let answered = "---\nid: a\nllm_inputs:\n  summary: \"h1\"\n  summary_done: \"h1\"\n---\n\n## Summary\n";
+        let answered = "---\nid: a\ntype: daily\nllm_inputs:\n  summary: \"h1\"\n  summary_done: \"h1\"\n---\n\n## Summary\n";
         assert!(
             unanswered(answered).is_empty(),
             "an answered section is not a defect, even with an empty body"
         );
 
-        let pending = "---\nid: a\nllm_inputs:\n  summary: \"h1\"\n  concepts: \"h2\"\n  concepts_done: \"h2\"\n---\n\n## Summary\n\n## Related Concepts\n";
+        let pending = "---\nid: a\ntype: daily\nllm_inputs:\n  summary: \"h1\"\n  concepts: \"h2\"\n  concepts_done: \"h2\"\n---\n\n## Summary\n\n## Related Concepts\n";
         assert_eq!(
             unanswered(pending),
             vec!["summary"],
@@ -542,17 +581,17 @@ mod tests {
     /// so a mismatch is outstanding work.
     #[test]
     fn a_marker_from_a_superseded_input_is_not_an_answer() {
-        let stale = "---\nid: a\nllm_inputs:\n  summary: \"new\"\n  summary_done: \"old\"\n---\n\n## Summary\n";
+        let stale = "---\nid: a\ntype: daily\nllm_inputs:\n  summary: \"new\"\n  summary_done: \"old\"\n---\n\n## Summary\n";
         assert_eq!(unanswered(stale), vec!["summary"]);
 
-        let matching = "---\nid: a\nllm_inputs:\n  summary: \"new\"\n  summary_done: \"new\"\n---\n\n## Summary\n";
+        let matching = "---\nid: a\ntype: daily\nllm_inputs:\n  summary: \"new\"\n  summary_done: \"new\"\n---\n\n## Summary\n";
         assert!(unanswered(matching).is_empty());
     }
 
     /// Top-level keys are not semantic input declarations.
     #[test]
     fn only_entries_inside_the_llm_inputs_mapping_count() {
-        let sibling = "---\nid: a\nsummary: \"h1\"\nllm_inputs:\n  concepts: \"h2\"\n  concepts_done: \"h2\"\n---\n\n## Related Concepts\n";
+        let sibling = "---\nid: a\ntype: daily\nsummary: \"h1\"\nllm_inputs:\n  concepts: \"h2\"\n  concepts_done: \"h2\"\n---\n\n## Related Concepts\n";
         assert!(
             unanswered(sibling).is_empty(),
             "a top-level key is not an llm_inputs entry: {:?}",
@@ -565,7 +604,9 @@ mod tests {
     #[test]
     fn an_input_recorded_as_a_non_string_can_never_be_answered() {
         for value in ["[\"h1\"]", "{a: 1}", "123", "true"] {
-            let page = format!("---\nid: a\nllm_inputs:\n  summary: {value}\n---\n\n## Summary\n");
+            let page = format!(
+                "---\nid: a\ntype: daily\nllm_inputs:\n  summary: {value}\n---\n\n## Summary\n"
+            );
             assert_eq!(
                 unanswered(&page),
                 vec!["summary"],
@@ -579,11 +620,10 @@ mod tests {
     /// it, so such a page can never receive a `_done` marker and is unanswered by construction.
     #[test]
     fn an_inline_mapping_records_the_same_inputs_as_a_block_one() {
-        let flow = "---\nid: a\nllm_inputs: {summary: \"h1\"}\n---\n\n## Summary\n";
+        let flow = "---\nid: a\ntype: daily\nllm_inputs: {summary: \"h1\"}\n---\n\n## Summary\n";
         assert_eq!(unanswered(flow), vec!["summary"]);
 
-        let answered =
-            "---\nid: a\nllm_inputs: {summary: \"h1\", summary_done: \"h1\"}\n---\n\n## Summary\n";
+        let answered = "---\nid: a\ntype: daily\nllm_inputs: {summary: \"h1\", summary_done: \"h1\"}\n---\n\n## Summary\n";
         assert!(unanswered(answered).is_empty());
     }
 

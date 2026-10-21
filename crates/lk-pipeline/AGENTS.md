@@ -34,6 +34,7 @@ configuration. Publication is guarded, not a second uncoordinated render path.
 
 Use `TargetKind` keys and locale-tolerant vault section resolution. Deleting `_done`
 invalidates a view; deleting prose does not. Never infer completion from emptiness.
+Completion requires the page's declared `type` to match its semantic task kind.
 Use one template path for daily, document, work-log and rollup pages.
 
 Concept links alone **accumulate** through `render::accumulate_concepts` on render
