@@ -660,6 +660,138 @@ fn manual_original_survives_retirement_and_asset_only_edits_revise_the_same_owne
 }
 
 #[test]
+fn manual_member_links_and_task_inputs_follow_the_existing_nested_document_address() {
+    let ws = Workspace::with_notes_options("    concept_policy: supported-new\n", "");
+    let config_path = ws.root.path().join("config.yaml");
+    let config = std::fs::read_to_string(&config_path)
+        .unwrap()
+        .replace("root: vault", "root: vault\n  locale: en")
+        .replace(
+            "inbox_dir: inbox",
+            "inbox_dir: inbox\n      archive_after_ingest: false",
+        );
+    std::fs::write(config_path, config).unwrap();
+    std::fs::create_dir(ws.vault().join("inbox/assets")).unwrap();
+    std::fs::write(ws.vault().join("inbox/assets/proof.txt"), "Retained proof.").unwrap();
+    std::fs::write(ws.vault().join("inbox/assets/plot.png"), [0, 255, 1]).unwrap();
+    let raw = "# Nested guide\n\n[Proof](assets/proof.txt#part \"Proof (retained)\")\n\n[Reference][proof]\n\n[proof]: assets/proof.txt#part \"Referenced\"\n\n![Figure](assets/plot.png)\n\n![Reference figure][image]\n\n[image]: assets/plot.png\n\n[Here](#part) [Web](https://example.com/guide)\n\n`[literal](assets/proof.txt)`\n\n```text\n![literal](assets/plot.png)\n```\n";
+    ws.drop_note("guide.md", raw);
+    let first = ws.run(&["ingest", "notes"]);
+    assert!(first.status.success(), "{}", stderr_of(&first));
+    let flat_path = ws.vault().join("wiki/documents/nested-guide.md");
+    let flat =
+        lk_core::frontmatter::parse_page(&std::fs::read_to_string(&flat_path).unwrap()).unwrap();
+    let original: lk_core::manual_original::ManualOriginalReference = serde_json::from_value(
+        flat.frontmatter.get("source_record").unwrap()["manual_original"].clone(),
+    )
+    .unwrap();
+    let nested_path = Path::new("wiki/documents/nested/guide.md");
+    std::fs::create_dir(ws.vault().join("wiki/documents/nested")).unwrap();
+    std::fs::rename(&flat_path, ws.vault().join(nested_path)).unwrap();
+
+    let second = ws.run(&["ingest", "notes"]);
+    assert!(second.status.success(), "{}", stderr_of(&second));
+    let nested_raw = std::fs::read_to_string(ws.vault().join(nested_path)).unwrap();
+    let nested = lk_core::frontmatter::parse_page(&nested_raw).unwrap();
+    for field in ["source_file", "source_identity", "source_record"] {
+        assert_eq!(nested.frontmatter.get(field), flat.frontmatter.get(field));
+    }
+    let entry = original.entry_vault_path().unwrap();
+    assert_eq!(
+        std::fs::read_to_string(ws.vault().join(&entry)).unwrap(),
+        raw
+    );
+    let files = Path::new(&entry).parent().unwrap();
+    let proof = files.join("assets/proof.txt");
+    let image = files.join("assets/plot.png");
+    let proof_link = format!("{}#part", lk_core::link::relative_dest(nested_path, &proof));
+    let image_link = lk_core::link::relative_dest(nested_path, &image);
+    let content = lk_vault::resolve_section(&nested.body, |s| s.document_content)
+        .unwrap()
+        .body;
+    let links = lk_core::link::extract_page_links(content);
+    assert_eq!(
+        links
+            .iter()
+            .filter(|link| link.dest.ends_with("proof.txt"))
+            .count(),
+        2
+    );
+    assert!(content.contains(&proof_link), "{content}");
+    assert!(
+        content.contains(&format!("![Figure]({image_link})")),
+        "{content}"
+    );
+    assert!(
+        content.contains(&format!("![Reference figure]({image_link})")),
+        "{content}"
+    );
+    assert!(content.contains("`[literal](assets/proof.txt)`"));
+    assert!(content.contains("![literal](assets/plot.png)\n"));
+    for link in lk_core::link::extract_page_links(&nested.body) {
+        let target = lk_core::link::resolve_dest(nested_path, &link.dest).unwrap();
+        if target.starts_with(".lorekeeper") {
+            assert!(ws.vault().join(target).is_file());
+        }
+    }
+    assert!(ws.vault().join(&proof).is_file());
+    assert!(ws.vault().join(&image).is_file());
+    assert!(!flat_path.exists());
+
+    let queue = ws.vault().join(".lorekeeper/queue");
+    let runs = files_under(&queue)
+        .into_iter()
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "jsonl")
+        })
+        .collect::<Vec<_>>();
+    let mut kinds = std::collections::BTreeSet::new();
+    for path in &runs {
+        for task in lk_queue::read_tasks(path).unwrap().tasks {
+            if task.target.vault_path != nested_path.to_string_lossy() {
+                continue;
+            }
+            kinds.insert(task.kind.as_str());
+            let text = task.input["text"].as_str().unwrap();
+            assert!(text.contains(&proof_link), "{text}");
+            assert!(text.contains(&image_link), "{text}");
+            assert!(text.contains("`[literal](assets/proof.txt)`"));
+            task.validate_retained_input().unwrap();
+        }
+    }
+    assert_eq!(
+        kinds,
+        ["extract-concepts", "summarize"].into_iter().collect()
+    );
+    let queue_before = runs
+        .iter()
+        .map(|path| std::fs::read(path).unwrap())
+        .collect::<Vec<_>>();
+    let third = ws.run(&["ingest", "notes"]);
+    assert!(third.status.success(), "{}", stderr_of(&third));
+    assert_eq!(
+        std::fs::read_to_string(ws.vault().join(nested_path)).unwrap(),
+        nested_raw
+    );
+    assert_eq!(
+        files_under(&queue)
+            .into_iter()
+            .filter(|path| path
+                .extension()
+                .is_some_and(|extension| extension == "jsonl"))
+            .collect::<Vec<_>>(),
+        runs
+    );
+    assert_eq!(
+        runs.iter()
+            .map(|path| std::fs::read(path).unwrap())
+            .collect::<Vec<_>>(),
+        queue_before
+    );
+}
+
+#[test]
 fn manual_html_preserves_raw_and_marks_unsupported_closure_without_retiring() {
     let ws = Workspace::new("");
     let raw = "<!doctype html><html><head><style>body{background:url(unknown.png)}</style></head><body><h1>Saved page</h1><p>A paragraph with an <img src='image.png' alt='chart'> image.</p></body></html>";

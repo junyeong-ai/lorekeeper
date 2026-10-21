@@ -91,6 +91,130 @@ fn far_future() -> jiff::civil::Date {
 }
 
 #[tokio::test]
+async fn manual_projection_relocation_preserves_observation_identity_and_enforces_output_limits() {
+    use lk_core::manual_original::{
+        ManualBundleManifest, ManualBundleMember, ORIGINAL_SCHEME, OriginalDigest,
+    };
+    let raw = "# Note\n\n[Proof](proof.txt)\n";
+    let proof = "Retained evidence.";
+    let manifest = ManualBundleManifest {
+        schema: ORIGINAL_SCHEME.into(),
+        entry: "note.md".into(),
+        members: vec![
+            ManualBundleMember {
+                path: "note.md".into(),
+                bytes: raw.len(),
+                revision: OriginalDigest::of(raw.as_bytes()),
+            },
+            ManualBundleMember {
+                path: "proof.txt".into(),
+                bytes: proof.len(),
+                revision: OriginalDigest::of(proof.as_bytes()),
+            },
+        ],
+        unsupported: vec![],
+    };
+    let reference = manifest.reference().unwrap();
+    let entry = reference.entry_vault_path().unwrap();
+    let member = std::path::Path::new(&entry)
+        .parent()
+        .unwrap()
+        .join("proof.txt");
+    let from = std::path::Path::new("wiki/documents/document.md");
+    let link = lk_core::link::relative_dest(from, &member);
+    let body = format!("[Proof]({link})\n\n![Image]({link})\n\n[Again]({link})\n");
+    for limited in [false, true] {
+        let dir = TempDir::new().unwrap();
+        let mut config = base_config(dir.path());
+        config.sources.get_mut("test-source").unwrap().source_type = SourceType::Manual;
+        if limited {
+            config.ingest.documents = Some(
+                serde_json::from_value(serde_json::json!({
+                    "python": "/unused/python", "max_output_bytes": body.len(),
+                }))
+                .unwrap(),
+            );
+        }
+        let source = config.sources["test-source"].clone();
+        let llm: Arc<dyn LlmClient> = Arc::new(lk_queue::QueueLlmClient::new(
+            dir.path().join(".lorekeeper/queue"),
+        ));
+        let mut item = raw_item(
+            "Note",
+            &body,
+            "original-observation",
+            "2026-05-23T10:00:00Z".parse().unwrap(),
+        );
+        item.metadata = serde_json::json!({
+            "source_file": dir.path().join("inbox/note.md"),
+            "source_hash": OriginalDigest::of(raw.as_bytes()).value,
+            "source_record": {"manual_original": reference, "input_format": "markdown"},
+        });
+        let options = IngestOptions {
+            target_date: None,
+            today: far_future(),
+            dry_run: false,
+        };
+        let mut pipeline = Pipeline::new(dir.path(), build_ctx(&config, llm.clone()));
+        let first = pipeline
+            .plan("test-source", &source, vec![item.clone()], &options)
+            .await
+            .unwrap();
+        let first_requests = llm.take_requests().await;
+        let page = &first.document_pages[0];
+        let flat_path = dir.path().join(page.path.as_ref());
+        std::fs::create_dir_all(flat_path.parent().unwrap()).unwrap();
+        std::fs::write(&flat_path, &page.content).unwrap();
+        let nested = std::path::Path::new("wiki/documents/nested/note.md");
+        std::fs::create_dir_all(dir.path().join(nested).parent().unwrap()).unwrap();
+        std::fs::rename(&flat_path, dir.path().join(nested)).unwrap();
+
+        let mut pipeline = Pipeline::new(dir.path(), build_ctx(&config, llm.clone()));
+        let second = pipeline
+            .plan("test-source", &source, vec![item], &options)
+            .await;
+        if limited {
+            assert!(
+                second
+                    .err()
+                    .unwrap()
+                    .to_string()
+                    .contains("projection or source batch limit")
+            );
+            assert!(llm.take_requests().await.is_empty());
+            assert_eq!(
+                std::fs::read_to_string(dir.path().join(nested)).unwrap(),
+                page.content
+            );
+            continue;
+        }
+        let second = second.unwrap();
+        assert_eq!(
+            second.events, first.events,
+            "presentation cannot change raw observations"
+        );
+        assert_eq!(second.events[0].body, body);
+        assert_eq!(second.document_pages[0].path.as_ref(), nested);
+        let relocated = lk_core::link::relative_dest(nested, &member);
+        assert!(second.document_pages[0].content.contains(&relocated));
+        let requests = llm.take_requests().await;
+        assert_eq!(requests.len(), 2);
+        for request in requests {
+            request.validate_retained_input().unwrap();
+            assert!(request.input["text"].as_str().unwrap().contains(&relocated));
+            assert_ne!(
+                request.cache_hash,
+                first_requests
+                    .iter()
+                    .find(|old| old.kind == request.kind)
+                    .unwrap()
+                    .cache_hash
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn literal_source_content_reaches_pages_and_semantic_requests() {
     let code = "value = \"\"\"first\n\n\nsecond\"\"\"\n";
     let body = format!("```python\n{code}```\n\n<pre>\n# literal heading\n\n\ntext\n</pre>\n");

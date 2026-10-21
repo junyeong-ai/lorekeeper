@@ -3,6 +3,7 @@
 use lk_core::markdown::{OPTIONS, has_sibling_boundary};
 use minijinja::{Error, ErrorKind};
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, LinkType, Parser, Tag, TagEnd};
+use std::path::Path;
 
 /// Scalar fields are literal inline text; their original values remain in metadata.
 pub(crate) fn inline_text(value: &str) -> String {
@@ -29,6 +30,65 @@ fn serialize(events: &[Event<'_>]) -> Result<String, Error> {
     pulldown_cmark_to_cmark::cmark(events.iter(), &mut output, OPTIONS)
         .map_err(|error| Error::new(ErrorKind::InvalidOperation, error.to_string()))?;
     Ok(output)
+}
+
+/// Keep vault-local link and image targets when Markdown moves between page addresses.
+/// Parsed destinations cover reference links without interpreting literal code or HTML.
+pub fn relocate_markdown_links(
+    value: &str,
+    from_page: &Path,
+    to_page: &Path,
+) -> Result<String, Error> {
+    if from_page.parent() == to_page.parent() {
+        return Ok(value.to_string());
+    }
+    let mut changed = false;
+    let mut events = Vec::new();
+    for mut event in Parser::new_ext(value, OPTIONS) {
+        if let Event::Start(
+            Tag::Link {
+                link_type,
+                dest_url,
+                id,
+                ..
+            }
+            | Tag::Image {
+                link_type,
+                dest_url,
+                id,
+                ..
+            },
+        ) = &mut event
+        {
+            let (destination, anchor) = lk_core::link::split_dest_anchor(dest_url);
+            if !destination.is_empty() && !lk_core::link::is_external(destination) {
+                let target = lk_core::link::resolve_dest(
+                    from_page,
+                    &lk_core::link::decode_dest(destination),
+                )
+                .ok_or_else(|| {
+                    Error::new(
+                        ErrorKind::InvalidOperation,
+                        "relocated Markdown destination escapes the vault",
+                    )
+                })?;
+                let relocated =
+                    format!("{}{anchor}", lk_core::link::relative_dest(to_page, &target));
+                if relocated != dest_url.as_ref() {
+                    *dest_url = relocated.into();
+                    *link_type = LinkType::Inline;
+                    *id = "".into();
+                    changed = true;
+                }
+            }
+        }
+        events.push(event);
+    }
+    if changed {
+        serialize(&events)
+    } else {
+        Ok(value.to_string())
+    }
 }
 
 fn shift_heading_level(level: HeadingLevel, shift: usize) -> HeadingLevel {
@@ -171,6 +231,84 @@ pub(crate) fn link(url: &str, label: &str) -> Result<String, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relocation_keeps_parsed_link_and_image_addresses_with_titles_and_anchors() {
+        let source = "[Proof](../../.lorekeeper/files/a%20b.md#part \"A (title)\")\n\n![Image][asset]\n\n[asset]: ../../.lorekeeper/files/image.png \"Figure\"\n\n[Here](#local) [Web](https://example.com/a)\n\n`[literal](../../keep.md)`\n\n```text\n![literal](../../keep.png)\n```\n";
+        let output = relocate_markdown_links(
+            source,
+            Path::new("wiki/documents/document.md"),
+            Path::new("wiki/documents/nested/guide.md"),
+        )
+        .unwrap();
+        let targets: Vec<_> = Parser::new_ext(&output, OPTIONS)
+            .filter_map(|event| match event {
+                Event::Start(
+                    Tag::Link {
+                        dest_url, title, ..
+                    }
+                    | Tag::Image {
+                        dest_url, title, ..
+                    },
+                ) => Some((dest_url.into_string(), title.into_string())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            targets,
+            [
+                (
+                    "../../../.lorekeeper/files/a%20b.md#part".into(),
+                    "A (title)".into()
+                ),
+                (
+                    "../../../.lorekeeper/files/image.png".into(),
+                    "Figure".into()
+                ),
+                ("#local".into(), String::new()),
+                ("https://example.com/a".into(), String::new()),
+            ]
+        );
+        assert!(output.contains("`[literal](../../keep.md)`"));
+        assert!(output.contains("![literal](../../keep.png)\n"));
+        assert!(
+            relocate_markdown_links(
+                "[Escape](../../../outside.md)",
+                Path::new("wiki/documents/document.md"),
+                Path::new("wiki/documents/nested/guide.md"),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn relocation_preserves_bytes_when_destinations_do_not_move() {
+        for source in [
+            "[Web](https://example.com)\r\n\r\n[Here](#local)\r\n",
+            "```text\r\n[Literal](relative.md)\r\n```\r\n",
+            "<div>\n[Literal](relative.md)\n</div>\n",
+        ] {
+            assert_eq!(
+                relocate_markdown_links(
+                    source,
+                    Path::new("wiki/documents/document.md"),
+                    Path::new("wiki/documents/nested/guide.md"),
+                )
+                .unwrap(),
+                source
+            );
+        }
+        let source = "[Proof](../../.lorekeeper/files/proof.txt)\r\n";
+        assert_eq!(
+            relocate_markdown_links(
+                source,
+                Path::new("wiki/documents/document.md"),
+                Path::new("wiki/documents/guide.md"),
+            )
+            .unwrap(),
+            source
+        );
+    }
 
     #[test]
     fn scalars_are_literal_single_line_text() {

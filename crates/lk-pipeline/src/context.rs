@@ -18,6 +18,7 @@ pub struct PipelineContext {
     pub(crate) timezone: jiff::tz::TimeZone,
     pub(crate) locale: Locale,
     pub(crate) concept_categories: Vec<lk_queue::CategoryReference>,
+    pub(crate) manual_projection_limit: usize,
 }
 
 impl PipelineContext {
@@ -44,6 +45,12 @@ impl PipelineContext {
             timezone: config.vault.timezone(),
             locale: config.vault.locale(),
             concept_categories,
+            manual_projection_limit: config
+                .ingest
+                .documents
+                .as_ref()
+                .map(|documents| documents.max_output_bytes.get())
+                .unwrap_or(lk_core::manual_original::MAX_ORIGINAL_ENTRY_BYTES),
         })
     }
 }

@@ -63,6 +63,10 @@ continued factual support; explicit reviewed retraction is separate.
 - `source_record` provenance participates in summary/extraction input. A metadata
   status change may change applicability even with identical primary body; archived
   does not mean false. Keep original content separate from interpretation.
+- Relocate parsed manual-original member links to the selected document address
+  before constructing semantic input or rendering, including nested existing owners.
+  Keep raw observations and their identity unchanged; relocated projections still
+  obey configured output and source batch limits.
 - Capture `VaultPage.original` when reading. `RenderResult.expected_original`
   guards the exact prior bytes/absence; never reread a newer baseline at publish
   time. Use `plan_publication`/`publish_expected` or document publication with its

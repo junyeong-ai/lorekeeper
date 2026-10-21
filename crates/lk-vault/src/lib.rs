@@ -48,7 +48,7 @@ pub use self::discovery::{DiscoveryQuery, discover_queries};
 pub use self::document::{
     DocumentContent, DocumentOptions, DocumentSection, DocumentView, inspect_document,
 };
-pub use self::fragment::render_markdown_fragment;
+pub use self::fragment::{relocate_markdown_links, render_markdown_fragment};
 pub use self::indexed_links::{
     IndexedLink, IndexedLinkOptions, IndexedLinks, LinkDirection, inspect_indexed_links,
 };

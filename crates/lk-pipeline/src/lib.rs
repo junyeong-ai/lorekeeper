@@ -1116,6 +1116,7 @@ impl Pipeline {
         let mut claimed_slugs: Vec<(String, Option<DocumentIdentity>)> = Vec::new();
         let mut staged_concepts: Vec<(lk_core::concept::ExtractedConcept, jiff::civil::Date)> =
             Vec::new();
+        let mut manual_projection_bytes = 0usize;
         // Two documents can share a title — and therefore a base slug — whether in one batch
         // or across two sources in the same run. Disambiguate a collision by the document's
         // OWN stable identity (the trailing hash of its `EventId`), so a same-titled later
@@ -1226,6 +1227,35 @@ impl Pipeline {
 
             let vault_path =
                 lk_core::vault_path::VaultPath::document(&self.ctx.dirs, &slug).to_string();
+
+            let projected_event = if event
+                .metadata
+                .get("source_record")
+                .and_then(|record| record.get(lk_core::manual_original::MANUAL_ORIGINAL_FIELD))
+                .is_some()
+            {
+                let body = lk_vault::relocate_markdown_links(
+                    &event.body,
+                    &lk_core::vault_path::documents_dir(&self.ctx.dirs).join("document.md"),
+                    Path::new(&vault_path),
+                )
+                .map_err(|error| PipelineError::Render(error.to_string()))?;
+                manual_projection_bytes = manual_projection_bytes.saturating_add(body.len());
+                if body.len() > self.ctx.manual_projection_limit
+                    || manual_projection_bytes > lk_core::manual_original::MAX_MANUAL_BATCH_BYTES
+                {
+                    return Err(PipelineError::Render(
+                        "relocated manual Markdown exceeds the configured projection or source batch limit"
+                            .into(),
+                    ));
+                }
+                let mut projected = event.clone();
+                projected.body = body;
+                Some(projected)
+            } else {
+                None
+            };
+            let event = projected_event.as_ref().unwrap_or(event);
 
             let combined = match event.metadata.get("source_record") {
                 Some(record) => format!("{}\nSource record: {record}\n{}", event.title, event.body),
