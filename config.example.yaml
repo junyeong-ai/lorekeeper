@@ -519,8 +519,8 @@ concepts:
 # Retention for ingest history, drained queue files, verified published work and
 # derived projection caches. Successful read/write cache reuse renews its last-use time;
 # inspect/dry-run reads do not. Active claims, originals and malformed cache data are preserved.
-# Unpublished, referenced or unowned work artifacts are preserved; work cleanup requires
-# exclusive workflow access and a settled queue. Sealing alone is not publication.
+# Work cleanup requires exclusive workflow access and verified live queue/reuse references.
+# Unpublished, referenced, unowned or unreadable work is preserved. Sealing alone is not publication.
 # Streaming event logs (`.lorekeeper/events/`) are the permanent raw layer — never pruned.
 # Fully optional — omit the block to use the default.
 # maintenance:
