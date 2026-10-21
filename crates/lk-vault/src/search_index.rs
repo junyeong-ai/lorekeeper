@@ -9,7 +9,7 @@ use crate::search::{MatchProjection, Page, SearchOptions, SearchResult, fold_nam
 use crate::{MutationSession, VaultError};
 
 pub(super) const INDEX_PATH: &str = ".lorekeeper/search.sqlite";
-const VERSION: i32 = 22;
+const VERSION: i32 = 23;
 
 #[derive(Serialize)]
 pub struct SearchSnapshot {
@@ -1037,6 +1037,179 @@ pub(super) fn visit_body_pages(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn summary_and_opening_keep_full_document_reference_context() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let path = "wiki/documents/reference.md";
+        for ending in ["\n", "\r\n", "\r"] {
+            for suffix in ["", "\n<div>Later HTML.</div>\n"] {
+                let body = format!(
+                    "## Summary\n[Helios][invisibleanchor] is bright.\n\n## Later\n[Helios][invisibleanchor] is bright.\n\n## Definitions\n[invisibleanchor]: https://example.com\n{suffix}"
+                ).replace('\n', ending);
+                let raw = format!("---\ntitle: Reference example\ntype: document\n---\n{body}");
+                write(root.path(), path, &raw);
+                let capture = prepare_search(&session, &dirs).unwrap();
+                for (query, expected) in [
+                    ("Helios is", Some(crate::MatchField::Summary)),
+                    ("Reference example", Some(crate::MatchField::Identity)),
+                    ("invisibleanchor", None),
+                ] {
+                    let mut options = SearchOptions {
+                        query: Some(query),
+                        phrase: true,
+                        ..Default::default()
+                    };
+                    let live = crate::search(root.path(), &dirs, &options).unwrap();
+                    options.snapshot = Some(&capture.snapshot);
+                    let captured = crate::search(root.path(), &dirs, &options).unwrap();
+                    assert_eq!(
+                        serde_json::to_value(&live.hits).unwrap(),
+                        serde_json::to_value(&captured.hits).unwrap()
+                    );
+                    assert_eq!(
+                        live.total,
+                        usize::from(expected.is_some()),
+                        "{query}: {body}"
+                    );
+                    if let Some(expected) = expected {
+                        let hit = &live.hits[0];
+                        assert_eq!(hit.matched, expected);
+                        assert_eq!(hit.excerpt, "Helios is bright.");
+                        assert_eq!(hit.excerpt_kind, crate::ExcerptKind::Opening);
+                    }
+                }
+                assert_eq!(
+                    std::fs::read_to_string(root.path().join(path)).unwrap(),
+                    raw
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn decoded_inline_whitespace_keeps_summary_phrase_with_or_without_html() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let session = MutationSession::acquire(root.path()).unwrap();
+        for entity in ["&#13;", "&#10;"] {
+            for suffix in ["", "\n## Content\n<div>Later HTML.</div>\n"] {
+                write(
+                    root.path(),
+                    "wiki/documents/entity.md",
+                    &format!(
+                        "---\ntitle: Entity scope\ntype: document\n---\n## Summary\nAlpha{entity}Beta.\n{suffix}"
+                    ),
+                );
+                let capture = prepare_search(&session, &dirs).unwrap();
+                for snapshot in [None, Some(capture.snapshot.as_str())] {
+                    let result = crate::search(
+                        root.path(),
+                        &dirs,
+                        &SearchOptions {
+                            query: Some("Alpha Beta"),
+                            phrase: true,
+                            snapshot,
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap();
+                    assert_eq!(result.total, 1, "{entity}: {suffix}");
+                    assert_eq!(result.hits[0].matched, crate::MatchField::Summary);
+                    assert_eq!(result.hits[0].excerpt, "Alpha Beta.");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn html_openings_require_a_complete_independent_markdown_prefix() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let session = MutationSession::acquire(root.path()).unwrap();
+        for (body, visible, expected_total) in [
+            ("## Summary\nAlpha <em>Beta</em>.\n", "Alpha Beta", 1),
+            (
+                "<template>\n\n## Summary\nSecret scope.\n\n</template>\n",
+                "Secret scope",
+                0,
+            ),
+            (
+                "## Summary <script>\n\nSecret scope.\n\n</script>\n",
+                "Secret scope",
+                0,
+            ),
+            (
+                "<h2><template>\n\n## Summary\nSecret scope.\n\n</template></h2>\n",
+                "Secret scope",
+                0,
+            ),
+            (
+                "<table>\n\n## Summary\nOutside fostered.\n\n</table>\n",
+                "Outside fostered",
+                1,
+            ),
+            (
+                "<div>\n\n## Summary\nVisible nested.\n\n</div>\n",
+                "Visible nested",
+                1,
+            ),
+            (
+                "## Summary\n<table><tr><td>\n\n## Sources\nOutside cell.\n\n</td></tr>\nOutside fostered\n</table>\n",
+                "Outside fostered",
+                1,
+            ),
+            (
+                "## Summary\n\n## Content\n<div>Later scope.</div>\n",
+                "Later scope",
+                1,
+            ),
+            ("## Summary\n- Alpha\n- <em>Beta</em>\n", "Alpha", 1),
+        ] {
+            write(
+                root.path(),
+                "wiki/documents/html.md",
+                &format!("---\ntitle: HTML scope\ntype: document\n---\n{body}"),
+            );
+            let capture = prepare_search(&session, &dirs).unwrap();
+            for snapshot in [None, Some(capture.snapshot.as_str())] {
+                let named = crate::search(
+                    root.path(),
+                    &dirs,
+                    &SearchOptions {
+                        query: Some("HTML scope"),
+                        snapshot,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                assert_eq!(
+                    named.hits[0].excerpt_kind,
+                    crate::ExcerptKind::Unavailable,
+                    "{body}"
+                );
+                assert_eq!(named.hits[0].excerpt, "");
+                let visible = crate::search(
+                    root.path(),
+                    &dirs,
+                    &SearchOptions {
+                        query: Some(visible),
+                        phrase: true,
+                        snapshot,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                assert_eq!(visible.total, expected_total, "{body}");
+                if let Some(hit) = visible.hits.first() {
+                    assert_eq!(hit.matched, crate::MatchField::Text, "{body}");
+                    assert_eq!(hit.excerpt_section, None);
+                }
+            }
+        }
+    }
 
     #[test]
     fn excerpt_sections_follow_full_document_reference_and_occurrence_ranges() {

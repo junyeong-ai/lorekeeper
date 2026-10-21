@@ -70,6 +70,7 @@ use its `excerpt_section` with revision-pinned `wiki read --section` to inspect 
 An opening preview introduces a named page; it is not automatically claim evidence.
 When the whole-document HTML projection has no verified source range, the section
 locator is null; inspect the outline instead of inferring an occurrence from equal text.
+If an opening crosses raw HTML, it is unavailable; full visible-body search still works.
 Inspect its outline, then read relevant `--section ID` content and follow `next_offset`.
 Carry `--revision` through pagination; a mismatch requires fresh retrieval. A section
 includes nested subsections. Read the sources behind the claim, not only its synthesis.

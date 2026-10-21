@@ -114,6 +114,10 @@ canonical; SQLite navigation is derived.
 - Excerpt locations use the selected visible block's original parser range from one
   complete document parse. Section slices lose global references; equal text does not
   identify an occurrence. HTML DOM text without a source map has no inferred locator.
+- Full text, summary rank and opening previews share that complete parse. HTML openings
+  require an independent H2 boundary and complete Markdown blocks before later raw HTML.
+  A generated DOM boundary marker verifies closed preambles; it never maps HTML text to
+  source positions. Unproven openings are unavailable; whole visible HTML stays searchable.
   ASCII-alphanumeric term edges require boundaries, CJK allows attached particles.
 - Browse filters/facets/pagination have distinct counts: facets before metadata/date
   filters, total after, pagination last. Each facet pages distinct values in exact-value

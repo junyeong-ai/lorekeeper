@@ -1235,9 +1235,10 @@ fn match_page(
 
 impl MatchProjection {
     fn from_body(body: &str) -> Self {
-        let text = fold(&search_text(body));
+        let document = VisibleDocument::from_body(body);
+        let text = fold(&document.text());
         Self {
-            summary: fold(&search_summary(body).unwrap_or_default()),
+            summary: fold(document.opening.as_deref().unwrap_or_default()),
             spacing_text: compact_blocks(&text),
             text,
         }
@@ -1378,8 +1379,10 @@ pub(super) fn excerpt_details(
     spellings: &[String],
     spacing: bool,
 ) -> SearchExcerpt {
+    let document = VisibleDocument::from_body(body);
     if matched != MatchField::Text {
-        let text = search_summary(body)
+        let text = document
+            .opening
             .map(|text| crate::summary::truncate_summary(&text))
             .filter(|text| !text.is_empty());
         return SearchExcerpt {
@@ -1403,13 +1406,14 @@ pub(super) fn excerpt_details(
             spellings.iter().any(|name| contains(&text, name))
         }
     };
-    let blocks = search_blocks(body);
-    let selected = blocks
+    let selected = document
+        .blocks
         .iter()
         .find(|block| matches_all(&block.text))
         .map(|block| (block, ExcerptKind::MatchedBlock))
         .or_else(|| {
-            blocks
+            document
+                .blocks
                 .iter()
                 .find(|block| {
                     let text = fold(&block.text);
@@ -1440,16 +1444,9 @@ pub(super) fn excerpt_details(
     }
 }
 
-/// Visible text with one line per Markdown block. Inline formatting and soft breaks
-/// do not split a phrase; paragraphs, list items and table cells do. Link addresses
-/// and markup are not prose. HTML contributes text through the parsed document;
-/// scripts, styles and metadata are excluded. Code remains searchable as literal content.
-pub(super) fn search_text(body: &str) -> String {
-    search_blocks(body)
-        .into_iter()
-        .map(|block| block.text)
-        .collect::<Vec<_>>()
-        .join("\n")
+#[cfg(test)]
+fn search_text(body: &str) -> String {
+    VisibleDocument::from_body(body).text()
 }
 
 struct VisibleBlock {
@@ -1457,24 +1454,173 @@ struct VisibleBlock {
     source: Option<Range<usize>>,
 }
 
-fn search_blocks(body: &str) -> Vec<VisibleBlock> {
-    let options =
-        Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
-    let markdown = lk_core::markdown::MarkdownInput::from_text(body);
-    let events: Vec<_> = markdown.offset_events(options).collect();
-    if !events
+/// One complete parse supplies visible blocks and the opening statement. Inline
+/// formatting preserves phrases; blocks and code lines remain separate. HTML text
+/// comes from the complete DOM, excluding non-content containers and attributes.
+struct VisibleDocument {
+    blocks: Vec<VisibleBlock>,
+    opening: Option<String>,
+}
+
+impl VisibleDocument {
+    fn from_body(body: &str) -> Self {
+        let options =
+            Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
+        let markdown = lk_core::markdown::MarkdownInput::from_text(body);
+        let events: Vec<_> = markdown.offset_events(options).collect();
+        let section = crate::section::first_section_range(body);
+        let has_html = events
+            .iter()
+            .any(|(event, _)| matches!(event, Event::Html(_) | Event::InlineHtml(_)));
+        if !has_html {
+            let blocks = markdown_search_blocks(events);
+            let opening = section.and_then(|section| {
+                blocks
+                    .iter()
+                    .find(|block| {
+                        block.source.as_ref().is_some_and(|source| {
+                            section.start <= source.start && source.end <= section.end
+                        })
+                    })
+                    .map(|block| block.text.clone())
+            });
+            return Self { blocks, opening };
+        }
+        let opening = section.and_then(|section| html_opening(body, &events, section));
+        let blocks = html_search_blocks(events.into_iter().map(|(event, _)| event), body.len());
+        Self { blocks, opening }
+    }
+
+    fn text(&self) -> String {
+        self.blocks
+            .iter()
+            .map(|block| block.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
+fn html_opening(
+    body: &str,
+    events: &[(Event<'_>, Range<usize>)],
+    section: Range<usize>,
+) -> Option<String> {
+    let heading_end = events.iter().position(|(event, range)| {
+        matches!(
+            event,
+            Event::End(TagEnd::Heading(pulldown_cmark::HeadingLevel::H2))
+        ) && range.end == section.start
+    })?;
+    let heading_start = events[..=heading_end].iter().rposition(|(event, _)| {
+        matches!(
+            event,
+            Event::Start(Tag::Heading {
+                level: pulldown_cmark::HeadingLevel::H2,
+                ..
+            })
+        )
+    })?;
+    if events[heading_start..heading_end]
         .iter()
         .any(|(event, _)| matches!(event, Event::Html(_) | Event::InlineHtml(_)))
     {
-        return markdown_search_blocks(events);
+        return None;
     }
-    use html5ever::tendril::TendrilSink;
-    let mut html = String::with_capacity(body.len());
-    pulldown_cmark::html::push_html(&mut html, events.into_iter().map(|(event, _)| event));
-    let document =
-        html5ever::parse_document(markup5ever_rcdom::RcDom::default(), Default::default())
-            .one(html);
-    let mut text = String::with_capacity(body.len());
+    if events[..heading_start]
+        .iter()
+        .any(|(event, _)| matches!(event, Event::Html(_) | Event::InlineHtml(_)))
+        && !has_html_opening_boundary(body, &events[..=heading_end], heading_start)
+    {
+        return None;
+    }
+    // Complete top-level blocks after a verified independent heading can be rendered
+    // separately. HTML inside an open block has no source map, so its opening is unknown.
+    let start = heading_end + 1;
+    let mut prefix = start;
+    let mut depth = 0;
+    for (index, (event, range)) in events.iter().enumerate().skip(start) {
+        if range.start >= section.end || matches!(event, Event::Html(_) | Event::InlineHtml(_)) {
+            break;
+        }
+        match event {
+            Event::Start(_) => depth += 1,
+            Event::End(_) => depth -= 1,
+            _ => {}
+        }
+        if depth == 0 {
+            prefix = index + 1;
+        }
+    }
+    html_search_blocks(
+        events[start..prefix].iter().map(|(event, _)| event.clone()),
+        section.len(),
+    )
+    .into_iter()
+    .next()
+    .map(|block| block.text)
+}
+
+fn has_html_opening_boundary(
+    body: &str,
+    events: &[(Event<'_>, Range<usize>)],
+    heading: usize,
+) -> bool {
+    use markup5ever_rcdom::NodeData;
+
+    let marker = format!(
+        "data-lorekeeper-opening-{}",
+        blake3::hash(body.as_bytes()).to_hex()
+    );
+    // HTML attribute names only fold ASCII case; character references cannot spell one.
+    if body
+        .as_bytes()
+        .windows(marker.len())
+        .any(|bytes| bytes.eq_ignore_ascii_case(marker.as_bytes()))
+    {
+        return false;
+    }
+    let mut prefix: Vec<_> = events.iter().map(|(event, _)| event.clone()).collect();
+    let Event::Start(Tag::Heading { attrs, .. }) = &mut prefix[heading] else {
+        return false;
+    };
+    attrs.push((marker.clone().into(), None));
+    let document = parse_search_html(
+        prefix.into_iter(),
+        events.last().map_or(0, |(_, range)| range.end),
+    );
+    let find_child = |node: &markup5ever_rcdom::Handle, tag: &str| {
+        node.children
+            .borrow()
+            .iter()
+            .find(|child| {
+                matches!(&child.data, NodeData::Element { name, .. }
+                    if name.ns.as_ref() == "http://www.w3.org/1999/xhtml"
+                    && name.local.as_ref() == tag)
+            })
+            .cloned()
+    };
+    let Some(html) = find_child(&document.document, "html") else {
+        return false;
+    };
+    let Some(body) = find_child(&html, "body") else {
+        return false;
+    };
+    let children = body.children.borrow();
+    let Some(last) = children.iter().rev().find(|child| {
+        !matches!(&child.data, NodeData::Text { contents } if contents.borrow().trim().is_empty())
+    }) else { return false };
+    matches!(&last.data, NodeData::Element { name, attrs, .. }
+        if name.ns.as_ref() == "http://www.w3.org/1999/xhtml"
+        && name.local.as_ref() == "h2" && attrs.borrow().iter().any(|attribute|
+            attribute.name.ns.as_ref().is_empty() && attribute.name.local.as_ref() == marker))
+}
+
+fn html_search_blocks<'a>(
+    events: impl Iterator<Item = Event<'a>>,
+    capacity: usize,
+) -> Vec<VisibleBlock> {
+    let document = parse_search_html(events, capacity);
+    let mut text = String::with_capacity(capacity);
     append_html_search_text(&document.document, &mut text, false);
     text.lines()
         .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
@@ -1483,6 +1629,16 @@ fn search_blocks(body: &str) -> Vec<VisibleBlock> {
         // position. Keep their visible-text semantics without guessing a location.
         .map(|text| VisibleBlock { text, source: None })
         .collect::<Vec<_>>()
+}
+
+fn parse_search_html<'a>(
+    events: impl Iterator<Item = Event<'a>>,
+    capacity: usize,
+) -> markup5ever_rcdom::RcDom {
+    use html5ever::tendril::TendrilSink;
+    let mut html = String::with_capacity(capacity);
+    pulldown_cmark::html::push_html(&mut html, events);
+    html5ever::parse_document(markup5ever_rcdom::RcDom::default(), Default::default()).one(html)
 }
 
 fn finish_search_block(
@@ -1505,8 +1661,19 @@ fn markdown_search_blocks(events: Vec<(Event<'_>, Range<usize>)>) -> Vec<Visible
     let mut blocks = Vec::new();
     let mut text = String::new();
     let mut source: Option<Range<usize>> = None;
+    let mut code_block = false;
     for (event, range) in events {
         let value = match event {
+            Event::Start(Tag::CodeBlock(_)) => {
+                code_block = true;
+                finish_search_block(&mut blocks, &mut text, &mut source);
+                continue;
+            }
+            Event::End(TagEnd::CodeBlock) => {
+                code_block = false;
+                finish_search_block(&mut blocks, &mut text, &mut source);
+                continue;
+            }
             Event::Text(value) | Event::Code(value) => value,
             Event::SoftBreak | Event::HardBreak => " ".into(),
             Event::Start(
@@ -1537,7 +1704,7 @@ fn markdown_search_blocks(events: Vec<(Event<'_>, Range<usize>)>) -> Vec<Visible
             } else {
                 source = Some(range.clone());
             }
-            if part.ends_with(['\r', '\n']) {
+            if code_block && part.ends_with(['\r', '\n']) {
                 finish_search_block(&mut blocks, &mut text, &mut source);
             }
         }
@@ -1652,13 +1819,6 @@ fn append_html_search_text(node: &markup5ever_rcdom::Node, text: &mut String, pr
         }
         _ => {}
     }
-}
-
-fn search_summary(body: &str) -> Option<String> {
-    search_text(first_section(body)?)
-        .lines()
-        .next()
-        .map(str::to_owned)
 }
 
 pub(super) fn fold_name(text: &str) -> String {

@@ -42,6 +42,10 @@ fn find_section(content: &str, heading: &str) -> Option<std::ops::Range<usize>> 
 
 /// The opening H2 section, independent of its name, syntax or locale.
 pub(crate) fn first_section(body: &str) -> Option<&str> {
+    first_section_range(body).map(|range| &body[range])
+}
+
+pub(crate) fn first_section_range(body: &str) -> Option<std::ops::Range<usize>> {
     let headings = lk_core::markdown::root_headings(body);
     let mut sections = headings
         .iter()
@@ -50,7 +54,7 @@ pub(crate) fn first_section(body: &str) -> Option<&str> {
     let end = sections
         .next()
         .map_or(body.len(), |heading| heading.range.start);
-    Some(&body[first.range.end..end])
+    Some(first.range.end..end)
 }
 
 /// Replace one owned body after validating that its Markdown stays within the section.
