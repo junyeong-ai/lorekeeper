@@ -140,6 +140,9 @@ canonical; SQLite navigation is derived.
   title/URL/alias guesses. Duplicate/missing owners stay ambiguous/unresolved;
   verified symlink spellings share an owner, hard links don't. Revision covers the
   collection/query, including added owners and malformed/legacy coverage counts.
+  Captured queries count and order scalar row keys before decoding selected metadata,
+  relation fields and issues. Exact totals still examine matching keys; a small
+  output limit does not bound that SQL work.
   This read-only view creates no graph edge or semantic current-truth judgment.
 - `brief.rs`: day membership comes from that day's pages, not concept.updated.
   Learned concepts carry opening lines, revisited names only; resolver metadata

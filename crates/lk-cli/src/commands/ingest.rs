@@ -3,6 +3,7 @@ use std::sync::Arc;
 use super::{build_llm_client, find_config, load_config_with_revision, parse_date};
 
 mod capture;
+mod cursor;
 pub mod recovery;
 
 /// The number of events the page states about itself, as ` (N events)`.
@@ -136,7 +137,7 @@ pub async fn run(
         dry_run,
     };
 
-    let sources: Vec<(String, lk_core::config::SourceConfig)> = match source {
+    let mut sources: Vec<(String, lk_core::config::SourceConfig)> = match source {
         Some(ref id) => {
             let sc = config
                 .sources
@@ -196,6 +197,24 @@ pub async fn run(
         max_input_bytes: config.ingest.inputs.max_source_bytes.get(),
     };
 
+    // Admission order must cover acquisition and planning: normalized events or
+    // relocated projections can exhaust a later stage even when raw items fit.
+    // Filtered and historical replay leave the ordinary full-run turn intact.
+    if source.is_none() && target_date.is_none_or(|date| date == today) {
+        let candidates = sources.iter().map(|(id, _)| id.clone()).collect();
+        if let Some(first) =
+            cursor::reserve_start(&vault_root, &candidates, dry_run, wait_for_vault, || {
+                ensure_config_current(&config_path, &config_revision)
+            })?
+        {
+            let start = sources
+                .iter()
+                .position(|(id, _)| *id == first)
+                .expect("reserved source is enabled");
+            sources.rotate_left(start);
+        }
+    }
+
     // Capture source observations before acquiring the vault writer.
     let collection_started_at = jiff::Timestamp::now();
     struct Planned {
@@ -214,7 +233,6 @@ pub async fn run(
     let mut acquired = Vec::new();
     let mut planned: Vec<Planned> = Vec::new();
     let mut manual_capture_bytes = 0usize;
-    let mut rss_capture_bytes = 0usize;
     let mut acquired_inputs =
         lk_core::input::InputBudget::new(config.ingest.inputs.max_run_bytes.get());
     // Set on any source/extract/pipeline/write failure so the process exits non-zero —
@@ -568,19 +586,6 @@ pub async fn run(
             eprintln!("  concepts: {}", result.concepts.len());
         }
 
-        let rss_bytes = result
-            .daily_pages
-            .iter()
-            .filter_map(|p| p.rss_original.as_ref())
-            .flat_map(|c| &c.payloads)
-            .map(Vec::len)
-            .sum::<usize>();
-        rss_capture_bytes = rss_capture_bytes.saturating_add(rss_bytes);
-        if rss_capture_bytes > 256 * 1024 * 1024 {
-            return Err(miette::miette!(
-                "RSS originals exceed ingest-wide 256 MiB limit; split the ingest"
-            ));
-        }
         if dry_run {
             for capture in &manual_originals {
                 if !result.events.iter().any(|event| {
@@ -669,6 +674,9 @@ pub async fn run(
         return Ok(());
     }
 
+    // Publish accepted sources in canonical source order. The pipeline separately
+    // canonicalizes work-log inputs.
+    planned.sort_by(|left, right| left.id.cmp(&right.id));
     let mut publication = super::publication::Publication::new(
         _mutation
             .as_ref()

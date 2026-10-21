@@ -144,6 +144,8 @@ remain explicit. Use `--direction incoming|both` or `--relation <name>` to narro
 then paginate with `--offset` and its collection `--revision`. Target candidates
 provide paths and file revisions for `wiki read`; neither a declared relation nor
 recorded source status establishes support, contradiction or current deployment.
+Pagination bounds returned rows; exact totals still require counting the matching
+relations and owners.
 `lore wiki concepts` is the registry for convergence decisions, not a
 lookup — reading all of it to find one page is what search exists to replace.
 ## Exact body and relationship queries

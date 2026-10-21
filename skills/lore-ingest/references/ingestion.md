@@ -14,7 +14,14 @@ may return edited, deleted or expired events, so it does not establish exact his
 replay. Failed planning discards that source's buffered requests. Native jobs do not
 commit vault edits automatically; review and commit them separately.
 
-1. **Collect observations** before taking the vault writer lock. Acquisition includes
+Ordinary full runs for today reserve their first source under a short mutation claim
+before collection, recovering pending journals before recording the next turn.
+Acquisition and planning follow that rotation so repeated capacity failures cannot
+always exclude the same later source. The claim is released before source I/O.
+Filtered and historical runs leave this turn unchanged; dry runs only preview it.
+Rejected sources still fail the job and retain their inputs.
+
+1. **Collect observations** without holding the vault writer lock. Acquisition includes
    fetch, retries and local preprocessing within each source's configured budget.
    Failed sources are reported; independent healthy sources can continue.
 2. **Plan against current pages** after acquiring the writer lock and recovering
@@ -73,6 +80,8 @@ deliberately adjust the corresponding configured limit; input is never clipped t
 RSS originals retain immutable pre-classification adapter-collected text, not the
 provider's HTTP/XML bytes. New bound extraction requires explicit article IDs and
 payload revisions for each reported concept; omission is not citation retraction.
+Original payload admission retains the 64 MiB source and 256 MiB run bounds. An
+oversized source releases its planning reservation so later fitting sources can proceed.
 Legacy event logs are retained observations, not proof of a page's historical input.
 Use the [query reference](../../lore-wiki/references/query.md) to inspect exact originals.
 

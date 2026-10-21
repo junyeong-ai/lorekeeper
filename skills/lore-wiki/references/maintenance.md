@@ -2,6 +2,7 @@
 
 ## Contents
 
+- [Structural preflight and repair](#structural-preflight-and-repair)
 - [Related-document discovery](#related-document-discovery)
 - [Assessment](#assessment)
 - [Operating budget and measurement](#operating-budget-and-measurement)
@@ -9,6 +10,17 @@
 This operation is a complete run of one batch, not a request to audit the entire vault.
 The scheduled session already holds the workflow lease. Follow the shared page and
 publication contracts in SKILL.md and read the curation reference before repairs.
+
+## Structural preflight and repair
+
+`lore run knowledge` reconciles the vault and stops before semantic execution when
+structural lint fails. Inspect `lore graph --json lint` and its exact affected pages.
+Use the audit and curation procedures for evidence-based name, alias or category
+corrections; guarded merge and normalization commands handle their respective repairs.
+A duplicate name does not establish that two subjects are equivalent. Standalone
+audit and curation remain available while native maintenance is blocked. Preserve
+revision guards, reconcile the supported repair, then rerun `lore run knowledge`.
+Do not bypass the preflight or record an assessment to hide an unresolved violation.
 
 ## Related-document discovery
 

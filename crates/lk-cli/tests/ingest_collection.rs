@@ -104,6 +104,11 @@ fn source_override_bounds_progressing_collection_without_holding_the_vault_write
             .unwrap(),
     );
     request.recv_timeout(Duration::from_secs(5)).unwrap();
+    let cursor: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(vault.join(".lorekeeper/ingest-cursor.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(cursor["next_source"], "z-notes");
     let held = lk_vault::MutationSession::acquire(&vault)
         .expect("network collection must not hold the vault writer");
     assert!(!vault.join("wiki/documents/note.md").exists());
@@ -137,8 +142,7 @@ fn source_override_bounds_progressing_collection_without_holding_the_vault_write
     );
 }
 
-#[test]
-fn configuration_drift_while_waiting_refuses_captured_observation_publication() {
+fn assert_config_drift_while_waiting(filtered: bool) {
     let root = tempfile::tempdir().unwrap();
     let vault = root.path().join("vault");
     std::fs::create_dir_all(vault.join("inbox")).unwrap();
@@ -148,8 +152,12 @@ fn configuration_drift_while_waiting_refuses_captured_observation_publication() 
     std::fs::write(&config, original).unwrap();
     let held = lk_vault::MutationSession::acquire(&vault).unwrap();
     let stderr = tempfile::NamedTempFile::new().unwrap();
+    let mut collection = command(&config);
+    if filtered {
+        collection.arg("notes");
+    }
     let mut child = Foreground(
-        command(&config)
+        collection
             .arg("--wait-for-vault")
             .stdout(Stdio::null())
             .stderr(stderr.reopen().unwrap())
@@ -164,7 +172,7 @@ fn configuration_drift_while_waiting_refuses_captured_observation_publication() 
         assert!(child.0.try_wait().unwrap().is_none());
         assert!(
             Instant::now() < deadline,
-            "ingest did not finish collection"
+            "ingest did not reach its configured writer wait"
         );
         std::thread::sleep(Duration::from_millis(10));
     }
@@ -183,4 +191,18 @@ fn configuration_drift_while_waiting_refuses_captured_observation_publication() 
     assert!(vault.join("inbox/note.md").is_file());
     assert!(!vault.join("wiki/documents/note.md").exists());
     assert!(!vault.join(".lorekeeper/queue").exists());
+    assert!(!vault.join(".lorekeeper/ingest-cursor.json").exists());
+    if !filtered {
+        assert!(!diagnostic.contains("collect notes"), "{diagnostic}");
+    }
+}
+
+#[test]
+fn configuration_drift_while_waiting_refuses_captured_observation_publication() {
+    assert_config_drift_while_waiting(true);
+}
+
+#[test]
+fn configuration_drift_while_reserving_refuses_acquisition_and_turn_publication() {
+    assert_config_drift_while_waiting(false);
 }
