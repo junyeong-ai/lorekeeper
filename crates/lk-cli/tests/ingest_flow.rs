@@ -370,14 +370,8 @@ fn unknown_source_id_is_an_error() {
     assert!(stderr_of(&out).contains("not found"));
 }
 
-/// `lore doctor` reports a section that records an input nothing answered. Whether that is a
-/// DEFECT depends on the queue, which it has to ask: the same page reads as work in flight
-/// while its task is pending, and as lost once the queue file is gone.
-///
-/// The distinction is not cosmetic. The remediation the report prints tells a reader to fill the
-/// section by hand and stamp its completion marker; done to work that is merely pending, that
-/// silences the queue (`lore queue count` drops to 0, so the scheduled drain skips the session),
-/// the extraction never happens, and `doctor` then certifies the vault clean.
+/// Pending semantic work is reported without recovery advice. If its task disappears,
+/// the same unfinished section becomes a defect requiring guarded recovery.
 #[test]
 fn a_section_with_a_pending_task_is_work_in_flight_not_a_defect() {
     let ws = Workspace::new("");
@@ -398,11 +392,11 @@ fn a_section_with_a_pending_task_is_work_in_flight_not_a_defect() {
         "queued work is not a vault defect\n{stderr}"
     );
     assert!(
-        stderr.contains("queued for a drain"),
+        stderr.contains("wiki/documents/queued-note.md: `summary`"),
         "the pending sections must still be reported, just not as defects\n{stderr}"
     );
     assert!(
-        !stderr.contains("Read the marker before"),
+        !stderr.contains("lore queue regenerate"),
         "the lost-work remediation must not print for work that is pending\n{stderr}"
     );
 
@@ -424,9 +418,7 @@ fn a_section_with_a_pending_task_is_work_in_flight_not_a_defect() {
         Some(1),
         "with nothing pending, an unanswered section is a defect\n{stderr}"
     );
-    assert!(stderr.contains("Read the marker before"), "{stderr}");
-    // The one marker a reader must never stamp by hand, named as the exception.
-    assert!(stderr.contains("is the exception"), "{stderr}");
+    assert!(stderr.contains("lore queue regenerate"), "{stderr}");
 }
 
 /// `--dry-run` has to report the number the doctor's remediation tells a reader to compare: a
