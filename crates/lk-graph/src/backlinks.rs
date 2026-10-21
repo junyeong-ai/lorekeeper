@@ -128,11 +128,11 @@ pub struct BacklinksSyncResult {
     /// evidence it answers to.
     pub resynthesize: Vec<ConceptResynthesis>,
     /// Concept pages that could not record their derived state: they carry no frontmatter
-    /// block, or one that will not parse, or no heading to hold one of the sections. Reported
-    /// rather than silently skipped — their citation counts are stale until a human repairs
-    /// the page — and the command exits non-zero while any remain. Skipped rather than fatal,
-    /// because aborting mid-sweep leaves every page already written synced and every page
-    /// after it not, and one corrupt page blocks it forever.
+    /// block, one that will not parse, no heading to hold one of the sections, or no declared
+    /// concept type where a new typed synthesis is required. Reported rather than silently
+    /// skipped; these pages remain unchanged and the command exits non-zero while any remain.
+    /// Skipped rather than fatal, because aborting mid-sweep leaves every page already written
+    /// synced and every page after it not, and one corrupt page blocks it forever.
     ///
     /// Always serialized. This list IS the command's verdict, so omitting it when empty hides
     /// the field on exactly the clean runs a consumer sees most, where `undefined` reads as
@@ -845,6 +845,13 @@ fn plan_concept_backlinks_inner(
             && !adopting
             && recorded_answer != Some(digest.as_str())
         {
+            // Legacy pages support discovery/bookkeeping and adoption of authored prose,
+            // but typed synthesis publication requires an explicit concept declaration.
+            // Do not record a promise whose queued result cannot apply to this target.
+            if !parsed.frontmatter.is_declared_concept() {
+                report.skipped.push(page.path.clone());
+                continue;
+            }
             requires_synthesis = true;
             let related = resolve_section(&raw, |s| s.related);
             report.resynthesize.push(ConceptResynthesis {
@@ -2588,6 +2595,9 @@ mod tests {
     fn a_concept_whose_citations_moved_is_owed_a_synthesis() {
         let dir = TempDir::new().unwrap();
         write_concept_page(&dir, "oy365", &[], &synthesized_from(&[]));
+        let path = dir.path().join("wiki/concepts/oy365.md");
+        let raw = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, raw.replacen("---\n", "---\ntype: concept\n", 1)).unwrap();
 
         let pages = vec![
             build_page("wiki/concepts/oy365", "wiki/concepts/oy365.md", &[]),
@@ -2708,6 +2718,9 @@ mod tests {
                 fixture_digest(&["daily/slack/2026-05-20".to_owned()])
             ),
         );
+        let path = dir.path().join("wiki/concepts/oy365.md");
+        let raw = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, raw.replacen("---\n", "---\ntype: concept\n", 1)).unwrap();
 
         let pages = vec![
             build_page("wiki/concepts/oy365", "wiki/concepts/oy365.md", &[]),
@@ -2839,7 +2852,7 @@ mod tests {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(
                 &path,
-                format!("---\nid: rag\nsource_count: 0\nllm_inputs:\n---\n\n# RAG\n\n{body}"),
+                format!("---\nid: rag\ntype: concept\nsource_count: 0\nllm_inputs:\n---\n\n# RAG\n\n{body}"),
             )
             .unwrap();
 
@@ -2888,7 +2901,7 @@ mod tests {
             std::fs::write(
                 &path,
                 format!(
-                    "---\nid: marker\nsource_count: 0\nllm_inputs:\n---\n\n# M\n\n\
+                    "---\nid: marker\ntype: concept\nsource_count: 0\nllm_inputs:\n---\n\n# M\n\n\
                      ## 핵심\n\n{body}\n\n## 출처\n\n## 메타\n"
                 ),
             )
@@ -2926,7 +2939,7 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(
             &path,
-            "---\nid: blank\nsource_count: 0\nllm_inputs:\n---\n\n# Blank\n\n\
+            "---\nid: blank\ntype: concept\nsource_count: 0\nllm_inputs:\n---\n\n# Blank\n\n\
              ## 핵심\n\n## 출처\n\n## 메타\n",
         )
         .unwrap();
@@ -2950,6 +2963,65 @@ mod tests {
         .unwrap();
         assert!(report.adopted.is_empty(), "{report:?}");
         assert_eq!(report.resynthesize.len(), 1, "{report:?}");
+    }
+
+    #[test]
+    fn new_synthesis_requires_a_declared_concept_but_skip_keeps_legacy_bookkeeping() {
+        for declared in [false, true] {
+            for changed_input in [false, true] {
+                for policy in [SynthesisPolicy::Record, SynthesisPolicy::Skip] {
+                    let dir = TempDir::new().unwrap();
+                    let path = PathBuf::from("wiki/concepts/topic.md");
+                    std::fs::create_dir_all(dir.path().join(path.parent().unwrap())).unwrap();
+                    let format = if declared { "type: concept\n" } else { "" };
+                    let input = if changed_input {
+                        synthesized_from(&[])
+                    } else {
+                        String::new()
+                    };
+                    let body = if changed_input {
+                        "An established answer."
+                    } else {
+                        ""
+                    };
+                    let raw = format!(
+                        "---\n{format}title: Topic\nsource_count: 77\nllm_inputs:\n{input}\
+                         ---\n## Synthesis\n{body}\n\n## Sources\n\n## Related\n"
+                    );
+                    std::fs::write(dir.path().join(&path), &raw).unwrap();
+                    let pages = vec![
+                        build_page("wiki/concepts/topic", "wiki/concepts/topic.md", &[]),
+                        build_page("daily/source", "daily/source.md", &["wiki/concepts/topic"]),
+                    ];
+                    let report =
+                        sync_fixture(&pages, dir.path(), false, &VaultDirs::default(), policy)
+                            .unwrap();
+                    let updated = std::fs::read_to_string(dir.path().join(&path)).unwrap();
+                    if !declared && policy == SynthesisPolicy::Record {
+                        assert_eq!(report.skipped, vec![path], "{report:?}");
+                        assert!(report.updated.is_empty(), "{report:?}");
+                        assert!(report.resynthesize.is_empty(), "{report:?}");
+                        assert_eq!(updated, raw);
+                        continue;
+                    }
+                    assert!(report.skipped.is_empty(), "{report:?}");
+                    assert!(updated.contains("source_count: 1"), "{updated}");
+                    assert_compact_sources(&updated, "Sources");
+                    assert_eq!(
+                        report.resynthesize.len(),
+                        usize::from(policy == SynthesisPolicy::Record),
+                        "{report:?}"
+                    );
+                    if policy == SynthesisPolicy::Skip {
+                        if changed_input {
+                            assert!(updated.contains(&input), "{updated}");
+                        } else {
+                            assert!(!updated.contains("synthesis:"), "{updated}");
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// A concept page written before the input existed carries no `llm_inputs:` mapping. The

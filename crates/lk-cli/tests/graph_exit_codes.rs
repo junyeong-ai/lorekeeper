@@ -1122,6 +1122,103 @@ fn an_upgraded_vault_adopts_its_prose_then_queues_when_the_evidence_moves() {
     assert_eq!(task["vault_path"], "wiki/concepts/cited.md");
 }
 
+#[test]
+fn legacy_reconciliation_never_queues_an_unpublishable_new_synthesis() {
+    for (case, declared, authored, previous_input, noop, skipped) in [
+        ("legacy-empty", false, false, false, false, true),
+        ("legacy-changed", false, true, true, false, true),
+        ("typed-empty", true, false, false, false, false),
+        ("legacy-authored", false, true, false, false, false),
+        ("legacy-noop", false, true, true, true, false),
+    ] {
+        let ws = Workspace::new();
+        if noop {
+            let config = ws.root.path().join("config.yaml");
+            let raw = std::fs::read_to_string(&config).unwrap();
+            std::fs::write(config, format!("{raw}llm:\n  provider: noop\n")).unwrap();
+        }
+        let format = if declared { "type: concept\n" } else { "" };
+        let old_input = "0".repeat(64);
+        let markers = if previous_input {
+            format!(
+                "llm_inputs:\n  synthesis: \"{old_input}\"\n  synthesis_done: \"{old_input}\"\n"
+            )
+        } else {
+            String::new()
+        };
+        let body = if authored {
+            "An authored definition."
+        } else {
+            ""
+        };
+        let original = format!(
+            "---\n{format}title: Topic\nsource_count: 77\n{markers}\
+             ---\n## Synthesis\n{body}\n\n## Sources\n\n## Related\n"
+        );
+        ws.write("wiki/concepts/topic.md", &original);
+        ws.write(
+            "daily/source.md",
+            "---\ntype: daily\ntitle: Source\n---\n[Topic](../wiki/concepts/topic.md)\n",
+        );
+
+        let output = ws.run(&["graph", "--json", "backlinks-sync"]);
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(i32::from(skipped)),
+            "{case}: {report}"
+        );
+        assert_eq!(report["ok"], !skipped, "{case}: {report}");
+        assert_eq!(
+            report["data"]["skipped"],
+            if skipped {
+                serde_json::json!(["wiki/concepts/topic.md"])
+            } else {
+                serde_json::json!([])
+            },
+            "{case}: {report}"
+        );
+        let current = declared && !noop;
+        assert_eq!(
+            report["data"]["queued"],
+            usize::from(current),
+            "{case}: {report}"
+        );
+        let status: serde_json::Value =
+            serde_json::from_str(&ws.stdout(&["queue", "status", "--json"])).unwrap();
+        let tasks = status["data"]["tasks"].as_array().unwrap();
+        assert_eq!(tasks.len(), usize::from(current), "{case}: {status}");
+        if current {
+            assert_eq!(tasks[0]["status"], "current", "{case}: {status}");
+        } else {
+            assert_eq!(ws.code(&["queue", "check"]), 0, "{case}: {status}");
+        }
+        let updated = ws.read("wiki/concepts/topic.md");
+        if skipped {
+            assert_eq!(updated, original, "{case}");
+            assert!(report["data"]["updated"].as_array().unwrap().is_empty());
+            let output = ws.run(&["graph", "backlinks-sync"]);
+            assert_eq!(output.status.code(), Some(1));
+            assert!(String::from_utf8_lossy(&output.stdout).contains("type: concept"));
+            assert_eq!(ws.read("wiki/concepts/topic.md"), original);
+        } else {
+            assert!(updated.contains("source_count: 1"), "{case}: {updated}");
+            assert!(
+                updated.contains("lorekeeper:concept-sources:v1"),
+                "{case}: {updated}"
+            );
+            if authored && !previous_input {
+                assert_eq!(report["data"]["adopted"].as_array().unwrap().len(), 1);
+                assert!(updated.contains("synthesis_done:"), "{case}: {updated}");
+                assert!(!updated.contains("type: concept"), "{case}: {updated}");
+            }
+            if noop {
+                assert!(updated.contains(&markers), "{case}: {updated}");
+            }
+        }
+    }
+}
+
 /// Answering the task retires it. The completion marker is what `llm_cache` and `queue
 /// status` read, so a synthesis written and stamped leaves the concept owing nothing until
 /// its evidence moves again — the same self-perpetuating cache every other section has.

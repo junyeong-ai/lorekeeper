@@ -112,6 +112,8 @@ belong to exploration reviews, not a machine-persisted callout inferred by locat
 - Reconciliation and concept lints accept declared concepts and untyped legacy pages
   in the concepts collection; explicit other types are excluded. Exact evidence capture
   and resynthesis require declared concepts. Use the shared frontmatter role predicates.
+  Preserve legacy bookkeeping/adoption, but report/skip an unchanged legacy target when
+  it needs new typed synthesis; never infer its type or record an unanswerable promise.
 - This is the sole derivation of Sources, `source_count`, and synthesis input.
   Derive citations from actual eligible source body links with exact authored
   revisions. Update the three together; unreadable sources forbid publication.

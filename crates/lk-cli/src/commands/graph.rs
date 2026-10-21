@@ -543,8 +543,7 @@ async fn run_inner(
         }
         GraphCommand::BacklinksSync { dry_run } => {
             let report = synchronize_backlinks(&rc, &views.scanned, dry_run, mutation.as_ref())?;
-            // A page the sweep could not record a count on keeps a `source_count` the graph
-            // contradicts, and only a human adding frontmatter fixes it.
+            // Skipped pages need metadata/section repair before derived state can publish.
             let violated = !report.sync.skipped.is_empty();
             if json {
                 output::print_json(&report, violated)?;
