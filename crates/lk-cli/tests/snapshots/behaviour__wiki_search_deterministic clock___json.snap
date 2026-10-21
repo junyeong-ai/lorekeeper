@@ -14,6 +14,7 @@ exit: 0
     }
   },
   "category": null,
+  "date_basis": "declared-created-not-ingestion",
   "formats": {
     "next_offset": null,
     "offset": 0,
@@ -22,6 +23,7 @@ exit: 0
       "concept": 1
     }
   },
+  "from": null,
   "hits": [
     {
       "aliases": [
@@ -31,6 +33,8 @@ exit: 0
       "created": "2026-05-02",
       "created_status": "valid",
       "excerpt": "A reference date supplied as an argument rather than read from the host, so a date-relative answer is a function of its inputs.",
+      "excerpt_kind": "opening",
+      "excerpt_section": null,
       "file_revision": "5ff21ff52d4ae9fcb3a3dfb3c04024bc9477e438e96b78a1d3fd63e8f4b77385",
       "format": "concept",
       "id": "deterministic-clock",
@@ -69,10 +73,14 @@ exit: 0
       "active": 1
     }
   },
+  "namespace": null,
   "next_offset": null,
   "offset": 0,
+  "path_prefix": null,
   "phrase": false,
+  "provider": null,
   "query": "deterministic clock",
+  "repository": null,
   "source_status": null,
   "source_statuses": {
     "next_offset": null,
@@ -90,6 +98,7 @@ exit: 0
     "total": 0,
     "values": {}
   },
+  "to": null,
   "total": 1,
   "type": null
 }

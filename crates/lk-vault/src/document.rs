@@ -13,9 +13,9 @@ pub struct DocumentSection {
     pub title: String,
     pub characters: usize,
     #[serde(skip)]
-    start: usize,
+    pub(super) start: usize,
     #[serde(skip)]
-    end: usize,
+    pub(super) end: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -163,7 +163,7 @@ pub fn inspect_document(
     })
 }
 
-fn outline(body: &str) -> Vec<DocumentSection> {
+pub(super) fn outline(body: &str) -> Vec<DocumentSection> {
     let mut sections = vec![DocumentSection {
         id: 0,
         level: 0,

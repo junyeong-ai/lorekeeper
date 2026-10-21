@@ -270,17 +270,16 @@ pub struct BrowseOptions {
     /// Title/path, or declared created newest first with unknown dates last
     #[arg(long, value_enum, default_value_t = BrowseSort::Title)]
     sort: BrowseSort,
-    /// Earliest declared created date, inclusive (YYYY-MM-DD); unknown dates excluded
-    #[arg(long = "from", value_parser = parse_browse_date)]
-    from: Option<jiff::civil::Date>,
-    /// Latest declared created date, inclusive (YYYY-MM-DD); not collection time
-    #[arg(long = "to", value_parser = parse_browse_date)]
-    to: Option<jiff::civil::Date>,
 }
 
 fn parse_browse_date(value: &str) -> Result<jiff::civil::Date, String> {
     lk_vault::parse_created_date(value)
         .ok_or_else(|| "expected a valid YYYY-MM-DD date".to_string())
+}
+
+fn parse_provider(value: &str) -> Result<lk_core::config::SourceType, String> {
+    serde_json::from_value(serde_json::Value::String(value.into()))
+        .map_err(|_| "expected an exact source type such as google-drive or nodex".to_owned())
 }
 
 #[derive(clap::Args)]
@@ -306,6 +305,24 @@ pub struct DiscoveryOptions {
     /// Exact recorded source lifecycle status; an empty value selects unknown status
     #[arg(long)]
     source_status: Option<String>,
+    /// Exact declared repository identity; does not assign concepts to their evidence's repository
+    #[arg(long, conflicts_with_all = ["provider", "namespace"])]
+    repository: Option<String>,
+    /// Exact provider source type; requires its declared namespace
+    #[arg(long, value_parser = parse_provider, requires = "namespace")]
+    provider: Option<lk_core::config::SourceType>,
+    /// Exact declared provider namespace; requires --provider
+    #[arg(long, requires = "provider")]
+    namespace: Option<String>,
+    /// Exact vault-relative path or directory prefix, matched on complete components
+    #[arg(long)]
+    path_prefix: Option<PathBuf>,
+    /// Earliest declared created date, inclusive (YYYY-MM-DD); unknown dates excluded
+    #[arg(long = "from", value_parser = parse_browse_date)]
+    from: Option<jiff::civil::Date>,
+    /// Latest declared created date, inclusive (YYYY-MM-DD); not last-change or collection time
+    #[arg(long = "to", value_parser = parse_browse_date)]
+    to: Option<jiff::civil::Date>,
     /// Exact frontmatter type, such as concept, document or exploration
     #[arg(long = "type")]
     format: Option<String>,
@@ -891,6 +908,12 @@ async fn run_body_search(
                 include_sources: options.include_sources,
                 category: options.category.as_deref(),
                 source_status: options.source_status.as_deref(),
+                repository: options.repository.as_deref(),
+                provider: options.provider,
+                namespace: options.namespace.as_deref(),
+                path_prefix: options.path_prefix.as_deref(),
+                created_from: options.from,
+                created_to: options.to,
                 format: options.format.as_deref(),
                 tags: &options.tags,
                 knowledge_status: options.knowledge_status.status(),
@@ -909,6 +932,13 @@ async fn run_body_search(
         output["include_sources"] = serde_json::json!(options.include_sources);
         output["category"] = serde_json::json!(options.category);
         output["source_status"] = serde_json::json!(options.source_status);
+        output["repository"] = serde_json::json!(options.repository);
+        output["provider"] = serde_json::json!(options.provider);
+        output["namespace"] = serde_json::json!(options.namespace);
+        output["path_prefix"] = serde_json::json!(options.path_prefix);
+        output["from"] = serde_json::json!(options.from.map(|date| date.to_string()));
+        output["to"] = serde_json::json!(options.to.map(|date| date.to_string()));
+        output["date_basis"] = serde_json::json!("declared-created-not-ingestion");
         output["type"] = serde_json::json!(options.format);
         output["tag_filters"] = serde_json::json!(options.tags);
         output["knowledge_status"] = serde_json::json!(options.knowledge_status);
@@ -991,8 +1021,8 @@ async fn run_search(
                 BrowseSort::Title => lk_vault::BrowseSort::Title,
                 BrowseSort::Created => lk_vault::BrowseSort::Created,
             },
-            created_from: dates.from,
-            created_to: dates.to,
+            created_from: options.from,
+            created_to: options.to,
             facet_limit: options.facet_limit.unwrap_or(20),
             facet_offset: options.facet_offset.unwrap_or(0),
             snapshot: options.snapshot.as_deref(),
@@ -1001,6 +1031,10 @@ async fn run_search(
             include_sources: options.include_sources,
             category: options.category.as_deref(),
             source_status: options.source_status.as_deref(),
+            repository: options.repository.as_deref(),
+            provider: options.provider,
+            namespace: options.namespace.as_deref(),
+            path_prefix: options.path_prefix.as_deref(),
             format: options.format.as_deref(),
             tags: &options.tags,
             knowledge_status: options.knowledge_status.status(),
@@ -1015,13 +1049,17 @@ async fn run_search(
         output["query"] = serde_json::json!(query);
         if query.is_none() {
             output["sort"] = serde_json::json!(dates.sort);
-            output["from"] = serde_json::json!(dates.from.map(|date| date.to_string()));
-            output["to"] = serde_json::json!(dates.to.map(|date| date.to_string()));
-            output["date_basis"] = serde_json::json!("declared-created-not-ingestion");
         }
+        output["from"] = serde_json::json!(options.from.map(|date| date.to_string()));
+        output["to"] = serde_json::json!(options.to.map(|date| date.to_string()));
+        output["date_basis"] = serde_json::json!("declared-created-not-ingestion");
         output["include_sources"] = serde_json::json!(options.include_sources);
         output["category"] = serde_json::json!(options.category);
         output["source_status"] = serde_json::json!(options.source_status);
+        output["repository"] = serde_json::json!(options.repository);
+        output["provider"] = serde_json::json!(options.provider);
+        output["namespace"] = serde_json::json!(options.namespace);
+        output["path_prefix"] = serde_json::json!(options.path_prefix);
         output["type"] = serde_json::json!(options.format);
         output["tag_filters"] = serde_json::json!(options.tags);
         output["knowledge_status"] = serde_json::json!(options.knowledge_status);
@@ -1033,8 +1071,9 @@ async fn run_search(
         );
         return Ok(());
     }
-    if query.is_none()
-        && (matches!(dates.sort, BrowseSort::Created) || dates.from.is_some() || dates.to.is_some())
+    if (query.is_none() && matches!(dates.sort, BrowseSort::Created))
+        || options.from.is_some()
+        || options.to.is_some()
     {
         eprintln!("Date basis: declared created; may be source-authored, not ingestion time.");
     }
