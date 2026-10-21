@@ -64,7 +64,9 @@ one source to infer that distinction.
   core/vault/queue RSS contracts before changing these paths.
 - **Cooperating writers use `MutationSession`.** Recover pending journals before
   deriving writes; journal complete guarded plans before mutation. External editors
-  are outside that lock. Read-only and `--dry-run` paths never write or recover.
+  are outside that lock. Read-only queries never write or recover. Publication
+  previews never publish or recover; missing-address validation uses disposable
+  private directory probes in the destination filesystem, without page payloads.
 - **Long workflows use a separate cooperative lease.** `lore workflow -- COMMAND`
   owns the canonical vault's Unix `workflow.lock` across evidence reading and
   publication; short mutation/queue locks remain inside commands, never across an

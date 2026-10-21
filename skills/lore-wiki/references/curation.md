@@ -14,8 +14,11 @@ lease before drafting changes. Counts and lexical similarity do not decide meani
 - Alias only the same subject and scope. Product vs method, family vs version and a
   homonym need distinct names. Search spelling variants never authorize a merge.
 
-`lore wiki curate --file PLAN.json --dry-run` validates a proposed plan without writing
-or recovering journals. Omit `--dry-run` to publish the reviewed plan atomically.
+`lore wiki curate --file PLAN.json --dry-run` validates a proposed plan without changing
+pages or recovering journals. Missing addresses use temporary directory-only probes
+beneath their existing parent, removed before returning; this requires directory creation
+permission there. Filesystem case/Unicode aliases refuse before publication, while distinct
+hard-link entries remain distinct pages. Omit `--dry-run` to publish the reviewed plan atomically.
 The command archives prior authored revisions and guards all evidence and targets.
 A changed revision requires rereading and reassessment, not replacement of the guard.
 

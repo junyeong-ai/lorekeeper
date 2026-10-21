@@ -905,6 +905,8 @@ async fn apply(
     }
     plan.extend(publications);
     if dry_run {
+        plan.validate_addresses(&vault_root)
+            .map_err(|error| miette::miette!("validate extraction addresses: {error}"))?;
         for page in &concept_pages {
             super::report_refusals(page, true);
         }

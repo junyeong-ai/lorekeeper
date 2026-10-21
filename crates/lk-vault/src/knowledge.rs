@@ -203,7 +203,9 @@ pub fn preview_curation(
     categories: &[ConceptCategory],
     request: CurationPlan,
 ) -> Result<CurationResult, VaultError> {
-    build_curation(root, dirs, categories, request).map(|(_, result)| result)
+    let (plan, result) = build_curation(root, dirs, categories, request)?;
+    plan.validate_addresses(root)?;
+    Ok(result)
 }
 
 fn build_curation(
@@ -528,6 +530,61 @@ fn build_curation(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn curation_previews_new_addresses_with_the_publication_namespace_rules() {
+        let root = tempfile::tempdir().unwrap();
+        let raw = "---\ntype: document\n---\nA retained observation.\n";
+        crate::VaultWriter::new(root.path())
+            .write_page_sync(Path::new("wiki/documents/source.md"), raw)
+            .unwrap();
+        let probe = tempfile::tempdir_in(root.path()).unwrap();
+        std::fs::write(probe.path().join("Review.md"), "probe").unwrap();
+        let aliases = probe.path().join("review.md").exists();
+        probe.close().unwrap();
+        let revision = source_revision(&crate::parse_page(raw).unwrap());
+        let review = |name: &str| ReviewCuration {
+            path: format!("wiki/explorations/{name}"),
+            revision: None,
+            content: format!(
+                "---\ntype: exploration\ntitle: {name}\nreview: {}\n---\nA scoped assessment.\n",
+                json!({
+                    "status": "open",
+                    "subjects": ["wiki/documents/source.md"],
+                    "evidence": [{"path": "wiki/documents/source.md", "revision": revision}]
+                })
+            ),
+        };
+        let request = || CurationPlan {
+            evidence: vec![PageRevision {
+                path: "wiki/documents/source.md".into(),
+                revision: file_revision(raw),
+            }],
+            concepts: vec![],
+            reviews: ["Review.md", "review.md"].map(review).into(),
+        };
+        assert_eq!(
+            preview_curation(root.path(), &VaultDirs::default(), &[], request()).is_ok(),
+            !aliases
+        );
+        assert!(!root.path().join("wiki/explorations").exists());
+        assert!(!root.path().join(".lorekeeper").exists());
+        let session = MutationSession::acquire(root.path()).unwrap();
+        assert_eq!(
+            curate(&session, &VaultDirs::default(), &[], request()).is_ok(),
+            !aliases
+        );
+        assert!(
+            !root
+                .path()
+                .join(".lorekeeper/mutation/pending.json")
+                .exists()
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("wiki/documents/source.md")).unwrap(),
+            raw
+        );
+    }
 
     fn recover_completed_curation(root: &Path, plan: MutationPlan) {
         let session = MutationSession::acquire(root).unwrap();

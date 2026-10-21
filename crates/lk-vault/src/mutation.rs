@@ -70,6 +70,12 @@ impl Progress {
 }
 
 impl MutationPlan {
+    /// Check publication address ownership without publishing or recovering a plan.
+    /// Missing names are tested in disposable directory-only probes on their target filesystem.
+    pub fn validate_addresses(&self, root: &Path) -> Result<(), VaultError> {
+        validate_addresses(&root.canonicalize()?, self)
+    }
+
     /// Append a validated publication/dependency group, preserving its step order.
     pub fn extend(&mut self, other: MutationPlan) {
         self.steps.extend(other.steps);
@@ -241,36 +247,7 @@ impl MutationSession {
     }
 
     fn path(&self, relative: &Path) -> Result<PathBuf, VaultError> {
-        if relative.as_os_str().is_empty()
-            || relative
-                .components()
-                .any(|c| !matches!(c, Component::Normal(_)))
-            || relative.starts_with(".lorekeeper/mutation")
-        {
-            return Err(
-                io::Error::other(format!("invalid mutation path: {}", relative.display())).into(),
-            );
-        }
-        let path = crate::writable_page_path(&self.root, relative)?;
-        let resolved = lk_core::fs::canonical_prefix(&path);
-        if resolved.starts_with(self.journal.parent().expect("journal has a parent")) {
-            return Err(io::Error::other("mutation cannot replace its recovery state").into());
-        }
-        if !resolved.starts_with(&self.root) {
-            return Err(io::Error::other(format!(
-                "mutation path escapes vault: {}",
-                relative.display()
-            ))
-            .into());
-        }
-        if fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
-            return Err(io::Error::other(format!(
-                "mutation requires a direct file address: {}",
-                relative.display()
-            ))
-            .into());
-        }
-        Ok(path)
+        mutation_path(&self.root, relative)
     }
 
     fn read(&self, path: &Path) -> Result<Option<String>, VaultError> {
@@ -290,7 +267,7 @@ impl MutationSession {
     }
 
     fn preflight(&self, plan: &MutationPlan) -> Result<(), VaultError> {
-        self.validate_addresses(plan)?;
+        validate_addresses(&self.root, plan)?;
         Self::validate_retained_guards(plan)?;
         let mut state: HashMap<PathBuf, Option<String>> = HashMap::new();
         for step in &plan.steps {
@@ -334,7 +311,7 @@ impl MutationSession {
                     if state[from].as_ref() != Some(expected) {
                         return Err(Self::conflict(from));
                     }
-                    if state[to].is_some() && !self.same_entry(from, to)? {
+                    if state[to].is_some() && from != to && !self.same_entry(from, to)? {
                         return Err(Self::conflict(to));
                     }
                     state.insert(from.clone(), None);
@@ -386,46 +363,6 @@ impl MutationSession {
         Ok(())
     }
 
-    fn validate_addresses(&self, plan: &MutationPlan) -> Result<(), VaultError> {
-        use std::collections::BTreeSet;
-        let mut owners: HashMap<PathBuf, (BTreeSet<PathBuf>, bool)> = HashMap::new();
-        for step in &plan.steps {
-            let (paths, writes): (Vec<&Path>, bool) = match step {
-                Step::RequireAbsent { path } => (vec![path], false),
-                Step::Edit {
-                    path,
-                    before,
-                    after,
-                } => (vec![path], before != after),
-                Step::Create { path, .. } | Step::Remove { path, .. } => (vec![path], true),
-                Step::Rename { from, to, .. } => (vec![from, to], true),
-            };
-            let mut previous = None;
-            for path in paths {
-                let resolved = crate::address::destination(&self.path(path)?)?;
-                if matches!(step, Step::Rename { .. }) && previous.as_ref() == Some(&resolved) {
-                    let owner = owners.get_mut(&resolved).expect("registered rename source");
-                    owner.0.clear();
-                    owner.0.insert(path.to_owned());
-                    continue;
-                }
-                let (addresses, has_writes) = owners.entry(resolved.clone()).or_default();
-                if let Some(prior) = addresses.iter().find(|prior| prior.as_path() != path)
-                    && (writes || *has_writes)
-                {
-                    return Err(io::Error::other(format!(
-                        "mutation paths {} and {} address the same file entry; use one exact address",
-                        prior.display(), path.display()
-                    )).into());
-                }
-                addresses.insert(path.to_owned());
-                *has_writes |= writes;
-                previous = Some(resolved);
-            }
-        }
-        Ok(())
-    }
-
     fn save(&self, journal: &Journal) -> Result<(), VaultError> {
         let bytes =
             serde_json::to_vec(journal).map_err(|e| VaultError::Serialization(e.to_string()))?;
@@ -434,7 +371,7 @@ impl MutationSession {
     }
 
     fn finish(&self, journal: &Journal) -> Result<(), VaultError> {
-        self.validate_addresses(&journal.plan)?;
+        validate_addresses(&self.root, &journal.plan)?;
         Self::validate_retained_guards(&journal.plan)?;
         let plan = serde_json::to_string(&journal.plan)
             .map_err(|e| VaultError::Serialization(e.to_string()))?;
@@ -563,6 +500,106 @@ impl MutationSession {
     }
 }
 
+fn mutation_path(root: &Path, relative: &Path) -> Result<PathBuf, VaultError> {
+    if relative.as_os_str().is_empty()
+        || relative
+            .components()
+            .any(|c| !matches!(c, Component::Normal(_)))
+        || relative.starts_with(".lorekeeper/mutation")
+    {
+        return Err(
+            io::Error::other(format!("invalid mutation path: {}", relative.display())).into(),
+        );
+    }
+    let path = crate::writable_page_path(root, relative)?;
+    let resolved = lk_core::fs::canonical_prefix(&path);
+    if resolved.starts_with(&crate::address::destination(
+        &root.join(".lorekeeper/mutation"),
+    )?) {
+        return Err(io::Error::other("mutation cannot replace its recovery state").into());
+    }
+    if !resolved.starts_with(root) {
+        return Err(io::Error::other(format!(
+            "mutation path escapes vault: {}",
+            relative.display()
+        ))
+        .into());
+    }
+    if fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Err(io::Error::other(format!(
+            "mutation requires a direct file address: {}",
+            relative.display()
+        ))
+        .into());
+    }
+    Ok(path)
+}
+
+fn validate_addresses(root: &Path, plan: &MutationPlan) -> Result<(), VaultError> {
+    use std::collections::BTreeSet;
+    let mut owners: std::collections::BTreeMap<PathBuf, (BTreeSet<PathBuf>, bool)> =
+        std::collections::BTreeMap::new();
+    let mut resolver = crate::address::PlannedAddressResolver::default();
+    let validation = (|| {
+        for step in &plan.steps {
+            let (paths, writes): (Vec<&Path>, bool) = match step {
+                Step::RequireAbsent { path } => (vec![path], false),
+                Step::Edit {
+                    path,
+                    before,
+                    after,
+                } => (vec![path], before != after),
+                Step::Create { path, .. } | Step::Remove { path, .. } => (vec![path], true),
+                Step::Rename { from, to, .. } => (vec![from, to], true),
+            };
+            let mut previous = None;
+            for path in paths {
+                let resolved = resolver.resolve(&mutation_path(root, path)?)?;
+                let ancestor = resolved.ancestors().skip(1).find_map(|parent| {
+                    owners
+                        .get(parent)
+                        .filter(|(_, prior_writes)| writes || *prior_writes)
+                });
+                let descendant = owners
+                    .range(resolved.clone()..)
+                    .take_while(|(candidate, _)| candidate.starts_with(&resolved))
+                    .find_map(|(candidate, owner)| {
+                        (candidate != &resolved && (writes || owner.1)).then_some(owner)
+                    });
+                if let Some((addresses, _)) = ancestor.or(descendant) {
+                    return Err(io::Error::other(format!(
+                        "mutation file paths {} and {} overlap as file and directory",
+                        addresses.first().expect("registered address").display(),
+                        path.display()
+                    ))
+                    .into());
+                }
+                if matches!(step, Step::Rename { .. }) && previous.as_ref() == Some(&resolved) {
+                    let owner = owners.get_mut(&resolved).expect("registered rename source");
+                    owner.0.clear();
+                    owner.0.insert(path.to_owned());
+                    continue;
+                }
+                let (addresses, has_writes) = owners.entry(resolved.clone()).or_default();
+                if let Some(prior) = addresses.iter().find(|prior| prior.as_path() != path)
+                    && (writes || *has_writes)
+                {
+                    return Err(io::Error::other(format!(
+                        "mutation paths {} and {} address the same file entry; use one exact address",
+                        prior.display(), path.display()
+                    )).into());
+                }
+                addresses.insert(path.to_owned());
+                *has_writes |= writes;
+                previous = Some(resolved);
+            }
+        }
+        Ok(())
+    })();
+    resolver.close()?;
+    validation
+}
+
 fn create_directories(path: &Path, root: &Path) -> io::Result<()> {
     fs::create_dir_all(path)?;
     #[cfg(unix)]
@@ -664,6 +701,67 @@ mod tests {
             "independent"
         );
         assert!(!session.journal.exists());
+    }
+
+    #[test]
+    fn missing_address_collisions_refuse_before_any_publication() {
+        for (first, second) in [
+            ("Review.md", "review.md"),
+            ("caf\u{e9}.md", "cafe\u{301}.md"),
+            ("Group/page.md", "group/page.md"),
+            ("Group/one.md", "group/two.md"),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let probe = tempfile::tempdir_in(root.path()).unwrap();
+            let full = probe.path().join(first);
+            fs::create_dir_all(full.parent().unwrap()).unwrap();
+            fs::write(full, "probe").unwrap();
+            let aliases = probe.path().join(second).exists();
+            probe.close().unwrap();
+            fs::write(root.path().join("existing.md"), "before").unwrap();
+            let session = MutationSession::acquire(root.path()).unwrap();
+            let mut plan = MutationPlan::default();
+            plan.edit("existing.md", "before".into(), "after".into());
+            plan.create(first, "first".into());
+            plan.create(second, "second".into());
+            assert_eq!(session.apply(plan).is_ok(), !aliases, "{first}, {second}");
+            assert_eq!(
+                fs::read_to_string(root.path().join("existing.md")).unwrap(),
+                if aliases { "before" } else { "after" }
+            );
+            assert_eq!(root.path().join(first).exists(), !aliases);
+            assert_eq!(root.path().join(second).exists(), !aliases);
+            assert!(!session.journal.exists());
+            assert!(!session.journal.with_file_name("progress.json").exists());
+            assert!(walkdir::WalkDir::new(root.path()).into_iter().all(|entry| {
+                !entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".lorekeeper-address-")
+            }));
+            drop(session);
+            MutationSession::acquire(root.path()).unwrap();
+        }
+    }
+
+    #[test]
+    fn planned_files_cannot_also_be_directories_and_invalid_names_leave_no_probes() {
+        for (first, second) in [
+            ("new.md", "new.md/child.md"),
+            ("new.md/child.md", "new.md"),
+            ("valid.md", "invalid\0.md"),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let session = MutationSession::acquire(root.path()).unwrap();
+            let mut plan = MutationPlan::default();
+            plan.create(first, "first".into());
+            plan.create(second, "second".into());
+            assert!(session.apply(plan).is_err(), "{first}, {second}");
+            assert!(!root.path().join(first).exists());
+            assert!(!session.journal.exists());
+            assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+        }
     }
 
     #[test]

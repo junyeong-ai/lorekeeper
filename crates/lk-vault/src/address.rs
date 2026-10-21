@@ -51,27 +51,102 @@ pub fn same_existing_entry(root: &Path, a: &Path, b: &Path) -> Result<bool, Vaul
 }
 
 pub(crate) fn destination(path: &Path) -> std::io::Result<PathBuf> {
+    let (mut resolved, missing) = split_destination(path)?;
+    for name in missing.iter().rev() {
+        resolved.push(name);
+    }
+    Ok(resolved)
+}
+
+fn split_destination(path: &Path) -> std::io::Result<(PathBuf, Vec<std::ffi::OsString>)> {
     let absolute = std::path::absolute(path)?;
     let mut ancestor = absolute.as_path();
     let mut missing = Vec::new();
     loop {
         match std::fs::symlink_metadata(ancestor) {
             Ok(_) => {
-                let mut resolved = ancestor.canonicalize()?;
-                for name in missing.iter().rev() {
-                    resolved.push(name);
-                }
-                return Ok(resolved);
+                return Ok((ancestor.canonicalize()?, missing));
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 let Some(name) = ancestor.file_name() else {
                     return Err(error);
                 };
-                missing.push(name);
+                missing.push(name.to_owned());
                 ancestor = ancestor.parent().ok_or(error)?;
             }
             Err(error) => return Err(error),
         }
+    }
+}
+
+/// Ask the destination filesystem about names that do not exist yet. Private
+/// directory-only probes inherit the nearest existing parent's naming rules;
+/// payloads and final addresses are never created by this validator.
+#[derive(Default)]
+pub(crate) struct PlannedAddressResolver {
+    probes: BTreeMap<ProbeIdentity, NameProbe>,
+}
+
+struct NameProbe {
+    directory: tempfile::TempDir,
+    ancestor: PathBuf,
+    owners: BTreeMap<ProbeIdentity, PathBuf>,
+}
+
+#[cfg(unix)]
+type ProbeIdentity = (u64, u64);
+#[cfg(not(unix))]
+type ProbeIdentity = PathBuf;
+
+fn probe_identity(path: &Path) -> std::io::Result<ProbeIdentity> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = std::fs::metadata(path)?;
+        Ok((metadata.dev(), metadata.ino()))
+    }
+    #[cfg(not(unix))]
+    path.canonicalize()
+}
+
+impl PlannedAddressResolver {
+    pub(crate) fn resolve(&mut self, path: &Path) -> std::io::Result<PathBuf> {
+        let (ancestor, missing) = split_destination(path)?;
+        if missing.is_empty() {
+            return Ok(ancestor);
+        }
+        let probe = match self.probes.entry(probe_identity(&ancestor)?) {
+            std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+            std::collections::btree_map::Entry::Vacant(entry) => entry.insert(NameProbe {
+                directory: tempfile::Builder::new()
+                    .prefix(".lorekeeper-address-")
+                    .tempdir_in(&ancestor)?,
+                ancestor,
+                owners: BTreeMap::new(),
+            }),
+        };
+        let mut candidate = probe.directory.path().to_path_buf();
+        let mut owner = probe.ancestor.clone();
+        for name in missing.iter().rev() {
+            candidate.push(name);
+            std::fs::create_dir_all(&candidate)?;
+            owner.push(name);
+            // Only private directories use inode identity. They cannot be distinct
+            // hard-link entries; real page owners still use canonical addresses.
+            owner = probe
+                .owners
+                .entry(probe_identity(&candidate)?)
+                .or_insert(owner)
+                .clone();
+        }
+        Ok(owner)
+    }
+
+    pub(crate) fn close(self) -> std::io::Result<()> {
+        for probe in self.probes.into_values() {
+            probe.directory.close()?;
+        }
+        Ok(())
     }
 }
 

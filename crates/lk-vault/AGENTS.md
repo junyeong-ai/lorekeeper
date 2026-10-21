@@ -37,7 +37,10 @@ canonical; SQLite navigation is derived.
   full before/after steps before edits. Recovery accepts expected states only and
   preserves conflicts. Lock order is mutation session before narrower queue locks.
 - Preflight rejects conflicting publication addresses resolving to one file entry,
-  including missing descendants under directory aliases. Pure repeated read guards
+  including absent case/Unicode aliases and missing descendants under directory aliases.
+  Missing names use disposable directory-only probes beneath their existing parent;
+  cleanup must finish before journaling. No string folding establishes identity.
+  Pure repeated read guards
   and explicit spelling renames remain valid; hard links are distinct entries.
   After a retained guard is evaluated, later owned steps must preserve it.
 - Persist plan once; progress receipts bind its revision. Remove/sync plan before
@@ -54,7 +57,8 @@ canonical; SQLite navigation is derived.
 ## Reviews and authored evidence (`review.rs`)
 
 - `knowledge.rs` validates guarded metadata/review curation as one plan, archives prior
-  authored states and validates evidence against proposed final pages. Preview is read-only.
+  authored states and validates evidence against proposed final pages. Preview validates
+  publication addresses without changing pages or journals; it removes namespace probes.
   Category changes use configured IDs; omitted values keep state, null clears category,
   and an explicit empty tags list clears tags. Tags describe the concept, not all its sources.
   Retired concepts keep addresses and evidence; normal discovery excludes them. Curation

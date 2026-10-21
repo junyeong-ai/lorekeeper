@@ -158,7 +158,9 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   journal; prune only owned valid recipes with no retained pending identity.
   Compose batch read guards against the actual publication set and matching original
   bytes; owned edits guard themselves during recovery. Distinct publication addresses
-  resolving to one physical page refuse before any write, including in dry runs.
+  resolving to one entry refuse before page writes or journaling, including in dry runs.
+  Use `MutationPlan::validate_addresses` for publication previews; it removes private
+  directory-only probes after checking missing names on the destination filesystem.
 - Hold the vault claim for each apply, not an entire LLM session; vault→queue is the
   lock order. Distinguish a page-local failure, quarantined malformed result, and
   fatal IO. Aggregate output honestly reports all/some/none applied.
