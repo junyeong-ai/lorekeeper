@@ -115,7 +115,7 @@ pub(super) fn request_selected(
     let mut matching = std::collections::BTreeSet::new();
     for binding in &declarations {
         if Path::new(&binding.concept) == concept
-            || lk_vault::same_existing_file(&config.root, Path::new(&binding.concept), concept)
+            || lk_vault::same_existing_entry(&config.root, Path::new(&binding.concept), concept)
                 .map_err(|e| e.to_string())?
         {
             matching.insert(binding.concept.clone());
@@ -243,7 +243,7 @@ fn remove_generated_links(
         // page_path also refuses an outside-root symlink destination.
         let addresses_target = dest == concept
             || (lk_vault::page_path(root, &dest).is_ok()
-                && lk_vault::same_existing_file(root, &dest, concept)
+                && lk_vault::same_existing_entry(root, &dest, concept)
                     .map_err(|e| e.to_string())?);
         if !addresses_target {
             continue;

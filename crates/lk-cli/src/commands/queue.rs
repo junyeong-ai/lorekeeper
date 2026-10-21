@@ -404,7 +404,7 @@ pub(super) fn require_citation_origin_quiescent(root: &Path, origin: &Path) -> m
         if lk_vault::page_path(root, &path).is_err() {
             return Ok(false);
         }
-        lk_vault::same_existing_file(root, &path, origin)
+        lk_vault::same_existing_entry(root, &path, origin)
             .map_err(|error| miette::miette!("compare queued origin address: {error}"))
     };
     let touches = |task: &QueueTask| -> miette::Result<bool> {

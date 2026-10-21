@@ -8,16 +8,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::{VaultError, parse_page};
 
-/// Compare filesystem objects, not slug or case-folded path spellings. Absence is
-/// not identity; permission and other I/O failures cannot prove two files differ.
-pub fn same_existing_file(root: &Path, a: &Path, b: &Path) -> Result<bool, VaultError> {
-    match same_file::is_same_file(root.join(a), root.join(b)) {
-        Ok(same) => Ok(same),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(error.into()),
-    }
-}
-
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum ReviewStatus {
@@ -142,7 +132,8 @@ impl KnowledgeReview {
                     })?;
                 let mut removed = false;
                 for path in removed_paths {
-                    removed |= path == &evidence || same_existing_file(root, path, &evidence)?;
+                    removed |=
+                        path == &evidence || crate::same_existing_entry(root, path, &evidence)?;
                 }
                 if removed && load_archived_evidence(root, &citation.revision)?.is_none() {
                     return Err(VaultError::Frontmatter(format!(
@@ -976,17 +967,25 @@ mod tests {
         assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 1);
     }
 
+    #[cfg(unix)]
     #[test]
-    fn removal_checks_the_filesystem_object_behind_an_evidence_alias() {
+    fn removal_checks_evidence_entry_aliases_without_conflating_hard_links() {
         let root = tempfile::tempdir().unwrap();
         let source = "---\ntype: document\n---\nHistorical evidence.\n";
         std::fs::write(root.path().join("old.md"), source).unwrap();
-        std::fs::hard_link(root.path().join("old.md"), root.path().join("alias.md")).unwrap();
+        std::os::unix::fs::symlink("old.md", root.path().join("alias.md")).unwrap();
+        std::fs::hard_link(root.path().join("old.md"), root.path().join("distinct.md")).unwrap();
         let revision = lk_core::concept::source_revision(&parse_page(source).unwrap());
         let review = format!(
             "---\ntype: exploration\nreview: {{status: open, evidence: [{{path: alias.md, revision: {revision}}}]}}\n---\nJudgment.\n"
         );
         std::fs::write(root.path().join("review.md"), review).unwrap();
+        KnowledgeReview::ensure_evidence_paths_preserved(
+            root.path(),
+            &["review.md".into()],
+            &["distinct.md".into()],
+        )
+        .unwrap();
         assert!(
             KnowledgeReview::ensure_evidence_paths_preserved(
                 root.path(),

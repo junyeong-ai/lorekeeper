@@ -26,10 +26,10 @@ pulldown-cmark = { workspace = true, features = ["html"] }
 html5ever = { workspace = true }
 markup5ever_rcdom = { workspace = true }
 walkdir = { workspace = true }
-same-file = { workspace = true }
 regex = { workspace = true }
 
 [dev-dependencies]
+same-file = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "macros"] }
 strum = { workspace = true }

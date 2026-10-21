@@ -278,7 +278,7 @@ fn plan_merge(
         let mut cites_from = false;
         for link in &page.outgoing {
             cites_from |=
-                lk_vault::same_existing_file(vault_root, Path::new(&link.dest), &from_rel)
+                lk_vault::same_existing_entry(vault_root, Path::new(&link.dest), &from_rel)
                     .map_err(|error| GraphError::Io(error.to_string()))?;
         }
         if !cites_from && !review_updates.contains_key(&page.path) {
@@ -447,7 +447,7 @@ fn rewrite_links(
             return None;
         }
         let resolved = link::resolve_dest(page_path, &decoded)?;
-        match lk_vault::same_existing_file(root, &resolved, from_rel) {
+        match lk_vault::same_existing_entry(root, &resolved, from_rel) {
             Ok(true) => {}
             Ok(false) => return None,
             Err(error) => {
@@ -741,6 +741,47 @@ mod tests {
         super::merge_concepts(&pages, root, "wiki", &request, false).unwrap();
         assert!(!root.join("wiki/concepts/group/a.md").exists());
         assert!(root.join("wiki/concepts/hard.md").is_file());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn merge_preserves_links_to_an_unselected_hard_link_entry() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let source = "wiki/concepts/a.md";
+        let distinct = "wiki/concepts/c.md";
+        write(root, source, "---\ntype: concept\n---\n");
+        std::fs::hard_link(root.join(source), root.join(distinct)).unwrap();
+        std::os::unix::fs::symlink("a.md", root.join("wiki/concepts/alias.md")).unwrap();
+        write(
+            root,
+            "wiki/concepts/b.md",
+            "---\ntype: concept\ntitle: B\n---\n# B\n",
+        );
+        write(
+            root,
+            "wiki/documents/source.md",
+            "---\ntype: document\n---\n[A](../concepts/a.md#detail)\n[Alias](../concepts/alias.md#detail)\n[C](../concepts/c.md#detail)\n",
+        );
+        let pages = crate::scan::scan_vault(root, false).unwrap();
+        let result = merge_concepts(&pages, root, "wiki", "a", "b", false, false).unwrap();
+        assert_eq!(
+            result
+                .rewritten
+                .iter()
+                .map(|page| page.links)
+                .sum::<usize>(),
+            2
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("wiki/documents/source.md")).unwrap(),
+            "---\ntype: document\n---\n[A](../concepts/b.md#detail)\n[Alias](../concepts/b.md#detail)\n[C](../concepts/c.md#detail)\n"
+        );
+        assert!(!root.join(source).exists());
+        assert_eq!(
+            std::fs::read_to_string(root.join(distinct)).unwrap(),
+            "---\ntype: concept\n---\n"
+        );
     }
 
     #[test]

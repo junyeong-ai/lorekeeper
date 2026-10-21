@@ -30,7 +30,7 @@ mod writer;
 // public surface exposes the page types alongside the I/O that produces them.
 pub use lk_core::frontmatter::{Frontmatter, VaultPage, parse_page};
 
-pub use self::address::{ExistingPageResolver, page_path, writable_page_path};
+pub use self::address::{ExistingPageResolver, page_path, same_existing_entry, writable_page_path};
 pub use self::body_search::{
     BodyContextLine, BodySearchHit, BodySearchOptions, BodySearchResult, search_body,
 };
@@ -68,7 +68,7 @@ pub use self::review::{
     EvidenceReport, KnowledgeReview, ReviewEffectiveState, ReviewReport, ReviewStatus,
     archive_evidence, evidence_archive_path, inspect_evidence, is_archived_evidence, list_reviews,
     load_archived_evidence, plan_document_publication, plan_review_repointing, publish_document,
-    publish_document_expected, publish_document_expected_with_plan, same_existing_file,
+    publish_document_expected, publish_document_expected_with_plan,
 };
 pub use self::rss_evidence::{
     RssEvidencePreview, accumulate_rss_evidence, guard_rss_citation, guard_rss_evidence,

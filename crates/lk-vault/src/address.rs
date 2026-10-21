@@ -39,6 +39,17 @@ pub fn writable_page_path(root: &Path, relative: &Path) -> std::io::Result<PathB
     }
 }
 
+/// Compare directory entries after resolving actual filesystem aliases. Hard
+/// links retain distinct addresses; missing entries do not establish identity.
+pub fn same_existing_entry(root: &Path, a: &Path, b: &Path) -> Result<bool, VaultError> {
+    let canonical = |path: &Path| match page_path(root, path)?.canonicalize() {
+        Ok(path) => Ok(Some(path)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    };
+    Ok(matches!((canonical(a)?, canonical(b)?), (Some(a), Some(b)) if a == b))
+}
+
 pub(crate) fn destination(path: &Path) -> std::io::Result<PathBuf> {
     let absolute = std::path::absolute(path)?;
     let mut ancestor = absolute.as_path();
@@ -200,6 +211,21 @@ mod tests {
         assert_eq!(
             resolver.resolve(Path::new("alias.md")).unwrap(),
             Some("owner.md".into())
+        );
+        assert!(
+            same_existing_entry(root.path(), Path::new("owner.md"), Path::new("alias.md")).unwrap()
+        );
+        std::fs::hard_link(root.path().join("owner.md"), root.path().join("hard.md")).unwrap();
+        assert!(
+            !same_existing_entry(root.path(), Path::new("owner.md"), Path::new("hard.md")).unwrap()
+        );
+        assert!(
+            !same_existing_entry(
+                root.path(),
+                Path::new("missing.md"),
+                Path::new("missing.md")
+            )
+            .unwrap()
         );
     }
 }

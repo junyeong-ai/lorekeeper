@@ -91,7 +91,7 @@ pub fn apply_in_session(
     for rename in renames {
         let target = root.join(&rename.new_path);
         if target.exists()
-            && !lk_vault::same_existing_file(root, &rename.old_path, &rename.new_path)
+            && !lk_vault::same_existing_entry(root, &rename.old_path, &rename.new_path)
                 .map_err(|e| GraphError::Io(e.to_string()))?
         {
             return Err(GraphError::Io(format!(

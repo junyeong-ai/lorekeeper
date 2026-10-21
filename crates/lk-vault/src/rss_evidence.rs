@@ -101,7 +101,7 @@ fn is_same_concept_address(
     concept: &Path,
 ) -> Result<bool, VaultError> {
     Ok(Path::new(declared) == concept
-        || crate::same_existing_file(root, Path::new(declared), concept)?)
+        || crate::same_existing_entry(root, Path::new(declared), concept)?)
 }
 
 fn has_selected_membership(
@@ -474,7 +474,7 @@ pub fn repoint_rss_evidence(
     }
     for binding in &mut declarations {
         for (from, into) in replacements {
-            if crate::same_existing_file(root, Path::new(&binding.concept), from)? {
+            if crate::same_existing_entry(root, Path::new(&binding.concept), from)? {
                 binding.concept = into.to_string_lossy().replace('\\', "/");
                 break;
             }
