@@ -1,5 +1,5 @@
 {
   "argument-hint": "[source-type]",
-  "allowed-tools": "Bash(slack-cli *)\nBash(atlassian-cli *)\nBash(gws *)\nBash(jq *)\nBash(grep *)\nBash(ls *)\nBash(lore validate)\nBash(lore schema)\nBash(lore schedule *)\nBash(lore config *)\nBash(lore ingest --dry-run *)\nRead\nEdit\nWrite\n",
+  "allowed-tools": "Bash(slack-cli *)\nBash(atlassian-cli *)\nBash(gws *)\nBash(jq *)\nBash(grep *)\nBash(ls *)\nBash(lore validate *)\nBash(lore schema *)\nBash(lore schedule *)\nBash(lore config *)\nBash(lore ingest --dry-run *)\nBash(lore run daily *)\nBash(lore input install *)\nBash(lore input install-vision *)\nBash(lore input check *)\nBash(lore input inspect *)\nBash(lore wiki snapshot *)\nBash(lore wiki search *)\nBash(lore wiki read *)\nBash(lore wiki original *)\nBash(lore wiki citations *)\nBash(lore wiki context *)\nBash(lore queue check *)\nRead\nEdit\nWrite\n",
   "name": "lore-setup:lore-setup"
 }

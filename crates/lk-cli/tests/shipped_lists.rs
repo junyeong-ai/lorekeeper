@@ -225,8 +225,7 @@ fn is_name_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_'
 }
 
-/// The commands a skill's `allowed-tools` frontmatter permits, one parser for every spelling of
-/// the entry (`Bash(lore *)`, `Bash(lore:*)`, `Bash(lore validate)`).
+/// Executable basenames with skill preapproval, without checking subcommand coverage.
 fn permitted_tools(frontmatter: &str) -> Vec<String> {
     frontmatter
         .lines()
@@ -272,17 +271,10 @@ fn a_spelled_command_is_read_the_way_a_shell_would() {
     );
 }
 
-/// Every command a skill's own procedure spells is one its `allowed-tools` permits.
-///
-/// A skill runs under `claude -p`, where nothing can prompt: a command the procedure spells and
-/// the allowlist omits is DENIED mid-step, unattended, with no way to ask. The two lists sit in
-/// one file and are kept by hand, which is the shape a gate exists for.
-///
-/// Bound: it reads fenced `bash` blocks, which is where these documents put the steps an agent
-/// runs. A command spelled in prose is not seen — and `spelled_commands` refuses a block it
-/// cannot read exactly, so what it does not see is never something it guessed at.
+/// Bash examples use executables with a corresponding skill preapproval entry.
+/// This does not validate argument patterns, prose commands or baseline host permissions.
 #[test]
-fn every_command_a_skill_spells_is_one_it_permits() {
+fn every_spelled_executable_has_a_skill_preapproval_entry() {
     let mut denied: Vec<String> = Vec::new();
     for dir in std::fs::read_dir(repo_root().join("skills"))
         .expect("skills dir")
@@ -322,8 +314,7 @@ fn every_command_a_skill_spells_is_one_it_permits() {
     denied.dedup();
     assert!(
         denied.is_empty(),
-        "these steps are denied under `claude -p`, never prompted — permit them in the skill's \
-         `allowed-tools`, or spell the step as a command that is:\n  {}",
+        "these executable basenames appear in Bash examples without a skill preapproval entry:\n  {}",
         denied.join("\n  ")
     );
 }
