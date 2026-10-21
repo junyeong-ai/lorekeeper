@@ -138,13 +138,27 @@ pub struct Pipeline {
 struct PlanningInputBudgets {
     events: lk_core::input::InputBudget,
     projections: lk_core::input::InputBudget,
+    rss_original_bytes: usize,
 }
+
+const MAX_RUN_RSS_CAPTURE_BYTES: usize = 256 * 1024 * 1024;
 
 impl PlanningInputBudgets {
     fn admit_events(&mut self, events: &[Event], source_limit: usize) -> Result<(), PipelineError> {
         let mut source = lk_core::input::InputBudget::new(source_limit);
         source.admit_all(events)?;
         self.events.admit_all(events)?;
+        Ok(())
+    }
+
+    fn admit_rss_originals(&mut self, bytes: usize) -> Result<(), PipelineError> {
+        let total = self.rss_original_bytes.checked_add(bytes);
+        let Some(total) = total.filter(|total| *total <= MAX_RUN_RSS_CAPTURE_BYTES) else {
+            return Err(PipelineError::Render(
+                "RSS originals exceed ingest-wide 256 MiB limit; split the ingest".into(),
+            ));
+        };
+        self.rss_original_bytes = total;
         Ok(())
     }
 }
@@ -169,6 +183,7 @@ impl Pipeline {
         let input_budgets = PlanningInputBudgets {
             events: lk_core::input::InputBudget::new(ctx.input_limits.max_run_bytes.get()),
             projections: lk_core::input::InputBudget::new(ctx.input_limits.max_run_bytes.get()),
+            rss_original_bytes: 0,
         };
         Self {
             vault_root: vault_root.to_owned(),
@@ -338,6 +353,7 @@ impl Pipeline {
                 }
                 rss_originals.insert(date, capture);
             }
+            input_budgets.admit_rss_originals(bytes)?;
         }
 
         // Classification is a render-time derivation of current config — re-applied to the
@@ -1583,4 +1599,139 @@ fn filter_valid_concepts(
             ec
         })
         .collect()
+}
+
+#[cfg(test)]
+mod input_admission_tests {
+    use super::*;
+    use lk_queue::LlmClient;
+
+    fn item(bytes: usize) -> RawItem {
+        RawItem {
+            external_id: Some("entry".into()),
+            title: "Article".into(),
+            body: "x".repeat(bytes),
+            url: None,
+            author: None,
+            timestamp: "2026-10-20T12:00:00Z".parse().unwrap(),
+            is_self: false,
+            work: None,
+            labels: vec![],
+            metadata: serde_json::Value::Null,
+        }
+    }
+
+    fn rss_bytes(source: &str, item: &RawItem) -> usize {
+        let events = normalize::normalize_events(
+            source,
+            lk_core::config::SourceType::Rss,
+            vec![item.clone()],
+            &jiff::tz::TimeZone::UTC,
+        );
+        lk_core::rss_original::RssOriginalCapture::from_events(&events.iter().collect::<Vec<_>>())
+            .unwrap()
+            .payloads
+            .iter()
+            .map(Vec::len)
+            .sum()
+    }
+
+    fn pipeline(root: &Path, llm: Arc<dyn LlmClient>) -> Pipeline {
+        let mut config: lk_core::config::Config = lk_core::yaml::from_str(
+            "vault: {root: vault, timezone: UTC, locale: en}\nidentity: {name: Test, email: test@example.invalid}\nsources: {}\n",
+        )
+        .unwrap();
+        config.vault.root = root.display().to_string();
+        Pipeline::new(
+            root,
+            Arc::new(PipelineContext::build(None, llm, &config).unwrap()),
+        )
+    }
+
+    fn source() -> SourceConfig {
+        serde_json::from_value(serde_json::json!({
+            "type": "rss",
+            "concept_policy": "supported-new",
+        }))
+        .unwrap()
+    }
+
+    fn options() -> IngestOptions {
+        IngestOptions {
+            target_date: None,
+            today: jiff::civil::date(2026, 10, 21),
+            dry_run: true,
+        }
+    }
+
+    #[tokio::test]
+    async fn rss_run_cap_rejects_one_source_without_reserving_inputs_or_staging_requests() {
+        let root = tempfile::tempdir().unwrap();
+        let queue = Arc::new(lk_queue::QueueLlmClient::new(root.path().join("queue")));
+        let mut pipeline = pipeline(root.path(), queue.clone());
+        let small = item(32);
+        let remaining = rss_bytes("small", &small);
+        let prior = MAX_RUN_RSS_CAPTURE_BYTES - remaining;
+        pipeline.input_budgets.rss_original_bytes = prior;
+
+        let error = pipeline
+            .plan("large", &source(), vec![item(2048)], &options())
+            .await
+            .err()
+            .unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("RSS originals exceed ingest-wide")
+        );
+        assert_eq!(pipeline.input_budgets.rss_original_bytes, prior);
+        assert_eq!(pipeline.input_budgets.events.bytes(), 0);
+        assert_eq!(pipeline.input_budgets.projections.bytes(), 0);
+        assert!(queue.take_requests().await.is_empty());
+        assert!(pipeline.render_concept_pages().await.unwrap().is_empty());
+        assert!(pipeline.document_slugs.is_empty());
+
+        let result = pipeline
+            .plan("small", &source(), vec![small], &options())
+            .await
+            .unwrap();
+        assert_eq!(result.daily_pages.len(), 1);
+        assert_eq!(
+            pipeline.input_budgets.rss_original_bytes,
+            MAX_RUN_RSS_CAPTURE_BYTES
+        );
+        assert!(!queue.take_requests().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn later_source_failure_rolls_back_admitted_rss_original_bytes() {
+        let root = tempfile::tempdir().unwrap();
+        let queue = Arc::new(lk_queue::QueueLlmClient::new(root.path().join("queue")));
+        let mut pipeline = pipeline(root.path(), queue.clone());
+        let raw = item(32);
+        let remaining = rss_bytes("a-one", &raw).max(rss_bytes("b-two", &raw));
+        let prior = MAX_RUN_RSS_CAPTURE_BYTES - remaining;
+        pipeline.input_budgets.rss_original_bytes = prior;
+        let path = root.path().join("daily/a-one/2026-10-20.md");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, "---\ntitle: [broken\n---\n").unwrap();
+
+        assert!(
+            pipeline
+                .plan("a-one", &source(), vec![raw.clone()], &options())
+                .await
+                .is_err()
+        );
+        assert_eq!(pipeline.input_budgets.rss_original_bytes, prior);
+        assert!(queue.take_requests().await.is_empty());
+        assert_eq!(
+            pipeline
+                .plan("b-two", &source(), vec![raw], &options())
+                .await
+                .unwrap()
+                .daily_pages
+                .len(),
+            1
+        );
+    }
 }
