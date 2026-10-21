@@ -183,6 +183,8 @@ fn set_title(text: &str, title: &str) -> Result<String, VaultError> {
             "\r\n"
         } else if heading.ends_with('\n') {
             "\n"
+        } else if heading.ends_with('\r') {
+            "\r"
         } else {
             ""
         };
@@ -538,6 +540,44 @@ fn build_curation(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn curation_titles_preserve_bare_cr_before_adjacent_headings() {
+        let path = "wiki/concepts/topic.md";
+        for heading in ["# Old\r", "Old\r===\r"] {
+            let root = tempfile::tempdir().unwrap();
+            let before =
+                format!("---\ntype: concept\ntitle: Old\n---\n{heading}## Synthesis\nKeep.\n");
+            crate::VaultWriter::new(root.path())
+                .write_page_sync(Path::new(path), &before)
+                .unwrap();
+            let request: CurationPlan = serde_json::from_value(json!({
+                "evidence": [{"path":path,"revision":file_revision(&before)}],
+                "concepts": [{"path":path,"revision":file_revision(&before),"title":"New"}]
+            }))
+            .unwrap();
+            let session = MutationSession::acquire(root.path()).unwrap();
+            curate(&session, &VaultDirs::default(), &[], request).unwrap();
+            let after = std::fs::read_to_string(root.path().join(path)).unwrap();
+            assert_eq!(
+                after,
+                "---\ntype: concept\ntitle: \"New\"\n---\n# New\r## Synthesis\nKeep.\n"
+            );
+            let view = crate::inspect_document(
+                root.path(),
+                Path::new(path),
+                &crate::DocumentOptions {
+                    section: None,
+                    offset: 0,
+                    limit: 10,
+                    revision: None,
+                },
+            )
+            .unwrap();
+            assert_eq!(view.sections[1].title, "New");
+            assert_eq!(view.sections[2].title, "Synthesis");
+        }
+    }
 
     #[test]
     fn curation_titles_preserve_raw_boundaries_and_render_literal_names() {
