@@ -148,9 +148,18 @@ fn incomplete_confluence_projection_preserves_published_pages_and_requests() {
                         page["version"].as_object_mut().unwrap().remove("number");
                     }
                     3 => page["body"]["storage"]["value"] = serde_json::json!(""),
+                    4 => {
+                        page["version"].as_object_mut().unwrap().remove("by");
+                    }
+                    5 => page["version"]["by"] = serde_json::json!({"displayName": "fixture-user"}),
                     _ => {}
                 }
-                serde_json::json!({"results": [page]})
+                serde_json::json!({"results": [page, {
+                    "id": "stable", "title": "Stable policy",
+                    "version": {"number": 1, "when": at.to_string(),
+                        "by": {"username": "fixture-user"}},
+                    "body": {"storage": {"value": "<p>Unchanged second observation.</p>"}},
+                }]})
             }
             other => panic!("unexpected Confluence fixture path {other}"),
         };
@@ -182,7 +191,7 @@ fn incomplete_confluence_projection_preserves_published_pages_and_requests() {
     let before_queue = snapshot(&vault.join(".lorekeeper/queue"));
     assert!(String::from_utf8_lossy(&before_page).contains("Keep records for 7 days."));
     assert!(!before_queue.is_empty());
-    for kind in [1, 2] {
+    for kind in [1, 2, 4, 5] {
         response_kind.store(kind, Ordering::Relaxed);
         let output = run(&config, &["ingest", "docs", "--date", &date]);
         let diagnostic = String::from_utf8_lossy(&output.stderr);

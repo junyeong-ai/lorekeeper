@@ -53,7 +53,8 @@ uses validated params and context; do not add per-adapter output pipelines.
   provider functions evaluate at acquisition, not the requested historical date.
   Re-anchor next links to the authenticated API base and follow `page_step`.
   External identity preserves the supplied version; unavailable version/body makes
-  the observation partial. `only_my_edits` compares the current author.
+  the observation partial. `only_my_edits` requires a known current editor identity;
+  exclude a known other editor before validating content needed only for selected pages.
 - `gmail.rs`: epoch bounds and parenthesized OR terms; queries are required/nonblank.
   An unread-only filter is an explicit user choice, not an implicit default.
 - `slack.rs`: form-encode API calls. Cursor pagination is authoritative, not

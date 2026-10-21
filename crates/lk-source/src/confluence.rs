@@ -471,20 +471,28 @@ fn map_page_observed(
         tracing::warn!(page = %page.id, "confluence: page has no version; skipping");
         return None;
     };
+    let editor = version.by.as_ref();
+    // Whichever field this deployment populates IS the identity; `account_id` is Cloud's,
+    // `username` is Data Center's, and exactly one is ever present.
+    let editor_account_id = editor
+        .and_then(|u| u.account_id.as_deref().or(u.username.as_deref()))
+        .filter(|id| !id.trim().is_empty());
+    let is_self = editor_account_id.is_some_and(|id| id == my_account_id);
+    if only_my_edits {
+        let Some(editor_account_id) = editor_account_id else {
+            *partial = true;
+            tracing::warn!(page = %page.id, "confluence: current editor identity is unavailable; cannot select own edits");
+            return None;
+        };
+        if editor_account_id != my_account_id {
+            return None;
+        }
+    }
     let Some(version_number) = version.number else {
         *partial = true;
         tracing::warn!(page = %page.id, "confluence: page has no version number; skipping");
         return None;
     };
-
-    let editor = version.by.as_ref();
-    // Whichever field this deployment populates IS the identity; `account_id` is Cloud's,
-    // `username` is Data Center's, and exactly one is ever present.
-    let editor_account_id = editor.and_then(|u| u.account_id.as_deref().or(u.username.as_deref()));
-    let is_self = editor_account_id.is_some_and(|id| id == my_account_id);
-    if only_my_edits && !is_self {
-        return None;
-    }
 
     let Some(ts) = version
         .when
@@ -575,15 +583,41 @@ mod tests {
     #[test]
     fn observation_distinguishes_invalid_page_from_ownership_filter() {
         let mut partial = false;
-        assert!(
-            map_page_observed(page_json("other", 1), "me", "https://x", true, &mut partial)
-                .is_none()
-        );
+        let mut other = page_json("other", 1);
+        other.version.as_mut().unwrap().number = None;
+        other.body = None;
+        assert!(map_page_observed(other, "me", "https://x", true, &mut partial).is_none());
         assert!(!partial);
         let mut broken = page_json("me", 1);
         broken.version.as_mut().unwrap().when = Some("invalid".into());
         assert!(map_page_observed(broken, "me", "https://x", true, &mut partial).is_none());
         assert!(partial);
+    }
+
+    #[test]
+    fn observation_requires_editor_identity_only_for_own_edit_selection() {
+        for missing in ["editor", "identity", "empty-identity"] {
+            for only_my_edits in [true, false] {
+                let mut page = page_json("me", 7);
+                let version = page.version.as_mut().unwrap();
+                match missing {
+                    "editor" => version.by = None,
+                    "identity" => version.by.as_mut().unwrap().account_id = None,
+                    "empty-identity" => {
+                        version.by.as_mut().unwrap().account_id = Some(String::new());
+                    }
+                    _ => unreachable!(),
+                }
+                let mut partial = false;
+                let item = map_page_observed(page, "me", "https://x", only_my_edits, &mut partial);
+                assert_eq!(partial, only_my_edits, "{missing}");
+                if only_my_edits {
+                    assert!(item.is_none(), "{missing}");
+                } else {
+                    assert!(!item.unwrap().is_self, "{missing}");
+                }
+            }
+        }
     }
 
     #[test]
