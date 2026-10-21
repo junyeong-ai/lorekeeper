@@ -5,17 +5,27 @@ use super::ResolvedConfig;
 
 /// A narrow operation on generated citation-list items, never arbitrary prose links.
 #[cfg(test)]
+#[allow(clippy::too_many_arguments)]
 pub(super) fn request(
     config: &ResolvedConfig,
     pages: &[lk_graph::scan::ScannedPage],
     origin: &Path,
     concept: &Path,
     revision: &str,
+    concept_revision: &str,
     dry_run: bool,
     session: Option<&lk_vault::MutationSession>,
 ) -> Result<serde_json::Value, String> {
     request_selected(
-        config, pages, origin, concept, revision, dry_run, session, None,
+        config,
+        pages,
+        origin,
+        concept,
+        revision,
+        concept_revision,
+        dry_run,
+        session,
+        None,
     )
 }
 
@@ -26,6 +36,7 @@ pub(super) fn request_selected(
     origin: &Path,
     concept: &Path,
     revision: &str,
+    concept_revision: &str,
     dry_run: bool,
     session: Option<&lk_vault::MutationSession>,
     selected: Option<&lk_core::rss_evidence::RssEventSelection>,
@@ -80,6 +91,11 @@ pub(super) fn request_selected(
     let full = lk_vault::page_path(&config.root, origin).map_err(|e| e.to_string())?;
     let target_full = lk_vault::page_path(&config.root, concept).map_err(|e| e.to_string())?;
     let target_raw = std::fs::read_to_string(target_full).map_err(|e| e.to_string())?;
+    if lk_core::concept::file_revision(&target_raw) != concept_revision {
+        return Err(
+            "concept revision changed; read the current concept and reconsider the citation".into(),
+        );
+    }
     let target_page = lk_vault::parse_page(&target_raw).map_err(|e| e.to_string())?;
     if target_page
         .frontmatter
@@ -172,6 +188,7 @@ pub(super) fn request_selected(
         // This existing publisher archives the exact inspected evidence before its
         // journaled edit, checks archive/current byte identity and refuses stale writes.
         let mut plan = lk_vault::MutationPlan::default();
+        plan.require_unchanged(concept, target_raw);
         lk_vault::guard_rss_evidence(&mut plan, &config.root, origin, &before)
             .map_err(|e| e.to_string())?;
         lk_vault::publish_document_expected_with_plan(
@@ -185,6 +202,7 @@ pub(super) fn request_selected(
     }
     Ok(serde_json::json!({"ok":true,"data":{
         "origin":origin,"concept":concept,"revision":revision,
+        "concept_revision":concept_revision,
         "after_revision":lk_core::concept::file_revision(&after),
         "archived_revision":archived_revision,"dry_run":dry_run,
         "follow_up":"Finalize: graph backlinks-sync; process resulting synthesis tasks; reconcile backlinks again; wiki refresh; graph lint; queue check; wiki reviews --check. Report unrelated findings separately."
@@ -306,6 +324,9 @@ mod tests {
         };
         (dir, config)
     }
+    fn load_revision(config: &ResolvedConfig, path: &Path) -> String {
+        lk_core::concept::file_revision(&std::fs::read_to_string(config.root.join(path)).unwrap())
+    }
     fn run(
         config: &ResolvedConfig,
         raw: &str,
@@ -322,6 +343,7 @@ mod tests {
             Path::new(ORIGIN),
             Path::new(CONCEPT),
             &lk_core::concept::file_revision(raw),
+            &load_revision(config, Path::new(CONCEPT)),
             dry,
             session,
         )
@@ -361,6 +383,62 @@ mod tests {
                 .join(".lorekeeper/mutation/pending.json")
                 .exists()
         );
+    }
+    #[test]
+    fn refuses_changed_endpoint_revisions_without_archiving() {
+        for dry_run in [true, false] {
+            for changed in [ORIGIN, CONCEPT] {
+                let (_dir, config) = fixture(RAW);
+                let revision = load_revision(&config, Path::new(ORIGIN));
+                let concept_revision = load_revision(&config, Path::new(CONCEPT));
+                let pages = lk_graph::scan::VaultViews::resolve(
+                    &config.root,
+                    &config.graph,
+                    &config.vault_dirs,
+                )
+                .unwrap()
+                .scanned;
+                let path = config.root.join(changed);
+                let current = std::fs::read_to_string(&path).unwrap() + "\nRevised conditions.\n";
+                std::fs::write(&path, &current).unwrap();
+                let origin = std::fs::read(config.root.join(ORIGIN)).unwrap();
+                let concept = std::fs::read(config.root.join(CONCEPT)).unwrap();
+                let session =
+                    (!dry_run).then(|| lk_vault::MutationSession::acquire(&config.root).unwrap());
+                let error = request(
+                    &config,
+                    &pages,
+                    Path::new(ORIGIN),
+                    Path::new(CONCEPT),
+                    &revision,
+                    &concept_revision,
+                    dry_run,
+                    session.as_ref(),
+                )
+                .unwrap_err();
+                let endpoint = if changed == ORIGIN {
+                    "origin"
+                } else {
+                    "concept"
+                };
+                assert!(
+                    error.contains(&format!("{endpoint} revision changed")),
+                    "{error}"
+                );
+                assert_eq!(std::fs::read(config.root.join(ORIGIN)).unwrap(), origin);
+                assert_eq!(std::fs::read(config.root.join(CONCEPT)).unwrap(), concept);
+                assert!(!config.root.join(".lorekeeper/evidence").exists());
+                assert!(
+                    !config
+                        .root
+                        .join(".lorekeeper/mutation/pending.json")
+                        .exists()
+                );
+                if dry_run {
+                    assert!(!config.root.join(".lorekeeper").exists());
+                }
+            }
+        }
     }
     #[test]
     fn refuses_prose_outside_citations_duplicate_sections_and_preserves_code() {
@@ -540,6 +618,7 @@ mod tests {
             daily,
             concept,
             &lk_core::concept::file_revision(&raw),
+            &load_revision(&config, concept),
             false,
             Some(&session),
         )
@@ -573,6 +652,7 @@ mod tests {
                 Path::new("Wiki/documents/evidence.md"),
                 Path::new("Wiki/concepts/retry.md"),
                 &lk_core::concept::file_revision(RAW),
+                &load_revision(&config, Path::new(CONCEPT)),
                 true,
                 None
             )
@@ -650,6 +730,7 @@ mod tests {
                 Path::new(ORIGIN),
                 Path::new(CONCEPT),
                 &lk_core::concept::file_revision(RAW),
+                &load_revision(&config, Path::new(CONCEPT)),
                 true,
                 None
             )
@@ -682,6 +763,7 @@ mod tests {
                 Path::new(ORIGIN),
                 Path::new(CONCEPT),
                 &lk_core::concept::file_revision(&raw),
+                &load_revision(&config, Path::new(CONCEPT)),
                 true,
                 None,
             )

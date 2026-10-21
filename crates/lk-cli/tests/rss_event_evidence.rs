@@ -348,6 +348,8 @@ fn two_articles_invalidate_only_the_explicitly_changed_selection() {
         "retract-citation",
         f.origin.to_str().unwrap(),
         "wiki/concepts/alpha.md",
+        "--concept-revision",
+        &file_revision(&std::fs::read_to_string(f.root().join("wiki/concepts/alpha.md")).unwrap()),
         "--revision",
         &revision,
         "--event",
@@ -374,6 +376,47 @@ fn two_articles_invalidate_only_the_explicitly_changed_selection() {
 }
 
 #[test]
+fn rss_pair_retraction_refuses_a_concept_changed_since_the_decision() {
+    let f = Fixture::build();
+    let concept = f.root().join("wiki/concepts/alpha.md");
+    let raw = std::fs::read_to_string(&concept).unwrap();
+    let concept_revision = file_revision(&raw);
+    std::fs::write(
+        &concept,
+        format!("{raw}\nRevised applicability conditions.\n"),
+    )
+    .unwrap();
+    let before = (f.raw(), std::fs::read(&concept).unwrap());
+    let revision = file_revision(&f.raw());
+    let event = &f.capture.manifest.events[0];
+    let args = [
+        "graph",
+        "retract-citation",
+        f.origin.to_str().unwrap(),
+        "wiki/concepts/alpha.md",
+        "--revision",
+        &revision,
+        "--concept-revision",
+        &concept_revision,
+        "--event",
+        &event.event_id,
+        "--event-revision",
+        &event.revision,
+    ];
+    for dry_run in [true, false] {
+        let mut selected = args.to_vec();
+        if dry_run {
+            selected.push("--dry-run");
+        }
+        let output = f.run(&selected);
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("concept revision changed"));
+        assert_eq!((f.raw(), std::fs::read(&concept).unwrap()), before);
+        assert!(!f.root().join(".lorekeeper/mutation/pending.json").exists());
+    }
+}
+
+#[test]
 fn final_pair_retraction_and_merge_keep_links_and_typed_declarations_consistent() {
     let f = Fixture::build();
     let event = &f.capture.manifest.events[1];
@@ -384,6 +427,8 @@ fn final_pair_retraction_and_merge_keep_links_and_typed_declarations_consistent(
         "retract-citation",
         f.origin.to_str().unwrap(),
         "wiki/concepts/beta.md",
+        "--concept-revision",
+        &file_revision(&std::fs::read_to_string(f.root().join("wiki/concepts/beta.md")).unwrap()),
         "--revision",
         &revision,
         "--event",
@@ -398,6 +443,8 @@ fn final_pair_retraction_and_merge_keep_links_and_typed_declarations_consistent(
         "retract-citation",
         f.origin.to_str().unwrap(),
         "wiki/concepts/beta.md",
+        "--concept-revision",
+        &file_revision(&std::fs::read_to_string(f.root().join("wiki/concepts/beta.md")).unwrap()),
         "--revision",
         &revision,
         "--event",
@@ -736,6 +783,8 @@ fn filesystem_alias_evidence_is_shared_by_backlinks_original_and_retraction() {
         "retract-citation",
         "daily/feed/2026-10-18.md",
         "wiki/concepts/alpha.md",
+        "--concept-revision",
+        &file_revision(&std::fs::read_to_string(f.root().join("wiki/concepts/alpha.md")).unwrap()),
         "--revision",
         &file_revision(&raw),
         "--event",
@@ -863,11 +912,15 @@ fn selected_pair_retraction_preserves_authored_page_evidence_and_strict_whole_re
     let outside = "Outside [Alpha](../../wiki/concepts/alpha.md) stays.";
     let raw = format!("{raw}\n{prose}\n\n## Notes\n\n{outside}\n");
     std::fs::write(f.root().join(&f.origin), &raw).unwrap();
+    let concept_revision =
+        file_revision(&std::fs::read_to_string(f.root().join("wiki/concepts/alpha.md")).unwrap());
     let base = [
         "graph",
         "retract-citation",
         f.origin.to_str().unwrap(),
         "wiki/concepts/alpha.md",
+        "--concept-revision",
+        &concept_revision,
     ];
     let before = snapshot(f.root());
     let revision = file_revision(&raw);

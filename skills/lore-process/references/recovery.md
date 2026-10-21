@@ -40,7 +40,8 @@ For a new bound RSS task, explicitly attribute each selected article using the t
 or position. Page-only legacy tasks keep their existing guards. Event-aware synthesis
 uses the packet's exact selected-original commands and treats the daily as interpretation.
 Normal omission is not retraction: a reviewed event pair can be removed with
-`graph retract-citation ORIGIN CONCEPT --revision FILE_REVISION --event EVENT_ID
+`graph retract-citation ORIGIN CONCEPT --revision ORIGIN_FILE_REVISION
+--concept-revision CONCEPT_FILE_REVISION --event EVENT_ID
 --event-revision PAYLOAD_REVISION` after the same pending-work and evidence checks.
 Pair-only retraction preserves authored prose links: a partial retraction changes only
 the declaration, and the last pair removes only the generated list item. Any surviving
@@ -52,7 +53,9 @@ the source and the concept's complete synthesis, including its conditions and
 boundary cases. A source can establish when a method does not apply; absence of
 a positive example does not make that citation mistaken. Judge the evidence
 against that scope, not just the concept's title or opening definition. Then preview `lore graph retract-citation
-<origin.md> <concept.md> --revision <file_revision from wiki read> --dry-run`.
+<origin.md> <concept.md> --revision <origin file_revision>
+--concept-revision <concept file_revision> --dry-run`, using both revisions from
+the reads that informed the decision.
 Omit `--dry-run` to publish the reviewed correction. This archives prior evidence
 and removes only standalone links in the existing related-concepts list. It never
 rewrites concept bodies. Record consequential reasoning in a knowledge review and

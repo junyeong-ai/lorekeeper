@@ -143,6 +143,8 @@ const SWEEP: &[&[&str]] = &[
         "wiki/concepts/deterministic-clock.md",
         "--revision",
         "not-current",
+        "--concept-revision",
+        "not-current",
         "--dry-run",
     ],
     // Each period is named explicitly, so the pin describes the code rather than
@@ -364,6 +366,8 @@ const GUARD_ONLY: &[(&[&str], &str)] = &[
             "wiki/concepts/behaviour-snapshot.md",
             "wiki/concepts/deterministic-clock.md",
             "--revision",
+            "not-current",
+            "--concept-revision",
             "not-current",
             "--dry-run",
         ],

@@ -59,8 +59,9 @@ resolve section headings before inspecting pages.
    repairs, run `lore graph backlinks-sync` to queue affected concept rewrites.
    For a mistaken existing citation, compare the complete source context with the
    concept's identity before proposing retraction. Within authorized repair work,
-   use `lore graph retract-citation <origin.md> <concept.md> --revision <file_revision>
-   --dry-run`, then omit `--dry-run` after reviewing the preview. It archives the
+   use `lore graph retract-citation <origin.md> <concept.md> --revision <origin file_revision>
+   --concept-revision <concept file_revision> --dry-run`, retaining both revisions
+   from those reads. Then omit `--dry-run` after reviewing the preview. It archives the
    prior evidence and refuses prose links or touching pending work. Process the
    affected synthesis through `/lore-process` and its full Finalize sequence.
    A rejected alternative can still be useful evidence; disagreement alone is not

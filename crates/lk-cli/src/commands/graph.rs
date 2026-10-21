@@ -123,9 +123,12 @@ pub enum GraphCommand {
         origin: PathBuf,
         /// Exact existing vault-relative concept Markdown path
         concept: PathBuf,
-        /// Required exact file revision from `lore wiki read`
+        /// Exact origin file revision from `lore wiki read`
         #[arg(long)]
         revision: String,
+        /// Exact concept file revision read when judging the citation
+        #[arg(long)]
+        concept_revision: String,
         /// Retract only this explicitly selected RSS event/version pair
         #[arg(long, requires = "event_revision")]
         event: Option<String>,
@@ -282,6 +285,7 @@ async fn run_inner(
             origin,
             concept,
             revision,
+            concept_revision,
             event,
             event_revision,
             dry_run,
@@ -295,6 +299,7 @@ async fn run_inner(
                 &origin,
                 &concept,
                 &revision,
+                &concept_revision,
                 dry_run,
                 mutation.as_ref(),
                 selection.as_ref(),
