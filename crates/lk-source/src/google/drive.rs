@@ -366,7 +366,6 @@ impl DriveApi<'_> {
                     "created_time": file.created_time,
                     "head_revision_id": file.head_revision_id,
                     "folder_id": folder_id,
-                    "observation": {"kind": "modified-time-window", "start": start, "end": end},
                     "extraction": {
                         "method": if projection.export_mime.is_some() { "export" } else { "media" },
                         "mime_type": projection.export_mime.or(file.mime_type.as_deref()),
@@ -945,6 +944,48 @@ mod tests {
             assert!(query["q"].contains(&format!("modifiedTime >= '{expected_start}'")));
             assert!(query["q"].contains(&format!("modifiedTime < '{expected_end}'")));
         }
+    }
+
+    #[tokio::test]
+    async fn overlapping_collection_windows_preserve_document_meaning() {
+        let doc = file("doc", "text/markdown", "31");
+        let server = server(move |url| match url.path() {
+            "/drive/v3/files/folder-id" => {
+                json_response(serde_json::json!({"id": "folder-id", "mimeType": FOLDER_MIME}))
+            }
+            "/drive/v3/files" => json_response(serde_json::json!({"files": [doc]})),
+            "/drive/v3/files/doc" => {
+                if url.query_pairs().any(|(key, _)| key == "alt") {
+                    response("text/markdown", "# Policy\n\nApplies to all projects.\n")
+                } else {
+                    json_response(doc.clone())
+                }
+            }
+            other => panic!("unexpected request {other}"),
+        })
+        .await;
+        let http = client();
+        let api = DriveApi {
+            http: &http,
+            token: "fixture-token",
+            base: server.base.clone(),
+        };
+        let first = api.observe(&params(1), &context()).await.unwrap();
+        let mut next_day = context();
+        next_day.target_date = next_day.target_date.tomorrow().unwrap();
+        let second = api.observe(&params(1), &next_day).await.unwrap();
+        // Collection reach belongs to the observation/collection receipt. It is
+        // not a statement made by the document and must not reopen semantic work.
+        assert_ne!(first.scope, second.scope);
+        assert_eq!(
+            serde_json::to_value(&first.items).unwrap(),
+            serde_json::to_value(&second.items).unwrap()
+        );
+        let record = &first.items[0].metadata["source_record"];
+        assert!(record.get("observation").is_none());
+        assert_eq!(record["version"], "31");
+        assert!(record["content_digest"]["value"].is_string());
+        assert_eq!(record["extraction"]["scope"], "document-text");
     }
 
     #[tokio::test]
