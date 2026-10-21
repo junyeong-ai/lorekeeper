@@ -965,6 +965,11 @@ fn browse(
     };
     let mut result = super::search::search_pages(&selected, &pages, &[], &[], None);
     for (hit, intro) in result.hits.iter_mut().zip(intros) {
+        hit.excerpt_kind = if intro.is_empty() {
+            super::search::ExcerptKind::Unavailable
+        } else {
+            super::search::ExcerptKind::Opening
+        };
         hit.excerpt = intro;
     }
     let total = total as usize;
@@ -1032,6 +1037,39 @@ pub(super) fn visit_body_pages(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn empty_opening_is_unavailable_in_live_and_captured_discovery() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let session = MutationSession::acquire(root.path()).unwrap();
+        for body in ["", "## Summary\n<script>hidden</script>\n"] {
+            write(
+                root.path(),
+                "wiki/documents/empty.md",
+                &format!("---\ntitle: Named\ntype: document\n---\n{body}"),
+            );
+            let capture = prepare_search(&session, &dirs).unwrap();
+            for query in [None, Some("Named")] {
+                let mut options = SearchOptions {
+                    query,
+                    ..Default::default()
+                };
+                let live = crate::search(root.path(), &dirs, &options).unwrap();
+                options.snapshot = Some(&capture.snapshot);
+                let captured = crate::search(root.path(), &dirs, &options).unwrap();
+                assert_eq!(live.total, 1);
+                assert_eq!(
+                    serde_json::to_value(&live.hits).unwrap(),
+                    serde_json::to_value(&captured.hits).unwrap()
+                );
+                let hit = &captured.hits[0];
+                assert_eq!(hit.excerpt_kind, crate::ExcerptKind::Unavailable);
+                assert!(hit.excerpt.is_empty());
+                assert_eq!(hit.excerpt_section, None);
+            }
+        }
+    }
 
     #[test]
     fn exact_identity_path_and_created_filters_compose_without_changing_facets() {

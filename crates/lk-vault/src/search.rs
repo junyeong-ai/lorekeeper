@@ -1376,11 +1376,16 @@ pub(super) fn excerpt_details(
     spacing: bool,
 ) -> SearchExcerpt {
     if matched != MatchField::Text {
+        let text = search_summary(body)
+            .map(|text| crate::summary::truncate_summary(&text))
+            .filter(|text| !text.is_empty());
         return SearchExcerpt {
-            text: search_summary(body)
-                .map(|text| crate::summary::truncate_summary(&text))
-                .unwrap_or_default(),
-            kind: ExcerptKind::Opening,
+            kind: if text.is_some() {
+                ExcerptKind::Opening
+            } else {
+                ExcerptKind::Unavailable
+            },
+            text: text.unwrap_or_default(),
             section: None,
         };
     }
