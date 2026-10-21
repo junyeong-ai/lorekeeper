@@ -212,6 +212,11 @@ headings. Section bodies cannot introduce sibling level-two headings or unclosed
 A changed target requires rereading and regenerating the answer, not copying a new
 revision onto old prose. Apply each task before reading another task on the same page.
 
+Use the canonical result filename above. If copied or renamed result files name the
+same current task and input, equivalent typed values publish once; conflicting
+values remain unpublished and every proposal is kept for review. Reconcile them to
+one agreed value before retrying. Unrelated valid tasks can still publish.
+
 Malformed JSON and invalid UTF-8 results of every type are preserved byte-for-byte in
 `results/corrupt/` with a reason sidecar. True filesystem read failures remain errors.
 The first corrupt-file apply reports failure even when quarantine succeeds; retrying

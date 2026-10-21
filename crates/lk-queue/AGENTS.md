@@ -28,7 +28,9 @@ lives in `lk-vault`/`lk-pipeline`.
 - `TaskTarget.anchor` is the rendered heading, not a worker-inferred kind table.
   Synthesis optionally includes `related_anchor`: both sections share one input
   and marker. `QueueTask::anchors` must enumerate every owned section.
-- `TargetKind::{llm_inputs_key,completion_key}` own marker names for every kind.
+- `TargetKind::{llm_inputs_key,completion_key,page_format}` own markers and declared
+  page formats for every kind. Unfinished publication requires the matching format;
+  historical Done classification still permits retirement without another write.
   Completion is matching `_done`, including empty results, never body fullness.
   Keep `tests/skill_contract.rs` exhaustive through `EnumIter`, not a hand list.
 
@@ -55,6 +57,9 @@ lives in `lk-vault`/`lk-pipeline`.
   `TaskResult`. Never edit page sections or markers directly. Use the task's exact
   identity and the target revision captured before reading; do not relabel a stale
   answer. Synthesis carries both core and related bodies.
+- Equivalent typed proposals for one task/input publish once. Competing current
+  section, synthesis or extraction values remain unpublished and retain every
+  result file for review; filename order never selects an answer.
 - The CLI applier requires matching pending work, validated retained input/policy,
   exact target/input identity, every owned anchor and current source dependencies.
   Bodies and completion publish together. Extraction concept/origin edits share a

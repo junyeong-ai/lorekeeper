@@ -1669,6 +1669,143 @@ fn synthesis_results_preserve_edits_and_apply_both_sections_only_to_current_inpu
 }
 
 #[test]
+fn duplicate_sections_fold_once_and_conflicting_typed_proposals_remain_for_review() {
+    for synthesis in [false, true] {
+        for conflicting in [false, true] {
+            let ws = Workspace::new();
+            let target = if synthesis {
+                "wiki/concepts/subject.md"
+            } else {
+                "wiki/documents/subject.md"
+            };
+            let source = "---\ntype: document\n---\nTimeout is 30 seconds.\n";
+            ws.write("wiki/documents/spec.md", source);
+            let citation = lk_core::concept::Citation::new(
+                Path::new("wiki/documents/spec.md"),
+                &lk_core::frontmatter::parse_page(source).unwrap(),
+            );
+            let input = if synthesis {
+                serde_json::json!({"locale":"en", "citations":[citation], "related_anchor":"## Related"})
+            } else {
+                serde_json::json!({"locale":"en", "text":"Retained source.", "max_sentences":3})
+            };
+            let hash = if synthesis {
+                lk_core::concept::citation_digest(&[citation])
+            } else {
+                lk_queue::cache_hash(input.as_object().unwrap())
+            };
+            let (kind, target_kind, key, page_format, heading, suffix) = if synthesis {
+                (
+                    "synthesize-concept",
+                    "concept-synthesis",
+                    "synthesis",
+                    "concept",
+                    "Synthesis",
+                    "synthesis",
+                )
+            } else {
+                (
+                    "summarize",
+                    "document-summary",
+                    "summary",
+                    "document",
+                    "Summary",
+                    "section",
+                )
+            };
+            let page = format!(
+                "---\ntype: {page_format}\nllm_inputs:\n  {key}: {hash}\n---\n## {heading}\nPrevious body.\n\n## Related\nPrevious relation.\n"
+            );
+            ws.write(target, &page);
+            let task = serde_json::json!({"task_id":"subject", "kind":kind, "created_at":"2026-10-16T00:00:00Z", "cache_hash":hash, "input":input, "target":{"vault_path":target,"kind":target_kind,"anchor":format!("## {heading}")}});
+            ws.write(".lorekeeper/queue/tasks.jsonl", &task.to_string());
+            let mut result = serde_json::json!({"task_id":"subject", "cache_hash":hash, "target_revision":lk_core::concept::file_revision(&page)});
+            if synthesis {
+                result["context_revision"] = synthesis_context(&ws, "subject");
+                result["synthesis"] = "Grounded synthesis.".into();
+                result["related"] = "Grounded relation.".into();
+            } else {
+                result["body"] = "Grounded summary.".into();
+            }
+            let original = result.to_string();
+            let original_path = format!(".lorekeeper/queue/results/subject.{suffix}.json");
+            ws.write(&original_path, &original);
+            if conflicting {
+                result[if synthesis { "related" } else { "body" }] = "A conflicting answer.".into();
+            }
+            let alias = serde_json::to_string_pretty(&result).unwrap();
+            let alias_path = format!(".lorekeeper/queue/results/another-name.{suffix}.json");
+            ws.write(&alias_path, &alias);
+
+            let mut independent = task.clone();
+            independent["task_id"] = "independent".into();
+            independent["kind"] = "summarize".into();
+            independent["input"] =
+                serde_json::json!({"locale":"en","text":"Independent source.","max_sentences":3});
+            independent["cache_hash"] =
+                lk_queue::cache_hash(independent["input"].as_object().unwrap()).into();
+            independent["target"] = serde_json::json!({"vault_path":"wiki/documents/independent.md","kind":"document-summary","anchor":"## Summary"});
+            let independent_page = format!(
+                "---\ntype: document\nllm_inputs:\n  summary: {}\n---\n## Summary\n",
+                independent["cache_hash"]
+            );
+            ws.write("wiki/documents/independent.md", &independent_page);
+            ws.write(
+                ".lorekeeper/queue/independent.jsonl",
+                &independent.to_string(),
+            );
+            ws.write(".lorekeeper/queue/results/independent.section.json", &serde_json::json!({"task_id":"independent","cache_hash":independent["cache_hash"],"target_revision":lk_core::concept::file_revision(&independent_page),"body":"Independent answer."}).to_string());
+
+            let preview = ws.run(&["queue", "apply", "--dry-run"]);
+            assert_eq!(
+                preview.status.success(),
+                !conflicting,
+                "{}",
+                String::from_utf8_lossy(&preview.stderr)
+            );
+            assert_eq!(ws.read(target), page);
+            assert_eq!(ws.read(&original_path), original);
+            assert_eq!(ws.read(&alias_path), alias);
+            let applied = ws.run(&["queue", "apply"]);
+            assert_eq!(
+                applied.status.success(),
+                !conflicting,
+                "{}",
+                String::from_utf8_lossy(&applied.stderr)
+            );
+            if conflicting {
+                assert!(
+                    String::from_utf8_lossy(&applied.stderr)
+                        .contains("conflicting section/synthesis results")
+                );
+                assert_eq!(ws.read(target), page);
+                assert_eq!(ws.read(&original_path), original);
+                assert_eq!(ws.read(&alias_path), alias);
+            } else {
+                assert!(ws.read(target).contains(&format!("{key}_done: {hash}")));
+                assert!(!ws.vault().join(&original_path).exists());
+                assert!(!ws.vault().join(&alias_path).exists());
+                assert!(
+                    String::from_utf8_lossy(&applied.stderr).contains("2 staged sections applied")
+                );
+                let answered = ws.read(target);
+                result[if synthesis { "related" } else { "body" }] = "Late obsolete answer.".into();
+                ws.write(&original_path, &original);
+                ws.write(&alias_path, &result.to_string());
+                assert!(ws.run(&["queue", "apply"]).status.success());
+                assert_eq!(ws.read(target), answered);
+                assert!(!ws.vault().join(original_path).exists());
+                assert!(!ws.vault().join(alias_path).exists());
+            }
+            assert!(
+                ws.read("wiki/documents/independent.md")
+                    .contains("Independent answer.")
+            );
+        }
+    }
+}
+
+#[test]
 fn synthesis_read_scope_guards_scoped_reviews_and_context_for_whole_and_bounded_work() {
     for bounded in [false, true] {
         for scenario in [

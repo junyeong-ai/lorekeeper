@@ -51,38 +51,57 @@ pub(super) fn apply(
     let pending = read_pending_tasks(queue)?;
 
     let mut report = ApplyResult::default();
+    let mut proposals: BTreeMap<_, Vec<_>> = BTreeMap::new();
     for path in paths {
-        let mut corrupt = false;
         let section = path
             .to_string_lossy()
             .ends_with(lk_queue::SECTION_RESULT_SUFFIX);
+        let raw = match std::fs::read(&path) {
+            Ok(raw) => raw,
+            Err(error) => {
+                report.failed += 1;
+                eprintln!("  ✗ {}: {error}", path.display());
+                continue;
+            }
+        };
+        let decoded = if section {
+            serde_json::from_slice::<SectionResult>(&raw).map(|result| SynthesisResult {
+                task_id: result.task_id,
+                cache_hash: result.cache_hash,
+                target_revision: result.target_revision,
+                context_revision: String::new(),
+                synthesis: result.body,
+                related: None,
+            })
+        } else {
+            serde_json::from_slice::<SynthesisResult>(&raw)
+        };
+        let result = match decoded {
+            Ok(result) => result,
+            Err(error) => {
+                report.unreadable += 1;
+                report.quarantined += super::quarantine(
+                    &dir.join(lk_queue::CORRUPT_SUBDIR),
+                    &[(path.clone(), error.to_string())],
+                    dry_run,
+                );
+                eprintln!(
+                    "  ✗ {}: invalid staged section payload: {error}",
+                    path.display()
+                );
+                continue;
+            }
+        };
+        proposals
+            .entry((section, result.task_id.clone(), result.cache_hash.clone()))
+            .or_default()
+            .push((path, result));
+    }
+    let mut proposals = proposals.into_iter().collect::<Vec<_>>();
+    proposals.sort_by(|left, right| left.1[0].0.cmp(&right.1[0].0));
+    for ((section, _, _), group) in proposals {
+        let (path, result) = &group[0];
         let result = (|| -> miette::Result<bool> {
-            let raw = std::fs::read(&path).map_err(|e| miette::miette!("{e}"))?;
-            let decoded = if section {
-                serde_json::from_slice::<SectionResult>(&raw).map(|result| SynthesisResult {
-                    task_id: result.task_id,
-                    cache_hash: result.cache_hash,
-                    target_revision: result.target_revision,
-                    context_revision: String::new(),
-                    synthesis: result.body,
-                    related: None,
-                })
-            } else {
-                serde_json::from_slice::<SynthesisResult>(&raw)
-            };
-            let result = match decoded {
-                Ok(result) => result,
-                Err(error) => {
-                    corrupt = true;
-                    report.unreadable += 1;
-                    report.quarantined += super::quarantine(
-                        &dir.join(lk_queue::CORRUPT_SUBDIR),
-                        &[(path.clone(), error.to_string())],
-                        dry_run,
-                    );
-                    return Err(miette::miette!("invalid staged section payload: {error}"));
-                }
-            };
             let Some(task) = pending
                 .tasks
                 .get(&(result.task_id.clone(), result.cache_hash.clone()))
@@ -95,7 +114,9 @@ pub(super) fn apply(
                 let reason =
                     "no matching pending task; its run was retired or the task identity is invalid";
                 if !dry_run {
-                    quarantine_orphan(queue, &path, reason)?;
+                    for (path, _) in &group {
+                        quarantine_orphan(queue, path, reason)?;
+                    }
                 }
                 return Err(miette::miette!(
                     "{reason}; result quarantined (or would be in dry-run)"
@@ -123,7 +144,9 @@ pub(super) fn apply(
                 TaskStatus::Done | TaskStatus::Stale | TaskStatus::MissingTarget
             ) {
                 if !dry_run {
-                    std::fs::remove_file(&path).map_err(|e| miette::miette!("{e}"))?;
+                    for (path, _) in &group {
+                        std::fs::remove_file(path).map_err(|e| miette::miette!("{e}"))?;
+                    }
                 }
                 return Ok(false);
             }
@@ -131,6 +154,14 @@ pub(super) fn apply(
                 return Err(miette::miette!(
                     "unreadable target or inconsistent synthesis input"
                 ));
+            }
+            let expected = serde_json::to_value(result).map_err(|e| miette::miette!("{e}"))?;
+            for (_, proposal) in group.iter().skip(1) {
+                if serde_json::to_value(proposal).map_err(|e| miette::miette!("{e}"))? != expected {
+                    return Err(miette::miette!(
+                        "conflicting section/synthesis results for the same retained task and input; review and reconcile all retained proposals to one agreed value before retrying"
+                    ));
+                }
             }
             let target = resolve_target_path(&task.target.vault_path)
                 .ok_or_else(|| miette::miette!("invalid target"))?;
@@ -245,17 +276,17 @@ pub(super) fn apply(
                     .ok_or_else(|| miette::miette!("publication requires mutation session"))?
                     .apply(plan)
                     .map_err(|e| miette::miette!("{e}"))?;
-                std::fs::remove_file(&path).map_err(|e| miette::miette!("{e}"))?;
+                for (path, _) in &group {
+                    std::fs::remove_file(path).map_err(|e| miette::miette!("{e}"))?;
+                }
             }
             Ok(true)
         })();
         match result {
             Ok(true) => report.applied += 1,
-            Ok(false) => report.dropped += 1,
+            Ok(false) => report.dropped += group.len(),
             Err(error) => {
-                if !corrupt {
-                    report.failed += 1;
-                }
+                report.failed += 1;
                 eprintln!("  ✗ {}: {error}", path.display());
             }
         }
