@@ -522,6 +522,7 @@ macOS의 문서·데스크탑·다운로드 같은 보호 폴더에 볼트가 �
 해당 폴더 접근 승인이 필요합니다. 터미널 앱의 승인이 launchd 실행까지 보장하지는 않습니다.
 작업을 실제로 시작해 표시되는 macOS 권한 요청을 승인하고, 로그와 종료 상태를 확인하세요.
 서명 식별자가 달라지는 바이너리 업데이트 후에는 재승인이 필요할 수 있습니다.
+서명 검사나 `--version` 성공만으로 실제 볼트 접근을 확인한 것은 아닙니다.
 파일 권한 `0600`은 이 OS 승인을 대신하지 않습니다.
 자세한 권한 동작은 [Apple 문서](https://developer.apple.com/documentation/bundleresources/information-property-list/nsdocumentsfolderusagedescription)를 참고하세요.
 

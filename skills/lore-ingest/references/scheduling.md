@@ -8,6 +8,14 @@ and an actual run to verify registration. Regenerate and replace definitions aft
 changing configuration or environment; unload disabled jobs too. Uninstall does
 not unregister OS jobs.
 
+Terminal approval does not establish macOS protected-folder access for a launchd job.
+After a binary update, protected-folder access may need renewed OS approval even
+when signature verification and `--version` succeed. Before resuming jobs, use a
+temporary launchd job with the same executable, config and environment to run the
+read-only `lore queue check`; inspect actual vault access and termination separately
+from unfinished-queue status. A permission prompt awaiting the user is not a passed check.
+This probes only the command's read paths, not source access or a complete pipeline run.
+
 The scheduler emits native commands:
 
 - `ingest.schedule`: `lore run daily --wait`.

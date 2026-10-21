@@ -552,6 +552,7 @@ the scheduled `lore` process needs permission to access that folder. Approval fo
 terminal app does not establish permission for launchd execution. Start the actual
 job, approve any macOS permission prompt, then inspect its logs and exit status.
 A binary update that changes its signing identity may require approval again.
+Signature verification or a successful `--version` does not establish actual vault access.
 File mode `0600` does not replace this OS consent. See
 [Apple's folder-access documentation](https://developer.apple.com/documentation/bundleresources/information-property-list/nsdocumentsfolderusagedescription).
 
