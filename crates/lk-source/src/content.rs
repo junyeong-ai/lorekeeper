@@ -721,7 +721,7 @@ impl From<ProcessingError> for crate::SourceError {
 /// Retains document structure while preventing original-relative links from being
 /// mistaken for canonical wiki relationships.
 pub fn render_markdown(value: &InputProjection) -> Result<String, crate::SourceError> {
-    use pulldown_cmark::{CowStr, Event, Options, Parser, Tag, TagEnd};
+    use pulldown_cmark::{CowStr, Event, Options, Tag, TagEnd};
     let mut output = String::new();
     for unit in &value.units {
         let label = serde_json::to_string(&(&unit.location, unit.method))
@@ -750,25 +750,24 @@ pub fn render_markdown(value: &InputProjection) -> Result<String, crate::SourceE
             continue;
         }
         let mut links = Vec::new();
-        let events = Parser::new_ext(
-            &unit.text,
-            Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH,
-        )
-        .flat_map(|event| match event {
-            Event::Start(Tag::Link { dest_url, .. } | Tag::Image { dest_url, .. }) => {
-                links.push(dest_url.into_string());
-                vec![Event::Start(Tag::Emphasis)]
-            }
-            Event::End(TagEnd::Link | TagEnd::Image) => {
-                let target = links.pop().unwrap_or_default();
-                vec![
-                    Event::End(TagEnd::Emphasis),
-                    Event::Text(CowStr::from(format!(" ({target})"))),
-                ]
-            }
-            Event::Html(text) | Event::InlineHtml(text) => vec![Event::Text(text)],
-            event => vec![event],
-        });
+        let input = lk_core::markdown::MarkdownInput::from_text(&unit.text);
+        let events = input
+            .events(Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH)
+            .flat_map(|event| match event {
+                Event::Start(Tag::Link { dest_url, .. } | Tag::Image { dest_url, .. }) => {
+                    links.push(dest_url.into_string());
+                    vec![Event::Start(Tag::Emphasis)]
+                }
+                Event::End(TagEnd::Link | TagEnd::Image) => {
+                    let target = links.pop().unwrap_or_default();
+                    vec![
+                        Event::End(TagEnd::Emphasis),
+                        Event::Text(CowStr::from(format!(" ({target})"))),
+                    ]
+                }
+                Event::Html(text) | Event::InlineHtml(text) => vec![Event::Text(text)],
+                event => vec![event],
+            });
         pulldown_cmark_to_cmark::cmark(
             events,
             &mut output,
@@ -1038,6 +1037,54 @@ save('external-sheet.xlsx', invalid)
             event,
             pulldown_cmark::Event::Start(pulldown_cmark::Tag::Table(_))
         )));
+    }
+
+    #[test]
+    fn projection_cr_code_keeps_literal_content_while_live_links_are_sanitized() {
+        use pulldown_cmark::{Event, Tag, TagEnd};
+        for text in [
+            "```python\rif ready:\r    print('first')\r\r[ghost](ghost.md)\r```\r\r[live](live.md)\r",
+            "```python\r\nif ready:\r    print('first')\r\r[ghost](ghost.md)\r```\n\r[live](live.md)\n",
+        ] {
+            let value = InputProjection {
+                policy: PROJECTION_POLICY.into(),
+                format: InputFormat::Docx,
+                packages: BTreeMap::new(),
+                ocr: None,
+                vision: None,
+                pdf: None,
+                warnings: vec![],
+                units: vec![lk_core::content::InputUnit {
+                    location: InputLocation::Document,
+                    method: ProjectionMethod::Native,
+                    representation: UnitRepresentation::Markdown,
+                    text: text.into(),
+                    sheet_structure: None,
+                    visual_structure: None,
+                }],
+            };
+            let rendered = render_markdown(&value).unwrap();
+            let input = lk_core::markdown::MarkdownInput::from_text(&rendered);
+            let mut in_code = false;
+            let mut code = String::new();
+            for event in input.events(pulldown_cmark::Options::empty()) {
+                match event {
+                    Event::Start(Tag::CodeBlock(_)) => in_code = true,
+                    Event::End(TagEnd::CodeBlock) => in_code = false,
+                    Event::Text(text) if in_code => code.push_str(&text),
+                    Event::Start(Tag::Link { .. } | Tag::Image { .. }) => {
+                        panic!("projection emitted a wiki edge: {rendered:?}")
+                    }
+                    _ => {}
+                }
+            }
+            assert_eq!(
+                code, "if ready:\n    print('first')\n\n[ghost](ghost.md)\n",
+                "{rendered:?}"
+            );
+            assert!(rendered.contains("live.md"));
+            assert_eq!(value.units[0].text, text);
+        }
     }
 
     #[cfg(unix)]

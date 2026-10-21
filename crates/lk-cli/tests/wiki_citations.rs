@@ -26,6 +26,132 @@ fn report(output: Output) -> serde_json::Value {
 }
 
 #[test]
+fn markdown_line_endings_agree_across_capture_links_search_and_retraction() {
+    for endings in [
+        ["\n", "\n", "\n", "\n"],
+        ["\r\n", "\r\n", "\r\n", "\r\n"],
+        ["\r", "\r", "\r", "\r"],
+        ["\r", "\r\n", "\r", "\n"],
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let vault = root.path().join("vault");
+        std::fs::create_dir_all(vault.join("wiki/documents")).unwrap();
+        std::fs::create_dir_all(vault.join("wiki/concepts")).unwrap();
+        std::fs::write(root.path().join("config.yaml"), "vault:\n  root: vault\n  locale: en\nidentity:\n  name: T\n  email: t@example.com\nsources:\n  notes:\n    type: manual\n    params:\n      inbox_dir: inbox\n").unwrap();
+        let concept_path = "wiki/concepts/topic.md";
+        let concept = "---\ntype: concept\ntitle: Topic\n---\n## Synthesis\nA scoped claim.\n\n## Sources\n\n";
+        std::fs::write(vault.join(concept_path), concept).unwrap();
+        let origin = "wiki/documents/source.md";
+        let link = "- [Topic](../concepts/topic.md)";
+        let raw = format!(
+            "---\ntype: document\ntitle: Source\n---\n# Source{}## Related Concepts{}{link}{}## Tail{}Keep 한글🙂.\n",
+            endings[0], endings[1], endings[2], endings[3]
+        );
+        std::fs::write(vault.join(origin), &raw).unwrap();
+        let live_links = report(run(root.path(), &["wiki", "links", origin]));
+        assert_eq!(live_links["links"][0]["line"], 7, "{endings:?}");
+        assert_eq!(live_links["links"][0]["context"], link);
+        let prepared = report(run(root.path(), &["wiki", "prepare"]));
+        let snapshot = prepared["snapshot"].as_str().unwrap();
+        let captured_links = report(run(
+            root.path(),
+            &["wiki", "links", origin, "--snapshot", snapshot],
+        ));
+        assert_eq!(captured_links["total"], live_links["total"]);
+        for key in [
+            "line",
+            "label",
+            "destination",
+            "target",
+            "context",
+            "context_truncated",
+        ] {
+            assert_eq!(captured_links["links"][0][key], live_links["links"][0][key]);
+        }
+        for captured in [false, true] {
+            let mut args = vec![
+                "wiki",
+                "search",
+                "Topic",
+                "--body",
+                "--context",
+                "0",
+                "--json",
+            ];
+            if captured {
+                args.extend(["--snapshot", snapshot]);
+            }
+            let body = report(run(root.path(), &args));
+            assert_eq!(body["total"], 1);
+            assert_eq!(body["hits"][0]["line"], 7, "{endings:?}");
+        }
+        assert_eq!(std::fs::read(vault.join(origin)).unwrap(), raw.as_bytes());
+        let revision = lk_core::concept::file_revision(&raw);
+        let concept_revision = lk_core::concept::file_revision(concept);
+        let mut retract = vec![
+            "graph",
+            "--json",
+            "retract-citation",
+            origin,
+            concept_path,
+            "--revision",
+            &revision,
+            "--concept-revision",
+            &concept_revision,
+            "--dry-run",
+        ];
+        report(run(root.path(), &retract));
+        assert_eq!(std::fs::read(vault.join(origin)).unwrap(), raw.as_bytes());
+        retract.pop();
+        report(run(root.path(), &retract));
+        assert_eq!(
+            std::fs::read_to_string(vault.join(origin)).unwrap(),
+            raw.replace(&format!("{link}{}", endings[2]), "")
+        );
+        assert_eq!(
+            std::fs::read_to_string(vault.join(concept_path)).unwrap(),
+            concept
+        );
+    }
+}
+
+#[test]
+fn carriage_return_code_blocks_never_become_captured_links_or_outline_sections() {
+    for ending in ["\n", "\r\n", "\r"] {
+        let root = tempfile::tempdir().unwrap();
+        let vault = root.path().join("vault");
+        std::fs::create_dir_all(vault.join("wiki/documents")).unwrap();
+        std::fs::write(root.path().join("config.yaml"), "vault:\n  root: vault\nidentity:\n  name: T\n  email: t@example.com\nsources:\n  notes:\n    type: manual\n    params:\n      inbox_dir: inbox\n").unwrap();
+        let path = "wiki/documents/source.md";
+        let raw = format!(
+            "---\ntype: document\ntitle: Source\n---\n```md{ending}## Hidden{ending}[Ghost](ghost.md){ending}```\n[Live](live.md)\n"
+        );
+        std::fs::write(vault.join(path), &raw).unwrap();
+        std::fs::write(
+            vault.join("wiki/documents/live.md"),
+            "---\ntype: document\ntitle: Live\n---\nKept.\n",
+        )
+        .unwrap();
+        let live = report(run(root.path(), &["wiki", "links", path]));
+        assert_eq!(live["total"], 1, "{ending:?}");
+        assert_eq!(live["links"][0]["destination"], "live.md");
+        assert_eq!(live["links"][0]["line"], 9);
+        let outline = report(run(root.path(), &["wiki", "read", path]));
+        assert_eq!(outline["total_sections"], 1);
+        let prepared = report(run(root.path(), &["wiki", "prepare"]));
+        let snapshot = prepared["snapshot"].as_str().unwrap();
+        let captured = report(run(
+            root.path(),
+            &["wiki", "links", path, "--snapshot", snapshot],
+        ));
+        assert_eq!(captured["total"], 1);
+        assert_eq!(captured["links"][0]["destination"], "live.md");
+        assert_eq!(captured["links"][0]["line"], 9);
+        assert_eq!(std::fs::read(vault.join(path)).unwrap(), raw.as_bytes());
+    }
+}
+
+#[test]
 fn snapshot_metadata_remains_captured_after_external_edits_without_writes() {
     let root = tempfile::tempdir().unwrap();
     let vault = root.path().join("vault");

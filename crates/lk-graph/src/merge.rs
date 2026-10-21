@@ -474,7 +474,7 @@ fn rewrite_links(
 
 /// Recognize only the template title, owned section headings and generated Sources.
 fn concept_has_authored_body(root: &Path, path: &Path) -> Result<bool, GraphError> {
-    use pulldown_cmark::{Event, HeadingLevel, Parser, Tag};
+    use pulldown_cmark::{Event, HeadingLevel, Options, Tag};
 
     let raw = std::fs::read_to_string(
         lk_vault::page_path(root, path).map_err(|error| GraphError::Io(error.to_string()))?,
@@ -504,11 +504,11 @@ fn concept_has_authored_body(root: &Path, path: &Path) -> Result<bool, GraphErro
     }
     let mut seen = std::collections::BTreeSet::new();
     let mut heading_end = 0;
-    let parser = Parser::new(&body);
-    if parser.reference_definitions().iter().next().is_some() {
+    let markdown = lk_core::markdown::MarkdownInput::from_text(&body);
+    if markdown.has_reference_definitions(Options::empty()) {
         return Ok(true);
     }
-    for (event, range) in parser.into_offset_iter() {
+    for (event, range) in markdown.offset_events(Options::empty()) {
         if range.start < heading_end {
             continue;
         }
@@ -865,6 +865,31 @@ mod tests {
                 ),
             );
             assert!(!concept_has_authored_body(tmp.path(), path).unwrap());
+        }
+    }
+
+    #[test]
+    fn cr_authored_reference_definitions_are_not_discarded_as_template_content() {
+        let tmp = TempDir::new().unwrap();
+        let path = Path::new("wiki/concepts/topic.md");
+        for ending in ["\r", "\r\n", "\n"] {
+            let managed =
+                format!("# Topic{ending}{ending}## Synthesis{ending}{ending}## Related{ending}");
+            let original = format!("---\ntype: concept\ntitle: Topic\n---\n{managed}");
+            write(tmp.path(), path.to_str().unwrap(), &original);
+            assert!(
+                !concept_has_authored_body(tmp.path(), path).unwrap(),
+                "{ending:?}"
+            );
+            write(
+                tmp.path(),
+                path.to_str().unwrap(),
+                &format!("{original}{ending}[proof]: https://example.com/evidence{ending}"),
+            );
+            assert!(
+                concept_has_authored_body(tmp.path(), path).unwrap(),
+                "{ending:?}"
+            );
         }
     }
 

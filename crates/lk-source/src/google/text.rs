@@ -1,4 +1,4 @@
-use pulldown_cmark::{Event, Parser, Tag};
+use pulldown_cmark::{Event, Tag};
 
 use crate::SourceError;
 
@@ -36,7 +36,8 @@ impl ContentFormat {
             }
         };
         let mut has_raw_html = false;
-        for event in Parser::new_ext(&markdown, lk_core::markdown::OPTIONS) {
+        let input = lk_core::markdown::MarkdownInput::from_text(&markdown);
+        for event in input.events(lk_core::markdown::OPTIONS) {
             match event {
                 Event::Start(Tag::Link { dest_url, .. } | Tag::Image { dest_url, .. }) => {
                     validate_destination(&dest_url)?;
@@ -49,10 +50,7 @@ impl ContentFormat {
             // Render the complete stream so generated paragraphs and escaped code
             // retain the same DOM/namespace context as the actual Markdown page.
             let mut html = String::new();
-            pulldown_cmark::html::push_html(
-                &mut html,
-                Parser::new_ext(&markdown, lk_core::markdown::OPTIONS),
-            );
+            pulldown_cmark::html::push_html(&mut html, input.events(lk_core::markdown::OPTIONS));
             let (references, has_base) = crate::manual_bundle::remote_html_references(&html);
             if has_base {
                 return Err(dependency_error(
@@ -91,6 +89,23 @@ fn validate_destination(destination: &str) -> Result<(), SourceError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pulldown_cmark::Parser;
+
+    #[test]
+    fn cr_fenced_examples_are_literal_and_do_not_hide_later_dependencies() {
+        for literal in [
+            "```html\r[ghost](missing.md)\r<img src='missing.png'>\r```\r\r<pre>\r[html literal](missing-html.md)\r</pre>\r\r",
+            "```html\r\n[ghost](missing.md)\r<img src='missing.png'>\r```\n\r<pre>\r[html literal](missing-html.md)\n</pre>\r\n\r",
+        ] {
+            let valid = format!("{literal}[live](https://example.com/live.md)\r");
+            assert_eq!(ContentFormat::Markdown.markdown(&valid).unwrap(), valid);
+            let invalid = format!("{literal}[live](relative.md)\r");
+            assert!(
+                ContentFormat::Markdown.markdown(&invalid).is_err(),
+                "{invalid:?}"
+            );
+        }
+    }
 
     #[test]
     fn structured_text_requires_explicit_dependency_addresses() {

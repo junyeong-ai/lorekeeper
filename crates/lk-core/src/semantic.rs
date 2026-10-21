@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 use std::io::Write;
 
-use pulldown_cmark::{Event, Options, Parser};
+use pulldown_cmark::{Event, Options};
 use serde::{Deserialize, Serialize};
 
 pub const SEMANTIC_POLICY: &str = "semantic-ranges-v1";
@@ -188,9 +188,8 @@ impl<'a> TextIndex<'a> {
         offsets.push(resource.text.len());
         let mut ends = BTreeSet::from([0, resource.text.len()]);
         let mut depth = 0usize;
-        for (event, range) in
-            Parser::new_ext(&resource.text, Options::ENABLE_TABLES).into_offset_iter()
-        {
+        let markdown = crate::markdown::MarkdownInput::from_text(&resource.text);
+        for (event, range) in markdown.offset_events(Options::ENABLE_TABLES) {
             match event {
                 Event::Start(_) => depth += 1,
                 Event::End(_) => {

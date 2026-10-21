@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use lk_core::concept::{file_revision, source_revision};
-use pulldown_cmark::{Event, Parser, Tag, TagEnd};
+use pulldown_cmark::{Event, Options, Tag, TagEnd};
 use serde::Serialize;
 
 use crate::{VaultError, page_path, parse_page};
@@ -174,7 +174,8 @@ fn outline(body: &str) -> Vec<DocumentSection> {
     }];
     let mut heading = None;
     let mut open = vec![0];
-    for (event, range) in Parser::new(body).into_offset_iter() {
+    let markdown = lk_core::markdown::MarkdownInput::from_text(body);
+    for (event, range) in markdown.offset_events(Options::empty()) {
         match event {
             Event::Start(Tag::Heading { level, .. }) => {
                 let level = level as u8;

@@ -243,7 +243,7 @@ fn remove_generated_links(
         .ok_or("missing related-concepts section")?;
     let start = section.body.as_ptr() as usize - before.as_ptr() as usize;
     let end = start + section.body.len();
-    let lines: Vec<_> = before.split_inclusive('\n').collect();
+    let lines: Vec<_> = lk_core::markdown::lines_with_endings(before).collect();
     let mut offsets = Vec::with_capacity(lines.len());
     let mut offset = 0;
     for line in &lines {
@@ -253,10 +253,7 @@ fn remove_generated_links(
     let mut removed = BTreeSet::new();
     let body_offset =
         lk_core::frontmatter::body_offset(before).ok_or("origin has unclosed frontmatter")?;
-    let first_body_line = before[..body_offset]
-        .bytes()
-        .filter(|byte| *byte == b'\n')
-        .count();
+    let first_body_line = lk_core::markdown::lines_with_endings(&before[..body_offset]).count();
     for occurrence in lk_core::link::extract_page_link_occurrences(&before[body_offset..]) {
         let Some(dest) = lk_core::link::resolve_dest(origin, &occurrence.link.dest) else {
             continue;

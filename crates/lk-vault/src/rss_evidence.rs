@@ -49,7 +49,7 @@ pub fn rss_link_previews(
     }
     let mut offsets = Vec::new();
     let mut offset = 0;
-    for line in raw.split_inclusive('\n') {
+    for line in lk_core::markdown::lines_with_endings(raw) {
         offsets.push((offset, line.trim_end_matches(['\r', '\n'])));
         offset += line.len();
     }
@@ -94,7 +94,7 @@ fn page_link_occurrences(
 ) -> Result<Vec<lk_core::link::PageLinkOccurrence<'_>>, VaultError> {
     let offset = lk_core::frontmatter::body_offset(raw)
         .ok_or_else(|| err("RSS evidence page has unclosed frontmatter"))?;
-    let lines = raw[..offset].bytes().filter(|byte| *byte == b'\n').count();
+    let lines = lk_core::markdown::lines_with_endings(&raw[..offset]).count();
     let mut occurrences = lk_core::link::extract_page_link_occurrences(&raw[offset..]);
     for occurrence in &mut occurrences {
         occurrence.line += lines;
@@ -227,7 +227,7 @@ fn rss_concept_citations_mode(
     let end = start + section.body.len();
     let mut lines = Vec::new();
     let mut offset = 0;
-    for line in raw.split_inclusive('\n') {
+    for line in lk_core::markdown::lines_with_endings(raw) {
         lines.push((offset, line.trim_end_matches(['\r', '\n'])));
         offset += line.len();
     }
@@ -688,38 +688,38 @@ mod tests {
             "\u{feff}---\r\ntype: daily\r\nsource: rss\r\ncreated: 2026-10-18\r\nsource_record: {{rss_original: {}}}\r\nconcept_evidence: {bindings}\r\nliteral: |\r\n  ```\r\n  [Metadata](../wiki/concepts/topic.md)\r\n---\r\n\r\n",
             serde_json::to_string(&reference).unwrap()
         );
-        let raw = format!(
-            "{prefix}<div>\r\n[HTML](../wiki/concepts/topic.md)\r\n</div>\r\n\r\n<!--\r\n```\r\n-->\r\n\r\n## Related Concepts\r\n- [Topic](../wiki/concepts/topic.md)\r\n"
-        );
         let origin = Path::new("daily/rss.md");
-        let line = raw
-            .lines()
-            .position(|line| line == "- [Topic](../wiki/concepts/topic.md)")
-            .unwrap()
-            + 1;
-        for authored in [false, true] {
-            let raw = if authored {
-                format!("{raw}\r\nAn authored [Topic](../wiki/concepts/topic.md) reference.\r\n")
-            } else {
-                raw.clone()
-            };
-            let previews = rss_link_previews(root.path(), origin, &raw).unwrap();
-            assert_eq!(previews.len(), 1);
-            assert_eq!(previews[&line].total, 1);
-            assert_eq!(previews[&line].events[0].revision, selected.revision);
-            let citations = rss_concept_citations(root.path(), origin, &raw).unwrap();
-            let citations = &citations["wiki/concepts/topic.md"];
-            assert_eq!(citations.len(), 1 + usize::from(authored));
-            assert_eq!(
-                citations
-                    .iter()
-                    .filter(|citation| citation.rss_event.is_some())
-                    .count(),
-                1
+        for ending in ["\n", "\r\n", "\r"] {
+            let raw = format!(
+                "{prefix}{}",
+                "<div>\n[HTML](../wiki/concepts/topic.md)\n</div>\n\n<!--\n```\n-->\n\n## Related Concepts\n- [Topic](../wiki/concepts/topic.md)\n".replace('\n', ending)
             );
-            let mut plan = crate::MutationPlan::default();
-            guard_rss_evidence(&mut plan, root.path(), origin, &raw).unwrap();
-            session.apply(plan).unwrap();
+            for authored in [false, true] {
+                let raw = if authored {
+                    format!(
+                        "{raw}{ending}An authored [Topic](../wiki/concepts/topic.md) reference.{ending}"
+                    )
+                } else {
+                    raw.clone()
+                };
+                let previews = rss_link_previews(root.path(), origin, &raw).unwrap();
+                assert_eq!(previews.len(), 1);
+                assert_eq!(previews[&21].total, 1);
+                assert_eq!(previews[&21].events[0].revision, selected.revision);
+                let citations = rss_concept_citations(root.path(), origin, &raw).unwrap();
+                let citations = &citations["wiki/concepts/topic.md"];
+                assert_eq!(citations.len(), 1 + usize::from(authored));
+                assert_eq!(
+                    citations
+                        .iter()
+                        .filter(|citation| citation.rss_event.is_some())
+                        .count(),
+                    1
+                );
+                let mut plan = crate::MutationPlan::default();
+                guard_rss_evidence(&mut plan, root.path(), origin, &raw).unwrap();
+                session.apply(plan).unwrap();
+            }
         }
     }
 }

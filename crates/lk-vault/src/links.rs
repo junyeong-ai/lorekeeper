@@ -77,7 +77,8 @@ pub fn inspect_links(
     let page = parse_page(&raw).map_err(VaultError::Frontmatter)?;
     crate::rss_concept_citations(root, path, &raw)?;
     let evidence_previews = crate::rss_link_previews(root, path, &raw)?;
-    let line_offset = raw.lines().count() - page.body.lines().count();
+    let line_offset = lk_core::markdown::lines_with_endings(&raw).count()
+        - lk_core::markdown::lines_with_endings(&page.body).count();
     let mut links = Vec::new();
     let mut total = 0;
     for occurrence in link::extract_page_link_occurrences(&page.body) {
@@ -133,6 +134,49 @@ mod tests {
         assert_eq!(preview, "가".repeat(400));
         assert!(truncated);
         assert_eq!(context_preview(&preview), (preview, false));
+    }
+
+    #[test]
+    fn mixed_commonmark_lines_agree_between_live_and_prepared_links() {
+        let root = tempfile::tempdir().unwrap();
+        let path = Path::new("wiki/documents/source.md");
+        std::fs::create_dir_all(root.path().join(path.parent().unwrap())).unwrap();
+        let raw = "\u{feff}---\r\ntype: document\r\n---\r\n\r\n# Source\r## Related Concepts\r- [Topic](../concepts/topic.md)\r\n## Tail\nKeep.\n";
+        std::fs::write(root.path().join(path), raw).unwrap();
+        let live = inspect_links(
+            root.path(),
+            path,
+            &LinkOptions {
+                target: None,
+                limit: 20,
+                offset: 0,
+                revision: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(live.links[0].line, 7);
+        assert_eq!(live.links[0].context, "- [Topic](../concepts/topic.md)");
+        let session = crate::MutationSession::acquire(root.path()).unwrap();
+        let capture =
+            crate::prepare_search(&session, &lk_core::config::VaultDirs::default()).unwrap();
+        let captured = crate::inspect_indexed_links(
+            root.path(),
+            &lk_core::config::VaultDirs::default(),
+            path,
+            &crate::IndexedLinkOptions {
+                snapshot: &capture.snapshot,
+                direction: crate::LinkDirection::Outgoing,
+                limit: 20,
+                offset: 0,
+            },
+        )
+        .unwrap();
+        assert_eq!(captured.links[0].line, live.links[0].line);
+        assert_eq!(captured.links[0].context, live.links[0].context);
+        assert_eq!(
+            std::fs::read_to_string(root.path().join(path)).unwrap(),
+            raw
+        );
     }
 
     #[test]

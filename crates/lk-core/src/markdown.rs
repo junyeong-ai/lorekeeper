@@ -1,5 +1,6 @@
 //! Shared Markdown structure and text-cleanliness contracts.
 
+use std::borrow::Cow;
 use std::ops::Range;
 
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag};
@@ -9,6 +10,73 @@ pub const OPTIONS: Options = Options::ENABLE_TABLES
     .union(Options::ENABLE_TASKLISTS)
     .union(Options::ENABLE_STRIKETHROUGH)
     .union(Options::ENABLE_FOOTNOTES);
+
+/// Raw CommonMark lines, including LF, CRLF or CR terminators without normalizing bytes.
+pub fn lines_with_endings(mut text: &str) -> impl Iterator<Item = &str> {
+    std::iter::from_fn(move || {
+        if text.is_empty() {
+            return None;
+        }
+        let end = text.find(['\r', '\n']).map_or(text.len(), |at| {
+            at + if text[at..].starts_with("\r\n") { 2 } else { 1 }
+        });
+        let (line, rest) = text.split_at(end);
+        text = rest;
+        Some(line)
+    })
+}
+
+/// Byte-aligned parser input. Original Markdown remains authoritative; the parser's
+/// LF-only block scanners receive LF in place of bare CR, leaving CRLF unchanged.
+/// Events are parsed CommonMark values for presentation; ranges index original bytes.
+pub struct MarkdownInput<'a> {
+    parsed: Cow<'a, str>,
+}
+
+impl<'a> MarkdownInput<'a> {
+    pub fn from_text(original: &'a str) -> Self {
+        let has_bare_cr =
+            original.as_bytes().iter().enumerate().any(|(at, byte)| {
+                *byte == b'\r' && original.as_bytes().get(at + 1) != Some(&b'\n')
+            });
+        let parsed = if has_bare_cr {
+            let mut parsed = String::with_capacity(original.len());
+            for line in lines_with_endings(original) {
+                if let Some(line) = line.strip_suffix('\r') {
+                    parsed.push_str(line);
+                    parsed.push('\n');
+                } else {
+                    parsed.push_str(line);
+                }
+            }
+            Cow::Owned(parsed)
+        } else {
+            Cow::Borrowed(original)
+        };
+        Self { parsed }
+    }
+
+    /// Parsed values retain CommonMark decoding and line-ending semantics.
+    pub fn events(&self, options: Options) -> impl Iterator<Item = Event<'_>> {
+        self.offset_events(options).map(|(event, _)| event)
+    }
+
+    /// Every returned byte range indexes the original input, not a normalized document.
+    pub fn offset_events(
+        &self,
+        options: Options,
+    ) -> impl Iterator<Item = (Event<'_>, Range<usize>)> {
+        Parser::new_ext(&self.parsed, options).into_offset_iter()
+    }
+
+    pub fn has_reference_definitions(&self, options: Options) -> bool {
+        Parser::new_ext(&self.parsed, options)
+            .reference_definitions()
+            .iter()
+            .next()
+            .is_some()
+    }
+}
 
 /// A root-level heading's complete source range, including its line terminator.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -22,13 +90,16 @@ pub struct MarkdownHeading {
 pub fn root_headings(markdown: &str) -> Vec<MarkdownHeading> {
     let mut headings = Vec::new();
     let mut depth = 0;
-    for (event, range) in Parser::new_ext(markdown, OPTIONS).into_offset_iter() {
+    let input = MarkdownInput::from_text(markdown);
+    for (event, range) in input.offset_events(OPTIONS) {
         match event {
             Event::Start(tag) => {
                 if depth == 0
                     && let Tag::Heading { level, .. } = tag
                 {
-                    let start = markdown[..range.start].rfind('\n').map_or(0, |end| end + 1);
+                    let start = markdown[..range.start]
+                        .rfind(['\r', '\n'])
+                        .map_or(0, |end| end + 1);
                     headings.push(MarkdownHeading {
                         level,
                         range: start..range.end,
@@ -108,7 +179,8 @@ impl TextDefect {
 /// "clean vault text" means. New invariants are added as `TextDefect` variants,
 /// extending every enforcement point at once.
 pub fn scan_defects(text: &str) -> Vec<(usize, TextDefect)> {
-    text.lines()
+    lines_with_endings(text)
+        .map(|line| line.trim_end_matches(['\r', '\n']))
         .enumerate()
         .filter(|(_, line)| has_inline_data_uri(line))
         .map(|(i, _)| (i + 1, TextDefect::InlineDataUri))
@@ -485,7 +557,10 @@ const PRIVATE_KEY_LABELS: &[&str] = &[
 pub fn scan_credentials(text: &str) -> Vec<(usize, CredentialForm)> {
     let rules = prefix_rules();
     let mut found = Vec::new();
-    for (i, line) in text.lines().enumerate() {
+    for (i, line) in lines_with_endings(text)
+        .map(|line| line.trim_end_matches(['\r', '\n']))
+        .enumerate()
+    {
         let line_no = i + 1;
         if is_private_key_header(line) {
             found.push((line_no, CredentialForm::PrivateKeyBlock));
@@ -716,6 +791,102 @@ pub fn parse_fence(line: &str) -> Option<(char, usize, &str)> {
 #[cfg(test)]
 mod tests {
     use super::{CredentialForm, scan_credentials};
+
+    #[test]
+    fn commonmark_lines_preserve_mixed_terminators_and_original_bytes() {
+        let text = "한글\r\n\rnext\nlast";
+        let lines = super::lines_with_endings(text).collect::<Vec<_>>();
+        assert_eq!(lines, ["한글\r\n", "\r", "next\n", "last"]);
+        assert_eq!(lines.concat(), text);
+        assert_eq!(super::lines_with_endings("").count(), 0);
+        assert_eq!(super::lines_with_endings("one\r\n").count(), 1);
+    }
+
+    #[test]
+    fn parser_projection_preserves_commonmark_values_and_original_byte_ranges() {
+        use super::MarkdownInput;
+        use pulldown_cmark::{Event, Options};
+        for text in ["plain\n", "plain\r\n"] {
+            assert!(matches!(
+                MarkdownInput::from_text(text).parsed,
+                std::borrow::Cow::Borrowed(_)
+            ));
+        }
+        let raw = "```md\r[Code](code.md)\r```\r\n\r\n<div>\rLiteral &amp; text\r</div>\r\n\r\nA &amp; B\r\n";
+        let input = MarkdownInput::from_text(raw);
+        assert_eq!(input.parsed.len(), raw.len());
+        assert_eq!(
+            input.parsed,
+            "```md\n[Code](code.md)\n```\r\n\r\n<div>\nLiteral &amp; text\n</div>\r\n\r\nA &amp; B\r\n"
+        );
+        let mut code = false;
+        let mut code_text = String::new();
+        let mut html = String::new();
+        let mut prose = String::new();
+        for (event, range) in input.offset_events(Options::empty()) {
+            assert!(raw.get(range).is_some());
+            match event {
+                Event::Start(pulldown_cmark::Tag::CodeBlock(_)) => code = true,
+                Event::End(pulldown_cmark::TagEnd::CodeBlock) => code = false,
+                Event::Text(text) if code => code_text.push_str(&text),
+                Event::Text(text) => prose.push_str(&text),
+                Event::Html(text) | Event::InlineHtml(text) => html.push_str(&text),
+                _ => {}
+            }
+        }
+        assert_eq!(code_text, "[Code](code.md)\n");
+        assert_eq!(html, "<div>\nLiteral &amp; text\n</div>\n");
+        assert_eq!(prose, "A & B");
+        let normalized = raw.replace("\r\n", "\n").replace('\r', "\n");
+        let canonical = MarkdownInput::from_text(&normalized);
+        let canonical_html = canonical
+            .events(Options::empty())
+            .filter_map(|event| match event {
+                Event::Html(text) | Event::InlineHtml(text) => Some(text.into_string()),
+                _ => None,
+            })
+            .collect::<String>();
+        assert_eq!(html, canonical_html);
+        assert!(
+            MarkdownInput::from_text("[unused]: target.md\r")
+                .has_reference_definitions(Options::empty())
+        );
+    }
+
+    #[test]
+    fn diagnostic_lines_follow_commonmark_without_changing_exact_grammars() {
+        let text = "Intro\r> -----BEGIN RSA PRIVATE KEY-----\r\n![x](data:text/plain,a)\nMiddle\r![y](DATA:image/png;base64,AA)\r";
+        assert_eq!(
+            super::scan_credentials(text),
+            [(2, CredentialForm::PrivateKeyBlock)]
+        );
+        assert_eq!(
+            super::scan_defects(text),
+            [
+                (3, super::TextDefect::InlineDataUri),
+                (5, super::TextDefect::InlineDataUri)
+            ]
+        );
+    }
+
+    #[test]
+    fn root_heading_ranges_keep_cr_lf_and_crlf_boundaries_in_original_bytes() {
+        let body = "# First\r  ## 둘째\r\nClaim.\n\nThird\r---\rEnd.";
+        let headings = super::root_headings(body);
+        assert_eq!(headings.len(), 3);
+        assert_eq!(
+            headings
+                .iter()
+                .map(|heading| &body[heading.range.clone()])
+                .collect::<Vec<_>>(),
+            ["# First\r", "  ## 둘째\r\n", "Third\r---\r"]
+        );
+        assert!(
+            headings
+                .windows(2)
+                .all(|pair| pair[0].range.end <= pair[1].range.start)
+        );
+    }
 
     #[test]
     fn semantic_bodies_preserve_their_parent_section() {

@@ -19,7 +19,7 @@ use lk_core::concept::identity_key;
 use lk_core::config::VaultDirs;
 use lk_core::frontmatter::KnowledgeStatus;
 use lk_core::vault_path::{concepts_dir, documents_dir, explorations_dir};
-use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{Event, Options, Tag, TagEnd};
 use unicode_normalization::UnicodeNormalization;
 use walkdir::WalkDir;
 
@@ -554,7 +554,8 @@ pub(super) fn visit_collections(
                 .and_then(|v| v.as_str())
                 .unwrap_or(&id)
                 .to_string();
-            let body_line_offset = raw.lines().count() - page.body.lines().count();
+            let body_line_offset = lk_core::markdown::lines_with_endings(&raw).count()
+                - lk_core::markdown::lines_with_endings(&page.body).count();
             visit(
                 Page {
                     file_revision: lk_core::concept::file_revision(&raw),
@@ -1349,7 +1350,8 @@ pub(super) fn search_text(body: &str) -> String {
     let mut text = String::with_capacity(body.len());
     let options =
         Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
-    let events: Vec<_> = Parser::new_ext(body, options).collect();
+    let markdown = lk_core::markdown::MarkdownInput::from_text(body);
+    let events: Vec<_> = markdown.events(options).collect();
     if events
         .iter()
         .any(|event| matches!(event, Event::Html(_) | Event::InlineHtml(_)))
@@ -1581,7 +1583,7 @@ fn first_section(body: &str) -> Option<&str> {
 /// a break that carries no meaning.
 pub(crate) fn opening_statement(body: &str) -> Option<String> {
     let mut paragraph: Vec<&str> = Vec::new();
-    for line in first_section(body)?.lines().map(str::trim) {
+    for line in lk_core::markdown::lines_with_endings(first_section(body)?).map(str::trim) {
         if line.is_empty() || line.starts_with('#') {
             if !paragraph.is_empty() {
                 break;

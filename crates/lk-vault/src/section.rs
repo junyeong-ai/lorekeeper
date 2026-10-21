@@ -104,7 +104,7 @@ pub fn replace_section(content: &str, heading: &str, new_body: &str) -> String {
     let newline = terminator(&content[..body.start]);
     let mut out = String::with_capacity(content.len());
     out.push_str(&content[..body.start]);
-    if !out.ends_with('\n') {
+    if !out.ends_with(['\r', '\n']) {
         out.push_str(newline);
     }
 
@@ -114,10 +114,14 @@ pub fn replace_section(content: &str, heading: &str, new_body: &str) -> String {
     out.push_str(newline);
     if !new_body.is_empty() {
         out.push_str(new_body);
-        if !new_body.ends_with('\n') {
+        if !new_body.ends_with(['\r', '\n']) {
             out.push_str(newline);
         }
         if body.end < content.len() {
+            if new_body.ends_with('\r') && newline == "\n" {
+                // The first LF joins the body's terminal CR; the second leaves a blank line.
+                out.push_str(newline);
+            }
             out.push_str(newline);
         }
     }
@@ -240,10 +244,15 @@ fn opens_block_scalar(line: &str) -> bool {
         .is_some_and(|token| token.starts_with(['|', '>']))
 }
 
-/// The terminator a written line takes, copied from the line it replaces or joins, so a
-/// CRLF page does not come back with one stray LF among its lines.
+/// The terminator a written line takes, copied from the line it replaces or joins.
 fn terminator(line: &str) -> &str {
-    if line.ends_with("\r\n") { "\r\n" } else { "\n" }
+    if line.ends_with("\r\n") {
+        "\r\n"
+    } else if line.ends_with('\r') {
+        "\r"
+    } else {
+        "\n"
+    }
 }
 
 /// The frontmatter block's key lines, as a range over `lines`: it starts after the opening
@@ -930,6 +939,49 @@ mod tests {
         assert_eq!(
             out,
             "```\n## Sources\nquoted\n```\n\n## Sources\n\n- [new](new.md)\n"
+        );
+    }
+
+    #[test]
+    fn sections_preserve_cr_and_mixed_body_boundaries_when_reading_and_replacing() {
+        let prefix = "\u{feff}---\r\ntype: concept\r\n---\r\n";
+        for ending in ["\n", "\r\n", "\r"] {
+            let body = format!(
+                "# Topic{ending}## Synthesis{ending}Old.{ending}{ending}Next{ending}---{ending}Kept."
+            );
+            let raw = format!("{prefix}{body}");
+            assert_eq!(
+                first_section(&body),
+                Some(format!("Old.{ending}{ending}").as_str())
+            );
+            assert_eq!(
+                section_body(&raw, "Synthesis"),
+                Some(format!("Old.{ending}{ending}").as_str())
+            );
+            let replacement = format!("New.{ending}");
+            let updated = replace_section_checked(&raw, "Synthesis", &replacement).unwrap();
+            assert_eq!(
+                updated,
+                format!(
+                    "{prefix}# Topic{ending}## Synthesis{ending}{ending}New.{ending}{ending}Next{ending}---{ending}Kept."
+                )
+            );
+            assert_eq!(replace_section(&raw, "Missing", "Ignored."), raw);
+            let duplicate = format!("{raw}{ending}## Synthesis{ending}Second.");
+            assert!(section_body(&duplicate, "Synthesis").is_none());
+            assert!(replace_section_checked(&duplicate, "Synthesis", "New.").is_err());
+        }
+        let mixed = "## Synthesis\rClaim.\r\n\r\n## Sources\nKeep.\n";
+        assert_eq!(first_section(mixed), Some("Claim.\r\n\r\n"));
+        let html = "<div>\rBody\r</div>\r";
+        let updated =
+            replace_section_checked("## Summary\nOld.\n## Tail\nKeep.\n", "Summary", html).unwrap();
+        assert_eq!(updated, format!("## Summary\n\n{html}\n\n## Tail\nKeep.\n"));
+        assert_eq!(
+            crate::search::opening_statement(
+                "## Summary\rFirst\rsecond\r\rNext paragraph.\r## Tail\n"
+            ),
+            Some("First second".into())
         );
     }
 

@@ -23,7 +23,7 @@ use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
 use std::sync::LazyLock;
 
-use pulldown_cmark::{Event, LinkType, Parser, Tag, TagEnd};
+use pulldown_cmark::{Event, LinkType, Tag, TagEnd};
 use regex::{Captures, Regex};
 
 use crate::markdown::OPTIONS;
@@ -292,21 +292,20 @@ pub fn extract_page_link_occurrences(body: &str) -> Vec<PageLinkOccurrence<'_>> 
 }
 
 fn visit_page_links<'a>(body: &'a str, mut visit: impl FnMut(PageLink, usize, &'a str)) {
+    let mut lines = crate::markdown::lines_with_endings(body);
+    let mut context = lines.next().unwrap_or_default();
     let mut line = 1;
-    let mut line_start = 0;
-    let mut scanned = 0;
+    let mut line_end = context.len();
     visit_inline_links(body, |link, range| {
-        for (offset, _) in body[scanned..range.start].match_indices('\n') {
+        while range.start >= line_end && line_end < body.len() {
+            context = lines
+                .next()
+                .expect("link range is within the supplied body");
+            line_end += context.len();
             line += 1;
-            line_start = scanned + offset + 1;
         }
-        scanned = range.start;
-        let end = body[range.start..]
-            .find('\n')
-            .map_or(body.len(), |offset| range.start + offset);
-        let context = body[line_start..end].trim_end_matches('\r');
         if let Some(link) = internal_page_link(&link) {
-            visit(link, line, context);
+            visit(link, line, context.trim_end_matches(['\r', '\n']));
         }
     });
 }
@@ -317,7 +316,8 @@ fn visit_page_links<'a>(body: &'a str, mut visit: impl FnMut(PageLink, usize, &'
 /// unsupported by the regex is excluded rather than combined with another link span.
 fn visit_inline_links(body: &str, mut visit: impl FnMut(InlineLink<'_>, Range<usize>)) {
     let mut image_depth = 0;
-    let mut input = Parser::new_ext(body, OPTIONS).into_offset_iter();
+    let markdown = crate::markdown::MarkdownInput::from_text(body);
+    let mut input = markdown.offset_events(OPTIONS);
     while let Some((event, range)) = input.next() {
         match event {
             Event::Start(Tag::Image { .. }) => image_depth += 1,
@@ -664,6 +664,17 @@ Inline `[span](c.md)` and [live2](d.md).
             )),
             body.replace("[Live](live.md)", "[Live](revised.md)")
         );
+    }
+
+    #[test]
+    fn mixed_commonmark_lines_keep_link_locations_context_and_noop_bytes() {
+        let body = "한글\r## Scope\r\n- [First](a.md#claim)\r\n```md\r[Code](code.md)\r```\n- [Again](a.md)\r";
+        let links = extract_page_link_occurrences(body);
+        assert_eq!(links.len(), 2);
+        assert_eq!((links[0].line, links[1].line), (3, 7), "{links:?}");
+        assert_eq!(links[0].context, "- [First](a.md#claim)");
+        assert_eq!(links[1].context, "- [Again](a.md)");
+        assert_eq!(rewrite_links_outside_code(body, |_| None), body);
     }
 
     #[test]

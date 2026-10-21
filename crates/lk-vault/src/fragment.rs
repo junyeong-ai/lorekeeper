@@ -1,8 +1,8 @@
 //! Embed standalone source Markdown without letting its syntax own the surrounding page.
 
-use lk_core::markdown::{OPTIONS, has_sibling_boundary};
+use lk_core::markdown::{MarkdownInput, OPTIONS, has_sibling_boundary};
 use minijinja::{Error, ErrorKind};
-use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, LinkType, Parser, Tag, TagEnd};
+use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, LinkType, Tag, TagEnd};
 use std::path::Path;
 
 /// Scalar fields are literal inline text; their original values remain in metadata.
@@ -44,7 +44,8 @@ pub fn relocate_markdown_links(
     }
     let mut changed = false;
     let mut events = Vec::new();
-    for mut event in Parser::new_ext(value, OPTIONS) {
+    let input = MarkdownInput::from_text(value);
+    for mut event in input.events(OPTIONS) {
         if let Event::Start(
             Tag::Link {
                 link_type,
@@ -106,7 +107,8 @@ fn shift_heading_level(level: HeadingLevel, shift: usize) -> HeadingLevel {
 /// remains separate from this presentation; headings, references and EOF syntax
 /// cannot claim the surrounding document.
 pub fn render_markdown_fragment(value: &str) -> Result<String, Error> {
-    let parsed: Vec<_> = Parser::new_ext(value, OPTIONS).collect();
+    let markdown = MarkdownInput::from_text(value);
+    let parsed: Vec<_> = markdown.events(OPTIONS).collect();
     let shallowest = parsed
         .iter()
         .filter_map(|event| match event {
@@ -231,6 +233,114 @@ pub(crate) fn link(url: &str, label: &str) -> Result<String, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pulldown_cmark::Parser;
+
+    #[test]
+    fn cr_code_and_html_literals_survive_fragment_rendering_and_relocation() {
+        for source in [
+            "```text\r# Literal\r[ghost](ghost.md)\r```\r\r<pre>\r[html literal](html.md)\r</pre>\r\r[live](live.md)\r",
+            "```text\r\n# Literal\r[ghost](ghost.md)\r```\n\r<pre>\r[html literal](html.md)\r</pre>\r\n\r[live](live.md)\n",
+        ] {
+            let relocated = relocate_markdown_links(
+                source,
+                Path::new("wiki/documents/a.md"),
+                Path::new("wiki/documents/nested/a.md"),
+            )
+            .unwrap();
+            for (output, expected_destination) in [
+                (relocated, "../live.md"),
+                (render_markdown_fragment(source).unwrap(), "live.md"),
+            ] {
+                let input = MarkdownInput::from_text(&output);
+                let mut destinations = Vec::new();
+                let mut code = String::new();
+                let mut html = String::new();
+                let mut in_code = false;
+                for event in input.events(OPTIONS) {
+                    match event {
+                        Event::Start(Tag::Link { dest_url, .. }) => {
+                            destinations.push(dest_url.into_string())
+                        }
+                        Event::Start(Tag::CodeBlock(_)) => in_code = true,
+                        Event::End(TagEnd::CodeBlock) => in_code = false,
+                        Event::Text(text) if in_code => code.push_str(&text),
+                        Event::Html(text) => html.push_str(&text),
+                        _ => {}
+                    }
+                }
+                assert_eq!(destinations, [expected_destination], "{output:?}");
+                assert_eq!(code, "# Literal\n[ghost](ghost.md)\n", "{output:?}");
+                assert_eq!(
+                    html.replace("\r\n", "\n"),
+                    "<pre>\n[html literal](html.md)\n</pre>\n",
+                    "{output:?}"
+                );
+                assert!(has_sibling_boundary(&output), "{output:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn cr_nested_code_and_html_stay_inside_their_quote_or_list() {
+        for (source, expected_code, expected_html) in [
+            (
+                "> ```python\r> print('first')\r> \r> print('second')\r> ```\r\r[live](live.md)\r",
+                "print('first')\n\nprint('second')\n",
+                "",
+            ),
+            (
+                "- ```python\r\n  print('first')\r  \r  print('second')\r  ```\n\r[live](live.md)\n",
+                "print('first')\n\nprint('second')\n",
+                "",
+            ),
+            (
+                "> <div>\r> literal\r> </div>\r\r[live](live.md)\r",
+                "",
+                "<div>\nliteral\n</div>\n",
+            ),
+            (
+                "- <div>\r\n  literal\r  </div>\r\n\r[live](live.md)\n",
+                "",
+                "<div>\nliteral\n</div>\n",
+            ),
+        ] {
+            for output in [
+                render_markdown_fragment(source).unwrap(),
+                relocate_markdown_links(
+                    source,
+                    Path::new("wiki/documents/a.md"),
+                    Path::new("wiki/documents/nested/a.md"),
+                )
+                .unwrap(),
+            ] {
+                let input = MarkdownInput::from_text(&output);
+                let mut depth = 0;
+                let mut in_code = false;
+                let mut code = String::new();
+                let mut html = String::new();
+                for event in input.events(OPTIONS) {
+                    match event {
+                        Event::Start(Tag::BlockQuote(_) | Tag::Item) => depth += 1,
+                        Event::End(TagEnd::BlockQuote(_) | TagEnd::Item) => depth -= 1,
+                        Event::Start(Tag::CodeBlock(_)) => {
+                            assert!(depth > 0, "{output:?}");
+                            in_code = true;
+                        }
+                        Event::End(TagEnd::CodeBlock) => in_code = false,
+                        Event::Text(text) if in_code => code.push_str(&text),
+                        Event::Html(text) => {
+                            assert!(depth > 0, "{output:?}");
+                            html.push_str(&text);
+                        }
+                        _ => {}
+                    }
+                }
+                assert_eq!(code, expected_code, "{output:?}");
+                assert_eq!(html.replace("\r\n", "\n"), expected_html, "{output:?}");
+                assert!(has_sibling_boundary(&output), "{output:?}");
+            }
+        }
+    }
 
     #[test]
     fn relocation_keeps_parsed_link_and_image_addresses_with_titles_and_anchors() {
@@ -287,6 +397,8 @@ mod tests {
             "[Web](https://example.com)\r\n\r\n[Here](#local)\r\n",
             "```text\r\n[Literal](relative.md)\r\n```\r\n",
             "<div>\n[Literal](relative.md)\n</div>\n",
+            "```text\r[Literal](relative.md)\r```\r",
+            "> <div>\r> literal\r> </div>\r",
         ] {
             assert_eq!(
                 relocate_markdown_links(

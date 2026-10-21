@@ -135,7 +135,9 @@ pub fn search_body(
             return Ok(());
         }
         scanned_pages += 1;
-        let lines: Vec<_> = page.page.body.lines().collect();
+        let lines: Vec<_> = lk_core::markdown::lines_with_endings(&page.page.body)
+            .map(|line| line.trim_end_matches(['\r', '\n']))
+            .collect();
         let mut page_matches = false;
         for (index, line) in lines.iter().enumerate() {
             let Some(found) = matcher.find(line) else {
@@ -219,6 +221,43 @@ mod tests {
         let full = root.join(path);
         std::fs::create_dir_all(full.parent().unwrap()).unwrap();
         std::fs::write(full, text).unwrap();
+    }
+
+    #[test]
+    fn mixed_commonmark_body_lines_have_identical_live_and_snapshot_locations() {
+        let root = tempfile::tempdir().unwrap();
+        let path = "wiki/documents/mixed.md";
+        let raw = "---\r\ntype: document\r\n---\r\n\r\n# Source\r## Claim\r한글 needle\r\nneedle again\n## Tail\rKeep.";
+        write(root.path(), path, raw);
+        let dirs = VaultDirs::default();
+        let session = crate::MutationSession::acquire(root.path()).unwrap();
+        let capture = crate::prepare_search(&session, &dirs).unwrap();
+        for snapshot in [None, Some(capture.snapshot.as_str())] {
+            let options = BodySearchOptions {
+                search: SearchOptions {
+                    query: Some("needle"),
+                    snapshot,
+                    ..Default::default()
+                },
+                context: 0,
+                ..Default::default()
+            };
+            let result = search_body(root.path(), &dirs, &options).unwrap();
+            assert_eq!(result.total, 2);
+            assert_eq!(
+                result
+                    .hits
+                    .iter()
+                    .map(|hit| (hit.line, hit.column))
+                    .collect::<Vec<_>>(),
+                [(7, 4), (8, 1)]
+            );
+            assert_eq!(result.hits[0].context[0].text, "한글 needle");
+        }
+        assert_eq!(
+            std::fs::read_to_string(root.path().join(path)).unwrap(),
+            raw
+        );
     }
 
     #[test]

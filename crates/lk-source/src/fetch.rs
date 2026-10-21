@@ -13,7 +13,7 @@
 //! whoever served it.
 
 use crate::SourceError;
-use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{Event, HeadingLevel, Options, Tag, TagEnd};
 
 /// Some sites reject requests with an empty User-Agent (HTTP 403); identify ourselves.
 pub const USER_AGENT: &str = concat!("lorekeeper/", env!("CARGO_PKG_VERSION"));
@@ -102,7 +102,8 @@ fn remote_markdown(text: &str, base: &url::Url) -> Result<ReadableArticle, Sourc
     let mut link_error = None;
     let mut title = None;
     let mut heading = None;
-    let events = Parser::new_ext(text, options).map(|event| {
+    let input = lk_core::markdown::MarkdownInput::from_text(text);
+    let events = input.events(options).map(|event| {
         match &event {
             Event::Start(Tag::Heading {
                 level: HeadingLevel::H1,
@@ -156,7 +157,14 @@ fn remote_markdown(text: &str, base: &url::Url) -> Result<ReadableArticle, Sourc
 }
 
 pub(crate) fn literal_markdown(text: &str) -> Result<String, SourceError> {
-    let normalized = text.replace("\r\n", "\n");
+    let mut normalized = String::with_capacity(text.len());
+    for line in lk_core::markdown::lines_with_endings(text) {
+        let content = line.trim_end_matches(['\r', '\n']);
+        normalized.push_str(content);
+        if content.len() != line.len() {
+            normalized.push('\n');
+        }
+    }
     let events = normalized.split("\n\n").flat_map(|paragraph| {
         let lines = paragraph.lines().enumerate().flat_map(|(index, line)| {
             (index != 0)
@@ -246,6 +254,90 @@ async fn read_capped(mut resp: reqwest::Response, url: &str) -> Result<String, S
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pulldown_cmark::Parser;
+
+    #[test]
+    fn cr_plain_text_keeps_line_start_markup_literal() {
+        for text in [
+            "Prefix\r# literal\r> quote\r\r[not a link](target.md)\r",
+            "Prefix\r\n# literal\r> quote\n\r[not a link](target.md)\r\n",
+        ] {
+            let rendered = literal_markdown(text).unwrap();
+            let input = lk_core::markdown::MarkdownInput::from_text(&rendered);
+            let mut visible = String::new();
+            for event in input.events(Options::empty()) {
+                match event {
+                    Event::Text(text) => visible.push_str(&text),
+                    Event::SoftBreak | Event::HardBreak => visible.push('\n'),
+                    Event::Start(Tag::Paragraph) if !visible.is_empty() => visible.push_str("\n\n"),
+                    Event::Start(Tag::Paragraph) | Event::End(TagEnd::Paragraph) => {}
+                    other => panic!("plain text became markup: {other:?}; {rendered:?}"),
+                }
+            }
+            assert_eq!(
+                visible, "Prefix\n# literal\n> quote\n\n[not a link](target.md)",
+                "{rendered:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn remote_cr_markdown_rebases_only_live_links_and_preserves_literal_content() {
+        for source in [
+            "# Guide\r\r```text\r[ghost](missing.md)\r```\r\r<pre>\r[html literal](missing-html.md)\r</pre>\r\r[live](live.md)\r",
+            "# Guide\r\n\r```text\r[ghost](missing.md)\r\n```\n\r<pre>\r[html literal](missing-html.md)\r</pre>\r\n\r[live](live.md)\n",
+        ] {
+            let article = remote_markdown(
+                source,
+                &url::Url::parse("https://example.com/docs/note.md").unwrap(),
+            )
+            .unwrap();
+            assert_eq!(article.title.as_deref(), Some("Guide"));
+            let input = lk_core::markdown::MarkdownInput::from_text(&article.markdown);
+            let mut destinations = Vec::new();
+            let mut code = String::new();
+            let mut html = String::new();
+            let mut in_code = false;
+            for event in input.events(Options::empty()) {
+                match event {
+                    Event::Start(Tag::Link { dest_url, .. }) => {
+                        destinations.push(dest_url.into_string())
+                    }
+                    Event::Start(Tag::CodeBlock(_)) => in_code = true,
+                    Event::End(TagEnd::CodeBlock) => in_code = false,
+                    Event::Text(text) if in_code => code.push_str(&text),
+                    Event::Html(text) => html.push_str(&text),
+                    _ => {}
+                }
+            }
+            assert_eq!(
+                destinations,
+                ["https://example.com/docs/live.md"],
+                "{:?}",
+                article.markdown
+            );
+            assert_eq!(code, "[ghost](missing.md)\n", "{:?}", article.markdown);
+            assert_eq!(
+                html.replace("\r\n", "\n"),
+                "<pre>\n[html literal](missing-html.md)\n</pre>\n",
+                "{:?}",
+                article.markdown
+            );
+            let unchanged = source.replace(
+                "[live](live.md)",
+                "[live](https://example.com/docs/live.md)",
+            );
+            assert_eq!(
+                remote_markdown(
+                    &unchanged,
+                    &url::Url::parse("https://example.com/docs/note.md").unwrap()
+                )
+                .unwrap()
+                .markdown,
+                unchanged
+            );
+        }
+    }
 
     fn serve(content_type: Option<&str>, body: impl AsRef<[u8]>, redirect: bool) -> String {
         use std::io::{BufRead, Write};

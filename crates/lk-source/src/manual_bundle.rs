@@ -10,7 +10,7 @@ use lk_core::manual_original::{
     ORIGINAL_SCHEME, OriginalCaptureConfig, UnsupportedOriginalConstruct,
 };
 use markup5ever_rcdom::{NodeData, RcDom};
-use pulldown_cmark::{Event, LinkType, Options, Parser, Tag};
+use pulldown_cmark::{Event, LinkType, Options, Tag};
 
 use crate::SourceError;
 #[cfg(test)]
@@ -312,7 +312,8 @@ fn validate_wikilink(dest: &str, piped: bool, image: bool) -> Result<(), SourceE
 fn markdown_references(text: &str) -> Result<(Vec<String>, BTreeSet<String>), SourceError> {
     let mut refs = Vec::new();
     let mut issues = BTreeSet::new();
-    for event in Parser::new_ext(text, PARSER_OPTIONS) {
+    let markdown = lk_core::markdown::MarkdownInput::from_text(text);
+    for event in markdown.events(PARSER_OPTIONS) {
         match event {
             Event::Start(tag @ (Tag::Link { .. } | Tag::Image { .. })) => {
                 let (link_type, dest_url) = match &tag {
@@ -492,7 +493,8 @@ pub(crate) fn project_links(
         .collect();
     let mut changed = false;
     let mut events = Vec::new();
-    for event in Parser::new_ext(text, PARSER_OPTIONS) {
+    let markdown = lk_core::markdown::MarkdownInput::from_text(text);
+    for event in markdown.events(PARSER_OPTIONS) {
         let event = match event {
             Event::Html(ref html) | Event::InlineHtml(ref html) => {
                 // Raw HTML in Markdown has no faithful local-attribute rewrite through
@@ -594,6 +596,7 @@ pub(crate) fn unchanged(root: &Path, capture: &ManualBundleCapture) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pulldown_cmark::{Parser, TagEnd};
     use tempfile::TempDir;
 
     #[test]
@@ -639,6 +642,64 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path().canonicalize().unwrap();
         (tmp, root)
+    }
+    #[test]
+    fn cr_code_and_html_keep_literals_out_of_bundle_dependencies_and_rewrites() {
+        for source in [
+            "```text\r[ghost](missing.md)\r```\r\r<pre>\r[html literal](missing-html.md)\r</pre>\r\r[live](live.txt)\r",
+            "```text\r\n[ghost](missing.md)\r```\n\r<pre>\r[html literal](missing-html.md)\n</pre>\r\n\r[live](live.txt)\n",
+        ] {
+            let (_tmp, root) = fixture();
+            std::fs::write(root.join("note.md"), source).unwrap();
+            std::fs::write(root.join("live.txt"), "Live evidence.").unwrap();
+            let captured = capture(&root, &root.join("note.md")).unwrap();
+            assert_eq!(captured.manifest.members.len(), 2, "{source:?}");
+            assert!(captured.manifest.unsupported.is_empty());
+            let projected = project_links(
+                source,
+                &root,
+                &root.join("note.md"),
+                &captured,
+                Path::new("wiki/documents"),
+                MAX_TEXT_BYTES,
+            )
+            .unwrap();
+            let input = lk_core::markdown::MarkdownInput::from_text(&projected);
+            let mut destinations = Vec::new();
+            let mut code = String::new();
+            let mut html = String::new();
+            let mut in_code = false;
+            for event in input.events(PARSER_OPTIONS) {
+                match event {
+                    Event::Start(Tag::Link { dest_url, .. }) => {
+                        destinations.push(dest_url.into_string())
+                    }
+                    Event::Start(Tag::CodeBlock(_)) => in_code = true,
+                    Event::End(TagEnd::CodeBlock) => in_code = false,
+                    Event::Text(text) if in_code => code.push_str(&text),
+                    Event::Html(text) => html.push_str(&text),
+                    _ => {}
+                }
+            }
+            assert_eq!(destinations.len(), 1, "{projected:?}");
+            assert!(destinations[0].ends_with("/files/live.txt"));
+            assert_eq!(code, "[ghost](missing.md)\n", "{projected:?}");
+            assert_eq!(
+                html.replace("\r\n", "\n"),
+                "<pre>\n[html literal](missing-html.md)\n</pre>\n",
+                "{projected:?}"
+            );
+            let entry = captured
+                .manifest
+                .members
+                .iter()
+                .position(|member| member.path == "note.md")
+                .unwrap();
+            assert_eq!(
+                captured.contents[entry].read_bytes(MAX_TEXT_BYTES).unwrap(),
+                source.as_bytes()
+            );
+        }
     }
     #[test]
     fn plain_text_examples_are_not_bundle_dependencies() {
@@ -855,6 +916,7 @@ mod tests {
 #[cfg(test)]
 mod wikilink_tests {
     use super::*;
+    use pulldown_cmark::Parser;
     #[test]
     fn parser_observes_explicit_obsidian_embeds_and_rewrites_them_as_standard_links() {
         let tmp = tempfile::tempdir().unwrap();

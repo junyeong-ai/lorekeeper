@@ -491,9 +491,10 @@ pub(super) fn split_frontmatter(
 
 /// Promote a first-block root H1 to a scalar title, preserving all other source bytes.
 fn split_title(body: &str, path: &Path) -> (String, String) {
-    use pulldown_cmark::{Event, HeadingLevel, Parser, Tag, TagEnd};
+    use pulldown_cmark::{Event, HeadingLevel, Tag, TagEnd};
 
-    let mut events = Parser::new_ext(body, lk_core::markdown::OPTIONS).into_offset_iter();
+    let markdown = lk_core::markdown::MarkdownInput::from_text(body);
+    let mut events = markdown.offset_events(lk_core::markdown::OPTIONS);
     if let Some((
         Event::Start(Tag::Heading {
             level: HeadingLevel::H1,
@@ -1545,6 +1546,11 @@ mod tests {
             ),
             ("Title\n=====", "Title", ""),
             ("\r# CR\r\r    code\r", "CR", "\r\r    code\r"),
+            (
+                "# CR\r\r```text\r# Literal\r```\r\rBody\r",
+                "CR",
+                "\r```text\r# Literal\r```\r\rBody\r",
+            ),
             ("# One&#10;Two\nBody", "One Two", "Body"),
         ] {
             let (title, body) = split_title(source, Path::new("fallback_note.md"));
@@ -1558,6 +1564,8 @@ mod tests {
         for source in [
             "    # This is code, not a title\n    print(1)\n",
             "```markdown\n# Literal\n```\n",
+            "```markdown\r# Literal\r```\r\r# Later\r",
+            "```markdown\r\n# Literal\r```\n\r# Later\r\n",
             "> # Quoted\n> paragraph\n",
             "- # Listed\n  paragraph\n",
             "Opening paragraph.\n\n# Later\nBody\n",

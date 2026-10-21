@@ -706,6 +706,57 @@ mod tests {
         );
     }
 
+    #[test]
+    fn retained_concepts_preserve_bare_cr_and_mixed_body_bytes() {
+        for (name, before, body, after) in [
+            (
+                "bare-cr",
+                "# Source\r\r## Summary\rPrior summary.\r\r## Related Concepts\r",
+                "\r- [Stored](../concepts/stored.md#claim)\r\r",
+                "## Other\rKept.\r",
+            ),
+            (
+                "mixed",
+                "# Source\r\n\r## Summary\nPrior summary.\r\r## Related Concepts\r\n",
+                "\r- [Stored](../concepts/stored.md#claim)\n\r\n",
+                "## Other\rKept.\n",
+            ),
+        ] {
+            let original = format!("---\ntype: document\n---\n{before}{body}{after}");
+            let page = lk_core::frontmatter::parse_page(&original).unwrap();
+            let retained = existing_concept_section(Some(&page)).unwrap();
+            assert_eq!(retained, Some(body), "{name}");
+
+            let fresh = format!("---\ntype: document\n---\n{before}Placeholder.\n\n{after}");
+            let output = retain_concept_section(fresh, "Related Concepts", retained).unwrap();
+            assert_eq!(output, original, "{name}");
+            assert_eq!(
+                section_body(&output, "Related Concepts"),
+                Some(body),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn retained_concepts_refuse_duplicate_anchors_after_bare_cr_lines() {
+        for (name, body) in [
+            (
+                "bare-cr",
+                "# Source\r\r## Related Concepts\rFirst.\r\r## Related Concepts\rSecond.\r",
+            ),
+            (
+                "mixed",
+                "# Source\r\n\r## Summary\nPrior summary.\r\r## Related Concepts\rFirst.\r\r## Related Concepts\r\nSecond.\n",
+            ),
+        ] {
+            let original = format!("---\ntype: document\n---\n{body}");
+            let page = lk_core::frontmatter::parse_page(&original).unwrap();
+            assert!(existing_concept_section(Some(&page)).is_err(), "{name}");
+            assert_eq!(page.original.as_deref(), Some(original.as_str()), "{name}");
+        }
+    }
+
     /// A highlight bucket item must be a POINTER — subject + sender only — so a
     /// structural (never-LLM-refined) section can never pin a raw source body into
     /// the page. Locked here because the leak it prevents is invisible until a real

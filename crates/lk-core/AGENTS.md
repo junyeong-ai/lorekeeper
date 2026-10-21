@@ -57,6 +57,11 @@ config loading and the shared filesystem primitives intentionally perform I/O.
 - `markdown::root_headings` owns CommonMark root structure. Semantic section bodies
   use `validate_section_body`: reject parent/sibling headings and syntax consuming
   the next section; preserve valid HTML and literal code without rewriting prose.
+- Markdown byte ranges and physical line positions recognize LF, CRLF and CR.
+  Parse through `markdown::MarkdownInput`: events represent CommonMark content,
+  while offsets address the original bytes. Preserve originals separately from
+  rendered presentation. Use `markdown::lines_with_endings` when counting or
+  slicing original lines; frontmatter delimiters have their own grammar.
 - Whole-page link consumers use `frontmatter::body_offset` to exclude metadata while
   preserving original bytes and physical line positions. Body parsers do not infer YAML.
 - Use `link` for construction, extraction, rewrite and resolution. Links are

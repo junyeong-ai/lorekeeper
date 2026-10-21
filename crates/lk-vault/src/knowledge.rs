@@ -160,16 +160,23 @@ fn set_title(text: &str, title: &str) -> Result<String, VaultError> {
     let mut updated = set(text, "title", &title)?;
     let offset = lk_core::frontmatter::body_offset(&updated)
         .ok_or_else(|| invalid("curation requires closed frontmatter"))?;
-    if let Some((
-        pulldown_cmark::Event::Start(pulldown_cmark::Tag::Heading {
-            level: pulldown_cmark::HeadingLevel::H1,
-            ..
-        }),
-        range,
-    )) = pulldown_cmark::Parser::new(&updated[offset..])
-        .into_offset_iter()
-        .next()
-    {
+    let heading_range = {
+        let markdown = lk_core::markdown::MarkdownInput::from_text(&updated[offset..]);
+        markdown
+            .offset_events(pulldown_cmark::Options::empty())
+            .next()
+            .and_then(|(event, range)| {
+                matches!(
+                    event,
+                    pulldown_cmark::Event::Start(pulldown_cmark::Tag::Heading {
+                        level: pulldown_cmark::HeadingLevel::H1,
+                        ..
+                    })
+                )
+                .then_some(range)
+            })
+    };
+    if let Some(range) = heading_range {
         let heading = &updated[offset + range.start..offset + range.end];
         let ending = if heading.ends_with("\r\n") {
             "\r\n"
