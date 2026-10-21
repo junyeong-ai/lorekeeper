@@ -192,12 +192,15 @@ Use parser/token-state behavior, not regex replacement of arbitrary markup.
   or keyword quality heuristic. Render pending visual pages at 150 DPI with a
   per-page RGBA cap and aggregate text/output bounds; legacy PDF OCR also retains
   its aggregate RGBA cap. Never reuse native page text as recognition evidence.
-  Kreuzberg v4's [best-effort support](https://docs.kreuzberg.dev/lts/) ends in 2026.
-  A decoder replacement must retain supported platform wheels and pass native/OCR
-  page/frame, resource-bound and private-diagnostic contracts. Replay the real-runtime
-  invalid-model cases: a successful envelope, an OCR method label or complete page
-  inventory does not prove OCR succeeded. Never publish native text as OCR evidence
-  after recognition failed, or infer success by parsing diagnostic prose.
+  Native decoding uses Xberg; PDF literal OCR renders physical pages through
+  pypdfium2 and recognizes each image, keeping native text separate. Never delegate
+  PDF OCR to an API that may substitute native text after recognition fails.
+  Decoder upgrades verify published platform wheels and pass native/OCR
+  page/frame, resource-bound, invalid-model and private-diagnostic contracts.
+  The pinned Xberg Python release has no Windows wheel; optional native-runtime
+  installation there refuses rather than building from source or changing versions.
+  An OCR label or complete page inventory does not establish recognition success;
+  never infer it by parsing diagnostic prose.
 - Decode image frames through Pillow, preserving ordinals, EXIF orientation and
   alpha compositing on white. Visual block coordinates follow EXIF and the recorded
   counterclockwise document correction. Verify physical inventory and exact selected

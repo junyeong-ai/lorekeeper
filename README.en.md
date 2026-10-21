@@ -133,7 +133,7 @@ actual run are separate steps; follow [Scheduling](#scheduling).
 
 ### Binary documents and large inputs
 
-For DOCX, XLSX and PDF, run `lore input install DIRECTORY` and merge its printed
+For DOCX, XLSX and PDF on macOS/Linux, run `lore input install DIRECTORY` and merge its printed
 configuration. On Apple Silicon with macOS 14 or later,
 `lore input install-vision VISION_DIRECTORY --python python3.12` installs PaddleOCR-VL 1.6.
 With `vision` configured, PDFs retain native text and visual recognition of every page

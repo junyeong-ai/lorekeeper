@@ -1,7 +1,9 @@
 """Isolated binary document projection. The Rust caller owns IO limits and publication."""
 
+import asyncio
 import contextlib
 import datetime
+import dataclasses
 import importlib.metadata
 import hashlib
 import io
@@ -16,7 +18,10 @@ import warnings
 import zipfile
 
 POLICY = "document-projection-v4"
-PACKAGES = {"kreuzberg": "4.10.4", "openpyxl": "3.1.5", "defusedxml": "0.7.1", "et-xmlfile": "2.0.0", "pillow": "13.0.0"}
+PACKAGES = {
+    "xberg": "1.3.9", "pypdfium2": "5.14.0", "openpyxl": "3.1.5",
+    "defusedxml": "0.7.1", "et-xmlfile": "2.0.0", "pillow": "13.0.0",
+}
 MIMES = {
     "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -284,66 +289,72 @@ def image_frames(data, options):
 
 def pdf_pages(result):
     pages = result.pages
-    expected = result.metadata.get("pages", {}).get("total_count")
-    if pages is None or expected is None or len(pages) != expected or [page["page_number"] for page in pages] != list(range(1, expected + 1)):
+    expected = result.metadata.pages.total_count if result.metadata.pages is not None else None
+    if pages is None or expected is None or len(pages) != expected or [page.page_number for page in pages] != list(range(1, expected + 1)):
         raise ProjectionError("invalid-projection")
     return pages
 
 
-def validate_pdf_raster_budget(result, limit, dpi, raster_limit):
-    pages = result.metadata.get("pages", {}).get("pages")
-    if not isinstance(pages, list) or len(pages) != len(result.pages):
-        raise ProjectionError("invalid-projection")
+def validate_pdf_raster_budget(document, limit, dpi, raster_limit):
+    sizes = []
     scale = dpi / 72
-    for number, page in enumerate(pages, 1):
-        dimensions = page.get("dimensions")
-        if (page.get("number") != number or not isinstance(dimensions, list) or len(dimensions) != 2
-                or any(not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0 for value in dimensions)):
+    for number in range(len(document)):
+        page = document[number]
+        try:
+            dimensions = page.get_size()
+        finally:
+            page.close()
+        if any(not math.isfinite(value) or value <= 0 for value in dimensions):
             raise ProjectionError("invalid-projection")
         width, height = [math.ceil(value * scale) for value in dimensions]
-        # The pinned renderer rescales larger dimensions; refuse that change to
-        # the declared DPI rather than silently using a lower resolution.
         if width > 65536 or height > 65536 or width * height * 4 > raster_limit:
             raise ProjectionError("decoded-limit")
         limit -= width * height * 4
         if limit < 0:
             raise ProjectionError("decoded-limit")
+        sizes.append((width, height))
+    return sizes
 
 
-def extraction(data, options):
-    import kreuzberg as k
+async def extraction(data, options):
+    import xberg as k
 
     kind = options["format"]
     limit = options["max_decoded_bytes"]
     config = k.ExtractionConfig(
         use_cache=False,
         enable_quality_processing=False,
+        strict_parse=True,
         disable_ocr=True,
         postprocessor=k.PostProcessorConfig(enabled=False),
         pages=k.PageConfig(extract_pages=True),
         output_format="markdown",
         extraction_timeout_secs=options["timeout_seconds"],
+        security_limits=k.SecurityLimits(
+            max_archive_size=limit, max_content_size=limit, max_compression_ratio=limit,
+            max_files_in_archive=10000, max_table_cells=1000000, max_pages=options["max_units"],
+        ),
     )
-    config.security_limits = {
-        "max_archive_size": limit,
-        "max_content_size": limit,
-        "max_compression_ratio": limit,
-        "max_files_in_archive": 10000,
-        "max_table_cells": 1000000,
-    }
     ocr = options.get("ocr")
     def ocr_config():
-        language = "+".join(ocr["languages"])
+        language = ocr["languages"]
         psm = {"auto": 3, "single-block": 6, "sparse-text": 11}[ocr["layout"]]
-        return k.OcrConfig(backend="tesseract", language=language,
+        return k.OcrConfig(backend="tesseract", language=language, tessdata_path=ocr["tessdata_dir"], numeric_repair=False,
                            tesseract_config=k.TesseractConfig(language=language, psm=psm, use_cache=False,
                                                            output_format="text", enable_table_detection=False))
     def enable_ocr():
-        config.disable_ocr = False
-        config.ocr = ocr_config()
-        config.output_format = "plain"
-    def recognize(location, frame):
-        result = k.extract_bytes_sync(frame, "image/png", config)
+        nonlocal config
+        config = dataclasses.replace(config, disable_ocr=False, ocr=ocr_config(), output_format="plain")
+    async def decode(input):
+        response = await k.extract(input, config)
+        if response.errors or len(response.results) != 1:
+            raise ProjectionError("decoder")
+        result = response.results[0]
+        if result.ocr_page_failures:
+            raise ProjectionError("decoder")
+        return result
+    async def recognize(location, frame):
+        result = await decode(k.ExtractInput(kind="bytes", bytes=frame, mime_type="image/png"))
         if result.mime_type != "image/png":
             raise ProjectionError("invalid-projection")
         return unit(location, result.content, method="ocr", representation="text")
@@ -355,13 +366,13 @@ def extraction(data, options):
         units = []
         size = 0
         for number, frame, _ in image_frames(data, options):
-            recognized = recognize({"kind": "image-frame", "number": number}, frame)
+            recognized = await recognize({"kind": "image-frame", "number": number}, frame)
             size += len(recognized["text"].encode("utf-8"))
             if size > limit:
                 raise ProjectionError("decoded-limit")
             units.append(recognized)
         return units, ["Every decoded image frame is projected in stored order with EXIF orientation applied and transparency composited on white. OCR preserves literal recognized text without dictionary-based line deletion or table reconstruction; layout, diagrams and recognition accuracy require separate inspection."]
-    result = k.extract_file_sync(data, MIMES[kind], config)
+    result = await decode(k.ExtractInput(kind="uri", uri=str(data), mime_type=MIMES[kind]))
     if result.mime_type != MIMES[kind]:
         raise ProjectionError("invalid-projection")
     warnings = []
@@ -372,22 +383,36 @@ def extraction(data, options):
         pages = pdf_pages(result)
         if len(pages) * (2 if ocr is not None and ocr["pdf"] else 1) > options["max_units"]:
             raise ProjectionError("unit-limit")
-        units = [unit({"kind": "page", "number": page["page_number"]}, page["content"], representation="markdown") for page in pages]
+        units = [unit({"kind": "page", "number": page.page_number}, page.content, representation="markdown") for page in pages]
         warnings.append("PDF native text follows the decoder's reading order; diagrams and image content require separate inspection.")
         if ocr is not None and ocr["pdf"]:
             dpi = 150
-            validate_pdf_raster_budget(result, limit, dpi, options["max_raster_bytes"])
+            import pypdfium2 as pdfium
+
+            # Recognize rendered images so failed PDF OCR cannot substitute native text.
             enable_ocr()
             size = sum(len(part["text"].encode("utf-8")) for part in units)
-            remaining_raster = limit
-            for number in range(1, len(pages) + 1):
-                rendered = k.render_pdf_page(data, number - 1, dpi=dpi)
-                if len(rendered) > limit:
-                    raise ProjectionError("decoded-limit")
-                image_options = {**options, "format": "png", "max_decoded_bytes": remaining_raster, "max_units": 1}
-                for _, frame, decoded_bytes in image_frames(io.BytesIO(rendered), image_options):
-                    remaining_raster -= decoded_bytes
-                    recognized = recognize({"kind": "page", "number": number}, frame)
+            with pdfium.PdfDocument(data) as document:
+                if len(document) != len(pages):
+                    raise ProjectionError("invalid-projection")
+                sizes = validate_pdf_raster_budget(document, limit, dpi, options["max_raster_bytes"])
+                for number, dimensions in enumerate(sizes, 1):
+                    page = document[number - 1]
+                    try:
+                        bitmap = page.render(scale=dpi / 72)
+                        try:
+                            if (bitmap.width, bitmap.height) != dimensions:
+                                raise ProjectionError("invalid-projection")
+                            with bitmap.to_pil().convert("RGB") as image:
+                                encoded = io.BytesIO()
+                                image.save(encoded, format="PNG")
+                        finally:
+                            bitmap.close()
+                    finally:
+                        page.close()
+                    if encoded.tell() > limit:
+                        raise ProjectionError("decoded-limit")
+                    recognized = await recognize({"kind": "page", "number": number}, encoded.getvalue())
                     size += len(recognized["text"].encode("utf-8"))
                     if size > limit:
                         raise ProjectionError("decoded-limit")
@@ -422,7 +447,7 @@ def project(options, data):
     if options["format"] == "xlsx":
         units, warnings = spreadsheet(data, limit, options["max_units"])
     else:
-        units, warnings = extraction(data, options)
+        units, warnings = asyncio.run(extraction(data, options))
     if sum(len(part["text"].encode("utf-8")) for part in units) > limit:
         raise ProjectionError("decoded-limit")
     if len(units) > options["max_units"]:
@@ -446,7 +471,8 @@ def main():
         for package, version in PACKAGES.items():
             if importlib.metadata.version(package) != version:
                 raise ProjectionError("dependency-version")
-        import kreuzberg
+        import xberg
+        import pypdfium2
         import openpyxl.xml
         from PIL import Image, features
         if not openpyxl.xml.DEFUSEDXML:

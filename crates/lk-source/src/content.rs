@@ -516,7 +516,8 @@ fn validate_projection_parts(
     allow_empty: bool,
 ) -> Result<(), ProcessingError> {
     let expected: BTreeMap<_, _> = [
-        ("kreuzberg".into(), "4.10.4".into()),
+        ("xberg".into(), "1.3.9".into()),
+        ("pypdfium2".into(), "5.14.0".into()),
         ("openpyxl".into(), "3.1.5".into()),
         ("defusedxml".into(), "0.7.1".into()),
         ("et-xmlfile".into(), "2.0.0".into()),
@@ -1112,7 +1113,7 @@ save('external-sheet.xlsx', invalid)
         for legacy in [true, false] {
             let mut projection = serde_json::json!({
                 "policy":PROJECTION_POLICY,"format":"pdf",
-                "packages":{"kreuzberg":"4.10.4","openpyxl":"3.1.5","defusedxml":"0.7.1","et-xmlfile":"2.0.0","pillow":"13.0.0"},
+                "packages":{"xberg":"1.3.9","pypdfium2":"5.14.0","openpyxl":"3.1.5","defusedxml":"0.7.1","et-xmlfile":"2.0.0","pillow":"13.0.0"},
                 "units":[native_unit.clone()],"warnings":[]
             });
             if legacy {
@@ -1403,7 +1404,7 @@ with tempfile.TemporaryDirectory() as directory:
                 "-c",
                 r#"
 from PIL import Image
-import pathlib, sys
+import pathlib, sys, zipfile
 source, target = map(pathlib.Path, sys.argv[1:])
 first = Image.open(source/'policy.png').convert('RGB')
 second = Image.open(source/'policy-ko.png').convert('RGB')
@@ -1411,6 +1412,12 @@ first.save(target/'pages.tiff', save_all=True, append_images=[second], compressi
 first.save(target/'page.jpeg', quality=95)
 first.save(target/'page.webp', lossless=True)
 first.save(target/'scanned.pdf', 'PDF', save_all=True, append_images=[second])
+with zipfile.ZipFile(source/'policy.docx') as archive:
+    members = {item.filename: archive.read(item) for item in archive.infolist()}
+members['word/document.xml'] = b'<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Keep records for 7 days.</w:t></w:r></w:p><w:p><w:r><w:t'
+with zipfile.ZipFile(target/'malformed.docx', 'w', compression=zipfile.ZIP_DEFLATED) as archive:
+    for name, data in members.items():
+        archive.writestr(name, data)
 "#,
             ])
             .arg(&fixtures)
@@ -1422,6 +1429,15 @@ first.save(target/'scanned.pdf', 'PDF', save_all=True, append_images=[second])
             "{}",
             String::from_utf8_lossy(&generated.stderr)
         );
+        assert!(matches!(
+            project(
+                &std::fs::read(temporary.path().join("malformed.docx")).unwrap(),
+                InputFormat::Docx,
+                Some(&config)
+            )
+            .await,
+            Err(ProcessingError::Failed(ProcessingFailure::Decoder))
+        ));
         for (name, format, count) in [
             ("pages.tiff", InputFormat::Tiff, 2),
             ("page.jpeg", InputFormat::Jpeg, 1),

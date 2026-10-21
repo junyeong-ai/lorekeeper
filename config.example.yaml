@@ -60,7 +60,7 @@ ingest:
     max_entry_bytes: 33554432     # 32 MiB per inbox entry; raise explicitly for larger inputs
     max_member_bytes: 67108864    # 64 MiB per locally referenced attachment
     max_source_bytes: 268435456   # 256 MiB captured originals per manual source
-  # Optional native DOCX/XLSX/PDF decoder: `lore input install DIRECTORY`.
+  # Optional native DOCX/XLSX/PDF decoder (macOS/Linux): `lore input install DIRECTORY`.
   # Add visual PDF/image recognition on Apple Silicon macOS 14+ with
   # `lore input install-vision VISION_DIRECTORY --python python3.12`.
   # Both installers use new directories and print configuration to merge here.

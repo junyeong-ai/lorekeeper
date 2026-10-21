@@ -199,6 +199,15 @@ replacing its existing `ingest.schedule`. Missing platform wheels fail explicitl
 the installer does not build native dependencies from source. A failed installation
 retains its incomplete directory for inspection and never overwrites existing data.
 
+The native runtime uses pinned Xberg for DOCX/PDF and openpyxl for XLSX. The pinned
+Xberg release provides macOS/Linux wheels; Windows native-runtime installation is
+currently unavailable. Literal PDF OCR renders each physical page through pypdfium2
+before image recognition; native text stays separate from failed OCR results.
+After a CLI upgrade, run `lore input check`. If dependency versions differ,
+install into a new directory and update `ingest.documents.python` from its printed
+configuration, then check again. Dependency identity invalidates derived cache
+reuse; preserved originals and document identities remain valid.
+
 For visual PDF and image recognition on Apple Silicon macOS 14+, also run
 `lore input install-vision VISION_DIRECTORY --python python3.12`. This explicitly
 installs separate hash-locked Paddle layout and MLX recognition environments and

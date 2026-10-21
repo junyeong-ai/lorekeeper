@@ -129,7 +129,7 @@ lore schedule > lorekeeper.cron
 
 ### 다양한 파일과 대용량 입력
 
-DOCX·XLSX·PDF는 `lore input install DIRECTORY`로 선택적 변환 환경을 설치한 뒤
+macOS·Linux에서 DOCX·XLSX·PDF는 `lore input install DIRECTORY`로 선택적 변환 환경을 설치한 뒤
 출력된 설정을 병합합니다. macOS 14 이상 Apple Silicon에서는
 `lore input install-vision VISION_DIRECTORY --python python3.12`로 PaddleOCR-VL 1.6을
 설치할 수 있습니다. `vision`을 설정한 PDF는 기본적으로 모든 페이지의 내장 텍스트와
