@@ -411,6 +411,7 @@ pub(super) async fn project(
                     if let Some(unit) = claim.load_unit(number)? {
                         validate_unit(&unit, &inventory[number - 1], format)?;
                         budget.consume(&unit)?;
+                        claim.touch_unit(number)?;
                         units.insert(number, unit);
                         skip.insert(number);
                     }
@@ -870,6 +871,23 @@ mod tests {
             .len(),
             2
         );
+        let paths: Vec<_> = std::fs::read_dir(
+            root.path()
+                .join("vault")
+                .join(lk_core::vault_path::PROJECTION_CACHE_DIR),
+        )
+        .unwrap()
+        .map(|entry| entry.unwrap().path().join("1.json"))
+        .filter(|path| path.is_file())
+        .collect();
+        assert_eq!(paths.len(), 1);
+        let old = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&paths[0])
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
         config.max_decoded_bytes = std::num::NonZeroUsize::new(10).unwrap();
         assert!(matches!(
             project(
@@ -882,6 +900,7 @@ mod tests {
             .await,
             Err(ProcessingError::Failed(ProcessingFailure::DecodedLimit))
         ));
+        assert_eq!(paths[0].metadata().unwrap().modified().unwrap(), old);
     }
 
     #[cfg(unix)]

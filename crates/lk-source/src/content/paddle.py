@@ -178,12 +178,13 @@ def main(options):
         raise ProjectionError("input-limit")
     units = inventory(path, options["format"], options)
     output.emit({"status": "inventory", "runtime": runtime, "units": units})
-    selected = read_message(256 * 1024)
+    selected = read_message(options["max_output_bytes"])
     if selected is None:
         raise ProjectionError("invalid-projection")
     skip = selected.get("skip")
     if set(selected) != {"skip"} or not isinstance(skip, list) or any(type(number) is not int or not 1 <= number <= len(units) for number in skip) or len(skip) != len(set(skip)):
         raise ProjectionError("invalid-projection")
+    skip = set(skip)
     pipeline = None
     remaining_decoded = options["max_decoded_bytes"]
     try:

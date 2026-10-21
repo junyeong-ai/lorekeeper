@@ -213,8 +213,10 @@ Use parser/token-state behavior, not regex replacement of arbitrary markup.
   publication under separate per-identity claims. Partial units are reusable work,
   never a completed source. Read-only inspection/dry run neither create cache files
   nor refresh their lifetime. Successful normal reuse renews operational mtime;
-  maintenance prunes expired payloads under the same claims without removing originals
-  or stable lock inodes. Current output/decoded limits still apply on cache hits.
+  maintenance previews and prunes expired payloads under the same claims without
+  removing originals. A stable namespace lock serializes claim opening and empty
+  namespace/lock removal; never unlink a claim outside that guard. Current
+  output/decoded limits apply before renewing cache hits.
 - Decoder-generated links are original references, not canonical wiki edges. Render
   them as literal destinations. Preserve raw input before optional inbox retirement.
 - Update the embedded requirements/hash lock and package protocol together. The ignored

@@ -52,14 +52,15 @@ pub(super) struct CacheClaim {
     identity: String,
     access: CacheAccess,
     max_output_bytes: usize,
-    _lock: Option<File>,
+    _lock: Option<CacheLock>,
 }
 
-impl Drop for CacheClaim {
+#[derive(Debug)]
+struct CacheLock(File);
+
+impl Drop for CacheLock {
     fn drop(&mut self) {
-        if let Some(lock) = &self._lock {
-            let _ = lock.unlock();
-        }
+        let _ = self.0.unlock();
     }
 }
 
@@ -115,24 +116,13 @@ impl ProjectionCache {
         self.validate_namespace()?;
         let writable = self.is_writable();
         let root_present = directory(&self.root, writable)?;
+        let _namespace = if writable {
+            acquire_lock(&self.root.join("namespace.lock"), true, true)?
+        } else {
+            None
+        };
         let lock = if writable {
-            let lock_path = self.root.join(format!("{identity}.lock"));
-            require_regular_if_present(&lock_path)?;
-            let mut options = OpenOptions::new();
-            options.read(true).write(true).create(true).truncate(false);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.mode(0o600);
-            }
-            let file = options.open(&lock_path)?;
-            verify_opened(&lock_path, &file)?;
-            match file.try_lock() {
-                Ok(()) => {}
-                Err(TryLockError::WouldBlock) => return Err(CacheError::Busy),
-                Err(TryLockError::Error(error)) => return Err(CacheError::Io(error)),
-            }
-            Some(file)
+            acquire_lock(&self.root.join(format!("{identity}.lock")), true, false)?
         } else {
             None
         };
@@ -170,31 +160,57 @@ impl ProjectionCache {
     }
 }
 
-pub fn prune(vault_root: &Path, cutoff: SystemTime) -> Result<usize, CacheError> {
+pub fn prune(vault_root: &Path, cutoff: SystemTime, dry_run: bool) -> Result<usize, CacheError> {
     let cache = ProjectionCache::for_vault(vault_root, CacheAccess::ReadWrite);
-    prune_cache(&cache, cutoff)
+    prune_cache(&cache, cutoff, dry_run)
 }
 
-fn prune_cache(cache: &ProjectionCache, cutoff: SystemTime) -> Result<usize, CacheError> {
+fn prune_cache(
+    cache: &ProjectionCache,
+    cutoff: SystemTime,
+    dry_run: bool,
+) -> Result<usize, CacheError> {
     cache.validate_namespace()?;
     if !directory(&cache.root, false)? {
         return Ok(0);
     }
     let mut removed = 0;
+    let mut identities = std::collections::BTreeSet::new();
     for entry in std::fs::read_dir(&cache.root)? {
         let entry = entry?;
         let name = entry.file_name();
-        let Some(identity) = name.to_str().filter(|name| is_identity(name)) else {
+        let Some(identity) = name
+            .to_str()
+            .map(|name| name.strip_suffix(".lock").unwrap_or(name))
+            .filter(|name| is_identity(name))
+        else {
             continue;
         };
-        if !entry.file_type()?.is_dir() {
-            return Err(CacheError::InvalidEntry);
-        }
-        let claim = match cache.claim(identity, MAX_CACHE_ENTRY_BYTES) {
-            Ok(claim) => claim,
+        identities.insert(identity.to_owned());
+    }
+    for identity in identities {
+        let namespace = acquire_lock(&cache.root.join("namespace.lock"), !dry_run, true)?;
+        let lock_path = cache.root.join(format!("{identity}.lock"));
+        let lock = match acquire_lock(&lock_path, !dry_run, false) {
+            Ok(lock) => lock,
             Err(CacheError::Busy) => continue,
             Err(error) => return Err(error),
         };
+        let mut claim = CacheClaim {
+            directory: cache.root.join(&identity),
+            identity,
+            access: CacheAccess::ReadOnly,
+            max_output_bytes: MAX_CACHE_ENTRY_BYTES,
+            _lock: lock,
+        };
+        if !directory(&claim.directory, false)? {
+            if !dry_run && claim._lock.is_some() {
+                drop(claim._lock.take());
+                std::fs::remove_file(&lock_path)?;
+            }
+            continue;
+        }
+        drop(namespace);
         let mut changed = false;
         for entry in std::fs::read_dir(&claim.directory)? {
             let entry = entry?;
@@ -220,17 +236,19 @@ fn prune_cache(cache: &ProjectionCache, cutoff: SystemTime) -> Result<usize, Cac
             }
             let completed = if number == 0 {
                 claim
-                    .load_entry::<InputProjection>(&entry.path(), number, false)?
+                    .load_entry::<InputProjection>(&entry.path(), number)?
                     .is_some()
             } else {
                 claim
-                    .load_entry::<InputUnit>(&entry.path(), number, false)?
+                    .load_entry::<InputUnit>(&entry.path(), number)?
                     .is_some()
             };
             if completed {
-                std::fs::remove_file(entry.path())?;
+                if !dry_run {
+                    std::fs::remove_file(entry.path())?;
+                }
                 removed += 1;
-                changed = true;
+                changed = !dry_run;
             }
         }
         #[cfg(unix)]
@@ -239,8 +257,47 @@ fn prune_cache(cache: &ProjectionCache, cutoff: SystemTime) -> Result<usize, Cac
         }
         #[cfg(not(unix))]
         let _ = changed;
+        if !dry_run {
+            let _namespace = acquire_lock(&cache.root.join("namespace.lock"), true, true)?;
+            if std::fs::read_dir(&claim.directory)?.next().is_none() {
+                std::fs::remove_dir(&claim.directory)?;
+                if claim._lock.is_some() {
+                    drop(claim._lock.take());
+                    std::fs::remove_file(&lock_path)?;
+                }
+            }
+        }
     }
     Ok(removed)
+}
+
+fn acquire_lock(path: &Path, create: bool, wait: bool) -> Result<Option<CacheLock>, CacheError> {
+    if !require_regular_if_present(path)? && !create {
+        return Ok(None);
+    }
+    let mut options = OpenOptions::new();
+    options
+        .read(true)
+        .write(true)
+        .create(create)
+        .truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options.open(path)?;
+    verify_opened(path, &file)?;
+    if wait {
+        file.lock()?;
+    } else {
+        match file.try_lock() {
+            Ok(()) => {}
+            Err(TryLockError::WouldBlock) => return Err(CacheError::Busy),
+            Err(TryLockError::Error(error)) => return Err(CacheError::Io(error)),
+        }
+    }
+    Ok(Some(CacheLock(file)))
 }
 
 fn is_identity(identity: &str) -> bool {
@@ -253,7 +310,7 @@ fn is_identity(identity: &str) -> bool {
 impl CacheClaim {
     pub(super) fn load_unit(&self, number: usize) -> Result<Option<InputUnit>, CacheError> {
         let path = self.unit_path(number)?;
-        self.load_entry(&path, number, true)
+        self.load_entry(&path, number)
     }
 
     pub(super) fn store_unit(&self, number: usize, unit: &InputUnit) -> Result<(), CacheError> {
@@ -262,7 +319,24 @@ impl CacheClaim {
     }
 
     pub(super) fn load_projection(&self) -> Result<Option<InputProjection>, CacheError> {
-        self.load_entry(&self.directory.join("projection.json"), 0, true)
+        self.load_entry(&self.directory.join("projection.json"), 0)
+    }
+
+    pub(super) fn touch_unit(&self, number: usize) -> Result<(), CacheError> {
+        self.touch_entry(&self.unit_path(number)?)
+    }
+
+    pub(super) fn touch_projection(&self) -> Result<(), CacheError> {
+        self.touch_entry(&self.directory.join("projection.json"))
+    }
+
+    fn touch_entry(&self, path: &Path) -> Result<(), CacheError> {
+        if self.access == CacheAccess::ReadWrite {
+            let file = OpenOptions::new().read(true).write(true).open(path)?;
+            verify_opened(path, &file)?;
+            file.set_modified(SystemTime::now())?;
+        }
+        Ok(())
     }
 
     pub(super) fn store_projection(&self, projection: &InputProjection) -> Result<(), CacheError> {
@@ -273,13 +347,11 @@ impl CacheClaim {
         &self,
         path: &Path,
         number: usize,
-        refresh_last_use: bool,
     ) -> Result<Option<T>, CacheError> {
         if !directory(&self.directory, false)? || !require_regular_if_present(path)? {
             return Ok(None);
         }
-        let writable = refresh_last_use && self.access == CacheAccess::ReadWrite;
-        let mut file = match OpenOptions::new().read(true).write(writable).open(path) {
+        let mut file = match File::open(path) {
             Ok(file) => file,
             Err(error)
                 if self.access == CacheAccess::ReadOnly
@@ -311,9 +383,6 @@ impl CacheClaim {
         {
             return Err(CacheError::InvalidEntry);
         }
-        if writable {
-            file.set_modified(SystemTime::now())?;
-        }
         Ok(Some(entry.payload))
     }
 
@@ -343,7 +412,7 @@ impl CacheClaim {
             return Err(CacheError::InvalidEntry);
         }
         if require_regular_if_present(path)? {
-            self.load_entry::<T>(path, number, false)?;
+            self.load_entry::<T>(path, number)?;
         }
         let entry = CacheEntry {
             version: ENTRY_VERSION,
@@ -579,7 +648,7 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        assert_eq!(prune(&vault, SystemTime::now()).unwrap(), 0);
+        assert_eq!(prune(&vault, SystemTime::now(), false).unwrap(), 0);
         assert!(!temporary.path().join("not-created").exists());
     }
 
@@ -608,7 +677,7 @@ mod tests {
         let temporary = tempfile::tempdir().unwrap();
         let store = cache(temporary.path(), CacheAccess::ReadWrite);
         let claim = store.claim(IDENTITY, 4096).unwrap();
-        let inherited = claim._lock.as_ref().unwrap().try_clone().unwrap();
+        let inherited = claim._lock.as_ref().unwrap().0.try_clone().unwrap();
         drop(claim);
         let next = store.claim(IDENTITY, 4096).unwrap();
         drop(inherited);
@@ -785,7 +854,7 @@ mod tests {
         assert!(matches!(current.load_unit(1), Err(CacheError::Limit)));
         assert!(matches!(current.load_projection(), Err(CacheError::Limit)));
         assert_eq!(
-            prune(temporary.path(), old + Duration::from_secs(1)).unwrap(),
+            prune(temporary.path(), old + Duration::from_secs(1), false).unwrap(),
             2
         );
         assert!(current.load_unit(1).unwrap().is_none());
@@ -823,6 +892,10 @@ mod tests {
 
         assert_eq!(claim.load_unit(1).unwrap().unwrap().text, "hot");
         assert!(claim.load_projection().unwrap().is_some());
+        assert_eq!(hot_path.metadata().unwrap().modified().unwrap(), old);
+        assert_eq!(projection_path.metadata().unwrap().modified().unwrap(), old);
+        claim.touch_unit(1).unwrap();
+        claim.touch_projection().unwrap();
         assert!(hot_path.metadata().unwrap().modified().unwrap() > cutoff);
         assert!(projection_path.metadata().unwrap().modified().unwrap() > cutoff);
         assert_eq!(std::fs::read(&hot_path).unwrap(), hot_bytes);
@@ -841,7 +914,7 @@ mod tests {
         );
         assert_eq!(inspected.metadata().unwrap().modified().unwrap(), old);
         drop(claim);
-        assert_eq!(prune(temporary.path(), cutoff).unwrap(), 2);
+        assert_eq!(prune(temporary.path(), cutoff, false).unwrap(), 2);
         assert_eq!(inspected.metadata().unwrap().modified().unwrap(), old);
         assert_eq!(unused.metadata().unwrap().modified().unwrap(), old);
         let remaining = reader.claim(IDENTITY, 4096).unwrap();
@@ -879,7 +952,7 @@ mod tests {
             .unwrap();
         drop(claim);
 
-        assert_eq!(prune_cache(&store, cutoff).unwrap(), 2);
+        assert_eq!(prune_cache(&store, cutoff, false).unwrap(), 2);
         let claim = store.claim(IDENTITY, 4096).unwrap();
         assert!(claim.load_unit(1).unwrap().is_none());
         assert!(claim.load_projection().unwrap().is_none());
@@ -888,6 +961,72 @@ mod tests {
         assert!(unknown.exists());
         assert!(claim.directory.exists());
         assert!(store.root.join(format!("{IDENTITY}.lock")).exists());
+        assert!(matches!(store.claim(IDENTITY, 4096), Err(CacheError::Busy)));
+    }
+
+    #[test]
+    fn prune_preview_preserves_bytes_and_times_and_reclaims_only_inactive_namespaces() {
+        use std::collections::BTreeMap;
+        use std::time::Duration;
+
+        fn snapshot(path: &Path) -> BTreeMap<PathBuf, (Vec<u8>, SystemTime)> {
+            let mut entries = BTreeMap::new();
+            for entry in std::fs::read_dir(path).unwrap() {
+                let entry = entry.unwrap();
+                let path = entry.path();
+                if entry.file_type().unwrap().is_dir() {
+                    entries.extend(snapshot(&path));
+                } else {
+                    let modified = path.metadata().unwrap().modified().unwrap();
+                    entries.insert(path.clone(), (std::fs::read(path).unwrap(), modified));
+                }
+            }
+            entries
+        }
+
+        let temporary = tempfile::tempdir().unwrap();
+        let store = cache(temporary.path(), CacheAccess::ReadWrite);
+        assert_eq!(prune_cache(&store, SystemTime::now(), true).unwrap(), 0);
+        assert!(!store.root.exists());
+        let old = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
+        let cutoff = old + Duration::from_secs(1);
+        let expired = store.claim(IDENTITY, 4096).unwrap();
+        expired.store_projection(&projection("expired")).unwrap();
+        open_writable(expired.directory.join("projection.json"))
+            .set_modified(old)
+            .unwrap();
+        let expired_directory = expired.directory.clone();
+        drop(expired);
+        let active_identity = "a".repeat(64);
+        let active = store.claim(&active_identity, 4096).unwrap();
+        let orphan = "b".repeat(64);
+        drop(store.claim(&orphan, 4096).unwrap());
+        std::fs::remove_dir(store.root.join(&orphan)).unwrap();
+
+        let before = snapshot(&store.root);
+        assert_eq!(prune_cache(&store, cutoff, true).unwrap(), 1);
+        assert_eq!(snapshot(&store.root), before);
+        assert!(expired_directory.exists());
+        assert_eq!(prune_cache(&store, cutoff, false).unwrap(), 1);
+        assert!(!expired_directory.exists());
+        assert!(!store.root.join(format!("{IDENTITY}.lock")).exists());
+        assert!(!store.root.join(format!("{orphan}.lock")).exists());
+        assert!(active.directory.exists());
+        assert!(matches!(
+            store.claim(&active_identity, 4096),
+            Err(CacheError::Busy)
+        ));
+        drop(active);
+        assert_eq!(prune_cache(&store, cutoff, false).unwrap(), 0);
+        assert_eq!(std::fs::read_dir(&store.root).unwrap().count(), 1);
+        assert!(store.root.join("namespace.lock").exists());
+
+        let recreated = store.claim(IDENTITY, 4096).unwrap();
+        recreated.store_projection(&projection("new")).unwrap();
+        assert_eq!(
+            recreated.load_projection().unwrap().unwrap().units[0].text,
+            "new"
+        );
         assert!(matches!(store.claim(IDENTITY, 4096), Err(CacheError::Busy)));
     }
 
@@ -904,12 +1043,12 @@ mod tests {
         open_writable(&path).set_modified(old).unwrap();
         drop(claim);
         assert!(matches!(
-            prune_cache(&store, old + Duration::from_secs(1)),
+            prune_cache(&store, old + Duration::from_secs(1), false),
             Err(CacheError::InvalidEntry)
         ));
         assert_eq!(std::fs::read(&path).unwrap(), b"{ malformed");
         let missing = temporary.path().join("missing");
-        assert_eq!(prune(&missing, old).unwrap(), 0);
+        assert_eq!(prune(&missing, old, false).unwrap(), 0);
         assert!(!missing.exists());
     }
 
@@ -1010,7 +1149,7 @@ mod tests {
             }
             assert!(
                 matches!(
-                    prune(&vault, SystemTime::now()),
+                    prune(&vault, SystemTime::now(), false),
                     Err(CacheError::InvalidEntry)
                 ),
                 "{owned}"
@@ -1048,7 +1187,10 @@ mod tests {
             .set_modified(old)
             .unwrap();
         drop(claim);
-        assert_eq!(prune(&alias, old + Duration::from_secs(1)).unwrap(), 1);
+        assert_eq!(
+            prune(&alias, old + Duration::from_secs(1), false).unwrap(),
+            1
+        );
         assert!(
             reader
                 .claim(IDENTITY, 4096)

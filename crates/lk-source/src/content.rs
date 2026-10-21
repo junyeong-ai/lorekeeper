@@ -358,6 +358,16 @@ async fn project_native(
             format == InputFormat::Pdf,
         )?;
         validate_native_models(&projection, expected_models.as_ref())?;
+        if serde_json::to_vec(&projection)
+            .map_err(|_| ProcessingError::Protocol)?
+            .len()
+            > config.max_output_bytes.get()
+        {
+            return Err(ProcessingError::Failed(ProcessingFailure::DecodedLimit));
+        }
+        captured.verify()?;
+        ensure_deadline(deadline)?;
+        claim.touch_projection()?;
         return Ok(projection);
     }
     let projection =
@@ -809,6 +819,67 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires the pinned optional document runtime; set LORE_TEST_DOCUMENT_PYTHON"]
+    async fn rejected_native_cache_reuse_does_not_renew_retention() {
+        let python =
+            std::env::var_os("LORE_TEST_DOCUMENT_PYTHON").expect("LORE_TEST_DOCUMENT_PYTHON");
+        let config = configuration(std::path::Path::new(&python));
+        let temporary = tempfile::tempdir().unwrap();
+        let cache = ProjectionCache::for_vault(temporary.path(), CacheAccess::ReadWrite);
+        let bytes = include_bytes!("content/fixtures/policy.pdf");
+        let captured =
+            lk_core::captured_file::CapturedFile::capture(bytes.as_slice(), bytes.len()).unwrap();
+        project_file_with_cache(&captured, InputFormat::Pdf, Some(&config), Some(&cache))
+            .await
+            .unwrap();
+        let payload = std::fs::read_dir(
+            temporary
+                .path()
+                .join(lk_core::vault_path::PROJECTION_CACHE_DIR),
+        )
+        .map(|entries| {
+            entries
+                .map(|entry| entry.unwrap().path().join("projection.json"))
+                .find(|path| path.is_file())
+                .unwrap()
+        })
+        .unwrap();
+        let old = std::time::UNIX_EPOCH + Duration::from_secs(1);
+        let envelope: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&payload).unwrap()).unwrap();
+        let native_bytes = serde_json::to_vec(&envelope["payload"]).unwrap().len();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&payload)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        for output_limited in [false, true] {
+            let mut limited = config.clone();
+            if output_limited {
+                limited.max_output_bytes = std::num::NonZeroUsize::new(native_bytes - 1).unwrap();
+            } else {
+                limited.max_decoded_bytes = std::num::NonZeroUsize::new(1).unwrap();
+            }
+            assert!(matches!(
+                project_file_with_cache(&captured, InputFormat::Pdf, Some(&limited), Some(&cache))
+                    .await,
+                Err(ProcessingError::Failed(ProcessingFailure::DecodedLimit))
+            ));
+            assert_eq!(payload.metadata().unwrap().modified().unwrap(), old);
+        }
+        let reader = ProjectionCache::for_vault(temporary.path(), CacheAccess::ReadOnly);
+        project_file_with_cache(&captured, InputFormat::Pdf, Some(&config), Some(&reader))
+            .await
+            .unwrap();
+        assert_eq!(payload.metadata().unwrap().modified().unwrap(), old);
+        project_file_with_cache(&captured, InputFormat::Pdf, Some(&config), Some(&cache))
+            .await
+            .unwrap();
+        assert!(payload.metadata().unwrap().modified().unwrap() > old);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires the pinned optional document runtime; set LORE_TEST_DOCUMENT_PYTHON"]
     async fn spreadsheet_structure_preserves_hidden_values_and_sparse_geometry() {
         let python =
             std::env::var_os("LORE_TEST_DOCUMENT_PYTHON").expect("LORE_TEST_DOCUMENT_PYTHON");
@@ -1113,6 +1184,54 @@ save('external-sheet.xlsx', invalid)
         assert_eq!(
             rustix::process::getpgid(Some(pid)),
             Err(rustix::io::Errno::SRCH)
+        );
+    }
+
+    #[test]
+    #[ignore = "requires Python; set LORE_TEST_DOCUMENT_PYTHON"]
+    fn visual_selection_control_uses_the_configured_output_budget() {
+        let python =
+            std::env::var_os("LORE_TEST_DOCUMENT_PYTHON").expect("LORE_TEST_DOCUMENT_PYTHON");
+        let script = [
+            "__name__ = 'selection_test'\n",
+            include_str!("content/vision_common.py"),
+            "\n",
+            include_str!("content/paddle.py"),
+            r#"
+units = [{"location": {"kind": "page", "number": number}, "width": 8, "height": 8} for number in range(1, 50001)]
+control = canonical({"skip": list(range(1, 50001))}) + b"\n"
+assert len(control) > 256 * 1024
+inventory = lambda *args: units
+class Sink:
+    def __init__(self):
+        self.records = []
+    def emit(self, record):
+        self.records.append(record["status"])
+sink = Sink()
+prepare = lambda options: (None, {}, {}, sink)
+with tempfile.NamedTemporaryFile() as captured:
+    options = {"operation": "project", "input_path": captured.name, "format": "pdf", "max_input_bytes": 100, "max_output_bytes": 32 * 1024 * 1024, "max_decoded_bytes": 1}
+    sys.stdin = io.TextIOWrapper(io.BytesIO(control))
+    main(options)
+    assert sink.records == ["inventory", "complete"]
+    options["max_output_bytes"] = 256 * 1024
+    sys.stdin = io.TextIOWrapper(io.BytesIO(control))
+    try:
+        main(options)
+    except ProjectionError as error:
+        assert error.code == "decoded-limit"
+    else:
+        raise AssertionError("over-budget control was accepted")
+"#,
+        ].concat();
+        let output = std::process::Command::new(python)
+            .args(["-I", "-X", "utf8", "-c", &script])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
         );
     }
 
