@@ -6,6 +6,7 @@ use serde::Deserialize;
 
 use lk_core::event::RawItem;
 
+use super::text::ContentFormat;
 use super::{GoogleAuth, check_response};
 use crate::{ExtractContext, Source, SourceError};
 
@@ -404,34 +405,6 @@ struct ContentProjection {
     format: ContentFormat,
 }
 
-/// The declared text format, independent of filename and HTTP charset metadata.
-pub(super) enum ContentFormat {
-    Plain,
-    Markdown,
-    Html,
-}
-
-impl ContentFormat {
-    pub(super) fn from_mime(mime_type: &str) -> Result<Self, SourceError> {
-        match mime_type {
-            "text/plain" => Ok(Self::Plain),
-            "text/markdown" | "text/x-markdown" => Ok(Self::Markdown),
-            "text/html" => Ok(Self::Html),
-            _ => Err(SourceError::Parse(format!(
-                "unsupported Drive text MIME type {mime_type:?}"
-            ))),
-        }
-    }
-
-    pub(super) fn markdown(&self, content: &str) -> Result<String, SourceError> {
-        match self {
-            Self::Plain => crate::fetch::literal_markdown(content),
-            Self::Markdown => Ok(content.to_owned()),
-            Self::Html => Ok(crate::markdown::html_to_markdown(content)),
-        }
-    }
-}
-
 impl ContentProjection {
     fn for_file(file: &FileMeta) -> Result<Self, SourceError> {
         let (export_mime, format) = match file.mime_type.as_deref() {
@@ -693,6 +666,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn relative_remote_dependencies_do_not_become_vault_addresses() {
+        let mut accepted = Vec::new();
+        for (mime, original) in [
+            ("text/markdown", "[Remote](../concepts/owned.md)"),
+            ("text/html", "<a href=\"../concepts/owned.md\">Remote</a>"),
+        ] {
+            let doc = file("doc", mime, "1");
+            let metadata = doc.clone();
+            let server = server(move |url| {
+                if url
+                    .query_pairs()
+                    .any(|(key, value)| key == "alt" && value == "media")
+                {
+                    response(mime, original)
+                } else {
+                    json_response(metadata.clone())
+                }
+            })
+            .await;
+            let http = client();
+            let api = DriveApi {
+                http: &http,
+                token: "fixture",
+                base: server.base.clone(),
+            };
+            let file: FileMeta = serde_json::from_value(doc).unwrap();
+            let (start, end) = context().day_window(24, 0).unwrap();
+            if let Ok(item) = api.capture(&file, "folder-id", start, end).await {
+                let links = lk_core::link::extract_page_links(&item.body);
+                accepted.push((
+                    mime,
+                    links
+                        .into_iter()
+                        .map(|link| {
+                            lk_core::link::resolve_dest(
+                                std::path::Path::new("wiki/documents/report.md"),
+                                &link.dest,
+                            )
+                        })
+                        .collect::<Vec<_>>(),
+                ));
+            }
+        }
+        assert!(
+            accepted.is_empty(),
+            "unresolved remote dependencies were accepted as vault addresses: {accepted:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn plain_projection_keeps_markdown_and_html_as_literal_source_text() {
         let original = "[Literal](ghost.md) <em>tag</em>";
         for mime in ["application/vnd.google-apps.presentation", "text/plain"] {
@@ -750,7 +773,7 @@ mod tests {
     async fn requested_markdown_export_remains_distinct_from_response_content_type() {
         let doc = file("doc", "application/vnd.google-apps.document", "1");
         let metadata = doc.clone();
-        let original = "# Heading\n\n[Related](related.md)\n";
+        let original = "# Heading\n\n[Related](https://example.com/related.md)\n";
         let server = server(move |url| {
             if url.path().ends_with("/export") {
                 response("text/plain; charset=UTF-8", original)
@@ -933,6 +956,7 @@ mod tests {
             "unsupported",
             "changed",
             "missing-version",
+            "relative-dependency",
             "empty",
         ] {
             let case = case.to_string();
@@ -962,6 +986,10 @@ mod tests {
                             missing.as_object_mut().unwrap().remove("version");
                             listing["files"].as_array_mut().unwrap().push(missing);
                         }
+                        "relative-dependency" => listing["files"]
+                            .as_array_mut()
+                            .unwrap()
+                            .push(file("z-relative", "text/markdown", "1")),
                         "empty" => listing["files"] = serde_json::json!([]),
                         _ => unreachable!(),
                     }
@@ -985,6 +1013,16 @@ mod tests {
                         response("text/plain", "unverified changing observation")
                     } else {
                         json_response(file("z-changing", "text/plain", "2"))
+                    }
+                }
+                "/drive/v3/files/z-relative" => {
+                    if url
+                        .query_pairs()
+                        .any(|(key, value)| key == "alt" && value == "media")
+                    {
+                        response("text/markdown", "[Remote](../concepts/owned.md)")
+                    } else {
+                        json_response(file("z-relative", "text/markdown", "1"))
                     }
                 }
                 other => panic!("unexpected request {other}"),

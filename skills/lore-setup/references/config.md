@@ -80,6 +80,13 @@ backfill. It does not reconstruct provider revision history. A folder name, date
 a selector. Google Docs and Slides have explicit text exports; unsupported formats
 are partial coverage. Inventory absence does not authorize retiring existing pages.
 
+Drive plain text stays literal, while declared Markdown and HTML retain structure.
+Structured documents with unresolved relative or root-local links/images are not
+captured; use absolute source URLs or a self-contained manual capture rather than
+relying on a Drive filename or viewer URL as a dependency base. Google Workspace
+[text exports are limited to 10 MB by the provider](https://developers.google.com/workspace/drive/api/reference/rest/v3/files/export);
+the adapter's 16 MiB response reader does not raise that provider limit.
+
 Semantic maintenance is optional and separate from weekly synthesis and retention.
 Enable `graph.audit.schedule` deliberately: each run uses the LLM to review at most
 `batch_size` changed/first-time concepts or declared source documents. `lore run knowledge` uses the configured

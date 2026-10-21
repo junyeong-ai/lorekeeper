@@ -187,7 +187,7 @@ async fn drive_markdown(response: reqwest::Response) -> Result<String, SourceErr
         .ok_or_else(|| {
             SourceError::Parse("Drive meeting notes need a valid Content-Type".into())
         })?;
-    let format = super::drive::ContentFormat::from_mime(media.essence_str())?;
+    let format = super::text::ContentFormat::from_mime(media.essence_str())?;
     let (content, _) = super::drive::read_content(response).await?;
     format.markdown(&content)
 }
@@ -596,7 +596,7 @@ mod tests {
 
     #[tokio::test]
     async fn meeting_notes_keep_explicit_markdown_and_html_structured() {
-        let markdown = "[Related](related.md)";
+        let markdown = "[Related](https://example.com/related.md)";
         let projected =
             meeting_notes_response(true, text_response("text/markdown", markdown.as_bytes()))
                 .await
@@ -615,6 +615,20 @@ mod tests {
             lk_core::link::first_external_dest(&html).as_deref(),
             Some("https://example.com")
         );
+    }
+
+    #[tokio::test]
+    async fn unresolved_meeting_note_dependencies_are_not_accepted_as_vault_links() {
+        for fallback in [false, true] {
+            for (mime, source) in [
+                ("text/markdown", "[Related](../concepts/owned.md)"),
+                ("text/html", "<img src=\"/assets/remote.png\">"),
+            ] {
+                let result =
+                    meeting_notes_response(fallback, text_response(mime, source.as_bytes())).await;
+                assert!(matches!(result, Err(SourceError::Parse(_))), "{result:?}");
+            }
+        }
     }
 
     fn event_from(json: serde_json::Value) -> CalEvent {

@@ -25,7 +25,7 @@ tracing = { workspace = true }
 htmd = { workspace = true }
 markup5ever_rcdom = { workspace = true }
 html5ever = { workspace = true }
-pulldown-cmark = { workspace = true }
+pulldown-cmark = { workspace = true, features = ["html"] }
 pulldown-cmark-to-cmark = { workspace = true }
 feed-rs = { workspace = true }
 dom_smoothie = { workspace = true }

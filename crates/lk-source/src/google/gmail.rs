@@ -522,11 +522,7 @@ where
                 "Gmail body cannot be decoded without replacement characters".into(),
             ));
         }
-        let text = if media.essence_str() == "text/html" {
-            crate::markdown::html_to_markdown(&text)
-        } else {
-            crate::fetch::literal_markdown(&text)?
-        };
+        let text = super::text::ContentFormat::from_mime(media.essence_str())?.markdown(&text)?;
         let separator = if result.is_empty() || text.is_empty() {
             ""
         } else {
@@ -766,6 +762,17 @@ fn decode_base64url(body: &PartBody) -> Result<Vec<u8>, SourceError> {
 mod tests {
     use super::*;
     use std::sync::Mutex;
+
+    #[tokio::test]
+    async fn relative_remote_dependencies_do_not_become_vault_addresses() {
+        let mut part = text_part("<p>Read <a href=\"../concepts/owned.md\">remote</a>.</p>");
+        part["mimeType"] = "text/html".into();
+        let result = body(part).await;
+        assert!(
+            result.is_err(),
+            "HTML email exposed an unresolved vault-relative link: {result:?}"
+        );
+    }
 
     #[tokio::test]
     async fn plain_body_keeps_markdown_and_html_as_literal_source_text() {
@@ -1170,13 +1177,18 @@ mod tests {
 
     #[tokio::test]
     async fn all_unreadable_is_an_error_but_filtered_and_empty_listings_are_valid() {
-        for mode in ["unreadable", "excluded", "calendar", "empty"] {
+        for mode in ["unreadable", "relative", "excluded", "calendar", "empty"] {
             let server = server(move |url| match url.path() {
                 "/gmail/v1/users/me/messages" => json_response(if mode == "empty" {
                     serde_json::json!({})
                 } else {
                     serde_json::json!({"messages": [{"id": "one"}]})
                 }),
+                "/gmail/v1/users/me/messages/one" if mode == "relative" => {
+                    let mut part = text_part("<a href=\"../concepts/owned.md\">remote</a>");
+                    part["mimeType"] = "text/html".into();
+                    json_response(message("one", part))
+                }
                 "/gmail/v1/users/me/messages/one" => json_response(message(
                     "one",
                     serde_json::json!({
@@ -1200,7 +1212,7 @@ mod tests {
             };
             let params = crate::parse_validated::<GmailParams>(&serde_json::json!({"include_queries": ["label:kept"], "exclude": {"subjects": if mode == "excluded" { vec!["skip"] } else { vec![] }}})).unwrap();
             let result = api.observe(&params, &context()).await;
-            if mode == "unreadable" {
+            if matches!(mode, "unreadable" | "relative") {
                 assert!(matches!(
                     result,
                     Err(SourceError::NothingObserved { attempted: 1, .. })

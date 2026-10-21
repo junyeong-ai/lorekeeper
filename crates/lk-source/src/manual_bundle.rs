@@ -153,14 +153,12 @@ fn unsupported_url_attribute(tag: &str, key: &str, namespace: &str) -> bool {
     )
 }
 
-fn html_references(text: &str) -> (Vec<String>, BTreeSet<String>) {
+fn visit_html_elements(text: &str, mut visit: impl FnMut(&str, &str, &[html5ever::Attribute])) {
     let dom = html5ever::parse_document(RcDom::default(), Default::default()).one(text);
 
     // Keep the DOM owner alive: RcDom Node::drop drains descendants even
     // when a traversal holds another handle to a child.
     let mut stack = vec![dom.document.clone()];
-    let mut refs = Vec::new();
-    let mut unsupported = BTreeSet::new();
     while let Some(node) = stack.pop() {
         if let NodeData::Element {
             name,
@@ -172,54 +170,127 @@ fn html_references(text: &str) -> (Vec<String>, BTreeSet<String>) {
             if let Some(contents) = template_contents.borrow().as_ref() {
                 stack.push(contents.clone());
             }
-            let tag = name.local.as_ref();
-            if matches!(
-                tag,
-                "style" | "script" | "base" | "iframe" | "object" | "svg"
-            ) {
-                unsupported.insert(format!("html-{tag}"));
-            }
-            for attr in attrs.borrow().iter() {
-                let key = attr.name.local.as_ref();
-                // A closed table of URL-bearing HTML/foreign-content surfaces. Unsupported
-                // syntax is recorded even when it points to a remote URI: preserving HTML
-                // bytes is not a claim to have captured those resource semantics.
-                if key == "style" || unsupported_url_attribute(tag, key, name.ns.as_ref()) {
-                    let construct = if key == "style" {
-                        "inline-css".into()
-                    } else if name.ns.as_ref() != "http://www.w3.org/1999/xhtml" {
-                        "foreign-url".into()
-                    } else {
-                        format!("html-{tag}-{key}")
-                    };
-                    unsupported.insert(construct);
-                }
-                if matches!(
-                    (tag, key),
-                    ("a", "href")
-                        | ("img", "src")
-                        | ("link", "href")
-                        | ("audio", "src")
-                        | ("video", "src")
-                        | ("source", "src")
-                        | ("video", "poster")
-                ) {
-                    refs.push(attr.value.to_string());
-                }
-                if tag == "link"
-                    && key == "rel"
-                    && attr
-                        .value
-                        .split_ascii_whitespace()
-                        .any(|s| s.eq_ignore_ascii_case("stylesheet"))
-                {
-                    unsupported.insert("css-dependencies".into());
-                }
-            }
+            visit(name.local.as_ref(), name.ns.as_ref(), &attrs.borrow());
         }
         stack.extend(node.children.borrow().iter().cloned());
     }
+}
+
+fn html_references(text: &str) -> (Vec<String>, BTreeSet<String>) {
+    let mut refs = Vec::new();
+    let mut unsupported = BTreeSet::new();
+    visit_html_elements(text, |tag, namespace, attrs| {
+        if matches!(
+            tag,
+            "style" | "script" | "base" | "iframe" | "object" | "svg"
+        ) {
+            unsupported.insert(format!("html-{tag}"));
+        }
+        for attr in attrs {
+            let key = attr.name.local.as_ref();
+            // A closed table of URL-bearing HTML/foreign-content surfaces. Unsupported
+            // syntax is recorded even when it points to a remote URI: preserving HTML
+            // bytes is not a claim to have captured those resource semantics.
+            if key == "style" || unsupported_url_attribute(tag, key, namespace) {
+                let construct = if key == "style" {
+                    "inline-css".into()
+                } else if namespace != "http://www.w3.org/1999/xhtml" {
+                    "foreign-url".into()
+                } else {
+                    format!("html-{tag}-{key}")
+                };
+                unsupported.insert(construct);
+            }
+            if matches!(
+                (tag, key),
+                ("a", "href")
+                    | ("img", "src")
+                    | ("link", "href")
+                    | ("audio", "src")
+                    | ("video", "src")
+                    | ("source", "src")
+                    | ("video", "poster")
+            ) {
+                refs.push(attr.value.to_string());
+            }
+            if tag == "link"
+                && key == "rel"
+                && attr
+                    .value
+                    .split_ascii_whitespace()
+                    .any(|s| s.eq_ignore_ascii_case("stylesheet"))
+            {
+                unsupported.insert("css-dependencies".into());
+            }
+        }
+    });
     (refs, unsupported)
+}
+
+/// URL attributes retained in remote HTML need an explicit source address. This is
+/// separate from the manual bundle's stronger resource-closure policy.
+pub(crate) fn remote_html_references(text: &str) -> (Vec<String>, bool) {
+    let mut refs = Vec::new();
+    let mut has_base = false;
+    visit_html_elements(text, |tag, namespace, attrs| {
+        has_base |= namespace == "http://www.w3.org/1999/xhtml" && tag == "base";
+        for attr in attrs {
+            let key = attr.name.local.as_ref();
+            let html_url = namespace == "http://www.w3.org/1999/xhtml"
+                && matches!(
+                    (tag, key),
+                    ("a" | "area" | "link" | "base", "href")
+                        | (
+                            "img"
+                                | "audio"
+                                | "video"
+                                | "source"
+                                | "track"
+                                | "input"
+                                | "embed"
+                                | "iframe"
+                                | "script",
+                            "src"
+                        )
+                        | ("video", "poster")
+                        | ("object", "data")
+                        | ("form", "action")
+                        | ("input" | "button", "formaction")
+                        | ("blockquote" | "q" | "ins" | "del", "cite")
+                        | ("img" | "iframe", "longdesc")
+                        | ("img" | "input" | "object", "usemap")
+                        | ("body" | "table" | "td" | "th", "background")
+                        | ("html", "manifest")
+                        | ("object" | "applet", "codebase" | "classid")
+                        | ("applet", "code")
+                        | ("command", "icon")
+                );
+            let svg_url = namespace == "http://www.w3.org/2000/svg"
+                && key == "href"
+                && matches!(
+                    tag,
+                    "a" | "image"
+                        | "use"
+                        | "feImage"
+                        | "linearGradient"
+                        | "radialGradient"
+                        | "pattern"
+                        | "filter"
+                        | "textPath"
+                        | "mpath"
+                        | "animate"
+                        | "animateMotion"
+                        | "animateTransform"
+                        | "set"
+                        | "discard"
+                        | "script"
+                );
+            if html_url || svg_url {
+                refs.push(attr.value.to_string());
+            }
+        }
+    });
+    (refs, has_base)
 }
 /// Obsidian's vault-wide basename lookup/implicit .md and embed options are not
 /// filesystem identity. Only an explicit relative filename (or same-page anchor) is supported.

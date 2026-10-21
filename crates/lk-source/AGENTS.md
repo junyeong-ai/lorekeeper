@@ -37,6 +37,14 @@ uses validated params and context; do not add per-adapter output pipelines.
 
 ## Provider-specific seams
 
+- `google/text.rs`: share declared Plain/Markdown/HTML conversion across Drive,
+  Calendar notes and Gmail. Plain is literal; structured Link/Image and retained
+  HTML URL attributes require absolute non-file URLs or same-document fragments.
+  Refuse unresolved local dependencies and HTML base authority rather than guessing
+  from API/viewer URLs or Drive names. Reuse the DOM scanner independently of manual
+  bundle closure policy; code/comments and plain styles are not dependencies. This
+  is not a CSS/srcset or browser resource-closure guarantee. Conversion errors follow
+  the caller's existing per-item or optional-enrichment failure policy.
 - `atlassian/`: auth method determines deployment routing. OAuth/scoped token uses
   api.atlassian.com product/cloud ID; API token/PAT uses the site (PAT Bearer).
   Keep Cloud/Server pagination and user identity separate. Persist a rotated refresh
