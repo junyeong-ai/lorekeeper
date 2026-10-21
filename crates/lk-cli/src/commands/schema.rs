@@ -368,12 +368,10 @@ fn page_schemas(
 /// Shared language and naming policy, including source-grounded homonym qualification.
 fn language_banner(language: &str) -> String {
     format!(
-        "**This vault is written in {language}.** Every word added to a page goes in that \
-         language — a summary, a theme, a concept's synthesis, an exploration — whatever \
-         language the source arrived in. Two things are not translated by it. Source content \
-         is quoted as it stands, and a NAME is not prose: a concept's base name is the form its \
-         own source writes, so a term a source writes in another language keeps its spelling \
-         here. Distinct subjects sharing that name need a source-grounded scope qualifier \
+        "**This vault is written in {language}.** New prose uses this language. \
+         Concept synthesis preserves an established body's language under its generation \
+         policy. Quoted source text and source-written concept names retain their spelling. \
+         Distinct subjects sharing a name need a source-grounded scope qualifier \
          (§ Concept convergence)."
     )
 }
@@ -569,9 +567,7 @@ pub fn render_agents_md(
     writeln!(out).unwrap();
     writeln!(
         out,
-        "A page's `llm_inputs` map is machine-coordination state: each key records the input \
-         a section is owed against and its `_done` companion the input a section was written \
-         from. Never author or edit those values. The applier owns completion and generation-policy \
+        "The applier owns completion and generation-policy \
          provenance; `lore queue regenerate --task-id ID` requests regeneration from retained \
          input when its guards still match. A concept page's `aliases` is renderer-written and always \
          present, carrying the title and every other name the page answers to; on a page you \
@@ -618,9 +614,10 @@ pub fn render_agents_md(
          carries the `.md` extension — the one form Obsidian, GitHub, and OKF consumers \
          all resolve. Never write `[[wikilinks]]`. A concept link from a page is \
          `[{{Name}}]({{concepts-dir}}/{{slug}}.md)`, where `{{concepts-dir}}` is the \
-         relative path to `{}/{}` from that page and `{{slug}}` is the slug of the \
-         concept name (rule \
-         below). Destinations with spaces or parens are percent-encoded (`%20`, `%28`, \
+         relative path to `{}/{}` from that page and `{{slug}}` is the exact \
+         collection-relative address without `.md`, including nested paths. Resolve \
+         names with `lore resolve --json` and use the returned path; never recalculate \
+         an existing address from its title. Destinations with spaces or parens are percent-encoded (`%20`, `%28`, \
          `%29`); non-ASCII slugs stay verbatim.",
         dirs.wiki, CONCEPTS_SUBDIR
     )
