@@ -50,6 +50,14 @@ lives in `lk-vault`/`lk-pipeline`.
   distinct from `done`; unreadable tasks remain for diagnosis. An unparseable line
   blocks its file rather than licensing partial destructive pruning. Prune retains
   answered history until the whole run can retire to `processed/`.
+- Explicit regeneration journals the replaced pending request's exact bytes into
+  processed history with the new request and completion invalidation. Preserve
+  sibling lines verbatim; unknown historical policy cannot keep superseded work
+  active after the new answer completes. A malformed run refuses replacement.
+  Refuse another exact current generation request, ignoring only its
+  `regenerated_from` provenance and the selected pending request being replaced;
+  matching Done requests still pending must be pruned before another request;
+  completed history does not prevent a deliberate later regeneration.
 
 ## Staged results and publication
 

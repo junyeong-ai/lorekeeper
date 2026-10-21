@@ -180,7 +180,7 @@ pub(super) fn apply(
                     body: result.synthesis.clone(),
                 })
             } else {
-                serde_json::to_value(&result)
+                serde_json::to_value(result)
             }
             .map_err(|e| miette::miette!("{e}"))?;
             super::super::work::guard_queue(

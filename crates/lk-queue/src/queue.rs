@@ -529,9 +529,20 @@ impl QueueFile {
 /// Decode JSONL without losing malformed lines or treating decode errors as I/O failures.
 pub fn read_tasks(path: &Path) -> std::io::Result<QueueFile> {
     let file = std::fs::File::open(path)?;
+    read_tasks_from(path, BufReader::new(file))
+}
+
+/// Capture exact queue bytes and decode that same snapshot for guarded replacement.
+pub fn read_tasks_snapshot(path: &Path) -> std::io::Result<(Vec<u8>, QueueFile)> {
+    let raw = std::fs::read(path)?;
+    let decoded = read_tasks_from(path, raw.as_slice())?;
+    Ok((raw, decoded))
+}
+
+fn read_tasks_from(path: &Path, reader: impl BufRead) -> std::io::Result<QueueFile> {
     let mut tasks = Vec::new();
     let mut unparseable = 0;
-    for (index, line) in BufReader::new(file).split(b'\n').enumerate() {
+    for (index, line) in reader.split(b'\n').enumerate() {
         let line = line?;
         if line.iter().all(|byte| byte.is_ascii_whitespace()) {
             continue;

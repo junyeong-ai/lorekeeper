@@ -2225,6 +2225,7 @@ fn explicit_regeneration_reuses_retained_input_and_stamps_policy_without_global_
         "processed",
         "historical-policy",
         "pending",
+        "pending-historical-policy",
         "changed-input",
         "missing",
         "ambiguous",
@@ -2247,7 +2248,7 @@ fn explicit_regeneration_reuses_retained_input_and_stamps_policy_without_global_
         let mut input = req.task_input();
         input.insert("locale".into(), "en".into());
         let mut task = serde_json::json!({"task_id":"retained","kind":"summarize","created_at":"2026-10-16T00:00:00Z","cache_hash":hash,"input":input,"target":req.target});
-        if scenario == "historical-policy" {
+        if matches!(scenario, "historical-policy" | "pending-historical-policy") {
             task["input"]["generation_policy"] = serde_json::json!("previous-policy-v0");
         }
         if scenario == "missing-input" {
@@ -2257,7 +2258,7 @@ fn explicit_regeneration_reuses_retained_input_and_stamps_policy_without_global_
             "---\ntype: daily\nllm_inputs:\n  summary: \"{hash}\"\n  summary_done: \"{hash}\"\n---\n## Summary\nPreserved authored summary.\n"
         );
         ws.write("daily/source/day.md", &page);
-        let retained = if scenario == "pending" {
+        let retained = if scenario.starts_with("pending") {
             ".lorekeeper/queue/retained.jsonl"
         } else {
             ".lorekeeper/queue/processed/retained.jsonl"
@@ -2274,7 +2275,10 @@ fn explicit_regeneration_reuses_retained_input_and_stamps_policy_without_global_
         let before = ws.read("daily/source/day.md");
         let args = ["queue", "regenerate", "--task-id", "retained"];
         let preview = ws.run(&[args.as_slice(), &["--dry-run"]].concat());
-        let accepted = matches!(scenario, "processed" | "pending" | "historical-policy");
+        let accepted = matches!(
+            scenario,
+            "processed" | "pending" | "historical-policy" | "pending-historical-policy"
+        );
         assert_eq!(
             preview.status.success(),
             accepted,
@@ -2308,18 +2312,28 @@ fn explicit_regeneration_reuses_retained_input_and_stamps_policy_without_global_
             .find(|r| r["task_id"] == new_id)
             .unwrap();
         assert_eq!(row["status"], "current");
-        if scenario == "pending" {
-            let old = status["data"]["tasks"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .find(|r| r["task_id"] == "retained")
-                .unwrap();
-            assert_eq!(
-                old["status"], "stale",
-                "legacy task cannot satisfy explicit new-policy request"
+        if scenario.starts_with("pending") {
+            assert!(
+                status["data"]["tasks"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|row| row["task_id"] != "retained")
             );
+            assert!(!ws.vault().join(retained).exists());
+            let archived = std::fs::read_dir(ws.vault().join(".lorekeeper/queue/processed"))
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap()
+                .path();
+            assert_eq!(std::fs::read_to_string(archived).unwrap(), task.to_string());
         }
+        let waiting_page = ws.read("daily/source/day.md");
+        let repeated = ws.run(&args);
+        assert!(!repeated.status.success());
+        assert!(String::from_utf8_lossy(&repeated.stderr).contains("regeneration already pending"));
+        assert_eq!(ws.read("daily/source/day.md"), waiting_page);
         let result = serde_json::json!({"task_id":new_id,"cache_hash":hash,"target_revision":row["target_revision"],"body":"Newly reviewed summary."});
         ws.write(
             &format!(".lorekeeper/queue/results/{new_id}.section.json"),
@@ -2337,7 +2351,120 @@ fn explicit_regeneration_reuses_retained_input_and_stamps_policy_without_global_
                 || after.contains("summary_policy_done: summary-v1")
         );
         assert!(after.contains("Newly reviewed summary."));
+        let completed_retry = ws.run(&args);
+        assert!(!completed_retry.status.success());
+        assert!(String::from_utf8_lossy(&completed_retry.stderr).contains("lore queue prune"));
+        assert_eq!(ws.read("daily/source/day.md"), after);
+        assert!(ws.run(&["queue", "prune"]).status.success());
+        assert!(ws.run(&["queue", "check"]).status.success());
+        assert!(
+            ws.run(&args).status.success(),
+            "completed work may be deliberately regenerated again"
+        );
     }
+}
+
+#[test]
+fn pending_regeneration_preserves_exact_siblings_and_rejects_corrupt_runs() {
+    for corruption in [
+        None,
+        Some(b"{truncated".as_slice()),
+        Some(b"\xff".as_slice()),
+    ] {
+        let ws = Workspace::new();
+        let input = serde_json::json!({"text":"Retained source.","max_sentences":3,"locale":"en"});
+        let hash = lk_queue::cache_hash(input.as_object().unwrap());
+        let page = format!(
+            "---\ntype: daily\nllm_inputs:\n  summary: {hash}\n---\n## Summary\nAuthored body.\n"
+        );
+        ws.write("daily/source/old.md", &page);
+        ws.write("daily/source/sibling.md", &page);
+        let mut old = serde_json::json!({"task_id":"retained","kind":"summarize","created_at":"2026-10-16T00:00:00Z","cache_hash":hash,"input":input,"target":{"vault_path":"daily/source/old.md","kind":"daily-summary","anchor":"## Summary"},"historical_note":"preserve exact bytes"});
+        let mut sibling = old.clone();
+        sibling["task_id"] = "sibling".into();
+        sibling["target"]["vault_path"] = "daily/source/sibling.md".into();
+        old["input"]["generation_policy"] = "previous-policy-v0".into();
+        let sibling_lines = format!("\t{} \r\n\r\n", sibling);
+        let old_line = old.to_string();
+        let mut original = format!("{sibling_lines}{old_line}").into_bytes();
+        if let Some(corruption) = corruption {
+            original.push(b'\n');
+            original.extend_from_slice(corruption);
+        }
+        let pending = ".lorekeeper/queue/retained.jsonl";
+        ws.write(pending, "");
+        std::fs::write(ws.vault().join(pending), &original).unwrap();
+        let preview = ws.run(&["queue", "regenerate", "--task-id", "retained", "--dry-run"]);
+        assert_eq!(
+            preview.status.success(),
+            corruption.is_none(),
+            "{}",
+            String::from_utf8_lossy(&preview.stderr)
+        );
+        assert_eq!(std::fs::read(ws.vault().join(pending)).unwrap(), original);
+        assert!(!ws.vault().join(".lorekeeper/queue/processed").exists());
+        let output = ws.run(&["queue", "regenerate", "--task-id", "retained"]);
+        assert_eq!(
+            output.status.success(),
+            corruption.is_none(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if corruption.is_some() {
+            assert_eq!(std::fs::read(ws.vault().join(pending)).unwrap(), original);
+            assert_eq!(ws.read("daily/source/old.md"), page);
+            assert!(!ws.vault().join(".lorekeeper/queue/processed").exists());
+        } else {
+            assert_eq!(ws.read(pending), sibling_lines);
+            let archived = std::fs::read_dir(ws.vault().join(".lorekeeper/queue/processed"))
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap()
+                .path();
+            assert_eq!(std::fs::read_to_string(archived).unwrap(), old_line);
+            let status = work_json(&ws, &["queue", "status", "--json"]);
+            assert_eq!(status["data"]["current"], 2);
+            assert_eq!(status["data"]["unreadable"], 0);
+            assert!(
+                status["data"]["tasks"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|task| task["task_id"] == "sibling")
+            );
+        }
+    }
+}
+
+#[test]
+fn regeneration_replaces_pending_attempts_without_admitting_a_matching_ancestor_again() {
+    let ws = Workspace::new();
+    let input = serde_json::json!({"text":"Retained source.","max_sentences":3,"locale":"en"});
+    let hash = lk_queue::cache_hash(input.as_object().unwrap());
+    let page = format!(
+        "---\ntype: daily\nllm_inputs:\n  summary: {hash}\n---\n## Summary\nAuthored body.\n"
+    );
+    ws.write("daily/source/page.md", &page);
+    let task = serde_json::json!({"task_id":"ancestor","kind":"summarize","created_at":"2026-10-16T00:00:00Z","cache_hash":hash,"input":input,"target":{"vault_path":"daily/source/page.md","kind":"daily-summary","anchor":"## Summary"}});
+    ws.write(
+        ".lorekeeper/queue/processed/original.jsonl",
+        &task.to_string(),
+    );
+    let first = work_json(&ws, &["queue", "regenerate", "--task-id", "ancestor"]);
+    let first_id = first["data"]["task_id"].as_str().unwrap();
+    let replacement = work_json(&ws, &["queue", "regenerate", "--task-id", first_id]);
+    let replacement_id = replacement["data"]["task_id"].as_str().unwrap();
+    let before = ws.read("daily/source/page.md");
+    let repeated = ws.run(&["queue", "regenerate", "--task-id", "ancestor"]);
+    assert!(!repeated.status.success());
+    assert!(String::from_utf8_lossy(&repeated.stderr).contains("regeneration already pending"));
+    assert_eq!(ws.read("daily/source/page.md"), before);
+    let status = work_json(&ws, &["queue", "status", "--json"]);
+    assert_eq!(status["data"]["current"], 1);
+    assert_eq!(status["data"]["unreadable"], 0);
+    assert_eq!(status["data"]["tasks"].as_array().unwrap().len(), 1);
+    assert_eq!(status["data"]["tasks"][0]["task_id"], replacement_id);
 }
 
 #[test]
