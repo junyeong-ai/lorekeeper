@@ -50,6 +50,29 @@ pub fn same_existing_entry(root: &Path, a: &Path, b: &Path) -> Result<bool, Vaul
     Ok(matches!((canonical(a)?, canonical(b)?), (Some(a), Some(b)) if a == b))
 }
 
+/// Resolve a page's direct owner without conflating distinct hard-link entries.
+/// Missing descendants retain their exact address; invalid/dangling ancestors fail.
+pub fn resolve_page_owner(root: &Path, path: &Path) -> Result<PathBuf, VaultError> {
+    let full = page_path(root, path)?;
+    destination(&full)?
+        .strip_prefix(destination(root)?)
+        .map(Path::to_path_buf)
+        .map_err(|error| VaultError::Io(std::io::Error::other(error.to_string())))
+}
+
+/// Find an existing page's owner; missing or dangling entries establish no owner.
+pub fn find_page_owner(root: &Path, path: &Path) -> Result<Option<PathBuf>, VaultError> {
+    let owner = match page_path(root, path).and_then(|full| full.canonicalize()) {
+        Ok(owner) => owner,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    owner
+        .strip_prefix(root.canonicalize()?)
+        .map(|path| Some(path.to_path_buf()))
+        .map_err(|error| VaultError::Io(std::io::Error::other(error.to_string())))
+}
+
 pub(crate) fn destination(path: &Path) -> std::io::Result<PathBuf> {
     let (mut resolved, missing) = split_destination(path)?;
     for name in missing.iter().rev() {
@@ -237,6 +260,7 @@ mod tests {
                 writer.edit_page_sync(Path::new(path), "new").is_err(),
                 "{path}"
             );
+            assert!(find_page_owner(root.path(), Path::new(path)).is_err());
         }
         assert!(!outside.path().join("page.md").exists());
         assert!(!outside.path().join("new").exists());
@@ -247,6 +271,19 @@ mod tests {
             .unwrap();
         std::os::unix::fs::symlink("inside/page.md", root.path().join("leaf.md")).unwrap();
         assert!(page_path(root.path(), Path::new("leaf.md")).is_ok());
+        assert_eq!(
+            find_page_owner(root.path(), Path::new("leaf.md")).unwrap(),
+            Some("inside/page.md".into())
+        );
+        std::fs::hard_link(
+            root.path().join("inside/page.md"),
+            root.path().join("hard.md"),
+        )
+        .unwrap();
+        assert_eq!(
+            find_page_owner(root.path(), Path::new("hard.md")).unwrap(),
+            Some("hard.md".into())
+        );
         assert!(
             writer
                 .write_page_sync(Path::new("leaf.md"), "replaced")
@@ -258,6 +295,14 @@ mod tests {
         );
         std::os::unix::fs::symlink("absent", root.path().join("dangling")).unwrap();
         assert!(page_path(root.path(), Path::new("dangling/new.md")).is_err());
+        assert_eq!(
+            find_page_owner(root.path(), Path::new("dangling/new.md")).unwrap(),
+            None
+        );
+        assert_eq!(
+            find_page_owner(root.path(), Path::new("absent.md")).unwrap(),
+            None
+        );
     }
     #[test]
     fn aliases_follow_the_actual_filesystem_and_exact_addresses_win() {

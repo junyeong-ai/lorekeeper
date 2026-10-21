@@ -888,10 +888,12 @@ pub(super) fn attach_reviews(
     dirs: &VaultDirs,
     pages: &mut [Page],
 ) -> Result<(), VaultError> {
-    let mut reviews = crate::review::review_previews(root, dirs)?;
+    let reviews = crate::review::review_previews(root, dirs)?;
     for page in pages {
+        let owner = crate::resolve_page_owner(root, &page.rel_path)?;
         page.reviews = reviews
-            .remove(page.rel_path.to_string_lossy().as_ref())
+            .get(owner.to_string_lossy().as_ref())
+            .cloned()
             .unwrap_or_default();
     }
     Ok(())

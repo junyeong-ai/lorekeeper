@@ -735,12 +735,11 @@ fn load_page_input(
     root: &Path,
     path: &str,
 ) -> Result<Option<(String, AuditPageInput)>, GraphError> {
-    let raw =
-        match std::fs::read_to_string(lk_vault::page_path(root, Path::new(path)).map_err(error)?) {
-            Ok(raw) => raw,
-            Err(failure) if failure.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(failure) => return Err(error(failure)),
-        };
+    let raw = match lk_vault::page_path(root, Path::new(path)).and_then(std::fs::read_to_string) {
+        Ok(raw) => raw,
+        Err(failure) if failure.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(failure) => return Err(error(failure)),
+    };
     let input = page_input(path, &raw);
     Ok(Some((raw, input)))
 }
@@ -755,22 +754,28 @@ struct ReviewDependencyIndex {
 impl ReviewDependencyIndex {
     fn load(root: &Path, dirs: &VaultDirs) -> Result<Self, GraphError> {
         let reports = lk_vault::list_reviews(root, dirs).map_err(error)?;
-        let subjects = review_subjects(root, &reports)?;
+        let mut subjects = review_subjects(root, &reports)?;
         let mut by_subject: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-        for (path, declared) in &subjects {
-            for subject in declared {
+        let mut indexed_subjects = BTreeMap::new();
+        let mut indexed_reports = BTreeMap::new();
+        for report in reports {
+            let owner = lk_vault::resolve_page_owner(root, Path::new(&report.path))
+                .map_err(error)?
+                .to_string_lossy()
+                .into_owned();
+            let declared = subjects.remove(&report.path).unwrap_or_default();
+            for subject in &declared {
                 by_subject
                     .entry(subject.clone())
                     .or_default()
-                    .insert(path.clone());
+                    .insert(report.path.clone());
             }
+            indexed_subjects.insert(owner.clone(), declared);
+            indexed_reports.insert(owner, report);
         }
         Ok(Self {
-            reports: reports
-                .into_iter()
-                .map(|report| (report.path.clone(), report))
-                .collect(),
-            subjects,
+            reports: indexed_reports,
+            subjects: indexed_subjects,
             by_subject,
             dependencies: BTreeMap::new(),
         })
@@ -782,20 +787,29 @@ impl ReviewDependencyIndex {
         subject: &str,
         path: &str,
     ) -> Result<AuditReviewDependency, GraphError> {
+        let subject = lk_vault::resolve_page_owner(root, Path::new(subject))
+            .map_err(error)?
+            .to_string_lossy()
+            .into_owned();
+        let owner = match lk_vault::find_page_owner(root, Path::new(path)) {
+            Ok(owner) => owner.map(|owner| owner.to_string_lossy().into_owned()),
+            Err(_) => return review_dependency(root, &subject, path, None, None),
+        };
+        let lookup = owner.as_deref().unwrap_or(path);
         let declares_subject = self
             .subjects
-            .get(path)
-            .is_some_and(|subjects| subjects.iter().any(|declared| declared == subject));
+            .get(lookup)
+            .is_some_and(|subjects| subjects.iter().any(|declared| declared == &subject));
         let key = (path.to_owned(), declares_subject);
         if let Some(dependency) = self.dependencies.get(&key) {
             return Ok(dependency.clone());
         }
         let dependency = review_dependency(
             root,
-            subject,
+            &subject,
             path,
-            self.reports.get(path),
-            self.subjects.get(path),
+            self.reports.get(lookup),
+            self.subjects.get(lookup),
         )?;
         self.dependencies.insert(key, dependency.clone());
         Ok(dependency)
@@ -846,7 +860,23 @@ fn review_subjects(
                 .map(|scope| scope.subjects)
                 .unwrap_or_default()
         };
-        subjects.insert(review.path.clone(), scoped);
+        let owners = scoped
+            .into_iter()
+            .filter(|path| exact_page_address(path))
+            .map(
+                |path| match lk_vault::find_page_owner(root, Path::new(&path)) {
+                    Ok(owner) => Ok(owner.map(|owner| owner.to_string_lossy().into_owned())),
+                    Err(_) if review.effective_state == lk_vault::ReviewEffectiveState::Invalid => {
+                        Ok(None)
+                    }
+                    Err(failure) => Err(error(failure)),
+                },
+            )
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .collect();
+        subjects.insert(review.path.clone(), owners);
     }
     Ok(subjects)
 }
@@ -859,11 +889,11 @@ fn scoped_reviews(
     receipts: &Receipts,
 ) -> Result<Vec<AuditReviewDependency>, GraphError> {
     let subject = subject.to_string_lossy();
-    let mut paths = index
-        .by_subject
-        .get(subject.as_ref())
-        .cloned()
-        .unwrap_or_default();
+    let owner = lk_vault::resolve_page_owner(root, Path::new(subject.as_ref()))
+        .map_err(error)?
+        .to_string_lossy()
+        .into_owned();
+    let mut paths = index.by_subject.get(&owner).cloned().unwrap_or_default();
     // Preserve dependencies recorded by earlier assessments, including now missing reviews.
     if let Some(receipt) = receipts.entries.get(subject.as_ref()) {
         paths.extend(receipt.reviews.iter().cloned());
@@ -3069,6 +3099,45 @@ mod tests {
                 u64::MAX
             )
             .is_err()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dangling_archived_evidence_remains_readable_without_weakening_publication_guards() {
+        let root = tempfile::tempdir().unwrap();
+        let subject = "wiki/concepts/a.md";
+        let body = "---\ntype: concept\n---\nA claim.\n";
+        write(root.path(), subject, body);
+        write(root.path(), "source.md", "Historical evidence.\n");
+        std::os::unix::fs::symlink("source.md", root.path().join("alias.md")).unwrap();
+        let archive = lk_vault::archive_evidence(root.path(), &["alias.md".into()]).unwrap();
+        write(
+            root.path(),
+            "wiki/explorations/finding.md",
+            &review_body(subject, "alias.md", &archive.citations[0].revision),
+        );
+        std::fs::remove_file(root.path().join("source.md")).unwrap();
+        let reviews = review_dependencies(
+            root.path(),
+            &VaultDirs::default(),
+            &BTreeMap::from([(subject.into(), lk_vault::parse_page(body).unwrap())]),
+        )
+        .unwrap();
+        let dependency = &reviews[subject][0];
+        assert_eq!(dependency.state, AuditReviewState::Open);
+        assert!(dependency.evidence[0].current.is_none());
+        assert!(dependency.evidence[0].archived.is_some());
+        let mut plan = MutationPlan::default();
+        guard_review_dependency(&mut plan, root.path(), dependency).unwrap();
+        let session = MutationSession::acquire(root.path()).unwrap();
+        assert!(session.apply(plan).is_err());
+        assert!(!root.path().join(STATE).exists());
+        assert!(
+            std::fs::symlink_metadata(root.path().join("alias.md"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
         );
     }
 

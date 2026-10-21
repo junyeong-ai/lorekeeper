@@ -246,10 +246,17 @@ pub fn plan_review_repointing(
                 pointer.display()
             ))
         })?;
-        if subjects
+        let declared = reviews[&owner]
+            .1
+            .subjects
             .iter()
-            .any(|subject| !reviews[&owner].1.subjects.contains(subject))
-        {
+            .map(|subject| crate::resolve_page_owner(root, &address(subject)?))
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        let requested = subjects
+            .iter()
+            .map(|subject| crate::resolve_page_owner(root, &address(subject)?))
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        if !requested.is_subset(&declared) {
             return Err(VaultError::Frontmatter(format!(
                 "knowledge_review does not declare the moved subject: {}; explicitly reassess its scope before moving or merging the subject",
                 owner.display()
@@ -335,12 +342,35 @@ pub(crate) fn review_previews(
         let Some(review) = &report.review else {
             continue;
         };
-        let subjects: std::collections::BTreeSet<_> = review.subjects.iter().cloned().collect();
-        let evidence: std::collections::BTreeSet<_> = review
-            .evidence
-            .iter()
-            .map(|citation| citation.path.clone())
-            .collect();
+        let mut subjects = BTreeSet::new();
+        let mut evidence = BTreeSet::new();
+        for (address, subject) in review.subjects.iter().map(|path| (path, true)).chain(
+            review
+                .evidence
+                .iter()
+                .map(|citation| (&citation.path, false)),
+        ) {
+            let Some(path) = lk_core::link::resolve_dest(Path::new(""), address).filter(|path| {
+                path.to_string_lossy() == *address
+                    && path.extension().is_some_and(|extension| extension == "md")
+            }) else {
+                continue;
+            };
+            let owner = match crate::find_page_owner(root, &path) {
+                Ok(owner) => owner,
+                Err(_) if report.effective_state == ReviewEffectiveState::Invalid => continue,
+                Err(error) => return Err(error),
+            };
+            let Some(owner) = owner else {
+                continue;
+            };
+            let owner = owner.to_string_lossy().into_owned();
+            if subject {
+                subjects.insert(owner);
+            } else {
+                evidence.insert(owner);
+            }
+        }
         for path in subjects.union(&evidence) {
             result.entry(path.clone()).or_default().push(ReviewPreview {
                 path: report.path.clone(),
@@ -731,6 +761,11 @@ pub fn list_reviews(root: &Path, dirs: &VaultDirs) -> Result<Vec<ReviewReport>, 
                     path.strip_prefix(root).expect("review belongs to vault"),
                     &page,
                 ));
+                for subject in &review.subjects {
+                    if let Err(error) = crate::find_page_owner(root, Path::new(subject)) {
+                        report.errors.push(format!("{subject}: {error}"));
+                    }
+                }
                 for citation in &review.evidence {
                     if lk_core::link::resolve_dest(Path::new(""), &citation.path).as_deref()
                         == path.strip_prefix(root).ok()
@@ -786,6 +821,55 @@ pub fn list_reviews(root: &Path, dirs: &VaultDirs) -> Result<Vec<ReviewReport>, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn review_repointing_accepts_symlink_subject_scope_but_keeps_hardlinks_distinct() {
+        for hardlink in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let before = "---\ntype: concept\nknowledge_review: review-alias.md\n---\nOld claim.\n";
+            std::fs::write(root.path().join("old.md"), before).unwrap();
+            let evidence = "---\ntype: concept\n---\nSurvivor.\n";
+            std::fs::write(root.path().join("new.md"), evidence).unwrap();
+            if hardlink {
+                std::fs::hard_link(root.path().join("old.md"), root.path().join("alias.md"))
+                    .unwrap();
+            } else {
+                std::os::unix::fs::symlink("old.md", root.path().join("alias.md")).unwrap();
+            }
+            let metadata = serde_json::json!({
+                "status":"open", "subjects":["alias.md"],
+                "evidence":[{"path":"new.md","revision":lk_core::concept::source_revision(&parse_page(evidence).unwrap())}]
+            });
+            let review = format!("---\ntype: exploration\nreview: {metadata}\n---\nOpen review.\n");
+            std::fs::write(root.path().join("review.md"), &review).unwrap();
+            std::os::unix::fs::symlink("review.md", root.path().join("review-alias.md")).unwrap();
+            let result = plan_review_repointing(
+                root.path(),
+                &["old.md".into(), "new.md".into(), "review.md".into()],
+                &[("old.md".into(), "new.md".into())],
+                &mut crate::MutationPlan::default(),
+            );
+            if hardlink {
+                assert!(
+                    result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("does not declare the moved subject")
+                );
+            } else {
+                let updates = result.unwrap();
+                let migrated = parse_page(&updates[Path::new("review.md")].1).unwrap();
+                let metadata_after = migrated.frontmatter.get("review").unwrap();
+                assert_eq!(metadata_after["subjects"], serde_json::json!(["new.md"]));
+                assert_eq!(metadata_after["evidence"], metadata["evidence"]);
+            }
+            assert_eq!(
+                std::fs::read_to_string(root.path().join("review.md")).unwrap(),
+                review
+            );
+        }
+    }
 
     #[test]
     fn unchanged_document_publication_keeps_composed_work_and_guards_target() {

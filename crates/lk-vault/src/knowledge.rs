@@ -8,7 +8,7 @@ use lk_core::config::{ConceptCategory, VaultDirs};
 use lk_core::frontmatter::KnowledgeStatus;
 use serde::{Deserialize, Serialize};
 
-use crate::{KnowledgeReview, MutationPlan, MutationSession, VaultError};
+use crate::{KnowledgeReview, MutationPlan, MutationSession, VaultError, resolve_page_owner};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -102,14 +102,6 @@ fn read(root: &Path, path: &Path, revision: Option<&str>) -> Result<Option<Strin
         )));
     }
     Ok(current)
-}
-
-fn resolve_page_owner(root: &Path, path: &Path) -> Result<PathBuf, VaultError> {
-    let full = crate::page_path(root, path)?;
-    lk_core::fs::canonical_prefix(&full)
-        .strip_prefix(root.canonicalize()?)
-        .map(Path::to_path_buf)
-        .map_err(|error| invalid(error.to_string()))
 }
 
 fn retain_read(
@@ -431,12 +423,22 @@ fn build_curation(
         if !errors.is_empty() {
             return Err(invalid(errors.join("; ")));
         }
+        for subject in &assessment.subjects {
+            crate::find_page_owner(root, Path::new(subject))?;
+        }
         for change in request
             .concepts
             .iter()
             .filter(|change| change.knowledge_review.as_deref() == Some(&review_path))
         {
-            if !assessment.subjects.contains(&change.path) {
+            let subject = resolve_page_owner(root, Path::new(&change.path))?;
+            let declares_subject = assessment
+                .subjects
+                .iter()
+                .map(|path| resolve_page_owner(root, Path::new(path)))
+                .collect::<Result<BTreeSet<_>, _>>()?
+                .contains(&subject);
+            if !declares_subject {
                 return Err(invalid(
                     "publication review must explicitly name its subject",
                 ));

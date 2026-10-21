@@ -190,3 +190,271 @@ fn reviewed_curation_is_read_only_in_preview_guarded_and_discoverable_after_publ
         after
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn review_scopes_follow_verified_symlink_owners_without_merging_hardlink_addresses() {
+    for kind in ["leaf", "directory", "hardlink", "review-directory"] {
+        let root = tempfile::tempdir().unwrap();
+        let vault = root.path().join("vault");
+        for directory in ["concepts", "documents", "explorations"] {
+            std::fs::create_dir_all(vault.join("wiki").join(directory)).unwrap();
+        }
+        if kind == "review-directory" {
+            std::fs::remove_dir(vault.join("wiki/explorations")).unwrap();
+            std::fs::create_dir(vault.join("review-storage")).unwrap();
+            std::os::unix::fs::symlink("../review-storage", vault.join("wiki/explorations"))
+                .unwrap();
+        }
+        let config = root.path().join("config.yaml");
+        std::fs::write(&config, "vault:\n  root: vault\n  locale: en\nidentity:\n  name: Test\n  email: test@example.com\nsources:\n  notes:\n    type: manual\n    params:\n      inbox_dir: inbox\n").unwrap();
+        let concept = "wiki/concepts/topic.md";
+        let source = "wiki/documents/source.md";
+        let review = "wiki/explorations/review.md";
+        let before = "---\ntype: concept\ntitle: Topic\n---\n## Synthesis\nA claim.\n\n## Sources\n\n## Related\n";
+        std::fs::write(vault.join(concept), before).unwrap();
+        std::fs::write(
+            vault.join(source),
+            "---\ntype: document\ntitle: Source\n---\n## Summary\nSource evidence.\n",
+        )
+        .unwrap();
+        let alias = if kind == "directory" {
+            std::os::unix::fs::symlink("wiki/concepts", vault.join("concept-alias")).unwrap();
+            "concept-alias/topic.md"
+        } else {
+            let alias = "wiki/concepts/alias.md";
+            if kind != "hardlink" {
+                std::os::unix::fs::symlink("topic.md", vault.join(alias)).unwrap();
+            } else {
+                std::fs::hard_link(vault.join(concept), vault.join(alias)).unwrap();
+            }
+            alias
+        };
+        let source_alias = "wiki/documents/source-alias.md";
+        std::os::unix::fs::symlink("source.md", vault.join(source_alias)).unwrap();
+        let evidence = ok(&config, &["wiki", "evidence", source_alias]);
+        let declared = json!({
+            "status":"open", "subjects":[alias], "evidence":evidence["citations"],
+            "resolution":null
+        });
+        let content = format!(
+            "---\ntype: exploration\ntitle: Assessment\nreview: {declared}\n---\nA scoped unresolved question.\n"
+        );
+        let plan = root.path().join("plan.json");
+        std::fs::write(&plan, serde_json::to_vec(&json!({
+            "evidence":[{"path":source_alias,"revision":evidence["file_revisions"][source_alias]}],
+            "reviews":[{"path":review,"revision":null,"content":content}]
+        })).unwrap()).unwrap();
+        ok(
+            &config,
+            &["wiki", "curate", "--file", plan.to_str().unwrap()],
+        );
+        let reports = ok(&config, &["wiki", "reviews"]);
+        assert_eq!(reports[0]["review"]["subjects"], json!([alias]), "{kind}");
+        assert_eq!(reports[0]["review"]["evidence"], evidence["citations"]);
+        assert_eq!(reports[0]["errors"], json!([]));
+        let snapshot = ok(&config, &["wiki", "prepare"]);
+        let id = snapshot["snapshot"].as_str().unwrap();
+        let expected = usize::from(kind != "hardlink");
+        for capture in [None, Some(id)] {
+            let mut args = vec!["wiki", "search", "Topic", "--json"];
+            if let Some(id) = capture {
+                args.extend(["--snapshot", id]);
+            }
+            let search = ok(&config, &args);
+            let canonical = search["hits"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|hit| hit["path"] == concept)
+                .unwrap();
+            assert_eq!(
+                canonical["reviews"].as_array().unwrap().len(),
+                expected,
+                "{kind}: {search}"
+            );
+            if kind == "hardlink" {
+                let separate = search["hits"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|hit| hit["path"] == alias)
+                    .unwrap();
+                assert_eq!(separate["reviews"].as_array().unwrap().len(), 1);
+            }
+        }
+        let context = ok(&config, &["wiki", "context", concept, "--snapshot", id]);
+        assert_eq!(context["reviews"]["total"], expected, "{kind}: {context}");
+        let source_context = ok(&config, &["wiki", "context", source, "--snapshot", id]);
+        assert_eq!(
+            source_context["reviews"]["total"], 1,
+            "{kind}: {source_context}"
+        );
+        assert_eq!(
+            source_context["reviews"]["reviews"][0]["relation"],
+            "evidence"
+        );
+        let audit = ok(&config, &["wiki", "audit-plan", "--path", concept]);
+        assert_eq!(
+            audit["candidates"][0]["reviews"].as_array().unwrap().len(),
+            expected,
+            "{kind}: {audit}"
+        );
+        if expected == 1 {
+            assert_eq!(audit["candidates"][0]["reviews"][0]["state"], "open");
+        }
+        let fingerprint = ok(
+            &config,
+            &[
+                "wiki",
+                "fingerprint",
+                "--file",
+                vault.join(concept).to_str().unwrap(),
+            ],
+        );
+        std::fs::write(&plan, serde_json::to_vec(&json!({
+            "evidence":[{"path":source_alias,"revision":evidence["file_revisions"][source_alias]}],
+            "concepts":[{"path":concept,"revision":fingerprint["file_revision"],"knowledge_status":"active","knowledge_review":review}]
+        })).unwrap()).unwrap();
+        let publication = run(
+            &config,
+            &["wiki", "curate", "--file", plan.to_str().unwrap()],
+        );
+        assert_eq!(
+            publication.status.success(),
+            kind != "hardlink",
+            "{kind}: {}",
+            String::from_utf8_lossy(&publication.stderr)
+        );
+        assert_eq!(
+            std::fs::read_to_string(vault.join(review)).unwrap(),
+            content
+        );
+        if kind == "hardlink" {
+            assert_eq!(
+                std::fs::read_to_string(vault.join(concept)).unwrap(),
+                before
+            );
+        } else {
+            let review_alias = "wiki/explorations/review-alias.md";
+            std::os::unix::fs::symlink("review.md", vault.join(review_alias)).unwrap();
+            let current = std::fs::read_to_string(vault.join(concept)).unwrap();
+            std::fs::write(&plan, serde_json::to_vec(&json!({
+                "evidence":[{"path":source_alias,"revision":evidence["file_revisions"][source_alias]}],
+                "concepts":[{"path":concept,"revision":file_revision(&current),"knowledge_status":"active","knowledge_review":review_alias}]
+            })).unwrap()).unwrap();
+            ok(
+                &config,
+                &["wiki", "curate", "--file", plan.to_str().unwrap()],
+            );
+            let audit = ok(&config, &["wiki", "audit-plan", "--path", concept]);
+            let dependencies = audit["candidates"][0]["reviews"].as_array().unwrap();
+            assert!(
+                dependencies.iter().all(|review| review["state"] == "open"),
+                "{kind}: {audit}"
+            );
+            assert!(
+                dependencies
+                    .iter()
+                    .any(|review| review["path"] == review_alias)
+            );
+        }
+        std::fs::remove_file(vault.join(source)).unwrap();
+        let reports = ok(&config, &["wiki", "reviews"]);
+        assert_eq!(reports[0]["effective_state"], "open", "{kind}: {reports}");
+        assert_eq!(reports[0]["errors"], json!([]));
+        assert_eq!(reports[0]["archived_evidence"], json!([source_alias]));
+        let search = ok(&config, &["wiki", "search", "Topic", "--json"]);
+        let canonical = search["hits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|hit| hit["path"] == concept)
+            .unwrap();
+        assert_eq!(
+            canonical["reviews"].as_array().unwrap().len(),
+            expected,
+            "{kind}: {search}"
+        );
+        let refused = run(&config, &["wiki", "prepare"]);
+        assert!(!refused.status.success());
+        let retained = ok(&config, &["wiki", "context", concept, "--snapshot", id]);
+        assert_eq!(retained["reviews"]["total"], expected);
+        std::fs::remove_file(vault.join(source_alias)).unwrap();
+        let snapshot = ok(&config, &["wiki", "prepare"]);
+        let context = ok(
+            &config,
+            &[
+                "wiki",
+                "context",
+                concept,
+                "--snapshot",
+                snapshot["snapshot"].as_str().unwrap(),
+            ],
+        );
+        assert_eq!(context["reviews"]["total"], expected, "{kind}: {context}");
+        let audit = ok(&config, &["wiki", "audit-plan", "--path", concept]);
+        for review in audit["candidates"][0]["reviews"].as_array().unwrap() {
+            assert_eq!(review["state"], "open", "{kind}: {audit}");
+            assert!(review["evidence"][0]["current"].is_null());
+            assert!(review["evidence"][0]["archived"].is_object());
+        }
+        if kind == "leaf" {
+            let outside = root.path().join("outside");
+            std::fs::create_dir(&outside).unwrap();
+            std::os::unix::fs::symlink(&outside, vault.join(".review-scope")).unwrap();
+            let mut invalid = declared.clone();
+            invalid["subjects"] = json!([concept, ".review-scope/unavailable.md"]);
+            let invalid_content =
+                format!("---\ntype: exploration\nreview: {invalid}\n---\nAn invalid scope.\n");
+            let invalid_path = "wiki/explorations/invalid.md";
+            let current = std::fs::read_to_string(vault.join(concept)).unwrap();
+            std::fs::write(
+                &plan,
+                serde_json::to_vec(&json!({
+                    "evidence":[{"path":concept,"revision":file_revision(&current)}],
+                    "reviews":[{"path":invalid_path,"revision":null,"content":invalid_content}]
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            let refused = run(
+                &config,
+                &["wiki", "curate", "--file", plan.to_str().unwrap()],
+            );
+            assert!(!refused.status.success());
+            assert!(String::from_utf8_lossy(&refused.stderr).contains("escapes vault"));
+            assert!(!vault.join(invalid_path).exists());
+            std::fs::write(vault.join(invalid_path), invalid_content).unwrap();
+            let reports = ok(&config, &["wiki", "reviews"]);
+            let invalid = reports
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|review| review["path"] == invalid_path)
+                .unwrap();
+            assert_eq!(invalid["effective_state"], "invalid");
+            assert!(!invalid["errors"].as_array().unwrap().is_empty());
+            let search = ok(&config, &["wiki", "search", "Topic", "--json"]);
+            assert!(
+                search["hits"][0]["reviews"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|review| review["path"] == invalid_path
+                        && review["effective_state"] == "invalid")
+            );
+            std::fs::write(
+                vault.join("wiki/concepts/unrelated.md"),
+                "---\ntype: concept\ntitle: Unrelated\n---\nAn independent claim.\n",
+            )
+            .unwrap();
+            let audit = ok(
+                &config,
+                &["wiki", "audit-plan", "--path", "wiki/concepts/unrelated.md"],
+            );
+            assert_eq!(audit["candidates"][0]["reviews"], json!([]));
+            ok(&config, &["wiki", "prepare"]);
+        }
+    }
+}

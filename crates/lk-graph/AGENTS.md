@@ -75,6 +75,8 @@ and CLI discovery, not a second graph authority.
   Bind authored review/evidence revisions and guard exact read bytes when recording.
   Read/count verified prior evidence only when current evidence differs or is missing;
   an identical archive or bookkeeping-only change does not reopen semantic work.
+  Resolve review subject aliases through the shared verified page owner; retain authored
+  addresses and keep hard-link entries distinct from symlink aliases.
 - Audit completion follows native merge receipts from the same workflow to a currently
   assessed survivor. Merge receipts join the page mutation journal and retain only
   the latest merging workflow. A correlation ID never authorizes a lease bypass.

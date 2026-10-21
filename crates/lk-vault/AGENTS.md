@@ -76,6 +76,8 @@ canonical; SQLite navigation is derived.
 - Reviews are authored explorations: effective state is invalid on errors, needs
   reassessment on changed evidence, otherwise authored status. Open isn't invalid.
   Evidence pins the current assessment, not a union of all historical revisions.
+  Associate subjects/evidence by verified page owners while preserving declared
+  addresses. Symlink aliases share a review scope; hard-link entries remain distinct.
 - Before reassessment archive the review itself; read changed evidence and record a
   dated judgment, preserving archive paths/revisions. Explicitly replace current
   evidence after review. Never retag stale prose, delete history or count a review
