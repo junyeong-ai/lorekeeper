@@ -57,6 +57,10 @@ pub enum SourceError {
     Auth(String),
     #[error("source collection identity changed; retry with the intended account and dataset")]
     CollectionIdentityChanged,
+    #[error(
+        "source collection identity is unavailable; check the intended account and identity-read permissions"
+    )]
+    CollectionIdentityUnavailable,
     #[error("invalid params: {0}")]
     InvalidParams(String),
     #[error(
@@ -371,7 +375,11 @@ pub trait Source: Send + Sync {
         let before = self.collection_identity().await?;
         let mut observation = self.observe(params, ctx).await?;
         if let Some(before) = before {
-            if self.collection_identity().await?.as_ref() != Some(&before) {
+            let after = self
+                .collection_identity()
+                .await?
+                .ok_or(SourceError::CollectionIdentityUnavailable)?;
+            if after != before {
                 return Err(SourceError::CollectionIdentityChanged);
             }
             observation.collection_identity = Some(before);
@@ -722,14 +730,18 @@ mod tests {
         );
         assert!(source.identities.lock().unwrap().is_empty());
 
-        for after in [identity("B"), Ok(None)] {
+        for (after, unavailable) in [(identity("B"), false), (Ok(None), true)] {
             let source = bound_source(vec![identity("A"), after]);
-            assert!(matches!(
-                source
-                    .observe_bound(&serde_json::json!({}), &ctx("2026-05-01", "UTC"))
-                    .await,
-                Err(SourceError::CollectionIdentityChanged)
-            ));
+            let error = source
+                .observe_bound(&serde_json::json!({}), &ctx("2026-05-01", "UTC"))
+                .await
+                .err()
+                .expect("changed or unavailable identity must refuse collection");
+            assert!(if unavailable {
+                matches!(error, SourceError::CollectionIdentityUnavailable)
+            } else {
+                matches!(error, SourceError::CollectionIdentityChanged)
+            });
             assert_eq!(
                 source
                     .observations
