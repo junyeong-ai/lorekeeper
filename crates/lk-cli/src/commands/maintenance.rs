@@ -124,22 +124,12 @@ pub async fn run(
 
     if work_present {
         if work_available {
-            let queue = super::queue::check::inspect(&vault_root)?;
-            if queue.is_settled() {
-                let report = super::work::state::prune_published(
-                    &vault_root,
-                    _mutation.as_ref(),
-                    cutoff_secs,
-                )?;
-                eprintln!(
-                    "{prefix}work: pruned {} published work(s), {} bytes; retained {} unpublished, referenced, unexpired or unowned work(s); cleared {} empty work directories.",
-                    report.removed, report.bytes, report.retained, report.empty_directories
-                );
-            } else {
-                eprintln!(
-                    "{prefix}work: retained while queue work, staged results or a mutation journal remain."
-                );
-            }
+            let report =
+                super::work::state::prune_published(&vault_root, _mutation.as_ref(), cutoff_secs)?;
+            eprintln!(
+                "{prefix}work: pruned {} published work(s), {} bytes; retained {} unpublished, referenced, unexpired or unowned work(s); cleared {} empty work directories.",
+                report.removed, report.bytes, report.retained, report.empty_directories
+            );
         } else {
             eprintln!("{prefix}work: retained; exclusive Unix workflow access is unavailable.");
         }
