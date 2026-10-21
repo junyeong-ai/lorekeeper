@@ -1058,18 +1058,15 @@ fn stamp_policy(
         &serde_json::to_string(policy).expect("policy serializes"),
     )
     .ok_or_else(|| miette::miette!("cannot stamp generation policy"))?;
-    let content = lk_vault::set_llm_input(
-        &content,
-        &format!("{}_policy_requested", kind.llm_inputs_key()),
-        "null",
-    )
-    .ok_or_else(|| miette::miette!("cannot clear policy request"))?;
-    lk_vault::set_llm_input(
-        &content,
-        &format!("{}_policy_requested_input", kind.llm_inputs_key()),
-        "null",
-    )
-    .ok_or_else(|| miette::miette!("cannot clear policy request input"))
+    let mut content = content;
+    for suffix in ["policy_requested", "policy_requested_input"] {
+        if let Some(updated) =
+            lk_vault::clear_llm_input(&content, &format!("{}_{}", kind.llm_inputs_key(), suffix))
+        {
+            content = updated;
+        }
+    }
+    Ok(content)
 }
 
 /// Move each unreadable result into `corrupt_dir`, returning how many actually moved.

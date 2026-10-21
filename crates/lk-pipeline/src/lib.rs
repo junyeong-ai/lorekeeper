@@ -795,6 +795,14 @@ impl Pipeline {
         // the run's drafts — `render_concept_pages` emits that accumulator unconditionally,
         // and a half-folded result would write concept pages this origin page was never
         // updated to cite.
+        for body in result
+            .concepts
+            .iter()
+            .filter_map(|concept| concept.synthesis.as_deref())
+        {
+            lk_core::markdown::validate_section_body(body)
+                .map_err(|error| PipelineError::Render(error.to_string()))?;
+        }
         let mut staged = Vec::with_capacity(result.concepts.len());
         for reported in &result.concepts {
             if manifest.is_some() && reported.rss_evidence.is_empty() {

@@ -197,8 +197,7 @@ fn historical_match(
         let linked = lk_source::repoint_document_links(&page.body, path, base_url, |p| {
             tree.blobs.contains_key(p)
         });
-        let projected =
-            lk_core::markdown::demote_headings(&lk_core::text::collapse_blank_lines(&linked), 4);
+        let projected = lk_vault::render_markdown_fragment(&linked).map_err(failure)?;
         if matches_projection(target, &projected) {
             matches.push(HistoricalProof {
                 commit: tree.commit.clone(),
@@ -568,7 +567,9 @@ fn build_manifest(
                     let identity = event.metadata["source_identity"].clone();
                     entry.identity = Some(identity.clone());
                     entry.source_record = Some(event.metadata["source_record"].clone());
-                    entry.projection_revision = Some(revision(event.body.trim()));
+                    let projected =
+                        lk_vault::render_markdown_fragment(&event.body).map_err(failure)?;
+                    entry.projection_revision = Some(revision(projected.trim()));
                     if locations[location] != 1 || owners.contains_key(&identity.to_string()) {
                         Some("multiple legacy or stable owners".into())
                     } else if page
@@ -578,7 +579,7 @@ fn build_manifest(
                         .is_some_and(|id| id != &event.metadata["source_record"]["id"])
                     {
                         Some("source_record ID disagrees".into())
-                    } else if !matches_projection(&raw, &event.body) {
+                    } else if !matches_projection(&raw, &projected) {
                         history_eligible = true;
                         Some(
                         "copied body differs from production projection; historical proof required"
@@ -735,6 +736,34 @@ mod tests {
             .unwrap()
             .is_none()
         );
+    }
+    #[test]
+    fn historical_proof_preserves_literal_code_and_html_content() {
+        let fixture = GitFixture::new();
+        let body = "# Heading\n\n```python\nvalue = \"\"\"first\n\n\nsecond\"\"\"\n```\n\n<pre>\n# literal heading\n\n\ntext\n</pre>\n";
+        let commit = fixture.commit("authored-id", body);
+        let trees = fixture.trees(std::slice::from_ref(&commit));
+        let projected = lk_vault::render_markdown_fragment(body).unwrap();
+        let target = format!("## Content\n\n{projected}\n\n## Summary\nRetained.\n");
+        std::fs::remove_file(fixture.temp.path().join("doc.md")).unwrap();
+        let proof = historical_match(fixture.temp.path(), &trees, "doc.md", &target, None)
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(proof.document, "authored-id");
+        assert_eq!(proof.projection_revision, revision(projected.trim()));
+        for changed in [
+            target.replace("first\n\n\nsecond", "first\n\nsecond"),
+            target.replace("# literal heading", "#### literal heading"),
+        ] {
+            assert_ne!(changed, target);
+            assert!(
+                historical_match(fixture.temp.path(), &trees, "doc.md", &changed, None)
+                    .unwrap()
+                    .unwrap()
+                    .is_none()
+            );
+        }
     }
     #[test]
     fn historical_identical_body_with_conflicting_ids_is_blocked() {
@@ -928,7 +957,8 @@ mod tests {
             let source = repo.join("doc.md");
             std::fs::write(&source, "source bytes").unwrap();
             let config: lk_core::config::Config = serde_json::from_value(serde_json::json!({"vault":{"root":root},"identity":{"name":"test","email":"test@example.test"},"sources":{}})).unwrap();
-            let projected = "#### Heading\n\n```md\n## literal heading\n```\n\n[link](https://example.test/doc.md)";
+            let body = "# Heading\n\n```md\n## literal heading\n```\n\n[link](https://example.test/doc.md)";
+            let projected = lk_vault::render_markdown_fragment(body).unwrap();
             let original = format!(
                 "---\ntype: document\nsource_file: {}\nllm_inputs:\n  summary_done: historical\n---\n## Content\n\n{projected}\n\n## Summary\nRetained summary\n",
                 serde_json::to_string(&source).unwrap()
@@ -940,7 +970,7 @@ mod tests {
             let raw = lk_core::event::RawItem {
                 external_id: Some("doc".into()),
                 title: "Doc".into(),
-                body: projected.into(),
+                body: body.into(),
                 url: None,
                 author: None,
                 timestamp: "2026-10-17T00:00:00Z".parse().unwrap(),
@@ -981,6 +1011,32 @@ mod tests {
     }
     fn clone_manifest(manifest: &Manifest) -> Manifest {
         serde_json::from_value(serde_json::to_value(manifest).unwrap()).unwrap()
+    }
+    #[test]
+    fn current_proof_uses_rendered_source_without_losing_literal_content() {
+        let mut fixture = Fixture::new();
+        let body = "# Source heading\n\n[reference][r] note[^1]\n\n[r]: https://example.test/ref\n\n[^1]: Footnote.\n\n```python\nvalue = \"\"\"first\n\n\nsecond\"\"\"\n```\n\n<pre>\n# literal heading\n\n\ntext\n</pre>\n";
+        fixture.events[0].body = body.into();
+        let projected = lk_vault::render_markdown_fragment(body).unwrap();
+        assert_ne!(projected, body);
+        fixture.original = lk_vault::replace_section(&fixture.original, "Content", &projected);
+        std::fs::write(&fixture.target, &fixture.original).unwrap();
+        let manifest = fixture.manifest();
+        assert!(manifest.entries[0].blocked.is_none());
+        assert_eq!(
+            manifest.entries[0].projection_revision,
+            Some(revision(projected.trim()))
+        );
+
+        let changed = fixture
+            .original
+            .replace("first\n\n\nsecond", "first\n\nsecond");
+        assert_ne!(changed, fixture.original);
+        std::fs::write(&fixture.target, changed).unwrap();
+        assert_eq!(
+            fixture.manifest().entries[0].blocked.as_deref(),
+            Some("copied body differs from production projection; historical proof required")
+        );
     }
     #[test]
     fn guarded_publication_archives_exact_bytes_keeps_blocked_and_replays() {

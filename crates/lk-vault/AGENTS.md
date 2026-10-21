@@ -18,6 +18,8 @@ canonical; SQLite navigation is derived.
   owned anchors; duplicates refuse reads/replacement. Preserve surrounding bytes.
   Read with `resolve_section` across locales, preferring nonblank when both exist;
   legitimate blank remains present. Write current locale headings only.
+  Semantic bodies use `replace_section_checked`, including cached and grounding prose;
+  checked replacement preserves all page boundaries or refuses the write.
 - Frontmatter setters stay within the real block: `set_frontmatter_field` changes
   a top-level key; `set_llm_input` changes a child of block-style `llm_inputs`;
   `record_llm_input` may establish that mapping. Missing placement returns `None`,
@@ -35,6 +37,8 @@ canonical; SQLite navigation is derived.
   source links `markdown_link`. Fragment rendering owns heading containment,
   reference/footnote isolation and code closure without changing event identity.
   EOF-terminated raw HTML displays as literal `html` code; balanced HTML stays markup.
+  Templates own generated separators; rendering never collapses whitespace across
+  injected source, semantic bodies or frontmatter.
 
 ## Publication and paths (`mutation.rs`, `address.rs`, `review.rs`)
 

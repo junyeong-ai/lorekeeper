@@ -8,62 +8,88 @@
 //! code and raw HTML do not introduce owned headings. Duplicate anchors are ambiguous.
 
 use lk_core::i18n::{Locale, Strings};
-use pulldown_cmark::{Event, HeadingLevel, Parser, Tag};
+use pulldown_cmark::HeadingLevel;
+
+fn markdown_offset(content: &str) -> Option<usize> {
+    let (bom, markdown) = split_bom(content);
+    let lines: Vec<_> = markdown.split_inclusive('\n').collect();
+    Some(
+        match frontmatter_block(&lines) {
+            Some(block) => lines[..=block.end].iter().map(|line| line.len()).sum(),
+            None if lines
+                .first()
+                .is_some_and(|line| lk_core::frontmatter::is_delimiter_line(line)) =>
+            {
+                return None;
+            }
+            None => 0,
+        } + bom.len(),
+    )
+}
 
 /// Locate one unambiguous owned section in the original bytes. Heading syntax is
 /// checked only after CommonMark establishes a root-level H2.
 fn find_section(content: &str, heading: &str) -> Option<std::ops::Range<usize>> {
-    let (bom, markdown) = split_bom(content);
-    let lines: Vec<_> = markdown.split_inclusive('\n').collect();
-    let offset = match frontmatter_block(&lines) {
-        Some(block) => lines[..=block.end].iter().map(|line| line.len()).sum(),
-        None if lines
-            .first()
-            .is_some_and(|line| lk_core::frontmatter::is_delimiter_line(line)) =>
-        {
-            return None;
-        }
-        None => 0,
-    } + bom.len();
+    let offset = markdown_offset(content)?;
     let target = format!("## {heading}");
     let mut found: Option<std::ops::Range<usize>> = None;
-    let mut depth = 0;
-    for (event, range) in Parser::new(&content[offset..]).into_offset_iter() {
-        match event {
-            Event::Start(tag) => {
-                if depth == 0
-                    && matches!(
-                        tag,
-                        Tag::Heading {
-                            level: HeadingLevel::H2,
-                            ..
-                        }
-                    )
-                {
-                    let start = offset + range.start;
-                    let line_start = content[..start].rfind('\n').map_or(offset, |end| end + 1);
-                    let line_end = content[start..]
-                        .find('\n')
-                        .map_or(content.len(), |end| start + end + 1);
-                    if let Some(section) = &mut found
-                        && section.end == content.len()
-                    {
-                        section.end = line_start;
-                    }
-                    if content[line_start..line_end].trim_end() == target {
-                        if found.is_some() {
-                            return None;
-                        }
-                        found = Some(line_end..content.len());
-                    }
-                }
-                depth += 1;
+    for heading in lk_core::markdown::root_headings(&content[offset..]) {
+        if heading.level != HeadingLevel::H2 {
+            continue;
+        }
+        let range = offset + heading.range.start..offset + heading.range.end;
+        if let Some(section) = &mut found
+            && section.end == content.len()
+        {
+            section.end = range.start;
+        }
+        if content[range.clone()].trim_end() == target {
+            if found.is_some() {
+                return None;
             }
-            Event::End(_) => depth -= 1,
-            _ => {}
+            found = Some(range.end..content.len());
         }
     }
     found
+}
+
+/// The opening H2 section, independent of its name, syntax or locale.
+pub(crate) fn first_section(body: &str) -> Option<&str> {
+    let headings = lk_core::markdown::root_headings(body);
+    let mut sections = headings
+        .iter()
+        .filter(|heading| heading.level == HeadingLevel::H2);
+    let first = sections.next()?;
+    let end = sections
+        .next()
+        .map_or(body.len(), |heading| heading.range.start);
+    Some(&body[first.range.end..end])
+}
+
+/// Replace one owned body after validating that its Markdown stays within the section.
+/// Missing/duplicate anchors refuse publication instead of silently leaving an old answer.
+pub fn replace_section_checked(
+    content: &str,
+    heading: &str,
+    body: &str,
+) -> Result<String, crate::VaultError> {
+    lk_core::markdown::validate_section_body(body)?;
+    find_section(content, heading)
+        .ok_or_else(|| crate::VaultError::MissingSection(heading.to_owned()))?;
+    let offset = markdown_offset(content)
+        .ok_or_else(|| crate::VaultError::MissingSection(heading.to_owned()))?;
+    let output = replace_section(content, heading, body);
+    let boundaries = |markdown: &str| {
+        lk_core::markdown::root_headings(markdown)
+            .into_iter()
+            .filter(|heading| matches!(heading.level, HeadingLevel::H1 | HeadingLevel::H2))
+            .map(|heading| markdown[heading.range].trim_end().to_owned())
+            .collect::<Vec<_>>()
+    };
+    if boundaries(&content[offset..]) != boundaries(&output[offset..]) {
+        return Err(lk_core::markdown::SectionBodyError::Boundary.into());
+    }
+    Ok(output)
 }
 
 /// Replace the body of the H2 section whose heading line is exactly `## {heading}`
@@ -718,6 +744,43 @@ mod tests {
         assert_eq!(
             replace_section(doc, "Sources", "body"),
             "## Sources\n\nbody\n"
+        );
+    }
+
+    #[test]
+    fn checked_replacement_preserves_every_page_boundary() {
+        let original = "---\ntype: document\n---\n# Note\n\n## Summary\n\nOld.\n\n## Content\n\nSource.\n\n## Related\n\n";
+        for body in ["<!--", "Injected\n---\n\nAnswer.", "```text\nunclosed"] {
+            assert!(replace_section_checked(original, "Summary", body).is_err());
+        }
+        for body in ["", "<pre>\n```\n## Literal\n</pre>", "Reviewed answer."] {
+            let updated = replace_section_checked(original, "Summary", body).unwrap();
+            assert_eq!(section_body(&updated, "Summary").unwrap().trim(), body);
+            assert_eq!(
+                section_body(&updated, "Content"),
+                section_body(original, "Content")
+            );
+            assert_eq!(
+                section_body(&updated, "Related"),
+                section_body(original, "Related")
+            );
+        }
+        assert!(replace_section_checked(original, "Absent", "Answer").is_err());
+        assert!(
+            replace_section_checked("## Summary\n\n## Summary\n", "Summary", "Answer").is_err()
+        );
+        assert!(replace_section_checked("## Summary", "Summary", "Answer").is_ok());
+    }
+
+    #[test]
+    fn checked_replacement_does_not_parse_yaml_scalars_as_markdown() {
+        let original = "---\ntype: document\ndescription: |\n  ```\n---\n## Summary\n\nOld.\n\n## Content\n\nSource.\n";
+        let body = "```python\nprint('answer')\n```";
+        let updated = replace_section_checked(original, "Summary", body).unwrap();
+        assert_eq!(section_body(&updated, "Summary").unwrap().trim(), body);
+        assert_eq!(
+            section_body(&updated, "Content"),
+            section_body(original, "Content")
         );
     }
 

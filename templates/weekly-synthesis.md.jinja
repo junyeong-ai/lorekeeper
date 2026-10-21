@@ -18,7 +18,7 @@ llm_inputs:
 ## {{ i18n.key_themes_this_week }}
 
 {% for theme in themes %}
-### {{ loop.index }}. {{ theme.title }}
+### {{ loop.index }}. {{ theme.title | markdown_text }}
 
 {{ theme.description }}
 

@@ -48,6 +48,7 @@ pub use self::discovery::{DiscoveryQuery, discover_queries};
 pub use self::document::{
     DocumentContent, DocumentOptions, DocumentSection, DocumentView, inspect_document,
 };
+pub use self::fragment::render_markdown_fragment;
 pub use self::indexed_links::{
     IndexedLink, IndexedLinkOptions, IndexedLinks, LinkDirection, inspect_indexed_links,
 };
@@ -89,8 +90,9 @@ pub use self::search_index::{
     SearchSnapshot, inspect_search_snapshot, prepare_search, prepare_search_with_citations,
 };
 pub use self::section::{
-    PageSection, SectionKey, clear_llm_input, record_llm_input, replace_section, resolve_section,
-    section_body, section_headings, set_frontmatter_field, set_llm_input,
+    PageSection, SectionKey, clear_llm_input, record_llm_input, replace_section,
+    replace_section_checked, resolve_section, section_body, section_headings,
+    set_frontmatter_field, set_llm_input,
 };
 pub use self::store::{
     FsVault, InMemoryVault, MarkdownInventory, VaultStore, load_concept_registry,
@@ -103,6 +105,10 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum VaultError {
+    #[error("section: {0}")]
+    SectionBody(#[from] lk_core::markdown::SectionBodyError),
+    #[error("missing or duplicate section: {0}")]
+    MissingSection(String),
     #[error("original: {0}")]
     Original(String),
     #[error("search index: {0}")]

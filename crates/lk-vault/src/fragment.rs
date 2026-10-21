@@ -1,12 +1,8 @@
 //! Embed standalone source Markdown without letting its syntax own the surrounding page.
 
+use lk_core::markdown::{OPTIONS, has_sibling_boundary};
 use minijinja::{Error, ErrorKind};
-use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, LinkType, Options, Parser, Tag, TagEnd};
-
-const OPTIONS: Options = Options::ENABLE_TABLES
-    .union(Options::ENABLE_TASKLISTS)
-    .union(Options::ENABLE_STRIKETHROUGH)
-    .union(Options::ENABLE_FOOTNOTES);
+use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, LinkType, Parser, Tag, TagEnd};
 
 /// Scalar fields are literal inline text; their original values remain in metadata.
 pub(crate) fn inline_text(value: &str) -> String {
@@ -35,35 +31,6 @@ fn serialize(events: &[Event<'_>]) -> Result<String, Error> {
     Ok(output)
 }
 
-/// A root heading at this exact byte offset proves the preceding fragment has ended.
-fn has_sibling_boundary(fragment: &str) -> bool {
-    let offset = fragment.len() + 2;
-    let probe = format!("{fragment}\n\n## boundary\n");
-    let mut depth = 0;
-    for (event, range) in Parser::new_ext(&probe, OPTIONS).into_offset_iter() {
-        match event {
-            Event::Start(tag) => {
-                if depth == 0
-                    && matches!(
-                        tag,
-                        Tag::Heading {
-                            level: HeadingLevel::H2,
-                            ..
-                        }
-                    )
-                    && range.start == offset
-                {
-                    return true;
-                }
-                depth += 1;
-            }
-            Event::End(_) => depth -= 1,
-            _ => {}
-        }
-    }
-    false
-}
-
 fn shift_heading_level(level: HeadingLevel, shift: usize) -> HeadingLevel {
     match (level as usize + shift).min(6) {
         1 => HeadingLevel::H1,
@@ -75,7 +42,10 @@ fn shift_heading_level(level: HeadingLevel, shift: usize) -> HeadingLevel {
     }
 }
 
-pub(crate) fn render(value: &str) -> Result<String, Error> {
+/// Render standalone source Markdown inside a page's owned sections. Source text
+/// remains separate from this presentation; headings, references and EOF syntax
+/// cannot claim the surrounding document.
+pub fn render_markdown_fragment(value: &str) -> Result<String, Error> {
     let parsed: Vec<_> = Parser::new_ext(value, OPTIONS).collect();
     let shallowest = parsed
         .iter()
@@ -233,7 +203,8 @@ mod tests {
             "<div>\n```\n## raw HTML\n</div>\n",
             "ordinary **text**",
         ] {
-            let output = render(value).unwrap_or_else(|error| panic!("{value:?}: {error}"));
+            let output = render_markdown_fragment(value)
+                .unwrap_or_else(|error| panic!("{value:?}: {error}"));
             assert!(has_sibling_boundary(&output), "{value:?}: {output}");
             let page = format!("## Source\n\n{output}\n\n## Related\n\nowned\n");
             assert_eq!(
@@ -254,9 +225,13 @@ mod tests {
     #[test]
     fn raw_html_is_preserved_unless_it_consumes_the_next_section() {
         let table = "<table><tr><td colspan=\"2\">value</td></tr></table>\n";
-        assert!(render(table).unwrap().contains(table.trim()));
+        assert!(
+            render_markdown_fragment(table)
+                .unwrap()
+                .contains(table.trim())
+        );
         for value in ["<!-- unclosed", "<script>unterminated"] {
-            let output = render(value).unwrap();
+            let output = render_markdown_fragment(value).unwrap();
             assert!(output.contains("```html"), "{output}");
             assert!(output.contains(value), "{output}");
         }
@@ -264,10 +239,14 @@ mod tests {
 
     #[test]
     fn independently_resolved_references_and_footnotes_do_not_mix() {
-        let a =
-            render("[link][r] ![image][r] note[^1]\n\n[r]: https://a.test\n\n[^1]: first").unwrap();
-        let b = render("[link][r] ![image][r] note[^1]\n\n[r]: https://b.test\n\n[^1]: second")
-            .unwrap();
+        let a = render_markdown_fragment(
+            "[link][r] ![image][r] note[^1]\n\n[r]: https://a.test\n\n[^1]: first",
+        )
+        .unwrap();
+        let b = render_markdown_fragment(
+            "[link][r] ![image][r] note[^1]\n\n[r]: https://b.test\n\n[^1]: second",
+        )
+        .unwrap();
         let combined = format!("{a}\n\n{b}");
         let destinations: Vec<_> = Parser::new_ext(&combined, OPTIONS)
             .filter_map(|event| match event {

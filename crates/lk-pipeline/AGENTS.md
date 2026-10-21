@@ -13,6 +13,8 @@ configuration. Publication is guarded, not a second uncoordinated render path.
 - Normalize event identity from external_id or JSON `[title, body]`. Dedup only
   exact `EventId` within one fetch, first wins; URL/title/body similarity is not
   identity. Cross-source observations remain separate provenance.
+  Trim title padding but retain the exact body, including code, raw HTML and line
+  endings. The render boundary owns heading containment and presentation syntax.
 - Canonicalize through `Event::canonical_cmp` (newest, then id) before bucketing,
   hashing and rendering. Adapter return order must not change bytes/cache hashes.
 - Streaming sources union fetched and stored raw events per date, fresh ID wins.

@@ -52,6 +52,9 @@ config loading and the shared filesystem primitives intentionally perform I/O.
 
 ## Markdown and links (`link.rs`, `markdown.rs`, `text.rs`)
 
+- `markdown::root_headings` owns CommonMark root structure. Semantic section bodies
+  use `validate_section_body`: reject parent/sibling headings and syntax consuming
+  the next section; preserve valid HTML and literal code without rewriting prose.
 - Use `link` for construction, extraction, rewrite and resolution. Links are
   CommonMark relative `.md` destinations; escape/percent-encode through shared
   helpers. Extraction excludes code/images/external schemes; preserving a link
@@ -66,7 +69,8 @@ config loading and the shared filesystem primitives intentionally perform I/O.
   and every occurrence per line. Read the grammar comments and positive/negative
   tests in `markdown.rs` before adding/narrowing a form; dropping an unsupported
   grammar is better than false coverage. Another scanner's threshold is not proof.
-- Use `text::collapse_blank_lines` for shared CR/blank-line normalization.
+- Source Markdown and literal code retain their content. Normalize generator-owned
+  separators where they are produced, never whole source bodies or rendered pages.
 
 ## Semantic ranges (`semantic.rs`)
 

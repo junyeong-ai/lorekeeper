@@ -180,8 +180,8 @@ complete its exact bounded inspections instead of loading a growing resource ros
 }
 ```
 
-Omit `related` only when the task has no `input.related_anchor`. Do not add level-two
-headings inside either body. `lore queue apply` validates the pending task, source revisions,
+Omit `related` only when the task has no `input.related_anchor`. Both bodies follow
+the [section-containment rules](#single-section-result). `lore queue apply` validates the pending task, source revisions,
 and target/read-scope snapshot before publishing both sections and `synthesis_done` in
 one atomic file replacement. New, changed or removed scoped reviews and changed context
 invalidate the draft. Read the changed scope and regenerate; never replace only a guard
@@ -208,7 +208,10 @@ never add these fields to this strict result contract. `queue status --json` rep
 `target_revision` for every readable target. Only `queue apply` publishes the body
 and marker together after exact revision validation. No worker writes target pages.
 Refinement may change bodies but must preserve the original sequence of `###` event
-headings. Section bodies cannot introduce sibling level-two headings or unclosed fences.
+headings. Section bodies must remain beneath their H2: no root H1/H2 headings
+(including Setext) or HTML/code blocks consuming the next section. Valid HTML and
+headings inside quoted/code blocks are allowed. The publisher rejects invalid bodies
+without rewriting their prose; staged results remain available for correction.
 A changed target requires rereading and regenerating the answer, not copying a new
 revision onto old prose. Apply each task before reading another task on the same page.
 

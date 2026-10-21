@@ -9,7 +9,7 @@ use lk_core::i18n::Locale;
 use lk_core::link;
 use lk_core::vault_path::VaultPath;
 use lk_queue::TargetKind;
-use lk_vault::{TemplateEngine, replace_section, section_body};
+use lk_vault::{TemplateEngine, replace_section_checked, section_body};
 
 use crate::PipelineError;
 use crate::llm_cache::SectionDecision;
@@ -298,6 +298,8 @@ pub fn render_daily_page(
     engine: &TemplateEngine,
     dirs: &VaultDirs,
 ) -> Result<RenderResult, PipelineError> {
+    lk_core::markdown::validate_section_body(ctx.summary)
+        .map_err(|error| PipelineError::Render(error.to_string()))?;
     let DailyRenderContext {
         source_id,
         source_type,
@@ -437,6 +439,8 @@ pub fn render_document_page(
     engine: &TemplateEngine,
     dirs: &VaultDirs,
 ) -> Result<RenderResult, PipelineError> {
+    lk_core::markdown::validate_section_body(ctx.summary)
+        .map_err(|error| PipelineError::Render(error.to_string()))?;
     let DocumentRenderContext {
         slug,
         event,
@@ -563,7 +567,13 @@ where
                 );
                 return None;
             }
-            out = replace_section(&out, heading, body);
+            out = match replace_section_checked(&out, heading, body) {
+                Ok(updated) => updated,
+                Err(error) => {
+                    tracing::warn!(heading, %error, "preserved LLM section is not contained — keeping previous page");
+                    return None;
+                }
+            };
         } else if decision.discarding.is_some() {
             candidates.push(heading);
         }
@@ -970,5 +980,20 @@ and [a real one](../../wiki/concepts/nl2sql.md)
             splice_preserved_sections(fresh, [("Summary", &summary)]).is_none(),
             "a missing heading must refuse the splice rather than drop the body"
         );
+    }
+
+    #[test]
+    fn splice_refuses_a_cached_body_that_would_consume_other_sections() {
+        let original = "## Summary\n\n## Content\n\nSource.\n";
+        for body in ["<!--", "Injected\n---\n", "```text\nunclosed"] {
+            assert!(
+                splice_preserved_sections(original.into(), [("Summary", &cached(body))]).is_none()
+            );
+        }
+        let body = "<pre>\n```\n</pre>";
+        let page =
+            splice_preserved_sections(original.into(), [("Summary", &cached(body))]).unwrap();
+        assert_eq!(section_body(&page.content, "Summary").unwrap().trim(), body);
+        assert_eq!(section_body(&page.content, "Content"), Some("\nSource.\n"));
     }
 }

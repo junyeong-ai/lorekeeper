@@ -191,30 +191,18 @@ pub(super) fn apply(
                 .zip(std::iter::once(&result.synthesis).chain(result.related.iter()))
             {
                 validate_links(root, &target, body)?;
-                let mut fence = lk_core::markdown::FenceState::new();
-                if body.lines().any(|line| {
-                    !fence.apply(line) && fence.is_closed() && line.trim_end().starts_with("## ")
-                }) {
-                    return Err(miette::miette!(
-                        "section content must not introduce a sibling heading"
-                    ));
-                }
-                if !fence.is_closed() {
-                    return Err(miette::miette!(
-                        "section content has an unclosed code fence"
-                    ));
-                }
                 let heading = anchor
                     .strip_prefix("## ")
                     .ok_or_else(|| miette::miette!("invalid section anchor"))?;
-                content = lk_vault::replace_section(&content, heading, body);
+                content = lk_vault::replace_section_checked(&content, heading, body)
+                    .map_err(|error| miette::miette!("{error}"))?;
             }
             task.generation_policy()
                 .map_err(|e| miette::miette!("{e}"))?;
             let content = lk_vault::set_llm_input(
                 &content,
                 &task.target.kind.completion_key(),
-                &task.cache_hash,
+                &serde_json::to_string(&task.cache_hash).expect("cache hash serializes"),
             )
             .ok_or_else(|| miette::miette!("cannot stamp completion"))?;
             let content = super::stamp_policy(&content, Some(task), task.target.kind)?;
@@ -336,10 +324,10 @@ fn validate_links(root: &Path, target: &Path, body: &str) -> miette::Result<()> 
 
 /// Event identity is structural; prose and source attribution remain semantic judgments.
 fn event_headings(body: &str) -> Vec<&str> {
-    let mut fence = lk_core::markdown::FenceState::new();
-    body.lines()
-        .filter(|line| !fence.apply(line) && fence.is_closed() && line.starts_with("### "))
-        .map(str::trim_end)
+    lk_core::markdown::root_headings(body)
+        .into_iter()
+        .filter(|heading| heading.level as usize == 3)
+        .map(|heading| body[heading.range].trim_end())
         .collect()
 }
 
