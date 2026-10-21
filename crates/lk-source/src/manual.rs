@@ -910,6 +910,51 @@ mod tests {
         std::fs::write(path, body).unwrap();
     }
 
+    fn new_capture_context(vault_root: PathBuf) -> ExtractContext {
+        ExtractContext {
+            target_date: jiff::civil::date(2026, 5, 24),
+            timezone: jiff::tz::TimeZone::UTC,
+            locale: Default::default(),
+            identity: Default::default(),
+            vault_root,
+            vault_dirs: Default::default(),
+            documents: None,
+            projection_cache: None,
+            originals: Default::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn plain_text_entry_preserves_literal_markup_through_projection() {
+        use pulldown_cmark::{Event, Parser, Tag};
+
+        let tmp = TempDir::new().unwrap();
+        let inbox = tmp.path().join("inbox");
+        std::fs::create_dir(&inbox).unwrap();
+        let text = "[example](missing.md)\n<img src='missing.png'>\n[drive](C:/outside.txt)\n";
+        write(&inbox.join("examples.TXT"), text);
+        let ctx = new_capture_context(tmp.path().to_path_buf());
+        let params = serde_json::json!({"inbox_dir": "inbox"});
+        let mut captured = capture_manual(&params, &ctx).await.unwrap();
+        captured.project_links(Path::new("wiki/documents")).unwrap();
+        assert!(captured.failures.is_empty());
+        assert_eq!(captured.items.len(), 1);
+        let mut visible = String::new();
+        for event in Parser::new(&captured.items[0].body) {
+            match event {
+                Event::Start(Tag::Link { .. } | Tag::Image { .. })
+                | Event::Html(_)
+                | Event::InlineHtml(_) => panic!("plain text became markup"),
+                Event::Text(text) => visible.push_str(&text),
+                _ => {}
+            }
+        }
+        assert!(visible.contains("[example](missing.md)"));
+        assert!(visible.contains("<img src='missing.png'>"));
+        assert!(visible.contains("[drive](C:/outside.txt)"));
+        assert_eq!(captured.originals[0].manifest.members.len(), 1);
+    }
+
     async fn one_item(dir: &Path) -> RawItem {
         let ctx = ExtractContext {
             target_date: jiff::civil::date(2026, 5, 24),

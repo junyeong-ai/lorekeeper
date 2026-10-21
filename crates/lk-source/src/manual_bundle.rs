@@ -68,7 +68,7 @@ fn read_bounded(path: &Path, limit: usize) -> Result<Vec<u8>, SourceError> {
 fn text_kind(path: &Path) -> Option<bool> {
     match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {
         "html" | "htm" => Some(true),
-        "md" | "markdown" | "txt" => Some(false),
+        "md" | "markdown" => Some(false),
         _ => None,
     }
 }
@@ -568,6 +568,34 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path().canonicalize().unwrap();
         (tmp, root)
+    }
+    #[test]
+    fn plain_text_examples_are_not_bundle_dependencies() {
+        let (_tmp, root) = fixture();
+        let text = "[example](missing.md)\n<img src='missing.png'>\n<base href='/outside/'>\n[drive](C:/outside.txt)\n";
+        std::fs::write(root.join("examples.TXT"), text).unwrap();
+        let plain = capture(&root, &root.join("examples.TXT")).unwrap();
+        assert_eq!(plain.manifest.members.len(), 1);
+        assert!(plain.manifest.unsupported.is_empty());
+        assert_eq!(
+            plain.contents[0].read_bytes(MAX_TEXT_BYTES).unwrap(),
+            text.as_bytes()
+        );
+
+        std::fs::write(root.join("note.md"), "[Literal examples](examples.TXT)").unwrap();
+        let note = capture(&root, &root.join("note.md")).unwrap();
+        assert_eq!(note.manifest.members.len(), 2);
+        assert!(note.manifest.unsupported.is_empty());
+        let index = note
+            .manifest
+            .members
+            .iter()
+            .position(|member| member.path == "examples.TXT")
+            .unwrap();
+        assert_eq!(
+            note.contents[index].read_bytes(MAX_TEXT_BYTES).unwrap(),
+            text.as_bytes()
+        );
     }
     #[test]
     fn captured_assets_change_revision_and_reference_images_rewrite_without_a_new_grammar() {
