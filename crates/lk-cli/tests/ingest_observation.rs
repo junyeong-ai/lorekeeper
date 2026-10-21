@@ -121,6 +121,216 @@ fn assert_success(output: &Output) {
 }
 
 #[test]
+fn disabled_extraction_retains_document_and_rss_evidence_until_reactivated() {
+    use lk_core::rss_evidence::{
+        ConceptEvidence, RSS_EVIDENCE_SCHEMA, RssEventSelection, bindings,
+    };
+    for rss in [false, true] {
+        let temp = tempfile::TempDir::new().unwrap();
+        let vault = temp.path().join("vault");
+        let config = temp.path().join("config.yaml");
+        let at = jiff::Timestamp::now() - jiff::SignedDuration::from_hours(1);
+        let date = at.to_zoned(jiff::tz::TimeZone::UTC).date().to_string();
+        let server = LocalServer::new(move |url| {
+            assert_eq!(url.path(), "/feed.xml");
+            (
+                "application/atom+xml",
+                format!(
+                    "<feed xmlns=\"http://www.w3.org/2005/Atom\"><id>feed</id><title>Feed</title><updated>{at}</updated><entry><id>observation</id><title>Observation</title><updated>{at}</updated><summary>Recorded evidence.</summary></entry></feed>"
+                ),
+            )
+        });
+        let params = if rss {
+            format!(
+                "feeds:\n        - id: fixture\n          url: {}/feed.xml\n          fetch_full_text: false",
+                server.base
+            )
+        } else {
+            std::fs::create_dir_all(vault.join("inbox")).unwrap();
+            std::fs::write(
+                vault.join("inbox/observation.md"),
+                "# Observation\n\nRecorded evidence.\n",
+            )
+            .unwrap();
+            "inbox_dir: inbox\n      archive_after_ingest: false".into()
+        };
+        let write_config = |policy| {
+            std::fs::write(
+                &config,
+                format!(
+                    "vault:\n  root: {}\n  timezone: UTC\n  locale: en\nidentity: {{name: Test, email: test@example.invalid}}\nllm: {{provider: queue}}\nsources:\n  observations:\n    type: {}\n    concept_policy: {policy}\n    params:\n      {params}\n",
+                    vault.display(),
+                    if rss { "rss" } else { "manual" },
+                ),
+            )
+            .unwrap();
+        };
+        let ingest = || {
+            assert_success(&run(&config, &["ingest", "observations", "--date", &date]));
+        };
+        let extraction_statuses = || {
+            let output = run(&config, &["queue", "status", "--json"]);
+            assert_success(&output);
+            let status: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            status["data"]["tasks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|task| task["kind"] == "extract-concepts")
+                .map(|task| task["status"].as_str().unwrap().to_string())
+                .collect::<Vec<_>>()
+        };
+        write_config("disabled");
+        ingest();
+        let origin = if rss {
+            PathBuf::from(format!("daily/observations/{date}.md"))
+        } else {
+            let documents = snapshot(&vault.join("wiki/documents"));
+            assert_eq!(documents.len(), 1);
+            PathBuf::from("wiki/documents").join(documents.keys().next().unwrap())
+        };
+        let read = || std::fs::read_to_string(vault.join(&origin)).unwrap();
+        assert!(lk_vault::resolve_section(&read(), |s| s.related_concepts).is_none());
+        assert!(extraction_statuses().is_empty());
+
+        write_config("supported-new");
+        ingest();
+        assert_eq!(extraction_statuses(), ["current"]);
+        let concept = Path::new("wiki/concepts/stored.md");
+        std::fs::create_dir_all(vault.join(concept).parent().unwrap()).unwrap();
+        std::fs::write(
+            vault.join(concept),
+            "---\ntype: concept\ntitle: Stored\nsource_count: 0\n---\n## Synthesis\nEstablished scope.\n\n## Sources\n\n## Related\n",
+        )
+        .unwrap();
+        let retained = format!(
+            "\n- {}\n\nRetained context, not renewed approval.\n\n",
+            lk_core::link::md_link("Stored", &lk_core::link::relative_dest(&origin, concept))
+        );
+        let mut raw = read();
+        let section = lk_vault::resolve_section(&raw, |s| s.related_concepts).unwrap();
+        let start = section.body.as_ptr() as usize - raw.as_ptr() as usize;
+        let end = start + section.body.len();
+        raw.replace_range(start..end, &retained);
+        if rss {
+            let page = lk_vault::parse_page(&raw).unwrap();
+            let reference = serde_json::from_value(
+                page.frontmatter.get("source_record").unwrap()["rss_original"].clone(),
+            )
+            .unwrap();
+            let manifest = lk_vault::load_rss_manifest(&vault, &reference).unwrap();
+            raw = lk_vault::write_bindings(
+                &raw,
+                &[ConceptEvidence {
+                    schema: RSS_EVIDENCE_SCHEMA.into(),
+                    concept: concept.to_string_lossy().into(),
+                    manifest: reference,
+                    events: vec![RssEventSelection {
+                        event_id: manifest.events[0].event_id.clone(),
+                        revision: manifest.events[0].revision.clone(),
+                    }],
+                }],
+            )
+            .unwrap();
+        }
+        let retained_bindings = bindings(&lk_vault::parse_page(&raw).unwrap()).unwrap();
+        std::fs::write(vault.join(&origin), raw).unwrap();
+        let reconcile = || {
+            assert_success(&run(&config, &["graph", "backlinks-sync"]));
+            let raw = std::fs::read_to_string(vault.join(concept)).unwrap();
+            let page = lk_vault::parse_page(&raw).unwrap();
+            assert_eq!(page.frontmatter.get("source_count").unwrap(), 1);
+        };
+        reconcile();
+
+        write_config("disabled");
+        let before_page = std::fs::read(vault.join(&origin)).unwrap();
+        let before_queue = snapshot(&vault.join(".lorekeeper/queue"));
+        let templates = temp.path().join("templates");
+        std::fs::create_dir_all(&templates).unwrap();
+        for headings in ["", "## Related Concepts\n\n## Related Concepts\n\n"] {
+            std::fs::write(
+                templates.join(if rss {
+                    "observations.md.jinja"
+                } else {
+                    "document.md.jinja"
+                }),
+                format!(
+                    "---\ntype: {}\n---\n## Summary\n\n{headings}",
+                    if rss { "daily" } else { "document" }
+                ),
+            )
+            .unwrap();
+            let output = run(
+                &config,
+                &[
+                    "--template-dir",
+                    templates.to_str().unwrap(),
+                    "ingest",
+                    "observations",
+                    "--date",
+                    &date,
+                ],
+            );
+            assert!(!output.status.success());
+            assert!(
+                String::from_utf8_lossy(&output.stderr)
+                    .contains("template must contain one related-concepts heading"),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(std::fs::read(vault.join(&origin)).unwrap(), before_page);
+            assert_eq!(snapshot(&vault.join(".lorekeeper/queue")), before_queue);
+        }
+        ingest();
+        let disabled = read();
+        assert_eq!(
+            lk_vault::resolve_section(&disabled, |s| s.related_concepts)
+                .unwrap()
+                .body,
+            retained
+        );
+        let page = lk_vault::parse_page(&disabled).unwrap();
+        assert_eq!(bindings(&page).unwrap(), retained_bindings);
+        let inputs = page.frontmatter.get("llm_inputs").unwrap();
+        assert!(inputs.get("concepts").is_none());
+        assert!(inputs.get("concepts_done").is_none());
+        assert_eq!(extraction_statuses(), ["stale"]);
+        reconcile();
+        if rss {
+            let citations = lk_vault::rss_concept_citations(&vault, &origin, &disabled).unwrap();
+            assert_eq!(citations["wiki/concepts/stored.md"].len(), 1);
+        }
+
+        write_config("supported-new");
+        ingest();
+        assert!(
+            extraction_statuses()
+                .iter()
+                .any(|status| status == "current")
+        );
+        let reenabled = read();
+        let page = lk_vault::parse_page(&reenabled).unwrap();
+        assert_eq!(bindings(&page).unwrap(), retained_bindings);
+        assert!(
+            page.frontmatter
+                .get("llm_inputs")
+                .unwrap()
+                .get("concepts")
+                .is_some()
+        );
+        assert!(
+            page.frontmatter
+                .get("llm_inputs")
+                .unwrap()
+                .get("concepts_done")
+                .is_none()
+        );
+        reconcile();
+    }
+}
+
+#[test]
 fn incomplete_confluence_projection_preserves_published_pages_and_requests() {
     let temp = tempfile::TempDir::new().unwrap();
     let vault = temp.path().join("vault");

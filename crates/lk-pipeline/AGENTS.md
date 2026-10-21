@@ -47,6 +47,11 @@ and apply. Carry only valid concept destinations and preserve their addresses;
 never reconstruct concepts from display labels. Other semantic bodies replace.
 Retention keeps citations through pending extraction but does not certify their
 continued factual support; explicit reviewed retraction is separate.
+Disabling extraction removes its current/completion markers and admits no new task;
+retain the existing Related Concepts body and RSS selectors exactly. The compatible
+template variable `extract_concepts` controls section presence (enabled policy or a
+retained section), never task admission. A missing/duplicate retained anchor refuses
+source publication instead of dropping evidence. New disabled pages omit that section.
 
 ## Document identity and publication (`document_identity.rs`)
 

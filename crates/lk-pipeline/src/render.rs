@@ -254,6 +254,55 @@ pub(crate) fn accumulate_concepts(
     concepts
 }
 
+/// Read retained evidence from the guarded original, without making a cache decision.
+pub(crate) fn existing_concept_section(
+    existing: Option<&lk_core::frontmatter::VaultPage>,
+) -> Result<Option<&str>, PipelineError> {
+    let Some(page) = existing else {
+        return Ok(None);
+    };
+    let original = page.original.as_deref().ok_or_else(|| {
+        PipelineError::Render("page reader omitted its original input snapshot".into())
+    })?;
+    let offset = lk_core::frontmatter::body_offset(original)
+        .ok_or_else(|| PipelineError::Render("unclosed page frontmatter".into()))?;
+    let headings = lk_vault::section_headings(|s| s.related_concepts)
+        .map(|heading| format!("## {heading}"))
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut seen = std::collections::BTreeSet::new();
+    for heading in lk_core::markdown::root_headings(&original[offset..]) {
+        let text = original[offset + heading.range.start..offset + heading.range.end].trim_end();
+        if headings.contains(text) && !seen.insert(text) {
+            return Err(PipelineError::Render(
+                "existing related-concepts section is duplicated".into(),
+            ));
+        }
+    }
+    Ok(lk_vault::resolve_section(original, |s| s.related_concepts).map(|section| section.body))
+}
+
+/// Disabled extraction retains published evidence verbatim, without input/done markers.
+pub(crate) fn retain_concept_section(
+    mut content: String,
+    heading: &str,
+    retained: Option<&str>,
+) -> Result<String, PipelineError> {
+    if let Some(body) = retained {
+        lk_core::markdown::validate_section_body(body)
+            .map_err(|error| PipelineError::Render(error.to_string()))?;
+        let target = section_body(&content, heading).ok_or_else(|| {
+            PipelineError::Render(
+                "template must contain one related-concepts heading to retain published evidence"
+                    .into(),
+            )
+        })?;
+        let start = target.as_ptr() as usize - content.as_ptr() as usize;
+        let end = start + target.len();
+        content.replace_range(start..end, body);
+    }
+    Ok(content)
+}
+
 /// Per-page LLM input hashes stamped into the rendered frontmatter. Subsequent
 /// re-ingests read these back to decide whether each LLM task is still necessary.
 /// `concepts` is optional because not every source extracts concepts.
@@ -282,9 +331,8 @@ pub struct DailyRenderContext<'a> {
     pub labels: &'a [String],
     pub summary: &'a str,
     pub concepts: &'a [ConceptIdentity],
-    /// Whether this source extracts concepts. Templates render the `## Related Concepts`
-    /// section only when true, so a source that opts out (`concept_policy: disabled`,
-    /// e.g. a personal work-log feed) doesn't carry a permanently-empty section.
+    /// Whether templates include Related Concepts: enabled extraction or an existing section.
+    /// Task admission follows the source policy separately; new disabled pages omit the section.
     pub extract_concepts: bool,
     /// Config-declared highlight sections for this source: each surfaces events whose
     /// `Event::category` matches, under its own label, above the full event list.
@@ -429,6 +477,7 @@ pub struct DocumentRenderContext<'a> {
     pub created: Option<&'a str>,
     pub summary: &'a str,
     pub concepts: &'a [ConceptIdentity],
+    /// Section presence, independent of whether future extraction tasks are enabled.
     pub extract_concepts: bool,
     pub locale: Locale,
     pub llm_inputs: DocumentLlmInputHashes<'a>,
@@ -631,6 +680,31 @@ mod tests {
     use super::*;
     use lk_core::config::SourceType;
     use lk_core::event::{Event, EventId};
+
+    #[test]
+    fn retained_concepts_require_one_template_anchor_and_preserve_empty_bodies() {
+        let body = "\r\n- [Stored](../concepts/stored.md#claim)\r\n\r\n";
+        let fresh = "## Summary\nNew summary.\n\n## Related Concepts\nGenerated placeholder.\n\n## Other\nKept.\n";
+        let output = retain_concept_section(fresh.into(), "Related Concepts", Some(body)).unwrap();
+        assert_eq!(section_body(&output, "Related Concepts"), Some(body));
+        assert!(output.ends_with("## Other\nKept.\n"));
+        for template in [
+            "## Summary\nNo retained anchor.\n",
+            "## Related Concepts\n\n## Related Concepts\n\n",
+        ] {
+            assert!(
+                retain_concept_section(template.into(), "Related Concepts", Some(body)).is_err()
+            );
+        }
+        let empty = "\n\n";
+        let output = retain_concept_section(fresh.into(), "Related Concepts", Some(empty)).unwrap();
+        assert_eq!(section_body(&output, "Related Concepts"), Some(empty));
+        let original = "---\ntype: document\n---\n## Related Concepts\n\n## Related Concepts\n\n";
+        assert!(
+            existing_concept_section(Some(&lk_core::frontmatter::parse_page(original).unwrap()))
+                .is_err()
+        );
+    }
 
     /// A highlight bucket item must be a POINTER — subject + sender only — so a
     /// structural (never-LLM-refined) section can never pin a raw source body into

@@ -91,6 +91,157 @@ fn far_future() -> jiff::civil::Date {
 }
 
 #[tokio::test]
+async fn disabled_policy_retains_published_concepts_without_claiming_completion() {
+    use lk_core::config::ConceptPolicy;
+    for source_type in [SourceType::Gmail, SourceType::Manual, SourceType::Rss] {
+        let dir = TempDir::new().unwrap();
+        let mut config = base_config(dir.path());
+        config.vault.locale = Some("en".into());
+        let mut source = config.sources["test-source"].clone();
+        source.source_type = source_type;
+        source.concept_policy = ConceptPolicy::Disabled;
+        let item = raw_item(
+            "Observation",
+            "Recorded evidence.",
+            "stable",
+            "2026-05-23T10:00:00Z".parse().unwrap(),
+        );
+        let mut item = item;
+        if source_type == SourceType::Manual {
+            item.metadata =
+                serde_json::json!({"source_file": dir.path().join("inbox/observation.md")});
+        }
+        let llm: Arc<dyn LlmClient> = Arc::new(lk_queue::QueueLlmClient::new(
+            dir.path().join(".lorekeeper/queue"),
+        ));
+        let plan = |source: &SourceConfig| {
+            let mut pipeline = Pipeline::new(dir.path(), build_ctx(&config, llm.clone()));
+            let source = source.clone();
+            let item = item.clone();
+            let options = IngestOptions {
+                target_date: None,
+                today: far_future(),
+                dry_run: false,
+            };
+            async move {
+                pipeline
+                    .plan("test-source", &source, vec![item], &options)
+                    .await
+                    .unwrap()
+            }
+        };
+        let control = plan(&source).await;
+        let output = control
+            .daily_pages
+            .first()
+            .or_else(|| control.document_pages.first())
+            .unwrap();
+        assert!(lk_vault::resolve_section(&output.content, |s| s.related_concepts).is_none());
+        assert!(
+            llm.take_requests()
+                .await
+                .iter()
+                .all(|task| task.kind != lk_queue::TaskKind::ExtractConcepts)
+        );
+        assert!(control.concepts.is_empty());
+
+        source.concept_policy = ConceptPolicy::SupportedNew;
+        let enabled = plan(&source).await;
+        let output = enabled
+            .daily_pages
+            .first()
+            .or_else(|| enabled.document_pages.first())
+            .unwrap();
+        let first_tasks = llm.take_requests().await;
+        let first_extraction = first_tasks
+            .iter()
+            .find(|task| task.kind == lk_queue::TaskKind::ExtractConcepts)
+            .unwrap();
+        let target = output.path.as_ref();
+        let retained = format!(
+            "\n- {}\n\nRetained context, not renewed approval.\n\n",
+            lk_core::link::md_link(
+                "Stored",
+                &lk_core::link::relative_dest(
+                    target,
+                    std::path::Path::new("wiki/concepts/nested/stored.md")
+                )
+            )
+        );
+        let section = lk_vault::resolve_section(&output.content, |s| s.related_concepts).unwrap();
+        let start = section.body.as_ptr() as usize - output.content.as_ptr() as usize;
+        let mut published = output.content.clone();
+        published.replace_range(start..start + section.body.len(), &retained);
+        std::fs::create_dir_all(dir.path().join(target).parent().unwrap()).unwrap();
+        std::fs::write(dir.path().join(target), &published).unwrap();
+
+        source.concept_policy = ConceptPolicy::Disabled;
+        let disabled = plan(&source).await;
+        let output = disabled
+            .daily_pages
+            .first()
+            .or_else(|| disabled.document_pages.first())
+            .unwrap();
+        assert_eq!(
+            lk_vault::resolve_section(&output.content, |s| s.related_concepts)
+                .unwrap()
+                .body,
+            retained
+        );
+        let page = lk_vault::parse_page(&output.content).unwrap();
+        let inputs = page.frontmatter.get("llm_inputs").unwrap();
+        assert!(inputs.get("concepts").is_none());
+        assert!(inputs.get("concepts_done").is_none());
+        assert_eq!(
+            inputs.get("summary"),
+            lk_vault::parse_page(&published)
+                .unwrap()
+                .frontmatter
+                .get("llm_inputs")
+                .unwrap()
+                .get("summary")
+        );
+        assert!(disabled.concepts.is_empty());
+        assert!(
+            llm.take_requests()
+                .await
+                .iter()
+                .all(|task| task.kind != lk_queue::TaskKind::ExtractConcepts)
+        );
+        std::fs::write(dir.path().join(target), &output.content).unwrap();
+
+        source.concept_policy = ConceptPolicy::SupportedNew;
+        let reenabled = plan(&source).await;
+        let tasks = llm.take_requests().await;
+        let extraction = tasks
+            .iter()
+            .find(|task| task.kind == lk_queue::TaskKind::ExtractConcepts)
+            .unwrap();
+        assert_eq!(extraction.cache_hash, first_extraction.cache_hash);
+        let output = reenabled
+            .daily_pages
+            .first()
+            .or_else(|| reenabled.document_pages.first())
+            .unwrap();
+        assert!(
+            lk_vault::resolve_section(&output.content, |s| s.related_concepts)
+                .unwrap()
+                .body
+                .contains("Stored")
+        );
+        assert!(
+            lk_vault::parse_page(&output.content)
+                .unwrap()
+                .frontmatter
+                .get("llm_inputs")
+                .unwrap()
+                .get("concepts_done")
+                .is_none()
+        );
+    }
+}
+
+#[tokio::test]
 async fn manual_projection_relocation_preserves_observation_identity_and_enforces_output_limits() {
     use lk_core::manual_original::{
         ManualBundleManifest, ManualBundleMember, ORIGINAL_SCHEME, OriginalDigest,

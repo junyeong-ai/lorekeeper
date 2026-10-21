@@ -491,16 +491,14 @@ impl Pipeline {
                         .await?,
                 );
             }
+            let retained_concepts = render::existing_concept_section(existing.as_ref())?;
             let concept_names = render::accumulate_concepts(
                 // Read under ANY locale's spelling. These links only ever accumulate, and a
                 // `vault.locale` switch renames the heading a page was written under — so a
                 // read that searched only the current one finds nothing to carry, drops every
                 // citation the page holds, and the next backlink sweep strips those concepts
                 // of the evidence justifying them. Nothing records what was lost.
-                existing
-                    .as_ref()
-                    .and_then(|p| lk_vault::resolve_section(&p.body, |s| s.related_concepts))
-                    .map(|section| section.body),
+                retained_concepts,
                 extracted,
                 &daily_path,
                 &self.ctx.dirs,
@@ -550,7 +548,8 @@ impl Pipeline {
                     labels: &labels,
                     summary: &summary,
                     concepts: &concept_names,
-                    extract_concepts: config.concept_policy.is_enabled(),
+                    extract_concepts: config.concept_policy.is_enabled()
+                        || retained_concepts.is_some(),
                     highlights: &config.highlights,
                     locale: self.ctx.locale,
                     llm_inputs,
@@ -569,7 +568,12 @@ impl Pipeline {
             // A cached body that can't be spliced (a custom template heading diverged
             // from the configured one) yields `None`; skip the write so the previous
             // on-disk page — and its LLM body — is left intact.
-            match render::splice_preserved_sections(fresh.content, splices) {
+            let content = if config.concept_policy.is_enabled() {
+                fresh.content
+            } else {
+                render::retain_concept_section(fresh.content, concepts_heading, retained_concepts)?
+            };
+            match render::splice_preserved_sections(content, splices) {
                 Some(spliced) => {
                     let mut output = render::RenderResult::spliced(fresh.path, spliced)
                         .with_original(existing.as_ref())?;
@@ -1361,16 +1365,14 @@ impl Pipeline {
                         .await?,
                 );
             }
+            let retained_concepts = render::existing_concept_section(existing.as_ref())?;
             let concept_names = render::accumulate_concepts(
                 // Read under ANY locale's spelling. These links only ever accumulate, and a
                 // `vault.locale` switch renames the heading a page was written under — so a
                 // read that searched only the current one finds nothing to carry, drops every
                 // citation the page holds, and the next backlink sweep strips those concepts
                 // of the evidence justifying them. Nothing records what was lost.
-                existing
-                    .as_ref()
-                    .and_then(|p| lk_vault::resolve_section(&p.body, |s| s.related_concepts))
-                    .map(|section| section.body),
+                retained_concepts,
                 extracted,
                 &vault_path,
                 &self.ctx.dirs,
@@ -1401,7 +1403,8 @@ impl Pipeline {
                         .and_then(|v| v.as_str()),
                     summary: &summary,
                     concepts: &concept_names,
-                    extract_concepts: config.concept_policy.is_enabled(),
+                    extract_concepts: config.concept_policy.is_enabled()
+                        || retained_concepts.is_some(),
                     locale: self.ctx.locale,
                     llm_inputs,
                 },
@@ -1414,7 +1417,12 @@ impl Pipeline {
             if let Some(d) = concepts_decision.as_ref() {
                 splices.push((concepts_heading, d));
             }
-            match render::splice_preserved_sections(fresh.content, splices) {
+            let content = if config.concept_policy.is_enabled() {
+                fresh.content
+            } else {
+                render::retain_concept_section(fresh.content, concepts_heading, retained_concepts)?
+            };
+            match render::splice_preserved_sections(content, splices) {
                 Some(spliced) => document_pages.push(
                     render::RenderResult::spliced(fresh.path, spliced)
                         .with_original(existing.as_ref())?,
