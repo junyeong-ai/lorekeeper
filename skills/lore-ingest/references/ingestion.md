@@ -113,13 +113,15 @@ empty historical input does not authorize adopting or deleting retained logs.
   retained event log, so entries that left the feed remain available. A missing log cannot
   recover entries absent from the feed. Inspect `--dry-run` counts and source replayability
   before replacing historical pages; counts alone do not prove identical content.
-- An LLM-owned section (a summary, refined events, concept links) survives a re-render only
-  while its `llm_inputs.<key>_done` marker matches the input the render computes. That is the
-  ordinary case, and the section is spliced through from the page on disk. Where the marker is
-  absent or stale the section is ANSWERED AGAIN, which means it is written empty and re-queued
-  — so a body nobody recorded (written by hand, or by a drain that did not stamp) is lost.
-  `lore ingest` names each section it is about to empty before it writes; `lore doctor` lists
-  the pages in that state.
+- A matching `llm_inputs.<key>_done` marker permits reuse of a completed semantic
+  body. Without valid completion, rendering can empty a summary and replace refined
+  events with freshly rendered raw events. In queue mode, unfinished enabled work
+  is queued or its exact pending request reused.
+  Existing valid concept links accumulate independently of completion, including
+  when extraction is disabled. Reingestion does not retract those citations.
+  Hand-written semantic bodies without valid completion are not protected from
+  replacement. `lore ingest` reports bodies it will actually empty; `lore doctor`
+  identifies unfinished semantic work. A retained body or link is not renewed approval.
 
 ## Missing-date recovery
 
