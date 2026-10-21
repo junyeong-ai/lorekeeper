@@ -126,6 +126,9 @@ canonical; SQLite navigation is derived.
   addresses/verified filesystem aliases, not names; missing links remain visible.
   Prepared links use captured lexical addresses only. Context ≤400 Unicode chars
   with truncation flag; do not clip destination/label into a different address.
+- `neighbors.rs`: deduplicate captured one-hop pages before direction/type/lifecycle
+  filters and pagination. Missing/self links remain occurrences, not neighboring pages.
+  Query only the pinned SQLite capture; never infer filesystem aliases or semantic support.
 - `provenance.rs`: resolve exact typed repository/provider namespace and document identities, never
   title/URL/alias guesses. Duplicate/missing owners stay ambiguous/unresolved;
   verified symlink spellings share an owner, hard links don't. Revision covers the

@@ -168,6 +168,8 @@ For page-level expansion, use `lore wiki neighbors <page.md> --snapshot <id>
 addresses and reports incoming/outgoing direction with captured revisions and pagination.
 Repeated occurrences remain available through `wiki links`. Expand selected neighbors
 one hop at a time; adjacency does not establish evidence or semantic equivalence.
+Only captured pages become neighbors; self-links and missing targets remain occurrences.
+Neighbors default to active pages; use `--knowledge-status retired|all` deliberately.
 For live graph diagnostics, `lore graph --json neighbors <vault-relative.md>` supports
 `--type`, `--direction incoming|outgoing|mutual` and pagination; it scans the live graph.
 A single live connection can use `lore wiki links <source.md> --target <target.md>`;

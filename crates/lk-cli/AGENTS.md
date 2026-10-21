@@ -133,7 +133,9 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   navigation mutation. Guide ownership, symlink, nonregular-file and authored
   collision guards remain strict; never infer ownership from an old export name.
 - Browse metadata with query=None; reject query-only/date-sort combinations in the
-  library too. Created means declared authored date, not ingestion time. Preserve
+  library too. Declared-created bounds compose with queries; created sorting is browse-only.
+  Exact repository/provider scopes match declared ownership, not concept evidence membership.
+  Created means declared authored date, not ingestion time. Preserve
   missing/invalid visibility, stable path ties, scope/filter/facet/pagination meaning.
   Search rejects an empty query and a zero limit. Do not reintroduce full
   corpus metadata decode/sort for SQL browse or load concept vocabulary there.
