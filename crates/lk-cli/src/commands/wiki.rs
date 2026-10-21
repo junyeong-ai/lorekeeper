@@ -87,6 +87,29 @@ pub enum WikiCommand {
         #[arg(long, default_value_t = 0)]
         offset: usize,
     },
+    /// List distinct captured one-hop neighboring pages with revisions (read-only JSON)
+    Neighbors {
+        /// Exact vault-relative Markdown address in the selected capture
+        path: PathBuf,
+        /// Snapshot returned by wiki prepare or snapshot; current pages are not reread
+        #[arg(long)]
+        snapshot: String,
+        /// Direct incoming, outgoing, either or mutually linked pages
+        #[arg(long, value_enum, default_value_t = NeighborDirection::Both)]
+        direction: NeighborDirection,
+        /// Exact declared page type; an empty value selects pages without a type
+        #[arg(long = "type")]
+        format: Option<String>,
+        /// Neighbor lifecycle filter; the selected center may have any status
+        #[arg(long, value_enum, default_value_t = KnowledgeScope::Active)]
+        knowledge_status: KnowledgeScope,
+        /// Maximum distinct neighboring pages (1..100)
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        /// Skip this many neighboring pages in exact path order
+        #[arg(long, default_value_t = 0)]
+        offset: usize,
+    },
     /// Inspect complete citations captured for an exact concept (read-only JSON)
     Citations {
         /// Exact vault-relative concept Markdown address
@@ -241,6 +264,14 @@ pub enum LinkDirection {
     Both,
 }
 
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub enum NeighborDirection {
+    Incoming,
+    Outgoing,
+    Both,
+    Mutual,
+}
+
 #[derive(clap::Args)]
 pub struct BodyEvidenceOptions {
     /// Search literal Markdown body lines, including code and link addresses
@@ -371,6 +402,42 @@ impl KnowledgeScope {
 
 pub async fn run(opts: &super::GlobalOptions, cmd: WikiCommand) -> miette::Result<()> {
     match cmd {
+        WikiCommand::Neighbors {
+            path,
+            snapshot,
+            direction,
+            format,
+            knowledge_status,
+            limit,
+            offset,
+        } => {
+            let config = load_config(&find_config(opts)?)?;
+            let report = lk_vault::inspect_indexed_neighbors(
+                &config.vault.root_path(),
+                &config.vault.dirs,
+                &path,
+                &lk_vault::IndexedNeighborOptions {
+                    snapshot: &snapshot,
+                    direction: match direction {
+                        NeighborDirection::Incoming => lk_vault::NeighborDirection::Incoming,
+                        NeighborDirection::Outgoing => lk_vault::NeighborDirection::Outgoing,
+                        NeighborDirection::Both => lk_vault::NeighborDirection::Both,
+                        NeighborDirection::Mutual => lk_vault::NeighborDirection::Mutual,
+                    },
+                    format: format.as_deref(),
+                    knowledge_status: knowledge_status.status(),
+                    limit,
+                    offset,
+                },
+            )
+            .map_err(|error| miette::miette!("{error}"))?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&report)
+                    .map_err(|error| miette::miette!("{error}"))?
+            );
+            Ok(())
+        }
         WikiCommand::Provenance {
             path,
             snapshot,
