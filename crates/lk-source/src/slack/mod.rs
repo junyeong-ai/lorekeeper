@@ -129,15 +129,21 @@ pub(crate) async fn paginate<Page, Item, F>(
 ) -> Result<Vec<Item>, SourceError>
 where
     Page: serde::de::DeserializeOwned,
+    Item: serde::Serialize,
     F: FnMut(Page) -> (Vec<Item>, String),
 {
+    let mut input_budget = lk_core::input::InputBudget::new(
+        lk_core::config::IngestInputLimits::default()
+            .max_source_bytes
+            .get(),
+    );
     Ok(paginate_observed(
         http,
         token,
         method,
         base_params,
-        max_total,
-        cap_param,
+        (max_total, cap_param),
+        &mut input_budget,
         decode,
     )
     .await?
@@ -149,12 +155,13 @@ pub(crate) async fn paginate_observed<Page, Item, F>(
     token: &str,
     method: &str,
     base_params: &[(&str, &str)],
-    max_total: usize,
-    cap_param: &str,
+    (max_total, cap_param): (usize, &str),
+    input_budget: &mut lk_core::input::InputBudget,
     mut decode: F,
 ) -> Result<Paginated<Item>, SourceError>
 where
     Page: serde::de::DeserializeOwned,
+    Item: serde::Serialize,
     F: FnMut(Page) -> (Vec<Item>, String),
 {
     let mut complete = true;
@@ -168,6 +175,7 @@ where
         }
         let page: Page = slack_post(http, token, method, &params).await?;
         let (items, next) = decode(page);
+        input_budget.admit_all(&items)?;
         out.extend(items);
         pages_fetched += 1;
 

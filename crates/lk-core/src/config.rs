@@ -104,6 +104,7 @@ impl Config {
 
     fn validate(&mut self) -> Result<(), ConfigError> {
         self.execution.validate()?;
+        self.ingest.inputs.validate()?;
         self.ingest
             .originals
             .validate()
@@ -1403,6 +1404,7 @@ impl Default for MaintenanceConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct IngestConfig {
     pub source_timeout_seconds: NonZeroU64,
+    pub inputs: IngestInputLimits,
     pub recovery: Option<IngestRecoveryConfig>,
     pub documents: Option<crate::content::InputProcessingConfig>,
     pub originals: crate::manual_original::OriginalCaptureConfig,
@@ -1415,11 +1417,41 @@ impl Default for IngestConfig {
     fn default() -> Self {
         Self {
             source_timeout_seconds: NonZeroU64::new(600).unwrap(),
+            inputs: Default::default(),
             recovery: None,
             documents: None,
             originals: Default::default(),
             schedule: None,
         }
+    }
+}
+
+/// Serialized retained records at collection and projected planning boundaries,
+/// counted separately at each stage. These are not decoder/process memory limits.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct IngestInputLimits {
+    pub max_source_bytes: std::num::NonZeroUsize,
+    pub max_run_bytes: std::num::NonZeroUsize,
+}
+
+impl Default for IngestInputLimits {
+    fn default() -> Self {
+        Self {
+            max_source_bytes: std::num::NonZeroUsize::new(64 * 1024 * 1024).unwrap(),
+            max_run_bytes: std::num::NonZeroUsize::new(256 * 1024 * 1024).unwrap(),
+        }
+    }
+}
+
+impl IngestInputLimits {
+    fn validate(&self) -> Result<(), ConfigError> {
+        if self.max_source_bytes > self.max_run_bytes {
+            return Err(ConfigError::Validation(
+                "ingest.inputs.max_source_bytes must not exceed max_run_bytes".into(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -2784,6 +2816,33 @@ graph:
 "#;
         let result: Result<Config, _> = crate::yaml::from_str(yaml);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn ingest_input_limits_default_and_validate_explicit_capacity() {
+        let base = "vault: {root: vault}\nidentity: {name: Test, email: test@example.invalid}\nsources: {notes: {type: manual}}\n";
+        let mut config: Config = crate::yaml::from_str(base).unwrap();
+        config.validate().unwrap();
+        assert_eq!(
+            config.ingest.inputs.max_source_bytes.get(),
+            64 * 1024 * 1024
+        );
+        assert_eq!(config.ingest.inputs.max_run_bytes.get(), 256 * 1024 * 1024);
+        for (settings, valid) in [
+            ("{max_source_bytes: 10, max_run_bytes: 10}", true),
+            ("{max_source_bytes: 11, max_run_bytes: 10}", false),
+            ("{max_source_bytes: 0}", false),
+            ("{max_run_bytes: -1}", false),
+            ("{max_source_byte: 10}", false),
+        ] {
+            let accepted = match crate::yaml::from_str::<Config>(&format!(
+                "{base}ingest:\n  inputs: {settings}\n"
+            )) {
+                Ok(mut config) => config.validate().is_ok(),
+                Err(_) => false,
+            };
+            assert_eq!(accepted, valid, "{settings}");
+        }
     }
 
     #[test]

@@ -73,7 +73,7 @@ struct EventList {
     next_page_token: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, serde::Serialize)]
 struct CalEvent {
     id: Option<String>,
     summary: Option<String>,
@@ -89,21 +89,21 @@ struct CalEvent {
     attachments: Vec<Attachment>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, serde::Serialize)]
 struct Attachment {
     title: Option<String>,
     #[serde(rename = "fileId")]
     file_id: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, serde::Serialize)]
 struct EventTime {
     #[serde(rename = "dateTime")]
     date_time: Option<String>,
     date: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, serde::Serialize)]
 struct Person {
     email: Option<String>,
     #[serde(rename = "displayName")]
@@ -237,6 +237,7 @@ impl Source for GoogleCalendarSource {
         let page_size = PAGE_SIZE.to_string();
 
         let mut events: Vec<CalEvent> = Vec::new();
+        let mut event_budget = lk_core::input::InputBudget::new(ctx.max_input_bytes);
         let mut page_token: Option<String> = None;
         let mut pages_fetched = 0usize;
 
@@ -262,7 +263,9 @@ impl Source for GoogleCalendarSource {
             .await?;
             let list: EventList = resp.json().await?;
 
-            events.extend(list.items.unwrap_or_default());
+            let page_events = list.items.unwrap_or_default();
+            event_budget.admit_all(&page_events)?;
+            events.extend(page_events);
             pages_fetched += 1;
 
             match crate::paging::page_step(
@@ -298,7 +301,7 @@ impl Source for GoogleCalendarSource {
 
         let s = ctx.locale.strings();
         let me = ctx.identity.email.trim();
-        let mut items = Vec::new();
+        let mut items = crate::SourceItems::new(ctx);
         for ev in events {
             let Some(mut mapped) = map_event(ev, me, &ctx.timezone, s) else {
                 partial = true;
@@ -347,11 +350,11 @@ impl Source for GoogleCalendarSource {
                 }
             }
 
-            items.push(mapped.item);
+            items.push(mapped.item)?;
         }
 
         Ok(crate::SourceObservation {
-            items,
+            items: items.into_vec(),
             scope: crate::ObservationScope::Window {
                 start: time_min,
                 end: time_max,

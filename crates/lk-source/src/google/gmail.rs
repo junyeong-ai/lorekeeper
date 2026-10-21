@@ -298,6 +298,7 @@ impl GmailApi<'_> {
         const PAGE_SIZE: usize = 50;
 
         let mut refs: Vec<MessageReference> = Vec::new();
+        let mut reference_budget = lk_core::input::InputBudget::new(ctx.max_input_bytes);
         let mut page_token: Option<String> = None;
         let mut pages_fetched = 0usize;
 
@@ -312,7 +313,10 @@ impl GmailApi<'_> {
             }
             let list: ListResponse = self.get(&["messages"], &query_params).await?;
 
-            refs.extend(list.messages.unwrap_or_default());
+            for reference in list.messages.unwrap_or_default() {
+                reference_budget.admit(&reference.id)?;
+                refs.push(reference);
+            }
             pages_fetched += 1;
 
             match crate::paging::page_step(
@@ -346,7 +350,7 @@ impl GmailApi<'_> {
 
         tracing::info!(count = refs.len(), "gmail: listed messages");
 
-        let mut items = Vec::new();
+        let mut items = crate::SourceItems::new(ctx);
         let mut observed = 0;
         for r in &refs {
             let result = async {
@@ -374,7 +378,7 @@ impl GmailApi<'_> {
             match result {
                 Ok(item) => {
                     observed += 1;
-                    items.extend(item);
+                    items.extend(item)?;
                 }
                 Err(error) => {
                     partial = true;
@@ -390,7 +394,7 @@ impl GmailApi<'_> {
             "gmail: extraction complete"
         );
         Ok(crate::SourceObservation {
-            items,
+            items: items.into_vec(),
             scope: crate::ObservationScope::Window {
                 start: min,
                 end: max,
@@ -1131,6 +1135,9 @@ mod tests {
             documents: None,
             projection_cache: None,
             originals: Default::default(),
+            max_input_bytes: lk_core::config::IngestInputLimits::default()
+                .max_source_bytes
+                .get(),
         }
     }
 

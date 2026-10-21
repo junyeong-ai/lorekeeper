@@ -49,6 +49,8 @@ pub use atlassian::oauth::{
 
 #[derive(Debug, Error)]
 pub enum SourceError {
+    #[error(transparent)]
+    Input(#[from] lk_core::input::InputError),
     #[error("HTTP: {0}")]
     Http(#[from] reqwest::Error),
     #[error("auth: {0}")]
@@ -157,6 +159,57 @@ pub struct ExtractContext {
     pub documents: Option<lk_core::content::InputProcessingConfig>,
     pub projection_cache: Option<crate::content::ProjectionCache>,
     pub originals: lk_core::manual_original::OriginalCaptureConfig,
+    /// Cumulative compact-JSON observation bytes admitted for this collection.
+    /// The CLI may lower this to the run's remaining admission budget.
+    pub max_input_bytes: usize,
+}
+
+/// Admit each projected observation before retaining it. Capacity exhaustion is a
+/// source error, never an item-level failure or permission to return a prefix.
+pub(crate) struct SourceItems {
+    items: Vec<RawItem>,
+    budget: lk_core::input::InputBudget,
+}
+
+impl SourceItems {
+    pub(crate) fn new(ctx: &ExtractContext) -> Self {
+        Self {
+            items: Vec::new(),
+            budget: lk_core::input::InputBudget::new(ctx.max_input_bytes),
+        }
+    }
+
+    pub(crate) fn push(&mut self, item: RawItem) -> Result<(), SourceError> {
+        self.budget.admit(&item)?;
+        self.items.push(item);
+        Ok(())
+    }
+
+    pub(crate) fn extend(
+        &mut self,
+        items: impl IntoIterator<Item = RawItem>,
+    ) -> Result<(), SourceError> {
+        for item in items {
+            self.push(item)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.items.len()
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+
+    pub(crate) fn truncate(&mut self, len: usize) {
+        self.items.truncate(len);
+    }
+
+    pub(crate) fn into_vec(self) -> Vec<RawItem> {
+        self.items
+    }
 }
 
 impl ExtractContext {
@@ -494,6 +547,9 @@ mod tests {
             documents: None,
             projection_cache: None,
             originals: Default::default(),
+            max_input_bytes: lk_core::config::IngestInputLimits::default()
+                .max_source_bytes
+                .get(),
         }
     }
 

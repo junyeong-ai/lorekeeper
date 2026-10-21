@@ -94,7 +94,7 @@ struct FileList {
     incomplete_search: bool,
 }
 
-#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Deserialize, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct FileMeta {
     id: String,
@@ -213,6 +213,7 @@ impl DriveApi<'_> {
         }
 
         let mut files = BTreeMap::new();
+        let mut file_budget = lk_core::input::InputBudget::new(ctx.max_input_bytes);
         let mut partial = false;
         let mut page_token: Option<String> = None;
         for pages_fetched in 1..=crate::paging::MAX_PAGES {
@@ -234,6 +235,7 @@ impl DriveApi<'_> {
                         )));
                     }
                 } else {
+                    file_budget.admit(&file)?;
                     files.insert(file.id.clone(), file);
                 }
             }
@@ -263,10 +265,10 @@ impl DriveApi<'_> {
         }
 
         let listed = files.len().min(params.max_files);
-        let mut items = Vec::new();
+        let mut items = crate::SourceItems::new(ctx);
         for file in files.into_values().take(params.max_files) {
             match self.capture(&file, &folder.id, start, end).await {
-                Ok(item) => items.push(item),
+                Ok(item) => items.push(item)?,
                 Err(error) => {
                     partial = true;
                     tracing::warn!(file_id = %file.id, file = %file.name, %error, "drive: file not captured");
@@ -275,7 +277,7 @@ impl DriveApi<'_> {
         }
         crate::require_any_observation("listed Drive file", items.len(), listed)?;
         Ok(crate::SourceObservation {
-            items,
+            items: items.into_vec(),
             scope: crate::ObservationScope::Window { start, end },
             outcome: if partial {
                 crate::ObservationOutcome::Partial
@@ -632,6 +634,9 @@ mod tests {
             documents: None,
             projection_cache: None,
             originals: Default::default(),
+            max_input_bytes: lk_core::config::IngestInputLimits::default()
+                .max_source_bytes
+                .get(),
         }
     }
 
@@ -986,6 +991,55 @@ mod tests {
         assert_eq!(record["version"], "31");
         assert!(record["content_digest"]["value"].is_string());
         assert_eq!(record["extraction"]["scope"], "document-text");
+    }
+
+    #[tokio::test]
+    async fn cumulative_input_exhaustion_refuses_the_source_instead_of_returning_a_prefix() {
+        let server = server(|url| match url.path() {
+            "/drive/v3/files/folder-id" => {
+                json_response(serde_json::json!({"id": "folder-id", "mimeType": FOLDER_MIME}))
+            }
+            "/drive/v3/files" => json_response(serde_json::json!({"files": [
+                file("a", "text/markdown", "1"), file("b", "text/markdown", "1"),
+            ]})),
+            "/drive/v3/files/a" | "/drive/v3/files/b" => {
+                if url.query_pairs().any(|(key, _)| key == "alt") {
+                    response("text/markdown", "x".repeat(1024))
+                } else {
+                    json_response(file(
+                        url.path().rsplit('/').next().unwrap(),
+                        "text/markdown",
+                        "1",
+                    ))
+                }
+            }
+            other => panic!("unexpected request {other}"),
+        })
+        .await;
+        let http = client();
+        let mut context = context();
+        context.max_input_bytes = 2048;
+        let error = DriveApi {
+            http: &http,
+            token: "fixture-token",
+            base: server.base.clone(),
+        }
+        .observe(&params(2), &context)
+        .await
+        .err()
+        .expect("two individually readable documents exceed cumulative admission");
+        assert!(matches!(
+            error,
+            SourceError::Input(lk_core::input::InputError::Limit { .. })
+        ));
+        let requests = server.requests.lock().unwrap();
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|url| url.query_pairs().any(|(key, _)| key == "alt"))
+                .count(),
+            2
+        );
     }
 
     #[tokio::test]

@@ -77,7 +77,7 @@ impl Source for TasksSource {
         let params = crate::parse_validated::<TasksParams>(params)?;
         let log = lk_task::TransitionLog::new(&ctx.vault_root);
 
-        let mut items = Vec::new();
+        let mut items = crate::SourceItems::new(ctx);
         let dates = window(ctx.target_date, params.lookback_hours);
         let start = dates
             .first()
@@ -99,10 +99,10 @@ impl Source for TasksSource {
             let transitions = log
                 .read(date)
                 .map_err(|e| SourceError::Parse(format!("{e}")))?;
-            items.extend(transitions.iter().filter_map(|t| t.observation()));
+            items.extend(transitions.iter().filter_map(|t| t.observation()))?;
         }
         Ok(crate::SourceObservation {
-            items,
+            items: items.into_vec(),
             scope: crate::ObservationScope::Window { start, end },
             outcome: crate::ObservationOutcome::Observed,
         })
@@ -129,6 +129,9 @@ mod tests {
             documents: None,
             projection_cache: None,
             originals: Default::default(),
+            max_input_bytes: lk_core::config::IngestInputLimits::default()
+                .max_source_bytes
+                .get(),
         }
     }
 

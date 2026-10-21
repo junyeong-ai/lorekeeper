@@ -165,7 +165,7 @@ impl Source for RssSource {
         // splits items onto their own publication date (multi-date batch).
         let (min, max) = ctx.day_window(p.lookback_hours, 0)?;
 
-        let mut items = Vec::new();
+        let mut items = crate::SourceItems::new(ctx);
         // Counted upward, never derived by subtraction — see `require_any_observation`.
         let mut feeds_read = 0usize;
         for feed_cfg in &p.feeds {
@@ -260,7 +260,7 @@ impl Source for RssSource {
                     partial = true;
                     continue;
                 }
-                items.push(item);
+                items.push(item)?;
                 kept += 1;
                 observed += 1;
             }
@@ -294,7 +294,7 @@ impl Source for RssSource {
             "rss: extraction complete"
         );
         Ok(crate::SourceObservation {
-            items,
+            items: items.into_vec(),
             // A feed is a finite current inventory, not a historical day query.
             // min/max only filter returned entries and cannot establish date coverage.
             scope: crate::ObservationScope::ConfiguredQuery,
@@ -849,6 +849,9 @@ mod tests {
             documents: None,
             projection_cache: None,
             originals: Default::default(),
+            max_input_bytes: lk_core::config::IngestInputLimits::default()
+                .max_source_bytes
+                .get(),
         }
     }
 
