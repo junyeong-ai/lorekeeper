@@ -697,6 +697,7 @@ fn preserve_captured_archive(
 /// One bounded manual source capture, retained beside the source's planned pages.
 pub struct ManualExtraction {
     pub items: Vec<RawItem>,
+    /// Includes refused projections so their dependencies still protect other entries.
     pub originals: Vec<lk_core::manual_original::ManualBundleCapture>,
     /// Per-entry refusal remains visible to the CLI even when other entries succeeded.
     pub failures: Vec<String>,
@@ -710,26 +711,53 @@ pub struct UnprocessedInput {
 }
 impl ManualExtraction {
     pub fn project_links(&mut self, documents: &Path) -> Result<(), SourceError> {
-        for (item, capture) in self.items.iter_mut().zip(&self.originals) {
-            let path = Path::new(&capture.source_file);
-            let root = path
-                .parent()
-                .ok_or_else(|| SourceError::Parse("manual parent".into()))?
-                .canonicalize()
-                .map_err(|e| SourceError::Parse(e.to_string()))?;
-            let entry = root.join(
-                path.file_name()
-                    .ok_or_else(|| SourceError::Parse("manual filename".into()))?,
-            );
-            item.body = crate::manual_bundle::project_links(
-                &item.body,
-                &root,
-                &entry,
-                capture,
-                documents,
-                self.projection_limit,
-            )?;
-        }
+        let attempted = self.items.len();
+        let originals = self
+            .originals
+            .iter()
+            .map(|capture| (capture.source_file.as_str(), capture))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        self.items.retain_mut(|item| {
+            let source_file = item.metadata.get("source_file").and_then(|v| v.as_str());
+            let projected = (|| {
+                let capture = source_file
+                    .and_then(|source_file| originals.get(source_file))
+                    .ok_or_else(|| SourceError::Parse("manual entry has no captured original".into()))?;
+                let path = Path::new(&capture.source_file);
+                let root = path
+                    .parent()
+                    .ok_or_else(|| SourceError::Parse("manual parent".into()))?
+                    .canonicalize()
+                    .map_err(|e| SourceError::Parse(e.to_string()))?;
+                let entry = root.join(
+                    path.file_name()
+                        .ok_or_else(|| SourceError::Parse("manual filename".into()))?,
+                );
+                crate::manual_bundle::project_links(
+                    &item.body,
+                    &root,
+                    &entry,
+                    capture,
+                    documents,
+                    self.projection_limit,
+                )
+            })();
+            match projected {
+                Ok(body) => {
+                    item.body = body;
+                    true
+                }
+                Err(error) => {
+                    tracing::warn!(file = ?source_file, %error, "manual: entry projection refused; retaining input");
+                    self.failures.push(match source_file {
+                        Some(path) => format!("{path}: {error}"),
+                        None => error.to_string(),
+                    });
+                    false
+                }
+            }
+        });
+        crate::require_any_observation("inbox file", self.items.len(), attempted)?;
         if self.items.iter().map(|item| item.body.len()).sum::<usize>()
             > lk_core::manual_original::MAX_MANUAL_BATCH_BYTES
         {
@@ -953,6 +981,112 @@ mod tests {
         assert!(visible.contains("<img src='missing.png'>"));
         assert!(visible.contains("[drive](C:/outside.txt)"));
         assert_eq!(captured.originals[0].manifest.members.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn link_projection_isolates_entries_and_keeps_failed_dependency_captures() {
+        let tmp = TempDir::new().unwrap();
+        let inbox = tmp.path().join("inbox");
+        std::fs::create_dir(&inbox).unwrap();
+        write(
+            &inbox.join("a-refused.md"),
+            "# Refused\n\n<a href='b-good.md'>Shared entry</a>\n",
+        );
+        write(&inbox.join("b-good.md"), "# Good\n\n![chart](asset.png)\n");
+        write(
+            &inbox.join("c-refused.md"),
+            "# Refused too\n\n<img src='asset.png'>\n",
+        );
+        write(
+            &inbox.join("d-other.md"),
+            "# Other\n\n![chart](asset.png)\n",
+        );
+        std::fs::write(inbox.join("asset.png"), b"opaque attachment").unwrap();
+        let ctx = new_capture_context(tmp.path().to_path_buf());
+        let params = serde_json::json!({"inbox_dir": "inbox", "extensions": ["md"]});
+        let mut captured = capture_manual(&params, &ctx).await.unwrap();
+        captured.project_links(Path::new("wiki/documents")).unwrap();
+        assert_eq!(captured.failures.len(), 2);
+        assert!(captured.failures[0].contains("a-refused.md"));
+        assert!(captured.failures[1].contains("c-refused.md"));
+        assert_eq!(captured.originals.len(), 4);
+        assert!(
+            captured.originals[0]
+                .manifest
+                .members
+                .iter()
+                .any(|member| member.path == "b-good.md")
+        );
+        assert_eq!(
+            captured
+                .items
+                .iter()
+                .map(|item| item.title.as_str())
+                .collect::<Vec<_>>(),
+            ["Good", "Other"]
+        );
+        for item in &captured.items {
+            let capture = captured
+                .originals
+                .iter()
+                .find(|capture| item.metadata["source_file"] == capture.source_file)
+                .unwrap();
+            let reference = capture.manifest.reference().unwrap();
+            let base = reference.manifest_path.rsplit_once('/').unwrap().0;
+            assert!(item.body.contains(&format!("../../{base}/files/asset.png")));
+        }
+
+        let events = captured
+            .items
+            .iter()
+            .map(|item| lk_core::event::Event {
+                id: lk_core::event::EventId::new("manual", ctx.target_date, &item.title),
+                source_id: "manual".into(),
+                source_type: lk_core::config::SourceType::Manual,
+                timestamp: item.timestamp,
+                date: ctx.target_date,
+                title: item.title.clone(),
+                body: item.body.clone(),
+                url: item.url.clone(),
+                author: None,
+                labels: vec![],
+                category: None,
+                performance_category: None,
+                is_self: false,
+                is_personal: false,
+                metadata: item.metadata.clone(),
+            })
+            .collect::<Vec<_>>();
+        archive_manual_originals(&params, &events, &captured.originals, &ctx).unwrap();
+        assert!(
+            inbox.join("b-good.md").exists(),
+            "a refused entry still owns its dependency"
+        );
+        assert!(inbox.join("a-refused.md").exists());
+        assert!(inbox.join("c-refused.md").exists());
+        assert!(inbox.join("asset.png").exists());
+        assert!(!inbox.join("d-other.md").exists());
+        assert!(inbox.join("archived/2026-05-24/d-other.md").exists());
+    }
+
+    #[tokio::test]
+    async fn all_link_projection_failures_are_not_an_empty_success() {
+        let tmp = TempDir::new().unwrap();
+        let inbox = tmp.path().join("inbox");
+        std::fs::create_dir(&inbox).unwrap();
+        write(&inbox.join("refused.md"), "<img src='asset.png'>");
+        std::fs::write(inbox.join("asset.png"), b"opaque attachment").unwrap();
+        let ctx = new_capture_context(tmp.path().to_path_buf());
+        let params = serde_json::json!({"inbox_dir": "inbox", "extensions": ["md"]});
+        let mut captured = capture_manual(&params, &ctx).await.unwrap();
+        assert!(matches!(
+            captured.project_links(Path::new("wiki/documents")),
+            Err(SourceError::NothingObserved { attempted: 1, .. })
+        ));
+        assert!(captured.items.is_empty());
+        assert_eq!(captured.failures.len(), 1);
+        assert_eq!(captured.originals.len(), 1);
+        assert!(inbox.join("refused.md").exists());
     }
 
     async fn one_item(dir: &Path) -> RawItem {
