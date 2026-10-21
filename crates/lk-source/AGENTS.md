@@ -19,8 +19,11 @@ uses validated params and context; do not add per-adapter output pipelines.
 - `Source::observe_bound` attaches only a nonsecret collection authority/principal
   observed before and after acquisition. Keep this separate from document identity.
   Refresh identity responses rather than reusing an in-memory principal cache.
-  An unavailable initial identity permits warned, unbound collection; a failed or
-  changed final check refuses the source. Unbound and legacy observations cannot
+  Only a declared unavailable identity (`Ok(None)`) permits unbound collection;
+  identity errors refuse without retrying acquisition/authentication. Calendar's
+  metadata endpoint may declare unavailable on HTTP403 for events-only credentials,
+  with a warning; token refresh failures remain errors. A failed or changed final
+  check refuses the source. Unbound and legacy observations cannot
   establish automatic recovery coverage. Never substitute configured names, token
   hashes or credential paths for observed provider identity.
 - Pagination follows the provider's continuation even after an empty page. Require

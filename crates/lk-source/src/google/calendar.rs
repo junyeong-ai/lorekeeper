@@ -202,7 +202,7 @@ async fn collection_identity_from(
     http: &reqwest::Client,
     token: &str,
     base: &str,
-) -> Result<crate::CollectionIdentity, SourceError> {
+) -> Result<Option<crate::CollectionIdentity>, SourceError> {
     let mut url = url::Url::parse(base).expect("Calendar API base is a URL");
     url.path_segments_mut()
         .expect("Calendar API URL has path segments")
@@ -210,6 +210,12 @@ async fn collection_identity_from(
         .extend(["calendars", "primary"]);
     let response =
         crate::retry::send_with_retry(|| http.get(url.clone()).bearer_auth(token).send()).await?;
+    if response.status() == reqwest::StatusCode::FORBIDDEN {
+        tracing::warn!(
+            "Google Calendar primary-calendar identity access is forbidden; observation is unbound and cannot establish automatic recovery coverage"
+        );
+        return Ok(None);
+    }
     let calendar: serde_json::Value = super::check_response(response).await?.json().await?;
     let calendar_id = calendar
         .get("id")
@@ -217,16 +223,14 @@ async fn collection_identity_from(
         .ok_or_else(|| SourceError::Parse("Calendar response missing id".into()))?;
     // The API resolves `primary` to an observed calendar ID, not an immutable
     // Google account subject. It still distinguishes the selected account's dataset.
-    crate::CollectionIdentity::new("https://www.googleapis.com/calendar/v3", calendar_id)
+    crate::CollectionIdentity::new("https://www.googleapis.com/calendar/v3", calendar_id).map(Some)
 }
 
 #[async_trait]
 impl Source for GoogleCalendarSource {
     async fn collection_identity(&self) -> Result<Option<crate::CollectionIdentity>, SourceError> {
         let token = self.auth.access_token().await?;
-        collection_identity_from(&self.http, &token, "https://www.googleapis.com/calendar/v3")
-            .await
-            .map(Some)
+        collection_identity_from(&self.http, &token, "https://www.googleapis.com/calendar/v3").await
     }
 
     async fn extract(
@@ -531,23 +535,17 @@ fn map_event(
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn collection_identity_resolves_primary_calendar_and_refuses_missing_id() {
+    async fn identity_response(
+        status: u16,
+        body: &[u8],
+    ) -> Result<Option<crate::CollectionIdentity>, SourceError> {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        for principal in [
-            Some("first@example.com"),
-            Some("second@example.com"),
-            Some(""),
-            Some(" \t"),
-            None,
-        ] {
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let base = format!("http://{}/calendar/v3", listener.local_addr().unwrap());
-            let value = principal
-                .map(|id| serde_json::json!({"id": id}))
-                .unwrap_or_else(|| serde_json::json!({}));
-            let response = text_response("application/json", &serde_json::to_vec(&value).unwrap());
-            let task = tokio::spawn(async move {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}/calendar/v3", listener.local_addr().unwrap());
+        let mut response = format!("HTTP/1.1 {status} Fixture\r\nContent-Type: application/json\r\nContent-Length: {}\r\nRetry-After: 0\r\nConnection: close\r\n\r\n", body.len()).into_bytes();
+        response.extend_from_slice(body);
+        let task = tokio::spawn(async move {
+            for _ in 0..if status >= 500 { 4 } else { 1 } {
                 let (mut stream, _) = listener.accept().await.unwrap();
                 let mut request = Vec::new();
                 while !request.ends_with(b"\r\n\r\n") {
@@ -563,16 +561,36 @@ mod tests {
                 );
                 stream.write_all(&response).await.unwrap();
                 stream.shutdown().await.unwrap();
-            });
-            let http = reqwest::Client::builder()
-                .no_proxy()
-                .timeout(std::time::Duration::from_secs(5))
-                .build()
-                .unwrap();
-            let identity = collection_identity_from(&http, "fixture", &base).await;
-            task.await.unwrap();
+            }
+        });
+        let http = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .unwrap();
+        let identity = collection_identity_from(&http, "fixture", &base).await;
+        tokio::time::timeout(std::time::Duration::from_secs(5), task)
+            .await
+            .unwrap()
+            .unwrap();
+        identity
+    }
+
+    #[tokio::test]
+    async fn collection_identity_resolves_primary_calendar_and_refuses_missing_id() {
+        for principal in [
+            Some("first@example.com"),
+            Some("second@example.com"),
+            Some(""),
+            Some(" \t"),
+            None,
+        ] {
+            let value = principal
+                .map(|id| serde_json::json!({"id": id}))
+                .unwrap_or_else(|| serde_json::json!({}));
+            let identity = identity_response(200, &serde_json::to_vec(&value).unwrap()).await;
             if let Some(principal) = principal.filter(|id| !id.trim().is_empty()) {
-                let identity = identity.unwrap();
+                let identity = identity.unwrap().unwrap();
                 assert_eq!(
                     identity.authority(),
                     "https://www.googleapis.com/calendar/v3"
@@ -581,6 +599,19 @@ mod tests {
             } else {
                 assert!(identity.is_err());
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn collection_identity_only_forbidden_metadata_is_declared_unavailable() {
+        assert_eq!(identity_response(403, b"{} ").await.unwrap(), None);
+        for status in [401, 404, 500] {
+            assert!(
+                matches!(identity_response(status, b"{}").await, Err(SourceError::Api { status: actual, .. }) if actual == status)
+            );
+        }
+        for malformed in [b"not JSON".as_slice(), b"[\"not a named id\"]"] {
+            assert!(identity_response(200, malformed).await.is_err());
         }
     }
 

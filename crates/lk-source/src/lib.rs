@@ -55,6 +55,8 @@ pub enum SourceError {
     Http(#[from] reqwest::Error),
     #[error("auth: {0}")]
     Auth(String),
+    #[error("source collection identity changed; retry with the intended account and dataset")]
+    CollectionIdentityChanged,
     #[error("invalid params: {0}")]
     InvalidParams(String),
     #[error(
@@ -353,7 +355,8 @@ pub trait Source: Send + Sync {
     }
 
     /// Resolve the current provider namespace/principal without collecting content.
-    /// `None` leaves observations unbound and unable to establish recovery coverage.
+    /// `None` declares unavailable identity and cannot establish recovery coverage.
+    /// Errors refuse collection, including uncertain authentication refreshes.
     async fn collection_identity(&self) -> Result<Option<CollectionIdentity>, SourceError> {
         Ok(None)
     }
@@ -365,19 +368,11 @@ pub trait Source: Send + Sync {
         params: &serde_json::Value,
         ctx: &ExtractContext,
     ) -> Result<SourceObservation, SourceError> {
-        let before = match self.collection_identity().await {
-            Ok(identity) => identity,
-            Err(error) => {
-                tracing::warn!(%error, "collection identity unavailable; observation is unbound and cannot establish automatic recovery coverage");
-                None
-            }
-        };
+        let before = self.collection_identity().await?;
         let mut observation = self.observe(params, ctx).await?;
         if let Some(before) = before {
             if self.collection_identity().await?.as_ref() != Some(&before) {
-                return Err(SourceError::Auth(
-                    "collection identity changed during observation; retry collection".into(),
-                ));
+                return Err(SourceError::CollectionIdentityChanged);
             }
             observation.collection_identity = Some(before);
         } else {
@@ -727,18 +722,14 @@ mod tests {
         );
         assert!(source.identities.lock().unwrap().is_empty());
 
-        for after in [
-            identity("B"),
-            Ok(None),
-            Err(SourceError::Auth("identity unavailable".into())),
-        ] {
+        for after in [identity("B"), Ok(None)] {
             let source = bound_source(vec![identity("A"), after]);
-            assert!(
+            assert!(matches!(
                 source
                     .observe_bound(&serde_json::json!({}), &ctx("2026-05-01", "UTC"))
-                    .await
-                    .is_err()
-            );
+                    .await,
+                Err(SourceError::CollectionIdentityChanged)
+            ));
             assert_eq!(
                 source
                     .observations
@@ -746,26 +737,60 @@ mod tests {
                 1
             );
         }
+        let source = bound_source(vec![
+            identity("A"),
+            Err(SourceError::Auth("identity unavailable".into())),
+        ]);
+        assert!(matches!(
+            source
+                .observe_bound(&serde_json::json!({}), &ctx("2026-05-01", "UTC"))
+                .await,
+            Err(SourceError::Auth(_))
+        ));
+        assert_eq!(
+            source
+                .observations
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
     }
 
     #[tokio::test]
-    async fn unavailable_initial_identity_preserves_unbound_collection() {
-        for before in [Ok(None), Err(SourceError::Auth("limited scope".into()))] {
-            let source = bound_source(vec![before]);
-            let observation = source
+    async fn declared_unavailable_identity_preserves_unbound_collection() {
+        let source = bound_source(vec![Ok(None)]);
+        let observation = source
+            .observe_bound(&serde_json::json!({}), &ctx("2026-05-01", "UTC"))
+            .await
+            .unwrap();
+        assert_eq!(observation.collection_identity, None);
+        assert_eq!(observation.outcome, ObservationOutcome::Observed);
+        assert!(matches!(observation.scope, ObservationScope::Window { .. }));
+        assert_eq!(
+            source
+                .observations
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn initial_identity_error_does_not_start_collection_or_retry_authentication() {
+        let source = bound_source(vec![Err(SourceError::Auth(
+            "uncertain token refresh".into(),
+        ))]);
+        assert!(
+            source
                 .observe_bound(&serde_json::json!({}), &ctx("2026-05-01", "UTC"))
                 .await
-                .unwrap();
-            assert_eq!(observation.collection_identity, None);
-            assert_eq!(observation.outcome, ObservationOutcome::Observed);
-            assert!(matches!(observation.scope, ObservationScope::Window { .. }));
-            assert_eq!(
-                source
-                    .observations
-                    .load(std::sync::atomic::Ordering::SeqCst),
-                1
-            );
-        }
+                .is_err()
+        );
+        assert_eq!(
+            source
+                .observations
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        assert!(source.identities.lock().unwrap().is_empty());
     }
 
     #[test]
