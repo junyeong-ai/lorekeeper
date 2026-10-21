@@ -193,6 +193,12 @@ impl SlackChannelSource {
 
 #[async_trait]
 impl Source for SlackChannelSource {
+    async fn collection_identity(&self) -> Result<Option<crate::CollectionIdentity>, SourceError> {
+        super::collection_identity_from(&self.http, &self.token, super::API)
+            .await
+            .map(Some)
+    }
+
     async fn extract(
         &self,
         params: &serde_json::Value,
@@ -370,6 +376,7 @@ impl Source for SlackChannelSource {
 
         Ok(crate::SourceObservation {
             items: items.into_vec(),
+            collection_identity: None,
             scope: crate::ObservationScope::Window {
                 start: oldest,
                 end: latest,

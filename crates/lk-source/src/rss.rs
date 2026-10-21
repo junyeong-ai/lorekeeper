@@ -295,6 +295,7 @@ impl Source for RssSource {
         );
         Ok(crate::SourceObservation {
             items: items.into_vec(),
+            collection_identity: None,
             // A feed is a finite current inventory, not a historical day query.
             // min/max only filter returned entries and cannot establish date coverage.
             scope: crate::ObservationScope::ConfiguredQuery,

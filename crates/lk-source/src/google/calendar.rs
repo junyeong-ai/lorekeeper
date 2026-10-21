@@ -198,8 +198,37 @@ impl GoogleCalendarSource {
     }
 }
 
+async fn collection_identity_from(
+    http: &reqwest::Client,
+    token: &str,
+    base: &str,
+) -> Result<crate::CollectionIdentity, SourceError> {
+    let mut url = url::Url::parse(base).expect("Calendar API base is a URL");
+    url.path_segments_mut()
+        .expect("Calendar API URL has path segments")
+        .pop_if_empty()
+        .extend(["calendars", "primary"]);
+    let response =
+        crate::retry::send_with_retry(|| http.get(url.clone()).bearer_auth(token).send()).await?;
+    let calendar: serde_json::Value = super::check_response(response).await?.json().await?;
+    let calendar_id = calendar
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| SourceError::Parse("Calendar response missing id".into()))?;
+    // The API resolves `primary` to an observed calendar ID, not an immutable
+    // Google account subject. It still distinguishes the selected account's dataset.
+    crate::CollectionIdentity::new("https://www.googleapis.com/calendar/v3", calendar_id)
+}
+
 #[async_trait]
 impl Source for GoogleCalendarSource {
+    async fn collection_identity(&self) -> Result<Option<crate::CollectionIdentity>, SourceError> {
+        let token = self.auth.access_token().await?;
+        collection_identity_from(&self.http, &token, "https://www.googleapis.com/calendar/v3")
+            .await
+            .map(Some)
+    }
+
     async fn extract(
         &self,
         params: &serde_json::Value,
@@ -349,6 +378,7 @@ impl Source for GoogleCalendarSource {
 
         Ok(crate::SourceObservation {
             items: items.into_vec(),
+            collection_identity: None,
             scope: crate::ObservationScope::Window {
                 start: time_min,
                 end: time_max,
@@ -500,6 +530,59 @@ fn map_event(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn collection_identity_resolves_primary_calendar_and_refuses_missing_id() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for principal in [
+            Some("first@example.com"),
+            Some("second@example.com"),
+            Some(""),
+            Some(" \t"),
+            None,
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base = format!("http://{}/calendar/v3", listener.local_addr().unwrap());
+            let value = principal
+                .map(|id| serde_json::json!({"id": id}))
+                .unwrap_or_else(|| serde_json::json!({}));
+            let response = text_response("application/json", &serde_json::to_vec(&value).unwrap());
+            let task = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    let mut byte = [0];
+                    assert_ne!(stream.read(&mut byte).await.unwrap(), 0);
+                    request.push(byte[0]);
+                    assert!(request.len() < 16 * 1024);
+                }
+                let request = String::from_utf8(request).unwrap();
+                assert!(
+                    request.starts_with("GET /calendar/v3/calendars/primary "),
+                    "{request}"
+                );
+                stream.write_all(&response).await.unwrap();
+                stream.shutdown().await.unwrap();
+            });
+            let http = reqwest::Client::builder()
+                .no_proxy()
+                .timeout(std::time::Duration::from_secs(5))
+                .build()
+                .unwrap();
+            let identity = collection_identity_from(&http, "fixture", &base).await;
+            task.await.unwrap();
+            if let Some(principal) = principal.filter(|id| !id.trim().is_empty()) {
+                let identity = identity.unwrap();
+                assert_eq!(
+                    identity.authority(),
+                    "https://www.googleapis.com/calendar/v3"
+                );
+                assert_eq!(identity.principal(), principal);
+            } else {
+                assert!(identity.is_err());
+            }
+        }
+    }
 
     #[test]
     fn meeting_note_fragments_preserve_leading_code_and_remaining_bytes() {

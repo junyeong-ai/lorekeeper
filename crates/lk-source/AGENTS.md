@@ -16,6 +16,13 @@ uses validated params and context; do not add per-adapter output pipelines.
   A configured query is not proof of date coverage. Optional enrichment warnings
   do not turn a complete source listing into missing observations. Adapters without
   an observation contract remain explicitly unverified.
+- `Source::observe_bound` attaches only a nonsecret collection authority/principal
+  observed before and after acquisition. Keep this separate from document identity.
+  Refresh identity responses rather than reusing an in-memory principal cache.
+  An unavailable initial identity permits warned, unbound collection; a failed or
+  changed final check refuses the source. Unbound and legacy observations cannot
+  establish automatic recovery coverage. Never substitute configured names, token
+  hashes or credential paths for observed provider identity.
 - Pagination follows the provider's continuation even after an empty page. Require
   positive caps; warn when overshoot/pending continuation proves truncation, not
   merely when the result happens to equal the cap. Keep the `MAX_PAGES` guard.

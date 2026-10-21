@@ -283,17 +283,107 @@ pub enum ObservationOutcome {
     Unverified,
 }
 
+/// Nonsecret provider namespace and account/resource key observed for collection.
+/// This is query-coverage identity, separate from an individual document's identity.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(try_from = "serde_json::Map<String, serde_json::Value>")]
+pub struct CollectionIdentity {
+    authority: String,
+    principal: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CollectionIdentityFields {
+    authority: String,
+    principal: String,
+}
+
+impl TryFrom<serde_json::Map<String, serde_json::Value>> for CollectionIdentity {
+    type Error = SourceError;
+
+    fn try_from(value: serde_json::Map<String, serde_json::Value>) -> Result<Self, Self::Error> {
+        let fields: CollectionIdentityFields =
+            serde_json::from_value(serde_json::Value::Object(value))
+                .map_err(|error| SourceError::Parse(error.to_string()))?;
+        Self::new(fields.authority, fields.principal)
+    }
+}
+
+impl CollectionIdentity {
+    pub fn new(
+        authority: impl Into<String>,
+        principal: impl Into<String>,
+    ) -> Result<Self, SourceError> {
+        let authority = authority.into();
+        let principal = principal.into();
+        if authority.trim().is_empty() || principal.trim().is_empty() {
+            return Err(SourceError::Parse(
+                "collection identity requires nonblank authority and principal".into(),
+            ));
+        }
+        Ok(Self {
+            authority,
+            principal,
+        })
+    }
+
+    pub fn authority(&self) -> &str {
+        &self.authority
+    }
+
+    pub fn principal(&self) -> &str {
+        &self.principal
+    }
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct SourceObservation {
     pub items: Vec<RawItem>,
     pub scope: ObservationScope,
     pub outcome: ObservationOutcome,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collection_identity: Option<CollectionIdentity>,
 }
 
 #[async_trait]
 pub trait Source: Send + Sync {
     fn selection(&self, _params: &serde_json::Value) -> Result<Selection, SourceError> {
         Ok(Selection::DateWindow)
+    }
+
+    /// Resolve the current provider namespace/principal without collecting content.
+    /// `None` leaves observations unbound and unable to establish recovery coverage.
+    async fn collection_identity(&self) -> Result<Option<CollectionIdentity>, SourceError> {
+        Ok(None)
+    }
+
+    /// Bind query reach only when fresh identity checks agree around acquisition.
+    /// Limited-scope credentials may still collect without a coverage binding.
+    async fn observe_bound(
+        &self,
+        params: &serde_json::Value,
+        ctx: &ExtractContext,
+    ) -> Result<SourceObservation, SourceError> {
+        let before = match self.collection_identity().await {
+            Ok(identity) => identity,
+            Err(error) => {
+                tracing::warn!(%error, "collection identity unavailable; observation is unbound and cannot establish automatic recovery coverage");
+                None
+            }
+        };
+        let mut observation = self.observe(params, ctx).await?;
+        if let Some(before) = before {
+            if self.collection_identity().await?.as_ref() != Some(&before) {
+                return Err(SourceError::Auth(
+                    "collection identity changed during observation; retry collection".into(),
+                ));
+            }
+            observation.collection_identity = Some(before);
+        } else {
+            observation.collection_identity = None;
+        }
+        Ok(observation)
     }
 
     async fn extract(
@@ -313,6 +403,7 @@ pub trait Source: Send + Sync {
             items: self.extract(params, ctx).await?,
             scope: ObservationScope::Unverified,
             outcome: ObservationOutcome::Unverified,
+            collection_identity: None,
         })
     }
 }
@@ -535,6 +626,159 @@ pub fn build_source(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn collection_identity_requires_named_nonblank_fields() {
+        let valid = CollectionIdentity::new("provider:tenant", "principal").unwrap();
+        let encoded = serde_json::to_value(&valid).unwrap();
+        assert_eq!(
+            encoded,
+            serde_json::json!({"authority": "provider:tenant", "principal": "principal"})
+        );
+        assert_eq!(
+            serde_json::from_value::<CollectionIdentity>(encoded).unwrap(),
+            valid
+        );
+        assert_eq!(valid.authority(), "provider:tenant");
+        assert_eq!(valid.principal(), "principal");
+        for invalid in [
+            serde_json::json!({"authority": "", "principal": "principal"}),
+            serde_json::json!({"authority": "provider", "principal": " \t"}),
+            serde_json::json!({"authority": "provider"}),
+            serde_json::json!({"authority": "provider", "principal": "principal", "extra": true}),
+            serde_json::json!(["provider", "principal"]),
+        ] {
+            assert!(
+                serde_json::from_value::<CollectionIdentity>(invalid.clone()).is_err(),
+                "{invalid}"
+            );
+        }
+    }
+
+    struct BoundSource {
+        identities: std::sync::Mutex<
+            std::collections::VecDeque<Result<Option<CollectionIdentity>, SourceError>>,
+        >,
+        observations: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl Source for BoundSource {
+        async fn collection_identity(&self) -> Result<Option<CollectionIdentity>, SourceError> {
+            self.identities
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("unexpected identity lookup")
+        }
+
+        async fn extract(
+            &self,
+            _: &serde_json::Value,
+            _: &ExtractContext,
+        ) -> Result<Vec<RawItem>, SourceError> {
+            unreachable!("test source supplies an observation")
+        }
+
+        async fn observe(
+            &self,
+            _: &serde_json::Value,
+            ctx: &ExtractContext,
+        ) -> Result<SourceObservation, SourceError> {
+            self.observations
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let (start, end) = ctx.day_window(0, 0)?;
+            Ok(SourceObservation {
+                items: Vec::new(),
+                scope: ObservationScope::Window { start, end },
+                outcome: ObservationOutcome::Observed,
+                collection_identity: Some(CollectionIdentity::new("untrusted", "adapter-value")?),
+            })
+        }
+    }
+
+    fn bound_source(
+        identities: Vec<Result<Option<CollectionIdentity>, SourceError>>,
+    ) -> BoundSource {
+        BoundSource {
+            identities: std::sync::Mutex::new(identities.into()),
+            observations: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    fn identity(principal: &str) -> Result<Option<CollectionIdentity>, SourceError> {
+        CollectionIdentity::new("provider:tenant", principal).map(Some)
+    }
+
+    #[tokio::test]
+    async fn bound_observation_requires_fresh_matching_identity() {
+        let source = bound_source(vec![identity("A"), identity("A")]);
+        let observation = source
+            .observe_bound(&serde_json::json!({}), &ctx("2026-05-01", "UTC"))
+            .await
+            .unwrap();
+        assert_eq!(observation.collection_identity, identity("A").unwrap());
+        assert_eq!(observation.outcome, ObservationOutcome::Observed);
+        assert_eq!(
+            source
+                .observations
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert!(source.identities.lock().unwrap().is_empty());
+
+        for after in [
+            identity("B"),
+            Ok(None),
+            Err(SourceError::Auth("identity unavailable".into())),
+        ] {
+            let source = bound_source(vec![identity("A"), after]);
+            assert!(
+                source
+                    .observe_bound(&serde_json::json!({}), &ctx("2026-05-01", "UTC"))
+                    .await
+                    .is_err()
+            );
+            assert_eq!(
+                source
+                    .observations
+                    .load(std::sync::atomic::Ordering::SeqCst),
+                1
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn unavailable_initial_identity_preserves_unbound_collection() {
+        for before in [Ok(None), Err(SourceError::Auth("limited scope".into()))] {
+            let source = bound_source(vec![before]);
+            let observation = source
+                .observe_bound(&serde_json::json!({}), &ctx("2026-05-01", "UTC"))
+                .await
+                .unwrap();
+            assert_eq!(observation.collection_identity, None);
+            assert_eq!(observation.outcome, ObservationOutcome::Observed);
+            assert!(matches!(observation.scope, ObservationScope::Window { .. }));
+            assert_eq!(
+                source
+                    .observations
+                    .load(std::sync::atomic::Ordering::SeqCst),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_observation_remains_unbound() {
+        let observation: SourceObservation = serde_json::from_value(serde_json::json!({"items": [], "scope": {"kind": "unverified"}, "outcome": "unverified"})).unwrap();
+        assert!(observation.collection_identity.is_none());
+        assert!(
+            serde_json::to_value(observation)
+                .unwrap()
+                .get("collection_identity")
+                .is_none()
+        );
+    }
 
     fn ctx(date: &str, tz: &str) -> ExtractContext {
         ExtractContext {

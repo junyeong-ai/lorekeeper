@@ -127,6 +127,25 @@ struct DriveApi<'a> {
 }
 
 impl DriveApi<'_> {
+    async fn collection_identity(&self) -> Result<crate::CollectionIdentity, SourceError> {
+        let about: serde_json::Value = self
+            .get(
+                &["about"],
+                &[("fields".into(), "user(permissionId)".into())],
+            )
+            .await?
+            .json()
+            .await?;
+        let principal = about
+            .get("user")
+            .and_then(|user| user.get("permissionId"))
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                SourceError::Parse("Drive about response missing user.permissionId".into())
+            })?;
+        crate::CollectionIdentity::new(BASE, principal)
+    }
+
     fn url(&self, segments: &[&str]) -> url::Url {
         let mut url = self.base.clone();
         url.path_segments_mut()
@@ -278,6 +297,7 @@ impl DriveApi<'_> {
         crate::require_any_observation("listed Drive file", items.len(), listed)?;
         Ok(crate::SourceObservation {
             items: items.into_vec(),
+            collection_identity: None,
             scope: crate::ObservationScope::Window { start, end },
             outcome: if partial {
                 crate::ObservationOutcome::Partial
@@ -484,6 +504,18 @@ impl GoogleDriveSource {
 
 #[async_trait]
 impl Source for GoogleDriveSource {
+    async fn collection_identity(&self) -> Result<Option<crate::CollectionIdentity>, SourceError> {
+        let token = self.auth.access_token().await?;
+        DriveApi {
+            http: &self.http,
+            token: &token,
+            base: url::Url::parse(BASE).expect("valid Drive API URL"),
+        }
+        .collection_identity()
+        .await
+        .map(Some)
+    }
+
     async fn extract(
         &self,
         params: &serde_json::Value,
@@ -658,6 +690,61 @@ mod tests {
             .timeout(std::time::Duration::from_secs(5))
             .build()
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn collection_identity_observes_permission_id_and_refuses_missing_user() {
+        for principal in [
+            Some("permission-A"),
+            Some("permission-B"),
+            Some(""),
+            Some(" \t"),
+            None,
+        ] {
+            let value = principal
+                .map(|id| serde_json::json!({"user": {"permissionId": id}}))
+                .unwrap_or_else(|| serde_json::json!({}));
+            let server = server(move |_| json_response(value.clone())).await;
+            let http = client();
+            let identity = DriveApi {
+                http: &http,
+                token: "fixture",
+                base: server.base.clone(),
+            }
+            .collection_identity()
+            .await;
+            if let Some(principal) = principal.filter(|id| !id.trim().is_empty()) {
+                let identity = identity.unwrap();
+                assert_eq!(identity.authority(), BASE);
+                assert_eq!(identity.principal(), principal);
+            } else {
+                assert!(identity.is_err());
+            }
+            let requests = server.requests.lock().unwrap();
+            assert_eq!(requests[0].path(), "/drive/v3/about");
+            assert!(
+                requests[0]
+                    .query_pairs()
+                    .any(|(key, value)| key == "fields" && value == "user(permissionId)")
+            );
+        }
+        for invalid in [
+            serde_json::json!([["fake-principal"]]),
+            serde_json::json!({"user": ["fake-principal"]}),
+        ] {
+            let server = server(move |_| json_response(invalid.clone())).await;
+            let http = client();
+            assert!(
+                DriveApi {
+                    http: &http,
+                    token: "fixture",
+                    base: server.base.clone()
+                }
+                .collection_identity()
+                .await
+                .is_err()
+            );
+        }
     }
 
     fn params(max_files: usize) -> GoogleDriveParams {

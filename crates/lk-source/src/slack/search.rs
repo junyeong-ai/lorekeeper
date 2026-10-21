@@ -313,6 +313,7 @@ impl Source for SlackSearchSource {
 
         Ok(crate::SourceObservation {
             items: all_items.into_vec(),
+            collection_identity: None,
             scope: crate::ObservationScope::ConfiguredQuery,
             outcome: if partial {
                 crate::ObservationOutcome::Partial

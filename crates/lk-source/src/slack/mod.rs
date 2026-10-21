@@ -30,11 +30,21 @@ async fn slack_post<T: serde::de::DeserializeOwned>(
     method: &str,
     params: &[(&str, &str)],
 ) -> Result<T, SourceError> {
+    slack_post_from(http, token, API, method, params).await
+}
+
+async fn slack_post_from<T: serde::de::DeserializeOwned>(
+    http: &reqwest::Client,
+    token: &str,
+    base: &str,
+    method: &str,
+    params: &[(&str, &str)],
+) -> Result<T, SourceError> {
     let mut attempts = 0u32;
 
     loop {
         let resp = http
-            .post(format!("{API}/{method}"))
+            .post(format!("{base}/{method}"))
             .bearer_auth(token)
             .form(params)
             .send()
@@ -84,6 +94,24 @@ async fn slack_post<T: serde::de::DeserializeOwned>(
 
         return Ok(wrapper.data);
     }
+}
+
+async fn collection_identity_from(
+    http: &reqwest::Client,
+    token: &str,
+    base: &str,
+) -> Result<crate::CollectionIdentity, SourceError> {
+    let identity: serde_json::Value = slack_post_from(http, token, base, "auth.test", &[]).await?;
+    let team = identity
+        .get("team_id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| SourceError::Parse("Slack auth.test response missing team_id".into()))?;
+    let user = identity
+        .get("user_id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| SourceError::Parse("Slack auth.test response missing user_id".into()))?;
+    crate::CollectionIdentity::new(format!("slack:{team}"), user)
 }
 
 /// The `next_cursor` envelope returned by every paginated Slack read method
@@ -437,6 +465,76 @@ async fn resolve_channel_id(
 #[cfg(test)]
 mod tests {
     use super::split_first_line;
+
+    #[tokio::test]
+    async fn collection_identity_observes_token_team_and_user_without_name_fallback() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut observed = Vec::new();
+        for (team, user) in [
+            (Some("T1"), Some("U1")),
+            (Some("T2"), Some("U1")),
+            (Some("T1"), Some("U2")),
+            (Some(""), Some("U1")),
+            (Some("T1"), Some(" \t")),
+            (None, Some("U1")),
+            (Some("T1"), None),
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            let mut value =
+                serde_json::json!({"ok": true, "team": "Display team", "user": "Display user"});
+            if let Some(team) = team {
+                value["team_id"] = team.into();
+            }
+            if let Some(user) = user {
+                value["user_id"] = user.into();
+            }
+            let body = serde_json::to_vec(&value).unwrap();
+            let task = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    let mut byte = [0];
+                    assert_ne!(stream.read(&mut byte).await.unwrap(), 0);
+                    request.push(byte[0]);
+                    assert!(request.len() < 16 * 1024);
+                }
+                let request = String::from_utf8(request).unwrap();
+                assert!(request.starts_with("POST /auth.test "));
+                assert!(
+                    request
+                        .to_ascii_lowercase()
+                        .contains("authorization: bearer selected-token")
+                );
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                stream.write_all(header.as_bytes()).await.unwrap();
+                stream.write_all(&body).await.unwrap();
+                stream.shutdown().await.unwrap();
+            });
+            let http = reqwest::Client::builder()
+                .no_proxy()
+                .timeout(std::time::Duration::from_secs(5))
+                .build()
+                .unwrap();
+            let identity = super::collection_identity_from(&http, "selected-token", &base).await;
+            task.await.unwrap();
+            if team.is_some_and(|id| !id.trim().is_empty())
+                && user.is_some_and(|id| !id.trim().is_empty())
+            {
+                observed.push(identity.unwrap());
+            } else {
+                assert!(identity.is_err());
+            }
+        }
+        assert_ne!(observed[0], observed[1], "different workspaces must differ");
+        assert_ne!(
+            observed[0], observed[2],
+            "different token principals must differ"
+        );
+    }
 
     #[test]
     fn promotes_short_first_line_and_strips_it() {

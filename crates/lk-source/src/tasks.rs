@@ -61,6 +61,10 @@ pub struct TasksSource;
 
 #[async_trait]
 impl Source for TasksSource {
+    async fn collection_identity(&self) -> Result<Option<crate::CollectionIdentity>, SourceError> {
+        crate::CollectionIdentity::new("lorekeeper:tasks", "local-transition-log").map(Some)
+    }
+
     async fn extract(
         &self,
         params: &serde_json::Value,
@@ -103,6 +107,7 @@ impl Source for TasksSource {
         }
         Ok(crate::SourceObservation {
             items: items.into_vec(),
+            collection_identity: None,
             scope: crate::ObservationScope::Window { start, end },
             outcome: crate::ObservationOutcome::Observed,
         })
@@ -113,6 +118,13 @@ impl Source for TasksSource {
 mod tests {
     use super::*;
     use lk_task::{Transition, TransitionKind};
+
+    #[tokio::test]
+    async fn collection_identity_is_portable_local_transition_authority() {
+        let identity = TasksSource.collection_identity().await.unwrap().unwrap();
+        assert_eq!(identity.authority(), "lorekeeper:tasks");
+        assert_eq!(identity.principal(), "local-transition-log");
+    }
 
     fn context(root: &std::path::Path, date: jiff::civil::Date) -> ExtractContext {
         ExtractContext {

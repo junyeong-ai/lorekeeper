@@ -218,6 +218,18 @@ impl GmailSource {
 
 #[async_trait]
 impl Source for GmailSource {
+    async fn collection_identity(&self) -> Result<Option<crate::CollectionIdentity>, SourceError> {
+        let token = self.auth.access_token().await?;
+        GmailApi {
+            http: &self.http,
+            token: &token,
+            base: url::Url::parse(BASE).expect("static Gmail URL"),
+        }
+        .collection_identity()
+        .await
+        .map(Some)
+    }
+
     async fn extract(
         &self,
         params: &serde_json::Value,
@@ -250,6 +262,17 @@ struct GmailApi<'a> {
 }
 
 impl GmailApi<'_> {
+    async fn collection_identity(&self) -> Result<crate::CollectionIdentity, SourceError> {
+        let profile: serde_json::Value = self.get(&["profile"], &[]).await?;
+        let email = profile
+            .get("emailAddress")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                SourceError::Parse("Gmail profile response missing emailAddress".into())
+            })?;
+        crate::CollectionIdentity::new(BASE, email)
+    }
+
     async fn get<T: DeserializeOwned>(
         &self,
         segments: &[&str],
@@ -395,6 +418,7 @@ impl GmailApi<'_> {
         );
         Ok(crate::SourceObservation {
             items: items.into_vec(),
+            collection_identity: None,
             scope: crate::ObservationScope::Window {
                 start: min,
                 end: max,
@@ -1147,6 +1171,46 @@ mod tests {
             .timeout(std::time::Duration::from_secs(5))
             .build()
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn collection_identity_observes_profile_and_refuses_missing_mailbox() {
+        for mailbox in ["first@example.com", "second@example.com", "", " \t"] {
+            let value = serde_json::json!({"emailAddress": mailbox});
+            let server = server(move |_| json_response(value.clone())).await;
+            let http = client();
+            let api = GmailApi {
+                http: &http,
+                token: "fixture",
+                base: server.base.clone(),
+            };
+            let identity = api.collection_identity().await;
+            if mailbox.trim().is_empty() {
+                assert!(identity.is_err());
+            } else {
+                let identity = identity.unwrap();
+                assert_eq!(identity.authority(), BASE);
+                assert_eq!(identity.principal(), mailbox);
+            }
+            assert_eq!(
+                server.requests.lock().unwrap()[0].path(),
+                "/gmail/v1/users/me/profile"
+            );
+        }
+        for invalid in [serde_json::json!({}), serde_json::json!(["fake-mailbox"])] {
+            let server = server(move |_| json_response(invalid.clone())).await;
+            let http = client();
+            assert!(
+                GmailApi {
+                    http: &http,
+                    token: "fixture",
+                    base: server.base.clone()
+                }
+                .collection_identity()
+                .await
+                .is_err()
+            );
+        }
     }
 
     fn message(id: &str, payload: serde_json::Value) -> serde_json::Value {

@@ -402,6 +402,7 @@ impl Source for JiraSource {
 
         Ok(crate::SourceObservation {
             items: items.into_vec(),
+            collection_identity: None,
             scope: crate::ObservationScope::ConfiguredQuery,
             outcome: if partial {
                 crate::ObservationOutcome::Partial

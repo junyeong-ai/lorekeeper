@@ -18,7 +18,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde::Deserialize;
-use tokio::sync::OnceCell;
 
 use lk_core::event::RawItem;
 
@@ -28,9 +27,6 @@ use crate::{ExtractContext, Source, SourceError};
 pub struct ConfluenceSource {
     http: reqwest::Client,
     auth: Arc<AtlassianAuth>,
-    /// The authenticated user's `accountId` — the exact ownership key. Invariant for a
-    /// fixed grant, so it is fetched once and cached.
-    account_id: OnceCell<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -174,59 +170,56 @@ struct PageLinks {
 
 impl ConfluenceSource {
     pub fn new(http: reqwest::Client, auth: Arc<AtlassianAuth>) -> Self {
-        Self {
-            http,
-            auth,
-            account_id: OnceCell::new(),
-        }
+        Self { http, auth }
     }
 
     /// The authenticated user's `accountId`. A failure is PROPAGATED, never degraded to
     /// "no account id" — collapsing an auth error into `None` would mark every page
     /// not-self, silently erasing a batch's authorship from the work-log with no signal
     /// (the same rule the Jira adapter follows).
-    async fn account_id(&self) -> Result<&str, SourceError> {
-        self.account_id
-            .get_or_try_init(|| async {
-                let url = format!(
-                    "{}/rest/api/user/current",
-                    self.auth.api_base(Product::Confluence)
-                );
-                let header = self.auth.header().await?;
-                let resp =
-                    crate::retry::send_with_retry(|| header.apply(self.http.get(&url)).send())
-                        .await?;
-                if !resp.status().is_success() {
-                    let status = resp.status().as_u16();
-                    let body = resp.text().await.unwrap_or_default();
-                    return Err(SourceError::Api {
-                        status,
-                        message: format!(
-                            "Confluence /user/current failed: {}",
-                            self.auth.explain_failure(status, &body)
-                        ),
-                    });
-                }
-                let key = self.auth.deployment().confluence_user_key();
-                resp.json::<serde_json::Value>()
-                    .await
-                    .map_err(|e| SourceError::Parse(e.to_string()))?
-                    .get(key)
-                    .and_then(|v| v.as_str())
-                    .map(String::from)
-                    .ok_or_else(|| {
-                        SourceError::Parse(format!(
-                            "Confluence /user/current response missing {key}"
-                        ))
-                    })
-            })
+    async fn current_account_id(&self) -> Result<String, SourceError> {
+        let url = format!(
+            "{}/rest/api/user/current",
+            self.auth.api_base(Product::Confluence)
+        );
+        let header = self.auth.header().await?;
+        let resp =
+            crate::retry::send_with_retry(|| header.apply(self.http.get(&url)).send()).await?;
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(SourceError::Api {
+                status,
+                message: format!(
+                    "Confluence /user/current failed: {}",
+                    self.auth.explain_failure(status, &body)
+                ),
+            });
+        }
+        let key = self.auth.deployment().confluence_user_key();
+        resp.json::<serde_json::Value>()
             .await
-            .map(String::as_str)
+            .map_err(|e| SourceError::Parse(e.to_string()))?
+            .get(key)
+            .and_then(|v| v.as_str())
+            .filter(|value| !value.trim().is_empty())
+            .map(String::from)
+            .ok_or_else(|| {
+                SourceError::Parse(format!("Confluence /user/current response missing {key}"))
+            })
     }
 }
 
 #[async_trait]
 impl Source for ConfluenceSource {
+    async fn collection_identity(&self) -> Result<Option<crate::CollectionIdentity>, SourceError> {
+        crate::CollectionIdentity::new(
+            self.auth.api_base(Product::Confluence),
+            self.current_account_id().await?,
+        )
+        .map(Some)
+    }
+
     async fn extract(
         &self,
         params: &serde_json::Value,
@@ -247,7 +240,7 @@ impl Source for ConfluenceSource {
         let cql = build_windowed_cql(&p.cql, min, max);
         tracing::debug!(cql = %cql, "confluence: query");
 
-        let my_account_id = self.account_id().await?.to_string();
+        let my_account_id = self.current_account_id().await?;
         let search_url = format!(
             "{}/rest/api/content/search",
             self.auth.api_base(Product::Confluence)
@@ -393,6 +386,7 @@ impl Source for ConfluenceSource {
         tracing::info!(count = items.len(), "confluence: pages found");
         Ok(crate::SourceObservation {
             items: items.into_vec(),
+            collection_identity: None,
             scope: crate::ObservationScope::Window {
                 start: min,
                 end: max,
@@ -563,6 +557,87 @@ fn map_page_observed(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn collection_identity_is_fresh_and_requires_deployment_user_key() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for cloud in [false, true] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let site = format!("http://{}", listener.local_addr().unwrap());
+            let key = if cloud { "accountId" } else { "username" };
+            let task = tokio::spawn(async move {
+                for id in [Some("first"), Some("second"), Some(" \t"), None] {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    let mut request = Vec::new();
+                    while !request.ends_with(b"\r\n\r\n") {
+                        let mut byte = [0];
+                        assert_ne!(stream.read(&mut byte).await.unwrap(), 0);
+                        request.push(byte[0]);
+                        assert!(request.len() < 16 * 1024);
+                    }
+                    let request = String::from_utf8(request).unwrap();
+                    let path = if cloud {
+                        "/wiki/rest/api/user/current"
+                    } else {
+                        "/rest/api/user/current"
+                    };
+                    assert!(request.starts_with(&format!("GET {path} ")), "{request}");
+                    let mut value = serde_json::json!({"displayName": "Not identity"});
+                    if let Some(id) = id {
+                        value[key] = id.into();
+                    }
+                    let body = serde_json::to_vec(&value).unwrap();
+                    let header = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    stream.write_all(header.as_bytes()).await.unwrap();
+                    stream.write_all(&body).await.unwrap();
+                    stream.shutdown().await.unwrap();
+                }
+            });
+            let http = reqwest::Client::builder()
+                .no_proxy()
+                .timeout(std::time::Duration::from_secs(5))
+                .build()
+                .unwrap();
+            let auth = if cloud {
+                crate::credentials::AtlassianAuthMethod::ApiToken {
+                    email: "fixture@example.com".into(),
+                    api_token: "fixture".into(),
+                }
+            } else {
+                crate::credentials::AtlassianAuthMethod::PersonalAccessToken {
+                    token: "fixture".into(),
+                }
+            };
+            let auth = Arc::new(AtlassianAuth::new(
+                http.clone(),
+                "fixture",
+                &crate::credentials::AtlassianCredentials {
+                    site_url: site.clone(),
+                    auth,
+                },
+                std::path::Path::new("."),
+            ));
+            let source = ConfluenceSource::new(http, auth);
+            let first = source.collection_identity().await.unwrap().unwrap();
+            let second = source.collection_identity().await.unwrap().unwrap();
+            assert_ne!(
+                first, second,
+                "identity checks must not reuse a previous principal"
+            );
+            assert_eq!(
+                first.authority(),
+                if cloud { format!("{site}/wiki") } else { site }
+            );
+            assert_eq!(first.principal(), "first");
+            assert_eq!(second.principal(), "second");
+            assert!(source.collection_identity().await.is_err());
+            assert!(source.collection_identity().await.is_err());
+            task.await.unwrap();
+        }
+    }
 
     fn page_json(account_id: &str, version: u64) -> Page {
         serde_json::from_value(serde_json::json!({
