@@ -26,9 +26,17 @@ Use its category/type/tag counts to select a scope with `--category`, `--type` a
 repeated `--tag` (all required, case-insensitive). Tags include preserved manual-source
 metadata; they do not create concept identity or evidence relationships.
 Browse orders by title, without treating citation frequency as relevance.
+Narrow document ownership with `--repository ID`, or paired `--provider TYPE --namespace ID`.
+These match validated declared source identity exactly; they do not assign concepts to
+their evidence's repository. `--path-prefix wiki/documents/team` selects exact address
+components, not title aliases or similarly prefixed sibling directories. The same
+scopes compose with search, browse and raw body search; repository and provider scopes
+are mutually exclusive.
 When time matters, use `lore wiki browse --snapshot <id> --sort created
 --from YYYY-MM-DD --to YYYY-MM-DD --json`. Bounds are inclusive; unknown or invalid
 dates are excluded by date filters. `created` may describe source authorship, not ingestion.
+The same date bounds compose with keyword search while retaining relevance order;
+`--sort created` remains browse-only. They do not mean modification or collection dates.
 Without date filters, newest-first order places unknown dates last.
 Search and browse return `total` and `next_offset`; follow `--offset` when more
 results are needed. `total` counts matches after metadata/date filters. Each metadata
@@ -56,6 +64,10 @@ not semantic equivalence or spelling aliases. Exact matches rank ahead of broade
 spacing matches, while named subjects retain priority. Ask for the full
 registered name to reach its alternate spellings in either language. Open each
 selected page with `lore wiki read <path> --revision <file_revision from the hit>`.
+For a body hit, `excerpt_kind` distinguishes a matching block from a `partial-match`
+whose terms occur in separate locations. The bounded excerpt may clip that block;
+use its `excerpt_section` with revision-pinned `wiki read --section` to inspect it.
+An opening preview introduces a named page; it is not automatically claim evidence.
 Inspect its outline, then read relevant `--section ID` content and follow `next_offset`.
 Carry `--revision` through pagination; a mismatch requires fresh retrieval. A section
 includes nested subsections. Read the sources behind the claim, not only its synthesis.
@@ -151,6 +163,11 @@ The JSON gives explicit occurrences with source lines, bounded context and captu
 revisions. Follow `next_offset` with `--offset` in the same snapshot; inspect selected
 sources with revision-checked `wiki read` before asserting meaning. A bare link does
 not establish support, contradiction or causality.
+For page-level expansion, use `lore wiki neighbors <page.md> --snapshot <id>
+--direction both --type concept --limit 10`. It deduplicates exact neighboring page
+addresses and reports incoming/outgoing direction with captured revisions and pagination.
+Repeated occurrences remain available through `wiki links`. Expand selected neighbors
+one hop at a time; adjacency does not establish evidence or semantic equivalence.
 For live graph diagnostics, `lore graph --json neighbors <vault-relative.md>` supports
 `--type`, `--direction incoming|outgoing|mutual` and pagination; it scans the live graph.
 A single live connection can use `lore wiki links <source.md> --target <target.md>`;

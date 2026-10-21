@@ -138,6 +138,9 @@ Tesseract의 일반 텍스트 OCR도 선택할 수 있습니다. 인식 결과�
 
 `lore input check`로 설치를, `lore input inspect FILE.pdf`로 결과를 확인하세요.
 원본은 기본 파일당 32 MiB이며 더 큰 파일은 `ingest.originals` 한도를 명시적으로 높입니다.
+`ingest.inputs`는 정규화·변환한 입력을 소스별 기본 64 MiB, 실행 전체 기본 256 MiB로
+제한합니다. 큰 배치는 한도를 명시적으로 높이거나 의존성이 완결된 작은 묶음으로 나누세요.
+원본·변환 결과·LLM 요청 한도는 서로 다르며, 프로세스 전체 메모리 상한을 뜻하지 않습니다.
 변환 결과·페이지 수·실행 시간은 별도 제한입니다. 재시도는 검증된 파생 캐시를 재사용하고,
 `inspect`와 `--dry-run`은 캐시를 기록하지 않습니다. 메모리·표·수식·페이지·시트의 보존 범위는
 [전처리 설정과 지원 범위](skills/lore-setup/references/config.md#document-preprocessing)에서 확인하세요.
@@ -249,6 +252,7 @@ pgvector를 선택했다. 이 결정의 조건과 첫 메모의 검색 품질 �
 lore wiki prepare                              # 현재 원본을 검증하고 snapshot ID 반환
 lore wiki search "Vector DB" --snapshot <id> --limit 10 --json
 lore wiki context wiki/concepts/vector-database.md --snapshot <id> --limit 10
+lore wiki neighbors wiki/concepts/vector-database.md --snapshot <id> --type document --limit 10
 lore wiki read wiki/concepts/vector-database.md  # 목차 → 필요한 --section ID
 lore wiki citations wiki/concepts/vector-database.md --snapshot <id> --limit 20
 lore wiki reviews                              # 관련된 현재 판단과 미해결 검토
@@ -258,6 +262,9 @@ lore wiki reviews                              # 관련된 현재 판단과 미�
 본문의 정확한 문자열은 `wiki search --body`, 띄어쓰기 차이는 `--spacing`, 분류는
 `wiki browse --category ... --tag ...`로 찾습니다. 검색 후보·일반 링크·인용 근거는
 서로 구분하며, 검색 순위와 출처 수를 신뢰도 점수로 사용하지 않습니다.
+검색에 `--repository ID` 또는 `--provider TYPE --namespace ID`, `--path-prefix`를
+조합해 문서 소유 범위를 좁힙니다. `--from`·`--to`는 선언된 작성일을 제한하며 수집일을 뜻하지
+않습니다. `wiki neighbors`는 연결된 페이지를 중복 없이 펼치고 `wiki links`는 개별 링크를 보여줍니다.
 
 검색·분류 응답의 각 분류 목록은 기본 20개 값과 전체 개수·다음 위치를 반환합니다.
 `--facet-limit`과 `--facet-offset`으로 이어서 조회하며, 문서 결과의 `--offset`과는 별개입니다.

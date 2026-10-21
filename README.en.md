@@ -142,6 +142,10 @@ Tesseract literal-text OCR is also available. Recognition is not semantic approv
 
 Check installation with `lore input check` and projections with `lore input inspect FILE.pdf`.
 Original entries default to 32 MiB; explicitly raise `ingest.originals` limits for larger files.
+`ingest.inputs` admits serialized normalized/projected input up to 64 MiB per source and
+256 MiB per run by default. Raise the limits deliberately or use smaller self-contained
+batches. Original, projected-input and model-request limits are separate; none caps
+total process memory.
 Projection size, page count and execution time have separate bounds. Retries reuse
 verified derived caches; `inspect` and `--dry-run` never write them. See
 [preprocessing configuration and scope](skills/lore-setup/references/config.md#document-preprocessing)
@@ -255,6 +259,7 @@ Disabling extraction retains established citations; retract mistaken citations t
 lore wiki prepare                              # verify current originals and return a snapshot ID
 lore wiki search "Vector DB" --snapshot <id> --limit 10 --json
 lore wiki context wiki/concepts/vector-database.md --snapshot <id> --limit 10
+lore wiki neighbors wiki/concepts/vector-database.md --snapshot <id> --type document --limit 10
 lore wiki read wiki/concepts/vector-database.md  # outline → selected --section ID
 lore wiki citations wiki/concepts/vector-database.md --snapshot <id> --limit 20
 lore wiki reviews                              # related judgments and unresolved reviews
@@ -265,6 +270,10 @@ relationships and direct evidence. Use `wiki search --body` for literal body tex
 `--spacing` for whitespace differences, and `wiki browse --category ... --tag ...`
 for metadata filters. Candidates, ordinary links and citations have different
 meanings; ranking and citation counts are not confidence scores.
+Compose search with `--repository ID` or `--provider TYPE --namespace ID`, and
+`--path-prefix` to narrow declared document ownership. `--from`/`--to` constrain
+declared creation dates, not collection time. `wiki neighbors` expands distinct
+connected pages; `wiki links` inspects individual occurrences.
 
 Each search/browse metadata facet returns up to 20 values by default, plus its
 distinct-value total and next offset. Follow `--facet-limit` and `--facet-offset`
