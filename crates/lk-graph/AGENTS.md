@@ -60,6 +60,9 @@ and CLI discovery, not a second graph authority.
   use the same complete live matcher without preparing or mutating navigation.
 - Preserve pending first-discovery order and rotate changed/first-time work. A bounded
   weekly batch must not starve old work or grow into an unbounded full-corpus audit.
+  Native admission journals pending order before external discovery or assessment,
+  under the writer claim with exact selected-input and readiness guards. It creates
+  no assessment receipt and does not advance a class turn; planning stays read-only.
   Native admission can defer unavailable subjects through a readiness callback;
   preserve complete coverage counts and pending order, and do not consume a class
   turn or create a receipt merely because a subject is deferred.
