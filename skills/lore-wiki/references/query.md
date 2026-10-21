@@ -31,8 +31,10 @@ When time matters, use `lore wiki browse --snapshot <id> --sort created
 dates are excluded by date filters. `created` may describe source authorship, not ingestion.
 Without date filters, newest-first order places unknown dates last.
 Search and browse return `total` and `next_offset`; follow `--offset` when more
-results are needed. Counts describe the query before metadata filters. An empty
-category key denotes uncategorized pages. Do not call the first page a complete inventory.
+results are needed. `total` counts matches after metadata/date filters; category,
+type and tag facets count query matches before those filters. An empty category
+key denotes uncategorized pages. Do not call the first page a complete inventory.
+
 ## Search and read selected content
 
 Run `lore wiki search "<terms>" --snapshot <id> --json` — it answers which pages the

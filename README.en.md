@@ -60,8 +60,9 @@ flowchart LR
 | `me/`, period synthesis | Optional personal work-log/reviews, separate from weekly knowledge themes |
 | SQLite and `index.md` | Rebuildable discovery and a small entry guide; Markdown remains authoritative |
 
-Structure and semantic results have different owners. A matching input hash and
-completion marker permit reuse; filled prose alone does not prove completion.
+Structure and semantic results have different owners. Reuse requires a matching
+input hash and completion marker plus the owned section; filled prose alone does
+not prove completion.
 Future dates do not materialize. `vault.locale` controls generated prose, while
 source text and source-written concept names retain their language. Established
 concept prose follows the [per-kind language policy](skills/lore-process/references/processing-kinds.md#output-language-all-kinds).

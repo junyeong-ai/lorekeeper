@@ -12,7 +12,7 @@ Read AGENTS.md to
 resolve section headings before inspecting pages.
 
 1. **Structural** — run `lore graph --json lint`. ONE pass returns ALL of it, in two
-   channels: `violations` (`broken`, `invalid_categories`, `duplicate_concepts`,
+   channels: `violations` (`broken`, `respelled_links`, `invalid_categories`, `duplicate_concepts`,
    `address_collisions` — distinct addresses that would collide under slug normalization —
    and `unnormalized` — a filename that is not its own slug) and `observations`
    (`orphans`, `hubs`, `unresolved_conflicts`). Surface every non-empty list from both.

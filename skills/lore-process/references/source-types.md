@@ -38,7 +38,8 @@ the work-log), apply the generic guidance without a type bias.
 - Highlight meeting outcomes and decisions if notes are present
 
 ### `jira`
-- Summarize key task status changes and deliverables
+- Summarize current task status and deliverables. Describe a status transition only
+  when the input records it; the adapter acquires current issue state, not a changelog.
 
 ### `confluence`
 - Treat the page as a document: preserve its argument, structure and reported author/editor.
