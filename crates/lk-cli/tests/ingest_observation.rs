@@ -3,7 +3,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 struct LocalServer {
     base: String,
@@ -117,6 +117,92 @@ fn assert_success(output: &Output) {
         output.status.success(),
         "{}",
         String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn incomplete_confluence_projection_preserves_published_pages_and_requests() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let vault = temp.path().join("vault");
+    let config = temp.path().join("config.yaml");
+    let credentials = temp.path().join("credentials.json");
+    let at = jiff::Timestamp::now();
+    let date = at.to_zoned(jiff::tz::TimeZone::UTC).date().to_string();
+    let response_kind = Arc::new(AtomicUsize::new(0));
+    let selected_kind = response_kind.clone();
+    let server = LocalServer::new(move |url| {
+        let result = match url.path() {
+            "/rest/api/user/current" => serde_json::json!({"username": "fixture-user"}),
+            "/rest/api/content/search" => {
+                let mut page = serde_json::json!({
+                    "id": "policy", "title": "Retention policy",
+                    "version": {"number": 7, "when": at.to_string(),
+                        "by": {"username": "fixture-user"}},
+                    "body": {"storage": {"value": "<p>Keep records for 7 days.</p>"}},
+                });
+                match selected_kind.load(Ordering::Relaxed) {
+                    1 => {
+                        page.as_object_mut().unwrap().remove("body");
+                    }
+                    2 => {
+                        page["version"].as_object_mut().unwrap().remove("number");
+                    }
+                    3 => page["body"]["storage"]["value"] = serde_json::json!(""),
+                    _ => {}
+                }
+                serde_json::json!({"results": [page]})
+            }
+            other => panic!("unexpected Confluence fixture path {other}"),
+        };
+        ("application/json", result.to_string())
+    });
+    let mut creds = lk_source::credentials::Credentials::default();
+    creds.atlassian.insert(
+        "fixture".into(),
+        lk_source::credentials::AtlassianCredentials {
+            site_url: server.base.clone(),
+            auth: lk_source::credentials::AtlassianAuthMethod::PersonalAccessToken {
+                token: "fixture-token".into(),
+            },
+        },
+    );
+    lk_source::credentials::CredentialStore::new(&credentials)
+        .unwrap()
+        .lock()
+        .unwrap()
+        .save(&creds)
+        .unwrap();
+    std::fs::write(&config, format!(
+        "vault:\n  root: {}\n  timezone: UTC\n  locale: en\nidentity: {{name: Test, email: test@example.invalid}}\ncredentials:\n  file: {}\nsources:\n  docs:\n    type: confluence\n    instance: fixture\n    params: {{cql: 'type = page'}}\n",
+        vault.display(), credentials.display()
+    )).unwrap();
+    assert_success(&run(&config, &["ingest", "docs", "--date", &date]));
+    let daily = vault.join(format!("daily/docs/{date}.md"));
+    let before_page = std::fs::read(&daily).unwrap();
+    let before_queue = snapshot(&vault.join(".lorekeeper/queue"));
+    assert!(String::from_utf8_lossy(&before_page).contains("Keep records for 7 days."));
+    assert!(!before_queue.is_empty());
+    for kind in [1, 2] {
+        response_kind.store(kind, Ordering::Relaxed);
+        let output = run(&config, &["ingest", "docs", "--date", &date]);
+        let diagnostic = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "kind {kind}: {diagnostic}");
+        assert!(
+            diagnostic.contains("cannot replace a daily snapshot"),
+            "{diagnostic}"
+        );
+        assert_eq!(std::fs::read(&daily).unwrap(), before_page);
+        assert_eq!(snapshot(&vault.join(".lorekeeper/queue")), before_queue);
+        let log = std::fs::read_to_string(vault.join(".lorekeeper/ingest.jsonl")).unwrap();
+        let last: serde_json::Value = serde_json::from_str(log.lines().last().unwrap()).unwrap();
+        assert_eq!(last["status"], "failed");
+    }
+    response_kind.store(3, Ordering::Relaxed);
+    assert_success(&run(&config, &["ingest", "docs", "--date", &date]));
+    assert!(
+        !std::fs::read_to_string(&daily)
+            .unwrap()
+            .contains("Keep records for 7 days.")
     );
 }
 

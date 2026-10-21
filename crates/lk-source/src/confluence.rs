@@ -484,7 +484,11 @@ fn map_page_observed(
         tracing::warn!(page = %page.id, "confluence: page has no version; skipping");
         return None;
     };
-    let version_number = version.number.unwrap_or(1);
+    let Some(version_number) = version.number else {
+        *partial = true;
+        tracing::warn!(page = %page.id, "confluence: page has no version number; skipping");
+        return None;
+    };
 
     let editor = version.by.as_ref();
     // Whichever field this deployment populates IS the identity; `account_id` is Cloud's,
@@ -512,11 +516,11 @@ fn map_page_observed(
     let title = page
         .title
         .unwrap_or_else(|| format!("Confluence {}", page.id));
-    let storage = page
-        .body
-        .and_then(|b| b.storage)
-        .and_then(|s| s.value)
-        .unwrap_or_default();
+    let Some(storage) = page.body.and_then(|b| b.storage).and_then(|s| s.value) else {
+        *partial = true;
+        tracing::warn!(page = %page.id, "confluence: expanded storage text is unavailable; skipping");
+        return None;
+    };
     // Confluence "storage format" is XHTML with custom macro elements; the shared HTML
     // converter degrades unmapped constructs to their text rather than leaking markup.
     let body = crate::markdown::html_to_markdown(&storage);
@@ -596,11 +600,34 @@ mod tests {
     }
 
     #[test]
+    fn observation_requires_a_provider_version_and_available_storage_text() {
+        let mut page = page_json("me", 7);
+        page.version.as_mut().unwrap().number = None;
+        let mut partial = false;
+        assert!(map_page_observed(page, "me", "https://x", true, &mut partial).is_none());
+        assert!(partial);
+        for missing in ["body", "storage", "value"] {
+            let mut page = page_json("me", 7);
+            match missing {
+                "body" => page.body = None,
+                "storage" => page.body.as_mut().unwrap().storage = None,
+                "value" => page.body.as_mut().unwrap().storage.as_mut().unwrap().value = None,
+                _ => unreachable!(),
+            }
+            let mut partial = false;
+            assert!(map_page_observed(page, "me", "https://x", true, &mut partial).is_none());
+            assert!(partial);
+        }
+    }
+
+    #[test]
     fn external_id_carries_the_version_so_an_edit_is_a_new_event() {
         let site = "https://acme.atlassian.net";
         let v3 = map_page(page_json("me", 3), "me", site, true).unwrap();
         let v4 = map_page(page_json("me", 4), "me", site, true).unwrap();
         assert_eq!(v3.external_id.as_deref(), Some("confluence:12345:v3"));
+        let v0 = map_page(page_json("me", 0), "me", site, true).unwrap();
+        assert_eq!(v0.external_id.as_deref(), Some("confluence:12345:v0"));
         assert_ne!(
             v3.external_id, v4.external_id,
             "an edit must mint a distinct event so it is re-summarized"
