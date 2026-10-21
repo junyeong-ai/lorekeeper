@@ -1661,11 +1661,17 @@ exit "$rc"
 
     #[test]
     fn parsed_document_destinations_preserve_exact_membership_title_and_anchor() {
-        for (raw, name) in [
-            ("<target.md#part>", "target.md"),
-            ("<a b.md#part>", "a b.md"),
-            (r"foo\(bar\).md#part", "foo(bar).md"),
-            ("a&amp;b.md#part", "a&b.md"),
+        for (raw, name, anchor) in [
+            ("<target.md#part>", "target.md", "#part"),
+            ("<a b.md#part>", "a b.md", "#part"),
+            (r"foo\(bar\).md#part", "foo(bar).md", "#part"),
+            ("a&amp;b.md#part", "a&b.md", "#part"),
+            (
+                "<target.md#anchor with spaces>",
+                "target.md",
+                "#anchor&#32;with&#32;spaces",
+            ),
+            ("target.md#anchor&#10;line", "target.md", "#anchor&#10;line"),
         ] {
             let member = format!("docs/{name}");
             let body = format!("[Raw \\[label\\]]({raw} \"A (condition)\")");
@@ -1676,7 +1682,7 @@ exit "$rc"
             assert_eq!(
                 updated,
                 format!(
-                    "[Raw \\[label\\]](https://host/r/{}#part \"A (condition)\")",
+                    "[Raw \\[label\\]](https://host/r/{}{anchor} \"A (condition)\")",
                     lk_core::link::encode_dest(&member)
                 )
             );

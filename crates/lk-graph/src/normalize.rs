@@ -476,11 +476,17 @@ mod tests {
 
     #[test]
     fn parsed_commonmark_destinations_are_repointed_with_titles_and_anchors() {
-        for (raw, name) in [
-            ("<target.md#part>", "target.md"),
-            ("<a b.md#part>", "a b.md"),
-            (r"foo\(bar\).md#part", "foo(bar).md"),
-            ("a&amp;b.md#part", "a&b.md"),
+        for (raw, name, anchor) in [
+            ("<target.md#part>", "target.md", "#part"),
+            ("<a b.md#part>", "a b.md", "#part"),
+            (r"foo\(bar\).md#part", "foo(bar).md", "#part"),
+            ("a&amp;b.md#part", "a&b.md", "#part"),
+            (
+                "<target.md#anchor with spaces>",
+                "target.md",
+                "#anchor&#32;with&#32;spaces",
+            ),
+            ("target.md#anchor&#10;line", "target.md", "#anchor&#10;line"),
         ] {
             let old = Path::new("wiki").join(name);
             let new = Path::new("wiki/new&amp;.md");
@@ -494,7 +500,7 @@ mod tests {
                     Path::new("/")
                 )
                 .unwrap(),
-                "See [Raw \\[label\\]](new%26amp;.md#part \"A (condition)\") here.",
+                format!("See [Raw \\[label\\]](new%26amp;.md{anchor} \"A (condition)\") here."),
                 "{content}"
             );
         }

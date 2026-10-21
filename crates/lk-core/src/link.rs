@@ -125,12 +125,18 @@ pub fn md_link(text: &str, dest: &str) -> String {
 }
 
 /// Keep an encoded URI's CommonMark value intact when embedding it in bare syntax.
-/// Unlike path encoding, this preserves existing percent escapes and fragment separators.
+/// Character references keep whitespace/control values out of the source grammar;
+/// unlike path encoding, they preserve percent escapes and fragment separators.
 fn escape_destination(destination: &str) -> String {
     let mut escaped = String::with_capacity(destination.len());
     for character in destination.chars() {
         match character {
             '&' => escaped.push_str("&amp;"),
+            character if character.is_whitespace() || character.is_control() => {
+                escaped.push_str("&#");
+                escaped.push_str(&u32::from(character).to_string());
+                escaped.push(';');
+            }
             '\\' | '(' | ')' | '<' | '>' => {
                 escaped.push('\\');
                 escaped.push(character);
@@ -546,6 +552,51 @@ mod tests {
                 assert_eq!(link.title, "A (condition)");
                 None
             });
+        }
+    }
+
+    #[test]
+    fn destination_serialization_preserves_parsed_whitespace_and_controls() {
+        for (raw, expected) in [
+            ("old.md#anchor with spaces", "old.md#anchor with spaces"),
+            (
+                "old path.md?query=with spaces#anchor",
+                "old path.md?query=with spaces#anchor",
+            ),
+            (
+                "https://example.test/old path?query=with spaces",
+                "https://example.test/old path?query=with spaces",
+            ),
+            ("old.md#anchor&#9;tab", "old.md#anchor\ttab"),
+            ("old.md#anchor&#10;line", "old.md#anchor\nline"),
+            ("old.md#anchor&#13;return", "old.md#anchor\rreturn"),
+            ("old.md#anchor&#1;control", "old.md#anchor\u{1}control"),
+            ("old.md#anchor&#127;delete", "old.md#anchor\u{7f}delete"),
+        ] {
+            let body = format!("[Old](<{raw}> \"title\")");
+            let mut original = Vec::new();
+            visit_inline_links(&body, |link, _| original.push(link.destination.to_owned()));
+            assert_eq!(original, [expected], "{body:?}");
+            assert_eq!(rewrite_links_outside_code(&body, |_| None), body);
+            let revised = expected.replacen("old", "new", 1);
+            let rewritten = rewrite_links_outside_code(&body, |link| {
+                Some(link.render_with_destination(&revised))
+            });
+            let mut observed = Vec::new();
+            visit_inline_links(&rewritten, |link, _| {
+                observed.push((link.destination.to_owned(), link.title.to_owned()))
+            });
+            assert_eq!(
+                observed,
+                [(revised.clone(), "title".into())],
+                "{rewritten:?}"
+            );
+            let emitted = md_link("New", &revised);
+            let mut observed = Vec::new();
+            visit_inline_links(&emitted, |link, _| {
+                observed.push(link.destination.to_owned())
+            });
+            assert_eq!(observed, [revised], "{emitted:?}");
         }
     }
 
