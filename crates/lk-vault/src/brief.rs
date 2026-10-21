@@ -240,6 +240,52 @@ fn pages_of(
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[test]
+    fn brief_uses_verified_owners_of_concept_and_document_aliases() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        write(
+            &root.path().join("backing/concept.md"),
+            "---\ntype: concept\ntitle: Harbor\ncreated: 2026-09-10\n---\n## Synthesis\nAn anchored definition.\n",
+        );
+        write(
+            &root.path().join("backing/document.md"),
+            "---\ntype: document\ncreated: 2026-09-10\n---\n[Harbor](../concepts/z-alias.md)\n",
+        );
+        for (collection, target) in [("concepts", "concept"), ("documents", "document")] {
+            std::fs::create_dir_all(root.path().join("wiki").join(collection)).unwrap();
+            for name in ["owner.md", "z-alias.md"] {
+                std::os::unix::fs::symlink(
+                    format!("../../backing/{target}.md"),
+                    root.path().join("wiki").join(collection).join(name),
+                )
+                .unwrap();
+            }
+        }
+        let date = jiff::civil::date(2026, 9, 10);
+        assert_eq!(
+            pages_of(root.path(), &dirs, date).unwrap(),
+            [PathBuf::from("wiki/documents/owner.md")]
+        );
+        let brief = build_brief(root.path(), &dirs, date).unwrap();
+        assert_eq!(brief.learned.len(), 1);
+        assert_eq!(brief.learned[0].path, "wiki/concepts/owner.md");
+        assert_eq!(brief.learned[0].title, "Harbor");
+        assert_eq!(
+            brief.learned[0].statement.as_deref(),
+            Some("An anchored definition.")
+        );
+        assert!(brief.revisited.is_empty());
+
+        std::os::unix::fs::symlink(
+            root.path().join("backing"),
+            root.path().join("wiki/documents/nested"),
+        )
+        .unwrap();
+        assert!(build_brief(root.path(), &dirs, date).is_err());
+    }
+
     #[test]
     fn brief_uses_declared_concept_roles_and_retains_untyped_legacy() {
         let root = tempfile::tempdir().unwrap();

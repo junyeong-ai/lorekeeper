@@ -194,48 +194,14 @@ pub(super) fn collect_documents(
     mut load: impl FnMut(&Path, &Path, &Path) -> Result<Option<Document>, VaultError>,
 ) -> Result<DocumentCollection, VaultError> {
     let directory = lk_core::vault_path::documents_dir(dirs);
-    let full = page_path(root, &directory)?;
-    match std::fs::metadata(&full) {
-        Ok(metadata) if metadata.is_dir() => {}
-        Ok(_) => return Err(invalid("document collection is not a directory")),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(DocumentCollection::default());
-        }
-        Err(error) => return Err(error.into()),
-    }
+    let inventory = crate::load_markdown_inventory(root, &directory)?;
     let mut owners: BTreeMap<std::path::PathBuf, (Document, bool)> = BTreeMap::new();
     let mut addresses = Vec::new();
     let mut revisions = Vec::new();
-    for entry in walkdir::WalkDir::new(full).follow_links(false) {
-        let entry = entry.map_err(|error| VaultError::Io(std::io::Error::other(error)))?;
-        // WalkDir traverses a validated collection-root alias, but not nested aliases.
-        if entry.depth() > 0
-            && entry.file_type().is_symlink()
-            && std::fs::metadata(entry.path())?.is_dir()
-        {
-            return Err(invalid(
-                "document collection contains an untraversed directory alias",
-            ));
-        }
-        if entry
-            .path()
-            .extension()
-            .is_none_or(|extension| extension != "md")
-            || entry.file_type().is_dir()
-        {
-            continue;
-        }
-        let relative = entry
-            .path()
-            .strip_prefix(root)
-            .map_err(|_| invalid("document escaped vault"))?;
-        let checked = page_path(root, relative)?;
-        let metadata = std::fs::metadata(&checked)?;
-        if !metadata.is_file() {
-            return Err(invalid("document address is not a regular file"));
-        }
+    for relative in inventory.addresses {
+        let checked = page_path(root, &relative)?;
         let canonical = checked.canonicalize()?;
-        let Some(document) = load(relative, &checked, &canonical)? else {
+        let Some(document) = load(&relative, &checked, &canonical)? else {
             continue;
         };
         let path = document.path.clone();
@@ -245,7 +211,9 @@ pub(super) fn collect_documents(
             document.metadata["file_revision"].clone(),
             canonical.clone(),
         ));
-        let alias = entry.file_type().is_symlink();
+        let alias = std::fs::symlink_metadata(&checked)?
+            .file_type()
+            .is_symlink();
         match owners.entry(canonical) {
             std::collections::btree_map::Entry::Vacant(entry) => {
                 entry.insert((document, alias));

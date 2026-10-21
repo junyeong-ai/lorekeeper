@@ -9,7 +9,7 @@ use crate::search::{MatchProjection, Page, SearchOptions, SearchResult, fold_nam
 use crate::{MutationSession, VaultError};
 
 pub(super) const INDEX_PATH: &str = ".lorekeeper/search.sqlite";
-const VERSION: i32 = 24;
+const VERSION: i32 = 25;
 
 #[derive(Serialize)]
 pub struct SearchSnapshot {
@@ -1038,6 +1038,233 @@ pub(super) fn visit_body_pages(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn search_inventory_uses_verified_collection_owners() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let raw = "---\ntype: concept\ntitle: Harbor Semantics\naliases: [항구의 의미]\n---\n## Synthesis\nAn anchored definition.\n";
+        write(root.path(), "backing/topic.md", raw);
+        std::fs::create_dir_all(root.path().join("wiki/concepts")).unwrap();
+        for name in ["topic.md", "z-alias.md"] {
+            std::os::unix::fs::symlink(
+                "../../backing/topic.md",
+                root.path().join("wiki/concepts").join(name),
+            )
+            .unwrap();
+        }
+        std::fs::hard_link(
+            root.path().join("backing/topic.md"),
+            root.path().join("wiki/concepts/independent.md"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(".", root.path().join("wiki/concepts/redundant")).unwrap();
+        write(
+            root.path(),
+            "document-pages/group/record.md",
+            "---\ntype: document\ntitle: Recorded observation\nsource_identity: {repository: exact-repository, document: exact-document}\nsource_record: {relations: [{relation: extends, target: missing}]}\n---\n## Content\n[Harbor](../../concepts/topic.md)\n",
+        );
+        std::os::unix::fs::symlink(
+            "group/record.md",
+            root.path().join("document-pages/alias.md"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink("group", root.path().join("document-pages/redundant")).unwrap();
+        std::os::unix::fs::symlink(
+            "../backing/topic.md",
+            root.path().join("document-pages/topic-copy.md"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink("../document-pages", root.path().join("wiki/documents"))
+            .unwrap();
+
+        let pages = super::super::search::load_pages(root.path(), &dirs, false).unwrap();
+        assert_eq!(pages.len(), 4);
+        let concept_paths = pages
+            .iter()
+            .filter(|page| page.concept)
+            .map(|page| page.rel_path.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            concept_paths,
+            ["wiki/concepts/independent.md", "wiki/concepts/topic.md"]
+        );
+
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let capture = prepare_search(&session, &dirs).unwrap();
+        assert_eq!(capture.pages, 4);
+        for (query, repository, expected) in [
+            (Some("항구의 의미"), None, 3),
+            (None, None, 4),
+            (None, Some("exact-repository"), 1),
+        ] {
+            let mut options = SearchOptions {
+                query,
+                repository,
+                ..Default::default()
+            };
+            let live = crate::search(root.path(), &dirs, &options).unwrap();
+            options.snapshot = Some(&capture.snapshot);
+            let captured = crate::search(root.path(), &dirs, &options).unwrap();
+            assert_eq!(live.total, expected);
+            assert_eq!(
+                serde_json::to_value(&live.hits).unwrap(),
+                serde_json::to_value(&captured.hits).unwrap()
+            );
+            if repository.is_some() {
+                assert_eq!(live.hits[0].path, "wiki/documents/group/record.md");
+                assert_eq!(
+                    live.hits[0].source_identity.as_ref().unwrap()["document"],
+                    "exact-document"
+                );
+            }
+        }
+        let links = crate::inspect_indexed_links(
+            root.path(),
+            &dirs,
+            Path::new("wiki/documents/group/record.md"),
+            &crate::IndexedLinkOptions {
+                snapshot: &capture.snapshot,
+                direction: crate::LinkDirection::Outgoing,
+                limit: 20,
+                offset: 0,
+            },
+        )
+        .unwrap();
+        assert_eq!(links.total, 1);
+        assert_eq!(links.links[0].source, "wiki/documents/group/record.md");
+        assert_eq!(links.links[0].destination, "../../concepts/topic.md");
+        assert_eq!(
+            links.links[0].target.as_deref(),
+            Some("wiki/concepts/topic.md")
+        );
+        let mut options = crate::ProvenanceOptions {
+            direction: crate::ProvenanceDirection::Outgoing,
+            relation: None,
+            limit: 20,
+            offset: 0,
+            revision: None,
+            snapshot: None,
+        };
+        let alias = Path::new("wiki/documents/alias.md");
+        let live = crate::inspect_provenance(root.path(), &dirs, alias, &options).unwrap();
+        options.snapshot = Some(&capture.snapshot);
+        let captured = crate::inspect_provenance(root.path(), &dirs, alias, &options).unwrap();
+        assert_eq!(live.path, "wiki/documents/group/record.md");
+        assert_eq!(live.total, 1);
+        assert_eq!(live.entries[0]["target_id"], "missing");
+        assert_eq!(live.entries[0]["resolution"], "unresolved");
+        assert_eq!(live.origin, captured.origin);
+        assert_eq!(live.entries, captured.entries);
+        assert_eq!(live.coverage["documents"], 1);
+        assert_eq!(captured.coverage["documents"], 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn invalid_collection_aliases_refuse_live_search_and_preserve_capture() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        write(
+            root.path(),
+            "wiki/concepts/valid.md",
+            "---\ntype: concept\ntitle: Valid\n---\nEstablished evidence.\n",
+        );
+        write(outside.path(), "outside.md", "Outside the vault.\n");
+        write(root.path(), "backing/unscanned.md", "Unscanned content.\n");
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let capture = prepare_search(&session, &dirs).unwrap();
+        let before = std::fs::read(root.path().join(INDEX_PATH)).unwrap();
+        for target in [
+            root.path().join("backing"),
+            outside.path().join("outside.md"),
+            root.path().join("missing.md"),
+        ] {
+            let alias = root.path().join("wiki/concepts/invalid.md");
+            std::os::unix::fs::symlink(&target, &alias).unwrap();
+            assert!(crate::search(root.path(), &dirs, &SearchOptions::default()).is_err());
+            assert!(prepare_search(&session, &dirs).is_err());
+            assert_eq!(std::fs::read(root.path().join(INDEX_PATH)).unwrap(), before);
+            let captured = crate::search(
+                root.path(),
+                &dirs,
+                &SearchOptions {
+                    snapshot: Some(&capture.snapshot),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(captured.total, 1);
+            assert_eq!(captured.hits[0].path, "wiki/concepts/valid.md");
+            std::fs::remove_file(alias).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn alias_only_reviews_preserve_subject_scope_and_live_captured_states() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        write(
+            root.path(),
+            "wiki/concepts/topic.md",
+            "---\ntype: concept\ntitle: Topic\n---\nAn established definition.\n",
+        );
+        std::os::unix::fs::symlink("topic.md", root.path().join("wiki/concepts/alias.md")).unwrap();
+        let evidence = "---\ntype: document\ntitle: Evidence\n---\nA supporting observation.\n";
+        write(root.path(), "wiki/documents/evidence.md", evidence);
+        std::fs::create_dir_all(root.path().join("wiki/explorations")).unwrap();
+        for name in ["review.md", "z-alias.md"] {
+            std::os::unix::fs::symlink(
+                "../../backing/review.md",
+                root.path().join("wiki/explorations").join(name),
+            )
+            .unwrap();
+        }
+        let revision = lk_core::concept::source_revision(&crate::parse_page(evidence).unwrap());
+        let session = MutationSession::acquire(root.path()).unwrap();
+        for (status, expected) in [
+            ("open", crate::ReviewEffectiveState::Open),
+            ("unsupported", crate::ReviewEffectiveState::Invalid),
+        ] {
+            let review = serde_json::json!({
+                "status":status,"subjects":["wiki/concepts/alias.md"],
+                "evidence":[{"path":"wiki/documents/evidence.md","revision":revision}],
+                "resolution":null
+            });
+            write(
+                root.path(),
+                "backing/review.md",
+                &format!(
+                    "---\ntype: exploration\ntitle: Review\nreview: {review}\n---\nAn authored assessment.\n"
+                ),
+            );
+            let reports = crate::list_reviews(root.path(), &dirs).unwrap();
+            assert_eq!(reports.len(), 1);
+            assert_eq!(reports[0].path, "wiki/explorations/review.md");
+            assert_eq!(reports[0].subjects(), ["wiki/concepts/alias.md"]);
+            assert_eq!(reports[0].effective_state, expected);
+            let capture = prepare_search(&session, &dirs).unwrap();
+            assert_eq!(capture.pages, 3);
+            let mut options = SearchOptions {
+                query: Some("Topic"),
+                ..Default::default()
+            };
+            let live = crate::search(root.path(), &dirs, &options).unwrap();
+            options.snapshot = Some(&capture.snapshot);
+            let captured = crate::search(root.path(), &dirs, &options).unwrap();
+            assert_eq!(live.total, 1);
+            assert_eq!(live.hits[0].reviews.total, 1);
+            assert_eq!(live.hits[0].reviews.reviews[0].effective_state, expected);
+            assert_eq!(live.hits[0].reviews.reviews[0].relation, "subject");
+            assert_eq!(
+                serde_json::to_value(live.hits).unwrap(),
+                serde_json::to_value(captured.hits).unwrap()
+            );
+        }
+    }
 
     #[test]
     fn summary_and_opening_keep_full_document_reference_context() {
@@ -3229,6 +3456,14 @@ mod tests {
         let session = MutationSession::acquire(root.path()).unwrap();
         let before = prepare_search(&session, &dirs).unwrap();
         let connection = Connection::open(root.path().join(INDEX_PATH)).unwrap();
+        connection
+            .execute("UPDATE snapshot SET version=?1", [VERSION - 1])
+            .unwrap();
+        assert!(inspect_search_snapshot(root.path(), &dirs).is_err());
+        assert_eq!(
+            prepare_search(&session, &dirs).unwrap().snapshot,
+            before.snapshot
+        );
         // Simulate the absence of maintenance columns in a previous schema.
         connection
             .execute_batch(
@@ -3331,9 +3566,9 @@ mod tests {
         assert!(before.links.iter().all(|link| link.rss_evidence.is_some()));
         std::fs::remove_file(&alias).unwrap();
         std::os::unix::fs::symlink("b.md", &alias).unwrap();
-        // Lexical-only capture does not enumerate concept leaf aliases. Change
-        // its selected inventory so this exercises incremental refresh rather
-        // than the existing identical-snapshot fast path.
+        // Redundant aliases share the direct owner's inventory row. Change the
+        // selected inventory to exercise incremental refresh rather than the
+        // identical-snapshot fast path.
         write(
             root.path(),
             "wiki/documents/new.md",

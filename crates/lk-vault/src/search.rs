@@ -22,7 +22,6 @@ use lk_core::frontmatter::KnowledgeStatus;
 use lk_core::vault_path::{concepts_dir, documents_dir, explorations_dir};
 use pulldown_cmark::{Event, Options, Tag, TagEnd};
 use unicode_normalization::UnicodeNormalization;
-use walkdir::WalkDir;
 
 use crate::VaultError;
 
@@ -1924,21 +1923,12 @@ fn string_array(page: &lk_core::frontmatter::VaultPage, key: &str) -> Vec<String
 }
 
 pub(crate) fn markdown_files(root: &Path, dir: &Path) -> Result<Vec<PathBuf>, VaultError> {
-    crate::page_path(root, dir.strip_prefix(root).map_err(std::io::Error::other)?)?;
-    match std::fs::read_dir(dir) {
-        Ok(_) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(error.into()),
-    }
-    let mut files = Vec::new();
-    for entry in WalkDir::new(dir).follow_links(false) {
-        let entry = entry.map_err(|error| std::io::Error::other(error.to_string()))?;
-        if entry.file_type().is_file() && entry.path().extension().is_some_and(|e| e == "md") {
-            files.push(entry.into_path());
-        }
-    }
-    files.sort();
-    Ok(files)
+    let relative = dir.strip_prefix(root).map_err(std::io::Error::other)?;
+    Ok(crate::load_markdown_inventory(root, relative)?
+        .owners
+        .into_iter()
+        .map(|path| root.join(path))
+        .collect())
 }
 
 #[cfg(test)]

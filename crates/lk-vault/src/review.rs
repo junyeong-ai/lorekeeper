@@ -754,21 +754,10 @@ fn publish_archive(root: &Path, revision: &str, raw: &str) -> Result<(), VaultEr
 pub fn list_reviews(root: &Path, dirs: &VaultDirs) -> Result<Vec<ReviewReport>, VaultError> {
     let mut reports = Vec::new();
     let mut revisions: BTreeMap<String, Result<String, VaultError>> = BTreeMap::new();
-    let directory = crate::page_path(root, &lk_core::vault_path::explorations_dir(dirs))?;
-    match std::fs::metadata(&directory) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(reports),
-        Err(error) => return Err(error.into()),
-        Ok(_) => {}
-    }
-    let mut paths = Vec::new();
-    for entry in walkdir::WalkDir::new(&directory).follow_links(false) {
-        let entry = entry.map_err(|e| VaultError::Io(std::io::Error::other(e)))?;
-        if entry.file_type().is_file() && entry.path().extension().is_some_and(|ext| ext == "md") {
-            paths.push(entry.into_path());
-        }
-    }
-    paths.sort();
-    for path in paths {
+    let inventory =
+        crate::load_markdown_inventory(root, &lk_core::vault_path::explorations_dir(dirs))?;
+    for relative in inventory.owners {
+        let path = root.join(relative);
         let mut report = ReviewReport {
             path: path
                 .strip_prefix(root)

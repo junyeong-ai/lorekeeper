@@ -5,7 +5,7 @@ use lk_core::frontmatter::{self, Frontmatter, VaultPage};
 
 use crate::VaultError;
 
-/// Distinct page owners and all validated occupied addresses from one collection scan.
+/// Distinct page owners and validated scanned addresses from one collection scan.
 pub struct MarkdownInventory {
     pub owners: Vec<PathBuf>,
     pub addresses: Vec<PathBuf>,
@@ -13,7 +13,8 @@ pub struct MarkdownInventory {
 
 /// Load distinct Markdown owners and validated occupied addresses from a collection.
 /// Filesystem aliases share one owner, preferring its direct address; hard links stay
-/// distinct. An incomplete traversal or an address outside the vault is an error.
+/// distinct. Nested directory aliases require a target already fully scanned directly
+/// in this collection. An incomplete traversal or an address outside the vault is an error.
 pub fn load_markdown_inventory(
     root: &Path,
     rel_dir: &Path,
@@ -34,22 +35,29 @@ pub fn load_markdown_inventory(
     }
     let mut owners = std::collections::BTreeMap::<PathBuf, (bool, PathBuf)>::new();
     let mut addresses = Vec::new();
+    let mut directories = std::collections::BTreeSet::new();
+    let mut directory_aliases = Vec::new();
     for entry in walkdir::WalkDir::new(&full).follow_links(false) {
         let entry = entry.map_err(|error| std::io::Error::other(error.to_string()))?;
+        if entry.depth() == 0 || entry.file_type().is_dir() {
+            directories.insert(entry.path().canonicalize()?);
+            continue;
+        }
         if entry.depth() > 0
             && entry.file_type().is_symlink()
             && std::fs::metadata(entry.path())?.is_dir()
         {
-            return Err(std::io::Error::other(
-                "vault collection contains an untraversed directory alias",
-            )
-            .into());
-        }
-        if entry.file_type().is_dir()
-            || entry
+            let relative = entry
                 .path()
-                .extension()
-                .is_none_or(|extension| extension != "md")
+                .strip_prefix(root)
+                .map_err(std::io::Error::other)?;
+            directory_aliases.push(crate::page_path(root, relative)?.canonicalize()?);
+            continue;
+        }
+        if entry
+            .path()
+            .extension()
+            .is_none_or(|extension| extension != "md")
         {
             continue;
         }
@@ -74,6 +82,15 @@ pub fn load_markdown_inventory(
                 }
             })
             .or_insert(candidate);
+    }
+    if directory_aliases
+        .iter()
+        .any(|target| !directories.contains(target))
+    {
+        return Err(std::io::Error::other(
+            "vault collection contains an untraversed directory alias",
+        )
+        .into());
     }
     let mut paths = owners
         .into_values()
@@ -463,6 +480,8 @@ mod tests {
             std::os::unix::fs::symlink("group/owner.md", root.path().join(directory).join(name))
                 .unwrap();
         }
+        std::os::unix::fs::symlink("group", root.path().join(directory).join("directory-alias"))
+            .unwrap();
         let reader = FsVault::new(root.path());
         assert_eq!(
             reader.list_markdown_recursive(directory).await.unwrap(),

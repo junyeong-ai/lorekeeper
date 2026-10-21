@@ -697,6 +697,7 @@ mod tests {
         std::fs::create_dir_all(&backing).unwrap();
         std::fs::write(backing.join("old.md"), "---\ntype: document\ntitle: Old\nsource_identity: {repository: r, document: old}\nsource_record: {superseded_by: new}\n---\nOld scope.\n").unwrap();
         std::fs::write(backing.join("new.md"), "---\ntype: document\ntitle: New\nsource_identity: {repository: r, document: new}\n---\nNew scope.\n").unwrap();
+        std::os::unix::fs::symlink(".", backing.join("redundant")).unwrap();
         let documents = root.path().join("wiki/documents");
         std::os::unix::fs::symlink("pages", &documents).unwrap();
         let path = Path::new("wiki/documents/old.md");

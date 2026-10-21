@@ -105,6 +105,12 @@ canonical; SQLite navigation is derived.
   never task boards. Concept vocabulary honors declared non-concept types, retaining
   untyped legacy concepts. Resolve aliases across scope before metadata filtering;
   ambiguity doesn't expand. Declared names match phrases, other queries every term.
+  Search and brief enumerate the shared verified Markdown owners per collection:
+  contained leaf aliases remain readable, duplicate aliases share an owner, and hard links
+  stay distinct. A nested directory alias is redundant only if its canonical directory was
+  fully scanned directly in that same collection; otherwise refuse incomplete results.
+  Review inventory uses the same owners. Scanned addresses do not enumerate recursively
+  spellable directory-alias paths; publication still verifies each requested address.
 - Matching/excerpts share CommonMark visible-text projection: formatting/soft breaks
   preserve phrases; blocks/list items/table cells separate; link destinations and
   markup are excluded. Raw HTML contributes parsed text with the same block boundaries;
