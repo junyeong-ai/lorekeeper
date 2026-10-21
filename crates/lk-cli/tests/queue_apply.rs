@@ -1952,6 +1952,7 @@ fn staged_sections_are_snapshot_guarded_and_only_the_applier_stamps_completion()
         "unknown-policy",
         "mutated-input",
         "missing-input",
+        "wrong-page-format",
     ] {
         let ws = Workspace::new();
         let (kind, target_kind, key) = match scenario {
@@ -1967,8 +1968,13 @@ fn staged_sections_are_snapshot_guarded_and_only_the_applier_stamps_completion()
             serde_json::json!({"text":"Source material", "max_sentences":3, "locale":"en"})
         };
         let hash = lk_queue::cache_hash(input.as_object().unwrap());
+        let page_format = match scenario {
+            "theme" => "weekly-synthesis",
+            "wrong-page-format" => "weekly-review",
+            _ => "daily",
+        };
         let page = format!(
-            "---\ntype: daily\nllm_inputs:\n  {key}: {hash}\n---\n## Target\n### Original Event\nRaw source.\n\n## Notes\nPreserve.\n"
+            "---\ntype: {page_format}\nllm_inputs:\n  {key}: {hash}\n---\n## Target\n### Original Event\nRaw source.\n\n## Notes\nPreserve.\n"
         );
         ws.write("daily/source/page.md", &page);
         let mut task = serde_json::json!({"task_id":"section-1","kind":kind,"created_at":"2026-10-16T00:00:00Z","cache_hash":hash,"input":input,"target":{"vault_path":"daily/source/page.md","kind":target_kind,"anchor":"## Target"}});

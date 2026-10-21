@@ -1847,6 +1847,16 @@ fn classify_against_page(
     if artifact == Artifact::Task && field(&kind.completion_key()).as_deref() == Some(cache_hash) {
         return Ok(TaskStatus::Done);
     }
+    if page
+        .frontmatter
+        .get("type")
+        .and_then(|value| value.as_str())
+        != Some(kind.page_format())
+    {
+        // Preserve unfinished requests and answers until the declared format is repaired.
+        // Historical Done tasks may still retire without authorizing another publication.
+        return Ok(TaskStatus::Unreadable);
+    }
     // Asked last, because it only decides the fate of work still to be written: EVERY
     // section the task names must exist on the page to receive it. An anchor the page does
     // not carry cannot come back — see `MissingTarget`. A `synthesize-concept` task names
@@ -1870,6 +1880,7 @@ fn classify_against_page(
 mod tests {
     use super::*;
     use lk_queue::{TargetKind, TaskKind, TaskTarget};
+    use strum::IntoEnumIterator;
     use tempfile::TempDir;
 
     fn classify_task(vault_root: &Path, task: &QueueTask) -> miette::Result<TaskStatus> {
@@ -1980,7 +1991,7 @@ mod tests {
         std::fs::write(
             dir.path().join("daily/s/2026-05-24.md"),
             format!(
-                "---\nllm_inputs:\n  summary: {}\n---\n\n## 요약\n\nbody\n",
+                "---\ntype: daily\nllm_inputs:\n  summary: {}\n---\n\n## 요약\n\nbody\n",
                 summary_hash("live")
             ),
         )
@@ -2166,7 +2177,9 @@ mod tests {
         let dir = TempDir::new().unwrap();
         std::fs::create_dir_all(dir.path().join("wiki/concepts")).unwrap();
         let hash = lk_core::concept::citation_digest(&[]);
-        let page = |body: &str| format!("---\nllm_inputs:\n  synthesis: {hash}\n---\n{body}");
+        let page = |body: &str| {
+            format!("---\ntype: concept\nllm_inputs:\n  synthesis: {hash}\n---\n{body}")
+        };
         let synthesis_task = |vault_path: &str| QueueTask {
             task_id: "syn-1".into(),
             kind: TaskKind::SynthesizeConcept,
@@ -2216,7 +2229,11 @@ mod tests {
     fn write_page(root: &Path, rel: &str, frontmatter: &str) {
         let path = root.join(rel);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, format!("---\n{frontmatter}---\n\n## 요약\n\nbody\n")).unwrap();
+        std::fs::write(
+            &path,
+            format!("---\ntype: daily\n{frontmatter}---\n\n## 요약\n\nbody\n"),
+        )
+        .unwrap();
     }
 
     #[test]
@@ -2232,6 +2249,78 @@ mod tests {
         );
         let t = task("daily/s/2026-05-23.md", "abc123");
         assert_eq!(classify_task(dir.path(), &t).unwrap(), TaskStatus::Current);
+    }
+
+    #[test]
+    fn unfinished_publication_requires_the_targets_declared_page_format() {
+        let dir = TempDir::new().unwrap();
+        let path = Path::new("page.md");
+        for kind in TargetKind::iter() {
+            for declaration in [
+                format!("type: {}\n", kind.page_format()),
+                String::new(),
+                "type: null\n".into(),
+                "type: 42\n".into(),
+                "type: unknown\n".into(),
+            ] {
+                let raw = format!(
+                    "---\n{declaration}llm_inputs:\n  {}: captured\n---\n## Target\n",
+                    kind.llm_inputs_key()
+                );
+                std::fs::write(dir.path().join(path), &raw).unwrap();
+                let expected = if declaration == format!("type: {}\n", kind.page_format()) {
+                    TaskStatus::Current
+                } else {
+                    TaskStatus::Unreadable
+                };
+                for artifact in [Artifact::Task, Artifact::Result] {
+                    assert_eq!(
+                        classify_against_page(
+                            dir.path(),
+                            path,
+                            kind,
+                            "captured",
+                            &["## Target"],
+                            artifact
+                        )
+                        .unwrap(),
+                        expected,
+                        "{kind:?}: {declaration:?}"
+                    );
+                }
+                if expected == TaskStatus::Unreadable {
+                    let answered =
+                        lk_vault::set_llm_input(&raw, &kind.completion_key(), "captured").unwrap();
+                    std::fs::write(dir.path().join(path), answered).unwrap();
+                    assert_eq!(
+                        classify_against_page(
+                            dir.path(),
+                            path,
+                            kind,
+                            "captured",
+                            &["## Target"],
+                            Artifact::Task
+                        )
+                        .unwrap(),
+                        TaskStatus::Done,
+                        "historical completion still permits retirement"
+                    );
+                    assert_eq!(
+                        classify_against_page(
+                            dir.path(),
+                            path,
+                            kind,
+                            "captured",
+                            &["## Target"],
+                            Artifact::Result
+                        )
+                        .unwrap(),
+                        TaskStatus::Unreadable,
+                        "historical completion cannot authorize another publication"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -2340,7 +2429,7 @@ mod tests {
         std::fs::write(
             &path,
             format!(
-                "---\nid: x\nllm_inputs:\n  summary: {}\n---\n\n## Summary\n\nbody\n",
+                "---\ntype: daily\nid: x\nllm_inputs:\n  summary: {}\n---\n\n## Summary\n\nbody\n",
                 summary_hash("abc123")
             ),
         )
@@ -2719,7 +2808,7 @@ mod tests {
         // And the repair does bring it back.
         std::fs::write(
             dir.path().join("daily/s/2026-05-23.md"),
-            format!("---\nllm_inputs:\n  summary: {}\ntitle: \"Notes: today\"\n---\n\n## 요약\n\nbody\n", summary_hash("live")),
+            format!("---\ntype: daily\nllm_inputs:\n  summary: {}\ntitle: \"Notes: today\"\n---\n\n## 요약\n\nbody\n", summary_hash("live")),
         )
         .unwrap();
         let tasks = read_tasks(&queue_dir.join("run-1.jsonl")).unwrap().tasks;

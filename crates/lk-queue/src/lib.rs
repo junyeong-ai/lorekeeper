@@ -79,6 +79,21 @@ pub enum TargetKind {
 }
 
 impl TargetKind {
+    /// Declared page format owned by this semantic target.
+    pub fn page_format(self) -> &'static str {
+        match self {
+            Self::DailySummary | Self::DailyConcepts | Self::DailyRefineEvents => "daily",
+            Self::DocumentSummary | Self::DocumentConcepts => "document",
+            Self::WeeklySynthesisThemes => "weekly-synthesis",
+            Self::WeeklyReviewNarrative => "weekly-review",
+            Self::MonthlyReviewNarrative => "monthly-review",
+            Self::QuarterlyReviewNarrative => "quarterly-review",
+            Self::AnnualReviewNarrative => "annual-review",
+            Self::WorkLogSynthesis => "work-log",
+            Self::ConceptSynthesis => "concept",
+        }
+    }
+
     /// The `llm_inputs.<key>` frontmatter field this task's result is cached under.
     /// One key per logical page section: the pipeline stamps the cache hash here at
     /// render time and the `/lore-process` skill compares against it (stale-task
