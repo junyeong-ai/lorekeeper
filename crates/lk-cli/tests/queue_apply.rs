@@ -506,6 +506,119 @@ fn duplicate_extraction_files_fold_once_and_conflicting_proposals_stay_unpublish
 }
 
 #[test]
+fn extraction_proposal_groups_classify_before_comparing_answers() {
+    for scenario in [
+        "stale",
+        "missing-target",
+        "done",
+        "orphan",
+        "unparseable-pending",
+        "unreadable",
+        "invalid-binding-current",
+        "invalid-binding-done",
+        "invalid-input",
+        "done-with-fresh-proposal",
+    ] {
+        let ws = Workspace::new();
+        ws.write(PAGE, &daily_page("h"));
+        ws.drop_result("proposal", PAGE, "h", "Shared Subject");
+        let original_path = ".lorekeeper/queue/results/proposal.json";
+        let original = ws.read(original_path);
+        if scenario.starts_with("done") || scenario == "invalid-binding-done" {
+            ws.apply_expecting(1, 0);
+            ws.write(original_path, &original);
+        }
+        let mut alias: serde_json::Value = serde_json::from_str(&original).unwrap();
+        alias["concepts"][0]["synthesis"] = "A conflicting retained interpretation.".into();
+        if scenario.starts_with("invalid-binding") {
+            alias["target"]["vault_path"] = "daily/notes/missing.md".into();
+        }
+        if scenario == "done-with-fresh-proposal" {
+            alias["target_revision"] = lk_core::concept::file_revision(&ws.read(PAGE)).into();
+        }
+        let alias = serde_json::to_string_pretty(&alias).unwrap();
+        let alias_path = if scenario == "invalid-binding-done" {
+            ".lorekeeper/queue/results/z-another-name.json"
+        } else {
+            ".lorekeeper/queue/results/another-name.json"
+        };
+        ws.write(alias_path, &alias);
+        let other = "daily/notes/other.md";
+        ws.write(other, &daily_page("other"));
+        ws.drop_result("independent", other, "other", "Independent Subject");
+
+        match scenario {
+            "stale" => ws.write(PAGE, &daily_page("newer-input")),
+            "missing-target" => std::fs::remove_file(ws.vault().join(PAGE)).unwrap(),
+            "orphan" => {
+                std::fs::remove_file(ws.vault().join(".lorekeeper/queue/proposal.jsonl")).unwrap();
+            }
+            "unparseable-pending" => {
+                ws.write(".lorekeeper/queue/proposal.jsonl", "{unfinished task\n");
+            }
+            "unreadable" => ws.write(PAGE, "---\ntype: [\n---\n## Related Concepts\n"),
+            "invalid-input" => {
+                let task_path = ".lorekeeper/queue/proposal.jsonl";
+                let mut task: serde_json::Value =
+                    serde_json::from_str(&ws.read(task_path)).unwrap();
+                task["input"]["text"] = "Unbound replacement input.".into();
+                ws.write(task_path, &task.to_string());
+            }
+            _ => {}
+        }
+        let before = std::fs::read(ws.vault().join(PAGE)).ok();
+        let retired = matches!(scenario, "stale" | "missing-target" | "done");
+        let preview = ws.run(&["queue", "apply", "--dry-run"]);
+        assert_eq!(
+            preview.status.success(),
+            retired,
+            "{scenario}: {}",
+            String::from_utf8_lossy(&preview.stderr)
+        );
+        assert_eq!(std::fs::read(ws.vault().join(PAGE)).ok(), before);
+        assert_eq!(ws.read(original_path), original);
+        assert_eq!(ws.read(alias_path), alias);
+
+        let output = ws.run(&["queue", "apply"]);
+        assert_eq!(
+            output.status.success(),
+            retired,
+            "{scenario}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(std::fs::read(ws.vault().join(PAGE)).ok(), before);
+        if scenario == "orphan" {
+            for (name, raw) in [("proposal.json", &original), ("another-name.json", &alias)] {
+                assert_eq!(
+                    ws.read(&format!(".lorekeeper/queue/results/orphaned/{name}")),
+                    *raw
+                );
+                assert!(
+                    ws.read(&format!(
+                        ".lorekeeper/queue/results/orphaned/{name}.reason.txt"
+                    ))
+                    .contains("no matching pending task")
+                );
+            }
+        } else if !retired {
+            assert_eq!(ws.read(original_path), original, "{scenario}");
+            assert_eq!(ws.read(alias_path), alias, "{scenario}");
+        }
+        if retired || scenario == "orphan" {
+            assert!(!ws.vault().join(original_path).exists(), "{scenario}");
+            assert!(!ws.vault().join(alias_path).exists(), "{scenario}");
+        }
+        assert!(ws.read(other).contains("concepts_done:"), "{scenario}");
+        assert!(
+            ws.vault()
+                .join("wiki/concepts/independent-subject.md")
+                .exists(),
+            "{scenario}"
+        );
+    }
+}
+
+#[test]
 fn extraction_discovery_guards_complete_candidates_and_explicit_admission() {
     for scenario in [
         "current",

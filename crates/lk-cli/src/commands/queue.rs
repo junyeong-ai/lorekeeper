@@ -616,39 +616,18 @@ async fn apply(
             .or_default()
             .push((path, result));
     }
-    let mut agreed = Vec::new();
-    for group in proposals.into_values() {
-        let expected =
-            serde_json::to_value(&group[0].1).map_err(|error| miette::miette!("{error}"))?;
-        let mut ambiguous = false;
-        for (_, result) in group.iter().skip(1) {
-            if serde_json::to_value(result).map_err(|error| miette::miette!("{error}"))? != expected
-            {
-                ambiguous = true;
-                break;
-            }
-        }
-        if ambiguous {
-            eprintln!(
-                "  ✗ {}: conflicting extraction results for the same retained task and input; review and reconcile all retained proposals to one agreed value before retrying",
-                group[0].1.task_id
-            );
-            failed += 1;
-            continue;
-        }
-        let mut entries = group.into_iter();
-        let (path, result) = entries.next().expect("proposal groups are nonempty");
-        let paths = std::iter::once(path)
-            .chain(entries.map(|(path, _)| path))
-            .collect::<Vec<_>>();
-        agreed.push((paths, result));
-    }
-    agreed.sort_by(|left, right| left.0[0].cmp(&right.0[0]));
+    let mut proposals = proposals.into_values().collect::<Vec<_>>();
+    proposals.sort_by(|left, right| left[0].0.cmp(&right[0].0));
 
     // Everything a result can get wrong is that result's problem, not the batch's: aborting
     // would strand every other valid extraction in the run. A RETRYABLE failure leaves the
     // file in place so a fixed page picks it up next time, and the run exits non-zero.
-    for (paths, result) in &agreed {
+    for group in &proposals {
+        let result = &group[0].1;
+        let paths = group
+            .iter()
+            .map(|(path, _)| path.clone())
+            .collect::<Vec<_>>();
         let fail = |reason: String| {
             eprintln!(
                 "  ✗ {} ({}): {reason}",
@@ -662,36 +641,17 @@ async fn apply(
             );
         };
 
-        // An address outside the vault is not a page that might be fixed — it is a result
-        // that can never be applied. Keeping it would fail `queue apply`, and so the whole
-        // scheduled pipeline, on every run forever: `queue prune` classifies TASKS, so no
-        // janitor would ever clear it. It is dead in the same sense a stale result is, and
-        // is consumed on the same terms.
-        let Some(rel_path) = resolve_target_path(&result.target.vault_path) else {
-            drop_dead("target path escapes the vault root");
-            dropped += 1;
-            consumed.extend(paths.iter().cloned());
-            continue;
-        };
-        if !matches!(
-            result.target.kind,
-            lk_queue::TargetKind::DailyConcepts | lk_queue::TargetKind::DocumentConcepts
-        ) {
-            fail("extraction result requires a daily or document concept target".into());
-            failed += 1;
-            continue;
-        }
-        let task = pending
+        let Some(task) = pending
             .tasks
-            .get(&(result.task_id.clone(), result.cache_hash.clone()));
-        if task.is_none() {
+            .get(&(result.task_id.clone(), result.cache_hash.clone()))
+        else {
             let reason = if pending.unparseable > 0 {
                 "no matching readable task; repair unparseable queue lines before deciding this result's fate"
             } else {
                 "no matching pending task; its run was retired or the task identity is invalid"
             };
             if pending.unparseable == 0 && !dry_run {
-                for path in paths {
+                for path in &paths {
                     synthesis::quarantine_orphan(&queue_dir, path, reason)?;
                 }
             }
@@ -699,35 +659,40 @@ async fn apply(
             failed += 1;
             continue;
         };
-        if let Some(task) = task
-            && let Err(error) = task
-                .validate_retained_input()
-                .and_then(|()| task.generation_policy().map(|_| ()))
+        if let Err(error) = task
+            .validate_retained_input()
+            .and_then(|()| task.generation_policy().map(|_| ()))
         {
             fail(error);
             failed += 1;
             continue;
         }
-        if let Some(task) = task
-            && (task.kind != lk_queue::TaskKind::ExtractConcepts
-                || task.target.vault_path != result.target.vault_path
-                || task.target.kind != result.target.kind
-                || task.target.anchor != result.target.anchor
+        if group.iter().any(|(_, proposal)| {
+            task.kind != lk_queue::TaskKind::ExtractConcepts
+                || task.target.vault_path != proposal.target.vault_path
+                || task.target.kind != proposal.target.kind
+                || task.target.anchor != proposal.target.anchor
                 || task.input.get("date").and_then(|value| value.as_str())
-                    != Some(result.date.to_string().as_str())
+                    != Some(proposal.date.to_string().as_str())
                 || task.input.get("concept_policy")
                     != Some(
-                        &serde_json::to_value(result.concept_policy)
+                        &serde_json::to_value(proposal.concept_policy)
                             .expect("concept policy serializes"),
-                    ))
-        {
+                    )
+        }) {
             fail("extraction result does not match its pending task".into());
             failed += 1;
             continue;
         }
-        if let Some(task) = task
-            && policy_request_status(&vault_root, task) == Some(TaskStatus::Stale)
-        {
+        // Every proposal is now bound to the same retained target. Dead work can
+        // retire together without choosing among answers that cannot be published.
+        let Some(rel_path) = resolve_target_path(&task.target.vault_path) else {
+            drop_dead("target path escapes the vault root");
+            dropped += 1;
+            consumed.extend(paths.iter().cloned());
+            continue;
+        };
+        if policy_request_status(&vault_root, task) == Some(TaskStatus::Stale) {
             drop_dead("superseded generation policy");
             dropped += 1;
             consumed.extend(paths.iter().cloned());
@@ -736,12 +701,12 @@ async fn apply(
         match classify_against_page(
             &vault_root,
             &rel_path,
-            result.target.kind,
-            &result.cache_hash,
+            task.target.kind,
+            &task.cache_hash,
             // One section, because `TaskResult` carries `concepts` and nothing else: a result
             // from any other kind would arrive with no payload to apply, so the single anchor
             // is what the type can express rather than what the protocol asks for.
-            &[result.target.anchor.as_str()],
+            &[task.target.anchor.as_str()],
             Artifact::Result,
         ) {
             Ok(TaskStatus::Current) => {}
@@ -781,15 +746,32 @@ async fn apply(
             .get(&rel_path)
             .cloned()
             .unwrap_or_else(|| synthesis::revision(&content));
-        if original_revision != result.target_revision {
-            if let Some(task) = task
-                && classify_task(&vault_root, task, &mut BTreeMap::new())? == TaskStatus::Done
+        if group
+            .iter()
+            .all(|(_, proposal)| original_revision != proposal.target_revision)
+            && classify_task(&vault_root, task, &mut BTreeMap::new())? == TaskStatus::Done
+        {
+            drop_dead("already materialized");
+            dropped += 1;
+            consumed.extend(paths.iter().cloned());
+            continue;
+        }
+        let expected = serde_json::to_value(result).map_err(|error| miette::miette!("{error}"))?;
+        let mut ambiguous = false;
+        for (_, proposal) in group.iter().skip(1) {
+            if serde_json::to_value(proposal).map_err(|error| miette::miette!("{error}"))?
+                != expected
             {
-                drop_dead("already materialized");
-                dropped += 1;
-                consumed.extend(paths.iter().cloned());
-                continue;
+                ambiguous = true;
+                break;
             }
+        }
+        if ambiguous {
+            fail("conflicting extraction results for the same retained task and input; review and reconcile all retained proposals to one agreed value before retrying".into());
+            failed += 1;
+            continue;
+        }
+        if original_revision != result.target_revision {
             fail("target changed; read the current page and regenerate this result".into());
             failed += 1;
             continue;
@@ -810,7 +792,8 @@ async fn apply(
             }
         };
         let rss_manifest = task
-            .and_then(|t| t.input.get("rss_original"))
+            .input
+            .get("rss_original")
             .map(|v| {
                 serde_json::from_value::<lk_core::rss_original::RssOriginalManifest>(v.clone())
             })
@@ -821,7 +804,7 @@ async fn apply(
             .await
         {
             Ok(rewritten) => {
-                let rewritten = stamp_policy(&rewritten, task, result.target.kind)?;
+                let rewritten = stamp_policy(&rewritten, Some(task), result.target.kind)?;
                 origin_revisions.insert(rel_path.clone(), original_revision);
                 let page = origin_pages
                     .entry(rel_path)
