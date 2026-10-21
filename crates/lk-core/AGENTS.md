@@ -60,8 +60,10 @@ config loading and the shared filesystem primitives intentionally perform I/O.
 - Use `link` for construction, extraction, rewrite and resolution. Links are
   CommonMark relative `.md` destinations; escape/percent-encode through shared
   helpers. Extraction excludes code/images/external schemes; preserving a link
-  requires its label/destination pair. Resolution folds dot segments and accepts
-  vault-absolute OKF addresses without escaping the root.
+  requires its label/destination pair. Read destination identity from CommonMark's
+  parsed value, not its raw spelling; repoint with the shared label/title renderer.
+  Resolution folds dot segments and accepts vault-absolute OKF addresses without
+  escaping the root.
 - `scan_defects` identifies converter cleanliness; `scan_credentials` reports
   issuer-defined token shapes, not verified live secrets. Never redact source
   content in a converter. A clean scan cannot certify absence of credentials.

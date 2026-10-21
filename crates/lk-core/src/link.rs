@@ -28,10 +28,10 @@ use regex::{Captures, Regex};
 
 use crate::markdown::OPTIONS;
 
-/// Matches an inline markdown link (or image embed): optional `!`, `[text](dest)`.
+/// Locates the supported inline link label (or image embed): optional `!`, `[text](dest)`.
 /// Group 1 = the `!` of an image embed (empty for links), group 2 = the link text
-/// (backslash escapes allowed), group 3 = the raw destination (up to the closing
-/// paren — literal parens in destinations are percent-encoded by [`encode_dest`]).
+/// (backslash escapes allowed), group 3 = a raw destination prefix. Structural
+/// extraction/rewriting takes the complete span and address from CommonMark.
 static MD_LINK_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(!?)\[((?:[^\]\\\n]|\\.)*)\]\(([^)\n]*)\)").unwrap());
 
@@ -42,16 +42,6 @@ pub fn split_dest_anchor(dest: &str) -> (&str, &str) {
         Some(pos) => (&dest[..pos], &dest[pos..]),
         None => (dest, ""),
     }
-}
-
-/// Split a link's RAW `(dest)` capture into its page path and anchor. CommonMark
-/// permits a quoted title after the destination, so the destination proper ends at
-/// the first whitespace. The one normalization every consumer of a raw destination
-/// goes through — extraction and the merge/normalize rewriters — so they can never
-/// disagree about which page a link addresses.
-pub fn split_raw_dest(raw: &str) -> (&str, &str) {
-    let dest = raw.split_whitespace().next().unwrap_or("");
-    split_dest_anchor(dest)
 }
 
 /// Whether a destination is external — it carries an RFC 3986 scheme
@@ -74,7 +64,7 @@ pub fn is_external(dest: &str) -> bool {
 }
 
 /// Percent-encode a destination path: the characters that would break an inline
-/// link's `(dest)` syntax (space, parens), `%` itself, and `#` (which extraction
+/// link's `(dest)` syntax or interpretation, `%` itself, and `#` (which extraction
 /// would otherwise read as an anchor separator, truncating the path). Everything
 /// else — notably non-ASCII slugs — passes through verbatim, as CommonMark permits.
 pub fn encode_dest(path: &str) -> String {
@@ -86,6 +76,10 @@ pub fn encode_dest(path: &str) -> String {
             '(' => out.push_str("%28"),
             ')' => out.push_str("%29"),
             '#' => out.push_str("%23"),
+            '&' => out.push_str("%26"),
+            '\\' => out.push_str("%5C"),
+            '<' => out.push_str("%3C"),
+            '>' => out.push_str("%3E"),
             c => out.push(c),
         }
     }
@@ -127,7 +121,24 @@ pub fn md_link(text: &str, dest: &str) -> String {
         }
         escaped.push(c);
     }
-    format!("[{escaped}]({dest})")
+    format!("[{escaped}]({})", escape_destination(dest))
+}
+
+/// Keep an encoded URI's CommonMark value intact when embedding it in bare syntax.
+/// Unlike path encoding, this preserves existing percent escapes and fragment separators.
+fn escape_destination(destination: &str) -> String {
+    let mut escaped = String::with_capacity(destination.len());
+    for character in destination.chars() {
+        match character {
+            '&' => escaped.push_str("&amp;"),
+            '\\' | '(' | ')' | '<' | '>' => {
+                escaped.push('\\');
+                escaped.push(character);
+            }
+            character => escaped.push(character),
+        }
+    }
+    escaped
 }
 
 /// The encoded relative destination from `from_page` to `to_page` — both
@@ -190,18 +201,54 @@ pub struct PageLink {
     pub dest: String,
 }
 
+/// One structurally accepted inline link. Raw fields retain source spelling;
+/// destination/title are CommonMark values (escapes and entities resolved, percent
+/// encoding retained). Full-page callers supply only the original Markdown body.
+pub struct InlineLink<'a> {
+    pub raw_text: &'a str,
+    pub raw_destination: &'a str,
+    pub destination: &'a str,
+    pub title: &'a str,
+}
+
+impl InlineLink<'_> {
+    /// Replace the address while preserving the raw label and semantic title.
+    /// `destination` is already encoded, as for [`md_link`]. A declined rewrite
+    /// preserves the complete original link instead of invoking this renderer.
+    pub fn render_with_destination(&self, destination: &str) -> String {
+        let mut output = format!("[{}]({}", self.raw_text, escape_destination(destination));
+        if !self.title.is_empty() {
+            output.push_str(" \"");
+            for character in self.title.chars() {
+                match character {
+                    '&' => output.push_str("&amp;"),
+                    '\\' => output.push_str("\\\\"),
+                    '"' => output.push_str("\\\""),
+                    '\n' => output.push_str("&#10;"),
+                    '\r' => output.push_str("&#13;"),
+                    character => output.push(character),
+                }
+            }
+            output.push('"');
+        }
+        output.push(')');
+        output
+    }
+}
+
 /// Parse one complete internal inline link after the caller establishes its structural
-/// position. Unlike prose extraction, this does not scan code spans: an emitted display
-/// label may itself contain backticks. Surrounding prose, whitespace and code fences refuse.
+/// position. The shared parser must report a link spanning the entire input; its label
+/// may contain code spans. Surrounding prose, whitespace and code fences refuse.
 /// Callers recognizing generated content must also round-trip the parsed link through their
 /// renderer, since destination parsing strips anchors/titles and decodes addresses.
 pub fn parse_standalone_page_link(text: &str) -> Option<PageLink> {
-    let captures = MD_LINK_RE.captures(text)?;
-    let matched = captures.get(0)?;
-    if matched.start() != 0 || matched.end() != text.len() {
-        return None;
-    }
-    internal_page_link(&captures, &captures[3])
+    let mut found = None;
+    visit_inline_links(text, |link, range| {
+        if range == (0..text.len()) {
+            found = internal_page_link(&link);
+        }
+    });
+    found
 }
 
 /// Extract every internal inline page link in `body`, in first-appearance order
@@ -242,7 +289,7 @@ fn visit_page_links<'a>(body: &'a str, mut visit: impl FnMut(PageLink, usize, &'
     let mut line = 1;
     let mut line_start = 0;
     let mut scanned = 0;
-    visit_inline_links(body, |captures, raw_dest, range| {
+    visit_inline_links(body, |link, range| {
         for (offset, _) in body[scanned..range.start].match_indices('\n') {
             line += 1;
             line_start = scanned + offset + 1;
@@ -252,7 +299,7 @@ fn visit_page_links<'a>(body: &'a str, mut visit: impl FnMut(PageLink, usize, &'
             .find('\n')
             .map_or(body.len(), |offset| range.start + offset);
         let context = body[line_start..end].trim_end_matches('\r');
-        if let Some(link) = internal_page_link(&captures, raw_dest) {
+        if let Some(link) = internal_page_link(&link) {
             visit(link, line, context);
         }
     });
@@ -262,17 +309,19 @@ fn visit_page_links<'a>(body: &'a str, mut visit: impl FnMut(PageLink, usize, &'
 /// existing regex keeps the single-line label grammar. Reference links and autolinks
 /// do not become new graph edges, and image alt text is never a citation. A label
 /// unsupported by the regex is excluded rather than combined with another link span.
-fn visit_inline_links<'a>(
-    body: &'a str,
-    mut visit: impl FnMut(Captures<'a>, &'a str, Range<usize>),
-) {
+fn visit_inline_links(body: &str, mut visit: impl FnMut(InlineLink<'_>, Range<usize>)) {
     let mut image_depth = 0;
     let mut input = Parser::new_ext(body, OPTIONS).into_offset_iter();
     while let Some((event, range)) = input.next() {
         match event {
             Event::Start(Tag::Image { .. }) => image_depth += 1,
             Event::End(TagEnd::Image) => image_depth -= 1,
-            Event::Start(Tag::Link { link_type, .. }) => {
+            Event::Start(Tag::Link {
+                link_type,
+                dest_url,
+                title,
+                ..
+            }) => {
                 let source = &body[range.clone()];
                 let captures = (image_depth == 0
                     && link_type == LinkType::Inline
@@ -307,7 +356,15 @@ fn visit_inline_links<'a>(
                 if aligned && let Some(captures) = captures {
                     let raw_start = captures.get(3).expect("destination capture").start();
                     let raw_dest = &source[raw_start..source.len() - 1];
-                    visit(captures, raw_dest, range);
+                    visit(
+                        InlineLink {
+                            raw_text: &source[captures.get(2).expect("label capture").range()],
+                            raw_destination: raw_dest,
+                            destination: &dest_url,
+                            title: &title,
+                        },
+                        range,
+                    );
                 }
             }
             _ => {}
@@ -333,27 +390,24 @@ pub fn extract_dests(body: &str) -> Vec<String> {
 /// extraction cannot answer where a task came from either, and a caller reaching for the URL
 /// would otherwise re-parse markdown by hand. One vocabulary, both directions.
 pub fn first_external_dest(text: &str) -> Option<String> {
-    MD_LINK_RE.captures_iter(text).find_map(|cap| {
-        if !cap[1].is_empty() {
-            return None; // image embed
+    let mut found = None;
+    visit_inline_links(text, |link, _| {
+        if found.is_none() && is_external(link.destination) {
+            found = Some(link.destination.to_string());
         }
-        let dest = cap[3].trim();
-        is_external(dest).then(|| dest.to_string())
-    })
+    });
+    found
 }
 
 /// A captured link as a [`PageLink`] — `None` for image embeds and
 /// external/empty/anchor-only destinations.
-fn internal_page_link(cap: &Captures, raw_dest: &str) -> Option<PageLink> {
-    if !cap[1].is_empty() {
-        return None; // image embed
-    }
-    let (page, _anchor) = split_raw_dest(raw_dest);
+fn internal_page_link(link: &InlineLink<'_>) -> Option<PageLink> {
+    let (page, _anchor) = split_dest_anchor(link.destination);
     if page.is_empty() || is_external(page) {
         return None;
     }
     Some(PageLink {
-        text: unescape_text(&cap[2]),
+        text: unescape_text(link.raw_text),
         dest: decode_dest(page),
     })
 }
@@ -367,24 +421,22 @@ fn unescape_text(text: &str) -> String {
 
 /// Rewrite inline links in a Markdown body outside CommonMark code and raw HTML,
 /// copying those regions and every image embed verbatim. Full-page callers retain
-/// their frontmatter prefix separately. `rewrite` receives
-/// each link's `(text, raw dest)` — both exactly as written, escapes and encoding
-/// included — and returns the full replacement link, or `None` to keep the original.
-/// A rewriter that only repoints the destination must reassemble with the text
-/// verbatim (`format!("[{text}]({new_dest})")`), NOT through [`md_link`], which
-/// would escape it a second time. The counterpart of [`extract_dests`]: the exact
+/// their frontmatter prefix separately. `rewrite` receives parsed address/title and
+/// raw source spelling, and returns the full replacement link or `None` to keep the
+/// original. Use [`InlineLink::render_with_destination`] to repoint an address while
+/// preserving its label/title. The counterpart of [`extract_dests`]: the exact
 /// same links form graph edges and are eligible for rewriting, so `graph
 /// merge`/`normalize` repoint real citations but never mutate a link a page merely
 /// shows as code.
 pub fn rewrite_links_outside_code(
     body: &str,
-    mut rewrite: impl FnMut(&str, &str) -> Option<String>,
+    mut rewrite: impl FnMut(&InlineLink<'_>) -> Option<String>,
 ) -> String {
     let mut out = String::with_capacity(body.len());
     let mut copied = 0;
-    visit_inline_links(body, |captures, raw_dest, range| {
+    visit_inline_links(body, |link, range| {
         out.push_str(&body[copied..range.start]);
-        match rewrite(&captures[2], raw_dest) {
+        match rewrite(&link) {
             Some(replacement) => out.push_str(&replacement),
             None => out.push_str(&body[range.clone()]),
         }
@@ -428,6 +480,16 @@ mod tests {
             Some("https://e/y".to_string()),
             "an image embed is not an origin"
         );
+        let url = "https://example.test/a?x=1&amp;y=2";
+        assert_eq!(
+            super::first_external_dest(&super::md_link("origin", url)).as_deref(),
+            Some(url)
+        );
+        assert_eq!(
+            super::first_external_dest("[origin](<https://example.test/a?x=1&amp;y=2> \"title\")")
+                .as_deref(),
+            Some("https://example.test/a?x=1&y=2")
+        );
     }
 
     use super::*;
@@ -463,6 +525,55 @@ mod tests {
     }
 
     #[test]
+    fn parsed_destinations_preserve_commonmark_address_identity() {
+        for (destination, expected) in [
+            ("<target.md>", "target.md"),
+            ("<a b.md>", "a b.md"),
+            (r"foo\(bar\).md", "foo(bar).md"),
+            ("a&amp;b.md", "a&b.md"),
+        ] {
+            let body = format!("[Target]({destination} \"A (condition)\")");
+            assert_eq!(extract_dests(&body), [expected], "{body}");
+            assert_eq!(parse_standalone_page_link(&body).unwrap().dest, expected);
+            assert_eq!(rewrite_links_outside_code(&body, |_| None), body);
+            let rewritten = rewrite_links_outside_code(&body, |link| {
+                assert_eq!(link.destination, expected);
+                Some(link.render_with_destination("new%26amp;.md#A&copy;\\(part\\)"))
+            });
+            assert_eq!(extract_dests(&rewritten), ["new&amp;.md"]);
+            rewrite_links_outside_code(&rewritten, |link| {
+                assert_eq!(link.destination, "new%26amp;.md#A&copy;\\(part\\)");
+                assert_eq!(link.title, "A (condition)");
+                None
+            });
+        }
+    }
+
+    #[test]
+    fn encoded_names_survive_commonmark_destination_decoding() {
+        for name in ["a&b.md", "a&amp;b.md", r"foo\(bar\).md", "<draft>.md"] {
+            let emitted = md_link("Source `gate`", &encode_dest(name));
+            assert_eq!(extract_dests(&emitted), [name], "{emitted}");
+            assert_eq!(parse_standalone_page_link(&emitted).unwrap().dest, name);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn constructed_paths_survive_commonmark_destination_decoding() {
+        let from = Path::new("wiki/concepts/source.md");
+        for name in ["a&b.md", "a&amp;b.md", r"foo\(bar\).md", "<draft>.md"] {
+            let target = Path::new("wiki/concepts").join(name);
+            let emitted = md_link("Source `gate`", &relative_dest(from, &target));
+            let links = extract_page_links(&emitted);
+            assert_eq!(links.len(), 1, "{emitted}");
+            assert_eq!(links[0].dest, name, "{emitted}");
+            assert_eq!(resolve_dest(from, &links[0].dest), Some(target));
+            assert_eq!(parse_standalone_page_link(&emitted).unwrap(), links[0]);
+        }
+    }
+
+    #[test]
     fn extract_skips_fenced_and_inline_code() {
         let text = "\
 [live](a.md)
@@ -482,8 +593,8 @@ Inline `[span](c.md)` and [live2](d.md).
         ] {
             let body = format!("{block}\n\n- [Retry](../concepts/retry.md)\n");
             assert_eq!(extract_dests(&body), ["../concepts/retry.md"]);
-            let rewritten = rewrite_links_outside_code(&body, |text, _| {
-                Some(md_link(text, "../concepts/revised.md"))
+            let rewritten = rewrite_links_outside_code(&body, |link| {
+                Some(link.render_with_destination("../concepts/revised.md"))
             });
             assert_eq!(
                 rewritten,
@@ -497,7 +608,9 @@ Inline `[span](c.md)` and [live2](d.md).
         let body = "    [Indented](indented.md)\n\n`multiline\n[Literal](literal.md)\ncode`\n\n\\[Escaped](escaped.md)\n\n![Image](image.md)\n[Reference][r]\n\n[r]: reference.md\n\n[Live](live.md)\n";
         assert_eq!(extract_dests(body), ["live.md"]);
         assert_eq!(
-            rewrite_links_outside_code(body, |text, _| Some(md_link(text, "revised.md"))),
+            rewrite_links_outside_code(body, |link| Some(
+                link.render_with_destination("revised.md")
+            )),
             body.replace("[Live](live.md)", "[Live](revised.md)")
         );
     }
@@ -512,34 +625,65 @@ Inline `[span](c.md)` and [live2](d.md).
         assert_eq!(links[1].context, "- [Again](a%20b.md \"title\")");
         assert_eq!(links[0].link.dest, "a b.md");
         assert_eq!(links[1].link.dest, "a b.md");
-        assert_eq!(rewrite_links_outside_code(body, |_, _| None), body);
+        assert_eq!(rewrite_links_outside_code(body, |_| None), body);
         assert_eq!(
-            rewrite_links_outside_code(body, |text, raw| Some(format!("[{text}](new/{raw})"))),
+            rewrite_links_outside_code(body, |link| Some(
+                link.render_with_destination(&format!("new/{}", link.destination))
+            )),
             body.replace("a%20b.md", "new/a%20b.md")
         );
     }
 
     #[test]
     fn rewrite_consumes_the_complete_inline_link_with_parentheses_in_its_title() {
-        for raw in [
-            r#"retry.md "A (condition)""#,
-            r#"retry.md "A \) condition""#,
+        for (raw, title, rendered_title) in [
+            (
+                r#"retry.md "A (condition)""#,
+                "A (condition)",
+                "A (condition)",
+            ),
+            (
+                r#"retry.md "A \) condition""#,
+                "A ) condition",
+                "A ) condition",
+            ),
+            (
+                r#"retry.md 'A &amp;copy; \\ \"condition\"'"#,
+                r#"A &copy; \ "condition""#,
+                r#"A &amp;copy; \\ \"condition\""#,
+            ),
+            (
+                "retry.md 'A &#10; condition'",
+                "A \n condition",
+                "A &#10; condition",
+            ),
         ] {
             let body = format!("Before [Retry]({raw}) after.");
             assert_eq!(extract_dests(&body), ["retry.md"]);
-            assert_eq!(rewrite_links_outside_code(&body, |_, _| None), body);
+            assert_eq!(rewrite_links_outside_code(&body, |_| None), body);
             let mut seen = Vec::new();
-            let rewritten = rewrite_links_outside_code(&body, |text, destination| {
-                seen.push((text.to_string(), destination.to_string()));
-                Some(md_link(text, "revised.md"))
+            let rewritten = rewrite_links_outside_code(&body, |link| {
+                seen.push((link.raw_text.to_string(), link.raw_destination.to_string()));
+                assert_eq!(link.destination, "retry.md");
+                assert_eq!(link.title, title);
+                Some(link.render_with_destination("revised.md"))
             });
             assert_eq!(seen, [("Retry".to_string(), raw.to_string())]);
-            assert_eq!(rewritten, "Before [Retry](revised.md) after.");
+            assert_eq!(
+                rewritten,
+                format!("Before [Retry](revised.md \"{rendered_title}\") after.")
+            );
+            rewrite_links_outside_code(&rewritten, |link| {
+                assert_eq!(link.title, title);
+                None
+            });
         }
         let multiline = "[Retry](retry.md\n\"multiline title\")";
         assert!(extract_dests(multiline).is_empty());
         assert_eq!(
-            rewrite_links_outside_code(multiline, |text, _| Some(md_link(text, "revised.md"))),
+            rewrite_links_outside_code(multiline, |link| Some(
+                link.render_with_destination("revised.md")
+            )),
             multiline
         );
     }
@@ -554,9 +698,11 @@ Inline `[span](c.md)` and [live2](d.md).
         ] {
             let body = format!("{unsupported}\n\n[Live](live.md)");
             assert_eq!(extract_dests(&body), ["live.md"], "{body}");
-            assert_eq!(rewrite_links_outside_code(&body, |_, _| None), body);
+            assert_eq!(rewrite_links_outside_code(&body, |_| None), body);
             assert_eq!(
-                rewrite_links_outside_code(&body, |text, _| Some(md_link(text, "revised.md"))),
+                rewrite_links_outside_code(&body, |link| Some(
+                    link.render_with_destination("revised.md")
+                )),
                 format!("{unsupported}\n\n[Live](revised.md)"),
                 "{body}"
             );
@@ -566,10 +712,7 @@ Inline `[span](c.md)` and [live2](d.md).
             "[HTML <em>label</em>](target.md)",
         ] {
             assert_eq!(extract_dests(supported), ["target.md"]);
-            assert_eq!(
-                rewrite_links_outside_code(supported, |_, _| None),
-                supported
-            );
+            assert_eq!(rewrite_links_outside_code(supported, |_| None), supported);
         }
     }
 
@@ -674,7 +817,7 @@ Inline `[span](c.md)` and [live2](d.md).
         let hashy = "wiki/a#b.md";
         let encoded = encode_dest(hashy);
         assert_eq!(encoded, "wiki/a%23b.md");
-        assert_eq!(split_raw_dest(&encoded), ("wiki/a%23b.md", ""));
+        assert_eq!(split_dest_anchor(&encoded), ("wiki/a%23b.md", ""));
         assert_eq!(decode_dest(&encoded), hashy);
     }
 
@@ -786,8 +929,9 @@ code [Old](../concepts/old.md)
 ```
 Inline `[Old](../concepts/old.md)` and ![img](old.png).
 ";
-        let out = rewrite_links_outside_code(body, |text, dest| {
-            (dest == "../concepts/old.md").then(|| md_link(text, "../concepts/new.md"))
+        let out = rewrite_links_outside_code(body, |link| {
+            (link.destination == "../concepts/old.md")
+                .then(|| link.render_with_destination("../concepts/new.md"))
         });
         assert!(out.contains("Cites [Old](../concepts/new.md)."));
         assert!(out.contains("code [Old](../concepts/old.md)"));
@@ -807,8 +951,9 @@ Live [Old](../concepts/old.md).
 Quoted ``a ` b [Old](../concepts/old.md)`` then live [Old](../concepts/old.md).
 Triple ```x ` y `` z [Old](../concepts/old.md)``` done.
 ";
-        let out = rewrite_links_outside_code(body, |text, dest| {
-            (dest == "../concepts/old.md").then(|| md_link(text, "../concepts/new.md"))
+        let out = rewrite_links_outside_code(body, |link| {
+            (link.destination == "../concepts/old.md")
+                .then(|| link.render_with_destination("../concepts/new.md"))
         });
         assert_eq!(
             out.matches("../concepts/new.md").count(),
@@ -828,18 +973,8 @@ Triple ```x ` y `` z [Old](../concepts/old.md)``` done.
     #[test]
     fn rewrite_is_identity_when_closure_declines() {
         let body = "A [x](x.md).\n```\n[y](y.md)\n```\nB `[z](z.md)` C [w](w.md).\n";
-        let out = rewrite_links_outside_code(body, |_, _| None);
+        let out = rewrite_links_outside_code(body, |_| None);
         assert_eq!(out, body);
-    }
-
-    #[test]
-    fn split_raw_dest_drops_commonmark_title_before_anchor_split() {
-        // The title must be dropped BEFORE the anchor split, or the anchor would
-        // swallow the title text.
-        assert_eq!(split_raw_dest("a.md \"tip\""), ("a.md", ""));
-        assert_eq!(split_raw_dest("a.md#sec \"tip\""), ("a.md", "#sec"));
-        assert_eq!(split_raw_dest("a.md"), ("a.md", ""));
-        assert_eq!(split_raw_dest(""), ("", ""));
     }
 
     #[test]

@@ -201,8 +201,11 @@ fn repoint_renamed_links(
     let mut error = None;
     let body_offset = lk_core::frontmatter::body_offset(content)
         .ok_or_else(|| GraphError::Io("cannot rewrite links in unclosed frontmatter".into()))?;
-    let updated = link::rewrite_links_outside_code(&content[body_offset..], |text, raw_dest| {
-        let (dest, anchor) = link::split_raw_dest(raw_dest);
+    let updated = link::rewrite_links_outside_code(&content[body_offset..], |inline| {
+        let (dest, anchor) = link::split_dest_anchor(inline.destination);
+        if link::is_external(dest) {
+            return None;
+        }
         let decoded = link::decode_dest(dest);
         if !Path::new(&decoded).extension().is_some_and(|e| e == "md") {
             return None;
@@ -221,7 +224,7 @@ fn repoint_renamed_links(
             }
         }?;
         let new_dest = format!("{}{anchor}", link::relative_dest(page_path, target));
-        Some(format!("[{text}]({new_dest})"))
+        Some(inline.render_with_destination(&new_dest))
     });
     match error {
         Some(e) => Err(GraphError::Io(e.to_string())),
@@ -468,7 +471,33 @@ mod tests {
             Path::new("/"),
         )
         .unwrap();
-        assert_eq!(updated, "See [A](concept-a.md) here.");
+        assert_eq!(updated, "See [A](concept-a.md \"tip\") here.");
+    }
+
+    #[test]
+    fn parsed_commonmark_destinations_are_repointed_with_titles_and_anchors() {
+        for (raw, name) in [
+            ("<target.md#part>", "target.md"),
+            ("<a b.md#part>", "a b.md"),
+            (r"foo\(bar\).md#part", "foo(bar).md"),
+            ("a&amp;b.md#part", "a&b.md"),
+        ] {
+            let old = Path::new("wiki").join(name);
+            let new = Path::new("wiki/new&amp;.md");
+            let path_map = [(old, new)].into();
+            let content = format!("See [Raw \\[label\\]]({raw} \"A (condition)\") here.");
+            assert_eq!(
+                repoint_renamed_links(
+                    &content,
+                    Path::new("wiki/source.md"),
+                    &path_map,
+                    Path::new("/")
+                )
+                .unwrap(),
+                "See [Raw \\[label\\]](new%26amp;.md#part \"A (condition)\") here.",
+                "{content}"
+            );
+        }
     }
 
     #[test]

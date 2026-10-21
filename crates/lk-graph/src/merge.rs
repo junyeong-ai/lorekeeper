@@ -442,13 +442,16 @@ fn rewrite_links(
     let body_offset = lk_core::frontmatter::body_offset(content)
         .ok_or_else(|| GraphError::Io("cannot rewrite links in unclosed frontmatter".into()))?;
     // Frontmatter and code/HTML examples do not contribute graph edges.
-    let out = link::rewrite_links_outside_code(&content[body_offset..], |text, raw_dest| {
+    let out = link::rewrite_links_outside_code(&content[body_offset..], |inline| {
         // Does this link target the from concept? Resolve the destination the SAME way
         // the graph does — `.md` destinations only, resolved against this page's
         // location, then checked against the actual filesystem — so exactly the spellings scan
         // counts as citations (`../concepts/from.md`, `./from.md`, the OKF absolute
         // form, actual filesystem aliases) are rewritten, no more and no fewer.
-        let (dest, anchor) = link::split_raw_dest(raw_dest);
+        let (dest, anchor) = link::split_dest_anchor(inline.destination);
+        if link::is_external(dest) {
+            return None;
+        }
         let decoded = link::decode_dest(dest);
         if !Path::new(&decoded).extension().is_some_and(|e| e == "md") {
             return None;
@@ -463,10 +466,8 @@ fn rewrite_links(
             }
         }
         count += 1;
-        // `text` arrives exactly as written (escapes included) — reassemble verbatim
-        // rather than through `md_link`, which would escape it a second time.
         let new_dest = format!("{}{anchor}", link::relative_dest(page_path, into_rel));
-        Some(format!("[{text}]({new_dest})"))
+        Some(inline.render_with_destination(&new_dest))
     });
     if let Some(error) = failure {
         return Err(error);
@@ -1476,8 +1477,8 @@ mod tests {
     #[test]
     fn titled_destination_is_still_repointed() {
         // A CommonMark title after the destination (`[T](x.md "tip")`) must not hide
-        // the link from the rewrite: extraction counts it as a citation of `from`
-        // (`split_raw_dest` drops the title), so the merge must repoint it too —
+        // the link from the rewrite: extraction counts it as a citation of `from`,
+        // so the merge must repoint it too —
         // otherwise it dangles once `from` is deleted.
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
@@ -1496,7 +1497,40 @@ mod tests {
         let r = merge_concepts(&pages, root, "wiki", "a", "b", false, false).unwrap();
         assert_eq!(r.rewritten.len(), 1, "titled citation must be repointed");
         let daily = std::fs::read_to_string(root.join("daily/x/d.md")).unwrap();
-        assert_eq!(daily, "See [A](../../wiki/concepts/b.md).\n");
+        assert_eq!(daily, "See [A](../../wiki/concepts/b.md \"tooltip\").\n");
+    }
+
+    #[test]
+    fn parsed_commonmark_destinations_are_scanned_and_rewritten_consistently() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let page = Path::new("wiki/concepts/source.md");
+        let into = Path::new("wiki/concepts/new&amp;.md");
+        write(root, into.to_str().unwrap(), "# New\n");
+        for (raw, name) in [
+            ("<target.md#part>", "target.md"),
+            ("<a b.md#part>", "a b.md"),
+            (r"foo\(bar\).md#part", "foo(bar).md"),
+            ("a&amp;b.md#part", "a&b.md"),
+        ] {
+            let from = Path::new("wiki/concepts").join(name);
+            write(root, from.to_str().unwrap(), "# Original\n");
+            let content = format!("[Raw \\[label\\]]({raw} \"A (condition)\")\n");
+            write(root, page.to_str().unwrap(), &content);
+            let pages = crate::scan::scan_vault(root, false).unwrap();
+            let source = pages.iter().find(|scanned| scanned.path == page).unwrap();
+            assert_eq!(
+                source.outgoing,
+                [crate::scan::Link::to(from.to_str().unwrap())]
+            );
+            let (updated, count) = rewrite_links(&content, page, &from, into, root).unwrap();
+            assert_eq!(count, 1, "{content}");
+            assert_eq!(
+                updated,
+                "[Raw \\[label\\]](new%26amp;.md#part \"A (condition)\")\n"
+            );
+            assert_eq!(link::extract_dests(&updated), ["new&amp;.md"]);
+        }
     }
 
     #[test]

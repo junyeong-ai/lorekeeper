@@ -715,8 +715,8 @@ pub fn repoint_document_links(
     held: impl Fn(&str) -> bool,
 ) -> String {
     let dir = Path::new(doc_path).parent().unwrap_or(Path::new(""));
-    lk_core::link::rewrite_links_outside_code(body, |text, raw| {
-        let (dest, anchor) = lk_core::link::split_raw_dest(raw);
+    lk_core::link::rewrite_links_outside_code(body, |inline| {
+        let (dest, anchor) = lk_core::link::split_dest_anchor(inline.destination);
         if dest.is_empty() || lk_core::link::is_external(dest) {
             return None;
         }
@@ -726,12 +726,12 @@ pub fn repoint_document_links(
             .filter_map(|candidate| normalize(&candidate))
             .find(|rel| held(rel));
         match (held, base_url) {
-            (Some(rel), Some(base)) => Some(format!(
-                "[{text}]({}/{}{anchor})",
+            (Some(rel), Some(base)) => Some(inline.render_with_destination(&format!(
+                "{}/{}{anchor}",
                 base.trim_end_matches('/'),
                 lk_core::link::encode_dest(&rel)
-            )),
-            _ => Some(text.to_owned()),
+            ))),
+            _ => Some(inline.raw_text.to_owned()),
         }
     })
 }
@@ -1657,6 +1657,30 @@ exit "$rc"
             repoint_links("[p](a%20%281%29.md)", repo.path(), "docs/a.md", base),
             "[p](https://host/r/docs/a%20%281%29.md)"
         );
+    }
+
+    #[test]
+    fn parsed_document_destinations_preserve_exact_membership_title_and_anchor() {
+        for (raw, name) in [
+            ("<target.md#part>", "target.md"),
+            ("<a b.md#part>", "a b.md"),
+            (r"foo\(bar\).md#part", "foo(bar).md"),
+            ("a&amp;b.md#part", "a&b.md"),
+        ] {
+            let member = format!("docs/{name}");
+            let body = format!("[Raw \\[label\\]]({raw} \"A (condition)\")");
+            let updated =
+                repoint_document_links(&body, "docs/source.md", Some("https://host/r"), |rel| {
+                    rel == member
+                });
+            assert_eq!(
+                updated,
+                format!(
+                    "[Raw \\[label\\]](https://host/r/{}#part \"A (condition)\")",
+                    lk_core::link::encode_dest(&member)
+                )
+            );
+        }
     }
 
     /// The silent one. `nodex` answers everything on or after `--since`, newest first, so a
