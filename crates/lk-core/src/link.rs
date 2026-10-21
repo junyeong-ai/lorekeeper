@@ -260,27 +260,51 @@ fn visit_page_links<'a>(body: &'a str, mut visit: impl FnMut(PageLink, usize, &'
 
 /// CommonMark owns structural visibility and the complete replacement span; the
 /// existing regex keeps the single-line label grammar. Reference links and autolinks
-/// do not become new graph edges, and image alt text is never a citation.
+/// do not become new graph edges, and image alt text is never a citation. A label
+/// unsupported by the regex is excluded rather than combined with another link span.
 fn visit_inline_links<'a>(
     body: &'a str,
     mut visit: impl FnMut(Captures<'a>, &'a str, Range<usize>),
 ) {
     let mut image_depth = 0;
-    for (event, range) in Parser::new_ext(body, OPTIONS).into_offset_iter() {
+    let mut input = Parser::new_ext(body, OPTIONS).into_offset_iter();
+    while let Some((event, range)) = input.next() {
         match event {
             Event::Start(Tag::Image { .. }) => image_depth += 1,
             Event::End(TagEnd::Image) => image_depth -= 1,
-            Event::Start(Tag::Link {
-                link_type: LinkType::Inline,
-                ..
-            }) if image_depth == 0 => {
+            Event::Start(Tag::Link { link_type, .. }) => {
                 let source = &body[range.clone()];
-                if !source.contains(['\r', '\n'])
-                    && source.ends_with(')')
-                    && let Some(captures) = MD_LINK_RE.captures(source)
-                    && let Some(matched) = captures.get(0)
-                    && matched.start() == 0
-                {
+                let captures = (image_depth == 0
+                    && link_type == LinkType::Inline
+                    && !source.contains(['\r', '\n'])
+                    && source.ends_with(')'))
+                .then(|| MD_LINK_RE.captures(source))
+                .flatten()
+                .filter(|captures| captures.get(0).is_some_and(|matched| matched.start() == 0));
+                let label = captures.as_ref().map(|captures| {
+                    let label = captures.get(2).expect("label capture");
+                    range.start + label.start()..range.start + label.end()
+                });
+                let mut aligned = true;
+                let mut depth = 1;
+                for (child, child_range) in input.by_ref() {
+                    match child {
+                        Event::Start(Tag::Link { .. }) => depth += 1,
+                        Event::End(TagEnd::Link) => {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                    if let Some(label) = &label
+                        && (child_range.start < label.start || child_range.end > label.end)
+                    {
+                        aligned = false;
+                    }
+                }
+                if aligned && let Some(captures) = captures {
                     let raw_start = captures.get(3).expect("destination capture").start();
                     let raw_dest = &source[raw_start..source.len() - 1];
                     visit(captures, raw_dest, range);
@@ -518,6 +542,35 @@ Inline `[span](c.md)` and [live2](d.md).
             rewrite_links_outside_code(multiline, |text, _| Some(md_link(text, "revised.md"))),
             multiline
         );
+    }
+
+    #[test]
+    fn nested_labels_never_combine_a_partial_label_with_the_outer_destination() {
+        for unsupported in [
+            "[![Icon](icon.png)](target.md)",
+            "![Outer [Nested](nested.md)](image.png)",
+            "[Code `](literal.md)` label](target.md)",
+            "[HTML <span data-value=\"](literal.md)\">label</span>](target.md)",
+        ] {
+            let body = format!("{unsupported}\n\n[Live](live.md)");
+            assert_eq!(extract_dests(&body), ["live.md"], "{body}");
+            assert_eq!(rewrite_links_outside_code(&body, |_, _| None), body);
+            assert_eq!(
+                rewrite_links_outside_code(&body, |text, _| Some(md_link(text, "revised.md"))),
+                format!("{unsupported}\n\n[Live](revised.md)"),
+                "{body}"
+            );
+        }
+        for supported in [
+            "[Code `label`](target.md)",
+            "[HTML <em>label</em>](target.md)",
+        ] {
+            assert_eq!(extract_dests(supported), ["target.md"]);
+            assert_eq!(
+                rewrite_links_outside_code(supported, |_, _| None),
+                supported
+            );
+        }
     }
 
     #[test]
