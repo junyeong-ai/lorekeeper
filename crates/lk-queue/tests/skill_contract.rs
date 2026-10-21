@@ -100,37 +100,37 @@ fn source_types_documents_every_source_type_in_both_sections() {
 }
 
 #[test]
-fn skill_key_table_maps_every_target_kind_to_its_llm_inputs_key() {
+fn queue_format_key_table_maps_every_target_kind_to_its_llm_inputs_key() {
     // Row-level check: the wire name and its key must co-occur on one line of the
-    // SKILL.md kind→key table. A mere "key appears somewhere in the file" check
+    // queue-format.md kind→key table. A mere "key appears somewhere in the file" check
     // would pass even if a kind's mapping silently switched to a different,
     // already-documented key.
-    let doc = read_skill_file("SKILL.md");
+    let doc = read_skill_file("references/queue-format.md");
     for kind in TargetKind::iter() {
         let wire = format!("`{}`", wire_name(kind));
         let key = format!("`{}`", kind.llm_inputs_key());
         let mentions: Vec<&str> = doc.lines().filter(|line| line.contains(&wire)).collect();
         assert!(
             !mentions.is_empty(),
-            "SKILL.md's kind→key table has no row for {wire} \
+            "queue-format.md's kind→key table has no row for {wire} \
              (TargetKind::{kind:?} added/renamed without updating the skill?)"
         );
         assert!(
             mentions.iter().any(|line| line.contains(&key)),
-            "SKILL.md maps {wire} to the wrong key — no line pairs it with {key}; \
+            "queue-format.md maps {wire} to the wrong key — no line pairs it with {key}; \
              lines mentioning it: {mentions:?}"
         );
     }
 }
 
 #[test]
-fn skill_documents_every_completion_marker() {
-    let doc = read_skill_file("SKILL.md");
+fn queue_format_documents_every_completion_marker() {
+    let doc = read_skill_file("references/queue-format.md");
     for kind in TargetKind::iter() {
         let needle = format!("`{}`", kind.completion_key());
         assert!(
             doc.contains(&needle),
-            "SKILL.md must document the completion marker {needle} \
+            "queue-format.md must document the completion marker {needle} \
              (completion_key for TargetKind::{kind:?} changed without updating the skill?)"
         );
     }

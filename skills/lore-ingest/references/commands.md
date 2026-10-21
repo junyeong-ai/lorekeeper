@@ -13,8 +13,9 @@
 | `lore ingest --date YYYY-MM-DD` | Re-materialize a specific day — RE-FETCHES it; see Safety notes before using it on a past date |
 | `lore fetch <URL> [--source ID]` | Save an HTML article, Markdown or text document into a configured manual inbox. Then ingest that source and run lore-process; fetching alone does not complete knowledge integration |
 | `lore input install DIRECTORY [--python PATH]` | Install optional pinned binary-document dependencies in a new isolated environment; prints the config block |
-| `lore input check` | Check configured decoder packages and OCR model digests without processing source documents |
-| `lore input inspect PATH` | Return a bounded DOCX/XLSX/PDF/image projection as JSON without publishing or moving input |
+| `lore input install-vision DIRECTORY [--python PATH]` | Explicitly install PaddleOCR-VL 1.6 in separate layout/recognition environments with verified model artifacts on Apple Silicon; see setup's document preprocessing reference |
+| `lore input check` | Check configured native/visual runtimes and model digests without processing source documents |
+| `lore input inspect PATH` | Return a bounded DOCX/XLSX/PDF/image projection as JSON without publishing or moving input; cache access is read-only |
 | `lore synthesis weekly [--previous]` | Weekly synthesis + personal review |
 | `lore synthesis monthly [--previous]` | Monthly performance review |
 | `lore synthesis quarterly [--previous]` | Quarterly review with category stats |
@@ -37,7 +38,7 @@
 | `lore performance` | Performance category distribution |
 | `lore doctor` | Audit materialized pages against the contracts they must satisfy — text cleanliness, a section whose input was recorded and never answered, and credentials in issuer-published forms. Non-zero on a defect or an unreadable page; a credential is REPORTED and does not gate, because its repair is at the issuer and editing the page would not undo the leak |
 | `lore schedule --format launchd --bin <abs>` | Print native scheduled-task definitions; review and register them explicitly |
-| `lore maintenance [--dry-run]` | Prune ingest history, drained queue files and proven published work caches past `maintenance.retention_days` (default 90d). Work pruning requires exclusive workflow access and a settled queue; unpublished/referenced work and unowned artifacts survive. Originals and streaming event logs are permanent; each source's latest collection log survives |
+| `lore maintenance [--dry-run]` | Prune ingest history, drained queue files, expired document projections and proven published work caches past `maintenance.retention_days` (default 90d). Work pruning requires exclusive workflow access and a settled queue; unpublished/referenced work and unowned artifacts survive. Originals and streaming event logs are permanent; each source's latest collection log survives |
 | `lore queue prune [--dry-run]` | Leave the queue holding only work that still needs an LLM session: drop dead tasks (stale / missing-target), retire a run whose every task is already answered |
 | `lore self status` | What this installation is, and whether every deployed copy — interactive/runtime skills, templates, config example, `AGENTS.md` — still matches the running binary. Non-zero when any differs |
 | `lore workflow -- claude` or `lore workflow -- codex` | Start a manual Unix agent session under the semantic workflow lease before reading inputs; add `--wait` to wait for another consumer. Scheduled headless calls already acquire it |

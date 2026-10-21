@@ -17,7 +17,9 @@ never infer them from terminal columns or edit `tasks.md` directly.
 
 Start with `lore agenda --json`. Its date/timezone define the vault's day.
 
-- If `unrecorded` is nonzero, run `lore task sync` and reread before acting.
+- For a read-only agenda or brief, report nonzero `unrecorded` and the indicated
+  `lore task sync` action without running it. Before a requested board mutation,
+  synchronize outstanding editor changes and reread the agenda.
   Null means the record could not be read, not that it is synchronized.
 - Non-null `unwritable` blocks writes: report its reason and repair requirement
   before any board mutation. `unwritable: null` means no reported restriction.

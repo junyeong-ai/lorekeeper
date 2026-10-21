@@ -137,9 +137,12 @@ For a complete initial setup, distinguish these outcomes:
    For a new vault, generate its writing contract with `lore schema` before processing.
 2. A selected-source `lore ingest --dry-run <id>` succeeds with the intended reach.
    It contacts the source without writing pages/queue; an empty result can be valid.
-3. The user-invoked `/lore-ingest` and `/lore-process` publish knowledge, then their queue
-   and relationship checks pass. Check `lore queue check`, `lore wiki reviews --check`
-   and retrieval of the input's topic. Use a full ingest to produce the personal work-log.
+3. Run `lore run daily` with the configured execution profile for the authorized
+   first collection, semantic publication and controller checks. Verify retrieval
+   of the input's topic and its evidence. For explicitly staged manual processing,
+   `/lore-ingest` collects and `/lore-process` publishes and finalizes; use a full
+   ingest to produce the personal work-log. Neither configuration nor dry run
+   establishes these stages' completion.
 4. If automation was requested, follow the existing
    [scheduling procedure](../../lore-ingest/references/scheduling.md), register the
    definitions with the OS, and inspect an actual scheduled run. Definition output

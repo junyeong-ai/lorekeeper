@@ -35,7 +35,7 @@ commit vault edits automatically; review and commit them separately.
    nothing about semantic queue or review completion.
 
 The manual adapter reads top-level UTF-8 Markdown, text and HTML. DOCX/XLSX/PDF
-use optional configured preprocessing; images use explicitly configured OCR.
+use optional configured preprocessing; images require configured OCR or vision.
 See [document preprocessing](../../lore-setup/references/config.md#document-preprocessing)
 for setup, format scope and limits. Unsupported formats and subdirectories are not
 ingestion units; failed reads and empty binary projections are reported, and
@@ -46,7 +46,7 @@ and supported local dependencies under `.lorekeeper/evidence/manual/`. Identical
 file bytes share storage across bundle revisions. `source_record.manual_original`
 identifies the immutable manifest; `lore wiki original <document-path>` verifies it
 and lists members. Assets remain in the inbox. Images become independent ingestion
-units only when selected by OCR configuration or an explicit extension list.
+units only when selected by OCR/vision configuration or an explicit extension list.
 
 Explicit relative Markdown links and supported HTML resources are captured within
 the inbox boundary. Missing, escaping or symlink dependencies fail capture. CSS/SVG

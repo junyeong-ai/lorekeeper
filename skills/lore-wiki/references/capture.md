@@ -125,7 +125,7 @@ concept. Preserve identifiers required to understand evidence while removing
 irrelevant project detail from generalized prose. A capture need not invent a
 universal pattern or extra sentences to meet a quota.
 
-The three middle items are `###` sub-sections INSIDE the content section AGENTS.md
-defines — they are not `##` sections of their own. A document page has exactly the
-`##` sections AGENTS.md lists, and an invented one passes `lore doctor` and
-`lore graph lint` silently while no consumer reads it.
+Use only the document's schema-defined `##` sections. Organize the finding with
+optional `###` subsections inside its content section; the analysis categories above
+are not additional page sections. Structural checks do not establish that prose is
+in the section its consumers read.

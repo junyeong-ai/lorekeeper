@@ -16,11 +16,10 @@ resolve section headings before inspecting pages.
    `address_collisions` — distinct addresses that would collide under slug normalization —
    and `unnormalized` — a filename that is not its own slug) and `observations`
    (`orphans`, `hubs`, `unresolved_conflicts`). Surface every non-empty list from both.
-   The split says which ones are FALSE (a violation names its own repair) versus true of a healthy vault
-   (an observation), not which ones to read. NOTE: an empty `violations` means no structural
-   faults — it does NOT mean the wiki is well-connected. Empty related-concepts sections are
-   never a lint finding; only `suggest-links` (layer 2) reveals that gap, so never equate
-   "no violations" with "healthy".
+   Violations identify structural contract failures, not false knowledge. Observations
+   may be valid in a healthy vault. Empty `violations` says nothing about semantic
+   completeness. An empty related-concepts section can be appropriate when no useful
+   relation is supported; inspect layer 2's candidates without treating them as a quota.
 2. **Missing cross-references** — two kinds, and they are found differently.
 
    Between concepts: run `lore graph --json suggest-links --limit 20`. Inspect the pairs;

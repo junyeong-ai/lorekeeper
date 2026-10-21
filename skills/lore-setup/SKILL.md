@@ -46,9 +46,9 @@ reconfigure the rest of an existing vault.
    hand-written additions separately before replacing an existing file.
 
 5. **Finish the requested setup** — a configuration-only change reports remaining
-   auth/runtime checks. For complete onboarding, continue with the first real
-   processing stages in `references/config.md`. Collection is the separate,
-   user-invoked `/lore-ingest` step; `/lore-process` owns semantic publication.
+   auth/runtime checks. For complete onboarding, continue with the authorized first
+   run and retrieval checks in `references/config.md`; `lore run daily` coordinates
+   collection and semantic publication through the configured execution profile.
    Do not report those stages complete after configuration. For requested automation,
    read the [scheduling procedure](../lore-ingest/references/scheduling.md).
 
@@ -68,6 +68,6 @@ reconfigure the rest of an existing vault.
 ## When NOT to invoke
 
 - Credentials (tokens/secrets) → `lore init credentials`
-- Run ingestion → `/lore-ingest`
-- Drain queue → `/lore-process`
+- Collection or operations without configuration work → `/lore-ingest`
+- Semantic processing without setup work → `/lore-process`
 - Search/audit vault → `/lore-wiki`

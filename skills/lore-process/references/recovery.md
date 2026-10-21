@@ -1,8 +1,39 @@
 # Retry, retained input and citation correction
 
-Contents: queue retirement; RSS attribution; citation retraction; current-evidence rewrite; exact regeneration.
+## Contents
 
-## Idempotency contract
+- [Retry and queue retirement](#retry-and-queue-retirement)
+- [Publication and coordination](#publication-and-coordination)
+- [Citation correction](#citation-correction)
+- [Current-evidence resynthesis](#current-evidence-resynthesis)
+- [Exact retained-input regeneration](#exact-retained-input-regeneration)
+
+## Retry and queue retirement
+
+Only `lore queue prune` retires queue files after classification. It removes stale
+and missing-target tasks, archives a run whose remaining tasks are done, and
+preserves unfinished or blocked work.
+
+On failure, retain the queue file and report the task ID and error. Apply may have
+published other valid results before returning nonzero: inspect status, remaining
+results and quarantine before retrying. Reclassify the retained file and skip
+completed tasks. For current tasks, capture fresh target and context guards before
+reading and generating again. Never attach new revisions to an old draft.
+
+Retry safety comes from classification and guarded publication, not an assumption
+that repeated model calls produce identical text. Workers do not edit pages or
+request lines. Apply publishes bodies and completion markers together; backlink
+reconciliation owns the sources-section body and `source_count`.
+
+## Publication and coordination
+
+Ingest publishes each page/request batch through a recoverable journal and replaces
+queue files atomically; the entire ingest is not one transaction. Readers do not
+consume an append-in-progress queue file, but an interrupted journal can still
+require recovery before processing. Atomic replacement does not freeze target
+pages: preserve workflow coordination and exact revision guards during a worker wave.
+
+## Citation correction
 
 For a new bound RSS task, explicitly attribute each selected article using the typed
 `rss_evidence` pairs described in `queue-format.md`; never infer an event from its title
@@ -16,38 +47,6 @@ the declaration, and the last pair removes only the generated list item. Any sur
 prose link remains page-level evidence. Whole-citation retraction keeps its strict
 refusal of prose or other occurrences.
 
-Only `lore queue prune` retires queue files after classification. It removes stale
-and missing-target tasks, archives a run whose remaining tasks are done, and
-preserves unfinished or blocked work. Failure rules:
-
-- **Any task fails** → leave the queue file in place, report the failed
-  `task_id` list to the user, and stop. The next `/lore-process` run
-  reattempts the whole file from the start.
-- **Re-running on a partially-processed file is safe** because:
-  - Section edits replace the body — repeating the edit produces identical
-    content. No drift.
-  - Concept page merging preserves the original `created` and reuses the
-    existing slug; the sources-section body is never written during processing
-    (it stays empty for `backlinks-sync` to own), so a re-run touches
-    nothing there.
-  - `source_count` is never written by processing — new pages start at `0`,
-    ingest preserves the existing value, and only `lore graph
-    backlinks-sync` computes the authoritative count.
-- **Never partially-commit progress** to the queue file itself (no
-  `processed.jsonl` sidecar): the source-of-truth is the applied vault state, which
-  are themselves idempotent.
-
-
-## When NOT to invoke
-
-Ingest publishes each page/request batch through a recoverable journal and replaces
-queue files atomically; the entire ingest is not one transaction. Readers do not
-consume an append-in-progress queue file, but an interrupted journal can still
-require recovery before processing. Atomic replacement does not freeze target
-pages: preserve workflow coordination and exact revision guards during a worker wave.
-
-## Regenerating a section
-
 For an established mistaken citation, finish work touching its origin first. Read
 the source and the concept's complete synthesis, including its conditions and
 boundary cases. A source can establish when a method does not apply; absence of
@@ -59,6 +58,8 @@ and removes only standalone links in the existing related-concepts list. It neve
 rewrites concept bodies. Record consequential reasoning in a knowledge review and
 run Finalize; an empty extraction cannot retract accumulated citations.
 
+## Current-evidence resynthesis
+
 For a deliberate concept rewrite from its **current citations**, including when its
 original task has expired, preview `lore graph resynthesize <exact-concept-path.md> --dry-run`
 and run it without `--dry-run`. This preserves the authored bodies and queues one typed
@@ -66,6 +67,8 @@ synthesis request; an already-current matching request is reused. Drain and Fina
 normally. Empty or unreadable evidence is refused. This is a new current-evidence
 request, not replay of an unavailable historical input.
 
+
+## Exact retained-input regeneration
 
 Use `lore queue regenerate --task-id <retained-task-id> --dry-run` to preview, then
 omit `--dry-run` to request that one task again. The task must exist exactly once in

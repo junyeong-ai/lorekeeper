@@ -26,8 +26,8 @@ resolves against the config file's directory. Templates are embedded unless
 
 ## Collection is not semantic completion
 
-`lore ingest` collects and normalizes observations, writes pages atomically per
-file, then publishes queue tasks. Document-unit sources (`manual`, `nodex`, `google-drive`) write
+`lore ingest` collects and normalizes observations, then publishes each page/request
+batch through a recoverable mutation journal. Document-unit sources (`manual`, `nodex`, `google-drive`) write
 documents; day-unit sources write daily aggregates. Follow the source descriptor,
 not a hardcoded source-name rule. Concept pages aggregate evidence across sources.
 

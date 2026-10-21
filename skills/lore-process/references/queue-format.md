@@ -4,6 +4,7 @@
 
 - [Queue lifecycle](#queue-file-lifecycle)
 - [Task schema](#queue-task-schema)
+- [Completion keys](#completion-keys)
 - [Lost extraction recovery](#recovering-a-lost-extraction-task)
 - [Synthesis results](#synthesis-result)
 - [Section results](#single-section-result)
@@ -109,7 +110,7 @@ the vault root. `queue status` checks revisions against current source pages; an
 pending work `stale`, and an unreadable source leaves it `unreadable` until repaired.
 
 New bound RSS extraction uses `concept-extraction-rss-v3` with a typed
-`input.rss_original` manifest. Read selected originals from that inventory; return an
+`input.rss_original` manifest. Read selected originals from that inventory; return a
 nonempty `rss_evidence: [{"event_id":"...","revision":"<payload revision>"}]` on every
 reported concept after verifying that the selected articles support it. A result with
 no concepts is valid; omitting a concept never retracts its prior selections. Legacy/page-only tasks keep
@@ -125,6 +126,23 @@ pagination; selecting `--event ID --revision PAYLOAD_REV` reads that exact histo
 selection even when the current collection manifest has moved. The inventory revision
 pins inventory pagination; it is not the selected payload revision. Validate current task
 status and target bytes normally. Do not replace a stale answer's guards.
+
+## Completion keys
+
+Only `lore queue apply` publishes these markers with their section bodies.
+Workers never edit them. Matching input and completion values establish publication
+for that input; a filled body alone does not.
+
+| target.kind | input key | completion marker |
+|---|---|---|
+| `daily-summary`, `document-summary` | `summary` | `summary_done` |
+| `daily-refine-events` | `refine_events` | `refine_events_done` |
+| `daily-concepts`, `document-concepts` | `concepts` | `concepts_done` |
+| `concept-synthesis` | `synthesis` | `synthesis_done` |
+| `work-log-synthesis` | `topic_summary` | `topic_summary_done` |
+| `weekly-synthesis-themes` | `themes` | `themes_done` |
+| `weekly-review-narrative`, `monthly-review-narrative` | `narrative` | `narrative_done` |
+| `quarterly-review-narrative`, `annual-review-narrative` | `narrative` | `narrative_done` |
 
 ## Recovering a lost extraction task
 
@@ -249,8 +267,8 @@ Capture `lore work context --task-id ID` before each target's evidence reading a
 carry its `context_revision` into the synthesis result; packet export does not bind
 the scoped review/context membership for publication.
 
-When the user explicitly requests `gpt-6.1-sol` parallel work, retain that model for
-the assigned workers. Give each target one owner, share source-group notes under the
+Preserve an explicitly requested worker model. Give each target one owner, share
+source-group notes under the
 conditions above, and have one coordinator run apply and Finalize. Workers stage only
 the existing typed result envelopes and send review proposals separately; packet
 metadata or reading notes never become extra result fields.
