@@ -108,7 +108,10 @@ canonical; SQLite navigation is derived.
   and legends remain separate text blocks; this projection does not evaluate CSS.
   ASCII-alphanumeric term edges require boundaries, CJK allows attached particles.
 - Browse filters/facets/pagination have distinct counts: facets before metadata/date
-  filters, total after, pagination last. Created-date sort is browse-only, exact-path
+  filters, total after, pagination last. Each facet pages distinct values in exact-value
+  order, independently of hit pagination. Search previews at most 3 scoped reviews;
+  captured context reads only the selected review rows, with complete inventory counts.
+  Created-date sort is browse-only, exact-path
   ties, unknown dates last/excluded by bounds; authored date isn't collection time.
 - `document.rs`: CommonMark outline/section IDs pin full file revision; duplicate
   headings stay distinct, selected sections include nested children. Character

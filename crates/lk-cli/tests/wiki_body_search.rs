@@ -42,6 +42,43 @@ fn report(output: &Output) -> Value {
 }
 
 #[test]
+fn metadata_facet_options_are_validated_without_vault_writes() {
+    let root = fixture();
+    for args in [
+        vec!["wiki", "browse", "--facet-limit", "0", "--json"],
+        vec![
+            "wiki",
+            "search",
+            "Example",
+            "--facet-limit",
+            "101",
+            "--json",
+        ],
+        vec![
+            "wiki",
+            "search",
+            "Example",
+            "--body",
+            "--facet-offset",
+            "0",
+            "--json",
+        ],
+    ] {
+        let output = run(root.path(), &args);
+        assert!(!output.status.success(), "{args:?}");
+        assert!(!root.path().join("vault/.lorekeeper").exists());
+    }
+    let output = run(
+        root.path(),
+        &["wiki", "browse", "--facet-limit", "1", "--json"],
+    );
+    let value = report(&output);
+    assert_eq!(value["categories"]["values"], serde_json::json!({"ops":1}));
+    assert_eq!(value["categories"]["total"], 1);
+    assert_eq!(value["hits"][0]["reviews"]["total"], 0);
+}
+
+#[test]
 fn cli_body_literal_regex_scope_and_read_revision_are_connected_without_writes() {
     let root = fixture();
     let output = run(

@@ -1190,7 +1190,7 @@ mod tests {
         let hits = crate::search(root.path(), &VaultDirs::default(), &options)
             .unwrap()
             .hits;
-        assert_eq!(hits[0].reviews[0].path, review_path);
+        assert_eq!(hits[0].reviews.reviews[0].path, review_path);
     }
 
     #[test]

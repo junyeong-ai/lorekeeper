@@ -105,9 +105,12 @@ fn reviewed_curation_is_read_only_in_preview_guarded_and_discoverable_after_publ
         ],
     );
     assert_eq!(retired["total"], 1);
-    assert_eq!(retired["hits"][0]["reviews"][0]["relation"], "subject");
     assert_eq!(
-        retired["hits"][0]["reviews"][0]["effective_state"],
+        retired["hits"][0]["reviews"]["reviews"][0]["relation"],
+        "subject"
+    );
+    assert_eq!(
+        retired["hits"][0]["reviews"]["reviews"][0]["effective_state"],
         "resolved"
     );
     assert_eq!(retired["hits"][0]["source_count"], 1);

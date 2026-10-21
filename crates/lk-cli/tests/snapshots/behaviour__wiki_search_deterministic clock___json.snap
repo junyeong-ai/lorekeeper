@@ -6,11 +6,21 @@ exit: 0
 --- stdout ---
 {
   "categories": {
-    "engineering": 1
+    "next_offset": null,
+    "offset": 0,
+    "total": 1,
+    "values": {
+      "engineering": 1
+    }
   },
   "category": null,
   "formats": {
-    "concept": 1
+    "next_offset": null,
+    "offset": 0,
+    "total": 1,
+    "values": {
+      "concept": 1
+    }
   },
   "hits": [
     {
@@ -28,7 +38,18 @@ exit: 0
       "matched": "name",
       "path": "wiki/concepts/deterministic-clock.md",
       "phrase_match": true,
-      "reviews": [],
+      "reviews": {
+        "next_offset": null,
+        "offset": 0,
+        "reviews": [],
+        "states": {
+          "invalid": 0,
+          "needs_reassessment": 0,
+          "open": 0,
+          "resolved": 0
+        },
+        "total": 0
+      },
       "source_count": 2,
       "spacing_match": false,
       "synthesis": {
@@ -41,7 +62,12 @@ exit: 0
   "include_sources": false,
   "knowledge_status": "active",
   "knowledge_statuses": {
-    "active": 1
+    "next_offset": null,
+    "offset": 0,
+    "total": 1,
+    "values": {
+      "active": 1
+    }
   },
   "next_offset": null,
   "offset": 0,
@@ -49,11 +75,21 @@ exit: 0
   "query": "deterministic clock",
   "source_status": null,
   "source_statuses": {
-    "": 1
+    "next_offset": null,
+    "offset": 0,
+    "total": 1,
+    "values": {
+      "": 1
+    }
   },
   "spacing": false,
   "tag_filters": [],
-  "tags": {},
+  "tags": {
+    "next_offset": null,
+    "offset": 0,
+    "total": 0,
+    "values": {}
+  },
   "total": 1,
   "type": null
 }
