@@ -333,15 +333,24 @@ fn states_something(text: &str) -> bool {
 /// `conflict` exactly — a callout of any other type is `None`, so an ordinary
 /// `> [!note]` never trips the lint.
 fn parse_conflict_callout(line: &str) -> Option<(usize, &str)> {
+    let (depth, kind, title) = parse_callout(line)?;
+    kind.eq_ignore_ascii_case(CONFLICT_CALLOUT)
+        .then_some((depth, title))
+}
+
+/// Shared explicit callout syntax; ordinary blockquotes carry no annotation marker.
+pub(crate) fn parse_callout(line: &str) -> Option<(usize, &str, &str)> {
     let quoted = quoted(line)?;
     let inner = quoted.text.trim().strip_prefix("[!")?;
     let close = inner.find(']')?;
-    if !inner[..close].trim().eq_ignore_ascii_case(CONFLICT_CALLOUT) {
+    let kind = inner[..close].trim();
+    if kind.is_empty() {
         return None;
     }
     let after = inner[close + 1..].trim_start();
     Some((
         quoted.depth,
+        kind,
         after.strip_prefix(['-', '+']).unwrap_or(after).trim(),
     ))
 }
@@ -369,7 +378,9 @@ pub fn find_unresolved_conflicts(pages: &[ConceptPage]) -> Vec<UnresolvedConflic
     pages
         .iter()
         .filter_map(|page| {
-            let lines: Vec<&str> = page.body.lines().collect();
+            let lines: Vec<&str> = lk_core::markdown::lines_with_endings(&page.body)
+                .map(|line| line.trim_end_matches(['\r', '\n']))
+                .collect();
             let mut fence = FenceState::new();
             let mut quoted_fence = FenceState::new();
             for (at, line) in lines.iter().enumerate() {
@@ -1119,6 +1130,23 @@ mod tests {
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].slug, "rag");
         assert_eq!(result[0].note, "sources disagree on chunk size");
+    }
+
+    #[test]
+    fn conflict_callouts_use_commonmark_lines_without_reporting_literal_examples() {
+        for ending in ["\n", "\r\n", "\r"] {
+            let page = ConceptPage {
+                slug: "topic".into(),
+                path: "wiki/concepts/topic.md".into(),
+                category: None,
+                names: vec!["Topic".into()],
+                body: "# Topic\n\n```md\n> [!conflict] literal example\n```\n\n> [!note] annotation\n\n> [!CONFLICT]-\n> Sources disagree.\n"
+                    .replace('\n', ending),
+            };
+            let result = find_unresolved_conflicts(&[page]);
+            assert_eq!(result.len(), 1, "{ending:?}: {result:?}");
+            assert_eq!(result[0].note, "Sources disagree.");
+        }
     }
 
     #[test]

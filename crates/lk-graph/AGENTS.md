@@ -135,6 +135,8 @@ belong to exploration reviews, not a machine-persisted callout inferred by locat
 - Authored concepts with substantive prose but no input may be adopted. Headings
   and callout-only content do not qualify; defer/report multi-citation adoption
   when required instead of silently manufacturing a completed input.
+  Classify actual Markdown blocks: ordinary quotations and literal code are authored
+  content, while callouts require their explicit marker in that quote's scope.
 - An empty citation set creates no new synthesis request. Preserve an answered
   input/done pair. Withdraw only an unanswered input whose evidence became empty;
   Skip or a missing anchor is not permission to erase an answer.

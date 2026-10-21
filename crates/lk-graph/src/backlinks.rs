@@ -1059,15 +1059,39 @@ fn guard_backlink_sources(
 
 /// Whether a section body says something about the concept, rather than only marking it.
 ///
-/// A line that opens a heading (`#`) or a blockquote — which is what a `> [!conflict]`
-/// callout is — annotates the section; anything else is its content. Structural, so no
-/// judgment about how good the prose is enters here: a terse definition is an answer, and a
-/// section holding nothing but annotation is not.
+/// Actual headings and explicit callout blocks annotate the section. Ordinary quotes,
+/// literal code and other authored content remain answers; this makes no support judgment.
 fn carries_an_answer(body: &str) -> bool {
-    body.lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .any(|line| !line.starts_with('#') && !line.starts_with('>'))
+    use pulldown_cmark::{Event, Tag};
+
+    let markdown = lk_core::markdown::MarkdownInput::from_text(body);
+    let mut ignored_until = 0;
+    for (event, range) in markdown.offset_events(lk_core::markdown::OPTIONS) {
+        if range.start < ignored_until {
+            continue;
+        }
+        match event {
+            Event::Start(Tag::Heading { .. }) => ignored_until = range.end,
+            Event::Start(Tag::BlockQuote(_)) => {
+                let first = lk_core::markdown::lines_with_endings(&body[range.clone()])
+                    .next()
+                    .unwrap_or_default();
+                // A nested callout is not the enclosing ordinary quote's annotation.
+                if crate::concept_lint::parse_callout(first).is_some_and(|(depth, _, _)| depth == 1)
+                {
+                    ignored_until = range.end;
+                }
+            }
+            Event::Text(text) | Event::Code(text) | Event::Html(text) | Event::InlineHtml(text)
+                if !text.trim().is_empty() =>
+            {
+                return true;
+            }
+            Event::Start(Tag::Image { .. }) => return true,
+            _ => {}
+        }
+    }
+    false
 }
 
 /// The value recorded under `llm_inputs.<key>`, if the page carries one.
@@ -2751,6 +2775,52 @@ mod tests {
     /// prose becomes the answer for the evidence the page carries. Queueing it instead is an
     /// upgrade that replaces every authored synthesis in the vault in one unattended run.
     #[test]
+    fn authored_definition_adoption_uses_commonmark_physical_lines() {
+        for (body, ending) in ["\n", "\r\n", "\r"].into_iter().flat_map(|ending| {
+            [
+                "> [!note] Annotation\n\nAn authored definition.\n",
+                "> An authored definition.\n",
+                "> \\[!note] An authored definition.\n",
+                "> ```text\n> # Literal definition\n> ```\n",
+                "> > [!note] Nested annotation\n>\n> An authored definition.\n",
+                "- > > [!note] Nested annotation\n  >\n  > An authored definition.\n",
+            ]
+            .into_iter()
+            .map(move |body| (body, ending))
+        }) {
+            let dir = TempDir::new().unwrap();
+            write_concept_page(&dir, "legacy", &[], "");
+            let concept = dir.path().join("wiki/concepts/legacy.md");
+            let body = body.replace('\n', ending);
+            let raw = std::fs::read_to_string(&concept)
+                .unwrap()
+                .replace("What legacy is.", &body);
+            std::fs::write(&concept, raw).unwrap();
+            let pages = vec![
+                build_page("wiki/concepts/legacy", "wiki/concepts/legacy.md", &[]),
+                build_page(
+                    "daily/slack/2026-05-20",
+                    "daily/slack/2026-05-20.md",
+                    &["wiki/concepts/legacy"],
+                ),
+            ];
+            let report = sync_fixture(
+                &pages,
+                dir.path(),
+                false,
+                &VaultDirs::default(),
+                SynthesisPolicy::Record,
+            )
+            .unwrap();
+            assert_eq!(report.adopted.len(), 1, "{ending:?}: {report:?}");
+            assert!(report.resynthesize.is_empty(), "{report:?}");
+            let updated = std::fs::read_to_string(concept).unwrap();
+            assert!(updated.contains(&body));
+            assert!(updated.contains("synthesis_done:"));
+        }
+    }
+
+    #[test]
     fn a_written_synthesis_with_no_recorded_input_is_adopted_not_replaced() {
         let dir = TempDir::new().unwrap();
         write_concept_page(&dir, "legacy", &[], "");
@@ -2892,6 +2962,9 @@ mod tests {
     fn a_body_that_only_annotates_is_not_an_answer_to_adopt() {
         for body in [
             "> [!conflict] two sources disagree on the retention window",
+            "> [!note] Annotation only\n> No authored definition outside this annotation.",
+            "> > [!conflict] nested annotation only",
+            "- > [!conflict] list annotation only",
             "### Notes",
             "## Later\n\n> a quoted line",
         ] {
