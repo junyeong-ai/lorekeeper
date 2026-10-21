@@ -166,21 +166,29 @@ fn set<T: Serialize>(text: &str, key: &str, value: &T) -> Result<String, VaultEr
 
 fn set_title(text: &str, title: &str) -> Result<String, VaultError> {
     let mut updated = set(text, "title", &title)?;
-    let page = crate::parse_page(&updated).map_err(invalid)?;
+    let offset = lk_core::frontmatter::body_offset(&updated)
+        .ok_or_else(|| invalid("curation requires closed frontmatter"))?;
     if let Some((
         pulldown_cmark::Event::Start(pulldown_cmark::Tag::Heading {
             level: pulldown_cmark::HeadingLevel::H1,
             ..
         }),
         range,
-    )) = pulldown_cmark::Parser::new(&page.body)
+    )) = pulldown_cmark::Parser::new(&updated[offset..])
         .into_offset_iter()
         .next()
     {
-        let offset = updated.len() - page.body.len();
+        let heading = &updated[offset + range.start..offset + range.end];
+        let ending = if heading.ends_with("\r\n") {
+            "\r\n"
+        } else if heading.ends_with('\n') {
+            "\n"
+        } else {
+            ""
+        };
         updated.replace_range(
             offset + range.start..offset + range.end,
-            &format!("# {title}\n"),
+            &format!("# {}{ending}", crate::fragment::inline_text(title)),
         );
     }
     Ok(updated)
@@ -530,6 +538,70 @@ fn build_curation(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn curation_titles_preserve_raw_boundaries_and_render_literal_names() {
+        let path = "wiki/concepts/topic.md";
+        let title = "새 [Literal](ghost.md) <b>HTML</b> &copy; `code`";
+        for (bom, ending) in [("", "\n"), ("\u{feff}", "\r\n")] {
+            let root = tempfile::tempdir().unwrap();
+            let before = format!("{bom}---\ntype: concept\ntitle: Old\nnotes: |\n  # Metadata heading\n  ```\n---\n\n\n# 이전 제목\n\n## Synthesis\nKeep 한글🙂 and [real](../documents/real.md).\n\n```md\n# Literal heading\n```\n\n## Sources\n\n").replace('\n', ending);
+            let writer = crate::VaultWriter::new(root.path());
+            writer.write_page_sync(Path::new(path), &before).unwrap();
+            let request: CurationPlan = serde_json::from_value(json!({
+                "evidence": [{"path":path,"revision":file_revision(&before)}],
+                "concepts": [{"path":path,"revision":file_revision(&before),"title":title}]
+            }))
+            .unwrap();
+            let session = MutationSession::acquire(root.path()).unwrap();
+            curate(&session, &VaultDirs::default(), &[], request).unwrap();
+            let after = std::fs::read_to_string(root.path().join(path)).unwrap();
+            let expected = before
+                .replace(
+                    "title: Old",
+                    &format!("title: {}", serde_json::to_string(title).unwrap()),
+                )
+                .replace(
+                    "# 이전 제목",
+                    &format!("# {}", crate::fragment::inline_text(title)),
+                );
+            assert_eq!(after, expected);
+            let parsed = crate::parse_page(&after).unwrap();
+            assert_eq!(
+                parsed
+                    .frontmatter
+                    .get("title")
+                    .and_then(serde_json::Value::as_str),
+                Some(title)
+            );
+            let view = crate::inspect_document(
+                root.path(),
+                Path::new(path),
+                &crate::DocumentOptions {
+                    section: None,
+                    offset: 0,
+                    limit: 10,
+                    revision: None,
+                },
+            )
+            .unwrap();
+            assert_eq!(view.sections[1].title, title);
+            assert_eq!(view.sections[2].title, "Synthesis");
+            assert_eq!(
+                lk_core::link::extract_dests(&parsed.body),
+                ["../documents/real.md"]
+            );
+            let revision = source_revision(&crate::parse_page(&before).unwrap());
+            let archive = crate::load_archived_evidence(root.path(), &revision)
+                .unwrap()
+                .unwrap();
+            assert_eq!(archive.original.as_deref(), Some(before.as_str()));
+        }
+        assert_eq!(
+            set_title("---\ntype: concept\ntitle: Old\n---\n# Old", "New").unwrap(),
+            "---\ntype: concept\ntitle: \"New\"\n---\n# New"
+        );
+    }
 
     #[test]
     fn curation_previews_new_addresses_with_the_publication_namespace_rules() {
