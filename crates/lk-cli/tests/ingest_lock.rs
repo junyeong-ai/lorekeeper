@@ -81,13 +81,14 @@ fn busy_ingest_refuses_by_default_and_waiting_dry_run_remains_read_only() {
 }
 
 #[test]
-fn explicit_ingest_collects_then_derives_from_pages_after_the_writer_releases() {
+fn filtered_ingest_collects_then_derives_from_pages_after_the_writer_releases() {
     let ws = Workspace::new();
     let held = lk_vault::MutationSession::acquire(&ws.vault()).unwrap();
     let before = snapshot(&ws.vault());
     let stderr = tempfile::NamedTempFile::new().unwrap();
     let mut child = ws
         .command()
+        .arg("notes")
         .arg("--wait-for-vault")
         .stdout(Stdio::null())
         .stderr(stderr.reopen().unwrap())
