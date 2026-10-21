@@ -221,6 +221,7 @@ fn prepare_search_inner(
             "DROP TABLE IF EXISTS provenance_documents;
             DROP TABLE IF EXISTS provenance_addresses;
             DROP TABLE IF EXISTS provenance_relations;
+            DROP TABLE IF EXISTS provenance_issues;
             DROP TABLE IF EXISTS provenance_coverage;
             DROP TABLE IF EXISTS concept_citations;
             DROP TABLE IF EXISTS concept_evidence;",
@@ -2769,6 +2770,7 @@ mod tests {
             "provenance_documents",
             "provenance_addresses",
             "provenance_relations",
+            "provenance_issues",
             "provenance_coverage",
             "concept_evidence",
             "concept_citations",

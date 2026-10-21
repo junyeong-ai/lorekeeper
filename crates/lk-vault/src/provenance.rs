@@ -368,27 +368,21 @@ pub(super) fn build_report(
                 .and_then(|id| registry.get(id))
                 .cloned()
                 .unwrap_or_default();
-            let status = if target_identity.is_none() {
-                if d.metadata["identity_status"] == "unavailable" {
-                    "unavailable-identity"
-                } else {
-                    "invalid-identity"
-                }
-            } else {
-                match owners.len() {
-                    0 => "unresolved",
-                    1 => "resolved",
-                    _ => "ambiguous",
-                }
-            };
             // Owners are separately paginated to bound ambiguous results without dropping names.
-            rows.push(json!({"kind":"declared-relation", "declaring":d.metadata,
-                "relation":declaration.relation,"fields":declaration.fields,"target_identity": d.metadata.get("source_identity").filter(|value|!value.is_null()).and_then(|value|lk_core::source_identity::SourceIdentity::from_value(value.clone()).ok()).map(|identity|identity.with_document(&declaration.target)),
-                "target_id":declaration.target,"incoming":incoming,"outgoing":outgoing,
-                "resolution":status,"candidate_total":owners.len()}));
+            rows.push(build_relation_entry(
+                &d.metadata,
+                declaration,
+                incoming,
+                outgoing,
+                owners.len(),
+            ));
             for owner in owners {
-                rows.push(json!({"kind":"target-candidate","declaring_path":d.path,
-                "relation":declaration.relation,"target_id":declaration.target,"target":owner.metadata}));
+                rows.push(build_target_entry(
+                    &d.path,
+                    &declaration.relation,
+                    &declaration.target,
+                    &owner.metadata,
+                ));
             }
         }
     }
@@ -409,6 +403,47 @@ pub(super) fn build_report(
         offset: options.offset,
         next_offset: (end < total).then_some(end),
     })
+}
+
+pub(super) fn build_relation_entry(
+    declaring: &Value,
+    declaration: &Declaration,
+    incoming: bool,
+    outgoing: bool,
+    candidate_total: usize,
+) -> Value {
+    let identity = declaring
+        .get("source_identity")
+        .filter(|value| !value.is_null())
+        .and_then(|value| lk_core::source_identity::SourceIdentity::from_value(value.clone()).ok());
+    let status = if identity.is_none() {
+        if declaring["identity_status"] == "unavailable" {
+            "unavailable-identity"
+        } else {
+            "invalid-identity"
+        }
+    } else {
+        match candidate_total {
+            0 => "unresolved",
+            1 => "resolved",
+            _ => "ambiguous",
+        }
+    };
+    json!({"kind":"declared-relation", "declaring":declaring,
+        "relation":declaration.relation,"fields":declaration.fields,
+        "target_identity":identity.map(|identity|identity.with_document(&declaration.target)),
+        "target_id":declaration.target,"incoming":incoming,"outgoing":outgoing,
+        "resolution":status,"candidate_total":candidate_total})
+}
+
+pub(super) fn build_target_entry(
+    declaring_path: &str,
+    relation: &str,
+    target_id: &str,
+    target: &Value,
+) -> Value {
+    json!({"kind":"target-candidate","declaring_path":declaring_path,
+        "relation":relation,"target_id":target_id,"target":target})
 }
 
 #[cfg(test)]
