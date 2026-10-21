@@ -10,6 +10,9 @@ configuration. Publication is guarded, not a second uncoordinated render path.
   across sources and render them once. Stage/read every concept before committing
   any to the accumulator on plan, documents and applied-extraction paths, so a
   failed source cannot leave publishable orphan drafts.
+- Original RSS payloads join the source-transaction planning budgets: enforce the
+  source and run bounds before semantic staging, and commit run bytes only after a
+  successful plan. A rejected source must leave capacity for later fitting sources.
 - Normalize event identity from external_id or JSON `[title, body]`. Dedup only
   exact `EventId` within one fetch, first wins; URL/title/body similarity is not
   identity. Cross-source observations remain separate provenance.

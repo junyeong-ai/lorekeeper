@@ -86,7 +86,12 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
 
 ## Ingest and originals (`commands/ingest.rs`)
 
-- Ingest captures observations before taking the writer lock. After acquisition,
+- Full current-day ingest reserves a persistent first-source turn under a short
+  mutation session before collection; recover journals and recheck pinned config before
+  reading that cursor. Release the claim before source I/O. Acquisition and planning
+  share the reserved order; accepted publication stays canonical. Filtered/historical
+  runs leave the turn unchanged; previews neither reserve nor recover.
+  Ingest captures observations without holding the writer lock. After acquisition,
   recover journals and derive page plans against current pages; never refresh a
   previously captured publication baseline. Pin the selected config path/revision
   across collection, lock waiting and planning. `ingest.source_timeout_seconds`
