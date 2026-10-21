@@ -27,8 +27,29 @@ pub struct Synthesizer {
     evidence_scope: Option<String>,
 }
 
-/// Completion of a captured semantic input, including a legitimate empty answer.
+/// Completion of a captured semantic input on its declared page format, including an empty answer.
 pub fn completed_input(page: &VaultPage, kind: TargetKind) -> Option<&str> {
+    let page_format = match kind {
+        TargetKind::DailySummary | TargetKind::DailyConcepts | TargetKind::DailyRefineEvents => {
+            "daily"
+        }
+        TargetKind::DocumentSummary | TargetKind::DocumentConcepts => "document",
+        TargetKind::WeeklySynthesisThemes => "weekly-synthesis",
+        TargetKind::WeeklyReviewNarrative => "weekly-review",
+        TargetKind::MonthlyReviewNarrative => "monthly-review",
+        TargetKind::QuarterlyReviewNarrative => "quarterly-review",
+        TargetKind::AnnualReviewNarrative => "annual-review",
+        TargetKind::WorkLogSynthesis => "work-log",
+        TargetKind::ConceptSynthesis => "concept",
+    };
+    if page
+        .frontmatter
+        .get("type")
+        .and_then(|value| value.as_str())
+        != Some(page_format)
+    {
+        return None;
+    }
     let inputs = page.frontmatter.get(field::LLM_INPUTS)?.as_object()?;
     let input = inputs.get(kind.llm_inputs_key())?.as_str()?;
     if input.is_empty() || inputs.get(&kind.completion_key())?.as_str()? != input {
@@ -926,6 +947,48 @@ pub fn quarter_range(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn completed_input_requires_the_declared_page_format() {
+        let weekly = "---\ntype: weekly-review\nllm_inputs:\n  narrative: captured\n  narrative_done: captured\n---\n## Summary\n";
+        let page = lk_vault::parse_page(weekly).unwrap();
+        assert_eq!(
+            completed_input(&page, TargetKind::WeeklyReviewNarrative),
+            Some("captured")
+        );
+        for kind in [
+            TargetKind::MonthlyReviewNarrative,
+            TargetKind::QuarterlyReviewNarrative,
+            TargetKind::AnnualReviewNarrative,
+        ] {
+            assert_eq!(completed_input(&page, kind), None, "{kind:?}");
+        }
+        for declaration in [
+            "",
+            "type: null\n",
+            "type: 42\n",
+            "type: [weekly-review]\n",
+            "type: unknown\n",
+        ] {
+            let page = lk_vault::parse_page(&weekly.replace("type: weekly-review\n", declaration))
+                .unwrap();
+            assert_eq!(
+                completed_input(&page, TargetKind::WeeklyReviewNarrative),
+                None,
+                "{declaration:?}"
+            );
+        }
+
+        let document = lk_vault::parse_page(
+            "---\ntype: document\nllm_inputs:\n  summary: captured\n  summary_done: captured\n---\n## Summary\n",
+        )
+        .unwrap();
+        assert_eq!(
+            completed_input(&document, TargetKind::DocumentSummary),
+            Some("captured")
+        );
+        assert_eq!(completed_input(&document, TargetKind::DailySummary), None);
+    }
 
     #[test]
     fn iso_week_basic() {

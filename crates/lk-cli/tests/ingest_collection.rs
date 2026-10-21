@@ -74,6 +74,7 @@ fn source_override_bounds_progressing_collection_without_holding_the_vault_write
                 Err(error) => panic!("accept source request: {error}"),
             }
         };
+        stream.set_nonblocking(false).unwrap();
         stream
             .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();
