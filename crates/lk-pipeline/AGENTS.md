@@ -62,6 +62,10 @@ source publication instead of dropping evidence. New disabled pages omit that se
   source_file/source_url fallback. Load all document descendants once and retain
   nested addresses. Unique owner keeps its address after title changes; multiple
   owners or overlapping document observations refuse before rendering.
+- Resolve established ownership and verified legacy adoption before deriving a new
+  address. New addresses retain title/source_file slugs; when neither yields a slug,
+  a structured source identity supplies a deterministic hashed address through the
+  same collision guards. Without either, refuse rather than silently drop a document.
 - Repeated identical events may collapse; different payloads under one ID fail.
   Reserve identities only after a successful plan. New-title collisions use the
   document's event suffix, lengthening through full hash then numeric tails; never

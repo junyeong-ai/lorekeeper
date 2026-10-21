@@ -1205,29 +1205,6 @@ impl Pipeline {
         // though pages are not written to disk until every source is planned.
 
         for event in &events {
-            // Derive slug from title; fall back to source_file metadata.
-            let base_slug = match lk_core::concept::slugify(&event.title) {
-                Some(s) => s,
-                None => {
-                    let source_file = event
-                        .metadata
-                        .get("source_file")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    match lk_core::concept::slugify(source_file) {
-                        Some(s) => s,
-                        None => {
-                            tracing::warn!(
-                                source = source_id,
-                                title = %event.title,
-                                "skipping document with empty slug"
-                            );
-                            continue;
-                        }
-                    }
-                }
-            };
-            let base_slug = bounded_address(&base_slug);
             let identity = Self::event_document_identity(event)?;
             let adopted = self
                 .legacy_document_address(event, identity.as_ref())
@@ -1241,11 +1218,11 @@ impl Pipeline {
                 ));
             }
 
-            let base_slug = match identity
+            let established = match identity
                 .as_ref()
                 .and_then(|identity| self.document_addresses.as_ref()?.get(identity))
             {
-                Some(addresses) if addresses.len() == 1 => addresses[0].clone(),
+                Some(addresses) if addresses.len() == 1 => Some(addresses[0].clone()),
                 Some(addresses) => {
                     return Err(PipelineError::Render(format!(
                         "document source {} is claimed by multiple pages: {}",
@@ -1256,7 +1233,27 @@ impl Pipeline {
                         addresses.join(", ")
                     )));
                 }
-                None => adopted.clone().unwrap_or(base_slug),
+                None => adopted.clone(),
+            };
+            let base_slug = if let Some(address) = established {
+                address
+            } else if let Some(slug) = lk_core::concept::slugify(&event.title).or_else(|| {
+                event
+                    .metadata
+                    .get("source_file")
+                    .and_then(|value| value.as_str())
+                    .and_then(lk_core::concept::slugify)
+            }) {
+                bounded_address(&slug)
+            } else if let Some(DocumentIdentity::Stable(identity)) = &identity {
+                let key = serde_json::to_string(&identity.key())
+                    .map_err(|error| PipelineError::Render(error.to_string()))?;
+                format!("document-{}", &lk_core::concept::file_revision(&key)[..16])
+            } else {
+                return Err(PipelineError::Render(format!(
+                    "document {} has no usable address: provide a title/source_file containing letters or numbers, or a structured source_identity",
+                    event.id
+                )));
             };
 
             // Resolve a collision-free slug, starting with the existing source address

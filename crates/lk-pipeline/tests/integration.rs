@@ -5283,6 +5283,275 @@ async fn location_only_imports_work_but_cannot_be_silently_adopted() {
 }
 
 #[tokio::test]
+async fn symbol_only_document_titles_keep_stable_addresses_and_current_content() {
+    for (established, structured) in [(false, true), (true, true), (true, false)] {
+        let dir = TempDir::new().unwrap();
+        let mut config = base_config(dir.path());
+        config.sources.get_mut("test-source").unwrap().source_type = SourceType::GoogleDrive;
+        let source = &config.sources["test-source"];
+        let identity = serde_json::json!({
+            "provider": "google-drive", "namespace": "files", "document": "drive-document"
+        });
+        let owner = "wiki/documents/nested/policy.md";
+        let identity_field = if structured {
+            format!("source_identity: {identity}")
+        } else {
+            "source_url: https://example.com/drive-document".into()
+        };
+        let original = format!(
+            "---\ntype: document\ntitle: Policy\ncreated: 2026-05-01\n{identity_field}\nsource_record: {{version: 1}}\n---\nOriginal body\n"
+        );
+        let writer = lk_vault::VaultWriter::new(dir.path());
+        if established {
+            writer
+                .write_page(std::path::Path::new(owner), &original)
+                .await
+                .unwrap();
+        }
+        let options = IngestOptions {
+            target_date: None,
+            today: far_future(),
+            dry_run: false,
+        };
+        let mut item = raw_item(
+            "✅",
+            "Current body",
+            "drive-document",
+            "2026-05-23T10:00:00Z".parse().unwrap(),
+        );
+        item.metadata = serde_json::json!({"source_record": {"version": 2}});
+        if structured {
+            item.metadata["source_identity"] = identity;
+        }
+        let result = Pipeline::new(dir.path(), build_ctx(&config, Arc::new(NoopLlmClient)))
+            .plan("test-source", source, vec![item.clone()], &options)
+            .await
+            .unwrap();
+        assert_eq!(result.document_pages.len(), 1, "established={established}");
+        let page = &result.document_pages[0];
+        if established {
+            assert_eq!(page.path.to_string(), owner);
+            assert_eq!(page.expected_original, Some(Some(original.clone())));
+        } else {
+            assert!(
+                page.path
+                    .to_string()
+                    .starts_with("wiki/documents/document-")
+            );
+            assert_eq!(page.expected_original, Some(None));
+        }
+        let parsed = lk_core::frontmatter::parse_page(&page.content).unwrap();
+        assert_eq!(parsed.frontmatter.get("title").unwrap(), "✅");
+        assert_eq!(
+            parsed.frontmatter.get("source_record").unwrap()["version"],
+            2
+        );
+        assert!(parsed.body.contains("Current body"));
+        writer
+            .write_page(page.path.as_ref(), &page.content)
+            .await
+            .unwrap();
+
+        item.title = "---".into();
+        item.body = "Revised body".into();
+        item.timestamp = "2026-05-24T10:00:00Z".parse().unwrap();
+        item.metadata["source_record"]["version"] = 3.into();
+        let repeated = Pipeline::new(dir.path(), build_ctx(&config, Arc::new(NoopLlmClient)))
+            .plan("test-source", source, vec![item], &options)
+            .await
+            .unwrap();
+        assert_eq!(repeated.document_pages.len(), 1);
+        let repeated = &repeated.document_pages[0];
+        assert_eq!(repeated.path, page.path);
+        assert_eq!(repeated.expected_original, Some(Some(page.content.clone())));
+        let parsed = lk_core::frontmatter::parse_page(&repeated.content).unwrap();
+        assert_eq!(parsed.frontmatter.get("title").unwrap(), "---");
+        assert_eq!(
+            parsed.frontmatter.get("source_record").unwrap()["version"],
+            3
+        );
+        assert!(parsed.body.contains("Revised body"));
+    }
+}
+
+#[tokio::test]
+async fn symbol_only_document_titles_preserve_namespace_identity_and_collision_guards() {
+    let dir = TempDir::new().unwrap();
+    let config = base_config(dir.path());
+    let options = IngestOptions {
+        target_date: None,
+        today: far_future(),
+        dry_run: false,
+    };
+    let identities = [
+        serde_json::json!({"provider":"google-drive", "namespace":"files", "document":"shared-id"}),
+        serde_json::json!({"repository":"org/one", "document":"shared-id"}),
+        serde_json::json!({"repository":"org/two", "document":"shared-id"}),
+    ];
+    let mut pipeline = Pipeline::new(dir.path(), build_ctx(&config, Arc::new(NoopLlmClient)));
+    let writer = lk_vault::VaultWriter::new(dir.path());
+    let mut pages = Vec::new();
+    let mut inputs = Vec::new();
+    for identity in identities {
+        let mut source = config.sources["test-source"].clone();
+        source.source_type = if identity.get("provider").is_some() {
+            SourceType::GoogleDrive
+        } else {
+            SourceType::Nodex
+        };
+        let mut item = raw_item(
+            "✅",
+            "Current body",
+            "shared-id",
+            "2026-05-23T10:00:00Z".parse().unwrap(),
+        );
+        item.metadata = serde_json::json!({"source_identity": identity});
+        let result = pipeline
+            .plan("test-source", &source, vec![item.clone()], &options)
+            .await
+            .unwrap();
+        assert_eq!(result.document_pages.len(), 1);
+        let page = result.document_pages.into_iter().next().unwrap();
+        writer
+            .write_page(page.path.as_ref(), &page.content)
+            .await
+            .unwrap();
+        let error = pipeline
+            .plan("other-source", &source, vec![item.clone()], &options)
+            .await
+            .err()
+            .expect("the same structured identity cannot publish twice in one run");
+        assert!(error.to_string().contains("already planned"), "{error}");
+        pages.push(page);
+        inputs.push((source, item));
+    }
+    assert_eq!(
+        pages
+            .iter()
+            .map(|page| page.path.to_string())
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        3
+    );
+
+    let mut reloaded = Pipeline::new(dir.path(), build_ctx(&config, Arc::new(NoopLlmClient)));
+    for ((source, item), page) in inputs.iter().zip(&pages).rev() {
+        let mut item = item.clone();
+        item.title = "---".into();
+        let result = reloaded
+            .plan("test-source", source, vec![item], &options)
+            .await
+            .unwrap();
+        assert_eq!(result.document_pages[0].path, page.path);
+    }
+
+    let fresh = TempDir::new().unwrap();
+    let fresh_config = base_config(fresh.path());
+    let mut fresh_pipeline = Pipeline::new(
+        fresh.path(),
+        build_ctx(&fresh_config, Arc::new(NoopLlmClient)),
+    );
+    for ((source, item), page) in inputs.iter().zip(&pages).rev() {
+        let mut item = item.clone();
+        item.title = "---".into();
+        item.body = "Different content".into();
+        item.timestamp = "2026-05-24T10:00:00Z".parse().unwrap();
+        let result = fresh_pipeline
+            .plan("different-source", source, vec![item], &options)
+            .await
+            .unwrap();
+        assert_eq!(result.document_pages[0].path, page.path);
+    }
+
+    let collision = TempDir::new().unwrap();
+    let collision_config = base_config(collision.path());
+    let occupied = "---\ntype: document\ntitle: Unrelated\n---\nKeep this authored page\n";
+    lk_vault::VaultWriter::new(collision.path())
+        .write_page(pages[0].path.as_ref(), occupied)
+        .await
+        .unwrap();
+    let (source, item) = &inputs[0];
+    let result = Pipeline::new(
+        collision.path(),
+        build_ctx(&collision_config, Arc::new(NoopLlmClient)),
+    )
+    .plan("test-source", source, vec![item.clone()], &options)
+    .await
+    .unwrap();
+    assert_eq!(result.document_pages.len(), 1);
+    assert_ne!(result.document_pages[0].path, pages[0].path);
+    assert_eq!(
+        std::fs::read_to_string(collision.path().join(pages[0].path.as_ref())).unwrap(),
+        occupied
+    );
+}
+
+#[tokio::test]
+async fn symbol_only_document_titles_refuse_ambiguous_or_unaddressable_inputs() {
+    let options = IngestOptions {
+        target_date: None,
+        today: far_future(),
+        dry_run: false,
+    };
+    for identity in [
+        None,
+        Some(serde_json::json!({
+            "provider":"google-drive", "namespace":"files", "document":"shared-id"
+        })),
+    ] {
+        let dir = TempDir::new().unwrap();
+        let mut config = base_config(dir.path());
+        config.sources.get_mut("test-source").unwrap().source_type = SourceType::GoogleDrive;
+        let source = &config.sources["test-source"];
+        let mut item = raw_item(
+            "✅",
+            "Current body",
+            "shared-id",
+            "2026-05-23T10:00:00Z".parse().unwrap(),
+        );
+        let expected = if let Some(identity) = identity {
+            item.metadata = serde_json::json!({"source_identity": identity});
+            let original = format!(
+                "---\ntype: document\ntitle: Policy\nsource_identity: {identity}\n---\nOriginal body\n"
+            );
+            for path in ["wiki/documents/first.md", "wiki/documents/nested/second.md"] {
+                lk_vault::VaultWriter::new(dir.path())
+                    .write_page(std::path::Path::new(path), &original)
+                    .await
+                    .unwrap();
+            }
+            "claimed by multiple pages"
+        } else {
+            "no usable address"
+        };
+        let error = Pipeline::new(dir.path(), build_ctx(&config, Arc::new(NoopLlmClient)))
+            .plan("test-source", source, vec![item.clone()], &options)
+            .await
+            .err()
+            .expect("unaddressable or ambiguous documents must fail instead of disappearing");
+        assert!(error.to_string().contains(expected), "{error}");
+        if item.metadata.is_null() {
+            item.url = None;
+            let error = Pipeline::new(dir.path(), build_ctx(&config, Arc::new(NoopLlmClient)))
+                .plan("test-source", source, vec![item.clone()], &options)
+                .await
+                .err()
+                .expect("an external ID alone cannot supply structured document ownership");
+            assert!(error.to_string().contains(expected), "{error}");
+            item.metadata = serde_json::json!({"source_file":"/repo/source.md"});
+            let result = Pipeline::new(dir.path(), build_ctx(&config, Arc::new(NoopLlmClient)))
+                .plan("test-source", source, vec![item], &options)
+                .await
+                .unwrap();
+            assert_eq!(
+                result.document_pages[0].path.to_string(),
+                "wiki/documents/repo-source-md.md"
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn nested_document_ownership_is_reused_and_duplicates_across_levels_are_refused() {
     let dir = TempDir::new().unwrap();
     let vault = dir.path();
