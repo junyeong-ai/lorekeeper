@@ -743,6 +743,9 @@ fn plan_concept_backlinks_inner(
             report.skipped.push(page.path.clone());
             continue;
         };
+        if !parsed.frontmatter.is_concept_or_legacy() {
+            continue;
+        }
 
         // Headings are found under ANY locale (a page authored before a `vault.locale` switch
         // keeps its old-language spelling) and rewritten under the one the page actually

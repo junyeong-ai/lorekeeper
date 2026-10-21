@@ -76,6 +76,9 @@ pub fn build_brief(
             Err(VaultError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => continue,
             Err(error) => return Err(error),
         };
+        if !page.frontmatter.is_concept_or_legacy() {
+            continue;
+        }
         if page
             .frontmatter
             .knowledge_status()
@@ -236,6 +239,28 @@ fn pages_of(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn brief_uses_declared_concept_roles_and_retains_untyped_legacy() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        for (name, declared_type) in [("document", "type: document\n"), ("legacy", "")] {
+            write(
+                &root.path().join(format!("wiki/concepts/{name}.md")),
+                &format!(
+                    "---\n{declared_type}title: {name}\ncreated: 2026-09-10\n---\n## Synthesis\nAn opening statement.\n"
+                ),
+            );
+        }
+        write(
+            &root.path().join("daily/news/2026-09-10.md"),
+            "[Document](../../wiki/concepts/document.md)\n[Legacy](../../wiki/concepts/legacy.md)\n",
+        );
+        let brief = build_brief(root.path(), &dirs, jiff::civil::date(2026, 9, 10)).unwrap();
+        assert_eq!(brief.learned.len(), 1);
+        assert_eq!(brief.learned[0].id, "legacy");
+        assert!(brief.revisited.is_empty());
+    }
 
     #[test]
     fn brief_keeps_nested_active_knowledge_and_excludes_both_retired_groups() {

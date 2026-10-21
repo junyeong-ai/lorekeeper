@@ -181,19 +181,6 @@ fn plan_merge(
             "from and into are the same concept; nothing to merge".into(),
         ));
     }
-    for path in [&from_rel, &into_rel] {
-        if pages
-            .iter()
-            .find(|page| &page.path == path)
-            .and_then(|page| page.format.as_deref())
-            .is_some_and(|format| format != "concept")
-        {
-            return Err(GraphError::Io(format!(
-                "merge target is not a concept: {}",
-                path.display()
-            )));
-        }
-    }
     let from_raw = std::fs::read_to_string(
         lk_vault::page_path(vault_root, &from_rel)
             .map_err(|error| GraphError::Io(error.to_string()))?,
@@ -204,6 +191,16 @@ fn plan_merge(
             .map_err(|error| GraphError::Io(error.to_string()))?,
     )
     .map_err(|error| GraphError::Io(error.to_string()))?;
+    for (path, raw) in [(&from_rel, &from_raw), (&into_rel, &into_raw)] {
+        let page = lk_core::frontmatter::parse_page(raw)
+            .map_err(|error| GraphError::Io(error.to_string()))?;
+        if !page.frontmatter.is_concept_or_legacy() {
+            return Err(GraphError::Io(format!(
+                "merge target is not a concept: {}",
+                path.display()
+            )));
+        }
+    }
     let from_revision = lk_core::concept::file_revision(&from_raw);
     let into_revision = lk_core::concept::file_revision(&into_raw);
     if let Some(expected) = &request.revisions
@@ -624,6 +621,44 @@ mod tests {
             assert!(rewritten.contains(&format!("../../{into_path}")));
             assert!(rewritten.contains(&format!("../../{flat}")));
         }
+    }
+
+    #[test]
+    fn merge_checks_endpoint_types_from_current_metadata() {
+        let root = TempDir::new().unwrap();
+        let from = "wiki/concepts/from.md";
+        let into = "wiki/concepts/into.md";
+        let pages = vec![page("from", from, &[]), page("into", into, &[])];
+        for declared_type in ["document", "null", "[concept]"] {
+            for nonconcept in [from, into] {
+                for path in [from, into] {
+                    let format = if path == nonconcept {
+                        format!("type: {declared_type}\n")
+                    } else {
+                        String::new()
+                    };
+                    write(
+                        root.path(),
+                        path,
+                        &format!("---\n{format}title: Topic\n---\n## Sources\n"),
+                    );
+                }
+                let request = MergeRequest {
+                    from: "from",
+                    into: "into",
+                    revisions: None,
+                    force: true,
+                };
+                let error =
+                    super::merge_concepts(&pages, root.path(), "wiki", &request, true).unwrap_err();
+                assert!(
+                    error.to_string().contains("not a concept"),
+                    "{declared_type}: {error}"
+                );
+                assert!(root.path().join(nonconcept).is_file());
+            }
+        }
+        assert!(!root.path().join(".lorekeeper").exists());
     }
 
     #[test]

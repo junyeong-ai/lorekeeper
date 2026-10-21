@@ -490,11 +490,7 @@ pub(super) fn visit_collections(
             if page.frontmatter.get("type").and_then(|v| v.as_str()) == Some("task-board") {
                 continue;
             }
-            let concept = concept_collection
-                && page
-                    .frontmatter
-                    .get("type")
-                    .is_none_or(|value| value.as_str() == Some("concept"));
+            let concept = concept_collection && page.frontmatter.is_concept_or_legacy();
             let id = path
                 .file_stem()
                 .map(|s| s.to_string_lossy().into_owned())

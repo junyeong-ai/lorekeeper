@@ -202,6 +202,9 @@ pub async fn load_concept_registry(
                 path.display()
             ))
         })?;
+        if !metadata.is_concept_or_legacy() {
+            continue;
+        }
         let title = metadata
             .get("title")
             .and_then(|value| value.as_str())
@@ -533,6 +536,44 @@ mod tests {
         std::os::unix::fs::symlink(root.path(), nested.join("directory-alias")).unwrap();
         assert!(
             load_concept_registry(&reader, &Default::default())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn registry_uses_concept_types_but_reserves_every_occupied_address() {
+        use lk_core::concept::Resolution;
+
+        let mut vault = InMemoryVault::new().with_page(
+            "wiki/concepts/legacy.md",
+            "---\ntitle: Legacy\naliases: [LegacyAlias]\n---\nLegacy definition.\n",
+        );
+        for (slug, declared_type) in [
+            ("document", "document"),
+            ("null", "null"),
+            ("array", "[concept]"),
+        ] {
+            vault = vault.with_page(
+                format!("wiki/concepts/{slug}.md"),
+                format!("---\ntype: {declared_type}\ntitle: {slug}\naliases: [Legacy]\n---\nOther content.\n"),
+            );
+        }
+        let registry = load_concept_registry(&vault, &Default::default())
+            .await
+            .unwrap();
+        for name in ["Legacy", "LegacyAlias"] {
+            assert!(
+                matches!(registry.resolve(name), Resolution::Owned(owner) if owner.slug == "legacy")
+            );
+        }
+        for name in ["document", "null", "array"] {
+            assert!(matches!(registry.resolve(name), Resolution::Absent));
+            assert_ne!(registry.available_slug(name).as_deref(), Some(name));
+        }
+        let unreadable = vault.with_page("wiki/concepts/broken.md", "---\ntype: [\n---\n");
+        assert!(
+            load_concept_registry(&unreadable, &Default::default())
                 .await
                 .is_err()
         );

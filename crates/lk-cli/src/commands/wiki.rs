@@ -1159,6 +1159,9 @@ async fn run_concepts(opts: &super::GlobalOptions, json: bool) -> miette::Result
                 continue;
             }
         };
+        if !page.frontmatter.is_concept_or_legacy() {
+            continue;
+        }
         // The collection-relative address, never the `id` frontmatter: a page's ADDRESS is where it sits, which
         // is what a link resolves to and what the graph keys a node on. Reading `id` would be
         // a second answer to the same question, and a page missing the field — hand-authored,

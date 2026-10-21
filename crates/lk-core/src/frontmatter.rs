@@ -82,6 +82,17 @@ pub struct Frontmatter {
 }
 
 impl Frontmatter {
+    /// Concept vocabulary accepts an absent legacy type, never a different or invalid type.
+    /// Collection membership remains the caller's separate address check.
+    pub fn is_concept_or_legacy(&self) -> bool {
+        self.get("type").is_none() || self.is_declared_concept()
+    }
+
+    /// Graph evidence and typed publication require an explicit concept declaration.
+    pub fn is_declared_concept(&self) -> bool {
+        self.get("type").and_then(serde_json::Value::as_str) == Some("concept")
+    }
+
     pub fn source_file(&self) -> Result<Option<SourceFile>, String> {
         self.get("source_file")
             .map(|value| {
@@ -244,6 +255,26 @@ pub fn parse_page(content: &str) -> Result<VaultPage, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn concept_roles_distinguish_missing_type_from_other_or_invalid_types() {
+        for (yaml, vocabulary, declared) in [
+            ("title: Legacy", true, false),
+            ("type: concept", true, true),
+            ("type: document", false, false),
+            ("type: null", false, false),
+            ("type: [concept]", false, false),
+            ("type: false", false, false),
+        ] {
+            let page = parse_page(&format!("---\n{yaml}\n---\nBody.\n")).unwrap();
+            assert_eq!(
+                page.frontmatter.is_concept_or_legacy(),
+                vocabulary,
+                "{yaml}"
+            );
+            assert_eq!(page.frontmatter.is_declared_concept(), declared, "{yaml}");
+        }
+    }
 
     #[test]
     fn raw_body_offsets_preserve_separators_and_literal_yaml() {

@@ -109,6 +109,9 @@ belong to exploration reviews, not a machine-persisted callout inferred by locat
 
 ## Backlinks and synthesis requests (`backlinks.rs`)
 
+- Reconciliation and concept lints accept declared concepts and untyped legacy pages
+  in the concepts collection; explicit other types are excluded. Exact evidence capture
+  and resynthesis require declared concepts. Use the shared frontmatter role predicates.
 - This is the sole derivation of Sources, `source_count`, and synthesis input.
   Derive citations from actual eligible source body links with exact authored
   revisions. Update the three together; unreadable sources forbid publication.

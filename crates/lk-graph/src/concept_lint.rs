@@ -88,6 +88,9 @@ pub fn scan_concept_pages(
         let mut names = Vec::new();
         let (category, body) = match frontmatter::parse_page(&raw) {
             Ok(page) => {
+                if !page.frontmatter.is_concept_or_legacy() {
+                    continue;
+                }
                 let category = page.frontmatter.get("category").cloned();
                 names.extend(
                     page.frontmatter

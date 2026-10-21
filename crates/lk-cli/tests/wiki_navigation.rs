@@ -17,6 +17,70 @@ fn run(root: &std::path::Path, args: &[&str]) -> Output {
 }
 
 #[test]
+fn declared_documents_do_not_become_concepts_through_their_directory() {
+    let root = tempfile::tempdir().unwrap();
+    let vault = root.path().join("vault");
+    let concepts = vault.join("wiki/concepts");
+    std::fs::create_dir_all(&concepts).unwrap();
+    std::fs::write(root.path().join("config.yaml"), "vault:\n  root: vault\n  locale: en\nidentity: {name: Test, email: test@example.invalid}\nsources:\n  notes: {type: manual, params: {inbox_dir: inbox}}\n").unwrap();
+    let document = "---\ntype: document\ntitle: Report\naliases: [DocumentAlias, Legacy]\nsource_count: 77\n---\n## Synthesis\nAn authored document statement about [Legacy](legacy.md).\n\n## Sources\n\n";
+    std::fs::write(concepts.join("report.md"), document).unwrap();
+    std::fs::write(concepts.join("legacy.md"), "---\ntitle: Legacy\naliases: [LegacyAlias]\nsource_count: 0\n---\n## Synthesis\nA legacy definition.\n\n## Sources\n\n").unwrap();
+    let json = |args: &[&str]| {
+        let output = run(root.path(), args);
+        assert!(
+            output.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
+    };
+    for name in ["Report", "DocumentAlias"] {
+        let output = run(root.path(), &["resolve", name, "--json"]);
+        assert_eq!(output.status.code(), Some(1));
+        let answer: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(answer["verdict"], "absent");
+    }
+    assert_eq!(json(&["resolve", "Legacy", "--json"])["slug"], "legacy");
+    let listed = json(&["wiki", "concepts", "--json"]);
+    assert_eq!(listed.as_array().unwrap().len(), 1);
+    assert_eq!(listed[0]["slug"], "legacy");
+    let lint = json(&["graph", "--json", "lint"]);
+    assert_eq!(
+        lint["data"]["violations"]["duplicate_concepts"],
+        serde_json::json!([])
+    );
+    let captured = json(&["wiki", "prepare"]);
+    for snapshot in [None, captured["snapshot"].as_str()] {
+        let mut args = vec!["wiki", "search", "Report", "--json"];
+        if let Some(snapshot) = snapshot {
+            args.extend(["--snapshot", snapshot]);
+        }
+        let search = json(&args);
+        assert_eq!(search["total"], 1);
+        assert_eq!(search["hits"][0]["synthesis"]["status"], "not-applicable");
+    }
+    let synced = json(&["graph", "--json", "backlinks-sync"]);
+    assert_eq!(synced["data"]["skipped"], serde_json::json!([]));
+    assert!(
+        synced["data"]["updated"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|page| page["path"] != "wiki/concepts/report.md")
+    );
+    assert_eq!(
+        std::fs::read_to_string(concepts.join("report.md")).unwrap(),
+        document
+    );
+    assert!(
+        std::fs::read_to_string(concepts.join("legacy.md"))
+            .unwrap()
+            .contains("lorekeeper:concept-sources:v1")
+    );
+}
+
+#[test]
 fn removed_markdown_export_commands_are_rejected_without_writes() {
     let dir = tempfile::tempdir().unwrap();
     for args in [
