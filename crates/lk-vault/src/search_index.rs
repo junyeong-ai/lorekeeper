@@ -1039,6 +1039,97 @@ mod tests {
     use super::*;
 
     #[test]
+    fn excerpt_sections_follow_full_document_reference_and_occurrence_ranges() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let path = "wiki/documents/reference.md";
+        for (body, query, expected_body) in [
+            (
+                "## Summary\nUnrelated opening.\n\n## Match\n[Helios][ref]\n\n## Definitions\n[ref]: https://example.com\n",
+                "Helios",
+                "[Helios][ref]",
+            ),
+            (
+                "## Summary\nUnrelated opening.\n\n## Production 2026\nHelios retention.\n\n## Development 2025\nHelios retention.\n",
+                "Helios retention",
+                "## Production 2026",
+            ),
+        ] {
+            write(
+                root.path(),
+                path,
+                &format!("---\ntitle: Reference scope\ntype: document\n---\n{body}"),
+            );
+            let capture = prepare_search(&session, &dirs).unwrap();
+            let mut options = SearchOptions {
+                query: Some(query),
+                ..Default::default()
+            };
+            let live = crate::search(root.path(), &dirs, &options).unwrap();
+            options.snapshot = Some(&capture.snapshot);
+            let captured = crate::search(root.path(), &dirs, &options).unwrap();
+            assert_eq!(live.total, 1);
+            assert_eq!(
+                serde_json::to_value(&live.hits).unwrap(),
+                serde_json::to_value(&captured.hits).unwrap()
+            );
+            let hit = &captured.hits[0];
+            assert_eq!(hit.excerpt_kind, crate::ExcerptKind::MatchedBlock);
+            assert_eq!(hit.excerpt_section, Some(2), "{body}");
+            let selected = crate::inspect_document(
+                root.path(),
+                Path::new(path),
+                &crate::DocumentOptions {
+                    section: hit.excerpt_section,
+                    offset: 0,
+                    limit: 1000,
+                    revision: Some(&hit.file_revision),
+                },
+            )
+            .unwrap();
+            let text = selected.content.unwrap().text;
+            assert!(text.contains(expected_body), "{text}");
+            assert!(!text.contains("## Development 2025"), "{text}");
+        }
+    }
+
+    #[test]
+    fn html_excerpts_keep_visible_text_without_inventing_source_positions() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        write(
+            root.path(),
+            "wiki/documents/html.md",
+            "---\ntitle: HTML scope\ntype: document\n---\n## Summary\nUnrelated opening.\n\n## Match\n<div>Helios <strong>retention</strong>.</div>\n<script>hidden</script>\n",
+        );
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let capture = prepare_search(&session, &dirs).unwrap();
+        let mut options = SearchOptions {
+            query: Some("Helios retention"),
+            phrase: true,
+            ..Default::default()
+        };
+        let live = crate::search(root.path(), &dirs, &options).unwrap();
+        options.snapshot = Some(&capture.snapshot);
+        let captured = crate::search(root.path(), &dirs, &options).unwrap();
+        assert_eq!(live.total, 1);
+        assert_eq!(
+            serde_json::to_value(&live.hits).unwrap(),
+            serde_json::to_value(&captured.hits).unwrap()
+        );
+        let hit = &captured.hits[0];
+        assert_eq!(hit.excerpt, "Helios retention.");
+        assert_eq!(hit.excerpt_kind, crate::ExcerptKind::MatchedBlock);
+        assert_eq!(hit.excerpt_section, None);
+        options.query = Some("hidden");
+        assert_eq!(
+            crate::search(root.path(), &dirs, &options).unwrap().total,
+            0
+        );
+    }
+
+    #[test]
     fn empty_opening_is_unavailable_in_live_and_captured_discovery() {
         let root = tempfile::tempdir().unwrap();
         let dirs = VaultDirs::default();

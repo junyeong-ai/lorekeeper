@@ -13,6 +13,7 @@
 use std::borrow::Cow;
 use std::cmp::{Ordering, Reverse};
 use std::collections::{BTreeMap, BinaryHeap};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use lk_core::concept::identity_key;
@@ -91,6 +92,7 @@ pub struct SearchHit {
     pub excerpt: String,
     pub excerpt_kind: ExcerptKind,
     /// Section id accepted by `wiki read --section`, pinned by `file_revision`.
+    /// None when a source position is unproven, including the HTML DOM projection.
     pub excerpt_section: Option<usize>,
     pub file_revision: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1400,21 +1402,19 @@ pub(super) fn excerpt_details(
             spellings.iter().any(|name| contains(&text, name))
         }
     };
-    let prose = search_text(body);
-    let selected = prose
-        .lines()
-        .map(str::trim)
-        .find(|line| matches_all(line))
-        .map(|line| (line, ExcerptKind::MatchedBlock))
+    let blocks = search_blocks(body);
+    let selected = blocks
+        .iter()
+        .find(|block| matches_all(&block.text))
+        .map(|block| (block, ExcerptKind::MatchedBlock))
         .or_else(|| {
-            prose
-                .lines()
-                .map(str::trim)
-                .find(|line| {
-                    let text = fold(line);
+            blocks
+                .iter()
+                .find(|block| {
+                    let text = fold(&block.text);
                     terms.iter().any(|term| contains(&text, term))
                 })
-                .map(|line| (line, ExcerptKind::PartialMatch))
+                .map(|block| (block, ExcerptKind::PartialMatch))
         });
     let Some((block, kind)) = selected else {
         return SearchExcerpt {
@@ -1423,19 +1423,17 @@ pub(super) fn excerpt_details(
             section: None,
         };
     };
-    // Use the document reader's exact outline. A section must contain the same visible
-    // block; when nested or repeated, prefer a later, more specific matching section.
-    let section = super::document::outline(body)
-        .iter()
-        .rev()
-        .find(|section| {
-            search_text(&body[section.start..section.end])
-                .lines()
-                .any(|line| line.trim() == block)
-        })
-        .map(|section| section.id);
+    // Positions come from the same full-document parse that produced the selected text.
+    // Section parsing alone would lose reference definitions and occurrence identity.
+    let section = block.source.as_ref().and_then(|source| {
+        super::document::outline(body)
+            .iter()
+            .rev()
+            .find(|section| section.start <= source.start && source.end <= section.end)
+            .map(|section| section.id)
+    });
     SearchExcerpt {
-        text: crate::summary::truncate_summary(block),
+        text: crate::summary::truncate_summary(&block.text),
         kind,
         section,
     }
@@ -1446,36 +1444,69 @@ pub(super) fn excerpt_details(
 /// and markup are not prose. HTML contributes text through the parsed document;
 /// scripts, styles and metadata are excluded. Code remains searchable as literal content.
 pub(super) fn search_text(body: &str) -> String {
-    let mut text = String::with_capacity(body.len());
-    let options =
-        Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
-    let events: Vec<_> = Parser::new_ext(body, options).collect();
-    if events
-        .iter()
-        .any(|event| matches!(event, Event::Html(_) | Event::InlineHtml(_)))
-    {
-        use html5ever::tendril::TendrilSink;
-        let mut html = String::with_capacity(body.len());
-        pulldown_cmark::html::push_html(&mut html, events.into_iter());
-        let document =
-            html5ever::parse_document(markup5ever_rcdom::RcDom::default(), Default::default())
-                .one(html);
-        append_html_search_text(&document.document, &mut text, false);
-    } else {
-        append_markdown_search_text(events, &mut text);
-    }
-    text.lines()
-        .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
-        .filter(|line| !line.is_empty())
+    search_blocks(body)
+        .into_iter()
+        .map(|block| block.text)
         .collect::<Vec<_>>()
         .join("\n")
 }
 
-fn append_markdown_search_text(events: Vec<Event<'_>>, text: &mut String) {
-    for event in events {
-        match event {
-            Event::Text(value) | Event::Code(value) => text.push_str(&value),
-            Event::SoftBreak | Event::HardBreak => text.push(' '),
+struct VisibleBlock {
+    text: String,
+    source: Option<Range<usize>>,
+}
+
+fn search_blocks(body: &str) -> Vec<VisibleBlock> {
+    let options =
+        Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
+    let events: Vec<_> = Parser::new_ext(body, options).into_offset_iter().collect();
+    if !events
+        .iter()
+        .any(|(event, _)| matches!(event, Event::Html(_) | Event::InlineHtml(_)))
+    {
+        return markdown_search_blocks(events);
+    }
+    use html5ever::tendril::TendrilSink;
+    let mut html = String::with_capacity(body.len());
+    pulldown_cmark::html::push_html(&mut html, events.into_iter().map(|(event, _)| event));
+    let document =
+        html5ever::parse_document(markup5ever_rcdom::RcDom::default(), Default::default())
+            .one(html);
+    let mut text = String::with_capacity(body.len());
+    append_html_search_text(&document.document, &mut text, false);
+    text.lines()
+        .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|line| !line.is_empty())
+        // DOM repair and whole-document HTML rendering do not preserve an exact source
+        // position. Keep their visible-text semantics without guessing a location.
+        .map(|text| VisibleBlock { text, source: None })
+        .collect::<Vec<_>>()
+}
+
+fn finish_search_block(
+    blocks: &mut Vec<VisibleBlock>,
+    text: &mut String,
+    source: &mut Option<Range<usize>>,
+) {
+    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let source = source.take();
+    if !normalized.is_empty() {
+        blocks.push(VisibleBlock {
+            text: normalized,
+            source,
+        });
+    }
+    text.clear();
+}
+
+fn markdown_search_blocks(events: Vec<(Event<'_>, Range<usize>)>) -> Vec<VisibleBlock> {
+    let mut blocks = Vec::new();
+    let mut text = String::new();
+    let mut source: Option<Range<usize>> = None;
+    for (event, range) in events {
+        let value = match event {
+            Event::Text(value) | Event::Code(value) => value,
+            Event::SoftBreak | Event::HardBreak => " ".into(),
             Event::Start(
                 Tag::Emphasis
                 | Tag::Strong
@@ -1490,10 +1521,27 @@ fn append_markdown_search_text(events: Vec<Event<'_>>, text: &mut String) {
                 | TagEnd::Link
                 | TagEnd::Image,
             )
-            | Event::TaskListMarker(_) => {}
-            _ => text.push('\n'),
+            | Event::TaskListMarker(_) => continue,
+            _ => {
+                finish_search_block(&mut blocks, &mut text, &mut source);
+                continue;
+            }
+        };
+        for part in value.split_inclusive('\n') {
+            text.push_str(part);
+            if let Some(source) = &mut source {
+                source.start = source.start.min(range.start);
+                source.end = source.end.max(range.end);
+            } else {
+                source = Some(range.clone());
+            }
+            if part.ends_with('\n') {
+                finish_search_block(&mut blocks, &mut text, &mut source);
+            }
         }
     }
+    finish_search_block(&mut blocks, &mut text, &mut source);
+    blocks
 }
 
 fn append_html_search_text(node: &markup5ever_rcdom::Node, text: &mut String, preformatted: bool) {
