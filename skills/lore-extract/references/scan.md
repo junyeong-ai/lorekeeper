@@ -85,8 +85,8 @@ Compare claims to the implementation evidence above.
 
 Code shows current shape; optional history can show abandoned approaches,
 measurements and reversals. Scan freshness and extraction freshness differ:
-`git_head_at_scan` anchors discovery, while each `extracted_at_commit` anchors
-that page's input. A rescan alone never refreshes an extracted page.
+`git_head_at_scan` anchors discovery; an `extracted_at_commit` with verified
+retained inputs anchors that page's input. A rescan alone never refreshes an extracted page.
 
 ## Manifest publication
 

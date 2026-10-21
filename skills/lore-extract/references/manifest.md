@@ -40,7 +40,7 @@ extracted:               # per-document tracking (written by run)
     vault_page: "<wiki>/documents/proj-some-adr.md"  # vault-relative; <wiki> is the configured wiki dir
     domain: cloud-platform
     extracted_at: <ISO-date>
-    extracted_at_commit: <short-sha>   # what THIS page was written from; null without git
+    extracted_at_commit: <commit-sha> # verified input commit; otherwise null (see below)
     transferability: T1
   - source: "README.md"     # a T4 skip is recorded too, so audit coverage is complete
     vault_page: null
@@ -53,6 +53,22 @@ one (theme-driven extraction, not 1:1). When several fold into one, record
 `extracted[].source` as a LIST of the verbatim source paths (each still
 filesystem-checkable for re-scan diffing) plus a `coverage_note` — never a
 synthetic label like `"a + b"`, which would look deleted on the next scan.
+
+## Extraction baseline
+
+Record `extracted_at_commit` only when the retained bytes actually read match the
+regular-file blobs at that full commit ID for every source and evidence dependency
+used. Inspect `git -C <repo> ls-tree -z --full-tree <commit> -- ':(literal)<path>'`:
+require one exact path entry, kind `blob`, and mode `100644` or `100755`. Compare
+the retained bytes with `git -C <repo> cat-file blob <object-id>` for that entry. A clean status
+or empty diff does not prove byte equality when filters, line endings or Git index
+flags hide differences. Verify the retained input, not a later working-tree read.
+
+Inputs without that proof, including dirty, untracked, ignored or dereferenced
+symlink inputs, may still be extracted. Set their entry's commit to null and explain
+the unmeasured baseline in `coverage_note`; retain exact source bytes and digests
+as usual. A commit field without matching retained-input proof is not a usable
+freshness baseline.
 
 ## Source retention
 

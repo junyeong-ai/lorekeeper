@@ -18,17 +18,17 @@ What is left is what needs a reader:
 1. **Per-source staleness** — `lore extract status` answers whether the PROJECT has moved
    since its last scan, which is a different question: a re-scan alone advances
    `git_head_at_scan`, so a project reads current while a page still holds what its source
-   said three commits ago. Ask it per entry, with the same anchor and the same content
-   question: `git -C <manifest.project.repo_path> diff --name-only <extracted_at_commit> -- ':(literal)<source>'`, plus `git -C <manifest.project.repo_path> ls-files --others --exclude-standard -- ':(literal)<source>'`. `:(literal)` and not `:(glob)` — an `extracted[].source` is
-   a concrete path rather than a pattern, and under glob magic a name containing `[`, `*` or
-   `?` is read as one: `docs/a[1].md` then answers for `docs/a1.md` and not for the file the
-   entry names. Non-empty means the page is behind its own source. An entry
-   written before this field existed carries none, and there the question has no anchor: report
-   it as un-checked beside the entries that answered, never as current — the next extraction
-   run records the field and the check starts working from there. An entry whose
-   `coverage_note` says the source is outside git is the same answer for the same reason: both
-   commands are silent over a file git ignores, and reading that silence as "current" is what
-   the note exists to prevent.
+   said three commits ago. First verify the entry's retained inputs against the
+   recorded commit under the manifest's extraction-baseline contract. A bare commit
+   field cannot prove that extraction read committed rather than dirty content.
+   Without that proof, report freshness as unmeasured and read the source whole.
+
+   For a verified baseline, compare each current source and retained evidence
+   dependency byte-for-byte with its captured input; check existence and file kind
+   too. Use exact source paths, never glob expansion. Deleted or changed input is
+   stale. Git diffs can locate candidates but their silence is not the final check:
+   ignored files, filters and index flags can conceal byte changes. An untracked,
+   non-Git or otherwise unverified input stays unmeasured, never implicitly current.
 
 2. **Quality** — inspect each document for incomplete sections, unsupported or missing
    concept links, and irrelevant project detail in generalized prose. Scoped searches

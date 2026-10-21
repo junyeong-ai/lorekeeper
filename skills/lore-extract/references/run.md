@@ -17,9 +17,10 @@ Extract knowledge using the manifest. Requires a prior scan.
 
 5. For each discovered source (filtered by `--domain` / `--transferability`):
 
-    a. **Skip only if already extracted and unchanged against that entry’s
-      `extracted_at_commit`**, using the per-source content check in the audit reference.
-      For an entry containing several source paths, check every path.
+    a. **Skip only if already extracted from a verified baseline and its exact input
+      bytes are unchanged**, using the per-source check in the audit reference.
+      For an entry containing several source paths, check every path and retained
+      evidence dependency.
       `git_head_at_scan` measures discovery, not extraction freshness: a rescan may
       advance it while the extracted page remains old. With no usable per-entry
       baseline (including non-git or ignored sources), read the source whole;
@@ -100,7 +101,9 @@ Extract knowledge using the manifest. Requires a prior scan.
       category fits a transferable concept, omit the `category` field (leave it
       uncategorized) rather than forcing a wrong one.
 
-   i. **Update manifest** `extracted` list with the new entry.
+   i. **Update manifest** `extracted` list with the new entry. Follow the manifest's
+      extraction-baseline contract before recording `extracted_at_commit`; the
+      current HEAD alone does not identify dirty working-tree input.
 
 6. Persist updated manifest.
 7. **Finalize** — reconcile the graph so machine-owned fields are
