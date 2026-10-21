@@ -105,6 +105,9 @@ impl TemplateEngine {
     /// the embedded copies are the source of truth.
     pub fn build(user_dir: Option<&Path>) -> Result<Self, VaultError> {
         let mut env = Environment::new();
+        env.add_filter("markdown_text", crate::fragment::inline_text);
+        env.add_filter("markdown_fragment", crate::fragment::render);
+        env.add_filter("markdown_link", crate::fragment::link);
         let user_dir = user_dir.map(Path::to_path_buf);
         let dir = user_dir.clone();
         env.set_loader(move |name| {
@@ -177,7 +180,7 @@ mod tests {
     fn concept_and_document_addresses_round_trip_through_native_frontmatter() {
         let engine = TemplateEngine::build(None).unwrap();
         let i18n = serde_json::to_value(lk_core::i18n::Locale::En.strings()).unwrap();
-        let title = "주제: \"인용\"\n둘째 줄";
+        let title = "주제: \"인용\"\n\n## Summary\n\n둘째 줄";
         for address in [
             "AI: Agents/owner",
             "지식/소유자",
@@ -220,6 +223,22 @@ mod tests {
                         .get("title")
                         .and_then(|value| value.as_str()),
                     Some(title)
+                );
+                let headings = pulldown_cmark::Parser::new(&page.body)
+                    .filter(|event| {
+                        matches!(
+                            event,
+                            pulldown_cmark::Event::Start(pulldown_cmark::Tag::Heading {
+                                level: pulldown_cmark::HeadingLevel::H2,
+                                ..
+                            })
+                        )
+                    })
+                    .count();
+                assert_eq!(
+                    headings,
+                    if template == "concept.md.jinja" { 3 } else { 2 },
+                    "{output}"
                 );
             }
         }

@@ -4,6 +4,7 @@ mod brief;
 mod citations;
 mod context;
 mod discovery;
+mod fragment;
 mod document;
 mod indexed_links;
 mod knowledge;

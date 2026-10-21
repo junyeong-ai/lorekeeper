@@ -31,7 +31,7 @@ llm_inputs:
 {%- endif %}
 ---
 
-# {{ title }}
+# {{ title | markdown_text }}
 {% if original_link %}
 {{ original_link }}
 {% endif %}
@@ -42,7 +42,7 @@ llm_inputs:
 
 ## {{ i18n.document_content }}
 
-{{ content }}
+{{ content | markdown_fragment }}
 
 {% if extract_concepts %}
 ## {{ i18n.related_concepts }}

@@ -31,6 +31,10 @@ canonical; SQLite navigation is derived.
   include bullets: emit `{{ c }}`, not `- {{ c }}`. LLM-derived YAML strings use JSON
   serialization. Only NotFound means no user override; parse/I/O errors propagate.
   Keep the exhaustive daily-template render contract test when adding a child.
+  Scalar titles/authors use `markdown_text`; source bodies use `markdown_fragment`,
+  source links `markdown_link`. Fragment rendering owns heading containment,
+  reference/footnote isolation and code closure without changing event identity.
+  EOF-terminated raw HTML displays as literal `html` code; balanced HTML stays markup.
 
 ## Publication and paths (`mutation.rs`, `address.rs`, `review.rs`)
 

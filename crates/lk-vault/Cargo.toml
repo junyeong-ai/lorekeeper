@@ -23,6 +23,7 @@ tracing = { workspace = true }
 unicode-normalization = { workspace = true }
 rusqlite = { workspace = true }
 pulldown-cmark = { workspace = true, features = ["html"] }
+pulldown-cmark-to-cmark = { workspace = true }
 html5ever = { workspace = true }
 markup5ever_rcdom = { workspace = true }
 walkdir = { workspace = true }
