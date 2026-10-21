@@ -428,6 +428,7 @@ async fn observe(
         documents: config.ingest.documents.clone(),
         projection_cache: None,
         originals: config.ingest.originals.clone(),
+        max_input_bytes: config.ingest.inputs.max_source_bytes.get(),
     };
     let http = lk_source::build_http_client().map_err(failure)?;
     let adapter = lk_source::build_source(

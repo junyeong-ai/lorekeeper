@@ -332,7 +332,7 @@ impl Source for NodexSource {
         }
 
         let attempted = admitted.len();
-        let mut kept = Vec::new();
+        let mut kept = crate::SourceItems::new(ctx);
         let mut observations = Vec::new();
         for item in admitted {
             // A path that leaves the repository is refused before it is read, and refusing it
@@ -365,8 +365,9 @@ impl Source for NodexSource {
                 p.repository_id.as_deref(),
             )?;
             observations.push((item, observation_revision(&detail)?));
-            kept.push(raw);
+            kept.push(raw)?;
         }
+        let kept = kept.into_vec();
         if let Some(before) = inventory {
             let after: serde_json::Value = run_nodex(
                 executable,
@@ -1091,6 +1092,9 @@ template = "{kind}-{path_slug}"
             documents: None,
             projection_cache: None,
             originals: Default::default(),
+            max_input_bytes: lk_core::config::IngestInputLimits::default()
+                .max_source_bytes
+                .get(),
         };
         let selected = serde_json::json!({"repo":root.path(), "executable":supported, "reconcile":true, "repository_id":"fixture/repo", "document_ids":["a"]});
         let raw = NodexSource.extract(&selected, &ctx).await.unwrap();
@@ -1332,6 +1336,9 @@ exit "$rc"
             documents: None,
             projection_cache: None,
             originals: Default::default(),
+            max_input_bytes: lk_core::config::IngestInputLimits::default()
+                .max_source_bytes
+                .get(),
         };
         verify_selection(&selected, &detail.node, true).unwrap();
         let raw = build_document_observation(

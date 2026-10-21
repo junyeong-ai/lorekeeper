@@ -13,6 +13,10 @@ identity:
 # Host-local cadence; takes effect only after explicit OS registration.
 ingest:
   source_timeout_seconds: 600  # acquisition budget per source, excluding writer-lock waiting
+  # Serialized retained/projected input admission, not raw-file size or process memory.
+  inputs:
+    max_source_bytes: 67108864
+    max_run_bytes: 268435456
   schedule: "0 7 * * *"
   # Date-window sources can opt in to outage recovery; choose an explicit start date:
   # recovery: {start_date: "2026-10-01", max_days_per_source_per_run: 3}

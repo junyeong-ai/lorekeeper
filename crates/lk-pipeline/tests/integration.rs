@@ -91,6 +91,136 @@ fn far_future() -> jiff::civil::Date {
 }
 
 #[tokio::test]
+async fn failed_normalized_input_admission_does_not_reserve_run_capacity() {
+    let dir = TempDir::new().unwrap();
+    let mut config = base_config(dir.path());
+    let items = (0..3)
+        .map(|index| {
+            raw_item(
+                &format!("Item {index}"),
+                &"x".repeat(1000),
+                &format!("id-{index}"),
+                "2026-05-23T10:00:00Z".parse().unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let events = lk_pipeline::normalize_events(
+        "test-source",
+        SourceType::Gmail,
+        items.clone(),
+        &jiff::tz::TimeZone::UTC,
+    );
+    let raw_bytes = items
+        .iter()
+        .map(|item| serde_json::to_vec(item).unwrap().len())
+        .sum::<usize>();
+    let event_bytes = events
+        .iter()
+        .map(|event| serde_json::to_vec(event).unwrap().len())
+        .sum::<usize>();
+    assert!(event_bytes > raw_bytes);
+    let limit = event_bytes - 1;
+    config.ingest.inputs.max_source_bytes = std::num::NonZeroUsize::new(limit).unwrap();
+    config.ingest.inputs.max_run_bytes = std::num::NonZeroUsize::new(limit).unwrap();
+    let source = config.sources["test-source"].clone();
+    let mut pipeline = Pipeline::new(dir.path(), build_ctx(&config, Arc::new(NoopLlmClient)));
+    let options = IngestOptions {
+        target_date: None,
+        today: far_future(),
+        dry_run: true,
+    };
+    let error = pipeline
+        .plan("test-source", &source, items.clone(), &options)
+        .await
+        .err()
+        .unwrap();
+    assert!(matches!(error, lk_pipeline::PipelineError::Input(_)));
+    let result = pipeline
+        .plan("test-source", &source, vec![items[0].clone()], &options)
+        .await
+        .unwrap();
+    assert_eq!(result.daily_pages.len(), 1);
+}
+
+#[tokio::test]
+async fn retained_stream_events_cannot_bypass_current_planning_admission() {
+    let dir = TempDir::new().unwrap();
+    let mut config = base_config(dir.path());
+    let mut source = config.sources["test-source"].clone();
+    source.source_type = SourceType::Rss;
+    let item = raw_item(
+        "Stored",
+        &"x".repeat(3000),
+        "stored",
+        "2026-05-23T10:00:00Z".parse().unwrap(),
+    );
+    let options = IngestOptions {
+        target_date: Some(jiff::civil::date(2026, 5, 23)),
+        today: far_future(),
+        dry_run: false,
+    };
+    Pipeline::new(dir.path(), build_ctx(&config, Arc::new(NoopLlmClient)))
+        .plan("test-source", &source, vec![item], &options)
+        .await
+        .unwrap();
+    let log = dir
+        .path()
+        .join(".lorekeeper/events/test-source/2026-05-23.jsonl");
+    let before = std::fs::read(&log).unwrap();
+    config.ingest.inputs.max_source_bytes = std::num::NonZeroUsize::new(1024).unwrap();
+    let error = Pipeline::new(dir.path(), build_ctx(&config, Arc::new(NoopLlmClient)))
+        .plan("test-source", &source, Vec::new(), &options)
+        .await
+        .err()
+        .unwrap();
+    assert!(matches!(error, lk_pipeline::PipelineError::Input(_)));
+    assert_eq!(std::fs::read(log).unwrap(), before);
+}
+
+#[tokio::test]
+async fn projected_source_record_is_counted_before_semantic_request_clones() {
+    let dir = TempDir::new().unwrap();
+    let mut config = base_config(dir.path());
+    let mut source = config.sources["test-source"].clone();
+    source.source_type = SourceType::GoogleDrive;
+    let mut item = raw_item(
+        "Document",
+        "Body",
+        "document",
+        "2026-05-23T10:00:00Z".parse().unwrap(),
+    );
+    item.metadata = serde_json::json!({
+        "source_identity": {"provider": "google-drive", "namespace": "files", "document": "document"},
+        "source_record": {"status": "active", "declarations": "\"".repeat(1000)},
+    });
+    let event = lk_pipeline::normalize_events(
+        "test-source",
+        SourceType::GoogleDrive,
+        vec![item.clone()],
+        &jiff::tz::TimeZone::UTC,
+    )
+    .remove(0);
+    let limit = serde_json::to_vec(&event).unwrap().len() + 32;
+    config.ingest.inputs.max_source_bytes = std::num::NonZeroUsize::new(limit).unwrap();
+    let error = Pipeline::new(dir.path(), build_ctx(&config, Arc::new(NoopLlmClient)))
+        .plan(
+            "test-source",
+            &source,
+            vec![item],
+            &IngestOptions {
+                target_date: None,
+                today: far_future(),
+                dry_run: true,
+            },
+        )
+        .await
+        .err()
+        .unwrap();
+    assert!(matches!(error, lk_pipeline::PipelineError::Input(_)));
+    assert!(!dir.path().join("wiki").exists());
+}
+
+#[tokio::test]
 async fn disabled_policy_retains_published_concepts_without_claiming_completion() {
     use lk_core::config::ConceptPolicy;
     for source_type in [SourceType::Gmail, SourceType::Manual, SourceType::Rss] {

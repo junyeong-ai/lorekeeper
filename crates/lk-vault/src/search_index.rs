@@ -9,7 +9,7 @@ use crate::search::{MatchProjection, Page, SearchOptions, SearchResult, fold_nam
 use crate::{MutationSession, VaultError};
 
 pub(super) const INDEX_PATH: &str = ".lorekeeper/search.sqlite";
-const VERSION: i32 = 21;
+const VERSION: i32 = 22;
 
 #[derive(Serialize)]
 pub struct SearchSnapshot {
@@ -188,7 +188,10 @@ fn prepare_search_inner(
             aliases TEXT NOT NULL, concept INTEGER NOT NULL, knowledge INTEGER NOT NULL, body TEXT NOT NULL, metadata TEXT NOT NULL, intro TEXT NOT NULL,
             category TEXT NOT NULL, format TEXT NOT NULL, source_status TEXT NOT NULL, created_date TEXT, path_rank INTEGER NOT NULL,
             knowledge_status TEXT NOT NULL, summary TEXT NOT NULL, text TEXT NOT NULL, name_text TEXT NOT NULL, spacing_text TEXT NOT NULL, spacing_name_text TEXT NOT NULL,
-            input_revision TEXT NOT NULL, traversal_rank INTEGER NOT NULL);
+            input_revision TEXT NOT NULL, traversal_rank INTEGER NOT NULL,
+            repository TEXT, provider TEXT, namespace TEXT);
+        CREATE INDEX pages_repository ON pages(repository, path_rank);
+        CREATE INDEX pages_provider_namespace ON pages(provider, namespace, path_rank);
         CREATE INDEX browse_title ON pages(knowledge, title, path_rank);
         CREATE INDEX browse_created ON pages(knowledge, created_date DESC, path_rank);
         CREATE INDEX browse_all_title ON pages(title, path_rank);
@@ -242,7 +245,7 @@ fn prepare_search_inner(
     let mut next_id = stored.values().map(|row| row.0).max().unwrap_or(-1);
     {
         let mut insert_page = transaction.prepare(
-            "INSERT INTO pages VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
+            "INSERT INTO pages VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
         )?;
         let mut insert_terms =
             transaction.prepare("INSERT INTO terms(rowid, name_text, text, spacing_name_text, spacing_text) VALUES (?1, ?2, ?3, ?4, ?5)")?;
@@ -330,6 +333,24 @@ fn prepare_search_inner(
             let projection = page.match_projection();
             let name_text = page.names().map(fold_name).collect::<Vec<_>>().join("\n");
             let spacing_name_text = super::search::compact_blocks(&name_text);
+            let identity = page
+                .page
+                .frontmatter
+                .get("source_identity")
+                .and_then(|value| {
+                    lk_core::source_identity::SourceIdentity::from_value(value.clone()).ok()
+                });
+            let (repository, provider, namespace) = match identity {
+                Some(lk_core::source_identity::SourceIdentity::Repository {
+                    repository, ..
+                }) => (Some(repository), None, None),
+                Some(lk_core::source_identity::SourceIdentity::Provider {
+                    provider,
+                    namespace,
+                    ..
+                }) => (None, Some(provider.to_string()), Some(namespace)),
+                None => (None, None, None),
+            };
             let knowledge = [
                 lk_core::vault_path::concepts_dir(dirs),
                 lk_core::vault_path::documents_dir(dirs),
@@ -373,6 +394,9 @@ fn prepare_search_inner(
                 spacing_name_text,
                 input_revision,
                 traversal_rank,
+                repository,
+                provider,
+                namespace,
             ])?;
             insert_terms.execute(params![
                 id,
@@ -539,13 +563,16 @@ pub(super) fn search(
     let mut body = transaction.prepare("SELECT body FROM pages WHERE path = ?1")?;
     for hit in &mut result.hits {
         let captured: String = body.query_row([&hit.path], |row| row.get(0))?;
-        hit.excerpt = super::search::excerpt_with_spacing(
+        let excerpt = super::search::excerpt_details(
             &captured,
             hit.matched,
             &terms,
             &spellings,
             hit.spacing_match,
         );
+        hit.excerpt = excerpt.text;
+        hit.excerpt_kind = excerpt.kind;
+        hit.excerpt_section = excerpt.section;
     }
     attach_synthesis(&transaction, &mut result)?;
     attach_reviews(&transaction, &mut result)?;
@@ -780,10 +807,14 @@ fn scalar_filter(options: &SearchOptions<'_>) -> (String, Vec<rusqlite::types::V
     };
     let mut predicates = vec![scope.to_string()];
     let mut arguments = Vec::<rusqlite::types::Value>::new();
+    let provider = options.provider.map(|provider| provider.to_string());
     for (column, value) in [
         ("category", options.category),
         ("format", options.format),
         ("source_status", options.source_status),
+        ("repository", options.repository),
+        ("provider", provider.as_deref()),
+        ("namespace", options.namespace),
         (
             "knowledge_status",
             options.knowledge_status.map(|status| status.as_str()),
@@ -793,6 +824,20 @@ fn scalar_filter(options: &SearchOptions<'_>) -> (String, Vec<rusqlite::types::V
             arguments.push(value.to_string().into());
             predicates.push(format!("{column} = ?{}", arguments.len()));
         }
+    }
+    if let Some(prefix) = options.path_prefix {
+        arguments.push(prefix.to_string_lossy().into_owned().into());
+        // Windows file walks may retain native separators. The public prefix uses
+        // portable slashes; a backslash remains a literal filename character on Unix.
+        let path = if cfg!(windows) {
+            "replace(path, char(92), '/')"
+        } else {
+            "path"
+        };
+        predicates.push(format!(
+            "({path} = ?{0} OR substr({path}, 1, length(?{0}) + 1) = ?{0} || '/')",
+            arguments.len()
+        ));
     }
     for tag in options.tags {
         arguments.push(super::search::tag_key(tag).into());
@@ -920,6 +965,11 @@ fn browse(
     };
     let mut result = super::search::search_pages(&selected, &pages, &[], &[], None);
     for (hit, intro) in result.hits.iter_mut().zip(intros) {
+        hit.excerpt_kind = if intro.is_empty() {
+            super::search::ExcerptKind::Unavailable
+        } else {
+            super::search::ExcerptKind::Opening
+        };
         hit.excerpt = intro;
     }
     let total = total as usize;
@@ -987,6 +1037,389 @@ pub(super) fn visit_body_pages(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn excerpt_sections_follow_full_document_reference_and_occurrence_ranges() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let path = "wiki/documents/reference.md";
+        for (body, query, expected_body) in [
+            (
+                "## Summary\nUnrelated opening.\n\n## Match\n[Helios][ref]\n\n## Definitions\n[ref]: https://example.com\n",
+                "Helios",
+                "[Helios][ref]",
+            ),
+            (
+                "## Summary\nUnrelated opening.\n\n## Production 2026\nHelios retention.\n\n## Development 2025\nHelios retention.\n",
+                "Helios retention",
+                "## Production 2026",
+            ),
+        ] {
+            for ending in ["\n", "\r\n", "\r"] {
+                let body = body.replace('\n', ending);
+                write(
+                    root.path(),
+                    path,
+                    &format!("---\ntitle: Reference scope\ntype: document\n---\n{body}"),
+                );
+                let capture = prepare_search(&session, &dirs).unwrap();
+                let mut options = SearchOptions {
+                    query: Some(query),
+                    ..Default::default()
+                };
+                let live = crate::search(root.path(), &dirs, &options).unwrap();
+                options.snapshot = Some(&capture.snapshot);
+                let captured = crate::search(root.path(), &dirs, &options).unwrap();
+                assert_eq!(live.total, 1);
+                assert_eq!(
+                    serde_json::to_value(&live.hits).unwrap(),
+                    serde_json::to_value(&captured.hits).unwrap()
+                );
+                let hit = &captured.hits[0];
+                assert_eq!(hit.excerpt_kind, crate::ExcerptKind::MatchedBlock);
+                assert_eq!(hit.excerpt_section, Some(2), "{body}");
+                let selected = crate::inspect_document(
+                    root.path(),
+                    Path::new(path),
+                    &crate::DocumentOptions {
+                        section: hit.excerpt_section,
+                        offset: 0,
+                        limit: 1000,
+                        revision: Some(&hit.file_revision),
+                    },
+                )
+                .unwrap();
+                let text = selected.content.unwrap().text;
+                assert!(text.contains(expected_body), "{text}");
+                assert!(!text.contains("## Development 2025"), "{text}");
+            }
+        }
+    }
+
+    #[test]
+    fn html_excerpts_keep_visible_text_without_inventing_source_positions() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        write(
+            root.path(),
+            "wiki/documents/html.md",
+            "---\ntitle: HTML scope\ntype: document\n---\n## Summary\nUnrelated opening.\n\n## Match\n<div>Helios <strong>retention</strong>.</div>\n<script>hidden</script>\n",
+        );
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let capture = prepare_search(&session, &dirs).unwrap();
+        let mut options = SearchOptions {
+            query: Some("Helios retention"),
+            phrase: true,
+            ..Default::default()
+        };
+        let live = crate::search(root.path(), &dirs, &options).unwrap();
+        options.snapshot = Some(&capture.snapshot);
+        let captured = crate::search(root.path(), &dirs, &options).unwrap();
+        assert_eq!(live.total, 1);
+        assert_eq!(
+            serde_json::to_value(&live.hits).unwrap(),
+            serde_json::to_value(&captured.hits).unwrap()
+        );
+        let hit = &captured.hits[0];
+        assert_eq!(hit.excerpt, "Helios retention.");
+        assert_eq!(hit.excerpt_kind, crate::ExcerptKind::MatchedBlock);
+        assert_eq!(hit.excerpt_section, None);
+        options.query = Some("hidden");
+        assert_eq!(
+            crate::search(root.path(), &dirs, &options).unwrap().total,
+            0
+        );
+    }
+
+    #[test]
+    fn empty_opening_is_unavailable_in_live_and_captured_discovery() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let session = MutationSession::acquire(root.path()).unwrap();
+        for body in ["", "## Summary\n<script>hidden</script>\n"] {
+            write(
+                root.path(),
+                "wiki/documents/empty.md",
+                &format!("---\ntitle: Named\ntype: document\n---\n{body}"),
+            );
+            let capture = prepare_search(&session, &dirs).unwrap();
+            for query in [None, Some("Named")] {
+                let mut options = SearchOptions {
+                    query,
+                    ..Default::default()
+                };
+                let live = crate::search(root.path(), &dirs, &options).unwrap();
+                options.snapshot = Some(&capture.snapshot);
+                let captured = crate::search(root.path(), &dirs, &options).unwrap();
+                assert_eq!(live.total, 1);
+                assert_eq!(
+                    serde_json::to_value(&live.hits).unwrap(),
+                    serde_json::to_value(&captured.hits).unwrap()
+                );
+                let hit = &captured.hits[0];
+                assert_eq!(hit.excerpt_kind, crate::ExcerptKind::Unavailable);
+                assert!(hit.excerpt.is_empty());
+                assert_eq!(hit.excerpt_section, None);
+            }
+        }
+    }
+
+    #[test]
+    fn exact_identity_path_and_created_filters_compose_without_changing_facets() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        write(
+            root.path(),
+            "wiki/concepts/retention.md",
+            "---\ntype: concept\ntitle: Retention policy\naliases: [보존 정책]\n---\n## Synthesis\nDefinition.\n",
+        );
+        for (path, identity, date) in [
+            (
+                "team/a.md",
+                "{repository: project-a, document: a}",
+                "2026-10-01",
+            ),
+            (
+                "teammate/b.md",
+                "{repository: project-a, document: b}",
+                "2026-10-02",
+            ),
+            (
+                "team/drive.md",
+                "{provider: google-drive, namespace: project-a, document: a}",
+                "2026-10-02",
+            ),
+            (
+                "team/gmail.md",
+                "{provider: gmail, namespace: project-a, document: a}",
+                "2026-10-02",
+            ),
+            (
+                "team/old.md",
+                "{repository: project-a, document: old}",
+                "2026-09-30",
+            ),
+            (
+                "team/case.md",
+                "{repository: Project-a, document: case}",
+                "2026-10-02",
+            ),
+            (
+                "team/invalid.md",
+                "{repository: project-a, document: invalid, extra: guessed}",
+                "2026-10-02",
+            ),
+            (
+                "team%_/literal.md",
+                "{repository: project-a, document: literal}",
+                "2026-10-02",
+            ),
+            (
+                "teamXY/decoy.md",
+                "{repository: project-a, document: decoy}",
+                "2026-10-02",
+            ),
+        ] {
+            write(
+                root.path(),
+                &format!("wiki/documents/{path}"),
+                &format!(
+                    "---\ntype: document\ntitle: Evidence\ncreated: {date}\nsource_identity: {identity}\ntags: [adr]\n---\n## Summary\n보존 정책을 기록한다.\n"
+                ),
+            );
+        }
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let capture = prepare_search(&session, &dirs).unwrap();
+        let tags = vec!["ADR".to_owned()];
+        for query in [None, Some("Retention policy")] {
+            let mut options = SearchOptions {
+                query,
+                repository: Some("project-a"),
+                path_prefix: Some(Path::new("wiki/documents/team")),
+                created_from: super::super::search::parse_created_date("2026-10-01"),
+                created_to: super::super::search::parse_created_date("2026-10-31"),
+                tags: &tags,
+                limit: 1,
+                ..Default::default()
+            };
+            let live = crate::search(root.path(), &dirs, &options).unwrap();
+            options.snapshot = Some(&capture.snapshot);
+            let mut captured = crate::search(root.path(), &dirs, &options).unwrap();
+            captured.snapshot = None;
+            assert_eq!(
+                serde_json::to_value(&live).unwrap(),
+                serde_json::to_value(&captured).unwrap()
+            );
+            assert_eq!(live.total, 1);
+            assert_eq!(live.hits[0].path, "wiki/documents/team/a.md");
+            assert_eq!(live.formats.values["document"], 9);
+            assert_eq!(live.formats.values["concept"], 1);
+            assert_eq!(live.next_offset, None);
+
+            options.repository = None;
+            options.provider = Some(lk_core::config::SourceType::GoogleDrive);
+            options.namespace = Some("project-a");
+            let captured = crate::search(root.path(), &dirs, &options).unwrap();
+            assert_eq!(captured.total, 1);
+            assert_eq!(captured.hits[0].path, "wiki/documents/team/drive.md");
+            options.snapshot = None;
+            let live = crate::search(root.path(), &dirs, &options).unwrap();
+            assert_eq!(
+                serde_json::to_value(&live.hits).unwrap(),
+                serde_json::to_value(&captured.hits).unwrap()
+            );
+
+            options.provider = None;
+            options.namespace = None;
+            options.path_prefix = Some(Path::new("wiki/documents/team%_"));
+            let live = crate::search(root.path(), &dirs, &options).unwrap();
+            options.snapshot = Some(&capture.snapshot);
+            let captured = crate::search(root.path(), &dirs, &options).unwrap();
+            assert_eq!(live.total, 1);
+            assert_eq!(captured.hits[0].path, "wiki/documents/team%_/literal.md");
+            options.path_prefix = Some(Path::new("wiki/Documents/team"));
+            assert_eq!(
+                crate::search(root.path(), &dirs, &options).unwrap().total,
+                0
+            );
+            options.snapshot = None;
+            assert_eq!(
+                crate::search(root.path(), &dirs, &options).unwrap().total,
+                0
+            );
+        }
+        let mut body = crate::BodySearchOptions {
+            search: SearchOptions {
+                query: Some("보존 정책"),
+                repository: Some("project-a"),
+                path_prefix: Some(Path::new("wiki/documents/team/a.md")),
+                created_from: super::super::search::parse_created_date("2026-10-01"),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let live = crate::search_body(root.path(), &dirs, &body).unwrap();
+        body.search.snapshot = Some(&capture.snapshot);
+        let mut captured = crate::search_body(root.path(), &dirs, &body).unwrap();
+        captured.snapshot = None;
+        assert_eq!(live.total, 1);
+        assert_eq!(
+            serde_json::to_value(live).unwrap(),
+            serde_json::to_value(captured).unwrap()
+        );
+    }
+
+    #[test]
+    fn exact_scopes_reject_invalid_combinations_before_io() {
+        let absent = Path::new("/nonexistent-exact-scope-fixture");
+        let dirs = VaultDirs::default();
+        for options in [
+            SearchOptions {
+                repository: Some(" "),
+                ..Default::default()
+            },
+            SearchOptions {
+                namespace: Some("project-a"),
+                ..Default::default()
+            },
+            SearchOptions {
+                provider: Some(lk_core::config::SourceType::GoogleDrive),
+                ..Default::default()
+            },
+            SearchOptions {
+                provider: Some(lk_core::config::SourceType::GoogleDrive),
+                namespace: Some(""),
+                ..Default::default()
+            },
+            SearchOptions {
+                repository: Some("project-a"),
+                provider: Some(lk_core::config::SourceType::GoogleDrive),
+                namespace: Some("project-a"),
+                ..Default::default()
+            },
+        ] {
+            assert!(
+                matches!(crate::search(absent, &dirs, &options), Err(VaultError::Io(error)) if error.kind() == std::io::ErrorKind::InvalidInput)
+            );
+        }
+        for prefix in [
+            "",
+            ".",
+            "../docs",
+            "/docs",
+            "wiki/./docs",
+            "wiki//docs",
+            "wiki/docs/",
+            "wiki\\docs",
+        ] {
+            let options = SearchOptions {
+                path_prefix: Some(Path::new(prefix)),
+                ..Default::default()
+            };
+            assert!(
+                matches!(crate::search(absent, &dirs, &options), Err(VaultError::Io(error)) if error.kind() == std::io::ErrorKind::InvalidInput),
+                "{prefix}"
+            );
+        }
+    }
+
+    #[test]
+    fn scattered_term_excerpts_locate_actual_passages_in_live_and_captured_reads() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let path = "wiki/documents/scattered.md";
+        write(
+            root.path(),
+            path,
+            "---\ntitle: Scattered\ntype: document\n---\n## Summary\nUnrelated opening.\n\n## Same heading\nHelios is documented.\n\n## Same heading\n### Detail\nRetention is documented.\n",
+        );
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let capture = prepare_search(&session, &dirs).unwrap();
+        let mut options = SearchOptions {
+            query: Some("Helios Retention"),
+            ..Default::default()
+        };
+        let live = crate::search(root.path(), &dirs, &options).unwrap();
+        options.snapshot = Some(&capture.snapshot);
+        let captured = crate::search(root.path(), &dirs, &options).unwrap();
+        assert_eq!(live.total, 1);
+        assert_eq!(
+            serde_json::to_value(&live.hits).unwrap(),
+            serde_json::to_value(&captured.hits).unwrap()
+        );
+        let hit = &captured.hits[0];
+        assert_eq!(hit.excerpt, "Helios is documented.");
+        assert_eq!(hit.excerpt_kind, crate::ExcerptKind::PartialMatch);
+        assert_eq!(hit.excerpt_section, Some(2));
+        let selected = crate::inspect_document(
+            root.path(),
+            Path::new(path),
+            &crate::DocumentOptions {
+                section: hit.excerpt_section,
+                offset: 0,
+                limit: 1000,
+                revision: Some(&hit.file_revision),
+            },
+        )
+        .unwrap();
+        assert!(
+            selected
+                .content
+                .unwrap()
+                .text
+                .contains("Helios is documented.")
+        );
+
+        options.query = Some("Retention documented");
+        let result = crate::search(root.path(), &dirs, &options).unwrap();
+        assert_eq!(
+            result.hits[0].excerpt_kind,
+            crate::ExcerptKind::MatchedBlock
+        );
+        assert_eq!(result.hits[0].excerpt_section, Some(4));
+        assert_eq!(result.hits[0].excerpt, "Retention is documented.");
+    }
 
     #[test]
     fn captured_browse_facets_preserve_scope_filters_and_refresh_membership() {

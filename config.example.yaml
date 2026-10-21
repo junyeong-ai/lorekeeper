@@ -45,6 +45,11 @@ identity:
 # personal events across sources. Source failures remain explicit and can block reviews.
 ingest:
   source_timeout_seconds: 600  # total acquisition budget per source, including retry waits
+  # Serialized retained provider records and projected inputs, separate from original/LLM limits.
+  # Positive byte limits with max_source_bytes <= max_run_bytes; not a process memory cap.
+  inputs:
+    max_source_bytes: 67108864   # 64 MiB per source
+    max_run_bytes: 268435456     # 256 MiB across the run
   schedule: "0 7 * * *"          # every day 07:00 (sources use lookback windows)
   # Explicit opt-in: native daily retries missing CLOSED query days before current collection.
   # Choose the earliest day you intend to recover; no history is inferred from installation.
@@ -519,8 +524,8 @@ concepts:
 # Retention for ingest history, drained queue files, verified published work and
 # derived projection caches. Successful read/write cache reuse renews its last-use time;
 # inspect/dry-run reads do not. Active claims, originals and malformed cache data are preserved.
-# Unpublished, referenced or unowned work artifacts are preserved; work cleanup requires
-# exclusive workflow access and a settled queue. Sealing alone is not publication.
+# Work cleanup requires exclusive workflow access and verified live queue/reuse references.
+# Unpublished, referenced, unowned or unreadable work is preserved. Sealing alone is not publication.
 # Streaming event logs (`.lorekeeper/events/`) are the permanent raw layer — never pruned.
 # Fully optional — omit the block to use the default.
 # maintenance:

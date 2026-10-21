@@ -1021,6 +1021,54 @@ mod native {
             Ok(plan)
         }
 
+        fn admit_audit(&mut self) -> miette::Result<lk_graph::audit::AuditPlan> {
+            let session = lk_vault::MutationSession::acquire(&self.root)
+                .map_err(|error| miette::miette!("{error}"))?;
+            let pages =
+                lk_graph::scan::scan_vault(&self.root, self.config.graph.scope.follow_links)
+                    .map_err(|error| miette::miette!("{error}"))?;
+            let _queue =
+                super::super::queue::claim_writer(&self.root.join(".lorekeeper/queue"), false)?;
+            let mut readiness = super::super::queue::readiness::AuditReadiness::load(&self.root)?;
+            let mut deferred = Vec::new();
+            let plan = lk_graph::audit::admit_available_partitioned(
+                &session,
+                &self.config.vault.dirs,
+                &pages,
+                self.config.graph.audit.batch_size,
+                self.config.graph.audit.max_input_bytes,
+                &mut |candidate| {
+                    let reasons = readiness
+                        .unfinished(&self.root, candidate)
+                        .map_err(|error| lk_graph::GraphError::Io(error.to_string()))?;
+                    if reasons.is_empty() {
+                        return Ok(true);
+                    }
+                    deferred.push(DeferredAudit {
+                        path: candidate.path.clone(),
+                        reasons,
+                    });
+                    Ok(false)
+                },
+                |candidates, mutation| {
+                    let mut selected =
+                        super::super::queue::readiness::AuditReadiness::load(&self.root)
+                            .map_err(|error| lk_graph::GraphError::Io(error.to_string()))?;
+                    for candidate in candidates {
+                        selected
+                            .require_ready(&self.root, candidate)
+                            .map_err(|error| lk_graph::GraphError::Io(error.to_string()))?;
+                    }
+                    selected
+                        .guard(&self.root, mutation)
+                        .map_err(|error| lk_graph::GraphError::Io(error.to_string()))
+                },
+            )
+            .map_err(|error| miette::miette!("{error}"))?;
+            self.result.audit_deferred = deferred;
+            Ok(plan)
+        }
+
         fn verify_audit(
             &self,
             batch: &[lk_graph::audit::AuditCandidate],
@@ -1174,7 +1222,7 @@ mod native {
             if !self.inspect_review_health() {
                 return;
             }
-            let mut plan = match self.audit_plan(&[]) {
+            let mut plan = match self.admit_audit() {
                 Ok(plan) => plan,
                 Err(error) => {
                     self.failure("audit planning", error);

@@ -1309,6 +1309,7 @@ pub fn plan_selected(
         max_input_bytes,
         Planning::WholeInput,
     )
+    .map(|prepared| prepared.plan)
 }
 
 /// Select fair work for bounded partitioned execution. Complete footprint/status
@@ -1340,6 +1341,7 @@ pub fn plan_selected_partitioned(
         max_input_bytes,
         Planning::Partitioned,
     )
+    .map(|prepared| prepared.plan)
 }
 
 pub fn plan_available_partitioned(
@@ -1359,12 +1361,58 @@ pub fn plan_available_partitioned(
         max_input_bytes,
         Planning::Available(available),
     )
+    .map(|prepared| prepared.plan)
+}
+
+/// Reserve first-discovery order before native execution, without recording a read
+/// or advancing a class turn. The caller guards selected-subject readiness while
+/// holding any narrower claims; ordinary planning remains read-only.
+pub fn admit_available_partitioned(
+    session: &MutationSession,
+    dirs: &VaultDirs,
+    pages: &[ScannedPage],
+    limit: usize,
+    max_input_bytes: u64,
+    available: &mut dyn FnMut(&AuditCandidate) -> Result<bool, GraphError>,
+    guard: impl FnOnce(&[AuditCandidate], &mut MutationPlan) -> Result<(), GraphError>,
+) -> Result<AuditPlan, GraphError> {
+    let root = session.root();
+    let prepared = plan_selected_inner(
+        root,
+        dirs,
+        pages,
+        limit,
+        &[],
+        max_input_bytes,
+        Planning::Available(available),
+    )?;
+    let mut mutation = MutationPlan::default();
+    guard(&prepared.plan.candidates, &mut mutation)?;
+    for candidate in &prepared.plan.candidates {
+        guard_candidate(&mut mutation, root, candidate)?;
+    }
+    let after = serde_json::to_string_pretty(&prepared.receipts).map_err(error)? + "\n";
+    if prepared.before.as_deref() != Some(&after)
+        && (!prepared.receipts.pending.is_empty() || prepared.before.is_some())
+    {
+        mutation
+            .publish_expected(root, STATE, prepared.before, after)
+            .map_err(error)?;
+    }
+    session.apply(mutation).map_err(error)?;
+    Ok(prepared.plan)
 }
 
 enum Planning<'a> {
     WholeInput,
     Partitioned,
     Available(&'a mut dyn FnMut(&AuditCandidate) -> Result<bool, GraphError>),
+}
+
+struct PreparedAudit {
+    plan: AuditPlan,
+    before: Option<String>,
+    receipts: Receipts,
 }
 
 fn plan_selected_inner(
@@ -1375,7 +1423,7 @@ fn plan_selected_inner(
     selection: &[String],
     max_input_bytes: u64,
     mut planning: Planning<'_>,
-) -> Result<AuditPlan, GraphError> {
+) -> Result<PreparedAudit, GraphError> {
     if !(1..=100).contains(&limit) {
         return Err(error("audit limit must be 1..100"));
     }
@@ -1388,7 +1436,7 @@ fn plan_selected_inner(
             "audit selection requires distinct paths within the batch limit",
         ));
     }
-    let (_, receipts) = load(root)?;
+    let (before, mut receipts) = load(root)?;
     let coverage_scope = if selection.is_empty() {
         AuditCoverageScope::Corpus
     } else {
@@ -1425,6 +1473,10 @@ fn plan_selected_inner(
         selected.push(candidate);
     }
     let (pending, counts_by_kind) = pending(candidates, &receipts);
+    receipts.pending = pending
+        .iter()
+        .map(|candidate| candidate.path.clone())
+        .collect();
     let reviewed_current = counts_by_kind
         .values()
         .map(|counts| counts.reviewed_current)
@@ -1492,19 +1544,23 @@ fn plan_selected_inner(
             });
         }
     }
-    Ok(AuditPlan {
-        coverage_scope,
-        candidates,
-        blocked,
-        blocked_count,
-        total,
-        reviewed_current,
-        follow_up_current,
-        unreviewed: unreviewed_count,
-        changed: changed_count,
-        counts_by_kind,
-        limit,
-        input,
+    Ok(PreparedAudit {
+        plan: AuditPlan {
+            coverage_scope,
+            candidates,
+            blocked,
+            blocked_count,
+            total,
+            reviewed_current,
+            follow_up_current,
+            unreviewed: unreviewed_count,
+            changed: changed_count,
+            counts_by_kind,
+            limit,
+            input,
+        },
+        before,
+        receipts,
     })
 }
 
@@ -1551,6 +1607,41 @@ fn guard_review_dependency(
         }
         if let Some(archived) = &evidence.archived {
             guard_page_input(plan, root, archived)?;
+        }
+    }
+    Ok(())
+}
+
+fn guard_candidate(
+    plan: &mut MutationPlan,
+    root: &Path,
+    candidate: &AuditCandidate,
+) -> Result<(), GraphError> {
+    for review in &candidate.reviews {
+        guard_review_dependency(plan, root, review)?;
+    }
+    guard_page_input(
+        plan,
+        root,
+        &AuditPageInput {
+            path: candidate.path.clone(),
+            file_revision: candidate.file_revision.clone(),
+            source_revision: None,
+        },
+    )?;
+    for citation in candidate.evidence.iter().chain(&candidate.related_pages) {
+        if citation.rss_event.is_some() {
+            lk_vault::guard_rss_citation(plan, root, Path::new(&candidate.path), citation)
+                .map_err(error)?;
+        } else {
+            let raw = std::fs::read_to_string(
+                lk_vault::page_path(root, Path::new(&citation.path)).map_err(error)?,
+            )
+            .map_err(error)?;
+            if source_revision(&lk_vault::parse_page(&raw).map_err(error)?) != citation.revision {
+                return Err(error("audit dependency changed"));
+            }
+            guard_page_input(plan, root, &page_input(&citation.path, &raw))?;
         }
     }
     Ok(())
@@ -1661,34 +1752,7 @@ pub fn record_with_guard(
         if guard(&assessment, &mut plan)? == AuditReadCoverage::WholeInput {
             whole_inputs.push(candidate);
         }
-        for review in &candidate.reviews {
-            guard_review_dependency(&mut plan, root, review)?;
-        }
-        guard_page_input(
-            &mut plan,
-            root,
-            &AuditPageInput {
-                path: candidate.path.clone(),
-                file_revision: candidate.file_revision.clone(),
-                source_revision: None,
-            },
-        )?;
-        for citation in candidate.evidence.iter().chain(&candidate.related_pages) {
-            if citation.rss_event.is_some() {
-                lk_vault::guard_rss_citation(&mut plan, root, Path::new(&candidate.path), citation)
-                    .map_err(error)?;
-            } else {
-                let raw = std::fs::read_to_string(
-                    lk_vault::page_path(root, Path::new(&citation.path)).map_err(error)?,
-                )
-                .map_err(error)?;
-                if source_revision(&lk_vault::parse_page(&raw).map_err(error)?) != citation.revision
-                {
-                    return Err(error("audit dependency changed"));
-                }
-                guard_page_input(&mut plan, root, &page_input(&citation.path, &raw))?;
-            }
-        }
+        guard_candidate(&mut plan, root, candidate)?;
         receipts.next_class = if receipts.entries.contains_key(&assessment.path) {
             AuditClass::Unreviewed
         } else {
@@ -1767,6 +1831,121 @@ mod tests {
         );
         let resumed = plan_partitioned(root.path(), &dirs, &files, 1, u64::MAX).unwrap();
         assert_eq!(resumed.candidates[0].path, "wiki/documents/a.md");
+    }
+
+    #[test]
+    fn admission_preserves_discovery_order_without_receipts_or_class_turns() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let z = "wiki/documents/z.md";
+        let a = "wiki/documents/a.md";
+        let zero = "wiki/documents/0.md";
+        let body = "---\ntype: document\n---\nA complete authored source.\n";
+        write(root.path(), z, body);
+        let planned =
+            plan_partitioned(root.path(), &dirs, &scan(root.path()), 1, u64::MAX).unwrap();
+        assert_eq!(planned.candidates[0].path, z);
+        assert!(!root.path().join(STATE).exists());
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let admitted = admit_available_partitioned(
+            &session,
+            &dirs,
+            &scan(root.path()),
+            1,
+            u64::MAX,
+            &mut |_| Ok(true),
+            |_, _| Ok(()),
+        )
+        .unwrap();
+        assert_eq!(admitted.candidates[0].path, z);
+        let (before, receipts) = load(root.path()).unwrap();
+        assert_eq!(receipts.pending, [z]);
+        assert!(receipts.entries.is_empty());
+        assert!(receipts.discovery.is_empty());
+        assert!(matches!(receipts.next_class, AuditClass::Changed));
+
+        for path in [a, zero] {
+            write(root.path(), path, body);
+        }
+        let resumed =
+            plan_partitioned(root.path(), &dirs, &scan(root.path()), 1, u64::MAX).unwrap();
+        assert_eq!(resumed.candidates[0].path, z);
+        assert_eq!(load(root.path()).unwrap().0, before);
+        let deferred = admit_available_partitioned(
+            &session,
+            &dirs,
+            &scan(root.path()),
+            1,
+            u64::MAX,
+            &mut |candidate| Ok(candidate.path == a),
+            |_, _| Ok(()),
+        )
+        .unwrap();
+        assert_eq!(deferred.candidates[0].path, a);
+        assert_eq!(deferred.unreviewed, 3);
+        assert_eq!(deferred.reviewed_current, 0);
+        let (_, receipts) = load(root.path()).unwrap();
+        assert_eq!(receipts.pending, [z, zero, a]);
+        assert!(receipts.entries.is_empty());
+        assert!(matches!(receipts.next_class, AuditClass::Changed));
+        let ready = plan_partitioned(root.path(), &dirs, &scan(root.path()), 1, u64::MAX).unwrap();
+        assert_eq!(ready.candidates[0].path, z);
+    }
+
+    #[test]
+    fn admission_refuses_changed_selected_dependencies_before_reserving() {
+        for changed in [
+            "wiki/documents/subject.md",
+            "wiki/explorations/review.md",
+            "evidence.md",
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let dirs = VaultDirs::default();
+            let subject = "wiki/documents/subject.md";
+            let evidence = "---\ntype: document\n---\nA scoped source statement.\n";
+            write(
+                root.path(),
+                subject,
+                "---\ntype: document\n---\nThe source under assessment.\n",
+            );
+            write(root.path(), "evidence.md", evidence);
+            write(
+                root.path(),
+                "wiki/explorations/review.md",
+                &review_body(
+                    subject,
+                    "evidence.md",
+                    &source_revision(&lk_vault::parse_page(evidence).unwrap()),
+                ),
+            );
+            let session = MutationSession::acquire(root.path()).unwrap();
+            let rejected = admit_available_partitioned(
+                &session,
+                &dirs,
+                &scan(root.path()),
+                1,
+                u64::MAX,
+                &mut |_| Ok(true),
+                |_, _| {
+                    let raw = std::fs::read_to_string(root.path().join(changed)).unwrap();
+                    write(root.path(), changed, &(raw + "Changed after selection.\n"));
+                    Ok(())
+                },
+            )
+            .err()
+            .unwrap();
+            assert!(
+                rejected.to_string().contains("changed"),
+                "{changed}: {rejected}"
+            );
+            assert!(!root.path().join(STATE).exists());
+            assert!(
+                !root
+                    .path()
+                    .join(".lorekeeper/mutation/pending.json")
+                    .exists()
+            );
+        }
     }
 
     #[test]

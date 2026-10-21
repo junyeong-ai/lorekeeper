@@ -19,6 +19,7 @@ pub struct PipelineContext {
     pub(crate) locale: Locale,
     pub(crate) concept_categories: Vec<lk_queue::CategoryReference>,
     pub(crate) manual_projection_limit: usize,
+    pub(crate) input_limits: lk_core::config::IngestInputLimits,
 }
 
 impl PipelineContext {
@@ -45,6 +46,7 @@ impl PipelineContext {
             timezone: config.vault.timezone(),
             locale: config.vault.locale(),
             concept_categories,
+            input_limits: config.ingest.inputs.clone(),
             manual_projection_limit: config
                 .ingest
                 .documents

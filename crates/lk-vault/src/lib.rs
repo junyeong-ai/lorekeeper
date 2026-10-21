@@ -13,6 +13,7 @@ mod log;
 mod manual_original;
 mod mutation;
 mod navigation;
+mod neighbors;
 mod original_io;
 mod provenance;
 mod provenance_index;
@@ -66,6 +67,10 @@ pub use self::manual_original::{
 };
 pub use self::mutation::{MutationPlan, MutationSession};
 pub use self::navigation::{NAVIGATION_ENTRY_MARKER, plan_navigation_entry};
+pub use self::neighbors::{
+    IndexedNeighbor, IndexedNeighborOptions, IndexedNeighbors, NeighborDirection,
+    inspect_indexed_neighbors,
+};
 pub use self::provenance::{
     ProvenanceDirection, ProvenanceOptions, ProvenanceReport, inspect_provenance,
 };
@@ -86,8 +91,8 @@ pub use self::rss_original::{
     publish_rss_original,
 };
 pub use self::search::{
-    BrowseSort, CreatedStatus, FacetPage, MatchField, SearchHit, SearchOptions, SearchResult,
-    SynthesisFreshness, SynthesisInputStatus, parse_created_date, search,
+    BrowseSort, CreatedStatus, ExcerptKind, FacetPage, MatchField, SearchHit, SearchOptions,
+    SearchResult, SynthesisFreshness, SynthesisInputStatus, parse_created_date, search,
 };
 pub use self::search_index::{
     SearchSnapshot, inspect_search_snapshot, prepare_search, prepare_search_with_citations,

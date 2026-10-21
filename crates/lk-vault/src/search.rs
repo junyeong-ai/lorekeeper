@@ -13,10 +13,11 @@
 use std::borrow::Cow;
 use std::cmp::{Ordering, Reverse};
 use std::collections::{BTreeMap, BinaryHeap};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use lk_core::concept::identity_key;
-use lk_core::config::VaultDirs;
+use lk_core::config::{SourceType, VaultDirs};
 use lk_core::frontmatter::KnowledgeStatus;
 use lk_core::vault_path::{concepts_dir, documents_dir, explorations_dir};
 use pulldown_cmark::{Event, Options, Tag, TagEnd};
@@ -50,6 +51,17 @@ pub enum MatchField {
     Text,
 }
 
+/// What the excerpt's source block establishes. A bounded preview may clip that block;
+/// `excerpt_section` locates its complete content under the hit's file revision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ExcerptKind {
+    Opening,
+    MatchedBlock,
+    PartialMatch,
+    Unavailable,
+}
+
 /// One page a query reached.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SearchHit {
@@ -78,6 +90,10 @@ pub struct SearchHit {
     pub reviews: crate::ContextReviews,
     pub matched: MatchField,
     pub excerpt: String,
+    pub excerpt_kind: ExcerptKind,
+    /// Section id accepted by `wiki read --section`, pinned by `file_revision`.
+    /// None when a source position is unproven, including the HTML DOM projection.
+    pub excerpt_section: Option<usize>,
     pub file_revision: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_record: Option<serde_json::Value>,
@@ -222,6 +238,12 @@ pub struct SearchOptions<'a> {
     pub include_sources: bool,
     pub category: Option<&'a str>,
     pub source_status: Option<&'a str>,
+    /// Exact declared repository ownership, never inferred concept evidence scope.
+    pub repository: Option<&'a str>,
+    pub provider: Option<SourceType>,
+    pub namespace: Option<&'a str>,
+    /// Exact lexical vault-relative address prefix, matched on path components.
+    pub path_prefix: Option<&'a Path>,
     pub format: Option<&'a str>,
     pub tags: &'a [String],
     pub knowledge_status: Option<KnowledgeStatus>,
@@ -244,6 +266,10 @@ impl Default for SearchOptions<'_> {
             include_sources: false,
             category: None,
             source_status: None,
+            repository: None,
+            provider: None,
+            namespace: None,
+            path_prefix: None,
             format: None,
             tags: &[],
             knowledge_status: Some(KnowledgeStatus::Active),
@@ -259,14 +285,32 @@ impl SearchOptions<'_> {
             Some("facet limit must be between 1 and 100")
         } else if self.query.is_none() && (self.phrase || self.spacing) {
             Some("phrase and spacing matching require a query")
-        } else if self.query.is_some()
-            && (self.sort != BrowseSort::Title
-                || self.created_from.is_some()
-                || self.created_to.is_some())
+        } else if self.query.is_some() && self.sort != BrowseSort::Title {
+            Some("created sorting is only available when browsing without a query")
+        } else if self.repository.is_some() && (self.provider.is_some() || self.namespace.is_some())
         {
-            Some(
-                "created sorting and date filters are only available when browsing without a query",
-            )
+            Some("repository scope cannot be combined with provider or namespace")
+        } else if self.provider.is_some() != self.namespace.is_some() {
+            Some("provider and namespace scope must be supplied together")
+        } else if [self.repository, self.namespace]
+            .into_iter()
+            .flatten()
+            .any(|value| value.trim().is_empty())
+        {
+            Some("repository and namespace must be nonblank exact identifiers")
+        } else if self.path_prefix.is_some_and(|prefix| {
+            prefix
+                .components()
+                .any(|part| !matches!(part, std::path::Component::Normal(_)))
+                || prefix.to_str().is_none_or(|text| {
+                    text.is_empty()
+                        || text.contains(['\\', '\0'])
+                        || text
+                            .split('/')
+                            .any(|part| part.is_empty() || matches!(part, "." | ".."))
+                })
+        }) {
+            Some("path prefix must be a nonempty exact vault-relative path without dot components")
         } else if self
             .created_from
             .zip(self.created_to)
@@ -788,14 +832,12 @@ impl<'a> SearchCollector<'a> {
                 let source_file = source_file_preview(&entry.page, &mut metadata_issues);
                 let source_url = source_url_preview(&entry.page, &mut metadata_issues);
                 let knowledge_review = knowledge_review_preview(&entry.page, &mut metadata_issues);
+                let excerpt =
+                    excerpt_details(&entry.page.body, matched, terms, spellings, spacing_match);
                 SearchHit {
-                    excerpt: excerpt_with_spacing(
-                        &entry.page.body,
-                        matched,
-                        terms,
-                        spellings,
-                        spacing_match,
-                    ),
+                    excerpt: excerpt.text,
+                    excerpt_kind: excerpt.kind,
+                    excerpt_section: excerpt.section,
                     file_revision: entry.file_revision.clone(),
                     source_record,
                     source_identity,
@@ -1021,9 +1063,38 @@ impl Page {
             .and_then(|record| record.get("status"))
             .and_then(|value| value.as_str())
             .unwrap_or("");
-        options
-            .category
-            .is_none_or(|value| metadata("category") == value)
+        let identity_matches = if options.repository.is_some() || options.provider.is_some() {
+            let identity = self
+                .page
+                .frontmatter
+                .get("source_identity")
+                .and_then(|value| {
+                    lk_core::source_identity::SourceIdentity::from_value(value.clone()).ok()
+                });
+            match identity {
+                Some(lk_core::source_identity::SourceIdentity::Repository {
+                    repository, ..
+                }) => options.repository == Some(repository.as_str()),
+                Some(lk_core::source_identity::SourceIdentity::Provider {
+                    provider,
+                    namespace,
+                    ..
+                }) => {
+                    options.provider == Some(provider)
+                        && options.namespace == Some(namespace.as_str())
+                }
+                None => false,
+            }
+        } else {
+            true
+        };
+        identity_matches
+            && options
+                .path_prefix
+                .is_none_or(|prefix| self.rel_path.starts_with(prefix))
+            && options
+                .category
+                .is_none_or(|value| metadata("category") == value)
             && options.format.is_none_or(|value| metadata("type") == value)
             && options.source_status.is_none_or(|value| status == value)
             && options
@@ -1291,55 +1362,82 @@ pub(super) fn excerpt(
     terms: &[String],
     spellings: &[String],
 ) -> String {
-    // The same prose the match was taken over, so the line shown is the line that matched —
-    // under whichever of the two routes reached the page, so a page found by another of the
-    // concept's names shows the line carrying that name rather than the page's opening.
-    let prose = search_text(body);
-    let text = match matched {
-        MatchField::Catalog
-        | MatchField::Identity
-        | MatchField::NameVariant
-        | MatchField::Name
-        | MatchField::Summary => search_summary(body),
-        MatchField::Text => prose
-            .lines()
-            .map(str::trim)
-            .find(|line| {
-                let folded = fold(line);
-                (spellings.is_empty() && terms.iter().all(|t| contains_term(&folded, t)))
-                    || spellings.iter().any(|n| contains_term(&folded, n))
-            })
-            .map(str::to_owned)
-            .or_else(|| search_summary(body)),
-    };
-    text.map(|t| crate::summary::truncate_summary(&t))
-        .unwrap_or_default()
+    excerpt_details(body, matched, terms, spellings, false).text
 }
 
-pub(super) fn excerpt_with_spacing(
+pub(super) struct SearchExcerpt {
+    pub text: String,
+    pub kind: ExcerptKind,
+    pub section: Option<usize>,
+}
+
+pub(super) fn excerpt_details(
     body: &str,
     matched: MatchField,
     terms: &[String],
     spellings: &[String],
     spacing: bool,
-) -> String {
-    if !spacing || matched != MatchField::Text {
-        return excerpt(body, matched, terms, spellings);
-    }
-    search_text(body)
-        .lines()
-        .find(|line| {
-            let text = fold(line);
-            if spellings.is_empty() {
-                terms.iter().all(|term| contains_spacing_term(&text, term))
+) -> SearchExcerpt {
+    if matched != MatchField::Text {
+        let text = search_summary(body)
+            .map(|text| crate::summary::truncate_summary(&text))
+            .filter(|text| !text.is_empty());
+        return SearchExcerpt {
+            kind: if text.is_some() {
+                ExcerptKind::Opening
             } else {
-                spellings
-                    .iter()
-                    .any(|name| contains_spacing_term(&text, name))
-            }
-        })
-        .map(crate::summary::truncate_summary)
-        .unwrap_or_else(|| excerpt(body, matched, terms, spellings))
+                ExcerptKind::Unavailable
+            },
+            text: text.unwrap_or_default(),
+            section: None,
+        };
+    }
+    let contains = |text: &str, term: &str| {
+        contains_term(text, term) || spacing && contains_spacing_term(text, term)
+    };
+    let matches_all = |line: &str| {
+        let text = fold(line);
+        if spellings.is_empty() {
+            terms.iter().all(|term| contains(&text, term))
+        } else {
+            spellings.iter().any(|name| contains(&text, name))
+        }
+    };
+    let blocks = search_blocks(body);
+    let selected = blocks
+        .iter()
+        .find(|block| matches_all(&block.text))
+        .map(|block| (block, ExcerptKind::MatchedBlock))
+        .or_else(|| {
+            blocks
+                .iter()
+                .find(|block| {
+                    let text = fold(&block.text);
+                    terms.iter().any(|term| contains(&text, term))
+                })
+                .map(|block| (block, ExcerptKind::PartialMatch))
+        });
+    let Some((block, kind)) = selected else {
+        return SearchExcerpt {
+            text: String::new(),
+            kind: ExcerptKind::Unavailable,
+            section: None,
+        };
+    };
+    // Positions come from the same full-document parse that produced the selected text.
+    // Section parsing alone would lose reference definitions and occurrence identity.
+    let section = block.source.as_ref().and_then(|source| {
+        super::document::outline(body)
+            .iter()
+            .rev()
+            .find(|section| section.start <= source.start && source.end <= section.end)
+            .map(|section| section.id)
+    });
+    SearchExcerpt {
+        text: crate::summary::truncate_summary(&block.text),
+        kind,
+        section,
+    }
 }
 
 /// Visible text with one line per Markdown block. Inline formatting and soft breaks
@@ -1347,37 +1445,70 @@ pub(super) fn excerpt_with_spacing(
 /// and markup are not prose. HTML contributes text through the parsed document;
 /// scripts, styles and metadata are excluded. Code remains searchable as literal content.
 pub(super) fn search_text(body: &str) -> String {
-    let mut text = String::with_capacity(body.len());
-    let options =
-        Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
-    let markdown = lk_core::markdown::MarkdownInput::from_text(body);
-    let events: Vec<_> = markdown.events(options).collect();
-    if events
-        .iter()
-        .any(|event| matches!(event, Event::Html(_) | Event::InlineHtml(_)))
-    {
-        use html5ever::tendril::TendrilSink;
-        let mut html = String::with_capacity(body.len());
-        pulldown_cmark::html::push_html(&mut html, events.into_iter());
-        let document =
-            html5ever::parse_document(markup5ever_rcdom::RcDom::default(), Default::default())
-                .one(html);
-        append_html_search_text(&document.document, &mut text, false);
-    } else {
-        append_markdown_search_text(events, &mut text);
-    }
-    text.lines()
-        .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
-        .filter(|line| !line.is_empty())
+    search_blocks(body)
+        .into_iter()
+        .map(|block| block.text)
         .collect::<Vec<_>>()
         .join("\n")
 }
 
-fn append_markdown_search_text(events: Vec<Event<'_>>, text: &mut String) {
-    for event in events {
-        match event {
-            Event::Text(value) | Event::Code(value) => text.push_str(&value),
-            Event::SoftBreak | Event::HardBreak => text.push(' '),
+struct VisibleBlock {
+    text: String,
+    source: Option<Range<usize>>,
+}
+
+fn search_blocks(body: &str) -> Vec<VisibleBlock> {
+    let options =
+        Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
+    let markdown = lk_core::markdown::MarkdownInput::from_text(body);
+    let events: Vec<_> = markdown.offset_events(options).collect();
+    if !events
+        .iter()
+        .any(|(event, _)| matches!(event, Event::Html(_) | Event::InlineHtml(_)))
+    {
+        return markdown_search_blocks(events);
+    }
+    use html5ever::tendril::TendrilSink;
+    let mut html = String::with_capacity(body.len());
+    pulldown_cmark::html::push_html(&mut html, events.into_iter().map(|(event, _)| event));
+    let document =
+        html5ever::parse_document(markup5ever_rcdom::RcDom::default(), Default::default())
+            .one(html);
+    let mut text = String::with_capacity(body.len());
+    append_html_search_text(&document.document, &mut text, false);
+    text.lines()
+        .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|line| !line.is_empty())
+        // DOM repair and whole-document HTML rendering do not preserve an exact source
+        // position. Keep their visible-text semantics without guessing a location.
+        .map(|text| VisibleBlock { text, source: None })
+        .collect::<Vec<_>>()
+}
+
+fn finish_search_block(
+    blocks: &mut Vec<VisibleBlock>,
+    text: &mut String,
+    source: &mut Option<Range<usize>>,
+) {
+    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let source = source.take();
+    if !normalized.is_empty() {
+        blocks.push(VisibleBlock {
+            text: normalized,
+            source,
+        });
+    }
+    text.clear();
+}
+
+fn markdown_search_blocks(events: Vec<(Event<'_>, Range<usize>)>) -> Vec<VisibleBlock> {
+    let mut blocks = Vec::new();
+    let mut text = String::new();
+    let mut source: Option<Range<usize>> = None;
+    for (event, range) in events {
+        let value = match event {
+            Event::Text(value) | Event::Code(value) => value,
+            Event::SoftBreak | Event::HardBreak => " ".into(),
             Event::Start(
                 Tag::Emphasis
                 | Tag::Strong
@@ -1392,10 +1523,27 @@ fn append_markdown_search_text(events: Vec<Event<'_>>, text: &mut String) {
                 | TagEnd::Link
                 | TagEnd::Image,
             )
-            | Event::TaskListMarker(_) => {}
-            _ => text.push('\n'),
+            | Event::TaskListMarker(_) => continue,
+            _ => {
+                finish_search_block(&mut blocks, &mut text, &mut source);
+                continue;
+            }
+        };
+        for part in lk_core::markdown::lines_with_endings(&value) {
+            text.push_str(part);
+            if let Some(source) = &mut source {
+                source.start = source.start.min(range.start);
+                source.end = source.end.max(range.end);
+            } else {
+                source = Some(range.clone());
+            }
+            if part.ends_with(['\r', '\n']) {
+                finish_search_block(&mut blocks, &mut text, &mut source);
+            }
         }
     }
+    finish_search_block(&mut blocks, &mut text, &mut source);
+    blocks
 }
 
 fn append_html_search_text(node: &markup5ever_rcdom::Node, text: &mut String, preformatted: bool) {
@@ -1936,11 +2084,6 @@ mod tests {
             SearchOptions {
                 query: Some("topic"),
                 sort: BrowseSort::Created,
-                ..Default::default()
-            },
-            SearchOptions {
-                query: Some("topic"),
-                created_from: parse_created_date("2026-01-01"),
                 ..Default::default()
             },
             SearchOptions {

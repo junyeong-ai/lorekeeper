@@ -92,13 +92,13 @@ struct SearchResult {
     total: Option<u64>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, serde::Serialize)]
 struct Issue {
     key: String,
     fields: IssueFields,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, serde::Serialize)]
 struct IssueFields {
     summary: Option<String>,
     /// Jira Cloud v3 returns rich text as an Atlassian Document Format tree
@@ -116,12 +116,12 @@ struct IssueFields {
     extra: serde_json::Map<String, serde_json::Value>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, serde::Serialize)]
 struct NameField {
     name: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, serde::Serialize)]
 struct StatusField {
     name: Option<String>,
     /// Jira's own three-value classification of the status, which every workflow's every
@@ -136,7 +136,7 @@ struct StatusField {
     category: Option<StatusCategory>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, serde::Serialize)]
 struct StatusCategory {
     key: Option<String>,
 }
@@ -154,7 +154,7 @@ impl StatusField {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, serde::Serialize)]
 struct UserField {
     #[serde(rename = "accountId")]
     account_id: Option<String>,
@@ -280,6 +280,7 @@ impl Source for JiraSource {
         let cap = p.max_issues as usize;
 
         let mut issues: Vec<Issue> = Vec::new();
+        let mut issue_budget = lk_core::input::InputBudget::new(ctx.max_input_bytes);
         let mut page_token: Option<String> = None;
         let mut pages_fetched = 0usize;
 
@@ -325,7 +326,9 @@ impl Source for JiraSource {
                 .map_err(|e| SourceError::Parse(e.to_string()))?;
 
             let page_len = result.issues.as_ref().map_or(0, Vec::len);
-            issues.extend(result.issues.unwrap_or_default());
+            let page_issues = result.issues.unwrap_or_default();
+            issue_budget.admit_all(&page_issues)?;
+            issues.extend(page_issues);
             pages_fetched += 1;
 
             // Each dialect states "more remain" differently: Cloud by handing back a cursor,
@@ -383,24 +386,22 @@ impl Source for JiraSource {
 
         // Links resolve against the site, never the OAuth gateway (which is not browsable).
         let base = self.auth.browse_base(Product::Jira).unwrap_or_default();
-        let items = issues
-            .into_iter()
-            .filter_map(|issue| {
-                let mapped = map_issue(
-                    issue,
-                    my_account_id,
-                    &base,
-                    &ctx.identity.email,
-                    p.start_date_field.as_deref(),
-                    ctx.locale.strings(),
-                );
-                partial |= mapped.is_none();
-                mapped
-            })
-            .collect();
+        let mut items = crate::SourceItems::new(ctx);
+        items.extend(issues.into_iter().filter_map(|issue| {
+            let mapped = map_issue(
+                issue,
+                my_account_id,
+                &base,
+                &ctx.identity.email,
+                p.start_date_field.as_deref(),
+                ctx.locale.strings(),
+            );
+            partial |= mapped.is_none();
+            mapped
+        }))?;
 
         Ok(crate::SourceObservation {
-            items,
+            items: items.into_vec(),
             scope: crate::ObservationScope::ConfiguredQuery,
             outcome: if partial {
                 crate::ObservationOutcome::Partial

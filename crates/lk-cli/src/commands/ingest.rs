@@ -193,6 +193,7 @@ pub async fn run(
             },
         )),
         originals: config.ingest.originals.clone(),
+        max_input_bytes: config.ingest.inputs.max_source_bytes.get(),
     };
 
     // Capture source observations before acquiring the vault writer.
@@ -214,6 +215,8 @@ pub async fn run(
     let mut planned: Vec<Planned> = Vec::new();
     let mut manual_capture_bytes = 0usize;
     let mut rss_capture_bytes = 0usize;
+    let mut acquired_inputs =
+        lk_core::input::InputBudget::new(config.ingest.inputs.max_run_bytes.get());
     // Set on any source/extract/pipeline/write failure so the process exits non-zero —
     // a cron or CI run must be able to detect a partial failure, not see exit 0.
     let mut had_failure = false;
@@ -221,6 +224,8 @@ pub async fn run(
 
     for (id, sc) in &sources {
         let started_at = std::time::Instant::now();
+        let mut source_ctx = extract_ctx.clone();
+        source_ctx.max_input_bytes = source_ctx.max_input_bytes.min(acquired_inputs.remaining());
         eprintln!("▸ collect {id} ({})", sc.source_type);
         let adapter = match lk_source::build_source(
             sc.source_type,
@@ -247,7 +252,7 @@ pub async fn run(
         let (adapter, selection) = adapter;
         let collection = async {
             if sc.source_type == lk_core::config::SourceType::Manual {
-                lk_source::capture_manual(&sc.params, &extract_ctx)
+                lk_source::capture_manual(&sc.params, &source_ctx)
                 .await
                 .and_then(|mut capture| {
                     capture.project_links(
@@ -286,7 +291,7 @@ pub async fn run(
                 })
             } else {
                 adapter
-                    .observe(&sc.params, &extract_ctx)
+                    .observe(&sc.params, &source_ctx)
                     .await
                     .map(|observation| SourceCapture {
                         observation,
@@ -299,13 +304,22 @@ pub async fn run(
             .collection_timeout_seconds
             .unwrap_or(config.ingest.source_timeout_seconds);
         let result = collect_with_budget(started_at, timeout, collection).await;
-        if let Ok(capture) = &result {
-            manual_capture_bytes += capture
+        let mut next_inputs = acquired_inputs.clone();
+        let result = result.and_then(|capture| {
+            // Recheck final projections (including manual link relocation) before
+            // retaining the source. Failed sources do not reserve run capacity.
+            let mut source_inputs = lk_core::input::InputBudget::new(source_ctx.max_input_bytes);
+            source_inputs.admit_all(&capture.observation.items)?;
+            next_inputs.admit_all(&capture.observation.items)?;
+            Ok(capture)
+        });
+        let captured_manual_bytes = result.as_ref().map_or(0, |capture| {
+            capture
                 .originals
                 .iter()
                 .map(lk_core::manual_original::ManualBundleCapture::byte_len)
-                .sum::<usize>();
-        }
+                .sum::<usize>()
+        });
         let result = match result {
             Ok(capture) => {
                 collect_with_budget(started_at, timeout, async move {
@@ -320,6 +334,10 @@ pub async fn run(
             }
             Err(error) => Err(error),
         };
+        if result.is_ok() {
+            acquired_inputs = next_inputs;
+            manual_capture_bytes += captured_manual_bytes;
+        }
         acquired.push(Acquired {
             id: id.clone(),
             started_at,

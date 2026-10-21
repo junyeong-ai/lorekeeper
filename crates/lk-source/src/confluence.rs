@@ -274,7 +274,7 @@ impl Source for ConfluenceSource {
         // which warns when it trips. That is the intended trade: the previous behaviour
         // stopped early by counting results it was about to discard, which is precisely how
         // it dropped the target day.
-        let mut items: Vec<RawItem> = Vec::new();
+        let mut items = crate::SourceItems::new(ctx);
         let mut next_path: Option<String> = None;
         let mut pages_fetched = 0usize;
 
@@ -343,7 +343,7 @@ impl Source for ConfluenceSource {
                         )
                     })
                     .filter(|item| item.timestamp >= min && item.timestamp < max),
-            );
+            )?;
 
             match crate::paging::page_step(items.len(), p.max_pages, has_next, pages_fetched) {
                 crate::paging::PageStep::Continue => continue,
@@ -392,7 +392,7 @@ impl Source for ConfluenceSource {
 
         tracing::info!(count = items.len(), "confluence: pages found");
         Ok(crate::SourceObservation {
-            items,
+            items: items.into_vec(),
             scope: crate::ObservationScope::Window {
                 start: min,
                 end: max,

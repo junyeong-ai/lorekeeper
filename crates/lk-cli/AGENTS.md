@@ -44,7 +44,10 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   Knowledge jobs give ready audit subjects a turn before global queue draining. Scope
   readiness to the actual subject/evidence/context/review pages, verified physical
   owners, typed unfinished work and staged results. Unknown task/result targets cannot
-  be assumed unrelated. Recheck readiness under vault→queue claims before recording,
+  be assumed unrelated. Reserve pending first-discovery order under vault→queue claims
+  before external audit discovery or assessment, preserving it across failed or
+  budget-limited runs without recording completion or consuming deferred class turns.
+  Recheck readiness under those claims before recording,
   and verify selected receipts after final reconciliation even when unrelated backlog
   leaves the overall job incomplete. Authored pages require no invented done markers.
   Grant each temporary selection manifest's directory explicitly to the selected host;
@@ -130,7 +133,9 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   navigation mutation. Guide ownership, symlink, nonregular-file and authored
   collision guards remain strict; never infer ownership from an old export name.
 - Browse metadata with query=None; reject query-only/date-sort combinations in the
-  library too. Created means declared authored date, not ingestion time. Preserve
+  library too. Declared-created bounds compose with queries; created sorting is browse-only.
+  Exact repository/provider scopes match declared ownership, not concept evidence membership.
+  Created means declared authored date, not ingestion time. Preserve
   missing/invalid visibility, stable path ties, scope/filter/facet/pagination meaning.
   Search rejects an empty query and a zero limit. Do not reintroduce full
   corpus metadata decode/sort for SQL browse or load concept vocabulary there.

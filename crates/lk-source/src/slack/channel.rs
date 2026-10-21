@@ -120,7 +120,7 @@ struct HistoryData {
     response_metadata: Option<ResponseMetadata>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
 struct SlackMessage {
     ts: String,
     #[serde(default)]
@@ -171,14 +171,15 @@ impl SlackChannelSource {
         channel_id: &str,
         root_ts: &str,
         max_messages: usize,
+        input_budget: &mut lk_core::input::InputBudget,
     ) -> Result<super::Paginated<SlackMessage>, SourceError> {
         paginate_observed::<HistoryData, SlackMessage, _>(
             &self.http,
             &self.token,
             "conversations.replies",
             &[("channel", channel_id), ("ts", root_ts), ("limit", "100")],
-            max_messages,
-            "max_thread_messages",
+            (max_messages, "max_thread_messages"),
+            input_budget,
             |data| {
                 (
                     data.messages.unwrap_or_default(),
@@ -214,7 +215,8 @@ impl Source for SlackChannelSource {
         let oldest_ts = format!("{}.000000", oldest.as_second());
         let latest_ts = format!("{}.000000", latest.as_second());
 
-        let mut items = Vec::new();
+        let mut items = crate::SourceItems::new(ctx);
+        let mut message_budget = lk_core::input::InputBudget::new(ctx.max_input_bytes);
         for ch_ref in p.channel_refs() {
             let channel_id = resolve_channel_id(&self.http, &self.token, ch_ref).await?;
             let channel_name = ch_ref.strip_prefix('#').unwrap_or(ch_ref);
@@ -233,8 +235,8 @@ impl Source for SlackChannelSource {
                     ("inclusive", "true"),
                     ("limit", "100"),
                 ],
-                p.max_messages_per_channel,
-                "max_messages_per_channel",
+                (p.max_messages_per_channel, "max_messages_per_channel"),
+                &mut message_budget,
                 |data| {
                     (
                         data.messages.unwrap_or_default(),
@@ -256,13 +258,19 @@ impl Source for SlackChannelSource {
                     || root.thread_ts.as_deref() == Some(root.ts.as_str());
                 let mut thread = if p.include_threads && has_replies {
                     match self
-                        .fetch_thread(&channel_id, &root.ts, p.max_thread_messages)
+                        .fetch_thread(
+                            &channel_id,
+                            &root.ts,
+                            p.max_thread_messages,
+                            &mut message_budget,
+                        )
                         .await
                     {
                         Ok(t) => {
                             partial |= !t.complete;
                             t.items
                         }
+                        Err(e @ SourceError::Input(_)) => return Err(e),
                         Err(e) => {
                             partial = true;
                             tracing::warn!(
@@ -350,7 +358,7 @@ impl Source for SlackChannelSource {
                         "reply_count": root.reply_count,
                         "author_id": root.user,
                     }),
-                });
+                })?;
             }
 
             tracing::info!(
@@ -361,7 +369,7 @@ impl Source for SlackChannelSource {
         }
 
         Ok(crate::SourceObservation {
-            items,
+            items: items.into_vec(),
             scope: crate::ObservationScope::Window {
                 start: oldest,
                 end: latest,

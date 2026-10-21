@@ -161,6 +161,103 @@ fn record_discovery(fixture: &Fixture, path: &str) {
 }
 
 #[test]
+fn knowledge_reserves_pending_order_before_discovery_across_call_limited_runs() {
+    let discover = r#"
+case "$*" in
+  *"discover."*)
+    "$LORE_BIN" wiki audit-plan > "$TEST_EXECUTION_ROOT/plan.json" || exit 40
+    python3 - <<'DISCOVERY'
+import json, os, subprocess
+from pathlib import Path
+root=Path(os.environ['TEST_EXECUTION_ROOT'])
+candidate=json.loads((root/'plan.json').read_text())['candidates'][0]
+request={key:candidate[key] for key in ['path','file_revision']}
+request['queries']=[{'query':candidate['title'],'phrase':True,'spacing':False}]
+path=root/'discovery.json'
+path.write_text(json.dumps(request))
+subprocess.run([os.environ['LORE_BIN'],'wiki','audit-discover','--file',str(path)],check=True)
+DISCOVERY
+    exit $?
+esac
+"#;
+    for engine in ["claude-code", "codex"] {
+        let fixture = Fixture::new(engine, 30, &format!("{discover}\n{RECORD_FIRST_AUDIT}"));
+        let config = std::fs::read_to_string(&fixture.config).unwrap().replace(
+            "  default_profile: primary\n",
+            "  default_profile: primary\n  work: {max_calls: 1}\n",
+        ) + "graph:\n  audit:\n    batch_size: 1\n";
+        std::fs::write(&fixture.config, config).unwrap();
+        let documents = fixture.root().join("vault/wiki/documents");
+        std::fs::create_dir_all(&documents).unwrap();
+        let write_document = |name| {
+            std::fs::write(
+                documents.join(format!("{name}.md")),
+                format!("---\ntype: document\ntitle: Source {name}\n---\nA complete authored source {name}.\n"),
+            )
+            .unwrap();
+        };
+        let state_path = fixture
+            .root()
+            .join("vault/.lorekeeper/knowledge-audit.json");
+        let state = || -> serde_json::Value {
+            serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap()
+        };
+        write_document("z");
+        let (output, result) = fixture.run("knowledge");
+        assert!(!output.status.success(), "{result}");
+        assert_eq!(result["semantic_calls"], 1, "{result}");
+        let reserved = state();
+        assert_eq!(
+            reserved["pending"],
+            serde_json::json!(["wiki/documents/z.md"])
+        );
+        assert_eq!(reserved["entries"], serde_json::json!({}));
+        assert_eq!(reserved["next_class"], "changed");
+        assert!(reserved["discovery"]["wiki/documents/z.md"].is_object());
+
+        write_document("a");
+        let before = std::fs::read(&state_path).unwrap();
+        let planned = fixture
+            .command()
+            .args(["wiki", "audit-plan"])
+            .output()
+            .unwrap();
+        assert!(planned.status.success());
+        let planned: serde_json::Value = serde_json::from_slice(&planned.stdout).unwrap();
+        assert_eq!(planned["candidates"][0]["path"], "wiki/documents/z.md");
+        assert_eq!(std::fs::read(&state_path).unwrap(), before);
+        let (output, result) = fixture.run("knowledge");
+        assert!(output.status.success(), "{result}");
+        assert_eq!(result["semantic_calls"], 1, "{result}");
+        assert_eq!(result["audit"][0]["assessed_path"], "wiki/documents/z.md");
+        assert_eq!(
+            state()["pending"],
+            serde_json::json!(["wiki/documents/a.md"])
+        );
+
+        write_document("0");
+        let (output, result) = fixture.run("knowledge");
+        assert!(!output.status.success(), "{result}");
+        assert_eq!(result["semantic_calls"], 1, "{result}");
+        let reserved = state();
+        assert_eq!(
+            reserved["pending"],
+            serde_json::json!(["wiki/documents/a.md", "wiki/documents/0.md"])
+        );
+        assert_eq!(reserved["entries"].as_object().unwrap().len(), 1);
+        assert!(reserved["discovery"]["wiki/documents/a.md"].is_object());
+        let (output, result) = fixture.run("knowledge");
+        assert!(output.status.success(), "{result}");
+        assert_eq!(result["semantic_calls"], 1, "{result}");
+        assert_eq!(result["audit"][0]["assessed_path"], "wiki/documents/a.md");
+        assert_eq!(
+            state()["pending"],
+            serde_json::json!(["wiki/documents/0.md"])
+        );
+    }
+}
+
+#[test]
 fn knowledge_discovers_unlinked_documents_before_assessment_on_both_hosts() {
     let discover = r#"
 case "$*" in
@@ -673,12 +770,21 @@ fn audit_exit_zero_without_assessments_is_incomplete() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(fixture.root().join("arguments").exists());
-    assert!(
-        !fixture
-            .root()
-            .join("vault/.lorekeeper/knowledge-audit.json")
-            .exists()
+    let reserved: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(
+            fixture
+                .root()
+                .join("vault/.lorekeeper/knowledge-audit.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(reserved["entries"], serde_json::json!({}));
+    assert_eq!(
+        reserved["pending"],
+        serde_json::json!(["wiki/concepts/unverified.md"])
     );
+    assert!(reserved.get("discovery").is_none());
 }
 
 #[test]

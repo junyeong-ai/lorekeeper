@@ -48,6 +48,11 @@ identifies the immutable manifest; `lore wiki original <document-path>` verifies
 and lists members. Assets remain in the inbox. Images become independent ingestion
 units only when selected by OCR/vision configuration or an explicit extension list.
 
+Manual document ownership follows the canonical input file location. Editing the same
+file updates its existing owner; renaming or copying it is a different input, even when
+its bytes match. Drive and repository documents instead use verified provider/document
+identities. Equal titles, URLs or text never authorize an automatic merge.
+
 Explicit relative Markdown links and supported HTML resources are captured within
 the inbox boundary. Missing, escaping or symlink dependencies fail capture. CSS/SVG
 and other unsupported resource constructs are reported as incomplete coverage and
@@ -57,8 +62,13 @@ self-contained export. Each entry is a separate observation, not an atomic inbox
 snapshot. Default capture limits are 32 MiB per entry, 64 MiB per member, 2048 members,
 32 dependency levels and 8192 member records per source. `ingest.originals` configures entry/member/source acquisition limits, with a default
 256 MiB per source and a fixed 512 MiB ingest envelope. Captures use private temporary
-files; decoded text retains its separate bounds. Each source permits 256 MiB of derived text. Split unlinked batches or provide smaller self-contained
-exports when those limits fail.
+files; manual derived text has a separate 256 MiB source envelope.
+`ingest.inputs` independently bounds cumulative serialized observations and projected
+planning input (default 64 MiB per source, 256 MiB per run), including retained streaming
+events. Failed admission preserves that stage's remaining capacity for independent
+sources and keeps the source's inbox entries. These limits do not cap process memory or native
+decoder allocations. Split unlinked batches, provide smaller self-contained exports or
+deliberately adjust the corresponding configured limit; input is never clipped to fit.
 
 RSS originals retain immutable pre-classification adapter-collected text, not the
 provider's HTTP/XML bytes. New bound extraction requires explicit article IDs and

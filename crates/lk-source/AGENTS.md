@@ -25,6 +25,10 @@ uses validated params and context; do not add per-adapter output pipelines.
   rather than truncating. Timeout is not a memory cap. Decode the HTTP Content-Type
   charset once via encoding_rs; do not reinterpret an already decoded meta charset.
   Private redirect targets are intentionally supported for intranet sources.
+- Use `SourceItems` before retaining projected items and `InputBudget` for retained
+  provider-record buffers. `ExtractContext.max_input_bytes` may reflect remaining run
+  capacity. Propagate typed capacity failures out of optional enrichment/item handlers;
+  an admitted prefix is not a successful observation. These bounds are not process RSS.
 - Remote readable fetch requires a supported HTTP media type. HTML uses readability;
   Markdown keeps its structure and rebases parsed Link/Image destinations against the
   final response URL. A `text/plain` URL ending in `.md`/`.markdown` uses that file

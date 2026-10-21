@@ -93,7 +93,7 @@ struct SearchPaging {
     pages: Option<u32>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, serde::Serialize)]
 struct SearchMatch {
     ts: String,
     text: String,
@@ -102,7 +102,7 @@ struct SearchMatch {
     permalink: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, serde::Serialize)]
 struct MatchChannel {
     id: Option<String>,
     name: Option<String>,
@@ -152,7 +152,8 @@ impl Source for SlackSearchSource {
         let after_str = after.to_string();
         let before_str = before.to_string();
 
-        let mut all_items = Vec::new();
+        let mut all_items = crate::SourceItems::new(ctx);
+        let mut match_budget = lk_core::input::InputBudget::new(ctx.max_input_bytes);
 
         for spec in &p.queries {
             let channel_name = spec.channel.strip_prefix('#').unwrap_or(&spec.channel);
@@ -195,6 +196,7 @@ impl Source for SlackSearchSource {
                     Some(m) => (m.matches.unwrap_or_default(), m.paging),
                     None => (Vec::new(), None),
                 };
+                match_budget.admit_all(&page_matches)?;
                 matches.extend(page_matches);
 
                 // A missing paging envelope reads as "no further pages" — Slack
@@ -305,12 +307,12 @@ impl Source for SlackSearchSource {
                         "keywords": spec.keywords,
                         "author_id": author_id,
                     }),
-                });
+                })?;
             }
         }
 
         Ok(crate::SourceObservation {
-            items: all_items,
+            items: all_items.into_vec(),
             scope: crate::ObservationScope::ConfiguredQuery,
             outcome: if partial {
                 crate::ObservationOutcome::Partial

@@ -34,6 +34,8 @@ use document_identity::DocumentIdentity;
 
 #[derive(Debug, Error)]
 pub enum PipelineError {
+    #[error(transparent)]
+    Input(#[from] lk_core::input::InputError),
     #[error("event-log: {0}")]
     EventLog(String),
     #[error("render: {0}")]
@@ -129,6 +131,22 @@ pub struct Pipeline {
     /// disambiguate by its own identity instead of silently overwriting the earlier page.
     document_slugs: std::collections::HashSet<String>,
     document_addresses: Option<BTreeMap<DocumentIdentity, Vec<String>>>,
+    input_budgets: PlanningInputBudgets,
+}
+
+#[derive(Clone)]
+struct PlanningInputBudgets {
+    events: lk_core::input::InputBudget,
+    projections: lk_core::input::InputBudget,
+}
+
+impl PlanningInputBudgets {
+    fn admit_events(&mut self, events: &[Event], source_limit: usize) -> Result<(), PipelineError> {
+        let mut source = lk_core::input::InputBudget::new(source_limit);
+        source.admit_all(events)?;
+        self.events.admit_all(events)?;
+        Ok(())
+    }
 }
 
 /// Document addresses reserve room for their disambiguation suffix and extension.
@@ -148,6 +166,10 @@ fn bounded_address(slug: &str) -> String {
 
 impl Pipeline {
     pub fn new(vault_root: &Path, ctx: Arc<PipelineContext>) -> Self {
+        let input_budgets = PlanningInputBudgets {
+            events: lk_core::input::InputBudget::new(ctx.input_limits.max_run_bytes.get()),
+            projections: lk_core::input::InputBudget::new(ctx.input_limits.max_run_bytes.get()),
+        };
         Self {
             vault_root: vault_root.to_owned(),
             ctx,
@@ -156,6 +178,7 @@ impl Pipeline {
             concept_drafts: ConceptDrafts::new(),
             document_slugs: std::collections::HashSet::new(),
             document_addresses: None,
+            input_budgets,
         }
     }
 
@@ -179,6 +202,9 @@ impl Pipeline {
         items: Vec<RawItem>,
         options: &IngestOptions,
     ) -> Result<IngestResult, PipelineError> {
+        let mut source_inputs =
+            lk_core::input::InputBudget::new(self.ctx.input_limits.max_source_bytes.get());
+        source_inputs.admit_all(&items)?;
         // Taken before the plan runs, because normalization is where a `RawItem` becomes
         // something the vault will render and a proposal is not a page — and taken on every
         // exit, because a source can declare open work in a run that renders nothing: an issue
@@ -192,7 +218,15 @@ impl Pipeline {
         } else {
             Vec::new()
         };
-        let mut result = self.plan_pages(source_id, config, items, options).await?;
+        let mut input_budgets = self.input_budgets.clone();
+        let result = self
+            .plan_pages(source_id, config, items, options, &mut input_budgets)
+            .await;
+        if result.is_err() {
+            self.concept_drafts.discard_staging();
+        }
+        let mut result = result?;
+        self.input_budgets = input_budgets;
         result.work = work;
         result.appointments = appointments;
         Ok(result)
@@ -204,6 +238,7 @@ impl Pipeline {
         config: &SourceConfig,
         items: Vec<RawItem>,
         options: &IngestOptions,
+        input_budgets: &mut PlanningInputBudgets,
     ) -> Result<IngestResult, PipelineError> {
         let mut events =
             normalize::normalize_events(source_id, config.source_type, items, &self.ctx.timezone);
@@ -243,7 +278,10 @@ impl Pipeline {
                     .is_some_and(|p| p.is_tracked(source_id)),
             );
             classify::classify_by_keywords(&mut events, &config.classify);
-            return self.plan_documents(source_id, config, events).await;
+            input_budgets.admit_events(&events, self.ctx.input_limits.max_source_bytes.get())?;
+            return self
+                .plan_documents(source_id, config, events, input_budgets)
+                .await;
         }
 
         // A STREAMING source (RSS) fetches a rolling, capped window that can't reproduce a
@@ -256,8 +294,17 @@ impl Pipeline {
         // Complete-refetch sources reproduce their whole window on demand, so they render
         // directly from the fetch and keep no log (nothing to accumulate).
         if config.source_type.descriptor().streaming {
-            events =
-                self.accumulate_with_log(source_id, events, options.target_date, options.dry_run)?;
+            events = self.accumulate_with_log(
+                source_id,
+                events,
+                options.target_date,
+                options.dry_run,
+                self.ctx
+                    .input_limits
+                    .max_source_bytes
+                    .get()
+                    .min(input_budgets.events.remaining()),
+            )?;
         }
 
         if events.is_empty() {
@@ -306,6 +353,7 @@ impl Pipeline {
                 .is_some_and(|p| p.is_tracked(source_id)),
         );
         classify::classify_by_keywords(&mut events, &config.classify);
+        input_budgets.admit_events(&events, self.ctx.input_limits.max_source_bytes.get())?;
 
         let mut by_date: BTreeMap<jiff::civil::Date, Vec<usize>> = BTreeMap::new();
         for (i, event) in events.iter().enumerate() {
@@ -328,6 +376,8 @@ impl Pipeline {
         let events_heading = item_kind.heading(strings);
         let concepts_heading = strings.related_concepts;
 
+        let mut projected_inputs =
+            lk_core::input::InputBudget::new(self.ctx.input_limits.max_source_bytes.get());
         for (date, day_indices) in &by_date {
             // A date after today is a FORECAST (a calendar look-ahead event that hasn't
             // happened): it isn't knowledge yet, so the vault never materializes a page for
@@ -344,6 +394,8 @@ impl Pipeline {
                 .map(|e| format!("{}\n{}", e.title, e.body))
                 .collect::<Vec<_>>()
                 .join("\n---\n");
+            projected_inputs.admit(&combined)?;
+            input_budgets.projections.admit(&combined)?;
 
             let daily_path =
                 lk_core::vault_path::VaultPath::daily(&self.ctx.dirs, source_id, *date).to_string();
@@ -685,6 +737,7 @@ impl Pipeline {
         fresh: Vec<Event>,
         target_date: Option<jiff::civil::Date>,
         dry_run: bool,
+        max_input_bytes: usize,
     ) -> Result<Vec<Event>, PipelineError> {
         let mut fresh_by_date: BTreeMap<jiff::civil::Date, Vec<Event>> = BTreeMap::new();
         for event in fresh {
@@ -695,10 +748,12 @@ impl Pipeline {
         dates.extend(target_date);
 
         let mut merged_all = Vec::new();
+        let mut input_budget = lk_core::input::InputBudget::new(max_input_bytes);
         for date in dates {
             let stored = self.event_log.read(source_id, date)?;
             let fresh_for_date = fresh_by_date.remove(&date).unwrap_or_default();
             let merged = event_log::merge_streaming_events(stored, fresh_for_date)?;
+            input_budget.admit_all(&merged)?;
             if !dry_run && !merged.is_empty() {
                 self.event_log.write(source_id, date, &merged)?;
             }
@@ -1075,6 +1130,7 @@ impl Pipeline {
         source_id: &str,
         config: &SourceConfig,
         events: Vec<Event>,
+        input_budgets: &mut PlanningInputBudgets,
     ) -> Result<IngestResult, PipelineError> {
         self.load_document_addresses().await?;
         let mut identities = std::collections::BTreeSet::new();
@@ -1121,6 +1177,8 @@ impl Pipeline {
         let mut staged_concepts: Vec<(lk_core::concept::ExtractedConcept, jiff::civil::Date)> =
             Vec::new();
         let mut manual_projection_bytes = 0usize;
+        let mut projected_inputs =
+            lk_core::input::InputBudget::new(self.ctx.input_limits.max_source_bytes.get());
         // Two documents can share a title — and therefore a base slug — whether in one batch
         // or across two sources in the same run. Disambiguate a collision by the document's
         // OWN stable identity (the trailing hash of its `EventId`), so a same-titled later
@@ -1265,6 +1323,8 @@ impl Pipeline {
                 Some(record) => format!("{}\nSource record: {record}\n{}", event.title, event.body),
                 None => format!("{}\n{}", event.title, event.body),
             };
+            projected_inputs.admit(&combined)?;
+            input_budgets.projections.admit(&combined)?;
 
             let summary_req = lk_queue::SummarizeRequest {
                 text: combined.clone(),

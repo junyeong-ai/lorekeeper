@@ -279,6 +279,9 @@ async fn read_item(path: &Path) -> Result<RawItem, SourceError> {
         documents: None,
         projection_cache: None,
         originals: Default::default(),
+        max_input_bytes: lk_core::config::IngestInputLimits::default()
+            .max_source_bytes
+            .get(),
     };
     read_captured_item(path, &capture, &ctx).await
 }
@@ -734,6 +737,7 @@ pub struct ManualExtraction {
     pub failures: Vec<String>,
     pub unprocessed: Vec<UnprocessedInput>,
     projection_limit: usize,
+    max_input_bytes: usize,
 }
 
 pub struct UnprocessedInput {
@@ -748,7 +752,12 @@ impl ManualExtraction {
             .iter()
             .map(|capture| (capture.source_file.as_str(), capture))
             .collect::<std::collections::BTreeMap<_, _>>();
+        let mut input_budget = lk_core::input::InputBudget::new(self.max_input_bytes);
+        let mut input_error = None;
         self.items.retain_mut(|item| {
+            if input_error.is_some() {
+                return false;
+            }
             let source_file = item.metadata.get("source_file").and_then(|v| v.as_str());
             let projected = (|| {
                 let capture = source_file
@@ -776,6 +785,10 @@ impl ManualExtraction {
             match projected {
                 Ok(body) => {
                     item.body = body;
+                    if let Err(error) = input_budget.admit(item) {
+                        input_error = Some(error);
+                        return false;
+                    }
                     true
                 }
                 Err(error) => {
@@ -788,6 +801,9 @@ impl ManualExtraction {
                 }
             }
         });
+        if let Some(error) = input_error {
+            return Err(error.into());
+        }
         crate::require_any_observation("inbox file", self.items.len(), attempted)?;
         if self.items.iter().map(|item| item.body.len()).sum::<usize>()
             > lk_core::manual_original::MAX_MANUAL_BATCH_BYTES
@@ -832,11 +848,13 @@ pub async fn capture_manual(
         failures: Vec::new(),
         unprocessed: Vec::new(),
         projection_limit: projection_limit(ctx),
+        max_input_bytes: ctx.max_input_bytes,
     };
     let mut total = 0usize;
     let mut total_members = 0usize;
     let mut total_derived = 0usize;
     let mut attempted = 0;
+    let mut input_budget = lk_core::input::InputBudget::new(ctx.max_input_bytes);
     let mut entries = std::fs::read_dir(&inbox)
         .map_err(|e| SourceError::Parse(e.to_string()))?
         .collect::<Result<Vec<_>, _>>()
@@ -900,6 +918,7 @@ pub async fn capture_manual(
                         "manual source batch exceeds ingest.originals.max_source_bytes".into(),
                     ));
                 }
+                input_budget.admit(&item)?;
                 result.items.push(item);
                 result.originals.push(capture);
             }
@@ -980,6 +999,9 @@ mod tests {
             documents: None,
             projection_cache: None,
             originals: Default::default(),
+            max_input_bytes: lk_core::config::IngestInputLimits::default()
+                .max_source_bytes
+                .get(),
         }
     }
 
@@ -1131,6 +1153,9 @@ mod tests {
             documents: None,
             projection_cache: None,
             originals: Default::default(),
+            max_input_bytes: lk_core::config::IngestInputLimits::default()
+                .max_source_bytes
+                .get(),
         };
         let params = serde_json::json!({ "inbox_dir": dir, "archive_after_ingest": false });
         let mut items = ManualSource::new().extract(&params, &ctx).await.unwrap();
@@ -1169,6 +1194,9 @@ mod tests {
                 documents: None,
                 projection_cache: None,
                 originals: Default::default(),
+                max_input_bytes: lk_core::config::IngestInputLimits::default()
+                    .max_source_bytes
+                    .get(),
             };
             let direct_params =
                 serde_json::json!({"inbox_dir": "inbox", "archive_after_ingest": archive});
@@ -1351,6 +1379,9 @@ mod tests {
             documents: None,
             projection_cache: None,
             originals: Default::default(),
+            max_input_bytes: lk_core::config::IngestInputLimits::default()
+                .max_source_bytes
+                .get(),
         };
         assert!(matches!(
             ManualSource::new().extract(&params, &ctx).await,
@@ -1515,6 +1546,9 @@ mod tests {
             documents: None,
             projection_cache: None,
             originals: Default::default(),
+            max_input_bytes: lk_core::config::IngestInputLimits::default()
+                .max_source_bytes
+                .get(),
         };
         let items = src.extract(&params, &ctx).await.unwrap();
         assert_eq!(items.len(), 1);
@@ -1659,6 +1693,9 @@ mod tests {
             documents: None,
             projection_cache: None,
             originals: Default::default(),
+            max_input_bytes: lk_core::config::IngestInputLimits::default()
+                .max_source_bytes
+                .get(),
         };
         let items = src.extract(&params, &ctx).await.unwrap();
         assert_eq!(items.len(), 1);
@@ -1683,6 +1720,9 @@ mod tests {
             documents: None,
             projection_cache: None,
             originals: Default::default(),
+            max_input_bytes: lk_core::config::IngestInputLimits::default()
+                .max_source_bytes
+                .get(),
         };
         let err = src.extract(&params, &ctx).await.unwrap_err();
         assert!(
@@ -1710,6 +1750,9 @@ mod tests {
             documents: None,
             projection_cache: None,
             originals: Default::default(),
+            max_input_bytes: lk_core::config::IngestInputLimits::default()
+                .max_source_bytes
+                .get(),
         };
         let items = src.extract(&params, &ctx).await.unwrap();
         // After extract(), file is still in inbox (archival is deferred).
@@ -1764,6 +1807,9 @@ mod tests {
             documents: None,
             projection_cache: None,
             originals: Default::default(),
+            max_input_bytes: lk_core::config::IngestInputLimits::default()
+                .max_source_bytes
+                .get(),
         };
         let items = src.extract(&params, &ctx).await.unwrap();
         let events: Vec<lk_core::event::Event> = items
@@ -1818,6 +1864,9 @@ mod tests {
             documents: None,
             projection_cache: None,
             originals: Default::default(),
+            max_input_bytes: lk_core::config::IngestInputLimits::default()
+                .max_source_bytes
+                .get(),
         };
         let items = src.extract(&params, &ctx).await.unwrap();
         let events: Vec<lk_core::event::Event> = items
@@ -1883,6 +1932,9 @@ mod tests {
             documents: None,
             projection_cache: None,
             originals: Default::default(),
+            max_input_bytes: lk_core::config::IngestInputLimits::default()
+                .max_source_bytes
+                .get(),
         };
         let items = src.extract(&params, &ctx).await.unwrap();
         let events: Vec<lk_core::event::Event> = items
@@ -1944,6 +1996,9 @@ mod tests {
             documents: None,
             projection_cache: None,
             originals: Default::default(),
+            max_input_bytes: lk_core::config::IngestInputLimits::default()
+                .max_source_bytes
+                .get(),
         };
         let items = src.extract(&params, &ctx).await.unwrap();
         let events: Vec<lk_core::event::Event> = items
@@ -2149,6 +2204,9 @@ mod tests {
             documents: None,
             projection_cache: None,
             originals: Default::default(),
+            max_input_bytes: lk_core::config::IngestInputLimits::default()
+                .max_source_bytes
+                .get(),
         };
         let params = serde_json::json!({"inbox_dir": "inbox"});
         let capture = capture_manual(&params, &ctx).await.unwrap();
@@ -2270,6 +2328,9 @@ mod tests {
             documents: None,
             projection_cache: None,
             originals: Default::default(),
+            max_input_bytes: lk_core::config::IngestInputLimits::default()
+                .max_source_bytes
+                .get(),
         };
         let items = src.extract(&params, &ctx).await.unwrap();
         assert_eq!(

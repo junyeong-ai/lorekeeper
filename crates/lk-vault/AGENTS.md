@@ -111,6 +111,9 @@ canonical; SQLite navigation is derived.
   scripts, styles, head metadata, templates and embedded-content fallback containers
   (`noscript`, `iframe`, `noembed`, `noframes`) do not contribute text. Form choices
   and legends remain separate text blocks; this projection does not evaluate CSS.
+- Excerpt locations use the selected visible block's original parser range from one
+  complete document parse. Section slices lose global references; equal text does not
+  identify an occurrence. HTML DOM text without a source map has no inferred locator.
   ASCII-alphanumeric term edges require boundaries, CJK allows attached particles.
 - Browse filters/facets/pagination have distinct counts: facets before metadata/date
   filters, total after, pagination last. Each facet pages distinct values in exact-value
@@ -126,6 +129,9 @@ canonical; SQLite navigation is derived.
   addresses/verified filesystem aliases, not names; missing links remain visible.
   Prepared links use captured lexical addresses only. Context ≤400 Unicode chars
   with truncation flag; do not clip destination/label into a different address.
+- `neighbors.rs`: deduplicate captured one-hop pages before direction/type/lifecycle
+  filters and pagination. Missing/self links remain occurrences, not neighboring pages.
+  Query only the pinned SQLite capture; never infer filesystem aliases or semantic support.
 - `provenance.rs`: resolve exact typed repository/provider namespace and document identities, never
   title/URL/alias guesses. Duplicate/missing owners stay ambiguous/unresolved;
   verified symlink spellings share an owner, hard links don't. Revision covers the

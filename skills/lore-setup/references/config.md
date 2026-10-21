@@ -34,6 +34,9 @@ ingest:
   schedule: "0 9 * * *"              # one native `lore run daily` over enabled sources
                                      # personal work-logs aggregate across sources;
                                      # failures remain explicit and may block reviews
+  inputs:
+    max_source_bytes: 67108864        # serialized normalized/projected input per source
+    max_run_bytes: 268435456          # cumulative run input; must be >= max_source_bytes
 
 sources:                             # key = source id; document sources use wiki/documents
   <id>:
@@ -86,6 +89,15 @@ captured; use absolute source URLs or a self-contained manual capture rather tha
 relying on a Drive filename or viewer URL as a dependency base. Google Workspace
 [text exports are limited to 10 MB by the provider](https://developers.google.com/workspace/drive/api/reference/rest/v3/files/export);
 the adapter's 16 MiB response reader does not raise that provider limit.
+
+`ingest.inputs` bounds cumulative serialized retained provider records, normalized
+observations and projected planning inputs. Collection and planning apply these limits
+independently; `ingest.originals` raw-file preservation and `execution.work` model
+requests have separate limits.
+Both limits are positive bytes, with the per-source limit no larger than the run limit.
+Over-budget input is reported as incomplete rather than clipped. Increase these values
+deliberately or use smaller self-contained input batches. They do not cap total process
+memory, native decoder allocations, or provider usage.
 
 Semantic maintenance is optional and separate from weekly synthesis and retention.
 Enable `graph.audit.schedule` deliberately: each run uses the LLM to review at most
