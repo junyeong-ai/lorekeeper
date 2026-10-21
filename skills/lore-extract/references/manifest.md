@@ -70,5 +70,8 @@ checked and any replacement has been verified at the published addresses.
 Regenerable indexes and checkout caches have a different lifetime. Reclaim them
 through their owner's locking protocol when no longer needed; preserve source
 bytes, Git objects needed to reconstruct the recorded revision, and manifests.
-`lore maintenance` prunes owned operational history and proven published work
-caches; it does not own ad-hoc repository copies under `source-snapshots/`.
+`lore maintenance` prunes owned operational history, proven published work caches
+and expired document projections, reclaiming empty projection namespaces and inactive
+claims. Its dry run previews eligible projection payloads without creating cache files
+or renewing their lifetime. It does not own ad-hoc repository copies under
+`source-snapshots/`.
