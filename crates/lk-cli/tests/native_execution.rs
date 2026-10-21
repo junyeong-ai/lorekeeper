@@ -1068,6 +1068,9 @@ fn maintenance_prunes_published_work_only_after_exclusive_access_without_changin
     );
     assert!(receipt_path.exists());
     drop(lock);
+    fixture.ingest();
+    let pending = fixture.command().args(["queue", "check"]).output().unwrap();
+    assert!(!pending.status.success());
     let preview = fixture
         .command()
         .args(["maintenance", "--dry-run"])

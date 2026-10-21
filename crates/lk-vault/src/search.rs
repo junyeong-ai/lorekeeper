@@ -25,6 +25,8 @@ use walkdir::WalkDir;
 
 use crate::VaultError;
 
+pub(super) const REVIEW_PREVIEW_LIMIT: usize = 3;
+
 /// Where a query matched a page, from the strongest claim to the weakest. The derived
 /// ordering is the search's ranking.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
@@ -73,7 +75,7 @@ pub struct SearchHit {
     pub tags: Vec<String>,
     pub phrase_match: bool,
     pub spacing_match: bool,
-    pub reviews: Vec<crate::review::ReviewPreview>,
+    pub reviews: crate::ContextReviews,
     pub matched: MatchField,
     pub excerpt: String,
     pub file_revision: String,
@@ -213,6 +215,9 @@ pub struct SearchOptions<'a> {
     pub snapshot: Option<&'a str>,
     pub limit: usize,
     pub offset: usize,
+    /// Maximum distinct values per metadata facet, ordered by their exact value.
+    pub facet_limit: usize,
+    pub facet_offset: usize,
     pub include_sources: bool,
     pub category: Option<&'a str>,
     pub source_status: Option<&'a str>,
@@ -233,6 +238,8 @@ impl Default for SearchOptions<'_> {
             snapshot: None,
             limit: 20,
             offset: 0,
+            facet_limit: 20,
+            facet_offset: 0,
             include_sources: false,
             category: None,
             source_status: None,
@@ -247,7 +254,9 @@ impl Default for SearchOptions<'_> {
 
 impl SearchOptions<'_> {
     pub(crate) fn validate_browse(&self) -> Result<(), VaultError> {
-        let message = if self.query.is_none() && (self.phrase || self.spacing) {
+        let message = if !(1..=100).contains(&self.facet_limit) {
+            Some("facet limit must be between 1 and 100")
+        } else if self.query.is_none() && (self.phrase || self.spacing) {
             Some("phrase and spacing matching require a query")
         } else if self.query.is_some()
             && (self.sort != BrowseSort::Title
@@ -282,11 +291,47 @@ pub struct SearchResult {
     pub offset: usize,
     pub next_offset: Option<usize>,
     /// Counts for the query and source scope, before metadata filters.
-    pub categories: BTreeMap<String, usize>,
-    pub source_statuses: BTreeMap<String, usize>,
-    pub formats: BTreeMap<String, usize>,
-    pub tags: BTreeMap<String, usize>,
-    pub knowledge_statuses: BTreeMap<String, usize>,
+    pub categories: FacetPage,
+    pub source_statuses: FacetPage,
+    pub formats: FacetPage,
+    pub tags: FacetPage,
+    pub knowledge_statuses: FacetPage,
+}
+
+#[derive(Debug, Default, PartialEq, Eq, serde::Serialize)]
+pub struct FacetPage {
+    pub values: BTreeMap<String, usize>,
+    /// Number of distinct values, not the number of matching pages.
+    pub total: usize,
+    pub offset: usize,
+    pub next_offset: Option<usize>,
+}
+
+impl FacetPage {
+    fn from_counts(counts: BTreeMap<String, usize>, options: &SearchOptions<'_>) -> Self {
+        let total = counts.len();
+        let values = counts
+            .into_iter()
+            .skip(options.facet_offset)
+            .take(options.facet_limit)
+            .collect::<BTreeMap<_, _>>();
+        let end = options.facet_offset.saturating_add(values.len());
+        Self {
+            values,
+            total,
+            offset: options.facet_offset,
+            next_offset: (end < total).then_some(end),
+        }
+    }
+}
+
+#[derive(Default)]
+struct FacetCounts {
+    categories: BTreeMap<String, usize>,
+    source_statuses: BTreeMap<String, usize>,
+    formats: BTreeMap<String, usize>,
+    tags: BTreeMap<String, usize>,
+    knowledge_statuses: BTreeMap<String, usize>,
 }
 
 /// Discovery exposes recorded navigation fields; full source metadata remains in the page.
@@ -518,6 +563,7 @@ pub(super) fn visit_collections(
                     page,
                     knowledge_status,
                     reviews: Vec::new(),
+                    review_states: crate::ReviewCounts::default(),
                     projection: None,
                 },
                 body_line_offset,
@@ -597,6 +643,7 @@ pub(super) struct SearchCollector<'a> {
     window: usize,
     candidates: BinaryHeap<SearchCandidate<'a>>,
     result: SearchResult,
+    facets: FacetCounts,
 }
 
 impl<'a> SearchCollector<'a> {
@@ -608,17 +655,18 @@ impl<'a> SearchCollector<'a> {
                 options.offset.saturating_add(options.limit)
             },
             candidates: BinaryHeap::new(),
+            facets: FacetCounts::default(),
             result: SearchResult {
                 snapshot: options.snapshot.map(String::from),
                 hits: Vec::new(),
                 total: 0,
                 offset: options.offset,
                 next_offset: None,
-                categories: BTreeMap::new(),
-                source_statuses: BTreeMap::new(),
-                formats: BTreeMap::new(),
-                tags: BTreeMap::new(),
-                knowledge_statuses: BTreeMap::new(),
+                categories: FacetPage::default(),
+                source_statuses: FacetPage::default(),
+                formats: FacetPage::default(),
+                tags: FacetPage::default(),
+                knowledge_statuses: FacetPage::default(),
             },
         }
     }
@@ -644,20 +692,20 @@ impl<'a> SearchCollector<'a> {
                 .unwrap_or("")
         };
         *self
-            .result
+            .facets
             .categories
             .entry(metadata("category").to_owned())
             .or_insert(0) += 1;
         *self
-            .result
+            .facets
             .formats
             .entry(metadata("type").to_owned())
             .or_insert(0) += 1;
         for tag in search_tags(&entry.page) {
-            *self.result.tags.entry(tag).or_insert(0) += 1;
+            *self.facets.tags.entry(tag).or_insert(0) += 1;
         }
         *self
-            .result
+            .facets
             .knowledge_statuses
             .entry(entry.knowledge_status().as_str().to_owned())
             .or_insert(0) += 1;
@@ -669,7 +717,7 @@ impl<'a> SearchCollector<'a> {
             .and_then(|value| value.as_str())
             .unwrap_or("");
         *self
-            .result
+            .facets
             .source_statuses
             .entry(source_status.to_owned())
             .or_insert(0) += 1;
@@ -789,13 +837,31 @@ impl<'a> SearchCollector<'a> {
                     tags: search_tags(&entry.page),
                     phrase_match,
                     spacing_match,
-                    reviews: entry.reviews.clone(),
+                    reviews: crate::ContextReviews {
+                        reviews: entry
+                            .reviews
+                            .iter()
+                            .take(REVIEW_PREVIEW_LIMIT)
+                            .cloned()
+                            .collect(),
+                        total: entry.review_states.total(),
+                        offset: 0,
+                        next_offset: (entry.review_states.total() > REVIEW_PREVIEW_LIMIT)
+                            .then_some(REVIEW_PREVIEW_LIMIT),
+                        states: entry.review_states.clone(),
+                    },
                     matched,
                 }
             })
             .collect();
         let end = options.offset.saturating_add(self.result.hits.len());
         self.result.next_offset = (end < self.result.total).then_some(end);
+        self.result.categories = FacetPage::from_counts(self.facets.categories, options);
+        self.result.source_statuses = FacetPage::from_counts(self.facets.source_statuses, options);
+        self.result.formats = FacetPage::from_counts(self.facets.formats, options);
+        self.result.tags = FacetPage::from_counts(self.facets.tags, options);
+        self.result.knowledge_statuses =
+            FacetPage::from_counts(self.facets.knowledge_statuses, options);
         self.result
     }
 }
@@ -878,7 +944,9 @@ pub(super) struct Page {
     pub(super) citations_captured: bool,
     pub(super) page: lk_core::frontmatter::VaultPage,
     pub(super) knowledge_status: KnowledgeStatus,
+    #[serde(skip)]
     pub(super) reviews: Vec<crate::review::ReviewPreview>,
+    pub(super) review_states: crate::ReviewCounts,
     #[serde(skip)]
     pub(super) projection: Option<MatchProjection>,
 }
@@ -895,6 +963,10 @@ pub(super) fn attach_reviews(
             .get(owner.to_string_lossy().as_ref())
             .cloned()
             .unwrap_or_default();
+        page.review_states = crate::ReviewCounts::default();
+        for review in &page.reviews {
+            page.review_states.record(review.effective_state, 1);
+        }
     }
     Ok(())
 }
@@ -1583,6 +1655,7 @@ mod tests {
                 .unwrap(),
                 knowledge_status: KnowledgeStatus::Active,
                 reviews: vec![],
+                review_states: crate::ReviewCounts::default(),
                 projection: Some(MatchProjection {
                     summary: "topic".into(),
                     text: format!("topic {}", "detail ".repeat(1000)),
@@ -1601,9 +1674,9 @@ mod tests {
         let result = collector.finish(&options, &[], &terms);
         assert_eq!(result.total, 500);
         assert_eq!(result.next_offset, Some(3));
-        assert_eq!(result.formats["document"], 1000);
-        assert_eq!(result.categories["selected"], 500);
-        assert_eq!(result.categories["other"], 500);
+        assert_eq!(result.formats.values["document"], 1000);
+        assert_eq!(result.categories.values["selected"], 500);
+        assert_eq!(result.categories.values["other"], 500);
         assert_eq!(
             result
                 .hits
@@ -1721,9 +1794,9 @@ mod tests {
             options.created_to = parse_created_date("2026-02-03");
             let result = super::search(root.path(), &dirs, &options).unwrap();
             assert_eq!(result.total, 2);
-            assert_eq!(result.categories["other"], 1);
-            assert_eq!(result.categories["ops"], 5);
-            assert_eq!(result.formats["document"], 6);
+            assert_eq!(result.categories.values["other"], 1);
+            assert_eq!(result.categories.values["ops"], 5);
+            assert_eq!(result.formats.values["document"], 6);
             assert!(
                 result
                     .hits
@@ -1868,9 +1941,9 @@ mod tests {
         loop {
             let result = super::search(tmp.path(), &dirs, &options).unwrap();
             assert_eq!(result.total, 3);
-            assert_eq!(result.categories["theory"], 1);
-            assert_eq!(result.categories["practice"], 3);
-            assert_eq!(result.formats["concept"], 1);
+            assert_eq!(result.categories.values["theory"], 1);
+            assert_eq!(result.categories.values["practice"], 3);
+            assert_eq!(result.formats.values["concept"], 1);
             paths.extend(result.hits.into_iter().map(|hit| hit.path));
             let Some(offset) = result.next_offset else {
                 break;
@@ -2068,7 +2141,7 @@ mod tests {
                 .is_none()
         );
         assert_eq!(hit("invalid-status").metadata_issues.len(), 2);
-        assert_eq!(result.source_statuses[""], 4);
+        assert_eq!(result.source_statuses.values[""], 4);
     }
 
     #[test]
@@ -2112,8 +2185,8 @@ mod tests {
                 .iter()
                 .all(|hit| hit.matched == MatchField::Catalog)
         );
-        assert_eq!(result.categories[""], 2);
-        assert_eq!(result.categories["theory"], 1);
+        assert_eq!(result.categories.values[""], 2);
+        assert_eq!(result.categories.values["theory"], 1);
         assert!(
             super::search(
                 tmp.path(),

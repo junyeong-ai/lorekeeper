@@ -32,12 +32,37 @@ pub enum ContextRelations {
     NotApplicable,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ContextReviews {
     pub reviews: Vec<crate::review::ReviewPreview>,
     pub total: usize,
     pub offset: usize,
     pub next_offset: Option<usize>,
+    /// Effective review states across the entire page scope, before pagination.
+    pub states: ReviewCounts,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct ReviewCounts {
+    pub open: usize,
+    pub resolved: usize,
+    pub needs_reassessment: usize,
+    pub invalid: usize,
+}
+
+impl ReviewCounts {
+    pub(super) fn record(&mut self, state: crate::ReviewEffectiveState, count: usize) {
+        match state {
+            crate::ReviewEffectiveState::Open => self.open += count,
+            crate::ReviewEffectiveState::Resolved => self.resolved += count,
+            crate::ReviewEffectiveState::NeedsReassessment => self.needs_reassessment += count,
+            crate::ReviewEffectiveState::Invalid => self.invalid += count,
+        }
+    }
+
+    pub(super) fn total(&self) -> usize {
+        self.open + self.resolved + self.needs_reassessment + self.invalid
+    }
 }
 
 #[derive(Serialize)]
@@ -161,20 +186,13 @@ pub fn inspect_page_context(
             options.snapshot,
         )?)
     };
-    let total = page.reviews.len();
-    let reviews = page
-        .reviews
-        .into_iter()
-        .skip(options.offset)
-        .take(options.limit)
-        .collect::<Vec<_>>();
-    let end = options.offset.saturating_add(reviews.len());
-    let reviews = ContextReviews {
-        reviews,
-        total,
-        offset: options.offset,
-        next_offset: (end < total).then_some(end),
-    };
+    let reviews = search_index::read_reviews(
+        &transaction,
+        path_text,
+        &page.review_states,
+        options.limit,
+        options.offset,
+    )?;
     let more = links.next_offset.is_some()
         || matches!(&evidence, ContextEvidence::Available(value) if value.next_offset.is_some())
         || matches!(&declared_relations, ContextRelations::Available(value) if value.next_offset.is_some())

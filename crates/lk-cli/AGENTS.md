@@ -200,6 +200,9 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
 - Maintenance reads store lifetime declarations. Keep newest collected source
   currency even when old, and preserve raw stream logs. Never prune another live
   worker's tmp directory or treat a disabled source as removed.
+  Bounded-work retention captures pending requests, staged results and transitive
+  reuse references under workflow→mutation→queue claims. Unrelated valid pending
+  work does not block expired published work; unknown references refuse cleanup.
 
 ## Original query authority
 

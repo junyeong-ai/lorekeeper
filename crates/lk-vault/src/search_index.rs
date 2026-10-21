@@ -3,22 +3,13 @@ use std::path::{Path, PathBuf};
 
 use lk_core::config::VaultDirs;
 use rusqlite::{Connection, OpenFlags, params};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::search::{MatchProjection, Page, SearchOptions, SearchResult, fold_name, spacing_key};
 use crate::{MutationSession, VaultError};
 
 pub(super) const INDEX_PATH: &str = ".lorekeeper/search.sqlite";
-const VERSION: i32 = 18;
-
-#[derive(Serialize, Deserialize)]
-struct BrowseFacets {
-    categories: BTreeMap<String, usize>,
-    formats: BTreeMap<String, usize>,
-    source_statuses: BTreeMap<String, usize>,
-    knowledge_statuses: BTreeMap<String, usize>,
-    tags: BTreeMap<String, usize>,
-}
+const VERSION: i32 = 19;
 
 #[derive(Serialize)]
 pub struct SearchSnapshot {
@@ -187,6 +178,7 @@ fn prepare_search_inner(
         DROP TABLE IF EXISTS names;
         DROP TABLE IF EXISTS tags;
         DROP TABLE IF EXISTS browse_facets;
+        DROP TABLE IF EXISTS page_reviews;
         DROP TABLE IF EXISTS pages;
         DROP TABLE IF EXISTS snapshot;
         CREATE TABLE snapshot (id TEXT NOT NULL, context TEXT NOT NULL, version INTEGER NOT NULL,
@@ -208,7 +200,12 @@ fn prepare_search_inner(
         CREATE INDEX names_spacing ON names(spacing_key, page_id);
         CREATE TABLE tags (page_id INTEGER NOT NULL, tag TEXT NOT NULL, PRIMARY KEY(page_id, tag));
         CREATE INDEX tags_tag ON tags(tag, page_id);
-        CREATE TABLE browse_facets(include_sources INTEGER PRIMARY KEY, payload TEXT NOT NULL);
+        CREATE TABLE browse_facets(include_sources INTEGER NOT NULL, kind TEXT NOT NULL,
+            value TEXT NOT NULL, page_count INTEGER NOT NULL,
+            PRIMARY KEY(include_sources, kind, value));
+        CREATE TABLE page_reviews(path TEXT NOT NULL, ordinal INTEGER NOT NULL,
+            state TEXT NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(path, ordinal));
+        CREATE INDEX review_states ON page_reviews(path, state);
         CREATE TABLE links (source TEXT NOT NULL, ordinal INTEGER NOT NULL,
             source_revision TEXT NOT NULL, line INTEGER NOT NULL, label TEXT NOT NULL,
             destination TEXT NOT NULL, target TEXT, context TEXT NOT NULL,
@@ -254,6 +251,8 @@ fn prepare_search_inner(
         let mut insert_name =
             transaction.prepare("INSERT OR IGNORE INTO names VALUES (?1, ?2, ?3, ?4, ?5)")?;
         let mut insert_tag = transaction.prepare("INSERT INTO tags VALUES (?1, ?2)")?;
+        let mut insert_review =
+            transaction.prepare("INSERT INTO page_reviews VALUES (?1, ?2, ?3, ?4)")?;
         for (traversal_rank, page) in pages.iter().enumerate() {
             let page_path = page.rel_path.to_string_lossy();
             let traversal_rank = integer(traversal_rank)?;
@@ -382,6 +381,18 @@ fn prepare_search_inner(
                 spacing_name_text,
                 projection.spacing_text
             ])?;
+            for (ordinal, review) in page.reviews.iter().enumerate() {
+                let payload = serde_json::to_string(review)
+                    .map_err(|error| VaultError::Serialization(error.to_string()))?;
+                let state = serde_json::to_value(review.effective_state)
+                    .map_err(|error| VaultError::Serialization(error.to_string()))?;
+                insert_review.execute(params![
+                    page_path,
+                    integer(ordinal)?,
+                    state.as_str(),
+                    payload
+                ])?;
+            }
             for name in page.names() {
                 insert_name.execute(params![
                     id,
@@ -469,6 +480,7 @@ fn remove_page(connection: &Connection, id: i64, path: &str) -> Result<(), Vault
     connection.execute("DELETE FROM names WHERE page_id=?1", [id])?;
     connection.execute("DELETE FROM tags WHERE page_id=?1", [id])?;
     connection.execute("DELETE FROM links WHERE source=?1", [path])?;
+    connection.execute("DELETE FROM page_reviews WHERE path=?1", [path])?;
     connection.execute("DELETE FROM pages WHERE id=?1", [id])?;
     Ok(())
 }
@@ -536,7 +548,77 @@ pub(super) fn search(
         );
     }
     attach_synthesis(&transaction, &mut result)?;
+    attach_reviews(&transaction, &mut result)?;
     Ok(result)
+}
+
+pub(super) fn read_reviews(
+    connection: &Connection,
+    path: &str,
+    expected_states: &crate::ReviewCounts,
+    limit: usize,
+    offset: usize,
+) -> Result<crate::ContextReviews, VaultError> {
+    let mut statement = connection
+        .prepare("SELECT state, COUNT(*) FROM page_reviews WHERE path=?1 GROUP BY state")?;
+    let rows = statement.query_map([path], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+    })?;
+    let mut states = crate::ReviewCounts::default();
+    for row in rows {
+        let (state, count) = row?;
+        let state: crate::ReviewEffectiveState =
+            serde_json::from_value(serde_json::Value::String(state))
+                .map_err(|error| VaultError::Serialization(error.to_string()))?;
+        states.record(
+            state,
+            usize::try_from(count).map_err(|error| invalid(error.to_string()))?,
+        );
+    }
+    if states != *expected_states {
+        return Err(invalid(
+            "captured review inventory differs from page metadata",
+        ));
+    }
+    let total = states.total();
+    let mut statement = connection.prepare(
+        "SELECT payload FROM page_reviews WHERE path=?1 ORDER BY ordinal LIMIT ?2 OFFSET ?3",
+    )?;
+    let rows = statement.query_map(
+        params![
+            path,
+            integer(limit)?,
+            i64::try_from(offset).unwrap_or(i64::MAX)
+        ],
+        |row| row.get::<_, String>(0),
+    )?;
+    let reviews = rows
+        .map(|row| {
+            serde_json::from_str(&row?)
+                .map_err(|error| VaultError::Serialization(error.to_string()))
+        })
+        .collect::<Result<Vec<_>, VaultError>>()?;
+    let end = offset.saturating_add(reviews.len());
+    Ok(crate::ContextReviews {
+        reviews,
+        total,
+        offset,
+        next_offset: (end < total).then_some(end),
+        states,
+    })
+}
+
+fn attach_reviews(connection: &Connection, result: &mut SearchResult) -> Result<(), VaultError> {
+    for hit in &mut result.hits {
+        hit.reviews = read_reviews(
+            connection,
+            &hit.path,
+            &hit.reviews.states,
+            super::search::REVIEW_PREVIEW_LIMIT,
+            0,
+        )?;
+    }
+    Ok(())
 }
 
 /// Enumerate the complete indexed lexical candidate set. The shared matcher decides
@@ -729,57 +811,72 @@ fn scalar_filter(options: &SearchOptions<'_>) -> (String, Vec<rusqlite::types::V
     (filter, arguments)
 }
 
-fn capture_browse_facets(
-    connection: &Connection,
-    include_sources: bool,
-) -> Result<BrowseFacets, VaultError> {
-    let scope = if include_sources {
-        "1"
-    } else {
-        "knowledge = 1"
-    };
-    let facets = |column: &str| -> Result<std::collections::BTreeMap<String, usize>, VaultError> {
-        let mut statement = connection.prepare(&format!(
-            "SELECT {column}, COUNT(*) FROM pages WHERE {scope} GROUP BY {column}"
-        ))?;
-        let rows = statement.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as usize))
-        })?;
-        Ok(rows.collect::<Result<_, _>>()?)
-    };
-    let categories = facets("category")?;
-    let formats = facets("format")?;
-    let source_statuses = facets("source_status")?;
-    let knowledge_statuses = facets("knowledge_status")?;
-    let mut tag_statement = connection.prepare(&format!(
-        "SELECT tag, COUNT(*) FROM tags JOIN pages ON pages.id = tags.page_id WHERE {scope} GROUP BY tag"
-    ))?;
-    let tags = tag_statement
-        .query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as usize))
-        })?
-        .collect::<Result<_, _>>()?;
-    Ok(BrowseFacets {
-        categories,
-        formats,
-        source_statuses,
-        knowledge_statuses,
-        tags,
-    })
-}
-
 fn write_browse_facets(connection: &Connection) -> Result<(), VaultError> {
+    connection.execute("DELETE FROM browse_facets", [])?;
     for include_sources in [false, true] {
-        let captured = capture_browse_facets(connection, include_sources)?;
-        let payload = serde_json::to_string(&captured)
-            .map_err(|error| VaultError::Serialization(error.to_string()))?;
+        let scope = if include_sources {
+            "1"
+        } else {
+            "knowledge = 1"
+        };
+        for (kind, column) in [
+            ("categories", "category"),
+            ("formats", "format"),
+            ("source_statuses", "source_status"),
+            ("knowledge_statuses", "knowledge_status"),
+        ] {
+            connection.execute(
+                &format!(
+                    "INSERT INTO browse_facets SELECT ?1, ?2, {column}, COUNT(*)
+                    FROM pages WHERE {scope} GROUP BY {column}"
+                ),
+                params![include_sources, kind],
+            )?;
+        }
         connection.execute(
-            "INSERT INTO browse_facets VALUES (?1, ?2)
-             ON CONFLICT(include_sources) DO UPDATE SET payload=excluded.payload",
-            params![include_sources, payload],
+            &format!(
+                "INSERT INTO browse_facets SELECT ?1, 'tags', tag, COUNT(*)
+                FROM tags JOIN pages ON pages.id = tags.page_id WHERE {scope} GROUP BY tag"
+            ),
+            [include_sources],
         )?;
     }
     Ok(())
+}
+
+fn read_facet(
+    connection: &Connection,
+    kind: &str,
+    options: &SearchOptions<'_>,
+) -> Result<crate::search::FacetPage, VaultError> {
+    let total: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM browse_facets WHERE include_sources=?1 AND kind=?2",
+        params![options.include_sources, kind],
+        |row| row.get(0),
+    )?;
+    let total = usize::try_from(total).map_err(|error| invalid(error.to_string()))?;
+    let mut statement = connection.prepare(
+        "SELECT value, page_count FROM browse_facets WHERE include_sources=?1 AND kind=?2
+            ORDER BY value LIMIT ?3 OFFSET ?4",
+    )?;
+    let values = statement
+        .query_map(
+            params![
+                options.include_sources,
+                kind,
+                integer(options.facet_limit)?,
+                i64::try_from(options.facet_offset).unwrap_or(i64::MAX)
+            ],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as usize)),
+        )?
+        .collect::<Result<BTreeMap<_, _>, _>>()?;
+    let end = options.facet_offset.saturating_add(values.len());
+    Ok(crate::search::FacetPage {
+        values,
+        total,
+        offset: options.facet_offset,
+        next_offset: (end < total).then_some(end),
+    })
 }
 
 /// Browse scalar metadata in SQLite; deserialize only the requested page of hits.
@@ -787,13 +884,6 @@ fn browse(
     connection: &Connection,
     options: &SearchOptions<'_>,
 ) -> Result<SearchResult, VaultError> {
-    let payload: String = connection.query_row(
-        "SELECT payload FROM browse_facets WHERE include_sources=?1",
-        [options.include_sources],
-        |row| row.get(0),
-    )?;
-    let facets: BrowseFacets = serde_json::from_str(&payload)
-        .map_err(|error| VaultError::Serialization(error.to_string()))?;
     let (filter, mut arguments) = scalar_filter(options);
     let total: i64 = connection.query_row(
         &format!("SELECT COUNT(*) FROM pages WHERE {filter}"),
@@ -837,12 +927,13 @@ fn browse(
     result.offset = options.offset;
     let end = options.offset.saturating_add(result.hits.len());
     result.next_offset = (end < total).then_some(end);
-    result.categories = facets.categories;
-    result.formats = facets.formats;
-    result.source_statuses = facets.source_statuses;
-    result.knowledge_statuses = facets.knowledge_statuses;
-    result.tags = facets.tags;
+    result.categories = read_facet(connection, "categories", options)?;
+    result.formats = read_facet(connection, "formats", options)?;
+    result.source_statuses = read_facet(connection, "source_statuses", options)?;
+    result.knowledge_statuses = read_facet(connection, "knowledge_statuses", options)?;
+    result.tags = read_facet(connection, "tags", options)?;
     attach_synthesis(connection, &mut result)?;
+    attach_reviews(connection, &mut result)?;
     Ok(result)
 }
 
@@ -967,9 +1058,9 @@ mod tests {
         };
         let filtered = crate::search(root.path(), &dirs, &options).unwrap();
         assert_eq!(filtered.total, 1);
-        assert_eq!(filtered.categories["security"], 2);
-        assert_eq!(filtered.tags["security"], 3);
-        assert_eq!(filtered.tags["legacy"], 1);
+        assert_eq!(filtered.categories.values["security"], 2);
+        assert_eq!(filtered.tags.values["security"], 3);
+        assert_eq!(filtered.tags.values["legacy"], 1);
         let prior = serde_json::to_value(&filtered).unwrap();
         std::fs::remove_file(root.path().join("wiki/concepts/b.md")).unwrap();
         write(
@@ -2240,6 +2331,7 @@ mod tests {
             "names",
             "tags",
             "browse_facets",
+            "page_reviews",
             "links",
             "provenance_documents",
             "provenance_addresses",
@@ -2331,6 +2423,132 @@ mod tests {
                 [],
             )
             .unwrap();
+    }
+
+    #[test]
+    fn discovery_pages_facets_and_reviews_without_loading_full_review_vectors() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let subject = "wiki/documents/hub.md";
+        let tags = (0..241).map(|i| format!("tag-{i:03}")).collect::<Vec<_>>();
+        let raw = format!(
+            "---\ntype: document\ntitle: Needle\ntags: {}\n---\nHub evidence.\n",
+            serde_json::to_string(&tags).unwrap(),
+        );
+        write(root.path(), subject, &raw);
+        let revision = lk_core::concept::source_revision(&crate::parse_page(&raw).unwrap());
+        for i in 0..300 {
+            let review = serde_json::json!({
+                "status":if i < 3 { "resolved" } else { "open" }, "subjects":[subject],
+                "evidence":[{"path":subject,"revision":revision}],
+                "resolution":if i < 3 { Some("Scoped judgment recorded") } else { None },
+            });
+            write(
+                root.path(),
+                &format!("wiki/explorations/review-{i:03}.md"),
+                &format!(
+                    "---\ntype: exploration\ntitle: Review {i:03}\nreview: {review}\n---\nUnresolved judgment.\n",
+                ),
+            );
+        }
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let prepared = prepare_search(&session, &dirs).unwrap();
+        let options = SearchOptions {
+            query: Some("Needle"),
+            limit: 1,
+            facet_limit: 7,
+            facet_offset: 14,
+            ..Default::default()
+        };
+        let live = crate::search(root.path(), &dirs, &options).unwrap();
+        let mut captured = SearchOptions {
+            snapshot: Some(&prepared.snapshot),
+            ..options
+        };
+        let indexed = crate::search(root.path(), &dirs, &captured).unwrap();
+        assert_eq!(
+            serde_json::to_value(&live.hits).unwrap(),
+            serde_json::to_value(&indexed.hits).unwrap()
+        );
+        assert_eq!(indexed.hits[0].reviews.total, 300);
+        assert_eq!(indexed.hits[0].reviews.states.resolved, 3);
+        assert_eq!(indexed.hits[0].reviews.states.open, 297);
+        assert!(
+            indexed.hits[0]
+                .reviews
+                .reviews
+                .iter()
+                .all(|review| review.effective_state == crate::ReviewEffectiveState::Resolved)
+        );
+        assert_eq!(indexed.hits[0].reviews.reviews.len(), 3);
+        assert_eq!(indexed.hits[0].reviews.next_offset, Some(3));
+        assert_eq!(indexed.tags.values.len(), 7);
+        assert_eq!(indexed.tags.total, 241);
+        assert_eq!(indexed.tags.offset, 14);
+        assert_eq!(indexed.tags.next_offset, Some(21));
+        assert_eq!(indexed.tags.values.keys().next().unwrap(), "tag-014");
+        assert_eq!(
+            serde_json::to_value(&live.tags).unwrap(),
+            serde_json::to_value(&indexed.tags).unwrap()
+        );
+        captured.query = None;
+        captured.format = Some("document");
+        let browse = crate::search(root.path(), &dirs, &captured).unwrap();
+        assert_eq!(browse.total, 1);
+        assert_eq!(browse.hits[0].reviews.total, 300);
+        assert_eq!(
+            serde_json::to_value(&browse.tags).unwrap(),
+            serde_json::to_value(&indexed.tags).unwrap()
+        );
+        captured.facet_offset = 238;
+        let tail = crate::search(root.path(), &dirs, &captured).unwrap();
+        assert_eq!(tail.tags.values.len(), 3);
+        assert_eq!(tail.tags.next_offset, None);
+        captured.facet_offset = 300;
+        let empty = crate::search(root.path(), &dirs, &captured).unwrap();
+        assert_eq!(empty.tags.total, 241);
+        assert!(empty.tags.values.is_empty());
+        assert_eq!(empty.tags.next_offset, None);
+        let context = crate::inspect_page_context(
+            root.path(),
+            &dirs,
+            Path::new(subject),
+            &crate::ContextOptions {
+                snapshot: &prepared.snapshot,
+                limit: 7,
+                offset: 293,
+            },
+        )
+        .unwrap();
+        assert_eq!(context.reviews.reviews.len(), 7);
+        assert_eq!(context.reviews.total, 300);
+        assert_eq!(context.reviews.next_offset, None);
+        assert!(context.reviews.reviews[0].path.ends_with("review-293.md"));
+        let connection = Connection::open(root.path().join(INDEX_PATH)).unwrap();
+        let metadata: String = connection
+            .query_row(
+                "SELECT metadata FROM pages WHERE path=?1",
+                [subject],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let metadata: serde_json::Value = serde_json::from_str(&metadata).unwrap();
+        assert!(metadata.get("reviews").is_none());
+        assert_eq!(metadata["review_states"]["open"], 297);
+        assert_eq!(metadata["review_states"]["resolved"], 3);
+        connection
+            .execute(
+                "DELETE FROM page_reviews WHERE path=?1 AND ordinal=1",
+                [subject],
+            )
+            .unwrap();
+        assert!(
+            crate::search(root.path(), &dirs, &captured)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("review inventory")
+        );
     }
 
     #[test]

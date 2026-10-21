@@ -6,13 +6,23 @@ exit: 0
 --- stdout ---
 {
   "categories": {
-    "": 2,
-    "engineering": 2
+    "next_offset": null,
+    "offset": 0,
+    "total": 2,
+    "values": {
+      "": 2,
+      "engineering": 2
+    }
   },
   "category": null,
   "date_basis": "declared-created-not-ingestion",
   "formats": {
-    "concept": 4
+    "next_offset": null,
+    "offset": 0,
+    "total": 1,
+    "values": {
+      "concept": 4
+    }
   },
   "from": null,
   "hits": [
@@ -28,7 +38,18 @@ exit: 0
       "matched": "catalog",
       "path": "wiki/concepts/behaviour-snapshot.md",
       "phrase_match": false,
-      "reviews": [],
+      "reviews": {
+        "next_offset": null,
+        "offset": 0,
+        "reviews": [],
+        "states": {
+          "invalid": 0,
+          "needs_reassessment": 0,
+          "open": 0,
+          "resolved": 0
+        },
+        "total": 0
+      },
       "source_count": 3,
       "spacing_match": false,
       "synthesis": {
@@ -52,7 +73,18 @@ exit: 0
       "matched": "catalog",
       "path": "wiki/concepts/deterministic-clock.md",
       "phrase_match": false,
-      "reviews": [],
+      "reviews": {
+        "next_offset": null,
+        "offset": 0,
+        "reviews": [],
+        "states": {
+          "invalid": 0,
+          "needs_reassessment": 0,
+          "open": 0,
+          "resolved": 0
+        },
+        "total": 0
+      },
       "source_count": 2,
       "spacing_match": false,
       "synthesis": {
@@ -65,7 +97,12 @@ exit: 0
   "include_sources": false,
   "knowledge_status": "active",
   "knowledge_statuses": {
-    "active": 4
+    "next_offset": null,
+    "offset": 0,
+    "total": 1,
+    "values": {
+      "active": 4
+    }
   },
   "next_offset": 2,
   "offset": 0,
@@ -74,11 +111,21 @@ exit: 0
   "sort": "title",
   "source_status": null,
   "source_statuses": {
-    "": 4
+    "next_offset": null,
+    "offset": 0,
+    "total": 1,
+    "values": {
+      "": 4
+    }
   },
   "spacing": false,
   "tag_filters": [],
-  "tags": {},
+  "tags": {
+    "next_offset": null,
+    "offset": 0,
+    "total": 0,
+    "values": {}
+  },
   "to": null,
   "total": 4,
   "type": "concept"

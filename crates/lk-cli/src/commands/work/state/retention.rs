@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use lk_vault::{MutationPlan, MutationSession};
 use serde_json::Value;
 
+use super::super::resources::Subject;
 use super::{
     Publication, Seal, StoredOutput, Work, fail, output_path, read_optional, require_id,
     require_settled, revision, work_path,
@@ -36,11 +37,104 @@ struct RetentionCapture {
     revisions: BTreeMap<PathBuf, String>,
     bytes: usize,
     references: BTreeSet<String>,
+    queue_subject: Option<(String, String)>,
     expired: bool,
+}
+
+#[derive(Default)]
+struct QueueReferences {
+    identities: BTreeSet<(String, String)>,
+    snapshots: BTreeMap<PathBuf, String>,
+}
+
+impl QueueReferences {
+    fn capture(root: &Path) -> miette::Result<Self> {
+        let mut references = Self::default();
+        for path in Self::files(root, Path::new(".lorekeeper/queue"), "jsonl")? {
+            let full = lk_vault::page_path(root, &path).map_err(fail)?;
+            Self::require_file(&full)?;
+            let (bytes, pending) = lk_queue::read_tasks_snapshot(&full).map_err(fail)?;
+            if !pending.is_rewritable() {
+                return Err(fail("unparseable pending tasks prevent work retention"));
+            }
+            for task in pending.tasks {
+                task.validate_retained_input().map_err(fail)?;
+                task.generation_policy().map_err(fail)?;
+                references
+                    .identities
+                    .insert((task.task_id, task.cache_hash));
+            }
+            references
+                .snapshots
+                .insert(path, String::from_utf8(bytes).map_err(fail)?);
+        }
+        for path in Self::files(root, Path::new(".lorekeeper/queue/results"), "json")? {
+            let raw = read_optional(root, &path)?
+                .ok_or_else(|| fail("staged result disappeared during work retention"))?;
+            let name = path.to_string_lossy();
+            let identity = if name.ends_with(lk_queue::SECTION_RESULT_SUFFIX) {
+                let result: lk_queue::SectionResult = serde_json::from_str(&raw).map_err(fail)?;
+                (result.task_id, result.cache_hash)
+            } else if name.ends_with(lk_queue::SYNTHESIS_RESULT_SUFFIX) {
+                let result: lk_queue::SynthesisResult = serde_json::from_str(&raw).map_err(fail)?;
+                (result.task_id, result.cache_hash)
+            } else {
+                let result: lk_queue::TaskResult = serde_json::from_str(&raw).map_err(fail)?;
+                (result.task_id, result.cache_hash)
+            };
+            if !references.identities.contains(&identity) {
+                return Err(fail("unmatched staged results prevent work retention"));
+            }
+            references.snapshots.insert(path, raw);
+        }
+        Ok(references)
+    }
+
+    fn files(root: &Path, directory: &Path, extension: &str) -> miette::Result<Vec<PathBuf>> {
+        let full = lk_vault::page_path(root, directory).map_err(fail)?;
+        let entries = match std::fs::read_dir(full) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(fail(error)),
+        };
+        let mut paths = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(fail)?;
+            let path = directory.join(entry.file_name());
+            if path.extension().is_some_and(|value| value == extension) {
+                paths.push(path);
+            }
+        }
+        paths.sort();
+        Ok(paths)
+    }
+
+    fn require_file(path: &Path) -> miette::Result<()> {
+        let metadata = std::fs::symlink_metadata(path).map_err(fail)?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(fail("work retention requires direct regular queue files"));
+        }
+        Ok(())
+    }
 }
 
 fn capture_retention(root: &Path, id: &str, cutoff: i64) -> miette::Result<RetentionCapture> {
     let work = Work::load(root, id)?;
+    let subject: Subject = serde_json::from_value(
+        work.context
+            .get("subject")
+            .cloned()
+            .ok_or_else(|| fail("work retention requires a known subject"))?,
+    )
+    .map_err(fail)?;
+    let queue_subject = match subject {
+        Subject::Queue {
+            task_id,
+            cache_hash,
+            ..
+        } => Some((task_id, cache_hash)),
+        Subject::Audit { .. } => None,
+    };
     let directory = work_path(id, "")?;
     let mut known = [
         "plan.json",
@@ -89,6 +183,7 @@ fn capture_retention(root: &Path, id: &str, cutoff: i64) -> miette::Result<Reten
             }
             if let Some(reused) = stored.reused_from {
                 require_id(&reused.work_id)?;
+                require_id(&reused.node_id)?;
                 references.insert(reused.work_id);
             }
         }
@@ -128,6 +223,7 @@ fn capture_retention(root: &Path, id: &str, cutoff: i64) -> miette::Result<Reten
         revisions,
         bytes,
         references,
+        queue_subject,
         expired,
     })
 }
@@ -161,6 +257,13 @@ pub(crate) fn prune_published(
     }
     let root_owned = root.canonicalize().map_err(fail)?;
     let root = root_owned.as_path();
+    if session.is_some_and(|session| session.root() != root) {
+        return Err(fail("retention session belongs to another vault"));
+    }
+    let queue_directory =
+        lk_vault::page_path(root, Path::new(".lorekeeper/queue")).map_err(fail)?;
+    let _queue = crate::commands::queue::claim_writer(&queue_directory, session.is_none())?;
+    let queue = QueueReferences::capture(root)?;
     let mut captures = BTreeMap::new();
     let mut empty = Vec::new();
     for entry in std::fs::read_dir(directory).map_err(fail)? {
@@ -179,9 +282,24 @@ pub(crate) fn prune_published(
         }
         captures.insert(id.clone(), capture_retention(root, &id, cutoff)?);
     }
+    for work in captures.values() {
+        for reference in &work.references {
+            if !captures.contains_key(reference) {
+                return Err(fail(
+                    "referenced work is missing from the retention inventory",
+                ));
+            }
+        }
+    }
     let mut retained = captures
         .values()
-        .filter(|work| !work.expired)
+        .filter(|work| {
+            !work.expired
+                || work
+                    .queue_subject
+                    .as_ref()
+                    .is_some_and(|subject| queue.identities.contains(subject))
+        })
         .map(|work| work.id.clone())
         .collect::<BTreeSet<_>>();
     let mut pending = retained.iter().cloned().collect::<Vec<_>>();
@@ -193,9 +311,6 @@ pub(crate) fn prune_published(
                 }
             }
         }
-    }
-    if session.is_some_and(|session| session.root() != root) {
-        return Err(fail("retention session belongs to another vault"));
     }
     let mut report = WorkRetention::default();
     for id in empty.into_iter().filter(|id| !retained.contains(id)) {
@@ -210,23 +325,38 @@ pub(crate) fn prune_published(
             }
         }
     }
+    let mut mutation = MutationPlan::default();
+    for (path, raw) in &queue.snapshots {
+        mutation.require_unchanged(path, raw.clone());
+    }
     for work in captures.values() {
         if retained.contains(&work.id) {
             report.retained += 1;
+            for (path, digest) in &work.revisions {
+                mutation.require_unchanged(path, read_captured(root, path, digest)?);
+            }
             continue;
         }
         report.removed += 1;
         report.bytes += work.bytes;
-        if let Some(session) = session {
+        if session.is_some() {
             let current = capture_retention(root, &work.id, cutoff)?;
             if current.revisions != work.revisions || !current.expired {
                 return Err(fail("work retention inventory changed"));
             }
-            let mut mutation = MutationPlan::default();
             for (path, digest) in &work.revisions {
                 mutation.remove(path, read_captured(root, path, digest)?);
             }
-            session.apply(mutation).map_err(fail)?;
+        }
+    }
+    if let Some(session) = session
+        && report.removed > 0
+    {
+        session.apply(mutation).map_err(fail)?;
+        for work in captures
+            .values()
+            .filter(|work| !retained.contains(&work.id))
+        {
             for suffix in ["nodes", ""] {
                 match std::fs::remove_dir(root.join(work_path(&work.id, suffix)?)) {
                     Ok(()) => {}
@@ -246,10 +376,45 @@ pub(crate) fn prune_published(
 #[cfg(test)]
 mod tests {
     use super::super::encoded;
-    use super::super::tests::{context, finish, limits, resources};
+    use super::super::tests::{context as test_context, finish, limits, resources};
     use super::*;
     use lk_core::semantic::SemanticResource;
     use serde_json::json;
+
+    fn context(subject: &str) -> Value {
+        let mut context = test_context(subject);
+        context["subject"] = json!(Subject::Audit {
+            path: format!("wiki/concepts/{subject}.md"),
+            file_revision: "captured-file".into(),
+            input_revision: "captured-input".into(),
+        });
+        context
+    }
+
+    fn pending_task(root: &Path) -> lk_queue::QueueTask {
+        let queue = root.join(".lorekeeper/queue");
+        let client = lk_queue::QueueLlmClient::new(queue.clone());
+        let task = client.build_task(
+            "summary",
+            lk_queue::TaskKind::Summarize,
+            lk_queue::SummarizeRequest {
+                text: "Retained source observation.".into(),
+                max_sentences: 3,
+                focus: None,
+                locale: lk_core::i18n::Locale::En,
+                source_type: None,
+                target: lk_queue::TaskTarget {
+                    vault_path: "wiki/documents/pending.md".into(),
+                    kind: lk_queue::TargetKind::DocumentSummary,
+                    anchor: "## Summary".into(),
+                },
+            },
+        );
+        std::fs::create_dir_all(&queue).unwrap();
+        lk_queue::write_tasks_atomic(&queue.join("pending.jsonl"), std::slice::from_ref(&task))
+            .unwrap();
+        task
+    }
 
     fn publish(work: &Work, session: &MutationSession, resources: &[SemanticResource]) {
         finish(work, session, resources);
@@ -268,6 +433,187 @@ mod tests {
         )
         .unwrap();
         session.apply(plan).unwrap();
+    }
+
+    #[test]
+    fn pending_queue_keeps_its_published_work_and_reuse_ancestors_without_blocking_other_cleanup() {
+        let root = tempfile::tempdir().unwrap();
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let mut source = resources();
+        source[0].text = "Exact shared evidence.".into();
+        let ancestor =
+            Work::create(&session, &source, "ancestor", context("ancestor"), limits()).unwrap();
+        publish(&ancestor, &session, &source);
+        let middle =
+            Work::create(&session, &source, "middle", context("middle"), limits()).unwrap();
+        middle
+            .reuse_from(
+                &session,
+                &ancestor,
+                &ancestor.plan.parts[0].id,
+                &middle.plan.parts[0].id,
+                &source,
+            )
+            .unwrap();
+        publish(&middle, &session, &source);
+        let task = pending_task(root.path());
+        let mut current_context = context("current");
+        current_context["subject"] = json!(Subject::Queue {
+            task_id: task.task_id.clone(),
+            cache_hash: task.cache_hash.clone(),
+            target: task.target.vault_path.clone(),
+            target_revision: "captured-target".into(),
+        });
+        let current =
+            Work::create(&session, &source, "current", current_context, limits()).unwrap();
+        current
+            .reuse_from(
+                &session,
+                &middle,
+                &middle.plan.parts[0].id,
+                &current.plan.parts[0].id,
+                &source,
+            )
+            .unwrap();
+        publish(&current, &session, &source);
+        let independent = Work::create(
+            &session,
+            &source,
+            "independent",
+            context("independent"),
+            limits(),
+        )
+        .unwrap();
+        publish(&independent, &session, &source);
+        let unpublished = Work::create(
+            &session,
+            &source,
+            "unpublished",
+            context("unpublished"),
+            limits(),
+        )
+        .unwrap();
+        let queue_path = root.path().join(".lorekeeper/queue/pending.jsonl");
+        let queue_lock = root.path().join(".lorekeeper/queue/.lock");
+        let queue_before = std::fs::read(&queue_path).unwrap();
+        let cutoff = jiff::Timestamp::now().as_second() + 1;
+        assert!(!queue_lock.exists());
+        let preview = prune_published(root.path(), None, cutoff).unwrap();
+        assert_eq!(preview.removed, 1);
+        assert_eq!(preview.retained, 4);
+        assert!(Work::load(root.path(), &independent.plan.id).is_ok());
+        assert_eq!(std::fs::read(&queue_path).unwrap(), queue_before);
+        assert!(!queue_lock.exists());
+        let actual = prune_published(root.path(), Some(&session), cutoff).unwrap();
+        assert_eq!(actual.bytes, preview.bytes);
+        assert!(
+            !root
+                .path()
+                .join(work_path(&independent.plan.id, "").unwrap())
+                .exists()
+        );
+        for work in [&ancestor, &middle, &current, &unpublished] {
+            assert!(Work::load(root.path(), &work.plan.id).is_ok());
+        }
+        assert_eq!(std::fs::read(queue_path).unwrap(), queue_before);
+    }
+
+    #[test]
+    fn unknown_queue_and_work_references_refuse_before_deleting_expired_work() {
+        for scenario in [
+            "queue-line",
+            "queue-input",
+            "staged-payload",
+            "staged-orphan",
+            "work-subject",
+            "reuse-reference",
+            "mutation-journal",
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let session = MutationSession::acquire(root.path()).unwrap();
+            let mut source = resources();
+            source[0].text = "Exact evidence for retention refusal.".into();
+            let work = Work::create(
+                &session,
+                &source,
+                "published",
+                context("published"),
+                limits(),
+            )
+            .unwrap();
+            publish(&work, &session, &source);
+            let task = pending_task(root.path());
+            let queue = root.path().join(".lorekeeper/queue");
+            match scenario {
+                "queue-line" => std::fs::write(queue.join("pending.jsonl"), "not-json\n").unwrap(),
+                "queue-input" => {
+                    let mut task = task;
+                    task.cache_hash = "wrong-input".into();
+                    lk_queue::write_tasks_atomic(&queue.join("pending.jsonl"), &[task]).unwrap();
+                }
+                "staged-payload" | "staged-orphan" => {
+                    std::fs::create_dir_all(queue.join("results")).unwrap();
+                    let body = if scenario == "staged-payload" {
+                        "{}".into()
+                    } else {
+                        encoded(&lk_queue::SectionResult {
+                            task_id: "unknown-task".into(),
+                            cache_hash: task.cache_hash,
+                            target_revision: "captured".into(),
+                            body: "Summary.".into(),
+                        })
+                        .unwrap()
+                    };
+                    std::fs::write(queue.join("results/pending.section.json"), body).unwrap();
+                }
+                "work-subject" => {
+                    Work::create(
+                        &session,
+                        &source,
+                        "unknown",
+                        test_context("unknown"),
+                        limits(),
+                    )
+                    .unwrap();
+                }
+                "reuse-reference" => {
+                    let path = output_path(&work.plan.id, &work.plan.parts[0].id).unwrap();
+                    let mut stored: StoredOutput =
+                        serde_json::from_str(&read_optional(root.path(), &path).unwrap().unwrap())
+                            .unwrap();
+                    stored.reused_from = Some(super::super::Reuse {
+                        work_id: "0".repeat(64),
+                        node_id: work.plan.parts[0].id.clone(),
+                        output_revision: stored.output_revision.clone(),
+                        content_revision: "0".repeat(64),
+                    });
+                    std::fs::write(root.path().join(path), encoded(&stored).unwrap()).unwrap();
+                }
+                "mutation-journal" => {
+                    std::fs::write(
+                        root.path().join(".lorekeeper/mutation/pending.json"),
+                        "pending",
+                    )
+                    .unwrap();
+                }
+                _ => unreachable!(),
+            }
+            let cutoff = jiff::Timestamp::now().as_second() + 1;
+            assert!(
+                prune_published(root.path(), None, cutoff).is_err(),
+                "{scenario}"
+            );
+            assert!(
+                prune_published(root.path(), Some(&session), cutoff).is_err(),
+                "{scenario}"
+            );
+            assert!(
+                root.path()
+                    .join(work_path(&work.plan.id, "publication.json").unwrap())
+                    .exists(),
+                "{scenario}"
+            );
+        }
     }
 
     #[test]

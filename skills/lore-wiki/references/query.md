@@ -31,9 +31,12 @@ When time matters, use `lore wiki browse --snapshot <id> --sort created
 dates are excluded by date filters. `created` may describe source authorship, not ingestion.
 Without date filters, newest-first order places unknown dates last.
 Search and browse return `total` and `next_offset`; follow `--offset` when more
-results are needed. `total` counts matches after metadata/date filters; category,
-type and tag facets count query matches before those filters. An empty category
-key denotes uncategorized pages. Do not call the first page a complete inventory.
+results are needed. `total` counts matches after metadata/date filters. Each metadata
+facet returns `values` (value → matching-page count), its distinct-value `total`,
+`offset` and `next_offset`. Counts describe query matches before metadata/date filters.
+Facets return at most 20 values each by default, ordered by exact value; use
+`--facet-limit 1..100` and follow `--facet-offset` independently of hit `--offset`.
+An empty category key denotes uncategorized pages. Do not call the first page a complete inventory.
 
 ## Search and read selected content
 
@@ -61,6 +64,10 @@ returns links, concept evidence, declared document relations and scoped reviews 
 one captured transaction. Each group has its own total and authority; links do not
 establish support, and source declarations are not current-truth judgments.
 Its `summary` is a bounded opening preview; use revision-pinned reads for full content.
+Search and browse include at most 3 previews in each hit's `reviews.reviews`, with
+`total`, `next_offset` and complete `states` counts for open, resolved, changed and invalid
+assessments. Expand reviews through this captured context rather than assuming the hit
+contains every assessment. Inspect relevant open or changed judgments before using a claim.
 `not-captured` differs from an available empty group. Follow its `next_offset` with
 `--offset` in the same snapshot; the offset applies independently to every group.
 Use the individual relation commands below when only one group needs expansion.

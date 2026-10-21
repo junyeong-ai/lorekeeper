@@ -105,9 +105,12 @@ fn reviewed_curation_is_read_only_in_preview_guarded_and_discoverable_after_publ
         ],
     );
     assert_eq!(retired["total"], 1);
-    assert_eq!(retired["hits"][0]["reviews"][0]["relation"], "subject");
     assert_eq!(
-        retired["hits"][0]["reviews"][0]["effective_state"],
+        retired["hits"][0]["reviews"]["reviews"][0]["relation"],
+        "subject"
+    );
+    assert_eq!(
+        retired["hits"][0]["reviews"]["reviews"][0]["effective_state"],
         "resolved"
     );
     assert_eq!(retired["hits"][0]["source_count"], 1);
@@ -269,10 +272,12 @@ fn review_scopes_follow_verified_symlink_owners_without_merging_hardlink_address
                 .find(|hit| hit["path"] == concept)
                 .unwrap();
             assert_eq!(
-                canonical["reviews"].as_array().unwrap().len(),
+                canonical["reviews"]["reviews"].as_array().unwrap().len(),
                 expected,
                 "{kind}: {search}"
             );
+            assert_eq!(canonical["reviews"]["total"], expected);
+            assert_eq!(canonical["reviews"]["states"]["open"], expected);
             if kind == "hardlink" {
                 let separate = search["hits"]
                     .as_array()
@@ -280,7 +285,7 @@ fn review_scopes_follow_verified_symlink_owners_without_merging_hardlink_address
                     .iter()
                     .find(|hit| hit["path"] == alias)
                     .unwrap();
-                assert_eq!(separate["reviews"].as_array().unwrap().len(), 1);
+                assert_eq!(separate["reviews"]["total"], 1);
             }
         }
         let context = ok(&config, &["wiki", "context", concept, "--snapshot", id]);
@@ -372,7 +377,7 @@ fn review_scopes_follow_verified_symlink_owners_without_merging_hardlink_address
             .find(|hit| hit["path"] == concept)
             .unwrap();
         assert_eq!(
-            canonical["reviews"].as_array().unwrap().len(),
+            canonical["reviews"]["reviews"].as_array().unwrap().len(),
             expected,
             "{kind}: {search}"
         );
@@ -437,7 +442,7 @@ fn review_scopes_follow_verified_symlink_owners_without_merging_hardlink_address
             assert!(!invalid["errors"].as_array().unwrap().is_empty());
             let search = ok(&config, &["wiki", "search", "Topic", "--json"]);
             assert!(
-                search["hits"][0]["reviews"]
+                search["hits"][0]["reviews"]["reviews"]
                     .as_array()
                     .unwrap()
                     .iter()

@@ -44,7 +44,7 @@ pub use self::citations::{
     inspect_concept_citations,
 };
 pub use self::context::{
-    ContextEvidence, ContextOptions, ContextRelations, ContextReviews, PageContext,
+    ContextEvidence, ContextOptions, ContextRelations, ContextReviews, PageContext, ReviewCounts,
     inspect_page_context,
 };
 pub use self::discovery::{DiscoveryQuery, discover_queries};
@@ -86,7 +86,7 @@ pub use self::rss_original::{
     publish_rss_original,
 };
 pub use self::search::{
-    BrowseSort, CreatedStatus, MatchField, SearchHit, SearchOptions, SearchResult,
+    BrowseSort, CreatedStatus, FacetPage, MatchField, SearchHit, SearchOptions, SearchResult,
     SynthesisFreshness, SynthesisInputStatus, parse_created_date, search,
 };
 pub use self::search_index::{

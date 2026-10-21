@@ -258,6 +258,11 @@ lore wiki reviews                              # 관련된 현재 판단과 미�
 `wiki browse --category ... --tag ...`로 찾습니다. 검색 후보·일반 링크·인용 근거는
 서로 구분하며, 검색 순위와 출처 수를 신뢰도 점수로 사용하지 않습니다.
 
+검색·분류 응답의 각 분류 목록은 기본 20개 값과 전체 개수·다음 위치를 반환합니다.
+`--facet-limit`과 `--facet-offset`으로 이어서 조회하며, 문서 결과의 `--offset`과는 별개입니다.
+각 문서의 리뷰는 최대 3개를 미리 보여주고 전체·상태별 개수를 함께 제공합니다. 나머지 리뷰와
+관계는 같은 snapshot의 `wiki context`로 펼쳐 확인합니다.
+
 `index.md`는 작은 진입 안내이고 `.lorekeeper/search.sqlite`가 검색 판본을 보관합니다.
 반복 탐색은 같은 snapshot과 `next_offset`을 사용하고, 실제 근거는 반환된 revision으로
 확인합니다. 저장된 판본 하나를 교체하면 이전 ID는 조회할 수 없습니다.

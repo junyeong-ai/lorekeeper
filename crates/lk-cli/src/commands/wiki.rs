@@ -294,6 +294,12 @@ pub struct DiscoveryOptions {
     /// Skip this many results in the current ordering
     #[arg(long, default_value_t = 0)]
     offset: usize,
+    /// Maximum distinct values per metadata facet (1..100, default 20), ordered by value
+    #[arg(long)]
+    facet_limit: Option<usize>,
+    /// Skip this many distinct values in each metadata facet
+    #[arg(long)]
+    facet_offset: Option<usize>,
     /// Exact declared category; an empty value selects uncategorized pages
     #[arg(long)]
     category: Option<String>,
@@ -867,6 +873,11 @@ async fn run_body_search(
     options: DiscoveryOptions,
     evidence: BodyEvidenceOptions,
 ) -> miette::Result<()> {
+    if options.facet_limit.is_some() || options.facet_offset.is_some() {
+        return Err(miette::miette!(
+            "body search does not return metadata facets"
+        ));
+    }
     let config = load_config(&find_config(opts)?)?;
     let report = lk_vault::search_body(
         &config.vault.root_path(),
@@ -982,6 +993,8 @@ async fn run_search(
             },
             created_from: dates.from,
             created_to: dates.to,
+            facet_limit: options.facet_limit.unwrap_or(20),
+            facet_offset: options.facet_offset.unwrap_or(0),
             snapshot: options.snapshot.as_deref(),
             limit: options.limit,
             offset: options.offset,
