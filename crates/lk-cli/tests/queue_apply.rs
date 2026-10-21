@@ -2096,6 +2096,81 @@ fn orphan_synthesis_is_preserved_with_a_reason_and_does_not_fail_forever() {
 }
 
 #[test]
+fn orphan_quarantine_failure_preserves_bytes_and_allows_independent_extraction() {
+    for suffix in ["json", "section.json", "synthesis.json"] {
+        let ws = Workspace::new();
+        ws.write(PAGE, &daily_page("independent"));
+        ws.drop_result("z-independent", PAGE, "independent", "Independent Subject");
+        let identity = serde_json::json!({
+            "task_id": "orphan", "cache_hash": "retired", "target_revision": "captured",
+        });
+        let orphan = match suffix {
+            "json" => {
+                let mut result: serde_json::Value =
+                    serde_json::from_str(&ws.read(".lorekeeper/queue/results/z-independent.json"))
+                        .unwrap();
+                result["task_id"] = "orphan".into();
+                result
+            }
+            "section.json" => {
+                let mut result = identity;
+                result["body"] = "Unpublished section.".into();
+                result
+            }
+            "synthesis.json" => {
+                let mut result = identity;
+                result["context_revision"] = "captured".into();
+                result["synthesis"] = "Unpublished synthesis.".into();
+                result["related"] = serde_json::Value::Null;
+                result
+            }
+            _ => unreachable!(),
+        };
+        let orphan = serde_json::to_string_pretty(&orphan).unwrap() + "\n";
+        let path = format!(".lorekeeper/queue/results/a-orphan.{suffix}");
+        let quarantine = ".lorekeeper/queue/results/orphaned";
+        ws.write(&path, &orphan);
+        ws.write(quarantine, "occupied quarantine address");
+
+        let out = ws.run(&["queue", "apply"]);
+        assert!(!out.status.success(), "{suffix}");
+        assert_eq!(ws.read(&path), orphan, "{suffix}");
+        assert_eq!(ws.read(quarantine), "occupied quarantine address");
+        let published = ws.read(PAGE);
+        assert!(
+            published.contains("concepts_done:"),
+            "{suffix}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            ws.vault()
+                .join("wiki/concepts/independent-subject.md")
+                .exists()
+        );
+        assert!(!results_dir(&ws).join("z-independent.json").exists());
+
+        std::fs::remove_file(ws.vault().join(quarantine)).unwrap();
+        let retried = ws.run(&["queue", "apply"]);
+        assert!(
+            !retried.status.success(),
+            "orphan remains a reported failure"
+        );
+        assert!(!ws.vault().join(&path).exists());
+        assert_eq!(ws.read(&format!("{quarantine}/a-orphan.{suffix}")), orphan);
+        assert!(
+            ws.read(&format!("{quarantine}/a-orphan.{suffix}.reason.txt"))
+                .contains("no matching pending task")
+        );
+        assert_eq!(
+            ws.read(PAGE),
+            published,
+            "retry must not reapply completed work"
+        );
+        assert!(ws.run(&["queue", "apply"]).status.success());
+    }
+}
+
+#[test]
 fn malformed_pending_task_prevents_orphan_disposition() {
     let ws = Workspace::new();
     ws.write(".lorekeeper/queue/tasks.jsonl", "{truncated task");

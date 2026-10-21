@@ -652,7 +652,12 @@ async fn apply(
             };
             if pending.unparseable == 0 && !dry_run {
                 for path in &paths {
-                    synthesis::quarantine_orphan(&queue_dir, path, reason)?;
+                    if let Err(error) = synthesis::quarantine_orphan(&queue_dir, path, reason) {
+                        eprintln!(
+                            "  ✗ {}: cannot quarantine orphan result: {error}; its file stays for retry",
+                            path.display()
+                        );
+                    }
                 }
             }
             fail(reason.into());
