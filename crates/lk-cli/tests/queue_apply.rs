@@ -2255,6 +2255,87 @@ fn regeneration_of_answered_synthesis_still_checks_current_source_revisions() {
 
 #[cfg(unix)]
 #[test]
+fn staged_section_links_must_resolve_inside_the_vault() {
+    for external in [false, true] {
+        for directory in [false, true] {
+            let ws = Workspace::new();
+            let outside = tempfile::tempdir().unwrap();
+            let evidence = "---\ntype: document\n---\nOriginal evidence.\n";
+            ws.write("wiki/documents/evidence.md", evidence);
+            std::fs::write(outside.path().join("evidence.md"), evidence).unwrap();
+            let owner = if external {
+                outside.path().to_owned()
+            } else {
+                ws.vault().join("wiki/documents")
+            };
+            let (alias, destination) = if directory {
+                ("alias", "../../alias/evidence.md")
+            } else {
+                ("alias.md", "../../alias.md")
+            };
+            let source = if directory {
+                owner
+            } else {
+                owner.join("evidence.md")
+            };
+            std::os::unix::fs::symlink(source, ws.vault().join(alias)).unwrap();
+            let request = lk_queue::SummarizeRequest {
+                text: "Original evidence".into(),
+                max_sentences: 3,
+                focus: None,
+                locale: lk_core::i18n::Locale::En,
+                source_type: None,
+                target: lk_queue::TaskTarget {
+                    vault_path: "daily/source/page.md".into(),
+                    kind: lk_queue::TargetKind::DailySummary,
+                    anchor: "## Summary".into(),
+                },
+            };
+            let task = lk_queue::QueueLlmClient::new(ws.vault().join(".lorekeeper/queue"))
+                .build_task("fixture", lk_queue::TaskKind::Summarize, request);
+            let page = format!(
+                "---\ntype: daily\nllm_inputs:\n  summary: {}\n---\n## Summary\nOriginal.\n",
+                task.cache_hash
+            );
+            ws.write(&task.target.vault_path, &page);
+            let pending_path = ".lorekeeper/queue/tasks.jsonl";
+            let pending = serde_json::to_string(&task).unwrap();
+            ws.write(pending_path, &pending);
+            let body = format!("A [linked document]({destination}).");
+            let result = lk_queue::SectionResult {
+                task_id: task.task_id.clone(),
+                cache_hash: task.cache_hash.clone(),
+                target_revision: lk_core::concept::file_revision(&page),
+                body: body.clone(),
+            };
+            let result_path = ".lorekeeper/queue/results/links.section.json";
+            let result = serde_json::to_string(&result).unwrap();
+            ws.write(result_path, &result);
+
+            for args in [vec!["queue", "apply", "--dry-run"], vec!["queue", "apply"]] {
+                let output = ws.run(&args);
+                assert_eq!(
+                    output.status.success(),
+                    !external,
+                    "external={external}, directory={directory}: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                if external || args.contains(&"--dry-run") {
+                    assert_eq!(ws.read(&task.target.vault_path), page);
+                    assert_eq!(ws.read(pending_path), pending);
+                    assert_eq!(ws.read(result_path), result);
+                } else {
+                    let published = ws.read(&task.target.vault_path);
+                    assert!(published.contains(&body));
+                    assert!(published.contains(&format!("summary_done: {}", task.cache_hash)));
+                }
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
 fn a_section_target_outside_the_vault_is_unreadable_and_never_published() {
     let ws = Workspace::new();
     let external = tempfile::tempdir().unwrap();

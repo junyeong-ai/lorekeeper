@@ -322,7 +322,9 @@ fn validate_links(root: &Path, target: &Path, body: &str) -> miette::Result<()> 
     for destination in lk_core::link::extract_dests(body) {
         let path = lk_core::link::resolve_dest(target, &destination)
             .ok_or_else(|| miette::miette!("section link escapes the vault: {destination}"))?;
-        if !root.join(&path).is_file() {
+        let full = lk_vault::page_path(root, &path)
+            .map_err(|error| miette::miette!("invalid section link {destination}: {error}"))?;
+        if !full.is_file() {
             return Err(miette::miette!(
                 "section links to a missing page: {}",
                 path.display()
