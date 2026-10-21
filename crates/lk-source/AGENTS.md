@@ -48,9 +48,12 @@ uses validated params and context; do not add per-adapter output pipelines.
 - `jira.rs`: Cloud v3 search/jql uses tokens; Server/DC v2 uses offsets/total. Cache
   `/myself` with OnceCell and fail on identity failure. Preserve ADF and due/start
   date headers rather than losing work semantics in text conversion.
-- `confluence.rs`: validate user CQL without rewriting its meaning; append the date
-  window. Re-anchor next links to the authenticated API base and follow `page_step`.
-  External identity includes version; `only_my_edits` compares the current author.
+- `confluence.rs`: treat CQL as a provider-validated filter, intersect it with the date
+  window and add ordering. Never infer query semantics from substrings. Relative
+  provider functions evaluate at acquisition, not the requested historical date.
+  Re-anchor next links to the authenticated API base and follow `page_step`.
+  External identity preserves the supplied version; unavailable version/body makes
+  the observation partial. `only_my_edits` compares the current author.
 - `gmail.rs`: epoch bounds and parenthesized OR terms; queries are required/nonblank.
   An unread-only filter is an explicit user choice, not an implicit default.
 - `slack.rs`: form-encode API calls. Cursor pagination is authoritative, not

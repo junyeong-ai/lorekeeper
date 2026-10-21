@@ -113,7 +113,11 @@ and account login. Their success does not authenticate Lore's native adapters.
 Use available helpers to find metadata; otherwise ask for the specific IDs or
 conditions. Never invent them or install unrelated tooling without need.
 Confluence uses a named Atlassian instance and the `confluence` params/CQL example;
-use the selected space/page scope, not a Jira issue query.
+use the selected space/page scope, not a Jira issue query. Its `cql` is a filter
+without `ORDER BY`; the adapter intersects it with the requested modification
+window and adds ordering. Confluence validates the grammar at fetch time.
+Provider-relative functions such as `now()` use acquisition time; a past `--date`
+does not restore their old evaluation or historical page versions.
 
 Credentials belong to `lore init credentials` in an interactive terminal or the
 supported credential store/environment, never source params. RSS/manual/tasks and

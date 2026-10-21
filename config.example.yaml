@@ -161,9 +161,9 @@ sources:
     enabled: false
     # instance: default
     params:
-      # WHICH pages matter. Must NOT contain a time clause: the adapter appends the target
-      # day's window itself, so `lore ingest --date <past>` queries that window (a
-      # hand-written `lastModified` would pin the query to the wall clock instead).
+      # CQL filter only; the adapter adds the target day's modification window and ordering.
+      # Provider functions such as now() use acquisition time, even with --date in the past.
+      # CQL grammar is validated by Confluence when fetching, not by `lore validate`.
       cql: >
         type = page AND contributor = currentUser()
       # lookback_hours: 24

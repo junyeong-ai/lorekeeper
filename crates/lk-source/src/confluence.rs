@@ -36,9 +36,8 @@ pub struct ConfluenceSource {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ConfluenceParams {
-    /// CQL selecting WHICH pages matter, with NO time clause — the adapter appends the
-    /// window from `day_window` so `lore ingest --date <past>` backfills the right day.
-    /// A time clause here would pin the query to the wall clock and break that.
+    /// Provider CQL filter intersected with the target day's modification window.
+    /// The adapter owns ordering; provider-relative functions use acquisition time.
     cql: String,
     #[serde(default = "default_lookback")]
     lookback_hours: u32,
@@ -83,18 +82,6 @@ impl crate::ValidatedParams for ConfluenceParams {
             return Err(SourceError::InvalidParams(
                 "confluence `cql` must not be blank — an empty query matches every page in \
                  the site, turning a targeted daily snapshot into a full scrape."
-                    .into(),
-            ));
-        }
-        // The adapter owns the time window. A user-supplied one would either fight it or
-        // silently anchor the query to `now`, breaking `--date` backfill.
-        let lowered = self.cql.to_lowercase();
-        if lowered.contains("lastmodified") || lowered.contains("created >") {
-            return Err(SourceError::InvalidParams(
-                "confluence `cql` must not carry a time clause (`lastModified`/`created`) — \
-                 the adapter appends the target day's window, so a hand-written one would \
-                 anchor the query to the wall clock and break `--date` backfill. Use \
-                 `lookback_hours` instead."
                     .into(),
             ));
         }
@@ -747,7 +734,7 @@ mod tests {
     }
 
     #[test]
-    fn params_reject_a_blank_or_time_bearing_cql() {
+    fn params_require_a_filter_and_positive_page_cap() {
         use crate::ValidatedParams;
         let parse = |v: serde_json::Value| serde_json::from_value::<ConfluenceParams>(v).unwrap();
 
@@ -755,12 +742,6 @@ mod tests {
             parse(serde_json::json!({ "cql": "   " }))
                 .validate()
                 .is_err()
-        );
-        assert!(
-            parse(serde_json::json!({ "cql": "type = page AND lastModified >= now(\"-1d\")" }))
-                .validate()
-                .is_err(),
-            "a hand-written window would break --date backfill"
         );
         assert!(
             parse(serde_json::json!({ "cql": "type = page", "max_pages": 0 }))
@@ -772,6 +753,25 @@ mod tests {
                 .validate()
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn cql_filters_are_preserved_without_keyword_classification() {
+        use crate::ValidatedParams;
+        let min: jiff::Timestamp = "2026-07-27T00:00:00Z".parse().unwrap();
+        let max: jiff::Timestamp = "2026-07-28T00:00:00Z".parse().unwrap();
+        for filter in [
+            r#"type = page AND text ~ "lastModified""#,
+            r#"type = page AND text ~ "created >""#,
+            r#"type = page AND created < "2026/01/01""#,
+            r#"type = page AND created >= now("-1d")"#,
+            r#"type = page AND lastModified >= now("-1d")"#,
+        ] {
+            let params: ConfluenceParams =
+                serde_json::from_value(serde_json::json!({ "cql": filter })).unwrap();
+            params.validate().unwrap();
+            assert!(build_windowed_cql(filter, min, max).starts_with(&format!("({filter}) AND ")));
+        }
     }
 
     #[test]
