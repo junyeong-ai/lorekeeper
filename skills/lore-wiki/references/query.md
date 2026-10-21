@@ -65,8 +65,8 @@ one captured transaction. Each group has its own total and authority; links do n
 establish support, and source declarations are not current-truth judgments.
 Its `summary` is a bounded opening preview; use revision-pinned reads for full content.
 Search and browse include at most 3 previews in each hit's `reviews.reviews`, with
-`total`, `next_offset` and complete `states` counts for open, resolved, changed and invalid
-assessments. Expand reviews through this captured context rather than assuming the hit
+`total`, `next_offset` and complete `states` counts (`open`, `resolved`,
+`needs_reassessment`, `invalid`). Expand reviews through this captured context rather than assuming the hit
 contains every assessment. Inspect relevant open or changed judgments before using a claim.
 `not-captured` differs from an available empty group. Follow its `next_offset` with
 `--offset` in the same snapshot; the offset applies independently to every group.

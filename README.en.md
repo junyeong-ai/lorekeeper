@@ -247,6 +247,7 @@ summaries without extracting concepts; `existing-only` links published owners;
 `supported-new` also permits supported new subjects. Omission means `disabled`.
 `focus` separately limits subject scope. The policy enters task identity and is
 enforced by native publication, rather than by prompts alone.
+Disabling extraction retains established citations; retract mistaken citations through explicit review and correction.
 
 ### ✅ Result ③ — disclose detail as needed
 
@@ -264,6 +265,12 @@ relationships and direct evidence. Use `wiki search --body` for literal body tex
 `--spacing` for whitespace differences, and `wiki browse --category ... --tag ...`
 for metadata filters. Candidates, ordinary links and citations have different
 meanings; ranking and citation counts are not confidence scores.
+
+Each search/browse metadata facet returns up to 20 values by default, plus its
+distinct-value total and next offset. Follow `--facet-limit` and `--facet-offset`
+independently of hit `--offset`. Each hit previews at most 3 scoped reviews with
+complete totals and state counts; expand the rest through `wiki context` in the
+same snapshot.
 
 `index.md` is a small entry guide; `.lorekeeper/search.sqlite` holds discovery.
 Reuse a snapshot and `next_offset` for a session, then verify evidence with returned
