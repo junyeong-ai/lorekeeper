@@ -7,7 +7,7 @@
 > **[English](README.en.md)** | **한국어**
 
 **흩어진 일상의 작업을 스스로 자라는 지식 위키로.**
-Gmail·Slack·Jira·캘린더·RSS·메모를 수집하고, 출처와 연결된 요약·개념을 Markdown으로 관리합니다. Rust가 수집·검색·게시 검증을, 설정한 LLM 실행기가 의미 판단을 맡습니다.
+Gmail·Slack·Jira·캘린더·RSS·메모를 수집하고, 출처와 연결된 요약·개념을 임베딩 없이 Markdown과 링크로 관리합니다. Rust가 수집·검색·게시 검증을, 설정한 LLM 실행기가 의미 판단을 맡습니다.
 
 ---
 
@@ -15,7 +15,7 @@ Gmail·Slack·Jira·캘린더·RSS·메모를 수집하고, 출처와 연결된 
 
 지식이 쌓이면 교차참조·분류·중복 후보·서로 다른 주장을 계속 확인해야 합니다. Lorekeeper는 반복 가능한 검사를 도구로 수행하고, 근거를 읽는 의미 판단을 LLM 작업으로 남깁니다.
 
-> 📖 **처음 보는 용어들** — **vault**: 마크다운 파일이 모인 폴더(곧 당신의 지식 저장소) · **개념(concept)**: 한 주제당 한 페이지 · **링크**: 페이지를 잇는 `[표시 이름](상대/경로.md)` 마크다운 링크(Obsidian·GitHub·OKF 어디서든 해석) · **부기**: 링크·중복·분류를 손으로 갱신하는 그 잡일.
+> 📖 **처음 보는 용어들** — **vault**: 마크다운 파일이 모인 폴더(곧 당신의 지식 저장소) · **개념(concept)**: 한 주제당 한 페이지 · **링크**: 페이지를 잇는 `[표시 이름](상대/경로.md)` 마크다운 링크(Obsidian·GitHub·OKF 어디서든 해석).
 
 | | |
 |---|---|
@@ -35,25 +35,39 @@ Gmail·Slack·Jira·캘린더·RSS·메모를 수집하고, 출처와 연결된 
 
 ```mermaid
 flowchart LR
-    subgraph SRC["📡 데이터 소스"]
-        direction TB
-        G["Gmail"]
-        S["Slack"]
-        J["Jira"]
-        C["Calendar"]
-        R["RSS"]
-        M["메모 inbox"]
-    end
-    SRC --> L["⚙️ lore (Rust CLI)"]
-    L --> P["수집 · 정규화 · 중복제거<br/>분류 · 렌더 · 그래프"]
-    P --> V[("🗂️ Obsidian Vault<br/>daily · concepts · documents")]
-    L -. "LLM 작업 큐" .-> CC["🤖 Claude Code · Codex<br/>공통 lore-process 스킬"]
-    CC -. "타입이 있는 의미 결과" .-> L
+    S["설정된 소스"] --> C["수집 · 전처리<br/>원본·관측 보존"]
+    C --> Q["타입이 있는 의미 작업 큐"]
+    Q --> A["Claude Code · Codex"]
+    A --> P["입력·판본·근거 검증 후 게시"]
+    P --> V[("Markdown<br/>출처 · 개념 · 검토")]
+    V --> N[("SQLite 탐색 판본")]
+    N --> R["검색 → 본문 → 근거·관계<br/>검수 · 보정"]
+    R -. "검토한 재합성 요청" .-> Q
 ```
 
 `lore`가 수집·실행 순서·게시 검증을 맡고, 공통 `lore-process` 스킬을 실행하는 Claude Code 또는 Codex가 요약·개념·관계를 판단합니다. Markdown이 지식 원본이며 SQLite는 다시 만들 수 있는 검색·탐색 인덱스입니다.
 
 ---
+
+## 핵심 개념
+
+| 저장 위치·단계 | 역할과 기준 |
+|---|---|
+| 원본·출처 페이지 | 수동 원본과 지원하는 의존성, RSS 수집 본문을 별도 보존. 재조회는 당시 원본 복원이 아님 |
+| `daily/`, `wiki/documents/` | 소스 관측과 문서. 구조는 파이프라인이 만들고 요약·추출은 큐로 처리 |
+| `wiki/concepts/` | 지속적으로 조회할 주제. 이름·별칭을 확인해 재사용하고 근거·관련 관계를 축적 |
+| `wiki/explorations/` | 질문에 대한 비교·판단·열린 검토. 출처와 그 판본을 명시해 이전 판단을 보존 |
+| `me/`, 기간 합성 | 선택적인 개인 업무 로그·리뷰와 별도의 주간 지식 테마 |
+| SQLite·`index.md` | 재생성 가능한 탐색 판본과 작은 진입 안내. Markdown 지식을 대신하는 원본 저장소가 아님 |
+
+구조와 의미 결과의 소유권을 구분합니다. 완료 마커가 현재 입력 해시와 일치해야 LLM 결과를
+재사용하며, 채워진 문장만으로 완료를 판단하지 않습니다. 미래 날짜는 실체화하지 않습니다.
+`vault.locale`은 생성 문장의 언어를 정하고 원문·출처가 적은 개념 이름은 번역하지 않습니다.
+기존 개념 본문의 언어 보존은 [작업별 언어 규약](skills/lore-process/references/processing-kinds.md#output-language-all-kinds)을 따릅니다.
+
+정확한 소스 식별자로 반복 관측을 정리하며, 서로 다른 출처의 유사한 문서를 자동 병합하지 않습니다.
+모델이 의미를 판단하고 Rust가 입력·판본·근거·게시 형식을 검증합니다. 구조 검사 통과는 전체
+지식의 의미적 일관성이나 사실의 정확성을 증명하지 않습니다.
 
 ## 읽는 순서
 
@@ -88,22 +102,6 @@ mkdir -p "$(lore config vault-root)/inbox"
 vault의 `inbox/`에 메모 파일 하나를 넣은 뒤 수집합니다. `inbox_dir: inbox`는 변경한
 `vault.root`를 따라갑니다. 기본 설정에는 공급자 인증 마법사가 필요하지 않습니다.
 
-DOCX·XLSX·PDF를 넣으려면 `lore input install DIRECTORY`로 선택적 변환 환경을 설치하고
-출력된 설정을 병합합니다. macOS 14 이상 Apple Silicon에서는
-`lore input install-vision VISION_DIRECTORY --python python3.12`로 PaddleOCR-VL 1.6의
-별도 실행 환경과 고정된 모델을 설치해 이미지·스캔 PDF·표를 인식할 수 있습니다.
-`vision`을 설정하면 PDF는 기본적으로 모든 페이지의 내장 텍스트와 시각 인식을 함께
-보존합니다. `pdf: {mode: native}`로 비용을 줄이거나 인식할 물리 페이지를 지정할 수 있습니다.
-시각 인식은 정확성이나 의미 검수의 승인이 아니므로 중요한 값은 보존 원본과 대조합니다.
-`lore input check`로 의존성을, `lore input inspect FILE.pdf`로 원본을 옮기지 않고 결과를
-확인합니다. Tesseract의 언어 데이터를 직접 지정하는 일반 텍스트 OCR도 선택할 수 있습니다.
-원본은 기본적으로 파일당 32 MiB이며, 더 큰 입력은 `ingest.originals.max_entry_bytes`를
-명시적으로 높여 허용합니다. 원본을 임시 파일에 보관하므로 전체 바이너리를 메모리에
-복제하지 않습니다. 변환 결과·페이지 수 제한은 별도이며, 변환기 자체의 메모리 사용량은
-파일 형식에 따라 달라집니다. 실제 수집은 완료된 페이지와 변환 결과를 비공개 파생 캐시에 보존해
-재시도에 재사용하며, `inspect`와 `--dry-run`은 캐시를 기록하지 않습니다.
-[전처리 설정과 지원 범위](skills/lore-setup/references/config.md#document-preprocessing)를 참고하세요.
-
 ```bash
 # 4) 입력 접근을 확인한 뒤 실제 수집
 lore ingest --dry-run
@@ -129,7 +127,20 @@ lore schedule > lorekeeper.cron
 `lore init credentials` → 해당 소스의 `lore ingest --dry-run <source-id>` 순서로 확인합니다.
 예약 정의 생성·OS 등록·실제 실행은 각각 별도 단계입니다. [스케줄링](#스케줄링)을 따르세요.
 
-> Obsidian이 없어도 됩니다 — 결과물은 평범한 마크다운 + 폴더라 그냥 텍스트로 읽힙니다. Obsidian은 그래프 탐색을 예쁘게 보여줄 뿐.
+### 다양한 파일과 대용량 입력
+
+DOCX·XLSX·PDF는 `lore input install DIRECTORY`로 선택적 변환 환경을 설치한 뒤
+출력된 설정을 병합합니다. macOS 14 이상 Apple Silicon에서는
+`lore input install-vision VISION_DIRECTORY --python python3.12`로 PaddleOCR-VL 1.6을
+설치할 수 있습니다. `vision`을 설정한 PDF는 기본적으로 모든 페이지의 내장 텍스트와
+시각 인식을 보존하며, `pdf: {mode: native}` 또는 명시한 물리 페이지 선택으로 비용을 조절합니다.
+Tesseract의 일반 텍스트 OCR도 선택할 수 있습니다. 인식 결과는 의미 검수의 승인이 아닙니다.
+
+`lore input check`로 설치를, `lore input inspect FILE.pdf`로 결과를 확인하세요.
+원본은 기본 파일당 32 MiB이며 더 큰 파일은 `ingest.originals` 한도를 명시적으로 높입니다.
+변환 결과·페이지 수·실행 시간은 별도 제한입니다. 재시도는 검증된 파생 캐시를 재사용하고,
+`inspect`와 `--dry-run`은 캐시를 기록하지 않습니다. 메모리·표·수식·페이지·시트의 보존 범위는
+[전처리 설정과 지원 범위](skills/lore-setup/references/config.md#document-preprocessing)에서 확인하세요.
 
 ---
 
@@ -298,38 +309,18 @@ flowchart LR
 | `google-drive` | Drive 폴더의 큐레이션 문서 | Google OAuth |
 | `rss` | 벤더 블로그·뉴스 → 개념 (인증 불필요, 다중 피드) | 없음 |
 | `nodex` | 프로젝트 저장소가 직접 쓴 결정·학습 기록 → 개념 (`nodex.toml`과 nodex `>=0.60,<0.61` 필요; [실행 파일·근거 버전 설정](skills/lore-setup/references/config.md#nodex-binary-selection)) | 없음 |
-| `manual` | `inbox/`의 Markdown·텍스트·HTML, 선택적 DOCX·XLSX·PDF·이미지 OCR | 소스 인증 없음; 바이너리 변환은 별도 런타임 |
+| `manual` | `inbox/`의 Markdown·텍스트·HTML, 선택적 DOCX·XLSX·PDF·이미지 인식 | 소스 인증 없음; 바이너리 변환은 별도 런타임 |
 | `tasks` | 내가 끝낸 작업 — `lore task`로 닫은 항목이 그날의 페이지가 됨 | 없음 |
 
-소스 키 = vault의 하위 폴더 이름. 같은 타입을 여러 개 정의할 수 있습니다(예: `team-slack`, `ai-news`). 전체 예시는 [`config.example.yaml`](config.example.yaml).
+같은 타입의 소스를 여러 개 정의할 수 있습니다(예: `team-slack`, `ai-news`). 일일 집계는
+`<daily>/<소스 키>/날짜.md`에, 문서 단위인 manual·nodex·Drive는 `<wiki>/documents/`에
+안정된 문서 식별자로 저장합니다. 전체 예시는 [`config.example.yaml`](config.example.yaml).
 
 외부 지식을 추가하려면 카탈로그의 `ai-news` 또는 `tech-news` 블록을 실제 설정에 복사해 활성화하세요. 공식 발표·모델 기법·AI 구현·제품 평가와 국내 개발 사례를 기본으로 두고, 추가 연구소·뉴스레터·집계 피드는 선택하도록 나눴습니다. `fetch_full_text`는 짧은 피드의 본문을 가져오지만 접근 실패 시 피드 텍스트만 남습니다. `focus`는 요약·개념 추출의 범위이며 원본 수집을 차단하지 않습니다. 피드의 현재 목록과 조회 한도는 전체 과거 이력이나 사실의 정확성을 보장하지 않습니다.
-
----
 
 새 소스는 어댑터의 타입·설정·문서 식별·관측 범위·부분 실패 계약을 등록해 확장합니다.
 설정에 이름만 추가하는 플러그인 방식은 아니며, 현재 YouTube 전용 수집기는 없습니다.
 Drive·웹 입력의 지원 형식과 이력 범위는 [설정 안내](skills/lore-setup/references/config.md)를 확인하세요.
-
-## 핵심 개념
-
-| 저장 위치·단계 | 역할과 기준 |
-|---|---|
-| 원본·출처 페이지 | 수동 원본과 지원하는 의존성, RSS 수집 본문을 별도 보존. 재조회는 당시 원본 복원이 아님 |
-| `daily/`, `wiki/documents/` | 소스 관측과 문서. 구조는 파이프라인이 만들고 요약·추출은 큐로 처리 |
-| `wiki/concepts/` | 지속적으로 조회할 주제. 이름·별칭을 확인해 재사용하고 근거·관련 관계를 축적 |
-| `wiki/explorations/` | 질문에 대한 비교·판단·열린 검토. 출처와 그 판본을 명시해 이전 판단을 보존 |
-| `me/`, 기간 합성 | 선택적인 개인 업무 로그·리뷰와 별도의 주간 지식 테마 |
-| SQLite·`index.md` | 재생성 가능한 탐색 판본과 작은 진입 안내. Markdown 지식을 대신하는 원본 저장소가 아님 |
-
-구조와 의미 결과의 소유권을 구분합니다. 완료 마커가 현재 입력 해시와 일치해야 LLM 결과를
-재사용하며, 채워진 문장만으로 완료를 판단하지 않습니다. 미래 날짜는 실체화하지 않습니다.
-`vault.locale`은 생성 문장의 언어를 정하고 원문·출처가 적은 개념 이름은 번역하지 않습니다.
-기존 개념 본문의 언어 보존은 [작업별 언어 규약](skills/lore-process/references/processing-kinds.md#output-language-all-kinds)을 따릅니다.
-
-정확한 소스 식별자로 반복 관측을 정리하며, 서로 다른 출처의 유사한 문서를 자동 병합하지 않습니다.
-모델이 의미를 판단하고 Rust가 입력·판본·근거·게시 형식을 검증합니다. 구조 검사 통과는 전체
-지식의 의미적 일관성이나 사실의 정확성을 증명하지 않습니다.
 
 ## 명령어
 
@@ -496,9 +487,6 @@ lore init credentials   # 대화형 마법사 — Google 토큰은 브라우저 
 
 ---
 
-
-
-
 ## 스케줄링
 
 ```bash
@@ -576,12 +564,6 @@ graph:
 초기 누적분은 등록된 프로필로 `lore run knowledge --profile reviewer --batches 20 --json`처럼
 실행량을 명시해 재개할 수 있습니다. `batch-limit`는 실행량 도달, `settled`는 현재 검사 범위의
 대기 대상이 없다는 뜻입니다. 전체 지식의 진실이나 모든 외부 원본 검수를 보장하지 않습니다.
-`audit_progress`는 검수 전후 건수, `semantic_calls`는 에이전트 실행 시도 수입니다.
-한 실행 안에서도 여러 모델 요청과 도구 호출이 발생하므로, `max_calls`는 모델 요청 수나
-토큰 수·요금의 상한이 아닙니다.
-`duration_ms`는 대기·정리까지 포함한 실행 시간이며, 여러 배치를 요청하면 전체 시간과 각 배치
-시간을 함께 제공합니다. `semantic_duration_ms`는 해당 배치의 에이전트 실행에 소요된 시간입니다.
-실패·취소한 실행 시간도 포함하며, 제공자의 처리 시간이나 청구 금액을 뜻하지 않습니다.
 예약 주기는 초기 누적량과 함께 정하세요. `lore wiki audit-plan`의 미검수·변경 건수와
 소규모 실행에서 실제 완료한 대상 수·호출 수·소요 시간을 확인한 뒤 초기 실행량을 정하고,
 이후 새로 들어오거나 변경되는 양보다 처리량이 충분한지 관찰하세요. `batch_size`는 대상 수의

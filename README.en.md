@@ -7,7 +7,7 @@
 > **English** | **[한국어](README.md)**
 
 **Turn your scattered daily work into a knowledge wiki that grows itself.**
-Lorekeeper collects Gmail, Slack, Jira, Calendar, RSS and notes into source-linked Markdown knowledge. Rust owns collection, search and publication checks; a configured LLM host judges summaries, concepts and relationships.
+Lorekeeper collects Gmail, Slack, Jira, Calendar, RSS and notes into source-linked Markdown knowledge, using links rather than embeddings. Rust owns collection, search and publication checks; a configured LLM host judges summaries, concepts and relationships.
 
 ---
 
@@ -15,7 +15,7 @@ Lorekeeper collects Gmail, Slack, Jira, Calendar, RSS and notes into source-link
 
 Growing knowledge needs continuing checks of cross-references, categories, duplicate candidates and competing claims. Lorekeeper automates reproducible checks and leaves evidence-based semantic judgments to explicit LLM work.
 
-> 📖 **New to the terms?** — **vault**: a folder of markdown files (i.e. your knowledge store) · **concept**: one page per topic · **link**: a `[Display](relative/path.md)` markdown link between pages (resolves in Obsidian, GitHub, and any OKF consumer) · **bookkeeping**: the chore of updating links, dedup, and categories by hand.
+> 📖 **New to the terms?** — **vault**: a folder of markdown files (i.e. your knowledge store) · **concept**: one page per topic · **link**: a `[Display](relative/path.md)` markdown link between pages (resolves in Obsidian, GitHub, and any OKF consumer).
 
 | | |
 |---|---|
@@ -23,6 +23,7 @@ Growing knowledge needs continuing checks of cross-references, categories, dupli
 | 🧹 **Cuts the noise** | Dedup, filters irrelevant items, splits *your* work into a work-log automatically |
 | 🧩 **Concept accumulation** | Reuse an existing subject after checking scope; preserve its names, aliases and evidence |
 | 🔗 **A connected knowledge graph** | Markdown links, backlinks, and clusters connect concepts |
+| ✅ **Completed work → knowledge** | Preserve completed tasks and notes; configured tasks collection and semantic processing feed daily pages, concepts and personal reviews |
 | 📈 **Compounding** | Weekly / monthly / quarterly / annual synthesis — value grows over time |
 | 🔑 **Reuse CLI login** | Uses existing Claude Code or Codex authentication; Lore needs no separate LLM API client |
 
@@ -34,25 +35,41 @@ Growing knowledge needs continuing checks of cross-references, categories, dupli
 
 ```mermaid
 flowchart LR
-    subgraph SRC["📡 Data sources"]
-        direction TB
-        G["Gmail"]
-        S["Slack"]
-        J["Jira"]
-        C["Calendar"]
-        R["RSS"]
-        M["Note inbox"]
-    end
-    SRC --> L["⚙️ lore (Rust CLI)"]
-    L --> P["collect · normalize · dedup<br/>classify · render · graph"]
-    P --> V[("🗂️ Obsidian Vault<br/>daily · concepts · documents")]
-    L -. "LLM task queue" .-> CC["🤖 Claude Code · Codex<br/>shared lore-process skill"]
-    CC -. "typed semantic results" .-> L
+    S["Configured sources"] --> C["Collect · preprocess<br/>retain originals/observations"]
+    C --> Q["Typed semantic queue"]
+    Q --> A["Claude Code · Codex"]
+    A --> P["Validate input, revisions and evidence<br/>then publish"]
+    P --> V[("Markdown<br/>sources · concepts · reviews")]
+    V --> N[("SQLite discovery snapshot")]
+    N --> R["Search → body → evidence/relations<br/>review · correct"]
+    R -. "Reviewed resynthesis requests" .-> Q
 ```
 
 `lore` owns collection, execution ordering and guarded publication. Claude Code or Codex follows the shared `lore-process` skill to judge summaries, concepts and relationships. Markdown is authoritative; SQLite is a rebuildable search and navigation index.
 
 ---
+
+## Core ideas
+
+| Storage or stage | Responsibility |
+|---|---|
+| Originals and source pages | Preserve manual originals/dependencies and collected RSS text separately; refetch is not historical restoration |
+| `daily/`, `wiki/documents/` | Source observations and documents; the pipeline owns structure and queues semantic work |
+| `wiki/concepts/` | Durable retrieval subjects with resolved names, aliases, evidence and supported relationships |
+| `wiki/explorations/` | Comparisons, judgments and open reviews with exact evidence revisions and retained prior decisions |
+| `me/`, period synthesis | Optional personal work-log/reviews, separate from weekly knowledge themes |
+| SQLite and `index.md` | Rebuildable discovery and a small entry guide; Markdown remains authoritative |
+
+Structure and semantic results have different owners. A matching input hash and
+completion marker permit reuse; filled prose alone does not prove completion.
+Future dates do not materialize. `vault.locale` controls generated prose, while
+source text and source-written concept names retain their language. Established
+concept prose follows the [per-kind language policy](skills/lore-process/references/processing-kinds.md#output-language-all-kinds).
+
+Exact source identities deduplicate repeated observations. Similar documents from
+different sources are not automatically merged. The model judges meaning; Rust
+validates input identity, revisions, evidence and publication. Passing structural
+checks does not establish complete semantic consistency or factual truth.
 
 ## Reading path
 
@@ -87,16 +104,6 @@ mkdir -p "$(lore config vault-root)/inbox"
 Put one note in the vault's `inbox/`, then collect it. `inbox_dir: inbox` follows
 your selected `vault.root`. The starter does not need the provider credential wizard.
 
-For DOCX, XLSX and PDF inputs, install the optional decoder with
-`lore input install DIRECTORY` and merge its printed configuration. Verify dependencies
-with `lore input check`, then inspect a file without moving it using
-`lore input inspect FILE.pdf`. Images additionally need explicit OCR language data.
-Original entries default to 32 MiB; raise `ingest.originals.max_entry_bytes` explicitly
-for larger inputs. Originals use temporary files instead of full in-memory binary
-copies. Projection size and page-count limits remain separate; decoder memory usage
-depends on the format.
-See [preprocessing configuration and scope](skills/lore-setup/references/config.md#document-preprocessing).
-
 ```bash
 # 4) Check input access, then collect for real
 lore ingest --dry-run
@@ -123,7 +130,21 @@ For an authenticated source, run `lore init credentials` and then
 `lore ingest --dry-run <source-id>`. Definition generation, OS registration and an
 actual run are separate steps; follow [Scheduling](#scheduling).
 
-> You don't need Obsidian — the output is plain markdown + folders, readable as text. Obsidian just makes the graph nicer to browse.
+### Binary documents and large inputs
+
+For DOCX, XLSX and PDF, run `lore input install DIRECTORY` and merge its printed
+configuration. On Apple Silicon with macOS 14 or later,
+`lore input install-vision VISION_DIRECTORY --python python3.12` installs PaddleOCR-VL 1.6.
+With `vision` configured, PDFs retain native text and visual recognition of every page
+by default. Choose `pdf: {mode: native}` or explicit physical pages to control cost.
+Tesseract literal-text OCR is also available. Recognition is not semantic approval.
+
+Check installation with `lore input check` and projections with `lore input inspect FILE.pdf`.
+Original entries default to 32 MiB; explicitly raise `ingest.originals` limits for larger files.
+Projection size, page count and execution time have separate bounds. Retries reuse
+verified derived caches; `inspect` and `--dry-run` never write them. See
+[preprocessing configuration and scope](skills/lore-setup/references/config.md#document-preprocessing)
+for memory limits and preservation of tables, formulas, pages and sheets.
 
 ---
 
@@ -295,41 +316,20 @@ Collection connects sources and concepts; period synthesis uses ready daily reco
 | `google-drive` | Curated docs in a Drive folder | Google OAuth |
 | `rss` | Vendor blogs / news → concepts (no auth, multi-feed) | none |
 | `nodex` | A project repository's own decision and learning records → concepts (needs `nodex.toml` and nodex `>=0.60,<0.61`; see [binary selection and evidence versions](skills/lore-setup/references/config.md#nodex-binary-selection)) | none |
-| `manual` | Inbox Markdown, text and HTML; optional DOCX, XLSX, PDF and image OCR | No source credentials; binary decoding needs an optional runtime |
+| `manual` | Inbox Markdown, text and HTML; optional DOCX, XLSX, PDF and image recognition | No source credentials; binary decoding needs an optional runtime |
 | `tasks` | Your own finished tasks — what `lore task` closed becomes the day's page | none |
 
-The source key becomes the vault subfolder name. You can define several of the same type (e.g. `team-slack`, `ai-news`). Full reference: [`config.example.yaml`](config.example.yaml).
+Define several sources of the same type when needed (e.g. `team-slack`, `ai-news`).
+Daily aggregates use `<daily>/<source-key>/DATE.md`; document-unit manual, nodex and
+Drive sources share `<wiki>/documents/` with stable document identities.
+Full reference: [`config.example.yaml`](config.example.yaml).
 
 To add external knowledge, copy the catalog's `ai-news` or `tech-news` block into your actual config and enable it. The selected feeds cover official announcements, model methods, AI implementation, product evaluation and Korean engineering accounts; additional labs, newsletters and aggregators are optional. `fetch_full_text` retrieves articles from short feeds, but access failures retain only the feed text. `focus` guides summaries and concept extraction without filtering raw collection. Current feed listings and query caps guarantee neither complete history nor factual accuracy.
-
----
 
 New sources register adapter types, configuration, document identity, observation scope
 and partial-failure contracts. Adding a configuration name alone does not install an
 adapter. There is no dedicated YouTube source; see [configuration](skills/lore-setup/references/config.md)
 for Drive/web format and historical-scope limits.
-
-## Core ideas
-
-| Storage or stage | Responsibility |
-|---|---|
-| Originals and source pages | Preserve manual originals/dependencies and collected RSS text separately; refetch is not historical restoration |
-| `daily/`, `wiki/documents/` | Source observations and documents; the pipeline owns structure and queues semantic work |
-| `wiki/concepts/` | Durable retrieval subjects with resolved names, aliases, evidence and supported relationships |
-| `wiki/explorations/` | Comparisons, judgments and open reviews with exact evidence revisions and retained prior decisions |
-| `me/`, period synthesis | Optional personal work-log/reviews, separate from weekly knowledge themes |
-| SQLite and `index.md` | Rebuildable discovery and a small entry guide; Markdown remains authoritative |
-
-Structure and semantic results have different owners. A matching input hash and
-completion marker permit reuse; filled prose alone does not prove completion.
-Future dates do not materialize. `vault.locale` controls generated prose, while
-source text and source-written concept names retain their language. Established
-concept prose follows the [per-kind language policy](skills/lore-process/references/processing-kinds.md#output-language-all-kinds).
-
-Exact source identities deduplicate repeated observations. Similar documents from
-different sources are not automatically merged. The model judges meaning; Rust
-validates input identity, revisions, evidence and publication. Passing structural
-checks does not establish complete semantic consistency or factual truth.
 
 ## Commands
 
@@ -594,13 +594,6 @@ For an initial backlog, select a registered profile and execution budget:
 `lore run knowledge --profile reviewer --batches 20 --json`. `batch-limit` means
 the budget was reached; `settled` means the current eligible plan has no pending
 subjects. Neither proves universal truth or review of every external original.
-`audit_progress` reports before/after counts; `semantic_calls` counts agent invocation
-attempts. Each invocation can make multiple model requests and tool calls, so
-`max_calls` does not cap provider requests, tokens or billing.
-`duration_ms` measures elapsed wall time including
-waiting and cleanup; campaigns report both total and per-batch time.
-`semantic_duration_ms` measures that batch's agent invocations, including failed or
-cancelled attempts. These are not provider processing time or billed cost.
 Size the initial campaign from `lore wiki audit-plan`
 and a small run's actual completions, calls and duration; then check that recurring
 capacity keeps up with new and changed subjects. `batch_size` caps selected subjects,

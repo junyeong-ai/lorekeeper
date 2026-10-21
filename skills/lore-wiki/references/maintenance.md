@@ -1,5 +1,11 @@
 # Bounded knowledge maintenance
 
+## Contents
+
+- [Related-document discovery](#related-document-discovery)
+- [Assessment](#assessment)
+- [Operating budget and measurement](#operating-budget-and-measurement)
+
 This operation is a complete run of one batch, not a request to audit the entire vault.
 The scheduled session already holds the workflow lease. Follow the shared page and
 publication contracts in SKILL.md and read the curation reference before repairs.
@@ -172,3 +178,24 @@ them. The native audit verifier requires current scoped reviews; an unchanged op
 finding with a current scoped review remains a valid follow-up assessment.
 Report batch coverage, repairs, unresolved findings and remaining backlog separately.
 No lint or receipt count certifies that the entire corpus is semantically consistent.
+
+## Operating budget and measurement
+
+Use `lore run knowledge --profile NAME --batches N --json` for an explicitly bounded
+initial campaign. Each batch releases its workflow lease; a failure or cancellation
+stops the campaign with unfinished work retained. `batch-limit` means the execution
+budget was reached; `settled` means no subjects remain pending in the current scope.
+Neither outcome certifies truth or a read of every external original.
+
+Measure a small run before selecting a campaign size or schedule. `audit_progress`
+reports before/after coverage counts; `semantic_calls` counts agent invocation attempts.
+One invocation can make multiple model requests and tool calls, so `execution.work.max_calls`
+does not cap provider requests, tokens or billing. `duration_ms` includes waiting and
+cleanup; campaigns report total and per-batch time. `semantic_duration_ms` measures
+the batch's agent invocations, including failed or cancelled attempts, not provider
+processing time or billed cost.
+
+Compare actual completions, calls and elapsed time with first-time/changed backlog
+and incoming work. `batch_size` bounds selected subjects, not successful completion
+or cost: deferred inputs, bounded work and failures change throughput. Keep global
+review health separate from whether the selected batch completed.
