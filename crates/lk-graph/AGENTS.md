@@ -123,6 +123,8 @@ belong to exploration reviews, not a machine-persisted callout inferred by locat
   Derive citations from actual eligible source body links with exact authored
   revisions. Update the three together; unreadable sources forbid publication.
   Symlink spellings share one verified source owner; hard-link entries remain distinct.
+  Concept target spellings share evidence by verified owner without changing link
+  occurrences or declared RSS selections; hard-link targets remain distinct.
   Refuse differing alias-relative citation contexts rather than choosing or unioning them.
   Report discarded anchor sections rather than pretending their evidence remained.
 - Generated Sources is a bounded, stable discovery instruction; complete citations

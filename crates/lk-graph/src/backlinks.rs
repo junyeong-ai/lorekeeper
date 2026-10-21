@@ -310,8 +310,9 @@ fn citation_sources<'a>(
 fn incoming_citations(
     sources: &[CitationSource<'_>],
     existence: &VaultExistence,
-) -> BTreeMap<String, BTreeSet<String>> {
-    // Reverse index: concept page id → sorted set of source page ids that cite it.
+    target_owners: &BTreeMap<&str, PathBuf>,
+) -> BTreeMap<PathBuf, BTreeSet<String>> {
+    // Reverse index: verified target owner → sorted set of source page ids that cite it.
     // Each link already carries its resolved page id (scan resolves every destination
     // against its page's location), so crediting is a set-membership check — source_count,
     // complete citation discovery and synthesis use this same set. Only non-concept content
@@ -319,7 +320,7 @@ fn incoming_citations(
     // `## Related`, and navigation pages aren't sources. BTreeMap/BTreeSet keep the
     // complete evidence projection deterministic.
     // `sources` contains one validated owner per eligible physical origin.
-    let mut incoming: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut incoming: BTreeMap<PathBuf, BTreeSet<String>> = BTreeMap::new();
     for source in sources {
         let page = source.page;
         for target in page
@@ -331,7 +332,7 @@ fn incoming_citations(
             // self-edges.
             if target != page.id && existence.is_knowledge(target) {
                 incoming
-                    .entry(target.to_owned())
+                    .entry(target_owners[target].clone())
                     .or_default()
                     .insert(page.id.clone());
             }
@@ -346,7 +347,8 @@ fn rss_evidence(
     sources: &[CitationSource<'_>],
     root: &Path,
     dirs: &VaultDirs,
-) -> Result<BTreeMap<String, BTreeMap<String, Vec<Citation>>>, GraphError> {
+    target_owners: &BTreeMap<&str, PathBuf>,
+) -> Result<BTreeMap<String, BTreeMap<PathBuf, Vec<Citation>>>, GraphError> {
     let mut result = BTreeMap::new();
     for source in sources
         .iter()
@@ -363,37 +365,20 @@ fn rss_evidence(
         }
         let evidence = lk_vault::rss_concept_citations(root, &source.path, &raw)
             .map_err(|e| GraphError::Io(e.to_string()))?;
-        let mut resolved: BTreeMap<String, Vec<Citation>> = BTreeMap::new();
+        let mut resolved: BTreeMap<PathBuf, Vec<Citation>> = BTreeMap::new();
         for (concept, citations) in evidence {
-            let direct = pages.iter().find(|p| {
-                p.path == Path::new(&concept)
-                    && is_concept_page(&p.path, dirs)
-                    && p.format.as_deref() == Some("concept")
-            });
-            let matched = if direct.is_some() {
-                direct
-            } else {
-                let full = lk_vault::page_path(root, Path::new(&concept))
-                    .and_then(std::fs::canonicalize)
-                    .map_err(|e| GraphError::Io(e.to_string()))?;
-                let canonical_root =
-                    std::fs::canonicalize(root).map_err(|e| GraphError::Io(e.to_string()))?;
-                let relative = full
-                    .strip_prefix(&canonical_root)
-                    .map_err(|e| GraphError::Io(e.to_string()))?;
-                pages.iter().find(|p| p.path == relative)
-            };
-            let matched = matched
-                .filter(|p| {
-                    is_concept_page(&p.path, dirs) && p.format.as_deref() == Some("concept")
-                })
-                .ok_or_else(|| {
-                    GraphError::Io("RSS evidence concept is not a concept page".into())
-                })?;
-            resolved
-                .entry(matched.path.to_string_lossy().into_owned())
-                .or_default()
-                .extend(citations);
+            let owner = lk_vault::resolve_page_owner(root, Path::new(&concept))
+                .map_err(|error| GraphError::Io(error.to_string()))?;
+            if !pages.iter().any(|page| {
+                is_concept_page(&page.path, dirs)
+                    && page.format.as_deref() == Some("concept")
+                    && target_owners[page.id.as_str()] == owner
+            }) {
+                return Err(GraphError::Io(
+                    "RSS evidence concept is not a concept page".into(),
+                ));
+            }
+            resolved.entry(owner).or_default().extend(citations);
         }
         for citations in resolved.values_mut() {
             citations.sort();
@@ -408,14 +393,14 @@ fn citations_for(
     sources: &[String],
     concept: &Path,
     by_id: &HashMap<&str, &ScannedPage>,
-    rss: &BTreeMap<String, BTreeMap<String, Vec<Citation>>>,
+    rss: &BTreeMap<String, BTreeMap<PathBuf, Vec<Citation>>>,
 ) -> Vec<Citation> {
     sources
         .iter()
         .flat_map(|id| {
             let source = by_id[id.as_str()];
             rss.get(id)
-                .and_then(|m| m.get(&concept.to_string_lossy().to_string()))
+                .and_then(|m| m.get(concept))
                 .cloned()
                 .unwrap_or_else(|| {
                     vec![Citation::at_revision(
@@ -429,8 +414,9 @@ fn citations_for(
 
 /// The shared derivation used by reconciliation, resynthesis, audit and prepared discovery.
 struct CitationGraph<'a> {
-    incoming: BTreeMap<String, BTreeSet<String>>,
-    rss: BTreeMap<String, BTreeMap<String, Vec<Citation>>>,
+    incoming: BTreeMap<PathBuf, BTreeSet<String>>,
+    rss: BTreeMap<String, BTreeMap<PathBuf, Vec<Citation>>>,
+    target_owners: BTreeMap<&'a str, PathBuf>,
     by_id: HashMap<&'a str, &'a ScannedPage>,
     sources: BTreeMap<&'a str, CitationSource<'a>>,
 }
@@ -439,9 +425,20 @@ impl<'a> CitationGraph<'a> {
     fn build(pages: &'a [ScannedPage], root: &Path, dirs: &VaultDirs) -> Result<Self, GraphError> {
         let existence = VaultExistence::build_at(root, pages, dirs)?;
         let sources = citation_sources(pages, root, dirs, &existence)?;
+        // Link occurrences keep their exact addresses. Evidence belongs to the verified
+        // target entry, shared by symlink spellings but not distinct hard-link entries.
+        let target_owners = pages
+            .iter()
+            .map(|page| {
+                lk_vault::resolve_page_owner(root, &page.path)
+                    .map(|owner| (page.id.as_str(), owner))
+                    .map_err(|error| GraphError::Io(error.to_string()))
+            })
+            .collect::<Result<BTreeMap<_, _>, _>>()?;
         Ok(Self {
-            incoming: incoming_citations(&sources, &existence),
-            rss: rss_evidence(pages, &sources, root, dirs)?,
+            incoming: incoming_citations(&sources, &existence, &target_owners),
+            rss: rss_evidence(pages, &sources, root, dirs, &target_owners)?,
+            target_owners,
             by_id: pages.iter().map(|page| (page.id.as_str(), page)).collect(),
             sources: sources
                 .into_iter()
@@ -452,13 +449,18 @@ impl<'a> CitationGraph<'a> {
 
     fn sources_for(&self, page: &ScannedPage) -> Vec<String> {
         self.incoming
-            .get(&page.id)
+            .get(&self.target_owners[page.id.as_str()])
             .map(|sources| sources.iter().cloned().collect())
             .unwrap_or_default()
     }
 
     fn citations_for(&self, page: &ScannedPage, sources: &[String]) -> Vec<Citation> {
-        let mut citations = citations_for(sources, &page.path, &self.by_id, &self.rss);
+        let mut citations = citations_for(
+            sources,
+            &self.target_owners[page.id.as_str()],
+            &self.by_id,
+            &self.rss,
+        );
         citations.sort();
         citations.dedup();
         citations
@@ -1890,6 +1892,168 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn concept_target_aliases_share_evidence_across_live_and_captured_consumers() {
+        for aliases_only in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let dirs = VaultDirs::default();
+            let concept = write_owner_test_concept(root.path());
+            if aliases_only {
+                std::fs::create_dir(root.path().join(".private")).unwrap();
+                std::fs::rename(
+                    root.path().join(&concept),
+                    root.path().join(".private/topic.md"),
+                )
+                .unwrap();
+                std::os::unix::fs::symlink("../../.private/topic.md", root.path().join(&concept))
+                    .unwrap();
+            }
+            let alias = Path::new("wiki/concepts/z-alias.md");
+            std::os::unix::fs::symlink("topic.md", root.path().join(alias)).unwrap();
+            let hardlink = Path::new("wiki/concepts/hard.md");
+            std::fs::hard_link(
+                root.path().join(&concept).canonicalize().unwrap(),
+                root.path().join(hardlink),
+            )
+            .unwrap();
+            std::fs::create_dir_all(root.path().join("wiki/documents")).unwrap();
+            let origin = Path::new("wiki/documents/source.md");
+            for links in [
+                "[Topic](../concepts/topic.md)",
+                "[Topic](../concepts/z-alias.md)",
+                "[Topic](../concepts/topic.md) [Again](../concepts/z-alias.md)",
+            ] {
+                let raw = format!("---\ntype: document\ntitle: Source\n---\n{links}\n");
+                std::fs::write(root.path().join(origin), &raw).unwrap();
+                let expected = vec![Citation::new(
+                    origin,
+                    &frontmatter::parse_page(&raw).unwrap(),
+                )];
+                let pages = crate::scan::scan_vault(root.path(), false).unwrap();
+                let evidence = concept_evidence(&pages, root.path(), &dirs).unwrap();
+                assert_eq!(evidence[&concept], expected);
+                assert_eq!(evidence[alias], expected);
+                assert!(evidence[hardlink].is_empty());
+                for path in [concept.as_path(), alias] {
+                    assert_eq!(
+                        concept_resynthesis(&pages, root.path(), &dirs, path)
+                            .unwrap()
+                            .citations,
+                        expected
+                    );
+                }
+                let audit = crate::audit::plan_selected(
+                    root.path(),
+                    &dirs,
+                    &pages,
+                    1,
+                    &[concept.to_string_lossy().into_owned()],
+                    u64::MAX,
+                )
+                .unwrap();
+                assert_eq!(audit.candidates[0].evidence, expected);
+                let captured = capture_concept_citations(root.path(), &dirs, false).unwrap();
+                for path in [concept.as_path(), alias] {
+                    let set = captured
+                        .projection()
+                        .concepts
+                        .iter()
+                        .find(|set| set.path == path)
+                        .unwrap();
+                    assert_eq!(set.source_count, 1);
+                    assert_eq!(set.citations, expected);
+                }
+                let session = lk_vault::MutationSession::acquire(root.path()).unwrap();
+                let snapshot = lk_vault::prepare_search_with_citations(
+                    &session,
+                    &dirs,
+                    captured.projection(),
+                    |selected| {
+                        captured
+                            .verify(selected)
+                            .map_err(|error| std::io::Error::other(error.to_string()).into())
+                    },
+                )
+                .unwrap();
+                let context = lk_vault::inspect_page_context(
+                    root.path(),
+                    &dirs,
+                    &concept,
+                    &lk_vault::ContextOptions {
+                        snapshot: &snapshot.snapshot,
+                        limit: 1,
+                        offset: 0,
+                    },
+                )
+                .unwrap();
+                let lk_vault::ContextEvidence::Available(context_evidence) = context.evidence
+                else {
+                    panic!("verified concept evidence must be captured");
+                };
+                assert_eq!(context_evidence.citations, expected);
+                assert_eq!(
+                    context.synthesis.status,
+                    lk_vault::SynthesisInputStatus::Untracked
+                );
+                for selected_snapshot in [None, Some(snapshot.snapshot.as_str())] {
+                    let search = lk_vault::search(
+                        root.path(),
+                        &dirs,
+                        &lk_vault::SearchOptions {
+                            snapshot: selected_snapshot,
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap();
+                    let hit = search
+                        .hits
+                        .iter()
+                        .find(|hit| Path::new(&hit.path) == concept)
+                        .unwrap();
+                    assert_eq!(
+                        hit.synthesis.status,
+                        if selected_snapshot.is_some() {
+                            context.synthesis.status
+                        } else {
+                            lk_vault::SynthesisInputStatus::NotCaptured
+                        }
+                    );
+                }
+                let occurrences = lk_vault::inspect_indexed_links(
+                    root.path(),
+                    &dirs,
+                    origin,
+                    &lk_vault::IndexedLinkOptions {
+                        snapshot: &snapshot.snapshot,
+                        direction: lk_vault::LinkDirection::Outgoing,
+                        limit: 10,
+                        offset: 0,
+                    },
+                )
+                .unwrap();
+                assert_eq!(occurrences.total, links.matches("](").count());
+                assert_eq!(
+                    occurrences.links[0].destination,
+                    if links.starts_with("[Topic](../concepts/z-alias.md)") {
+                        "../concepts/z-alias.md"
+                    } else {
+                        "../concepts/topic.md"
+                    }
+                );
+                let refusal =
+                    plan_concept_backlinks(&pages, root.path(), &dirs, SynthesisPolicy::Record)
+                        .err()
+                        .expect("leaf symlink publication must remain refused");
+                assert!(refusal.to_string().contains("direct file address"));
+                assert_eq!(
+                    std::fs::read_to_string(root.path().join(origin)).unwrap(),
+                    raw
+                );
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn source_alias_contexts_compare_verified_target_owners_and_keep_missing_targets_distinct() {
         let root = tempfile::tempdir().unwrap();
         let dirs = VaultDirs::default();
@@ -2025,6 +2189,33 @@ mod tests {
         assert!(written.contains("source_count: 1"));
         assert!(written.contains(&citation_digest(&evidence[&concept])));
         assert_compact_sources(&written, "Sources");
+
+        let target_alias = Path::new("wiki/concepts/selected-alias.md");
+        std::os::unix::fs::symlink("topic.md", root.path().join(target_alias)).unwrap();
+        let origin = backing.join("report.md");
+        let aliased = std::fs::read_to_string(&origin)
+            .unwrap()
+            .replace("wiki/concepts/topic.md", "wiki/concepts/selected-alias.md");
+        std::fs::write(&origin, &aliased).unwrap();
+        let pages = crate::scan::scan_vault(root.path(), true).unwrap();
+        let aliased_evidence = concept_evidence(&pages, root.path(), &dirs).unwrap();
+        assert_eq!(aliased_evidence[&concept], evidence[&concept]);
+        assert_eq!(aliased_evidence[target_alias], evidence[&concept]);
+        assert_eq!(
+            concept_resynthesis(&pages, root.path(), &dirs, &concept)
+                .unwrap()
+                .citations,
+            evidence[&concept]
+        );
+        let captured = capture_concept_citations(root.path(), &dirs, true).unwrap();
+        assert!(
+            captured
+                .projection()
+                .concepts
+                .iter()
+                .all(|set| set.source_count == 1 && set.citations == evidence[&concept])
+        );
+        assert_eq!(std::fs::read_to_string(&origin).unwrap(), aliased);
 
         let mut plan = lk_vault::MutationPlan::default();
         lk_vault::guard_rss_citation(&mut plan, root.path(), &concept, citation).unwrap();
