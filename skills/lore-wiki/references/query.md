@@ -179,7 +179,8 @@ For live graph diagnostics, `lore graph --json neighbors <vault-relative.md>` su
 `--type`, `--direction incoming|outgoing|mutual` and pagination; it scans the live graph.
 A single live connection can use `lore wiki links <source.md> --target <target.md>`;
 pin subsequent pages with its returned `--revision`.
-Check `lore wiki reviews` for relevant open reviews or changed evidence before answering.
+Use `lore wiki reviews` for an explicit inventory of current reviews. It reads all
+live reports, separately from the captured, scoped review groups above.
 A full natural-language question may match nothing: search its subjects and claim terms,
 then inspect the sources. Report the queries and scope checked when evidence remains absent;
 absence in a bounded result set does not establish absence from the vault.
