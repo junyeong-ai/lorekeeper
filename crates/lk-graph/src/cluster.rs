@@ -405,30 +405,39 @@ pub fn suggest_links(
                     }
                 }
             } else {
-                // Witnesses follow the same sorted order as shared_indices, keeping
-                // floating-point sums stable. Only one endpoint's candidates are held.
                 for &neighbor in neighbors {
-                    let members = members_after(&postings[&neighbor], i);
-                    if members.is_empty() {
-                        continue;
-                    }
-                    let weight = adamic_adar(graph, &[neighbor], &mut degree);
-                    for &j in members {
+                    for &j in members_after(&postings[&neighbor], i) {
                         if neighbor_sets[j].len() < minimum {
                             continue;
                         }
-                        let (count, score) = &mut candidates[j];
+                        let (count, _) = &mut candidates[j];
                         if *count == 0 {
                             touched.push(j);
                         }
                         *count += 1;
-                        *score += weight;
+                    }
+                }
+                for &j in &touched {
+                    if candidates[j].0 < minimum || graph.has_edge_between(indices[i], indices[j]) {
+                        candidates[j] = (0, 0.0);
+                    }
+                }
+                // Only surviving candidates need witness degrees. Sorted witnesses
+                // preserve floating-point sums without retaining witness lists per pair.
+                for &neighbor in neighbors {
+                    let mut weight = None;
+                    for &j in members_after(&postings[&neighbor], i) {
+                        if candidates[j].0 > 0 {
+                            candidates[j].1 += *weight.get_or_insert_with(|| {
+                                adamic_adar(graph, &[neighbor], &mut degree)
+                            });
+                        }
                     }
                 }
             }
             for j in touched.drain(..) {
                 let (shared_neighbors, score) = std::mem::take(&mut candidates[j]);
-                if shared_neighbors < minimum || graph.has_edge_between(indices[i], indices[j]) {
+                if shared_neighbors == 0 {
                     continue;
                 }
                 pairs.push(LinkSuggestion {
@@ -961,6 +970,33 @@ mod tests {
                 suggest_links(&graph, &cluster, 1).pairs.len(),
                 size * (size - 1)
             );
+        }
+    }
+
+    #[test]
+    fn rejected_candidates_can_share_high_degree_external_witnesses() {
+        for linked in [false, true] {
+            let mut pages = vec![
+                build_page(
+                    "a",
+                    if linked {
+                        &["hub", "own-a", "b"]
+                    } else {
+                        &["hub", "own-a"]
+                    },
+                ),
+                build_page("b", &["hub", "own-b"]),
+                build_page("hub", &[]),
+                build_page("own-a", &[]),
+                build_page("own-b", &[]),
+            ];
+            pages.extend((0..100).map(|index| build_page(&format!("extra-{index}"), &["hub"])));
+            let graph = WikiGraph::build(&pages, &VaultDirs::default());
+            let cluster = explicit_cluster(&["a", "b"]);
+            for minimum in [0, 1, 2] {
+                assert_suggestion_parity(&graph, &cluster, minimum);
+            }
+            assert!(suggest_links(&graph, &cluster, 2).pairs.is_empty());
         }
     }
 }
