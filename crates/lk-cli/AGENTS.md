@@ -150,6 +150,11 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
 - Keep all capture dependency information, even for events removed by the pipeline.
   Referenced entries are not retired; any capture failure holds that source's
   retirement. Attachments are never removed. Retirement rechecks consumed bytes.
+- Manual admission reserves fair pending turns under the writer claim, then releases
+  it before collection. Journal exact receipts with actual document/request outputs;
+  archives and reservations are not completion. Reuse checks the pipeline-owned recipe,
+  full preserved bundle and current target ownership. Backlog remains explicitly partial;
+  previews never reserve or reset state. Preserve admission state across backup/restore.
 - `fetch` uses the same unique enabled manual-inbox resolver. Preserve title/source
   URL frontmatter and require body. Publish exclusive collision suffixes
   (8/16/full digest then counter), never overwrite an occupied/nonregular path;

@@ -143,9 +143,12 @@ Tesseract literal-text OCR is also available. Recognition is not semantic approv
 Check installation with `lore input check` and projections with `lore input inspect FILE.pdf`.
 Original entries default to 32 MiB; explicitly raise `ingest.originals` limits for larger files.
 `ingest.inputs` admits serialized normalized/projected input up to 64 MiB per source and
-256 MiB per run by default. Raise the limits deliberately or use smaller self-contained
-batches. Original, projected-input and model-request limits are separate; none caps
-total process memory.
+256 MiB per run by default. Manual inboxes attempt up to `params.max_entries_per_run`
+entries (default 2048, range 1..2048) and continue pending inputs on later runs. Exact
+publication receipts skip unchanged bundles only when processing rules and document
+ownership still match; semantic completion remains separate. An indivisible input
+closure that exceeds a limit is refused. Original, projected-input and model-request
+limits are separate; none caps total process memory.
 Projection size, page count and execution time have separate bounds. Retries reuse
 verified derived caches; `inspect` and `--dry-run` never write them. See
 [preprocessing configuration and scope](skills/lore-setup/references/config.md#document-preprocessing)

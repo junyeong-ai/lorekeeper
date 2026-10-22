@@ -32,12 +32,13 @@ documents; day-unit sources write daily aggregates. Follow the source descriptor
 not a hardcoded source-name rule. Concept pages aggregate evidence across sources.
 
 In queue mode, run `/lore-process` afterward. It owns the typed publication,
-reconciliation and completion checks. An empty inbox only means collection is
-finished; it says nothing about pending synthesis or unresolved knowledge reviews.
+reconciliation and completion checks. An empty inbox is a filesystem observation;
+publication receipts, pending synthesis and knowledge reviews retain separate states.
 Do not call queued pages fully knowledge-integrated.
 
-A run is not a multi-page transaction. Never archive raw inputs after partial
-writes or queue failure. Exact replay requires retained identical inputs; refetch
+A run is not a multi-page transaction. Retirement requires successful entry/request
+publication and complete dependency guards; publication failures retain inputs.
+Exact replay requires retained identical inputs; refetch
 can return edited, missing or expired evidence. `lore ingest --date <past>` is a
 refetch, not restoration from an immutable historical snapshot.
 

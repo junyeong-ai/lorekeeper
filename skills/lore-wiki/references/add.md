@@ -38,10 +38,11 @@ inspection alone publishes nothing. Missing decoding, no extracted text or unsup
 formats must remain visible, without a model-only fallback or a false completion claim.
 
 Once inputs are in the chosen inbox, run `lore ingest SOURCE --dry-run`, inspect its
-selected reach, then `lore ingest SOURCE` and `/lore-process`. Collection covers all
-eligible entries in that source, so unrelated pending inputs require an explicit scope
-decision. Do not also create document or concept pages here. Report original capture,
-semantic publication and any unprocessed files separately.
+selected reach, then `lore ingest SOURCE` and `/lore-process`. Collection observes the
+configured inbox, with bounded admission turns that may include other pending entries.
+Keep retries within the authorized source scope and report when the requested input is
+deferred. Do not also create document or concept pages here. Report original capture,
+publication, semantic completion and any unprocessed files separately.
 
 ## Author pasted text or an explicitly requested document
 

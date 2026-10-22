@@ -39,6 +39,9 @@ canonical; SQLite navigation is derived.
   EOF-terminated raw HTML displays as literal `html` code; balanced HTML stays markup.
   Templates own generated separators; rendering never collapses whitespace across
   injected source, semantic bodies or frontmatter.
+  Render recipes bind actual loaded template sources and observed missing lookups,
+  including cached and dynamic dependencies. Never substitute a later loader read
+  for a missing input observed during rendering. Conflicting observations refuse.
 
 ## Publication and paths (`mutation.rs`, `address.rs`, `review.rs`)
 

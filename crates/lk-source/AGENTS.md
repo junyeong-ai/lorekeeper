@@ -193,7 +193,7 @@ Use parser/token-state behavior, not regex replacement of arbitrary markup.
   coverage/no retirement. Preserving their bytes is not proving full closure.
 - `ingest.originals` defaults to 32 MiB entry, 64 MiB member and 256 MiB per source;
   configured entry/member budgets fit the source budget, at most512 MiB. Keep the
-  2 MiB manifest, depth32/2048 bundle members, 2048 entries per source,
+  2 MiB manifest, depth32/2048 bundle members, at most2048 new/retry admissions per batch,
   8192 aggregate member records/256 MiB derived documents and CLI aggregate capture
   cap512 MiB. Closure overflow is an explicit error,
   not silently solved by splitting top-level entries. Binary attachments stay bytes;
@@ -212,6 +212,12 @@ Use parser/token-state behavior, not regex replacement of arbitrary markup.
   Retire only direct inbox entries into a strict descendant of that inbox.
   These checks are not a global inbox snapshot or a lease against external editors.
   Publication order and immutable object/bundle storage belong to vault/CLI owners.
+- `manual/admission.rs` owns typed pending turns and exact publication receipts;
+  reservation never records completion. `params.max_entries_per_run` bounds attempts,
+  not total inbox membership. Complete dependency inventory includes omitted markup
+  roots and protects referenced entries/cycles; unknown reach forbids retirement.
+  The CLI journals receipts with actual page/request publication. Render meaning
+  belongs to the pipeline; source processing identity excludes admission budgets.
 
 ## Document projection (`content.rs`, `content/`)
 

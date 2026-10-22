@@ -3,6 +3,7 @@
 ## Contents
 
 - Publication and original bundles
+- [Manual inbox batches](#manual-inbox-batches)
 - [Semantic completion](#semantic-completion)
 - [Refetch and replay](#refetch-and-replay)
 - [Missing-date recovery](#missing-date-recovery)
@@ -91,6 +92,31 @@ Original payload admission retains the 64 MiB source and 256 MiB run bounds. An
 oversized source releases its planning reservation so later fitting sources can proceed.
 Legacy event logs are retained observations, not proof of a page's historical input.
 Use the [query reference](../../lore-wiki/references/query.md) to inspect exact originals.
+
+## Manual inbox batches
+
+`params.max_entries_per_run` bounds new/retry admission turns, from 1 to 2048
+(default 2048). Pending entries retain their order; newly discovered entries join
+behind them, and reserved attempts rotate even after failure. A reservation is not
+publication. Remaining or refused entries keep the source incomplete and the run
+nonzero; repeat collection within the authorized scope to continue. `--dry-run`
+does not reserve turns or write receipts.
+
+Each receipt commits with the actual document and its semantic requests. Reuse
+requires exact current entry/dependency bytes, preserved originals, publication
+ownership and processing rules, including templates and decoder identity. Host,
+account, schedule and admission-budget changes do not establish new source meaning.
+A receipt proves collection publication, not semantic completion or correctness.
+
+Referenced entries and cycles remain physically present; matching receipts let
+later pending entries progress. Retirement requires a complete, current dependency
+inventory and unchanged consumed bytes. Unknown dependencies, read failures and
+changed inputs prevent retirement. Assets remain untouched. Keep admission state
+with the vault's other `.lorekeeper/` state when backing up or moving the vault.
+State and its independent initialization marker bind the source ID to the canonical
+inbox location. Missing/corrupt state or a different location refuses collection;
+deleting the state directory is not a reset. A genuinely new inbox can use a new
+source ID; moving existing document ownership requires a separate migration decision.
 
 ## Semantic completion
 

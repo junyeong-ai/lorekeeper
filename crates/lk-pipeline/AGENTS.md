@@ -83,6 +83,12 @@ source publication instead of dropping evidence. New disabled pages omit that se
   guards the exact prior bytes/absence; never reread a newer baseline at publish
   time. Use `plan_publication`/`publish_expected` or document publication with its
   evidence archive in the same mutation plan.
+- Return processing recipes only for materialized document outputs. Bind source
+  policy, normalization/rendering, actual template inputs and decoder identity;
+  exclude schedules, accounts and batch size. Queue versus noop publication is
+  relevant: a prior noop receipt cannot establish that semantic requests exist.
+  Projection-capacity errors stay typed so bounded manual retries cannot hide
+  rendering or identity failures.
 
 ## Concept ownership (`concept_draft.rs`)
 

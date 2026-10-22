@@ -326,6 +326,14 @@ must fit 512 MiB. Private acquisition files are automatically removed, including
 after inspection and dry runs; real ingestion publishes preserved originals before
 knowledge pages or inbox retirement.
 
+A manual source's `params.max_entries_per_run` bounds new/retry admission attempts
+(default 2048, range 1..2048). Larger inboxes continue on later runs. Pending or refused
+entries remain explicit incomplete coverage, even when other entries were published.
+Exact publication receipts allow unchanged inputs to be skipped independently of
+semantic queue completion; see [manual inbox batches](../../lore-ingest/references/ingestion.md#manual-inbox-batches).
+State binds the source ID and canonical inbox location. Changing that location or
+restoring the same source at a different path refuses automatic state adoption.
+
 The inbox defaults to text plus formats enabled by `ingest.documents`/OCR/vision.
 Known binary files without that capability stay in the inbox and are counted as
 unprocessed for standalone interpretation. Their bytes can still be preserved as
