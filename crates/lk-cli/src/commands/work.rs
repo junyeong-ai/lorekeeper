@@ -1279,6 +1279,17 @@ fn finish(
     prepared: &Prepared,
     result: Value,
 ) -> miette::Result<Value> {
+    let (path, mutation) = plan_finish(session, work, prepared, result)?;
+    session.apply(mutation).into_diagnostic()?;
+    Ok(json!({"work_id":work.plan.id,"staged_result":path,"canonical_published":false}))
+}
+
+fn plan_finish(
+    session: &lk_vault::MutationSession,
+    work: &Work,
+    prepared: &Prepared,
+    result: Value,
+) -> miette::Result<(PathBuf, lk_vault::MutationPlan)> {
     if prepared.context["purpose"]["extraction_scope"]["policy"] == "source-proposals-v1" {
         return Err(miette::miette!(
             "source observations support candidate screening; they cannot publish a final knowledge result"
@@ -1325,8 +1336,8 @@ fn finish(
             "final typed result exceeds the bounded result limit"
         ));
     }
-    let reduced = work.result(session.root(), &prepared.resources)?;
-    let unresolved = reduced["output"]["unresolved"]
+    let completed = work.capture_completion(session.root(), &prepared.resources)?;
+    let unresolved = completed.result()["output"]["unresolved"]
         .as_array()
         .is_some_and(|items| !items.is_empty());
     let path = match &prepared.subject {
@@ -1416,10 +1427,9 @@ fn finish(
                 .join("assessment.json")
         }
     };
-    work.seal(session, &prepared.resources, result.clone())?;
     let mut mutation = lk_vault::MutationPlan::default();
     prepared.guard_pages(&mut mutation);
-    work.guard_completion(&mut mutation, session.root(), &prepared.resources, &result)?;
+    completed.plan_seal(&mut mutation, session.root(), &result)?;
     let raw = serde_json::to_string(&result).into_diagnostic()?;
     let final_path = PathBuf::from(".lorekeeper/work")
         .join(&work.plan.id)
@@ -1440,8 +1450,7 @@ fn finish(
     mutation
         .publish_expected(session.root(), &path, before, raw)
         .into_diagnostic()?;
-    session.apply(mutation).into_diagnostic()?;
-    Ok(json!({"work_id":work.plan.id,"staged_result":path,"canonical_published":false}))
+    Ok((path, mutation))
 }
 
 #[cfg(test)]
@@ -1454,6 +1463,170 @@ mod tests {
         let path = root.join(path);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, raw).unwrap();
+    }
+
+    fn completed_audit_work(root: &Path) -> (Work, Prepared, Value) {
+        let config_path = root.join("config.yaml");
+        std::fs::write(
+            &config_path,
+            format!(
+                "vault:\n  root: {}\n  locale: en\nidentity: {{name: Tester, email: tester@example.com}}\nsources:\n  notes:\n    type: manual\n    params: {{inbox_dir: inbox}}\nexecution:\n  work: {{max_input_bytes: 8192, max_result_bytes: 2048}}\n",
+                serde_json::to_string(root).unwrap()
+            ),
+        )
+        .unwrap();
+        let (config, config_revision) =
+            lk_core::config::Config::load_with_revision(&config_path).unwrap();
+        let path = "wiki/documents/subject.md";
+        write(
+            root,
+            path,
+            &format!(
+                "---\ntype: document\ntitle: Subject\n---\n## Content\n{}",
+                "A source-scoped observation.\n\n".repeat(500)
+            ),
+        );
+        let prepared = resources::audit(root, &config, path).unwrap();
+        let session = MutationSession::acquire(root).unwrap();
+        let work = Work::create(
+            &session,
+            &prepared.resources,
+            &prepared.revision(&config_revision).unwrap(),
+            prepared.context.clone(),
+            limits(&config).unwrap(),
+        )
+        .unwrap();
+        assert!(work.plan.parts.len() > 1);
+        loop {
+            let (status, request) = work.prepare_inspection(root, &prepared.resources).unwrap();
+            if status.complete {
+                break;
+            }
+            let request = request.unwrap();
+            work.record(
+                &session,
+                WorkOutput {
+                    work_id: work.plan.id.clone(),
+                    node_id: request["node_id"].as_str().unwrap().into(),
+                    input_revision: request["input_revision"].as_str().unwrap().into(),
+                    summary: "Fixture read of every exact assigned observation.".into(),
+                    findings: vec![],
+                    source_questions: vec![],
+                    unresolved: vec![],
+                    resolutions: vec![],
+                },
+                &prepared.resources,
+            )
+            .unwrap();
+        }
+        let Subject::Audit {
+            path,
+            file_revision,
+            input_revision,
+        } = &prepared.subject
+        else {
+            unreachable!()
+        };
+        let result = json!({"assessments":[{
+            "path":path,"file_revision":file_revision,"input_revision":input_revision,
+            "disposition":"reviewed","reason":"Fixture completed the exact selected reads.","reviews":[],
+        }]});
+        (work, prepared, result)
+    }
+
+    #[test]
+    fn combined_completion_refuses_changed_manifest_or_observation_before_publication() {
+        for artifact in ["plan.json", "observation"] {
+            let directory = tempfile::tempdir().unwrap();
+            let root = directory.path().canonicalize().unwrap();
+            let (work, prepared, result) = completed_audit_work(&root);
+            let session = MutationSession::acquire(&root).unwrap();
+            let (staged, mutation) = plan_finish(&session, &work, &prepared, result).unwrap();
+            let work_dir = PathBuf::from(".lorekeeper/work").join(&work.plan.id);
+            let changed = if artifact == "observation" {
+                work_dir
+                    .join("nodes")
+                    .join(format!("{}.json", work.plan.parts[0].id))
+            } else {
+                work_dir.join(artifact)
+            };
+            let before = std::fs::read_to_string(root.join(&changed)).unwrap();
+            let after = format!("{before}\n");
+            std::fs::write(root.join(&changed), &after).unwrap();
+            assert!(session.apply(mutation).is_err());
+            assert_eq!(std::fs::read_to_string(root.join(&changed)).unwrap(), after);
+            for path in [
+                work_dir.join("seal.json"),
+                work_dir.join("final.json"),
+                staged,
+            ] {
+                assert!(!root.join(path).exists());
+            }
+            assert!(!root.join(".lorekeeper/mutation/pending.json").exists());
+        }
+    }
+
+    #[test]
+    fn interrupted_combined_completion_recovers_seal_final_and_staged_result_together() {
+        for seal_receipted in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let root = directory.path().canonicalize().unwrap();
+            let (work, prepared, result) = completed_audit_work(&root);
+            let original = std::fs::read(root.join("wiki/documents/subject.md")).unwrap();
+            let session = MutationSession::acquire(&root).unwrap();
+            let (staged, mutation) =
+                plan_finish(&session, &work, &prepared, result.clone()).unwrap();
+            let work_dir = PathBuf::from(".lorekeeper/work").join(&work.plan.id);
+            let seal = work_dir.join("seal.json");
+            let plan_revision = file_revision(&serde_json::to_string(&mutation).unwrap());
+            let plan = serde_json::to_value(mutation).unwrap();
+            let steps = plan["steps"].as_array().unwrap();
+            let seal_index = steps
+                .iter()
+                .position(|step| step["path"] == seal.to_str().unwrap())
+                .unwrap();
+            let seal_after = steps[seal_index]["after"].as_str().unwrap().to_owned();
+            let completed = seal_index + usize::from(seal_receipted);
+            drop(session);
+            write(
+                &root,
+                ".lorekeeper/mutation/pending.json",
+                &json!({"version":1,"plan":plan}).to_string(),
+            );
+            write(&root, seal.to_str().unwrap(), &seal_after);
+            write(
+                &root,
+                ".lorekeeper/mutation/progress.json",
+                &json!({
+                    "plan_revision":plan_revision,"completed":completed,
+                    "checksum":file_revision(&format!("{plan_revision}:{completed}")),
+                })
+                .to_string(),
+            );
+            assert!(!root.join(work_dir.join("final.json")).exists());
+            assert!(!root.join(&staged).exists());
+            let _recovered = MutationSession::acquire(&root).unwrap();
+            for path in [work_dir.join("final.json"), staged] {
+                let restored: Value =
+                    serde_json::from_slice(&std::fs::read(root.join(path)).unwrap()).unwrap();
+                assert_eq!(restored, result);
+            }
+            work.guard_completion(
+                &mut MutationPlan::default(),
+                &root,
+                &prepared.resources,
+                &result,
+            )
+            .unwrap();
+            assert_eq!(
+                std::fs::read(root.join("wiki/documents/subject.md")).unwrap(),
+                original
+            );
+            for file in ["pending.json", "progress.json"] {
+                assert!(!root.join(".lorekeeper/mutation").join(file).exists());
+            }
+            assert!(!root.join(".lorekeeper/knowledge-audit.json").exists());
+        }
     }
 
     #[test]

@@ -186,6 +186,48 @@ struct Evaluation<'a> {
     ready: Vec<String>,
 }
 
+pub(super) struct CompletedWork {
+    work_id: String,
+    root_node: String,
+    root_output_revision: String,
+    result: Value,
+    guards: BTreeMap<PathBuf, String>,
+}
+
+impl CompletedWork {
+    pub fn result(&self) -> &Value {
+        &self.result
+    }
+
+    pub fn plan_seal(
+        self,
+        mutation: &mut MutationPlan,
+        root: &Path,
+        final_result: &Value,
+    ) -> miette::Result<()> {
+        let path = work_path(&self.work_id, "seal.json")?;
+        let seal = Seal {
+            work_id: self.work_id,
+            root_node: self.root_node,
+            root_output_revision: self.root_output_revision,
+            final_result_revision: revision(final_result)?,
+        };
+        let before = read_optional(root, &path)?;
+        let after = encoded(&seal)?;
+        for (path, raw) in self.guards {
+            mutation.require_unchanged(path, raw);
+        }
+        if before.as_ref() == Some(&after) {
+            mutation.require_unchanged(path, after);
+        } else {
+            mutation
+                .publish_expected(root, path, before, after)
+                .map_err(fail)?;
+        }
+        Ok(())
+    }
+}
+
 impl Evaluation<'_> {
     fn progress(&self) -> WorkProgress {
         let root_node = self.nodes.last().expect("nonempty tree").id.clone();
@@ -941,8 +983,7 @@ impl Work {
     }
 
     pub fn result(&self, root: &Path, resources: &[SemanticResource]) -> miette::Result<Value> {
-        let evaluated = self.evaluate(root, resources)?;
-        self.build_finalizer_result(&evaluated)
+        Ok(self.capture_completion(root, resources)?.result)
     }
 
     pub fn result_with_guards(
@@ -950,9 +991,29 @@ impl Work {
         root: &Path,
         resources: &[SemanticResource],
     ) -> miette::Result<(Value, BTreeMap<PathBuf, String>)> {
+        let completed = self.capture_completion(root, resources)?;
+        Ok((completed.result, completed.guards))
+    }
+
+    pub(super) fn capture_completion(
+        &self,
+        root: &Path,
+        resources: &[SemanticResource],
+    ) -> miette::Result<CompletedWork> {
         let evaluated = self.evaluate(root, resources)?;
         let result = self.build_finalizer_result(&evaluated)?;
-        Ok((result, evaluated.raw))
+        let node = evaluated.nodes.last().expect("nonempty tree");
+        let output = evaluated
+            .current
+            .get(&node.id)
+            .expect("finalizer result requires a complete root");
+        Ok(CompletedWork {
+            work_id: self.plan.id.clone(),
+            root_node: node.id.clone(),
+            root_output_revision: output.output_revision.clone(),
+            result,
+            guards: evaluated.raw,
+        })
     }
 
     fn build_finalizer_result(&self, evaluated: &Evaluation<'_>) -> miette::Result<Value> {
@@ -1183,33 +1244,16 @@ impl Work {
         )
     }
 
+    #[cfg(test)]
     pub fn seal(
         &self,
         session: &MutationSession,
         resources: &[SemanticResource],
         final_result: Value,
     ) -> miette::Result<()> {
-        let evaluated = self.evaluate(session.root(), resources)?;
-        let node = evaluated.nodes.last().expect("nonempty tree");
-        let output = evaluated
-            .current
-            .get(&node.id)
-            .ok_or_else(|| fail("work reduction is incomplete"))?;
-        let seal = Seal {
-            work_id: self.plan.id.clone(),
-            root_node: node.id.clone(),
-            root_output_revision: output.output_revision.clone(),
-            final_result_revision: revision(&final_result)?,
-        };
-        let path = work_path(&self.plan.id, "seal.json")?;
-        let before = read_optional(session.root(), &path)?;
         let mut mutation = MutationPlan::default();
-        for (path, raw) in evaluated.raw {
-            mutation.require_unchanged(path, raw);
-        }
-        mutation
-            .publish_expected(session.root(), path, before, encoded(&seal)?)
-            .map_err(fail)?;
+        self.capture_completion(session.root(), resources)?
+            .plan_seal(&mut mutation, session.root(), &final_result)?;
         session.apply(mutation).map_err(fail)
     }
 
@@ -1804,6 +1848,26 @@ mod tests {
             )
             .is_err()
         );
+        let seal_path = root
+            .path()
+            .join(work_path(&work.plan.id, "seal.json").unwrap());
+        let seal_before = std::fs::read_to_string(&seal_path).unwrap();
+        let mut retry = MutationPlan::default();
+        work.capture_completion(root.path(), &source)
+            .unwrap()
+            .plan_seal(&mut retry, root.path(), &final_result)
+            .unwrap();
+        retry.create("retry-publication.md", "must not publish".into());
+        std::fs::write(&seal_path, format!("{seal_before}\n")).unwrap();
+        assert!(session.apply(retry).is_err());
+        assert!(!root.path().join("retry-publication.md").exists());
+        assert!(
+            !root
+                .path()
+                .join(".lorekeeper/mutation/pending.json")
+                .exists()
+        );
+        std::fs::write(seal_path, seal_before).unwrap();
     }
 
     #[test]
