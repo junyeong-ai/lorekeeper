@@ -116,6 +116,7 @@ impl Fixture {
         ]);
         let context = cli(&["work", "context", "--task-id", &task.task_id]);
         let result = lk_queue::TaskResult {
+            selection: None,
             context_revision: context["context_revision"].as_str().unwrap().into(),
             discovery,
             concept_policy: lk_core::config::ConceptPolicy::SupportedNew,

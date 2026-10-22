@@ -679,6 +679,7 @@ mod tests {
                 .is_empty()
         );
         let result = lk_queue::TaskResult {
+            selection: None,
             task_id: task.task_id,
             cache_hash: task.cache_hash,
             target_revision: lk_core::concept::file_revision(&page),

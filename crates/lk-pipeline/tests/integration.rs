@@ -3327,6 +3327,7 @@ async fn queue_results_materialize_through_the_same_merge_path() {
 
     let page = "---\nid: daily-1\ntype: daily\nllm_inputs:\n  concepts: \"h\"\n---\n\n## Summary\n\nbody\n\n## Related Concepts\n\n## Key Events\n\n- a\n";
     let result = lk_queue::TaskResult {
+        selection: None,
         context_revision: String::new(),
         discovery: Vec::new(),
         concept_policy: lk_core::config::ConceptPolicy::SupportedNew,
@@ -3439,6 +3440,7 @@ async fn a_page_without_the_concepts_section_is_an_error_not_a_silent_no_op() {
 
     let page = "---\nid: daily-1\ntype: daily\n---\n\n## Summary\n\nbody\n";
     let result = lk_queue::TaskResult {
+        selection: None,
         context_revision: String::new(),
         discovery: Vec::new(),
         concept_policy: lk_core::config::ConceptPolicy::SupportedNew,
@@ -3488,6 +3490,7 @@ async fn a_page_that_cannot_record_completion_is_an_error() {
     let page =
         "---\nid: daily-1\ntype: daily\n---\n\n## Related Concepts\n\n## Key Events\n\n- a\n";
     let result = lk_queue::TaskResult {
+        selection: None,
         context_revision: String::new(),
         discovery: Vec::new(),
         concept_policy: lk_core::config::ConceptPolicy::SupportedNew,
@@ -3558,6 +3561,7 @@ async fn a_concept_that_fails_to_stage_takes_its_whole_result_with_it() {
         )),
     };
     let result = |names: &[&str]| lk_queue::TaskResult {
+        selection: None,
         context_revision: String::new(),
         discovery: Vec::new(),
         concept_policy: lk_core::config::ConceptPolicy::SupportedNew,
@@ -3629,6 +3633,7 @@ async fn new_concept_grounding_is_required_before_staging_and_can_be_retried() {
 
     let page = "---\nid: daily-1\ntype: daily\nllm_inputs:\n  concepts: \"h\"\n---\n\n## Related Concepts\n\n## Key Events\n\n- a\n";
     let result = |vault_path: &str, synthesis: Option<&str>| lk_queue::TaskResult {
+        selection: None,
         context_revision: String::new(),
         discovery: Vec::new(),
         concept_policy: lk_core::config::ConceptPolicy::SupportedNew,
@@ -3715,6 +3720,7 @@ async fn ambiguous_names_refuse_writes_without_touching_either_page() {
 
     let page = "---\nid: daily-1\ntype: daily\nllm_inputs:\n  concepts: \"h\"\n---\n\n## Related Concepts\n\n## Key Events\n\n- a\n";
     let result = lk_queue::TaskResult {
+        selection: None,
         context_revision: String::new(),
         discovery: Vec::new(),
         concept_policy: lk_core::config::ConceptPolicy::SupportedNew,
@@ -3765,6 +3771,7 @@ async fn one_new_concept_declares_alternative_spellings_without_duplicate_owners
         synthesis: Some("Seeded on creation.".into()),
     };
     let result = lk_queue::TaskResult {
+        selection: None,
         context_revision: String::new(),
         discovery: Vec::new(),
         concept_policy: lk_core::config::ConceptPolicy::SupportedNew,
@@ -3803,6 +3810,7 @@ async fn a_published_new_concept_is_explicitly_reused_by_a_later_spelling() {
 
     let page = "---\nid: daily-1\ntype: daily\nllm_inputs:\n  concepts: \"h\"\n---\n\n## Related Concepts\n\n## Key Events\n\n- a\n";
     let result = |task: &str, name: &str| lk_queue::TaskResult {
+        selection: None,
         context_revision: String::new(),
         discovery: Vec::new(),
         concept_policy: lk_core::config::ConceptPolicy::SupportedNew,
@@ -3878,6 +3886,7 @@ async fn a_break_between_digits_does_not_fold_one_version_onto_another() {
 
     let page = "---\nid: daily-1\ntype: daily\nllm_inputs:\n  concepts: \"h\"\n---\n\n## Related Concepts\n\n## Key Events\n\n- a\n";
     let result = lk_queue::TaskResult {
+        selection: None,
         context_revision: String::new(),
         discovery: Vec::new(),
         concept_policy: lk_core::config::ConceptPolicy::SupportedNew,
@@ -4246,6 +4255,7 @@ async fn a_name_spelled_without_separators_lands_on_the_established_page() {
 
     let page = "---\nid: daily-1\ntype: daily\nllm_inputs:\n  concepts: \"h\"\n---\n\n## Related Concepts\n\n## Key Events\n\n- a\n";
     let result = lk_queue::TaskResult {
+        selection: None,
         context_revision: String::new(),
         discovery: Vec::new(),
         concept_policy: lk_core::config::ConceptPolicy::SupportedNew,
@@ -4336,6 +4346,7 @@ async fn stale_alias_loses_to_the_address_owner(claimant: &str) {
 
     let page = "---\nid: daily-1\ntype: daily\nllm_inputs:\n  concepts: \"h\"\n---\n\n## Related Concepts\n\n## Key Events\n\n- a\n";
     let result = lk_queue::TaskResult {
+        selection: None,
         context_revision: String::new(),
         discovery: Vec::new(),
         concept_policy: lk_core::config::ConceptPolicy::SupportedNew,
@@ -4414,6 +4425,7 @@ async fn an_extraction_naming_an_alias_lands_on_the_established_page() {
 
     let page = "---\nid: daily-1\ntype: daily\nllm_inputs:\n  concepts: \"h\"\n---\n\n## Related Concepts\n\n## Key Events\n\n- a\n";
     let result = lk_queue::TaskResult {
+        selection: None,
         context_revision: String::new(),
         discovery: Vec::new(),
         concept_policy: lk_core::config::ConceptPolicy::SupportedNew,
@@ -4544,6 +4556,7 @@ async fn applying_a_result_adds_to_a_pages_citations_rather_than_replacing_them(
 
     let page = "---\nid: daily-1\ntype: daily\nllm_inputs:\n  concepts: \"h\"\n---\n\n## Related Concepts\n\n- [Cited Earlier](../../wiki/concepts/cited-earlier.md)\n\n## Key Events\n\n- a\n";
     let result = lk_queue::TaskResult {
+        selection: None,
         context_revision: String::new(),
         discovery: Vec::new(),
         concept_policy: lk_core::config::ConceptPolicy::SupportedNew,
@@ -4940,6 +4953,7 @@ async fn symbol_distinct_names_keep_separate_pages_and_resolve_after_reload() {
     let page = "---\ntype: daily\nllm_inputs:\n  concepts: h\n---\n## Related Concepts\n";
     let long_name = "지식".repeat(100);
     let mut result = lk_queue::TaskResult {
+        selection: None,
         context_revision: String::new(),
         discovery: Vec::new(),
         concept_policy: lk_core::config::ConceptPolicy::SupportedNew,
@@ -5625,6 +5639,7 @@ async fn extraction_publication_preserves_concepts_edited_after_staging() {
         std::fs::create_dir_all(origin_path.parent().unwrap()).unwrap();
         std::fs::write(&origin_path, origin).unwrap();
         let result = lk_queue::TaskResult {
+            selection: None,
             context_revision: String::new(),
             discovery: Vec::new(),
             concept_policy: lk_core::config::ConceptPolicy::SupportedNew,
@@ -5862,6 +5877,7 @@ fn admission_test_result(
     concepts: Vec<lk_queue::ReportedConcept>,
 ) -> lk_queue::TaskResult {
     lk_queue::TaskResult {
+        selection: None,
         context_revision: String::new(),
         discovery: Vec::new(),
         concept_policy: lk_core::config::ConceptPolicy::SupportedNew,

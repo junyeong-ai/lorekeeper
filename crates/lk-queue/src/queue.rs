@@ -222,9 +222,26 @@ pub struct TaskResult {
     pub target_revision: String,
     pub context_revision: String,
     pub discovery: Vec<lk_core::discovery::DiscoveryQuery>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection: Option<ExtractionSelection>,
     pub target: TaskTarget,
     pub date: jiff::civil::Date,
     pub concepts: Vec<ReportedConcept>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ExtractionSelectionPolicy {
+    #[serde(rename = "progressive-evidence-v1")]
+    ProgressiveV1,
+}
+
+/// The exact complete candidate inventory and reviewed admission decisions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExtractionSelection {
+    pub policy: ExtractionSelectionPolicy,
+    pub inventory_revision: String,
+    pub decisions_revision: String,
 }
 
 /// A synthesis draft against one target snapshot and the task's source revisions.
@@ -746,6 +763,62 @@ mod tests {
         }
     }
 
+    #[test]
+    fn extraction_selection_is_explicit_and_preserves_legacy_result_bytes() {
+        let legacy = serde_json::json!({
+            "concept_policy":"supported-new",
+            "task_id":"ext-1",
+            "cache_hash":"input",
+            "target_revision":"target",
+            "context_revision":"context",
+            "discovery":[],
+            "target":{
+                "vault_path":"wiki/documents/source.md",
+                "kind":"document-concepts",
+                "anchor":"## Related Concepts",
+            },
+            "date":"2026-10-22",
+            "concepts":[],
+        });
+        let result: TaskResult = serde_json::from_value(legacy.clone()).unwrap();
+        assert!(result.selection.is_none());
+        assert_eq!(serde_json::to_value(result).unwrap(), legacy);
+
+        let mut progressive = legacy;
+        progressive["selection"] = serde_json::json!({
+            "policy":"progressive-evidence-v1",
+            "inventory_revision":"inventory",
+            "decisions_revision":"decisions",
+        });
+        let result: TaskResult = serde_json::from_value(progressive.clone()).unwrap();
+        assert_eq!(
+            result.selection.as_ref().unwrap().policy,
+            ExtractionSelectionPolicy::ProgressiveV1,
+        );
+        assert_eq!(serde_json::to_value(result).unwrap(), progressive);
+
+        for invalid in [
+            serde_json::json!({
+                "policy":"progressive-evidence-v2",
+                "inventory_revision":"inventory",
+                "decisions_revision":"decisions",
+            }),
+            serde_json::json!({
+                "policy":"progressive-evidence-v1",
+                "inventory_revision":"inventory",
+            }),
+            serde_json::json!({
+                "policy":"progressive-evidence-v1",
+                "inventory_revision":"inventory",
+                "decisions_revision":"decisions",
+                "complete":true,
+            }),
+        ] {
+            progressive["selection"] = invalid;
+            assert!(serde_json::from_value::<TaskResult>(progressive.clone()).is_err());
+        }
+    }
+
     #[tokio::test]
     async fn repeated_requests_reuse_pending_work_but_not_processed_history() {
         let dir = TempDir::new().unwrap();
@@ -978,6 +1051,7 @@ mod tests {
             target_revision: String::new(),
             context_revision: "fixture-scope".into(),
             discovery: Vec::new(),
+            selection: None,
             task_id: "ext-1".into(),
             cache_hash: "h".into(),
             target: crate::TaskTarget {

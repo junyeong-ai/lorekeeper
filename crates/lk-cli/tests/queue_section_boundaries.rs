@@ -280,6 +280,7 @@ fn new_concept_grounding_cannot_hide_the_concept_page_sections() {
     ]);
     let context = workspace.json(&["work", "context", "--task-id", &task.task_id]);
     let result = lk_queue::TaskResult {
+        selection: None,
         concept_policy: lk_core::config::ConceptPolicy::SupportedNew,
         target_revision,
         context_revision: context["context_revision"].as_str().unwrap().into(),

@@ -156,6 +156,7 @@ fn skill_documents_the_result_protocol_it_must_produce() {
         target_revision: "r".into(),
         context_revision: "scope".into(),
         discovery: Vec::new(),
+        selection: None,
         task_id: "t".into(),
         cache_hash: "h".into(),
         target: lk_queue::TaskTarget {

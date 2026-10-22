@@ -79,11 +79,19 @@ pub struct ExecutionConfig {
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ExtractionContext {
+    Progressive,
+    FullContext,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct SemanticWorkConfig {
     pub max_input_bytes: usize,
     pub max_result_bytes: usize,
     pub max_calls: usize,
+    pub extraction_context: ExtractionContext,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -92,6 +100,7 @@ pub struct SemanticWorkOverrides {
     pub max_input_bytes: Option<usize>,
     pub max_result_bytes: Option<usize>,
     pub max_calls: Option<usize>,
+    pub extraction_context: Option<ExtractionContext>,
 }
 
 impl SemanticWorkOverrides {
@@ -100,6 +109,9 @@ impl SemanticWorkOverrides {
             max_input_bytes: self.max_input_bytes.unwrap_or(defaults.max_input_bytes),
             max_result_bytes: self.max_result_bytes.unwrap_or(defaults.max_result_bytes),
             max_calls: self.max_calls.unwrap_or(defaults.max_calls),
+            extraction_context: self
+                .extraction_context
+                .unwrap_or(defaults.extraction_context),
         }
     }
 }
@@ -125,6 +137,7 @@ impl Default for SemanticWorkConfig {
             max_input_bytes: 262_144,
             max_result_bytes: 32_768,
             max_calls: 64,
+            extraction_context: ExtractionContext::Progressive,
         }
     }
 }
@@ -356,6 +369,10 @@ mod tests {
             assert_eq!(config.work.max_input_bytes, 262_144);
             assert_eq!(config.work.max_result_bytes, 32_768);
             assert_eq!(config.work.max_calls, 64);
+            assert_eq!(
+                config.work.extraction_context,
+                ExtractionContext::Progressive
+            );
         }
         for (input, result, calls) in [
             (4096, 1024, 1),
@@ -403,6 +420,8 @@ mod tests {
             "work: {max_calls: 1.5}",
             "work: {max_input_bytes: true}",
             "work: {max_result_bytes: many}",
+            "work: {extraction_context: automatic}",
+            "work: {extraction_context: true}",
         ] {
             assert!(
                 crate::yaml::from_str::<ExecutionConfig>(body).is_err(),
@@ -424,13 +443,27 @@ mod tests {
             SemanticWorkConfig {
                 max_input_bytes: 16384,
                 max_result_bytes: 4096,
-                max_calls: 2
+                max_calls: 2,
+                extraction_context: ExtractionContext::Progressive,
             }
         );
         assert!(config.select_profile("missing").is_err());
         assert_eq!(config.selected_profile(), Some("small"));
         config.select_profile("main").unwrap();
         assert_eq!(config.effective_work().unwrap(), config.work);
+        let mut scopes: ExecutionConfig = crate::yaml::from_str(
+            "work: {extraction_context: full-context}\nprofiles:\n  inherited: {engine: codex, timeout_seconds: 60}\n  selected: {engine: codex, timeout_seconds: 60, work: {extraction_context: progressive}}\n"
+        ).unwrap();
+        scopes.select_profile("inherited").unwrap();
+        assert_eq!(
+            scopes.effective_work().unwrap().extraction_context,
+            ExtractionContext::FullContext
+        );
+        scopes.select_profile("selected").unwrap();
+        assert_eq!(
+            scopes.effective_work().unwrap().extraction_context,
+            ExtractionContext::Progressive
+        );
         for fields in ["max_input_bytes: 8192", "max_calls: 0"] {
             let body = format!(
                 "profiles: {{x: {{engine: codex, timeout_seconds: 1, work: {{{fields}}}}}}}"

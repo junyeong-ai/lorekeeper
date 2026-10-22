@@ -202,6 +202,7 @@ impl Workspace {
             })
         });
         let result = lk_queue::TaskResult {
+            selection: None,
             concept_policy: lk_core::config::ConceptPolicy::SupportedNew,
             target_revision,
             context_revision,
