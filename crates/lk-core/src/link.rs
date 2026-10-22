@@ -223,22 +223,26 @@ impl InlineLink<'_> {
     /// preserves the complete original link instead of invoking this renderer.
     pub fn render_with_destination(&self, destination: &str) -> String {
         let mut output = format!("[{}]({}", self.raw_text, escape_destination(destination));
-        if !self.title.is_empty() {
-            output.push_str(" \"");
-            for character in self.title.chars() {
-                match character {
-                    '&' => output.push_str("&amp;"),
-                    '\\' => output.push_str("\\\\"),
-                    '"' => output.push_str("\\\""),
-                    '\n' => output.push_str("&#10;"),
-                    '\r' => output.push_str("&#13;"),
-                    character => output.push(character),
-                }
-            }
-            output.push('"');
-        }
+        push_title(&mut output, self.title);
         output.push(')');
         output
+    }
+}
+
+pub(crate) fn push_title(output: &mut String, title: &str) {
+    if !title.is_empty() {
+        output.push_str(" \"");
+        for character in title.chars() {
+            match character {
+                '&' => output.push_str("&amp;"),
+                '\\' => output.push_str("\\\\"),
+                '"' => output.push_str("\\\""),
+                '\n' => output.push_str("&#10;"),
+                '\r' => output.push_str("&#13;"),
+                character => output.push(character),
+            }
+        }
+        output.push('"');
     }
 }
 

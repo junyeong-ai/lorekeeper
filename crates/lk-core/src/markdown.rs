@@ -11,6 +11,89 @@ pub const OPTIONS: Options = Options::ENABLE_TABLES
     .union(Options::ENABLE_STRIKETHROUGH)
     .union(Options::ENABLE_FOOTNOTES);
 
+/// Serialize structured Markdown, preserving multiline link/image titles as values.
+/// Attribute line breaks must not become blank lines in CommonMark link grammar.
+pub fn serialize(
+    events: &[Event<'_>],
+    parser_options: Options,
+    formatting: pulldown_cmark_to_cmark::Options<'_>,
+) -> Result<String, pulldown_cmark_to_cmark::Error> {
+    use pulldown_cmark::{LinkType, Tag};
+    use pulldown_cmark_to_cmark::Error;
+
+    let mut output = String::new();
+    let multiline = events.iter().any(|event| matches!(event,
+        Event::Start(Tag::Link { title, .. } | Tag::Image { title, .. }) if title.contains(['\r', '\n'])
+    ));
+    if !multiline {
+        pulldown_cmark_to_cmark::cmark_with_options(
+            events,
+            &mut output,
+            parser_options,
+            formatting,
+        )?;
+        return Ok(output);
+    }
+    let titles = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Start(Tag::Link { title, .. } | Tag::Image { title, .. }) => {
+                Some(title.as_ref())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let safe_events = events.iter().cloned().map(|mut event| {
+        if let Event::Start(
+            Tag::Link {
+                title, link_type, ..
+            }
+            | Tag::Image {
+                title, link_type, ..
+            },
+        ) = &mut event
+            && title.contains(['\r', '\n'])
+        {
+            *title = "".into();
+            *link_type = LinkType::Inline;
+        }
+        event
+    });
+    pulldown_cmark_to_cmark::cmark_with_options(
+        safe_events,
+        &mut output,
+        parser_options,
+        formatting,
+    )?;
+    let input = MarkdownInput::from_text(&output);
+    let ranges = input
+        .offset_events(parser_options)
+        .filter_map(|(event, range)| {
+            matches!(event, Event::Start(Tag::Link { .. } | Tag::Image { .. })).then_some(range)
+        })
+        .collect::<Vec<_>>();
+    if ranges.len() != titles.len() {
+        return Err(Error::Unrepresentable);
+    }
+    let mut insertions = Vec::new();
+    for (range, title) in ranges.into_iter().zip(titles) {
+        if title.contains(['\r', '\n']) {
+            let at = range.end.checked_sub(1).ok_or(Error::Unrepresentable)?;
+            if output.as_bytes().get(at) != Some(&b')') {
+                return Err(Error::Unrepresentable);
+            }
+            let mut encoded = String::new();
+            crate::link::push_title(&mut encoded, title);
+            insertions.push((at, encoded));
+        }
+    }
+    insertions.sort_by_key(|(at, _)| std::cmp::Reverse(*at));
+    for (at, title) in insertions {
+        output.insert_str(at, &title);
+    }
+    Ok(output)
+}
+
 /// Render a plain scalar as single-line Markdown text.
 pub fn inline_text(value: &str) -> String {
     let mut output = String::new();
@@ -811,6 +894,58 @@ pub fn parse_fence(line: &str) -> Option<(char, usize, &str)> {
 #[cfg(test)]
 mod tests {
     use super::{CredentialForm, scan_credentials};
+
+    #[test]
+    fn serialization_preserves_nested_image_and_link_titles_without_creating_markup() {
+        use super::{MarkdownInput, OPTIONS, serialize};
+        use pulldown_cmark::{Event, LinkType, Tag, TagEnd};
+        let title = "first\r\n\r\n[extra](../../concepts/extra.md) & \"quoted\"";
+        let events = vec![
+            Event::Start(Tag::Paragraph),
+            Event::Start(Tag::Link {
+                link_type: LinkType::Inline,
+                dest_url: "https://example.com/a".into(),
+                title: title.into(),
+                id: "".into(),
+            }),
+            Event::Start(Tag::Image {
+                link_type: LinkType::Inline,
+                dest_url: "image.png".into(),
+                title: title.into(),
+                id: "".into(),
+            }),
+            Event::Text("literal [label]".into()),
+            Event::End(TagEnd::Image),
+            Event::End(TagEnd::Link),
+            Event::Text(" suffix".into()),
+            Event::End(TagEnd::Paragraph),
+        ];
+        let output = serialize(&events, OPTIONS, Default::default()).unwrap();
+        let input = MarkdownInput::from_text(&output);
+        let observed = input
+            .events(OPTIONS)
+            .filter_map(|event| match event {
+                Event::Start(
+                    Tag::Link {
+                        dest_url, title, ..
+                    }
+                    | Tag::Image {
+                        dest_url, title, ..
+                    },
+                ) => Some((dest_url.to_string(), title.to_string())),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            observed,
+            [
+                ("https://example.com/a".into(), title.into()),
+                ("image.png".into(), title.into())
+            ]
+        );
+        assert!(crate::link::extract_dests(&output).is_empty());
+        assert!(output.ends_with(" suffix"));
+    }
 
     #[test]
     fn plain_scalar_strikethrough_is_literal_with_all_supported_options() {

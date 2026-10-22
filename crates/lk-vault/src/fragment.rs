@@ -11,10 +11,8 @@ pub(crate) fn inline_text(value: &str) -> String {
 }
 
 fn serialize(events: &[Event<'_>]) -> Result<String, Error> {
-    let mut output = String::new();
-    pulldown_cmark_to_cmark::cmark(events.iter(), &mut output, OPTIONS)
-        .map_err(|error| Error::new(ErrorKind::InvalidOperation, error.to_string()))?;
-    Ok(output)
+    lk_core::markdown::serialize(events, OPTIONS, Default::default())
+        .map_err(|error| Error::new(ErrorKind::InvalidOperation, error.to_string()))
 }
 
 /// Keep vault-local link and image targets when Markdown moves between page addresses.
@@ -219,6 +217,32 @@ pub(crate) fn link(url: &str, label: &str) -> Result<String, Error> {
 mod tests {
     use super::*;
     use pulldown_cmark::Parser;
+
+    #[test]
+    fn multiline_titles_survive_fragment_rendering_and_relocation() {
+        let source = "[Proof](proof.md \"first&#10;&#10;[extra](extra.md)\")";
+        for output in [
+            render_markdown_fragment(source).unwrap(),
+            relocate_markdown_links(
+                source,
+                Path::new("wiki/documents/a.md"),
+                Path::new("wiki/documents/nested/a.md"),
+            )
+            .unwrap(),
+        ] {
+            let links = Parser::new_ext(&output, OPTIONS)
+                .filter_map(|event| match event {
+                    Event::Start(Tag::Link {
+                        dest_url, title, ..
+                    }) => Some((dest_url.to_string(), title.to_string())),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(links.len(), 1, "{output}");
+            assert!(matches!(links[0].0.as_str(), "proof.md" | "../proof.md"));
+            assert_eq!(links[0].1, "first\n\n[extra](extra.md)");
+        }
+    }
 
     #[test]
     fn cr_code_and_html_literals_survive_fragment_rendering_and_relocation() {
