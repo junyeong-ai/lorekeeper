@@ -332,6 +332,7 @@ fn prepare_search_inner(
                 &[],
             );
             let projection = page.match_projection();
+            let spacing_text = super::search::compact_blocks(&projection.text);
             let name_text = page.names().map(fold_name).collect::<Vec<_>>().join("\n");
             let spacing_name_text = super::search::compact_blocks(&name_text);
             let identity = page
@@ -391,7 +392,7 @@ fn prepare_search_inner(
                 projection.summary,
                 projection.text,
                 name_text,
-                projection.spacing_text,
+                spacing_text,
                 spacing_name_text,
                 input_revision,
                 traversal_rank,
@@ -404,7 +405,7 @@ fn prepare_search_inner(
                 name_text,
                 projection.text,
                 spacing_name_text,
-                projection.spacing_text
+                spacing_text
             ])?;
             for (ordinal, review) in page.reviews.iter().enumerate() {
                 let payload = serde_json::to_string(review)
@@ -685,18 +686,13 @@ pub(super) fn visit_query_candidates(
             row.get::<_, String>(0)?,
             row.get::<_, String>(1)?,
             row.get::<_, String>(2)?,
-            row.get::<_, String>(3)?,
         ))
     })?;
     for row in rows {
-        let (metadata, summary, text, spacing_text) = row?;
+        let (metadata, summary, text) = row?;
         let mut page: Page = serde_json::from_str(&metadata)
             .map_err(|error| VaultError::Serialization(error.to_string()))?;
-        page.projection = Some(MatchProjection {
-            summary,
-            text,
-            spacing_text,
-        });
+        page.projection = Some(MatchProjection { summary, text });
         visit(page, &spellings, &terms, identity.as_deref())?;
     }
     Ok((spellings, terms))
@@ -761,7 +757,7 @@ fn build_candidate_query(
         "knowledge = 1"
     };
     let sql = format!(
-        "SELECT metadata, summary, text, spacing_text FROM pages WHERE {scope} AND {filter} ORDER BY traversal_rank"
+        "SELECT metadata, summary, text FROM pages WHERE {scope} AND {filter} ORDER BY traversal_rank"
     );
     (sql, arguments)
 }

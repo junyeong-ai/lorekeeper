@@ -1025,7 +1025,6 @@ pub(super) fn attach_reviews(
 pub(super) struct MatchProjection {
     pub summary: String,
     pub text: String,
-    pub spacing_text: String,
 }
 
 impl Page {
@@ -1235,11 +1234,13 @@ fn match_page(
 impl MatchProjection {
     fn from_body(body: &str) -> Self {
         let document = VisibleDocument::from_body(body);
-        let text = fold(&document.text());
+        Self::from_document(&document)
+    }
+
+    pub(super) fn from_document(document: &VisibleDocument) -> Self {
         Self {
             summary: fold(document.opening.as_deref().unwrap_or_default()),
-            spacing_text: compact_blocks(&text),
-            text,
+            text: fold(&document.text()),
         }
     }
 }
@@ -1985,7 +1986,6 @@ mod tests {
                 projection: Some(MatchProjection {
                     summary: "topic".into(),
                     text: format!("topic {}", "detail ".repeat(1000)),
-                    spacing_text: "topic".into(),
                 }),
             };
             collector.push(Cow::Owned(page), &options, &[], &terms, None);
