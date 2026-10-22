@@ -1,5 +1,3 @@
-use pulldown_cmark::{Event, Tag};
-
 use crate::SourceError;
 
 /// The declared text format, independent of filename and HTTP charset metadata.
@@ -22,74 +20,18 @@ impl ContentFormat {
     }
 
     pub(super) fn markdown(&self, content: &str) -> Result<String, SourceError> {
-        let markdown = match self {
-            Self::Plain => return crate::fetch::literal_markdown(content),
-            Self::Markdown => content.to_owned(),
-            Self::Html => {
-                // Conversion can discard <base>, while its meaning still affects links.
-                if crate::manual_bundle::remote_html_references(content).1 {
-                    return Err(dependency_error(
-                        "HTML base has no captured source authority",
-                    ));
-                }
-                crate::markdown::html_to_markdown(content)
-            }
-        };
-        let mut has_raw_html = false;
-        let input = lk_core::markdown::MarkdownInput::from_text(&markdown);
-        for event in input.events(lk_core::markdown::OPTIONS) {
-            match event {
-                Event::Start(Tag::Link { dest_url, .. } | Tag::Image { dest_url, .. }) => {
-                    validate_destination(&dest_url)?;
-                }
-                Event::Html(_) | Event::InlineHtml(_) => has_raw_html = true,
-                _ => {}
-            }
+        match self {
+            Self::Plain => crate::fetch::literal_markdown(content),
+            Self::Markdown => crate::remote_text::markdown(content, None),
+            Self::Html => crate::remote_text::html(content, None),
         }
-        if has_raw_html {
-            // Render the complete stream so generated paragraphs and escaped code
-            // retain the same DOM/namespace context as the actual Markdown page.
-            let mut html = String::new();
-            pulldown_cmark::html::push_html(&mut html, input.events(lk_core::markdown::OPTIONS));
-            let (references, has_base) = crate::manual_bundle::remote_html_references(&html);
-            if has_base {
-                return Err(dependency_error(
-                    "HTML base has no captured source authority",
-                ));
-            }
-            for destination in references {
-                validate_destination(&destination)?;
-            }
-        }
-        Ok(markdown)
     }
-}
-
-fn dependency_error(detail: &str) -> SourceError {
-    SourceError::Parse(format!(
-        "Google structured text has an unresolved remote dependency ({detail}); use absolute source URLs or a self-contained manual capture"
-    ))
-}
-
-fn validate_destination(destination: &str) -> Result<(), SourceError> {
-    if destination.is_empty() || destination.starts_with('#') {
-        return Ok(());
-    }
-    if lk_core::link::is_external(destination)
-        && !destination.contains('\\')
-        && url::Url::parse(destination).is_ok_and(|url| url.scheme() != "file")
-    {
-        return Ok(());
-    }
-    Err(dependency_error(
-        "relative or local URL has no captured source base",
-    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pulldown_cmark::Parser;
+    use pulldown_cmark::{Event, Parser, Tag};
 
     #[test]
     fn cr_fenced_examples_are_literal_and_do_not_hide_later_dependencies() {

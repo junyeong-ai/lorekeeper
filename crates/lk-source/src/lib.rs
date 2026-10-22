@@ -11,6 +11,7 @@ pub(crate) mod markdown;
 mod nodex;
 pub use nodex::repoint_document_links;
 pub(crate) mod paging;
+pub(crate) mod remote_text;
 pub(crate) mod retry;
 mod rss;
 mod slack;

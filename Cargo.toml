@@ -57,6 +57,7 @@ htmd = "0.5"
 html5ever = "0.38"
 markup5ever_rcdom = "0.38"
 feed-rs = "3"
+quick-xml = { version = "0.42", features = ["encoding"] }
 dom_smoothie = "0.18"
 url = "2"
 base64 = "0.23"

@@ -46,7 +46,7 @@ uses validated params and context; do not add per-adapter output pipelines.
   Markdown keeps its structure and rebases parsed Link/Image destinations against the
   final response URL. A `text/plain` URL ending in `.md`/`.markdown` uses that file
   format; other plain text is escaped as literal prose. Raw HTML inside Markdown stays
-  unchanged and is subject to manual capture's dependency checks. Unknown media/charset,
+  unchanged and must have absolute source dependencies. Unknown media/charset,
   malformed text and oversized bodies are errors; RSS retains its feed content.
 - `is_self` uses structured identity: Gmail From email, Slack user ID, Jira assignee,
   Calendar organizer/attendee. Drive/RSS/manual are false; nodex's authored kind is
@@ -54,14 +54,14 @@ uses validated params and context; do not add per-adapter output pipelines.
 
 ## Provider-specific seams
 
-- `google/text.rs`: share declared Plain/Markdown/HTML conversion across Drive,
-  Calendar notes and Gmail. Plain is literal; structured Link/Image and retained
-  HTML URL attributes require absolute non-file URLs or same-document fragments.
-  Refuse unresolved local dependencies and HTML base authority rather than guessing
-  from API/viewer URLs or Drive names. Reuse the DOM scanner independently of manual
-  bundle closure policy; code/comments and plain styles are not dependencies. This
-  is not a CSS/srcset or browser resource-closure guarantee. Conversion errors follow
-  the caller's existing per-item or optional-enrichment failure policy.
+- `remote_text.rs`: parsed links and HTML URL attributes retain remote URI authority.
+  Resolve only against an observed response/page URI or its declared base; never guess
+  from API/viewer URLs or names. Without a source base, structured dependencies require
+  absolute non-file URLs or same-document fragments. Raw HTML in Markdown is preserved
+  and validated in the complete rendered DOM; in-document anchors remain local, while
+  other relative attributes require declared HTML input instead of a lossy fragment rewrite. This is not CSS/srcset or browser resource
+  closure. `google/text.rs` shares this policy for Drive, Calendar notes and Gmail;
+  plain text remains literal. Errors follow the caller's per-item/enrichment policy.
 - `atlassian/`: auth method determines deployment routing. OAuth/scoped token uses
   api.atlassian.com product/cloud ID; API token/PAT uses the site (PAT Bearer).
   Keep Cloud/Server pagination and user identity separate. Persist a rotated refresh
@@ -83,10 +83,13 @@ uses validated params and context; do not add per-adapter output pipelines.
 - `gmail.rs`: epoch bounds and parenthesized OR terms; queries are required/nonblank.
   An unread-only filter is an explicit user choice, not an implicit default.
   MIME plain text is literal prose; only declared HTML is converted as markup.
-- `slack.rs`: form-encode API calls. Cursor pagination is authoritative, not
+- `slack/`: form-encode API calls. Cursor pagination is authoritative, not
   `has_more`; distinguish bare channel IDs from `#` lookup. Watch-user author/mention
   semantics, thread/bot filters, and user-token search remain explicit. Split only
   headings, not code, mentions, or URLs.
+  The mrkdwn renderer emits typed formatting; ordinary text, decoded entities and
+  labels stay literal. Code isolates token/emoji interpretation. Only explicit
+  absolute Slack angle URLs introduce links; ordered markers retain their values.
 - `calendar.rs`: construct URL path segments safely. All-day civil dates use the
   vault timezone; skip invalid timestamps diagnostically. Optional Drive notes
   require a supported textual Content-Type and share Drive's 16 MiB strict-decoding
@@ -114,6 +117,10 @@ uses validated params and context; do not add per-adapter output pipelines.
   metadata; delimiter concatenation cannot distinguish arbitrary feed IDs and GUIDs.
   Feed HTTP bodies are bounded at 16 MiB before parsing, including chunked responses;
   overflow refuses that feed rather than publishing a parseable truncated prefix.
+  Preserve inherited XML base separately for content and summary, rooted at the final
+  response URI. Decode strictly from the XML declaration/BOM before inspecting scopes;
+  decoded and rewritten XML share the bounded representation limit. Resolve actual XHTML
+  URL attributes before feed-rs removes wrappers. Escaped HTML is not XML.
 
 ## HTML/storage normalization (`markdown.rs`)
 

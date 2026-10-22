@@ -512,7 +512,20 @@ fn map_page_observed(
     };
     // Confluence "storage format" is XHTML with custom macro elements; the shared HTML
     // converter degrades unmapped constructs to their text rather than leaking markup.
-    let body = crate::markdown::html_to_markdown(&storage);
+    let url = page
+        .links
+        .webui
+        .filter(|_| !site.is_empty())
+        .map(|webui| format!("{site}{webui}"));
+    let source_base = url.as_deref().and_then(|url| url::Url::parse(url).ok());
+    let body = match crate::remote_text::html(&storage, source_base.as_ref()) {
+        Ok(body) => body,
+        Err(error) => {
+            *partial = true;
+            tracing::warn!(page = %page.id, %error, "confluence: storage has unresolved source dependencies; skipping");
+            return None;
+        }
+    };
 
     let space_key = page.space.as_ref().and_then(|s| s.key.clone());
     let author = editor.and_then(|u| {
@@ -525,12 +538,6 @@ fn map_page_observed(
     // `site` is already the browsable root for this deployment (Cloud includes `/wiki`;
     // Data Center's context path is part of the configured site URL), so `webui` — which is
     // relative to that root — appends directly.
-    let url = page
-        .links
-        .webui
-        .filter(|_| !site.is_empty())
-        .map(|webui| format!("{site}{webui}"));
-
     Some(RawItem {
         labels: Vec::new(),
         // The version is part of the identity: an unchanged page re-fetched tomorrow yields
@@ -557,6 +564,35 @@ fn map_page_observed(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn returned_page_uri_owns_storage_links_and_missing_authority_is_partial() {
+        let page = || {
+            serde_json::from_value(serde_json::json!({
+            "id": "1", "title": "Remote page", "version": {"number": 1, "when": "2026-05-23T09:00:00Z"},
+            "body": {"storage": {"value": "<p><a href='/wiki/concepts/topic.md'>remote</a></p>"}},
+            "_links": {"webui": "/spaces/S/pages/1"}
+        })).unwrap()
+        };
+        let mut partial = false;
+        let item = map_page_observed(
+            page(),
+            "",
+            "https://source.example/wiki",
+            false,
+            &mut partial,
+        )
+        .unwrap();
+        assert!(!partial);
+        assert!(
+            item.body
+                .contains("https://source.example/wiki/concepts/topic.md"),
+            "{}",
+            item.body
+        );
+        assert!(map_page_observed(page(), "", "", false, &mut partial).is_none());
+        assert!(partial);
+    }
 
     #[tokio::test]
     async fn collection_identity_is_fresh_and_requires_deployment_user_key() {

@@ -482,6 +482,13 @@ fn map_issue(
         .as_ref()
         .map(crate::markdown::adf_to_markdown)
         .unwrap_or_default();
+    let description = match crate::remote_text::markdown(&description, None) {
+        Ok(description) => description,
+        Err(error) => {
+            tracing::warn!(issue_key = %issue.key, %error, "jira: description has unresolved source dependencies; skipping");
+            return None;
+        }
+    };
     let start_date = start_date_field
         .and_then(|f| issue.fields.extra.get(f))
         .and_then(serde_json::Value::as_str)
@@ -728,6 +735,26 @@ mod tests {
             item.body.contains("2026-05-18"),
             "start date from custom field: {}",
             item.body
+        );
+    }
+
+    #[test]
+    fn relative_adf_links_refuse_the_issue_without_an_authoritative_body_base() {
+        let issue = issue_from(serde_json::json!({
+            "key": "PROJ-1", "fields": { "summary": "Remote link", "updated": "2026-05-23T09:00:00Z",
+                "description": {"type": "doc", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "link", "marks": [{"type": "link", "attrs": {"href": "../../wiki/concepts/topic.md"}}]}]}]}
+            }
+        }));
+        assert!(
+            map_issue(
+                issue,
+                "me",
+                "https://source.example",
+                "me@example.com",
+                None,
+                lk_core::i18n::Locale::En.strings()
+            )
+            .is_none()
         );
     }
 

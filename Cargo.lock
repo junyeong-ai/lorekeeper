@@ -1675,6 +1675,7 @@ dependencies = [
  "proptest",
  "pulldown-cmark",
  "pulldown-cmark-to-cmark",
+ "quick-xml",
  "rand",
  "regex",
  "reqwest",

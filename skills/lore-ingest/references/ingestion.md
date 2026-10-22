@@ -60,6 +60,13 @@ file updates its existing owner; renaming or copying it is a different input, ev
 its bytes match. Drive and repository documents instead use verified provider/document
 identities. Equal titles, URLs or text never authorize an automatic merge.
 
+Remote rich-text links use the captured source URI and declared HTML/XML base, not
+the destination vault page. Without a trustworthy source base, relative dependencies
+are refused; absolute non-file URLs and in-document fragments remain supported.
+Raw HTML inside Markdown retains its bytes and requires absolute dependencies;
+its in-document anchors remain local. Plain provider text, labels and code never
+acquire link authority merely because they contain Markdown-looking characters.
+
 Explicit relative Markdown links and supported HTML resources are captured within
 the inbox boundary. Missing, escaping or symlink dependencies fail capture. CSS/SVG
 and other unsupported resource constructs are reported as incomplete coverage and

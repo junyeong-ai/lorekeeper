@@ -98,13 +98,11 @@ fn remote_markdown(text: &str, base: &url::Url) -> Result<ReadableArticle, Sourc
         | Options::ENABLE_TASKLISTS
         | Options::ENABLE_STRIKETHROUGH
         | Options::ENABLE_FOOTNOTES;
-    let mut changed = false;
-    let mut link_error = None;
     let mut title = None;
     let mut heading = None;
     let input = lk_core::markdown::MarkdownInput::from_text(text);
-    let events = input.events(options).map(|event| {
-        match &event {
+    for event in input.events(options) {
+        match event {
             Event::Start(Tag::Heading {
                 level: HeadingLevel::H1,
                 ..
@@ -116,7 +114,7 @@ fn remote_markdown(text: &str, base: &url::Url) -> Result<ReadableArticle, Sourc
             }
             Event::Text(value) | Event::Code(value) => {
                 if let Some(heading) = &mut heading {
-                    heading.push_str(value);
+                    heading.push_str(&value);
                 }
             }
             Event::SoftBreak | Event::HardBreak => {
@@ -126,34 +124,9 @@ fn remote_markdown(text: &str, base: &url::Url) -> Result<ReadableArticle, Sourc
             }
             _ => {}
         }
-        if let Event::Start(mut tag @ (Tag::Link { .. } | Tag::Image { .. })) = event {
-            let destination = match &mut tag {
-                Tag::Link { dest_url, .. } | Tag::Image { dest_url, .. } => dest_url,
-                _ => unreachable!(),
-            };
-            match base.join(destination) {
-                Ok(absolute) if absolute.as_str() != destination.as_ref() => {
-                    *destination = absolute.to_string().into();
-                    changed = true;
-                }
-                Err(error) => link_error = Some(error),
-                _ => {}
-            }
-            Event::Start(tag)
-        } else {
-            event
-        }
-    });
-    let mut markdown = String::new();
-    pulldown_cmark_to_cmark::cmark(events, &mut markdown, options)
-        .map_err(|error| SourceError::Parse(format!("remote Markdown: {error}")))?;
-    if let Some(error) = link_error {
-        return Err(SourceError::Parse(format!("remote Markdown link: {error}")));
     }
-    Ok(ReadableArticle {
-        title,
-        markdown: if changed { markdown } else { text.into() },
-    })
+    let markdown = crate::remote_text::markdown(text, Some(base))?;
+    Ok(ReadableArticle { title, markdown })
 }
 
 pub(crate) fn literal_markdown(text: &str) -> Result<String, SourceError> {

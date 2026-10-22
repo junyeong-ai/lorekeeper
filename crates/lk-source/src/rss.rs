@@ -11,6 +11,8 @@ use lk_core::event::RawItem;
 
 use crate::{ExtractContext, Source, SourceError};
 
+mod base;
+
 const MAX_FEED_BYTES: usize = 16 * 1024 * 1024;
 
 pub struct RssSource {
@@ -109,7 +111,10 @@ impl RssSource {
             .map(|a| a.markdown))
     }
 
-    async fn fetch_feed(&self, url: &str) -> Result<feed_rs::model::Feed, SourceError> {
+    async fn fetch_feed(
+        &self,
+        url: &str,
+    ) -> Result<(feed_rs::model::Feed, Vec<base::EntryBases>), SourceError> {
         let mut resp = self
             .http
             .get(url)
@@ -130,6 +135,7 @@ impl RssSource {
                 max_bytes: MAX_FEED_BYTES,
             });
         }
+        let final_url = resp.url().clone();
         let mut bytes = Vec::new();
         while let Some(chunk) = resp.chunk().await? {
             if chunk.len() > MAX_FEED_BYTES - bytes.len() {
@@ -139,7 +145,34 @@ impl RssSource {
             }
             bytes.extend_from_slice(&chunk);
         }
-        feed_rs::parser::parse(&bytes[..]).map_err(|e| SourceError::Parse(e.to_string()))
+        let (mut bases, rewritten) = base::capture(&bytes, &final_url)?;
+        let feed_bytes = rewritten.as_deref().unwrap_or(&bytes);
+        let feed = feed_rs::parser::Builder::new()
+            .base_uri(Some(final_url.as_str()))
+            .build()
+            .parse(feed_bytes)
+            .map_err(|e| SourceError::Parse(e.to_string()))?;
+        if bytes
+            .iter()
+            .copied()
+            .find(|byte| !byte.is_ascii_whitespace())
+            == Some(b'{')
+        {
+            let final_url = std::sync::Arc::new(final_url);
+            bases = vec![
+                base::EntryBases {
+                    content: Some(final_url.clone()),
+                    summary: Some(final_url.clone())
+                };
+                feed.entries.len()
+            ];
+        }
+        if bases.len() != feed.entries.len() {
+            return Err(SourceError::Parse(
+                "feed content base: parsed entry inventory differs from XML base scopes".into(),
+            ));
+        }
+        Ok((feed, bases))
     }
 }
 
@@ -169,7 +202,7 @@ impl Source for RssSource {
         // Counted upward, never derived by subtraction — see `require_any_observation`.
         let mut feeds_read = 0usize;
         for feed_cfg in &p.feeds {
-            let feed = match self.fetch_feed(&feed_cfg.url).await {
+            let (feed, bases) = match self.fetch_feed(&feed_cfg.url).await {
                 Ok(f) => f,
                 Err(e) => {
                     partial = true;
@@ -192,12 +225,12 @@ impl Source for RssSource {
             // marking itself fails loudly rather than silently.
             let (mut seen, mut observed) = (0usize, 0usize);
             let mut kept = 0usize;
-            for entry in feed.entries {
+            for (entry, bases) in feed.entries.into_iter().zip(bases) {
                 seen += 1;
                 let Some(MappedEntry {
                     mut item,
                     supplied_unrepresentable_body,
-                }) = map_entry(&feed_cfg.id, &feed_title, entry)
+                }) = map_entry(&feed_cfg.id, &feed_title, entry, &bases)
                 else {
                     partial = true;
                     continue;
@@ -323,6 +356,7 @@ fn map_entry(
     feed_id: &str,
     feed_title: &Option<String>,
     entry: feed_rs::model::Entry,
+    bases: &base::EntryBases,
 ) -> Option<MappedEntry> {
     let dt = entry.published.or(entry.updated)?;
     let ts = jiff::Timestamp::from_millisecond(dt.timestamp_millis()).ok()?;
@@ -343,8 +377,10 @@ fn map_entry(
         .as_ref()
         .map(|summary| (summary.content.as_str(), summary.content_type.as_str()));
     let body = content
-        .and_then(|(text, media)| feed_text(text, media))
-        .or_else(|| summary.and_then(|(text, media)| feed_text(text, media)));
+        .and_then(|(text, media)| feed_text(text, media, bases.content.as_deref()))
+        .or_else(|| {
+            summary.and_then(|(text, media)| feed_text(text, media, bases.summary.as_deref()))
+        });
     let supplied_unrepresentable_body = body.is_none()
         && content
             .into_iter()
@@ -404,7 +440,7 @@ fn map_entry(
 
 /// Feed parsers already decode Atom text constructs. Only declared HTML is markup;
 /// literal text must also stay literal when embedded in the Markdown daily page.
-fn feed_text(text: &str, content_type: &str) -> Option<String> {
+fn feed_text(text: &str, content_type: &str, base: Option<&url::Url>) -> Option<String> {
     if text.trim().is_empty() {
         return None;
     }
@@ -418,9 +454,11 @@ fn feed_text(text: &str, content_type: &str) -> Option<String> {
     match media.essence_str() {
         // feed-rs represents Atom type="xhtml" as application/xhtml.
         "text/html" | "application/xhtml" | "application/xhtml+xml" => {
-            Some(crate::markdown::html_to_markdown(text))
+            project_feed_text(crate::remote_text::html(text, base))
         }
-        "text/markdown" | "text/x-markdown" => Some(text.to_owned()),
+        "text/markdown" | "text/x-markdown" => {
+            project_feed_text(crate::remote_text::markdown(text, base))
+        }
         "text/plain" => match crate::fetch::literal_markdown(text) {
             Ok(body) => Some(body),
             Err(error) => {
@@ -438,6 +476,16 @@ fn feed_text(text: &str, content_type: &str) -> Option<String> {
     }
 }
 
+fn project_feed_text(result: Result<String, SourceError>) -> Option<String> {
+    match result {
+        Ok(body) => Some(body),
+        Err(error) => {
+            tracing::warn!(%error, "rss: unresolved inline source dependencies; trying summary");
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -447,7 +495,71 @@ mod tests {
         feed_title: &Option<String>,
         entry: feed_rs::model::Entry,
     ) -> Option<RawItem> {
-        super::map_entry(feed_id, feed_title, entry).map(|mapped| mapped.item)
+        super::map_entry(feed_id, feed_title, entry, &base::EntryBases::default())
+            .map(|mapped| mapped.item)
+    }
+
+    #[tokio::test]
+    async fn redirected_feed_and_xml_body_bases_remain_remote_uri_authority() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for expected in ["/start", "/feeds/current.xml"] {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    let mut byte = [0];
+                    assert_ne!(stream.read(&mut byte).await.unwrap(), 0);
+                    request.push(byte[0]);
+                    assert!(request.len() < 16 * 1024);
+                }
+                assert!(
+                    String::from_utf8(request)
+                        .unwrap()
+                        .starts_with(&format!("GET {expected} "))
+                );
+                if expected == "/start" {
+                    stream.write_all(b"HTTP/1.1 302 Found\r\nLocation: /feeds/current.xml\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
+                } else {
+                    let body = r#"<feed xmlns="http://www.w3.org/2005/Atom"><entry><title>Redirected</title><id>redirected</id><updated>2026-05-23T01:00:00Z</updated><summary type="html">&lt;a href='child.md'&gt;child&lt;/a&gt;</summary></entry><entry xml:base="https://remote.example/root/"><title>Scoped</title><id>scoped</id><updated>2026-05-23T01:00:00Z</updated><summary type="html" xml:base="summary/">&lt;a href='../../wiki/concepts/topic.md'&gt;remote topic&lt;/a&gt;</summary></entry></feed>"#;
+                    let header = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/atom+xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    stream.write_all(header.as_bytes()).await.unwrap();
+                    stream.write_all(body.as_bytes()).await.unwrap();
+                }
+                stream.shutdown().await.unwrap();
+            }
+        });
+        let source = RssSource::new(loopback_client());
+        let params = serde_json::json!({"feeds": [{"id": "base-fixture", "url": format!("http://{address}/start")}], "lookback_hours": 0});
+        let observed = source.observe(&params, &test_ctx()).await.unwrap();
+        server.await.unwrap();
+        assert_eq!(observed.outcome, crate::ObservationOutcome::Observed);
+        assert_eq!(observed.items.len(), 2);
+        assert!(
+            observed.items[0]
+                .body
+                .contains(&format!("http://{address}/feeds/child.md")),
+            "{}",
+            observed.items[0].body
+        );
+        assert!(
+            observed.items[1]
+                .body
+                .contains("https://remote.example/wiki/concepts/topic.md"),
+            "{}",
+            observed.items[1].body
+        );
+        for item in observed.items {
+            assert!(
+                lk_core::link::extract_page_links(&item.body).is_empty(),
+                "{}",
+                item.body
+            );
+        }
     }
 
     /// Per-feed isolation must not extend to a source that reached NOTHING. An empty
@@ -488,7 +600,7 @@ mod tests {
             let result = source.fetch_feed(&format!("http://{address}/feed")).await;
             server.await.unwrap();
             if mode == "exact" {
-                assert_eq!(result.unwrap().entries.len(), 1);
+                assert_eq!(result.unwrap().0.entries.len(), 1);
             } else {
                 assert!(
                     matches!(
@@ -702,9 +814,14 @@ mod tests {
 <content type="application/octet-stream">Ym9keQ==</content></entry>"#;
         let entry_xml = format!(r#"<feed xmlns="http://www.w3.org/2005/Atom">{bad_entry}</feed>"#);
         assert!(
-            super::map_entry("fixture", &None, parse_one(&entry_xml))
-                .unwrap()
-                .supplied_unrepresentable_body
+            super::map_entry(
+                "fixture",
+                &None,
+                parse_one(&entry_xml),
+                &base::EntryBases::default()
+            )
+            .unwrap()
+            .supplied_unrepresentable_body
         );
 
         let only_bad = tiny_feed_server(
@@ -1081,7 +1198,7 @@ mod tests {
 
     #[test]
     fn atom_unusable_content_falls_back_to_typed_summary() {
-        assert!(feed_text("", "text/plain").is_none());
+        assert!(feed_text("", "text/plain", None).is_none());
         for content in [
             r#"<content type="application/octet-stream">Ym9keQ==</content>"#,
             r#"<content type="text/plain" src="https://example.com/body"/>"#,

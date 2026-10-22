@@ -1,4 +1,5 @@
 pub mod channel;
+pub(crate) mod mrkdwn;
 pub mod search;
 
 use std::collections::HashMap;
@@ -252,7 +253,14 @@ where
 /// unbalanced fence behind.
 pub(crate) fn split_first_line(body: &str) -> (String, String) {
     let first = body.lines().next().unwrap_or_default().trim();
+    let linked = pulldown_cmark::Parser::new_ext(first, lk_core::markdown::OPTIONS).any(|event| {
+        matches!(
+            event,
+            pulldown_cmark::Event::Start(pulldown_cmark::Tag::Link { .. })
+        )
+    });
     let title_like = !first.is_empty()
+        && !linked
         && first.chars().count() <= 120
         && !first.starts_with("```")
         && !first.starts_with("~~~")
@@ -270,33 +278,40 @@ pub(crate) fn split_first_line(body: &str) -> (String, String) {
             .unwrap_or("")
             .trim_start()
             .to_string();
-        (first.to_string(), rest)
+        (visible_text(first), rest)
     } else {
         (preview_title(body), body.trim_start().to_string())
     }
 }
 
 /// A one-line, length-bounded preview of a body, used as a title when the first
-/// line is not itself title-like. Skips fence-marker lines so a code-block opener
-/// doesn't leak backticks into the title, and collapses whitespace so a multi-line
-/// opener reads as a single label.
+/// line is not itself title-like. Project generated Markdown to visible text so
+/// delimiters and literal-text escapes never become scalar title characters.
 fn preview_title(body: &str) -> String {
     const MAX: usize = 80;
-    let text = body
-        .lines()
-        .filter(|l| {
-            let t = l.trim_start();
-            !(t.starts_with("```") || t.starts_with("~~~"))
-        })
-        .collect::<Vec<_>>()
-        .join(" ");
-    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let flat = visible_text(body);
     if flat.chars().count() <= MAX {
         flat
     } else {
         let truncated: String = flat.chars().take(MAX).collect();
         format!("{}…", truncated.trim_end())
     }
+}
+
+fn visible_text(markdown: &str) -> String {
+    use pulldown_cmark::{Event, TagEnd};
+
+    let mut output = String::new();
+    for event in pulldown_cmark::Parser::new_ext(markdown, lk_core::markdown::OPTIONS) {
+        match event {
+            Event::Text(text) | Event::Code(text) => output.push_str(&text),
+            Event::SoftBreak
+            | Event::HardBreak
+            | Event::End(TagEnd::Paragraph | TagEnd::CodeBlock | TagEnd::Item) => output.push(' '),
+            _ => {}
+        }
+    }
+    output.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 #[derive(Debug, Deserialize)]
@@ -541,6 +556,24 @@ mod tests {
         let (title, body) = split_first_line("Deploy completed\n\ndetails here");
         assert_eq!(title, "Deploy completed");
         assert_eq!(body, "details here");
+    }
+
+    #[test]
+    fn converted_slack_titles_project_visible_text_and_keep_link_evidence() {
+        let rendered = super::mrkdwn::render(
+            "[Claim](local.md) *bold*\n\nDetails",
+            &std::collections::HashMap::new(),
+        );
+        let (title, body) = split_first_line(&rendered);
+        assert_eq!(title, "[Claim](local.md) bold");
+        assert_eq!(body, "Details");
+
+        let rendered = super::mrkdwn::render(
+            "<https://example.com|Source>\n\nDetails",
+            &std::collections::HashMap::new(),
+        );
+        let (_, body) = split_first_line(&rendered);
+        assert_eq!(body, rendered);
     }
 
     #[test]

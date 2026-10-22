@@ -409,6 +409,7 @@ fn render_thread(
     for r in replies {
         let raw_uid = r.user.as_deref().unwrap_or("unknown");
         let display = users.get(raw_uid).map(String::as_str).unwrap_or(raw_uid);
+        let display = lk_core::markdown::inline_text(display);
         out.push_str(&format!("\n@{display}: {}", render(r)));
     }
     out
@@ -546,6 +547,25 @@ mod tests {
         assert_eq!(
             render_thread(&thread, "쓰레드 답글", &no_users()),
             "solo @U2 ping"
+        );
+    }
+
+    #[test]
+    fn reply_display_names_remain_literal_text() {
+        let users = HashMap::from([(
+            "U2".into(),
+            "[Claim](../../wiki/concepts/topic.md) <b>".into(),
+        )]);
+        let thread = vec![msg("1", "U1", "Question"), msg("2", "U2", "Answer")];
+        let output = render_thread(&thread, "Replies", &users);
+        assert!(lk_core::link::extract_page_links(&output).is_empty());
+        assert!(
+            pulldown_cmark::Parser::new_ext(&output, lk_core::markdown::OPTIONS).all(
+                |event| !matches!(
+                    event,
+                    pulldown_cmark::Event::Html(_) | pulldown_cmark::Event::InlineHtml(_)
+                )
+            )
         );
     }
 }

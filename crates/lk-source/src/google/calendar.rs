@@ -464,11 +464,16 @@ fn map_event(
 
     // Google Calendar descriptions are HTML (`<ul>`, `<a>`, `<br>`); convert to Markdown
     // so the daily page and LLM see clean text, not raw tags.
-    let description = ev
-        .description
-        .as_deref()
-        .map(crate::markdown::html_to_markdown)
-        .unwrap_or_default();
+    let description = match ev.description.as_deref() {
+        Some(description) => match crate::remote_text::html(description, None) {
+            Ok(description) => description,
+            Err(error) => {
+                tracing::warn!(event_id = %id, %error, "calendar: event description has unresolved source dependencies; skipping");
+                return None;
+            }
+        },
+        None => String::new(),
+    };
     let mut body_parts: Vec<String> = Vec::new();
     if !description.is_empty() {
         body_parts.push(description.clone());
@@ -631,6 +636,28 @@ mod tests {
                 let separator = if prefix.is_empty() { "" } else { "\n\n" };
                 assert_eq!(body, format!("{prefix}{separator}**Notes:**\n\n{content}"));
             }
+        }
+    }
+
+    #[test]
+    fn unresolved_description_refuses_the_event_instead_of_publishing_vault_links() {
+        for description in [
+            "<p><a href='../../wiki/concepts/topic.md'>remote</a></p>",
+            "<base href='https://remote.example/'><p>body</p>",
+        ] {
+            let event = event_from(serde_json::json!({
+                "id": "remote-event", "summary": "Remote event",
+                "start": {"dateTime": "2026-05-23T09:00:00Z"}, "description": description
+            }));
+            assert!(
+                map_event(
+                    event,
+                    "",
+                    &jiff::tz::TimeZone::UTC,
+                    lk_core::i18n::Locale::En.strings()
+                )
+                .is_none()
+            );
         }
     }
 

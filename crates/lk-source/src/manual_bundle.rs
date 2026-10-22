@@ -3,13 +3,11 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
-use html5ever::tendril::TendrilSink;
 use lk_core::captured_file::CapturedFile;
 use lk_core::manual_original::{
     MAX_ORIGINAL_MEMBERS, ManualBundleCapture, ManualBundleManifest, ManualBundleMember,
     ORIGINAL_SCHEME, OriginalCaptureConfig, UnsupportedOriginalConstruct,
 };
-use markup5ever_rcdom::{NodeData, RcDom};
 use pulldown_cmark::{Event, LinkType, Options, Tag};
 
 use crate::SourceError;
@@ -153,33 +151,10 @@ fn unsupported_url_attribute(tag: &str, key: &str, namespace: &str) -> bool {
     )
 }
 
-fn visit_html_elements(text: &str, mut visit: impl FnMut(&str, &str, &[html5ever::Attribute])) {
-    let dom = html5ever::parse_document(RcDom::default(), Default::default()).one(text);
-
-    // Keep the DOM owner alive: RcDom Node::drop drains descendants even
-    // when a traversal holds another handle to a child.
-    let mut stack = vec![dom.document.clone()];
-    while let Some(node) = stack.pop() {
-        if let NodeData::Element {
-            name,
-            attrs,
-            template_contents,
-            ..
-        } = &node.data
-        {
-            if let Some(contents) = template_contents.borrow().as_ref() {
-                stack.push(contents.clone());
-            }
-            visit(name.local.as_ref(), name.ns.as_ref(), &attrs.borrow());
-        }
-        stack.extend(node.children.borrow().iter().cloned());
-    }
-}
-
 fn html_references(text: &str) -> (Vec<String>, BTreeSet<String>) {
     let mut refs = Vec::new();
     let mut unsupported = BTreeSet::new();
-    visit_html_elements(text, |tag, namespace, attrs| {
+    crate::remote_text::visit_html_elements(text, |tag, namespace, attrs| {
         if matches!(
             tag,
             "style" | "script" | "base" | "iframe" | "object" | "svg"
@@ -227,71 +202,6 @@ fn html_references(text: &str) -> (Vec<String>, BTreeSet<String>) {
     (refs, unsupported)
 }
 
-/// URL attributes retained in remote HTML need an explicit source address. This is
-/// separate from the manual bundle's stronger resource-closure policy.
-pub(crate) fn remote_html_references(text: &str) -> (Vec<String>, bool) {
-    let mut refs = Vec::new();
-    let mut has_base = false;
-    visit_html_elements(text, |tag, namespace, attrs| {
-        has_base |= namespace == "http://www.w3.org/1999/xhtml" && tag == "base";
-        for attr in attrs {
-            let key = attr.name.local.as_ref();
-            let html_url = namespace == "http://www.w3.org/1999/xhtml"
-                && matches!(
-                    (tag, key),
-                    ("a" | "area" | "link" | "base", "href")
-                        | (
-                            "img"
-                                | "audio"
-                                | "video"
-                                | "source"
-                                | "track"
-                                | "input"
-                                | "embed"
-                                | "iframe"
-                                | "script",
-                            "src"
-                        )
-                        | ("video", "poster")
-                        | ("object", "data")
-                        | ("form", "action")
-                        | ("input" | "button", "formaction")
-                        | ("blockquote" | "q" | "ins" | "del", "cite")
-                        | ("img" | "iframe", "longdesc")
-                        | ("img" | "input" | "object", "usemap")
-                        | ("body" | "table" | "td" | "th", "background")
-                        | ("html", "manifest")
-                        | ("object" | "applet", "codebase" | "classid")
-                        | ("applet", "code")
-                        | ("command", "icon")
-                );
-            let svg_url = namespace == "http://www.w3.org/2000/svg"
-                && key == "href"
-                && matches!(
-                    tag,
-                    "a" | "image"
-                        | "use"
-                        | "feImage"
-                        | "linearGradient"
-                        | "radialGradient"
-                        | "pattern"
-                        | "filter"
-                        | "textPath"
-                        | "mpath"
-                        | "animate"
-                        | "animateMotion"
-                        | "animateTransform"
-                        | "set"
-                        | "discard"
-                        | "script"
-                );
-            if html_url || svg_url {
-                refs.push(attr.value.to_string());
-            }
-        }
-    });
-    (refs, has_base)
-}
 /// Obsidian's vault-wide basename lookup/implicit .md and embed options are not
 /// filesystem identity. Only an explicit relative filename (or same-page anchor) is supported.
 fn validate_wikilink(dest: &str, piped: bool, image: bool) -> Result<(), SourceError> {
@@ -568,8 +478,8 @@ pub(crate) fn project_links(
     if !changed {
         return Ok(text.into());
     }
-    let mut out = String::new();
-    pulldown_cmark_to_cmark::cmark(events, &mut out, SERIALIZER_OPTIONS).map_err(error)?;
+    let out = lk_core::markdown::serialize(&events, SERIALIZER_OPTIONS, Default::default())
+        .map_err(error)?;
     if out.len() > max_output_bytes {
         return Err(error(
             "derived Markdown exceeds the configured projection limit",

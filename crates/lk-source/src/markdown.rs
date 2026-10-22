@@ -23,6 +23,7 @@ pub fn html_to_markdown(html: &str) -> String {
             bullet_list_marker: htmd::options::BulletListMarker::Dash,
             ..Default::default()
         })
+        .add_handler(vec!["a"], html_link)
         .add_handler(vec!["img"], img_without_data_uris)
         .add_handler(vec!["table"], ordered_html_table)
         .add_handler(MACHINE_STATE_ELEMENTS.to_vec(), drop_element)
@@ -42,6 +43,34 @@ pub fn html_to_markdown(html: &str) -> String {
         .convert(&normalize_storage_format(html))
         .map(|md| md.trim().to_string())
         .unwrap_or_default()
+}
+
+fn html_link(
+    handlers: &dyn htmd::element_handler::Handlers,
+    element: htmd::Element,
+) -> Option<htmd::element_handler::HandlerResult> {
+    let content = handlers.walk_children(element.node).content;
+    let attribute = |key: &str| {
+        element
+            .attrs
+            .iter()
+            .find(|attr| attr.name.local.as_ref() == key)
+            .map(|attr| attr.value.as_ref())
+    };
+    let Some(destination) = attribute("href") else {
+        return Some(content.into());
+    };
+    let title = attribute("title").unwrap_or("");
+    let label = content.trim_ascii();
+    let mut rendered = lk_core::link::InlineLink {
+        raw_text: label,
+        raw_destination: destination,
+        destination,
+        title,
+    }
+    .render_with_destination(destination);
+    rendered.push_str(&content[content.trim_ascii_end().len()..]);
+    Some(rendered.into())
 }
 
 /// GFM has one column-header row and no spanning cells. Read direct cells together,
@@ -498,7 +527,7 @@ fn trimmed_link(
 /// spells CDATA syntax. An iframe's fallback is a sentence about browsers when it is anything at
 /// all, and what makes `noscript` common is the lazy-loaded `<img>` inside it, which carries no
 /// CDATA. The live vault holds none of either.
-fn normalize_storage_format(html: &str) -> std::borrow::Cow<'_, str> {
+pub(crate) fn normalize_storage_format(html: &str) -> std::borrow::Cow<'_, str> {
     let unwrapped = unwrap_cdata(html);
     match rewrite_tags(&unwrapped) {
         std::borrow::Cow::Borrowed(_) => unwrapped,
@@ -908,7 +937,13 @@ pub fn readable_article(html: &str, base_url: &url::Url) -> Option<crate::fetch:
     };
     match readability.parse() {
         Ok(article) => {
-            let markdown = html_to_markdown(&article.content);
+            let markdown = match crate::remote_text::html(&article.content, Some(base_url)) {
+                Ok(markdown) => markdown,
+                Err(error) => {
+                    tracing::warn!(url = %base_url, %error, "readability content has unresolved source dependencies");
+                    return None;
+                }
+            };
             if markdown.trim().is_empty() {
                 tracing::warn!(url = %base_url, "readability extracted empty content");
                 return None;
@@ -925,197 +960,202 @@ pub fn readable_article(html: &str, base_url: &url::Url) -> Option<crate::fetch:
 
 /// Convert an Atlassian Document Format node tree (Jira rich text) to Markdown.
 pub fn adf_to_markdown(node: &Value) -> String {
-    let mut out = String::new();
-    render_adf(node, &mut out);
-    out.trim().to_string()
+    let mut events = Vec::new();
+    render_adf(node, &mut events);
+    let output = lk_core::markdown::serialize(
+        &events,
+        lk_core::markdown::OPTIONS,
+        pulldown_cmark_to_cmark::Options {
+            code_block_token_count: 3,
+            list_token: '-',
+            increment_ordered_list_bullets: true,
+            ..Default::default()
+        },
+    )
+    .expect("serializing supported ADF events into a String cannot fail");
+    output.trim_matches(['\r', '\n']).to_owned()
 }
 
-fn render_adf(node: &Value, out: &mut String) {
-    match node.get("type").and_then(Value::as_str).unwrap_or("") {
-        "text" => out.push_str(&apply_marks(node)),
-        "hardBreak" => out.push('\n'),
-        "rule" => out.push_str("\n---\n\n"),
-        "mention" => out.push_str(adf_attr(node, "text").unwrap_or("")),
-        "emoji" => out.push_str(
-            adf_attr(node, "text")
-                .or_else(|| adf_attr(node, "shortName"))
-                .unwrap_or(""),
-        ),
+fn render_adf<'a>(node: &'a Value, events: &mut Vec<pulldown_cmark::Event<'a>>) {
+    use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Tag};
+
+    let tag = match node.get("type").and_then(Value::as_str).unwrap_or("") {
+        "text" => {
+            render_adf_text(node, events);
+            return;
+        }
+        "hardBreak" => {
+            events.push(Event::HardBreak);
+            return;
+        }
+        "rule" => {
+            events.push(Event::Rule);
+            return;
+        }
+        "mention" | "emoji" => {
+            events.push(Event::Text(
+                adf_attr(node, "text")
+                    .or_else(|| adf_attr(node, "shortName"))
+                    .unwrap_or("")
+                    .into(),
+            ));
+            return;
+        }
         "heading" => {
-            let level = node
-                .get("attrs")
-                .and_then(|a| a.get("level"))
-                .and_then(Value::as_u64)
-                .unwrap_or(1)
-                .clamp(1, 6) as usize;
-            out.push_str(&"#".repeat(level));
-            out.push(' ');
-            render_adf_children(node, out);
-            out.push_str("\n\n");
-        }
-        "paragraph" => {
-            render_adf_children(node, out);
-            out.push_str("\n\n");
-        }
-        "bulletList" => render_adf_list(node, out, None),
-        "orderedList" => {
-            // ADF carries the list's first number in `attrs.order` (Confluence/Jira split a
-            // long list by starting the next block at N). Honor it so the number isn't lost;
-            // default to 1 when absent.
-            let start = node
-                .get("attrs")
-                .and_then(|a| a.get("order"))
-                .and_then(Value::as_u64)
-                .map_or(1, |n| n as usize);
-            render_adf_list(node, out, Some(start))
-        }
-        "taskList" => {
-            render_adf_children(node, out);
-            out.push('\n');
-        }
-        "taskItem" => {
-            let checked = adf_attr(node, "state") == Some("DONE");
-            out.push_str(if checked { "- [x] " } else { "- [ ] " });
-            render_adf_children(node, out);
-            if !out.ends_with('\n') {
-                out.push('\n');
+            let level = match node["attrs"]["level"].as_u64().unwrap_or(1) {
+                0 | 1 => HeadingLevel::H1,
+                2 => HeadingLevel::H2,
+                3 => HeadingLevel::H3,
+                4 => HeadingLevel::H4,
+                5 => HeadingLevel::H5,
+                _ => HeadingLevel::H6,
+            };
+            Tag::Heading {
+                level,
+                id: None,
+                classes: vec![],
+                attrs: vec![],
             }
+        }
+        "paragraph" => Tag::Paragraph,
+        "bulletList" | "taskList" => Tag::List(None),
+        "orderedList" => Tag::List(Some(node["attrs"]["order"].as_u64().unwrap_or(1))),
+        "listItem" => Tag::Item,
+        "taskItem" => {
+            events.push(Event::Start(Tag::Item));
+            events.push(Event::TaskListMarker(
+                adf_attr(node, "state") == Some("DONE"),
+            ));
+            render_adf_item_children(node, events);
+            events.push(Event::End(pulldown_cmark::TagEnd::Item));
+            return;
         }
         "codeBlock" => {
-            let lang = adf_attr(node, "language").unwrap_or("");
-            out.push_str("```");
-            out.push_str(lang);
-            out.push('\n');
-            render_adf_children(node, out);
-            if !out.ends_with('\n') {
-                out.push('\n');
-            }
-            out.push_str("```\n\n");
-        }
-        "blockquote" => {
-            let mut inner = String::new();
-            render_adf_children(node, &mut inner);
-            for line in inner.trim_end().lines() {
-                out.push_str("> ");
-                out.push_str(line);
-                out.push('\n');
-            }
-            out.push('\n');
-        }
-        "table" => render_adf_table(node, out),
-        // doc, panel, and anything unrecognized: recurse so text is preserved.
-        // For unknown leaf nodes (no content array), rescue common attrs.
-        _ => {
-            if node.get("content").and_then(Value::as_array).is_some() {
-                render_adf_children(node, out);
-            } else if let Some(attrs) = node.get("attrs").and_then(Value::as_object) {
-                let rescued = attrs
-                    .get("url")
-                    .or_else(|| attrs.get("href"))
-                    .or_else(|| attrs.get("text"))
-                    .or_else(|| attrs.get("title"))
-                    .and_then(Value::as_str);
-                if let Some(value) = rescued {
-                    out.push_str(value);
+            // ADF renders unsupported language labels as plain code; fence info is single-line.
+            let language = adf_attr(node, "language")
+                .filter(|language| !language.contains(['\r', '\n']))
+                .unwrap_or("");
+            let tag = Tag::CodeBlock(CodeBlockKind::Fenced(language.into()));
+            events.push(Event::Start(tag));
+            let mut terminated = true;
+            if let Some(content) = node.get("content").and_then(Value::as_array) {
+                for child in content {
+                    if let Some(text) = child.get("text").and_then(Value::as_str) {
+                        events.push(Event::Text(text.into()));
+                        if !text.is_empty() {
+                            terminated = text.ends_with(['\r', '\n']);
+                        }
+                    }
                 }
             }
+            if !terminated {
+                events.push(Event::Text("\n".into()));
+            }
+            events.push(Event::End(pulldown_cmark::TagEnd::CodeBlock));
+            return;
         }
+        "blockquote" => Tag::BlockQuote(None),
+        "table" => {
+            render_adf_table(node, events);
+            return;
+        }
+        _ => {
+            if node.get("content").and_then(Value::as_array).is_some() {
+                render_adf_children(node, events);
+            } else if let Some(attrs) = node.get("attrs").and_then(Value::as_object)
+                && let Some(value) = ["url", "href", "text", "title"]
+                    .into_iter()
+                    .find_map(|key| attrs.get(key).and_then(Value::as_str))
+            {
+                events.push(Event::Text(value.into()));
+            }
+            return;
+        }
+    };
+    let end = tag.to_end();
+    events.push(Event::Start(tag));
+    if node["type"] == "listItem" {
+        render_adf_item_children(node, events);
+    } else {
+        render_adf_children(node, events);
     }
+    events.push(Event::End(end));
 }
 
-fn render_adf_children(node: &Value, out: &mut String) {
+fn render_adf_children<'a>(node: &'a Value, events: &mut Vec<pulldown_cmark::Event<'a>>) {
     if let Some(content) = node.get("content").and_then(Value::as_array) {
         for child in content {
-            render_adf(child, out);
+            render_adf(child, events);
         }
     }
 }
 
-fn render_adf_list(node: &Value, out: &mut String, ordered_start: Option<usize>) {
-    let Some(items) = node.get("content").and_then(Value::as_array) else {
-        return;
-    };
-    let mut idx = ordered_start.unwrap_or(0);
-    for item in items {
-        let mut inner = String::new();
-        render_adf_children(item, &mut inner);
-        let marker = match ordered_start {
-            Some(_) => {
-                let m = format!("{idx}. ");
-                idx += 1;
-                m
-            }
-            None => "- ".to_string(),
-        };
-        let mut lines = inner.trim().lines();
-        if let Some(first) = lines.next() {
-            out.push_str(&marker);
-            out.push_str(first);
-            out.push('\n');
-            // Continuation lines (nested lists, multi-paragraph items) align under the text.
-            for line in lines {
-                out.push_str("  ");
-                out.push_str(line);
-                out.push('\n');
-            }
+fn render_adf_item_children<'a>(node: &'a Value, events: &mut Vec<pulldown_cmark::Event<'a>>) {
+    match node
+        .get("content")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+    {
+        Some([paragraph]) if paragraph["type"] == "paragraph" => {
+            render_adf_children(paragraph, events);
         }
+        _ => render_adf_children(node, events),
     }
-    out.push('\n');
 }
 
-/// Render an ADF table as a GFM pipe table. Each cell is flattened to a single line
-/// (cell separators escaped); the first row becomes the GFM header. Ragged rows are
-/// padded to the widest row so the column count is consistent.
-fn render_adf_table(node: &Value, out: &mut String) {
-    let Some(content) = node.get("content").and_then(Value::as_array) else {
-        return;
-    };
-    let mut rows: Vec<Vec<String>> = Vec::new();
-    for row in content {
-        if row.get("type").and_then(Value::as_str) != Some("tableRow") {
+fn render_adf_table<'a>(node: &'a Value, events: &mut Vec<pulldown_cmark::Event<'a>>) {
+    let mut html = String::from("<table>");
+    for row in node
+        .get("content")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if row["type"] != "tableRow" {
             continue;
         }
-        let Some(cells) = row.get("content").and_then(Value::as_array) else {
-            continue;
-        };
-        let rendered: Vec<String> = cells
-            .iter()
-            .map(|cell| {
-                let mut inner = String::new();
-                render_adf_children(cell, &mut inner);
-                // A GFM cell is single-line; collapse whitespace and escape the pipe.
-                inner
-                    .split_whitespace()
-                    .collect::<Vec<_>>()
-                    .join(" ")
-                    .replace('|', "\\|")
-            })
-            .collect();
-        if !rendered.is_empty() {
-            rows.push(rendered);
-        }
-    }
-    let Some(cols) = rows.iter().map(Vec::len).max() else {
-        return;
-    };
-
-    for (i, row) in rows.iter().enumerate() {
-        out.push('|');
-        for c in 0..cols {
-            out.push(' ');
-            out.push_str(row.get(c).map(String::as_str).unwrap_or(""));
-            out.push_str(" |");
-        }
-        out.push('\n');
-        if i == 0 {
-            out.push('|');
-            for _ in 0..cols {
-                out.push_str(" --- |");
+        html.push_str("<tr>");
+        for cell in row
+            .get("content")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let tag = match cell["type"].as_str() {
+                Some("tableHeader") => "th",
+                Some("tableCell") => "td",
+                _ => continue,
+            };
+            html.push('<');
+            html.push_str(tag);
+            for attribute in ["rowspan", "colspan"] {
+                if let Some(span) = cell["attrs"][attribute].as_u64().filter(|span| *span > 1) {
+                    html.push_str(&format!(" {attribute}=\"{span}\""));
+                }
             }
-            out.push('\n');
+            html.push('>');
+            let mut content = Vec::new();
+            match cell
+                .get("content")
+                .and_then(Value::as_array)
+                .map(Vec::as_slice)
+            {
+                Some([paragraph]) if paragraph["type"] == "paragraph" => {
+                    render_adf_children(paragraph, &mut content);
+                }
+                _ => render_adf_children(cell, &mut content),
+            }
+            pulldown_cmark::html::push_html(&mut html, content.into_iter());
+            html.push_str(&format!("</{tag}>"));
         }
+        html.push_str("</tr>");
     }
-    out.push('\n');
+    html.push_str("</table>");
+    let markdown = html_to_markdown(&html);
+    let input = lk_core::markdown::MarkdownInput::from_text(&markdown);
+    for event in input.events(lk_core::markdown::OPTIONS) {
+        events.push(event.into_static());
+    }
 }
 
 fn adf_attr<'a>(node: &'a Value, key: &str) -> Option<&'a str> {
@@ -1124,348 +1164,57 @@ fn adf_attr<'a>(node: &'a Value, key: &str) -> Option<&'a str> {
         .and_then(Value::as_str)
 }
 
-/// Wrap a text leaf's content in the Markdown for each of its ADF marks. Unknown marks
-/// (underline, color, …) leave the text untouched so nothing is lost.
-fn apply_marks(text_node: &Value) -> String {
-    let mut s = text_node
+fn render_adf_text<'a>(node: &'a Value, events: &mut Vec<pulldown_cmark::Event<'a>>) {
+    use pulldown_cmark::{Event, LinkType, Tag};
+
+    let marks = node.get("marks").and_then(Value::as_array);
+    let tags = marks
+        .into_iter()
+        .flatten()
+        .rev()
+        .filter_map(|mark| {
+            Some(match mark["type"].as_str()? {
+                "strong" => Tag::Strong,
+                "em" => Tag::Emphasis,
+                "strike" => Tag::Strikethrough,
+                "link" => Tag::Link {
+                    link_type: LinkType::Inline,
+                    dest_url: adf_attr(mark, "href").unwrap_or("").into(),
+                    title: adf_attr(mark, "title").unwrap_or("").into(),
+                    id: "".into(),
+                },
+                _ => return None,
+            })
+        })
+        .collect::<Vec<_>>();
+    for tag in &tags {
+        events.push(Event::Start(tag.clone()));
+    }
+    let text = node
         .get("text")
         .and_then(Value::as_str)
         .unwrap_or("")
-        .to_string();
-    if let Some(marks) = text_node.get("marks").and_then(Value::as_array) {
-        for mark in marks {
-            s = match mark.get("type").and_then(Value::as_str).unwrap_or("") {
-                "strong" => format!("**{s}**"),
-                "em" => format!("*{s}*"),
-                "code" => format!("`{s}`"),
-                "strike" => format!("~~{s}~~"),
-                "link" => {
-                    let href = mark
-                        .get("attrs")
-                        .and_then(|a| a.get("href"))
-                        .and_then(Value::as_str)
-                        .unwrap_or("");
-                    format!("[{s}]({href})")
-                }
-                _ => s,
-            };
-        }
+        .into();
+    events.push(
+        if marks
+            .into_iter()
+            .flatten()
+            .any(|mark| mark["type"] == "code")
+        {
+            Event::Code(text)
+        } else {
+            Event::Text(text)
+        },
+    );
+    for tag in tags.into_iter().rev() {
+        events.push(Event::End(tag.to_end()));
     }
-    s
 }
 
-/// Convert Slack mrkdwn to Markdown: rewrite `<…>` tokens (user/channel mentions, special
-/// commands, links), convert emphasis markers (`*bold*` → `**bold**`,
-/// `~strike~` → `~~strike~~`), and decode HTML entities. User-id mentions are resolved to
-/// display names via `users`.
+/// Convert Slack mrkdwn through its own lexical grammar. Ordinary text and resolved
+/// labels remain literal; only source-declared Slack constructs create Markdown structure.
 pub fn slack_to_markdown(text: &str, users: &HashMap<String, String>) -> String {
-    let rewritten = rewrite_angle_tokens(text, users);
-    let converted = convert_mrkdwn_formatting(&rewritten);
-    let decoded = decode_entities(&converted);
-    render_emoji_shortcodes(&decoded)
-}
-
-fn rewrite_angle_tokens(text: &str, users: &HashMap<String, String>) -> String {
-    let mut out = String::new();
-    let mut rest = text;
-    while let Some(lt) = rest.find('<') {
-        out.push_str(&rest[..lt]);
-        let after = &rest[lt + 1..];
-        match after.find('>') {
-            Some(gt) => {
-                out.push_str(&convert_slack_token(&after[..gt], users));
-                rest = &after[gt + 1..];
-            }
-            // Unbalanced '<' — emit literally and continue past it.
-            None => {
-                out.push('<');
-                rest = after;
-            }
-        }
-    }
-    out.push_str(rest);
-    out
-}
-
-/// The label after a `|` in a Slack token (`U123|name` → `name`), if non-empty.
-fn label_after_pipe(s: &str) -> Option<&str> {
-    s.split('|').nth(1).filter(|l| !l.is_empty())
-}
-
-/// `token` is the text between `<` and `>`. Forms: `@U123`/`@U123|name` (user),
-/// `#C123`/`#C123|name` (channel), `!here`/`!subteam^S1|@team` (special), or `url`/
-/// `url|label` (link).
-fn convert_slack_token(token: &str, users: &HashMap<String, String>) -> String {
-    if let Some(rest) = token.strip_prefix('@') {
-        // Prefer the pipe-label, then the resolved display name, then the raw user id.
-        let user_id = rest.split('|').next().unwrap_or(rest);
-        let name = label_after_pipe(rest)
-            .map(|s| s.to_string())
-            .or_else(|| users.get(user_id).cloned())
-            .unwrap_or_else(|| user_id.to_string());
-        format!("@{name}")
-    } else if let Some(rest) = token.strip_prefix('#') {
-        format!(
-            "#{}",
-            label_after_pipe(rest).unwrap_or_else(|| rest.split('|').next().unwrap_or(rest))
-        )
-    } else if let Some(rest) = token.strip_prefix("!date^") {
-        // Date tokens: `!date^timestamp^format|fallback` — emit the fallback text or the
-        // raw unix timestamp when no fallback is given.
-        match label_after_pipe(rest) {
-            Some(fallback) => fallback.to_string(),
-            None => rest.split('^').next().unwrap_or(rest).to_string(),
-        }
-    } else if let Some(rest) = token.strip_prefix('!') {
-        match label_after_pipe(rest) {
-            Some(label) => format!("@{}", label.trim_start_matches('@')),
-            None => format!("@{}", rest.split('^').next().unwrap_or(rest)),
-        }
-    } else {
-        let url = token.split('|').next().unwrap_or("");
-        match label_after_pipe(token) {
-            Some(label) => format!("[{label}]({url})"),
-            None => url.to_string(),
-        }
-    }
-}
-
-/// Convert Slack mrkdwn emphasis markers to standard Markdown:
-/// - `*text*` (Slack bold) → `**text**` (Markdown bold)
-/// - `~text~` (Slack strikethrough) → `~~text~~` (Markdown strikethrough)
-///
-/// Markers must be at word boundaries: preceded by whitespace/start-of-string and followed
-/// by whitespace/end-of-string (after the closing marker). Content inside backtick code
-/// spans and triple-backtick code blocks is left untouched.
-fn convert_mrkdwn_formatting(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let chars: Vec<char> = text.chars().collect();
-    let len = chars.len();
-    let mut i = 0;
-
-    while i < len {
-        // Skip triple-backtick code blocks.
-        if i + 2 < len && chars[i] == '`' && chars[i + 1] == '`' && chars[i + 2] == '`' {
-            out.push_str("```");
-            i += 3;
-            // Copy until closing ```.
-            while i < len {
-                if i + 2 < len && chars[i] == '`' && chars[i + 1] == '`' && chars[i + 2] == '`' {
-                    out.push_str("```");
-                    i += 3;
-                    break;
-                }
-                out.push(chars[i]);
-                i += 1;
-            }
-            continue;
-        }
-
-        // Skip inline code spans.
-        if chars[i] == '`' {
-            out.push('`');
-            i += 1;
-            while i < len && chars[i] != '`' {
-                out.push(chars[i]);
-                i += 1;
-            }
-            if i < len {
-                out.push('`');
-                i += 1;
-            }
-            continue;
-        }
-
-        // Try to convert *bold* or ~strike~.
-        if (chars[i] == '*' || chars[i] == '~') && is_word_boundary_before(i, &chars) {
-            let marker = chars[i];
-            if let Some(end) = find_closing_marker(i + 1, marker, &chars) {
-                // The closing marker must be followed by a word boundary.
-                if is_word_boundary_after(end, &chars) {
-                    let inner: String = chars[i + 1..end].iter().collect();
-                    if marker == '*' {
-                        out.push_str("**");
-                        out.push_str(&inner);
-                        out.push_str("**");
-                    } else {
-                        out.push_str("~~");
-                        out.push_str(&inner);
-                        out.push_str("~~");
-                    }
-                    i = end + 1;
-                    continue;
-                }
-            }
-        }
-
-        out.push(chars[i]);
-        i += 1;
-    }
-
-    out
-}
-
-/// CJK characters act as word boundaries for inline formatting — Korean, Chinese, and
-/// Japanese text typically has no whitespace between words, but Slack treats CJK characters
-/// as natural boundaries for `*bold*` and `~strike~` markers.
-fn is_cjk_char(c: char) -> bool {
-    matches!(c as u32,
-        0x1100..=0x11FF    // Hangul Jamo
-        | 0x2E80..=0x9FFF  // CJK Radicals through Unified Ideographs (includes Hiragana/Katakana)
-        | 0xAC00..=0xD7AF  // Hangul Syllables
-        | 0xD7B0..=0xD7FF  // Hangul Jamo Extended-B
-        | 0xF900..=0xFAFF  // CJK Compatibility Ideographs
-        | 0xFF65..=0xFFDC  // Halfwidth Katakana + Hangul
-        | 0x20000..=0x2FA1F // CJK Extension B–F
-    )
-}
-
-/// The position before `pos` is a word boundary (start of string, whitespace, CJK character,
-/// or punctuation that commonly precedes emphasis).
-fn is_word_boundary_before(pos: usize, chars: &[char]) -> bool {
-    if pos == 0 {
-        return true;
-    }
-    let prev = chars[pos - 1];
-    prev.is_whitespace() || is_cjk_char(prev) || matches!(prev, '(' | '[' | '{' | '"' | '\'' | '\n')
-}
-
-/// The position after `pos` is a word boundary (end of string, whitespace, CJK character,
-/// or punctuation that commonly follows emphasis).
-fn is_word_boundary_after(pos: usize, chars: &[char]) -> bool {
-    let next_pos = pos + 1;
-    if next_pos >= chars.len() {
-        return true;
-    }
-    let next = chars[next_pos];
-    next.is_whitespace()
-        || is_cjk_char(next)
-        || matches!(
-            next,
-            ')' | ']' | '}' | '.' | ',' | ';' | ':' | '!' | '?' | '"' | '\''
-        )
-}
-
-/// Find the closing marker character that is not preceded by whitespace (Slack rule:
-/// closing markers must be adjacent to the word they wrap). Returns the index of the
-/// closing marker, or `None`.
-fn find_closing_marker(start: usize, marker: char, chars: &[char]) -> Option<usize> {
-    let mut j = start;
-    while j < chars.len() {
-        if chars[j] == '\n' {
-            // Slack inline formatting doesn't span lines.
-            return None;
-        }
-        if chars[j] == marker && j > start && !chars[j - 1].is_whitespace() {
-            return Some(j);
-        }
-        j += 1;
-    }
-    None
-}
-
-fn decode_entities(text: &str) -> String {
-    text.replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&amp;", "&")
-}
-
-/// Render Slack emoji shortcodes (`:tada:`, `:+1:`) as their Unicode glyph — exactly
-/// what the author saw — instead of dropping them, since a shortcode like `:100:` or
-/// `:rocket:` can carry real meaning. Only shortcodes in the standard Unicode emoji set
-/// are converted, and only in prose: a shortcode written as a code literal is content, so
-/// code spans are preserved verbatim. Colon-delimited prose (`:default:`, a `key:value:`
-/// token) and Slack-specific or workspace-custom names (not in the standard set) are left
-/// untouched.
-fn render_emoji_shortcodes(text: &str) -> String {
-    // Code spans are skipped using the CommonMark rule: a run of N backticks opens a span
-    // that closes at the next run of EXACTLY N backticks. This keeps inline (`` `…` ``) and
-    // fenced (```` ```…``` ````) code intact even when a fenced body itself contains
-    // backticks — a naive split on `` ` `` miscounts parity there and would eat a shortcode
-    // inside the fence.
-    let bytes = text.as_bytes();
-    let n = bytes.len();
-    let mut out = String::with_capacity(n);
-    let mut prose_start = 0;
-    let mut i = 0;
-    while i < n {
-        if bytes[i] != b'`' {
-            i += 1;
-            continue;
-        }
-        // Convert the prose run preceding this backtick run.
-        render_prose_shortcodes(&text[prose_start..i], &mut out);
-        let open = i;
-        while i < n && bytes[i] == b'`' {
-            i += 1;
-        }
-        let run = i - open;
-        // Seek the matching closing run of exactly `run` backticks.
-        let mut close_end = None;
-        let mut j = i;
-        while j < n {
-            if bytes[j] != b'`' {
-                j += 1;
-                continue;
-            }
-            let cstart = j;
-            while j < n && bytes[j] == b'`' {
-                j += 1;
-            }
-            if j - cstart == run {
-                close_end = Some(j);
-                break;
-            }
-        }
-        match close_end {
-            // Emit the whole code span (both fences + body) verbatim.
-            Some(end) => {
-                out.push_str(&text[open..end]);
-                i = end;
-                prose_start = end;
-            }
-            // Unclosed run: the backticks are literal text, so the rest is prose again.
-            None => {
-                out.push_str(&text[open..i]);
-                prose_start = i;
-            }
-        }
-    }
-    render_prose_shortcodes(&text[prose_start..], &mut out);
-    out
-}
-
-/// Convert recognized emoji shortcodes in one prose run (no code spans) to their glyph,
-/// writing into `out`.
-fn render_prose_shortcodes(text: &str, out: &mut String) {
-    let mut rest = text;
-    while let Some(start) = rest.find(':') {
-        out.push_str(&rest[..start]);
-        let after = &rest[start + 1..];
-        // A shortcode is delimited, not embedded mid-word: the opening colon must not
-        // directly follow an alphanumeric, so `key:tada:value` is left intact.
-        let boundary = !rest[..start]
-            .chars()
-            .next_back()
-            .is_some_and(|c| c.is_alphanumeric());
-        match after.find(':') {
-            Some(end) if boundary && end > 0 => match emojis::get_by_shortcode(&after[..end]) {
-                Some(emoji) => {
-                    out.push_str(emoji.as_str());
-                    rest = &after[end + 1..];
-                }
-                None => {
-                    out.push(':');
-                    rest = after;
-                }
-            },
-            _ => {
-                out.push(':');
-                rest = after;
-            }
-        }
-    }
-    out.push_str(rest);
+    crate::slack::mrkdwn::render(text, users)
 }
 
 #[cfg(test)]
@@ -2063,6 +1812,135 @@ mod tests {
     }
 
     #[test]
+    fn adf_literal_nodes_do_not_create_markdown_structure() {
+        use pulldown_cmark::{Event, Tag};
+        for text in [
+            "[literal](../../wiki/concepts/target.md)",
+            "<a href='../../wiki/concepts/target.md'>literal</a>",
+            "# literal heading",
+            "- literal list",
+            "1. literal list",
+            "*literal* `code` &lt;tag&gt;",
+        ] {
+            for node in [
+                json!({"type":"text", "text":text}),
+                json!({"type":"mention", "attrs":{"text":text}}),
+                json!({"type":"emoji", "attrs":{"shortName":text}}),
+                json!({"type":"unknown", "attrs":{"title":text}}),
+            ] {
+                let adf = json!({"type":"paragraph", "content":[node]});
+                let output = adf_to_markdown(&adf);
+                let input = lk_core::markdown::MarkdownInput::from_text(&output);
+                let mut visible = String::new();
+                for event in input.events(lk_core::markdown::OPTIONS) {
+                    match event {
+                        Event::Text(text) => visible.push_str(&text),
+                        Event::Start(Tag::Paragraph)
+                        | Event::End(pulldown_cmark::TagEnd::Paragraph) => {}
+                        other => panic!("literal node acquired structure: {other:?}; {output}"),
+                    }
+                }
+                assert_eq!(visible, text, "{output}");
+            }
+        }
+    }
+
+    #[test]
+    fn html_link_attributes_cannot_introduce_markdown_structure() {
+        use pulldown_cmark::{Event, Tag};
+        let title = "first\\\"\n\n[extra](../../wiki/concepts/extra.md) & last";
+        let encoded = title.replace('&', "&amp;").replace('"', "&quot;");
+        let html = format!(
+            "<p><a href=\"https://example.com/a(b)\" title=\"{encoded}\">Proof</a> suffix</p>"
+        );
+        let output = html_to_markdown(&html);
+        let input = lk_core::markdown::MarkdownInput::from_text(&output);
+        let links = input
+            .events(lk_core::markdown::OPTIONS)
+            .filter_map(|event| match event {
+                Event::Start(Tag::Link {
+                    dest_url, title, ..
+                }) => Some((dest_url.to_string(), title.to_string())),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            links,
+            [("https://example.com/a(b)".into(), title.into())],
+            "{output}"
+        );
+        assert!(lk_core::link::extract_dests(&output).is_empty());
+    }
+
+    #[test]
+    fn adf_code_fences_contain_backticks_and_language_labels() {
+        use pulldown_cmark::{Event, Tag, TagEnd};
+        let code = "before\n````\n[escaped](../../wiki/concepts/target.md)\n~~~\n\nafter\n";
+        for language in [
+            "rust",
+            "odd`language",
+            "rust`\n~~~\n[bad](target.md)\n~~~",
+            "rust\r\n```",
+        ] {
+            let adf = json!({"type":"doc","content":[
+                {"type":"codeBlock","attrs":{"language":language},"content":[
+                    {"type":"text","text":"before\n``"},
+                    {"type":"text","text":&code["before\n``".len()..]},
+                ]},
+                {"type":"paragraph","content":[{"type":"text","text":"Following prose."}]}
+            ]});
+            let output = adf_to_markdown(&adf);
+            let input = lk_core::markdown::MarkdownInput::from_text(&output);
+            let mut literal = String::new();
+            let mut in_code = false;
+            for event in input.events(lk_core::markdown::OPTIONS) {
+                match event {
+                    Event::Start(Tag::CodeBlock(_)) => in_code = true,
+                    Event::End(TagEnd::CodeBlock) => in_code = false,
+                    Event::Text(text) if in_code => literal.push_str(&text),
+                    Event::Start(Tag::Link { .. }) | Event::Html(_) | Event::InlineHtml(_) => {
+                        panic!("code escaped its container: {output}");
+                    }
+                    _ => {}
+                }
+            }
+            assert_eq!(literal, code, "{output}");
+            assert!(output.ends_with("Following prose."));
+        }
+    }
+
+    #[test]
+    fn adf_link_labels_and_inline_code_keep_literal_text() {
+        use pulldown_cmark::{Event, Tag};
+        let label = "[literal](../../wiki/concepts/target.md) `tick`";
+        let destination = "https://example.com/a(b)?x=1&y=2";
+        let adf = json!({"type":"paragraph","content":[
+            {"type":"text","text":label,"marks":[{"type":"link","attrs":{"href":destination,"title":"first\n\n[extra](extra.md)"}}]},
+            {"type":"text","text":" "},
+            {"type":"text","text":label,"marks":[{"type":"code"}]}
+        ]});
+        let output = adf_to_markdown(&adf);
+        let input = lk_core::markdown::MarkdownInput::from_text(&output);
+        let links = input
+            .events(lk_core::markdown::OPTIONS)
+            .filter_map(|event| match event {
+                Event::Start(Tag::Link { dest_url, .. }) => Some(dest_url.to_string()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(links, [destination]);
+        assert!(input.events(lk_core::markdown::OPTIONS).any(|event| matches!(event,
+            Event::Start(Tag::Link { title, .. }) if title.as_ref() == "first\n\n[extra](extra.md)"
+        )));
+        assert!(
+            input
+                .events(lk_core::markdown::OPTIONS)
+                .any(|event| matches!(event, Event::Code(text) if text.as_ref() == label))
+        );
+        assert!(lk_core::link::extract_dests(&output).is_empty());
+    }
+
+    #[test]
     fn adf_unknown_node_rescues_url_attr() {
         let adf = json!({
             "type": "doc",
@@ -2115,10 +1993,7 @@ mod tests {
                 ]}
             ]
         });
-        assert_eq!(
-            adf_to_markdown(&adf),
-            "| Name | Role |\n| --- | --- |\n| Ada | Eng |"
-        );
+        assert_eq!(adf_to_markdown(&adf), "|Name|Role|\n|----|----|\n|Ada|Eng|");
     }
 
     fn no_users() -> HashMap<String, String> {
@@ -2137,7 +2012,7 @@ mod tests {
         );
         assert_eq!(
             slack_to_markdown("raw <https://x.io>", &u),
-            "raw https://x.io"
+            "raw <https://x.io>"
         );
         assert_eq!(slack_to_markdown("<!here> ping", &u), "@here ping");
     }
@@ -2158,6 +2033,38 @@ mod tests {
             slack_to_markdown("due <!date^1234567890^{date}|May 24, 2026>", &u),
             "due May 24, 2026"
         );
+    }
+
+    #[test]
+    fn adf_table_preserves_literal_cells_code_and_spans() {
+        use pulldown_cmark::{Event, Tag};
+        for code in ["a|b", "a\\|b"] {
+            let adf = json!({"type":"table","content":[{"type":"tableRow","content":[
+                {"type":"tableCell","content":[{"type":"paragraph","content":[{"type":"text","text":"[literal](target.md)"}]}]},
+                {"type":"tableCell","content":[{"type":"paragraph","content":[{"type":"text","text":code,"marks":[{"type":"code"}]}]}]}
+            ]}]});
+            let output = adf_to_markdown(&adf);
+            let input = lk_core::markdown::MarkdownInput::from_text(&output);
+            assert!(
+                input
+                    .events(lk_core::markdown::OPTIONS)
+                    .any(|event| matches!(event, Event::Code(text) if text.as_ref()==code)),
+                "{output}"
+            );
+            assert!(
+                !input
+                    .events(lk_core::markdown::OPTIONS)
+                    .any(|event| matches!(event, Event::Start(Tag::Link { .. }))),
+                "{output}"
+            );
+        }
+        let adf = json!({"type":"table","content":[{"type":"tableRow","content":[
+            {"type":"tableCell","attrs":{"colspan":2},"content":[{"type":"codeBlock","content":[{"type":"text","text":"```\n[literal](target.md)\n"}]}]}
+        ]}]});
+        let output = adf_to_markdown(&adf);
+        assert!(output.contains("colspan=\"2\""), "{output}");
+        assert!(output.contains("<pre>"), "{output}");
+        assert!(lk_core::link::extract_dests(&output).is_empty());
     }
 
     #[test]
@@ -2190,7 +2097,24 @@ mod tests {
     #[test]
     fn slack_bold_not_converted_mid_word() {
         let u = no_users();
-        assert_eq!(slack_to_markdown("file*name*here", &u), "file*name*here");
+        let output = slack_to_markdown("file*name*here", &u);
+        let events = pulldown_cmark::Parser::new(&output).collect::<Vec<_>>();
+        assert!(events.iter().all(|event| !matches!(
+            event,
+            pulldown_cmark::Event::Start(
+                pulldown_cmark::Tag::Strong | pulldown_cmark::Tag::Emphasis
+            )
+        )));
+        assert_eq!(
+            events
+                .iter()
+                .filter_map(|event| match event {
+                    pulldown_cmark::Event::Text(text) => Some(text.as_ref()),
+                    _ => None,
+                })
+                .collect::<String>(),
+            "file*name*here"
+        );
     }
 
     #[test]
@@ -2215,8 +2139,20 @@ mod tests {
 
     #[test]
     fn slack_decodes_entities() {
+        let output = slack_to_markdown("a &lt;b&gt; &amp; c", &no_users());
+        let events = pulldown_cmark::Parser::new(&output).collect::<Vec<_>>();
+        assert!(events.iter().all(|event| !matches!(
+            event,
+            pulldown_cmark::Event::Html(_) | pulldown_cmark::Event::InlineHtml(_)
+        )));
         assert_eq!(
-            slack_to_markdown("a &lt;b&gt; &amp; c", &no_users()),
+            events
+                .iter()
+                .filter_map(|event| match event {
+                    pulldown_cmark::Event::Text(text) => Some(text.as_ref()),
+                    _ => None,
+                })
+                .collect::<String>(),
             "a <b> & c"
         );
     }
@@ -2280,7 +2216,12 @@ mod tests {
             "```\nlet s = `:tada:`;\n```"
         );
         // A double-backtick inline span is a code span too (run length 2).
-        assert_eq!(slack_to_markdown("``:tada:``", &u), "``:tada:``");
+        let output = slack_to_markdown("``:tada:``", &u);
+        assert!(
+            pulldown_cmark::Parser::new(&output).any(|event| matches!(event,
+                pulldown_cmark::Event::Code(text) if text.as_ref() == ":tada:"
+            ))
+        );
     }
 
     #[test]
