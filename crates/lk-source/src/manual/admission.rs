@@ -113,6 +113,18 @@ impl ManualAdmission {
         &self.published
     }
 
+    pub fn pending_count(&self) -> usize {
+        self.pending.len()
+    }
+
+    pub fn pending(&self) -> &[String] {
+        &self.pending
+    }
+
+    pub fn inbox(&self) -> &Path {
+        &self.inbox
+    }
+
     /// The caller verifies published acquisitions against current bytes and ownership.
     /// Taking a turn rotates work but records no publication or read coverage.
     pub fn reserve(
@@ -124,6 +136,18 @@ impl ManualAdmission {
         if limit == 0 || limit > lk_core::manual_original::MAX_ORIGINAL_MEMBERS {
             return Err(invalid("entry limit must be 1..=2048"));
         }
+        self.reconcile(entries, verified)?;
+        let turn = self.pending[..self.pending.len().min(limit)].to_vec();
+        self.pending.rotate_left(turn.len());
+        Ok(turn)
+    }
+
+    /// Refresh membership and verified publication coverage without taking another turn.
+    pub fn reconcile(
+        &mut self,
+        entries: &BTreeSet<String>,
+        verified: &BTreeSet<String>,
+    ) -> Result<(), SourceError> {
         for entry in entries {
             validate_entry(entry)?;
         }
@@ -146,9 +170,7 @@ impl ManualAdmission {
                 .cloned(),
         );
         self.published.retain(|entry, _| entries.contains(entry));
-        let turn = self.pending[..self.pending.len().min(limit)].to_vec();
-        self.pending.rotate_left(turn.len());
-        Ok(turn)
+        Ok(())
     }
 
     pub fn record(

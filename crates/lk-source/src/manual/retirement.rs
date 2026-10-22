@@ -89,7 +89,7 @@ pub fn archive_verified_manual_originals(
             });
         let owned = if borrowed.is_none() {
             let file = std::fs::File::open(&source).map_err(error)?;
-            Some(CapturedFile::capture(file, ctx.originals.max_entry_bytes.get()).map_err(error)?)
+            Some(CapturedFile::capture(file, entry.bytes).map_err(error)?)
         } else {
             None
         };
@@ -250,7 +250,7 @@ mod tests {
     }
 
     #[test]
-    fn changed_bundle_members_and_bounded_receipt_entry_capture_preserve_inputs() {
+    fn changed_members_remain_but_verified_retirement_uses_historical_manifest_bounds() {
         let (_directory, root, mut context, params) = fixture();
         std::fs::write(root.join("asset.txt"), "Old asset.").unwrap();
         let original = capture(&root, "entry.md", "[asset](asset.txt)");
@@ -262,17 +262,14 @@ mod tests {
         assert!(root.join("entry.md").is_file());
         assert!(!root.join("archived").exists());
 
-        let original = capture(&root, "binary.pdf", "too big for a one-byte capture");
+        let original = capture(&root, "binary.pdf", "previously published original");
         let manifest = original.manifest.clone();
         drop(original);
         context.originals.max_entry_bytes = std::num::NonZeroUsize::new(1).unwrap();
         let inventory = ManualDependencyInventory::capture(&root, 4096).unwrap();
-        assert!(
-            archive_verified_manual_originals(&params, &[manifest], &[], &inventory, &context)
-                .is_err()
-        );
-        assert!(root.join("binary.pdf").is_file());
-        assert!(!root.join("archived").exists());
+        archive_verified_manual_originals(&params, &[manifest], &[], &inventory, &context).unwrap();
+        assert!(!root.join("binary.pdf").exists());
+        assert!(root.join("archived").exists());
     }
 
     #[test]
