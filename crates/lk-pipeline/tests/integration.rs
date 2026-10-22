@@ -1411,6 +1411,73 @@ async fn synthesis_excludes_pages_dated_after_today() {
 }
 
 #[tokio::test]
+async fn personal_rollup_category_cells_remain_literal() {
+    let dir = TempDir::new().unwrap();
+    let vault = dir.path();
+    let mut config = base_config(vault);
+    config.vault.locale = Some("en".into());
+    let categories = [
+        "project-delivery",
+        "Delivery | Ops",
+        r"Drive C:\Reports",
+        "First\nSecond",
+        "[Topic](../../wiki/concepts/topic.md)",
+        "**성과**",
+    ];
+    config.personal.as_mut().unwrap().performance_categories = categories
+        .iter()
+        .map(|category| (*category).into())
+        .collect();
+    let work_log = vault.join("me/work-log/2026-05-23.md");
+    std::fs::create_dir_all(work_log.parent().unwrap()).unwrap();
+    let original = format!(
+        "---\ntype: work-log\ncreated: 2026-05-23\ncategories: {}\n---\n\nCompleted work.\n",
+        serde_json::to_string(&categories).unwrap()
+    );
+    std::fs::write(&work_log, &original).unwrap();
+    let llm: Arc<dyn LlmClient> = Arc::new(MockLlmClient {
+        summary: "Narrative.".into(),
+        ..Default::default()
+    });
+    let synth = Synthesizer::new(vault, build_ctx(&config, llm), &config, far_future());
+    let weekly = synth
+        .try_weekly_review(jiff::civil::date(2026, 5, 23))
+        .await
+        .unwrap()
+        .unwrap();
+    let monthly = synth.try_monthly_review(2026, 5).await.unwrap().unwrap();
+    std::fs::create_dir_all(vault.join(monthly.path.as_ref().parent().unwrap())).unwrap();
+    std::fs::write(vault.join(monthly.path.as_ref()), &monthly.content).unwrap();
+    let quarterly = synth.try_quarterly_review(2026, 2).await.unwrap().unwrap();
+    std::fs::create_dir_all(vault.join(quarterly.path.as_ref().parent().unwrap())).unwrap();
+    std::fs::write(vault.join(quarterly.path.as_ref()), &quarterly.content).unwrap();
+    let annual = synth.try_annual_review(2026).await.unwrap().unwrap();
+
+    let expected_rows = [
+        "| project-delivery | 1 | 17% |",
+        r"| Delivery \| Ops | 1 | 17% |",
+        r"| Drive C:\\Reports | 1 | 17% |",
+        "| First Second | 1 | 17% |",
+        r"| \[Topic\](../../wiki/concepts/topic.md) | 1 | 17% |",
+        r"| \*\*성과\*\* | 1 | 17% |",
+    ];
+    for output in [weekly, monthly, quarterly, annual] {
+        let page = lk_vault::parse_page(&output.content).unwrap();
+        let table =
+            lk_vault::resolve_section(&page.body, |strings| strings.category_distribution).unwrap();
+        let rows = table
+            .body
+            .lines()
+            .filter(|line| line.starts_with('|'))
+            .collect::<Vec<_>>();
+        assert_eq!(rows.len(), expected_rows.len() + 2, "{}", output.content);
+        assert_eq!(&rows[2..], expected_rows.as_slice(), "{}", output.content);
+        assert!(lk_core::link::extract_page_links(&page.body).is_empty());
+    }
+    assert_eq!(std::fs::read_to_string(work_log).unwrap(), original);
+}
+
+#[tokio::test]
 async fn synthesis_page_is_a_materialized_view() {
     let dir = TempDir::new().unwrap();
     let vault = dir.path();

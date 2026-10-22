@@ -23,7 +23,7 @@ llm_inputs:
 | {{ i18n.col_category }} | {{ i18n.col_count }} | {{ i18n.col_ratio }} |
 |---|---|---|
 {% for cat in category_stats -%}
-| {{ cat.name }} | {{ cat.count }} | {{ cat.percent }}% |
+| {{ cat.name | markdown_text }} | {{ cat.count }} | {{ cat.percent }}% |
 {% endfor %}
 
 ## {{ i18n.key_summary }}
