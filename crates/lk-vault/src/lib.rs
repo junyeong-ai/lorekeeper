@@ -110,7 +110,7 @@ pub use self::store::{
     FsVault, InMemoryVault, MarkdownInventory, VaultStore, load_concept_registry,
     load_markdown_inventory,
 };
-pub use self::template::{TemplateEngine, embedded_templates};
+pub use self::template::{TemplateEngine, TemplateInputs, embedded_templates};
 pub use self::writer::VaultWriter;
 
 use thiserror::Error;

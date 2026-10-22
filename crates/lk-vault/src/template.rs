@@ -1,8 +1,12 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use minijinja::{Environment, value::Serde};
 
 use crate::VaultError;
+
+pub type TemplateInputs = BTreeMap<String, Option<String>>;
 
 /// Default templates, compiled into the binary. A user template directory overrides any
 /// of these by name; otherwise these are used — so a binary-only install (no repo, no
@@ -97,6 +101,28 @@ fn embedded(name: &str) -> Option<String> {
 pub struct TemplateEngine {
     env: Environment<'static>,
     user_dir: Option<PathBuf>,
+    render_claim: Mutex<()>,
+    requested: Arc<Mutex<Option<BTreeSet<String>>>>,
+}
+
+fn load_source(user_dir: Option<&Path>, name: &str) -> Result<Option<String>, minijinja::Error> {
+    if let Some(dir) = user_dir {
+        match std::fs::read_to_string(dir.join(name)) {
+            Ok(source) => return Ok(Some(source)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(minijinja::Error::new(
+                    minijinja::ErrorKind::InvalidOperation,
+                    format!("read template {name}: {error}"),
+                ));
+            }
+        }
+    }
+    Ok(embedded(name))
+}
+
+fn recipe_lock_error() -> std::io::Error {
+    std::io::Error::other("template dependency capture was interrupted")
 }
 
 impl TemplateEngine {
@@ -113,22 +139,23 @@ impl TemplateEngine {
         env.add_filter("markdown_link", crate::fragment::link);
         let user_dir = user_dir.map(Path::to_path_buf);
         let dir = user_dir.clone();
-        env.set_loader(move |name| {
-            if let Some(d) = &dir {
-                match std::fs::read_to_string(d.join(name)) {
-                    Ok(src) => return Ok(Some(src)),
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(e) => {
-                        return Err(minijinja::Error::new(
-                            minijinja::ErrorKind::InvalidOperation,
-                            format!("read template {name}: {e}"),
-                        ));
-                    }
-                }
+        env.set_loader(move |name| load_source(dir.as_deref(), name));
+        let requested: Arc<Mutex<Option<BTreeSet<String>>>> = Arc::new(Mutex::new(None));
+        let dependencies = requested.clone();
+        env.set_path_join_callback(move |name, _| {
+            if let Ok(mut active) = dependencies.lock()
+                && let Some(names) = active.as_mut()
+            {
+                names.insert(name.to_owned());
             }
-            Ok(embedded(name))
+            name.into()
         });
-        Ok(Self { env, user_dir })
+        Ok(Self {
+            env,
+            user_dir,
+            render_claim: Mutex::new(()),
+            requested,
+        })
     }
 
     pub fn render(
@@ -136,8 +163,61 @@ impl TemplateEngine {
         template_name: &str,
         context: &serde_json::Value,
     ) -> Result<String, VaultError> {
+        let _claim = self.render_claim.lock().map_err(|_| recipe_lock_error())?;
         let tmpl = self.env.get_template(template_name)?;
         Ok(tmpl.render(Serde(context))?)
+    }
+
+    /// Record actual template lookups, including ignored missing alternatives.
+    /// Cached includes still pass through the environment's path-join callback.
+    pub fn render_with_inputs(
+        &self,
+        template_name: &str,
+        context: &serde_json::Value,
+    ) -> Result<(String, TemplateInputs), VaultError> {
+        let _claim = self.render_claim.lock().map_err(|_| recipe_lock_error())?;
+        *self.requested.lock().map_err(|_| recipe_lock_error())? =
+            Some(BTreeSet::from([template_name.into()]));
+        let rendered = self
+            .env
+            .get_template(template_name)
+            .and_then(|template| template.render(Serde(context)));
+        let names = self
+            .requested
+            .lock()
+            .map_err(|_| recipe_lock_error())?
+            .take()
+            .ok_or_else(recipe_lock_error)?;
+        let rendered = rendered?;
+        let mut inputs = BTreeMap::new();
+        for name in names {
+            let revision = match self.env.get_template(&name) {
+                Ok(template) => Some(
+                    blake3::hash(template.source().as_bytes())
+                        .to_hex()
+                        .to_string(),
+                ),
+                Err(error) if error.kind() == minijinja::ErrorKind::TemplateNotFound => None,
+                Err(error) => return Err(error.into()),
+            };
+            inputs.insert(name, revision);
+        }
+        Ok((rendered, inputs))
+    }
+
+    /// Check fresh loader bytes rather than this environment's compiled cache.
+    pub fn inputs_current(
+        &self,
+        inputs: &TemplateInputs,
+    ) -> Result<bool, VaultError> {
+        for (name, expected) in inputs {
+            let revision = load_source(self.user_dir.as_deref(), name)?
+                .map(|source| blake3::hash(source.as_bytes()).to_hex().to_string());
+            if &revision != expected {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     /// `Ok(true)` only if `name` exists as a USER-provided override file (not an
@@ -164,6 +244,123 @@ impl TemplateEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn render_inputs_follow_cached_dynamic_includes_and_ignored_missing_templates() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory.path().join("entry"),
+            "{% include chosen %}{% include 'optional' ignore missing %}",
+        )
+        .unwrap();
+        std::fs::write(directory.path().join("a"), "A").unwrap();
+        std::fs::write(directory.path().join("b"), "B").unwrap();
+        let engine = TemplateEngine::build(Some(directory.path())).unwrap();
+        let a = serde_json::json!({"chosen": "a"});
+        let b = serde_json::json!({"chosen": "b"});
+        assert_eq!(engine.render("entry", &a).unwrap(), "A");
+        let first = engine.render_with_inputs("entry", &a).unwrap();
+        assert_eq!(first.0, "A");
+        assert_eq!(engine.render_with_inputs("entry", &a).unwrap(), first);
+        let second = engine.render_with_inputs("entry", &b).unwrap();
+        assert_eq!(second.0, "B");
+        assert_eq!(
+            second.1.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["b", "entry", "optional"]
+        );
+        assert_eq!(second.1["optional"], None);
+        std::fs::write(directory.path().join("a"), "different").unwrap();
+        assert!(engine.inputs_current(&second.1).unwrap());
+        assert!(!engine.inputs_current(&first.1).unwrap());
+        std::fs::write(directory.path().join("optional"), "now present").unwrap();
+        assert!(!engine.inputs_current(&second.1).unwrap());
+    }
+
+    #[test]
+    fn render_inputs_include_inheritance_imports_and_recover_after_render_error() {
+        let directory = tempfile::tempdir().unwrap();
+        for (name, source) in [
+            ("base", "{% block body %}{% endblock %}"),
+            ("macros", "{% macro label() %}value{% endmacro %}"),
+            (
+                "entry",
+                "{% extends 'base' %}{% block body %}{% from 'macros' import label %}{{ label() }}{% endblock %}",
+            ),
+            ("bad", "{% include 'missing' %}"),
+        ] {
+            std::fs::write(directory.path().join(name), source).unwrap();
+        }
+        let engine = TemplateEngine::build(Some(directory.path())).unwrap();
+        assert!(
+            engine
+                .render_with_inputs("bad", &serde_json::json!({}))
+                .is_err()
+        );
+        assert_eq!(
+            engine.render("entry", &serde_json::json!({})).unwrap(),
+            "value"
+        );
+        let (text, inputs) = engine
+            .render_with_inputs("entry", &serde_json::json!({}))
+            .unwrap();
+        assert_eq!(text, "value");
+        assert_eq!(
+            inputs.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["base", "entry", "macros"]
+        );
+        assert!(engine.inputs_current(&inputs).unwrap());
+        std::fs::remove_file(directory.path().join("macros")).unwrap();
+        assert!(!engine.inputs_current(&inputs).unwrap());
+    }
+
+    #[test]
+    fn recipe_capture_isolated_from_concurrent_ordinary_renders_and_fallback_errors() {
+        let directory = tempfile::tempdir().unwrap();
+        for (name, source) in [
+            ("ordinary", "{% include 'a' %}"),
+            ("recipe", "{% include ['missing', 'b'] %}"),
+            ("a", "A"),
+            ("b", "B"),
+        ] {
+            std::fs::write(directory.path().join(name), source).unwrap();
+        }
+        let engine = Arc::new(TemplateEngine::build(Some(directory.path())).unwrap());
+        let ordinary = engine.clone();
+        let worker = std::thread::spawn(move || {
+            for _ in 0..32 {
+                assert_eq!(
+                    ordinary.render("ordinary", &serde_json::json!({})).unwrap(),
+                    "A"
+                );
+            }
+        });
+        for _ in 0..32 {
+            let (body, inputs) = engine
+                .render_with_inputs("recipe", &serde_json::json!({}))
+                .unwrap();
+            assert_eq!(body, "B");
+            assert_eq!(
+                inputs.keys().map(String::as_str).collect::<Vec<_>>(),
+                ["b", "missing", "recipe"]
+            );
+            assert_eq!(inputs["missing"], None);
+        }
+        worker.join().unwrap();
+        std::fs::create_dir(directory.path().join("missing")).unwrap();
+        let fresh = TemplateEngine::build(Some(directory.path())).unwrap();
+        assert!(
+            fresh
+                .render_with_inputs("recipe", &serde_json::json!({}))
+                .is_err()
+        );
+        assert_eq!(
+            fresh
+                .render_with_inputs("ordinary", &serde_json::json!({}))
+                .unwrap()
+                .0,
+            "A"
+        );
+    }
 
     #[test]
     fn rendering_preserves_injected_text_and_line_endings() {
