@@ -1410,6 +1410,46 @@ fn read_requirements_follow_the_content_each_graph_claim_consumes() {
 }
 
 #[test]
+fn merge_preview_refuses_unknown_incoming_links_without_writes() {
+    let ws = Workspace::new();
+    for name in ["from", "into"] {
+        ws.write(
+            &format!("wiki/concepts/{name}.md"),
+            &format!("---\ntype: concept\ntitle: {name}\n---\n## Synthesis\n"),
+        );
+    }
+    let reference = "private/reference.md";
+    ws.write(reference, "[From](../wiki/concepts/from.md)\n");
+    let preview = ws.run(&["graph", "--json", "merge", "from", "into", "--dry-run"]);
+    assert!(preview.status.success(), "{preview:?}");
+    let parsed: serde_json::Value = serde_json::from_slice(&preview.stdout).unwrap();
+    assert_eq!(parsed["data"]["rewritten"].as_array().unwrap().len(), 1);
+    let path = ws.root.path().join("vault").join(reference);
+    let original = b"[From](../wiki/concepts/from.md)\n\xff";
+    std::fs::write(&path, original).unwrap();
+    let before = [
+        ws.read("wiki/concepts/from.md"),
+        ws.read("wiki/concepts/into.md"),
+    ];
+    let refused = ws.run(&["graph", "--json", "merge", "from", "into", "--dry-run"]);
+    assert_eq!(refused.status.code(), Some(2), "{refused:?}");
+    assert!(
+        String::from_utf8(refused.stderr)
+            .unwrap()
+            .contains(reference)
+    );
+    assert_eq!(std::fs::read(path).unwrap(), original);
+    assert_eq!(
+        before,
+        [
+            ws.read("wiki/concepts/from.md"),
+            ws.read("wiki/concepts/into.md")
+        ]
+    );
+    assert!(!ws.root.path().join("vault/.lorekeeper").exists());
+}
+
+#[test]
 fn audit_coverage_cannot_silently_omit_unreadable_subjects_or_explicit_context() {
     let ws = Workspace::new();
     ws.write(

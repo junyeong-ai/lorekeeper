@@ -116,7 +116,9 @@ belong to exploration reviews, not a machine-persisted callout inferred by locat
   caller's reads; a preview exposes revisions but does not establish equivalence.
 - Related prose is authored content too: refuse merging it unless explicitly forced.
   Force does not bypass unreadable metadata or immutable evidence protection.
-  A dry run previews without writes; backlink reconciliation follows publication.
+  A dry run previews without writes and requires readable whole-vault incoming-link
+  inputs; unknown links cannot become an empty rewrite list. Backlink reconciliation
+  follows publication.
 - Repoint validated RSS event bindings with their typed addresses/original guards;
   changing visible links alone must not leave stale provenance declarations.
 

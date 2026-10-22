@@ -63,7 +63,7 @@ pub struct MergeResult {
 /// content and `force` is false, the merge aborts BEFORE mutating anything, so the
 /// human can salvage that prose into `into` first. Re-run with `force` once salvaged.
 /// `dry_run` reports the plan (including the authored-body flag) without this gate
-/// firing, so a preview always works.
+/// firing. A preview still requires readable incoming-link inputs.
 pub fn merge_concepts(
     pages: &[ScannedPage],
     vault_root: &Path,
@@ -166,6 +166,9 @@ fn plan_merge(
     request: &MergeRequest<'_>,
     dry_run: bool,
 ) -> Result<(MergeResult, lk_vault::MutationPlan), GraphError> {
+    for page in pages {
+        page.require_readable()?;
+    }
     let concepts_dir = Path::new(wiki_dir).join(lk_core::vault_path::CONCEPTS_SUBDIR);
     let mut resolver =
         lk_vault::ExistingPageResolver::new(vault_root, pages.iter().map(|page| page.path.clone()))
