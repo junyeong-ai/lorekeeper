@@ -668,7 +668,7 @@ mod native {
             let mut targets = std::collections::BTreeMap::new();
             for task in tasks {
                 let owner = lk_vault::page_path(&self.root, Path::new(&task.target.vault_path))
-                    .and_then(|path| path.canonicalize().map_err(Into::into))
+                    .and_then(|path| path.canonicalize())
                     .map_err(|error| miette::miette!("queue target: {error}"))?;
                 targets.entry(owner).or_insert(task);
             }

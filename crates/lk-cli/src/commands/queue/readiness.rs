@@ -207,12 +207,12 @@ impl InputReadiness {
         )
         .map_err(|error| miette::miette!("synthesis citations: {error}"))?;
         let target = lk_vault::page_path(root, Path::new(&task.target.vault_path))
-            .and_then(|path| path.canonicalize().map_err(Into::into))
+            .and_then(|path| path.canonicalize())
             .map_err(|error| miette::miette!("synthesis target: {error}"))?;
         let mut reasons = BTreeSet::new();
         for citation in citations {
             let owner = lk_vault::page_path(root, Path::new(&citation.path))
-                .and_then(|path| path.canonicalize().map_err(Into::into))
+                .and_then(|path| path.canonicalize())
                 .map_err(|error| miette::miette!("{}: {error}", citation.path))?;
             if owner != target {
                 reasons.extend(self.page(root, &citation.path)?);
