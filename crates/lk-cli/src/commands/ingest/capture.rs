@@ -9,6 +9,7 @@ pub(super) struct CapturedSource {
     observation: CapturedFile,
     originals: Vec<lk_core::manual_original::ManualBundleCapture>,
     retirement_blocked: bool,
+    manual: Option<super::manual::Acquisition>,
 }
 
 fn failure(error: impl std::fmt::Display) -> SourceError {
@@ -30,6 +31,7 @@ impl CapturedSource {
             observation: CapturedFile::from_file(file).map_err(failure)?,
             originals: source.originals,
             retirement_blocked: source.retirement_blocked,
+            manual: source.manual,
         })
     }
 
@@ -40,6 +42,7 @@ impl CapturedSource {
             observation,
             originals: self.originals,
             retirement_blocked: self.retirement_blocked,
+            manual: self.manual,
         })
     }
 }
@@ -79,6 +82,7 @@ mod tests {
             },
             originals: Vec::new(),
             retirement_blocked: true,
+            manual: None,
         }
     }
 

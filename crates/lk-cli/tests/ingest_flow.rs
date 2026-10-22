@@ -534,10 +534,10 @@ fn a_re_render_names_the_unanswered_section_it_is_about_to_empty() {
     )
     .expect("write");
 
-    // Re-drop the same note so the source can re-render the page.
+    // A changed source requires a re-render even when publication was already recorded.
     ws.drop_note(
         "note.md",
-        "# Rollback\n\nThe only record of the rollback decision.\n",
+        "# Rollback\n\nThe rollback decision now has additional evidence.\n",
     );
     let out = ws.run(&["ingest"]);
     let stderr = stderr_of(&out);
@@ -585,7 +585,7 @@ fn a_dry_run_says_it_would_empty_the_section_rather_than_that_it_did() {
     )
     .expect("write");
 
-    ws.drop_note("note.md", "# Rollback\n\nThe rollback decision.\n");
+    ws.drop_note("note.md", "# Rollback\n\nAdditional rollback evidence.\n");
     let out = ws.run(&["ingest", "--dry-run"]);
     let stderr = stderr_of(&out);
     assert!(out.status.success(), "{stderr}");
@@ -1002,12 +1002,12 @@ fn an_excluded_forecast_entry_still_protects_its_consumed_dependency_from_retire
         .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(3 * 86400))
         .unwrap();
     let run = ws.run(&["ingest"]);
-    assert!(run.status.success(), "{}", stderr_of(&run));
+    assert!(!run.status.success(), "{}", stderr_of(&run));
     assert_eq!(files_under(&ws.vault().join("wiki/documents")).len(), 1);
     assert!(ws.vault().join("inbox/A.md").exists());
     assert!(ws.vault().join("inbox/B.md").exists());
     let dry = ws.run(&["ingest", "--dry-run"]);
-    assert!(dry.status.success());
+    assert!(!dry.status.success());
     assert!(stderr_of(&dry).contains("retirement blocked"));
     assert!(!stderr_of(&dry).contains("retirement eligible"));
 }

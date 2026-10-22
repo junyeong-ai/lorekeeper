@@ -40,7 +40,7 @@ fn note(root: &Path, source: &str, name: &str, bytes: usize) {
 }
 
 #[test]
-fn rejected_source_releases_run_capacity_and_preserves_its_inbox() {
+fn bounded_manual_prefix_preserves_backlog_and_later_source_capacity() {
     let temp = tempfile::tempdir().unwrap();
     let config = config(temp.path(), 16 * 1024, &["bad", "good"]);
     for index in 0..5 {
@@ -53,7 +53,8 @@ fn rejected_source_releases_run_capacity_and_preserves_its_inbox() {
     assert!(stderr.contains("admission budget"), "{stderr}");
     let documents = temp.path().join("vault/wiki/documents");
     assert!(documents.join("good.md").exists(), "{stderr}");
-    assert_eq!(std::fs::read_dir(documents).unwrap().count(), 1);
+    let published = std::fs::read_dir(documents).unwrap().count();
+    assert!(published > 1 && published < 6, "{stderr}");
     assert_eq!(
         std::fs::read_dir(temp.path().join("vault/bad"))
             .unwrap()
@@ -97,8 +98,8 @@ fn repeated_full_ingest_gives_each_source_the_first_admission_turn() {
 
     let second = run(&config, &["ingest"]);
     let diagnostic = String::from_utf8_lossy(&second.stderr);
-    assert!(!second.status.success(), "{diagnostic}");
-    assert!(diagnostic.contains("admission budget"), "{diagnostic}");
+    assert!(second.status.success(), "{diagnostic}");
+    assert!(diagnostic.contains("1 verified_published"), "{diagnostic}");
     assert!(documents.join("second.md").exists(), "{diagnostic}");
     assert!(temp.path().join("vault/a/first.md").exists());
     assert!(temp.path().join("vault/b/second.md").exists());
@@ -151,14 +152,16 @@ async fn first_admission_turn_also_rotates_when_collected_items_fit_but_planning
     assert!(raw_bytes <= limit);
     config(temp.path(), limit, &["a", "b"]);
     let documents = temp.path().join("vault/wiki/documents");
-    for expected in ["first.md", "second.md"] {
+    for (index, expected) in ["first.md", "second.md"].into_iter().enumerate() {
         let output = run(&path, &["ingest"]);
         let diagnostic = String::from_utf8_lossy(&output.stderr);
-        assert!(!output.status.success(), "{diagnostic}");
-        assert!(
-            diagnostic.contains("pipeline: serialized input exceeds"),
-            "{diagnostic}"
-        );
+        assert_eq!(output.status.success(), index == 1, "{diagnostic}");
+        if index == 0 {
+            assert!(
+                diagnostic.contains("manual planning: serialized input exceeds"),
+                "{diagnostic}"
+            );
+        }
         assert!(!diagnostic.contains(" extract:"), "{diagnostic}");
         assert!(documents.join(expected).exists(), "{diagnostic}");
     }

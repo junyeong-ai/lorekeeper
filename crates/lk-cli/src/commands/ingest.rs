@@ -4,6 +4,7 @@ use super::{build_llm_client, find_config, load_config_with_revision, parse_date
 
 mod capture;
 mod cursor;
+mod manual;
 pub mod recovery;
 
 /// The number of events the page states about itself, as ` (N events)`.
@@ -56,6 +57,7 @@ struct SourceCapture {
     observation: lk_source::SourceObservation,
     originals: Vec<lk_core::manual_original::ManualBundleCapture>,
     retirement_blocked: bool,
+    manual: Option<manual::Acquisition>,
 }
 
 async fn collect_with_budget<T>(
@@ -248,6 +250,7 @@ async fn run_with_identity(
         started_at: std::time::Instant,
         manual_originals: Vec<lk_core::manual_original::ManualBundleCapture>,
         manual_retirement_blocked: bool,
+        manual: Option<manual::Acquisition>,
         observation_outcome: lk_source::ObservationOutcome,
     }
     struct Acquired {
@@ -269,6 +272,28 @@ async fn run_with_identity(
         let started_at = std::time::Instant::now();
         let mut source_ctx = extract_ctx.clone();
         source_ctx.max_input_bytes = source_ctx.max_input_bytes.min(acquired_inputs.remaining());
+        if sc.source_type == lk_core::config::SourceType::Manual {
+            let remaining = (512 * 1024 * 1024usize).saturating_sub(manual_capture_bytes);
+            if let Some(limit) = std::num::NonZeroUsize::new(
+                source_ctx.originals.max_source_bytes.get().min(remaining),
+            ) {
+                source_ctx.originals.max_source_bytes = limit;
+                source_ctx.originals.max_entry_bytes =
+                    source_ctx.originals.max_entry_bytes.min(limit);
+                source_ctx.originals.max_member_bytes =
+                    source_ctx.originals.max_member_bytes.min(limit);
+            } else {
+                acquired.push(Acquired {
+                    id: id.clone(),
+                    started_at,
+                    result: Err(lk_core::input::InputError::Limit {
+                        max_bytes: 512 * 1024 * 1024,
+                    }
+                    .into()),
+                });
+                continue;
+            }
+        }
         eprintln!("▸ collect {id} ({})", sc.source_type);
         let adapter = match (|| {
             let empty = lk_source::credentials::Credentials::default();
@@ -306,44 +331,16 @@ async fn run_with_identity(
         let (adapter, selection) = adapter;
         let collection = async {
             if sc.source_type == lk_core::config::SourceType::Manual {
-                lk_source::capture_manual(&sc.params, &source_ctx)
+                manual::acquire(
+                    id,
+                    sc,
+                    &source_ctx,
+                    &pipeline,
+                    dry_run,
+                    wait_for_vault,
+                    || ensure_config_current(&config_path, &config_revision),
+                )
                 .await
-                .and_then(|mut capture| {
-                    capture.project_links(
-                        &std::path::PathBuf::from(&config.vault.dirs.wiki)
-                            .join(lk_core::vault_path::DOCUMENTS_SUBDIR),
-                    )?;
-                    for failure in &capture.failures {
-                        eprintln!("  ✗ {failure}");
-                    }
-                    if !capture.unprocessed.is_empty() {
-                        eprintln!("  retained: {} binary input(s) without a configured standalone decoder; configure ingest.documents/OCR for independent processing", capture.unprocessed.len());
-                    }
-                    if !capture.failures.is_empty() {
-                        had_failure = true;
-                    }
-                    if manual_capture_bytes.saturating_add(capture.byte_len()) > 512 * 1024 * 1024 {
-                        return Err(lk_source::SourceError::Parse(
-                        "manual captures exceed the ingest-wide 512 MiB limit; split the ingest"
-                            .into(),
-                    ));
-                    }
-                    let retirement_blocked = !capture.failures.is_empty();
-                    Ok(SourceCapture {
-                        observation: lk_source::SourceObservation {
-                            items: capture.items,
-                            collection_identity: None,
-                            scope: lk_source::ObservationScope::Unverified,
-                            outcome: if retirement_blocked {
-                                lk_source::ObservationOutcome::Partial
-                            } else {
-                                lk_source::ObservationOutcome::Unverified
-                            },
-                        },
-                        originals: capture.originals,
-                        retirement_blocked,
-                    })
-                })
             } else {
                 adapter
                     .observe_bound(&sc.params, &source_ctx)
@@ -352,6 +349,7 @@ async fn run_with_identity(
                         observation,
                         originals: Vec::new(),
                         retirement_blocked: false,
+                        manual: None,
                     })
             }
         };
@@ -485,6 +483,7 @@ async fn run_with_identity(
                 observation,
                 originals: manual_originals,
                 retirement_blocked: manual_retirement_blocked,
+                mut manual,
             },
         ) = match acquisition
             .result
@@ -537,7 +536,17 @@ async fn run_with_identity(
             today: options.today,
             dry_run: options.dry_run,
         };
-        let result = match pipeline.plan(id, sc, raw, &source_options).await {
+        let result = match manual::plan(
+            &mut pipeline,
+            &llm,
+            id,
+            sc,
+            raw,
+            &source_options,
+            manual.as_mut(),
+        )
+        .await
+        {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("  ✗ pipeline: {e}");
@@ -602,7 +611,7 @@ async fn run_with_identity(
 
         // Skip only when there are no pages to write. (A manual source with an empty
         // inbox lands here too; with no events its archive step is a no-op.)
-        if result.is_empty() {
+        if result.is_empty() && manual.is_none() {
             let (status, error) = source_log_outcome(observation_outcome, false, true);
             if observation_outcome == lk_source::ObservationOutcome::Partial {
                 eprintln!("  ✗ no events retained from incomplete source reach");
@@ -632,6 +641,10 @@ async fn run_with_identity(
         }
 
         if dry_run {
+            if let Some(manual) = &manual {
+                manual.report(true);
+                had_failure |= manual.preview_has_pending(&result);
+            }
             for capture in &manual_originals {
                 if !result.events.iter().any(|event| {
                     event.metadata.get("source_file").and_then(|v| v.as_str())
@@ -656,6 +669,10 @@ async fn run_with_identity(
                     "disabled"
                 } else if manual_retirement_blocked
                     || shared
+                    || manual.as_ref().is_some_and(|manual| {
+                        manual.inventory.is_referenced(&capture.manifest.entry)
+                            || !manual.inventory.diagnostics().is_empty()
+                    })
                     || !capture.manifest.unsupported.is_empty()
                 {
                     "blocked"
@@ -694,6 +711,7 @@ async fn run_with_identity(
             observation_outcome,
             manual_originals,
             manual_retirement_blocked,
+            manual,
             id: id.clone(),
             result,
             started_at,
@@ -733,7 +751,7 @@ async fn run_with_identity(
     let mut any_write_failed = false;
     let mut all_personal: Vec<lk_core::event::Event> = Vec::new();
 
-    for p in &planned {
+    for p in &mut planned {
         for capture in &p.manual_originals {
             if !p.result.events.iter().any(|event| {
                 event.metadata.get("source_file").and_then(|v| v.as_str())
@@ -759,10 +777,40 @@ async fn run_with_identity(
         for out in outputs.clone() {
             report_discards(out, false);
         }
-        if let Err(error) = publication.publish(outputs.clone()).await {
+        let receipt_plan = p
+            .manual
+            .as_mut()
+            .map(|manual| {
+                manual.publication_plan(
+                    &vault_root,
+                    &p.result,
+                    &config.sources[&p.id],
+                    &extract_ctx,
+                )
+            })
+            .transpose();
+        let receipt_plan = match receipt_plan {
+            Ok(plan) => plan.unwrap_or_default(),
+            Err(error) => {
+                eprintln!("  ✗ manual publication receipt {}: {error}", p.id);
+                any_write_failed = true;
+                break;
+            }
+        };
+        if let Err(error) = publication
+            .publish_with_plan(outputs.clone(), receipt_plan)
+            .await
+        {
             eprintln!("  ✗ source publication {}: {error}", p.id);
             any_write_failed = true;
             break;
+        }
+        if let Some(manual) = &p.manual {
+            manual.report(false);
+            if manual.has_pending() {
+                had_failure = true;
+                p.observation_outcome = lk_source::ObservationOutcome::Partial;
+            }
         }
         for out in outputs {
             total_pages += 1;
@@ -887,7 +935,8 @@ async fn run_with_identity(
     // anywhere just leaves the affected pages for the next run to reproduce; there is no
     // commit point to roll back.
     for p in &planned {
-        let (status, error) = source_log_outcome(p.observation_outcome, any_write_failed, false);
+        let (status, error) =
+            source_log_outcome(p.observation_outcome, any_write_failed, p.result.is_empty());
         record_log(
             &log,
             &lk_vault::LogEntry {
@@ -913,15 +962,13 @@ async fn run_with_identity(
             }
             let sc = sources.iter().find(|(id, _)| id == &p.id).map(|(_, sc)| sc);
             if let Some(sc) = sc
-                && sc.source_type == lk_core::config::SourceType::Manual
-                && let Err(e) = lk_source::archive_manual_originals(
-                    &sc.params,
-                    &p.result.events,
-                    &p.manual_originals,
-                    &extract_ctx,
-                )
+                && let Some(manual) = &p.manual
+                && let Err(e) = manual
+                    .retire(sc, &extract_ctx, &pipeline, &p.manual_originals, &p.id)
+                    .await
             {
                 tracing::warn!(source = %p.id, error = %e, "manual archive failed");
+                had_failure = true;
             }
         }
     }
