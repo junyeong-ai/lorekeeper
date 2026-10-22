@@ -346,6 +346,7 @@ pub fn suggest_links(
     min_shared_neighbors: usize,
 ) -> SuggestResult {
     let mut pairs: Vec<LinkSuggestion> = Vec::new();
+    let minimum = min_shared_neighbors.max(1);
     // |N(z)| per shared-neighbour index, memoised across pairs (a hub recurs in many).
     let mut degree: HashMap<usize, usize> = HashMap::new();
 
@@ -360,23 +361,75 @@ pub fn suggest_links(
 
         // Precompute neighbour sets once per node for shared-neighbour counting.
         let neighbor_sets: Vec<Vec<usize>> = indices.iter().map(|&i| graph.neighbors(i)).collect();
+        let mut postings: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+        for (member, neighbors) in neighbor_sets.iter().enumerate() {
+            for &neighbor in neighbors {
+                postings.entry(neighbor).or_default().push(member);
+            }
+        }
 
         for i in 0..indices.len() {
-            for j in (i + 1)..indices.len() {
-                let (a, b) = (indices[i], indices[j]);
-                if graph.has_edge_between(a, b) {
+            let neighbors = &neighbor_sets[i];
+            if neighbors.len() < minimum {
+                continue;
+            }
+            let visits = neighbors.iter().fold(0usize, |total, neighbor| {
+                total.saturating_add(members_after(&postings[neighbor], i).len())
+            });
+            // Dense rows can have many two-hop walks but few unlinked endpoints.
+            // Compare that exact walk count with a direct-intersection work bound.
+            let direct = if visits > indices.len() - i - 1 {
+                let eligible: Vec<_> = ((i + 1)..indices.len())
+                    .filter(|&j| {
+                        neighbor_sets[j].len() >= minimum
+                            && neighbors.binary_search(&indices[j]).is_err()
+                    })
+                    .collect();
+                let bound = eligible.iter().fold(0usize, |total, &j| {
+                    total
+                        .saturating_add(neighbors.len())
+                        .saturating_add(neighbor_sets[j].len())
+                });
+                (bound <= visits).then_some(eligible)
+            } else {
+                None
+            };
+            let mut candidates = BTreeMap::<usize, (usize, f64)>::new();
+            if let Some(eligible) = direct {
+                for j in eligible {
+                    let shared = shared_indices(neighbors, &neighbor_sets[j]);
+                    if shared.len() >= minimum {
+                        candidates
+                            .insert(j, (shared.len(), adamic_adar(graph, &shared, &mut degree)));
+                    }
+                }
+            } else {
+                // Witnesses follow the same sorted order as shared_indices, keeping
+                // floating-point sums stable. Only one endpoint's candidates are held.
+                for &neighbor in neighbors {
+                    let members = members_after(&postings[&neighbor], i);
+                    if members.is_empty() {
+                        continue;
+                    }
+                    let weight = adamic_adar(graph, &[neighbor], &mut degree);
+                    for &j in members {
+                        if neighbor_sets[j].len() < minimum {
+                            continue;
+                        }
+                        let (count, score) = candidates.entry(j).or_default();
+                        *count += 1;
+                        *score += weight;
+                    }
+                }
+            }
+            for (j, (shared_neighbors, score)) in candidates {
+                if shared_neighbors < minimum || graph.has_edge_between(indices[i], indices[j]) {
                     continue;
                 }
-                let shared = shared_indices(&neighbor_sets[i], &neighbor_sets[j]);
-                if shared.len() < min_shared_neighbors.max(1) {
-                    continue;
-                }
-                let score = adamic_adar(graph, &shared, &mut degree);
-                let (id_a, id_b) = (graph.node_id(a).to_owned(), graph.node_id(b).to_owned());
                 pairs.push(LinkSuggestion {
-                    a: id_a,
-                    b: id_b,
-                    shared_neighbors: shared.len(),
+                    a: graph.node_id(indices[i]).to_owned(),
+                    b: graph.node_id(indices[j]).to_owned(),
+                    shared_neighbors,
                     score,
                 });
             }
@@ -395,6 +448,10 @@ pub fn suggest_links(
     });
 
     SuggestResult { pairs }
+}
+
+fn members_after(members: &[usize], after: usize) -> &[usize] {
+    &members[members.partition_point(|&member| member <= after)..]
 }
 
 /// The common elements of two sorted, deduped index slices.
@@ -698,5 +755,178 @@ mod tests {
             niche_score > hub_score,
             "a niche shared neighbour ({niche_score}) must outweigh a hub one ({hub_score})"
         );
+    }
+
+    fn explicit_cluster(members: &[&str]) -> ClusterResult {
+        ClusterResult {
+            communities: vec![Community {
+                id: 0,
+                size: members.len(),
+                label: None,
+                members: members.iter().map(|member| (*member).into()).collect(),
+            }],
+            modularity: 0.0,
+            iterations: 0,
+        }
+    }
+
+    fn all_pairs_reference(
+        graph: &WikiGraph,
+        cluster: &ClusterResult,
+        minimum: usize,
+    ) -> SuggestResult {
+        let mut pairs = Vec::new();
+        for community in &cluster.communities {
+            let mut members: Vec<_> = community
+                .members
+                .iter()
+                .filter_map(|id| graph.node_index(id))
+                .collect();
+            members.sort_unstable();
+            for (at, &a) in members.iter().enumerate() {
+                let neighbors = graph.neighbors(a);
+                for &b in &members[at + 1..] {
+                    if graph.has_edge_between(a, b) {
+                        continue;
+                    }
+                    let other = graph.neighbors(b);
+                    let shared: Vec<_> = neighbors
+                        .iter()
+                        .filter(|neighbor| other.binary_search(neighbor).is_ok())
+                        .collect();
+                    if shared.len() < minimum.max(1) {
+                        continue;
+                    }
+                    pairs.push(LinkSuggestion {
+                        a: graph.node_id(a).into(),
+                        b: graph.node_id(b).into(),
+                        shared_neighbors: shared.len(),
+                        score: shared
+                            .iter()
+                            .map(|&&neighbor| {
+                                1.0 / (graph.neighbors(neighbor).len().max(2) as f64).ln()
+                            })
+                            .sum(),
+                    });
+                }
+            }
+        }
+        pairs.sort_by(|a, b| {
+            b.score
+                .total_cmp(&a.score)
+                .then_with(|| b.shared_neighbors.cmp(&a.shared_neighbors))
+                .then_with(|| a.a.cmp(&b.a))
+                .then_with(|| a.b.cmp(&b.b))
+        });
+        SuggestResult { pairs }
+    }
+
+    fn assert_suggestion_parity(graph: &WikiGraph, cluster: &ClusterResult, minimum: usize) {
+        let expected = all_pairs_reference(graph, cluster, minimum);
+        let actual = suggest_links(graph, cluster, minimum);
+        let exact = |result: SuggestResult| {
+            result
+                .pairs
+                .into_iter()
+                .map(|pair| (pair.a, pair.b, pair.shared_neighbors, pair.score.to_bits()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(exact(actual), exact(expected), "minimum={minimum}");
+    }
+
+    #[test]
+    fn suggestion_candidates_match_all_four_node_directed_graphs() {
+        let names = ["d", "b", "a", "c"];
+        let edges: Vec<_> = (0..names.len())
+            .flat_map(|a| {
+                (0..names.len())
+                    .filter(move |&b| a != b)
+                    .map(move |b| (a, b))
+            })
+            .collect();
+        let complete = explicit_cluster(&names);
+        let mut repeated = explicit_cluster(&["a", "d", "unknown", "a", "b"]);
+        repeated.communities.push(repeated.communities[0].clone());
+        for mask in 0..(1usize << edges.len()) {
+            let pages: Vec<_> = names
+                .iter()
+                .enumerate()
+                .map(|(a, name)| {
+                    let mut outgoing: Vec<_> = edges
+                        .iter()
+                        .enumerate()
+                        .filter(|(bit, (source, _))| *source == a && mask & (1 << bit) != 0)
+                        .map(|(_, (_, target))| names[*target])
+                        .collect();
+                    if let Some(&target) = outgoing.first() {
+                        outgoing.push(target);
+                    }
+                    outgoing.push(name);
+                    outgoing.push(name);
+                    build_page(name, &outgoing)
+                })
+                .collect();
+            let graph = WikiGraph::build(&pages, &VaultDirs::default());
+            for cluster in [&complete, &repeated] {
+                for minimum in [0, 1, 2, 3, usize::MAX] {
+                    assert_suggestion_parity(&graph, cluster, minimum);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn suggestion_scores_preserve_witness_order_across_community_boundaries() {
+        let names: Vec<_> = (0..24).map(|index| format!("n{index}")).collect();
+        let pages: Vec<_> = names
+            .iter()
+            .enumerate()
+            .map(|(a, name)| {
+                let outgoing: Vec<_> = names
+                    .iter()
+                    .enumerate()
+                    .filter(|(b, _)| (a * 17 + b * 7 + a * b) % 11 < 3)
+                    .map(|(_, target)| target.as_str())
+                    .collect();
+                build_page(name, &outgoing)
+            })
+            .collect();
+        let graph = WikiGraph::build(&pages, &VaultDirs::default());
+        let cluster = explicit_cluster(&names[..12].iter().map(String::as_str).collect::<Vec<_>>());
+        for minimum in [0, 1, 2, 4, usize::MAX] {
+            assert_suggestion_parity(&graph, &cluster, minimum);
+        }
+        assert_eq!(
+            serde_json::to_string(&suggest_links(&graph, &cluster, 2)).unwrap(),
+            serde_json::to_string(&all_pairs_reference(&graph, &cluster, 2)).unwrap(),
+        );
+    }
+
+    #[test]
+    fn suggestion_candidates_handle_empty_stale_and_dense_communities() {
+        let names: Vec<_> = (0..48).map(|index| format!("n{index}")).collect();
+        let pages: Vec<_> = names
+            .iter()
+            .enumerate()
+            .map(|(a, name)| {
+                let outgoing: Vec<_> = names
+                    .iter()
+                    .enumerate()
+                    .filter(|(b, _)| a.abs_diff(*b) != 1)
+                    .map(|(_, target)| target.as_str())
+                    .collect();
+                build_page(name, &outgoing)
+            })
+            .collect();
+        let graph = WikiGraph::build(&pages, &VaultDirs::default());
+        for cluster in [
+            explicit_cluster(&[]),
+            explicit_cluster(&["unknown"]),
+            explicit_cluster(&names.iter().map(String::as_str).collect::<Vec<_>>()),
+        ] {
+            for minimum in [0, 1, 2, 46, usize::MAX] {
+                assert_suggestion_parity(&graph, &cluster, minimum);
+            }
+        }
     }
 }
