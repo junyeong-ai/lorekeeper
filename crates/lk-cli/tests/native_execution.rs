@@ -2917,7 +2917,7 @@ fn sealed_queue_work_restages_a_missing_result_without_calling_the_model_again()
 #[test]
 fn bounded_audit_resumes_call_budgets_and_exit_zero_cannot_forge_a_receipt() {
     for engine in ["claude-code", "codex"] {
-        let no_receipt = bounded_audit_fixture(engine, 1, "exit 0");
+        let no_receipt = bounded_audit_fixture(engine, 1, "/bin/cat > /dev/null\nexit 0");
         let (output, result) = no_receipt.run("knowledge");
         assert!(!output.status.success());
         assert!(result["stages"].as_array().unwrap().iter().any(|stage| {
@@ -2936,7 +2936,7 @@ fn bounded_audit_resumes_call_budgets_and_exit_zero_cannot_forge_a_receipt() {
         assert!(bounded_calls(&no_receipt).is_empty());
         let step = &result["work_steps"][0];
         assert_eq!(result["work_steps"].as_array().unwrap().len(), 1);
-        assert_eq!(step["outcome"], "rejected");
+        assert_eq!(step["outcome"], "rejected", "{result}");
         assert!(step["request_json_bytes"].as_u64().is_some());
         assert!(step["agent_duration_ms"].as_u64().is_some());
         assert!(step["result_json_bytes"].is_null());
