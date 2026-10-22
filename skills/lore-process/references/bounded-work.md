@@ -46,6 +46,14 @@ boundaries with `continued` set. Ranges are half-open Unicode scalar offsets,
 not byte offsets. There is no overlapping or omitted source range. Parts are
 execution units, never new documents or concepts.
 
+New plans group consecutive observations using the exact reduction envelope and each
+child's full result-byte allowance. A reduction can contain more than two children;
+read the request's entire child list. The topology is fixed at planning time, independent
+of observed answers. Saved plans retain their declared topology; plans without that
+declaration retain binary reduction and resume without rewriting their observations.
+Actual request and result limits still apply. Fewer reduction calls do not establish
+semantic equivalence, lower billed cost or complete corpus coverage.
+
 Native jobs rotate one inspection/reduction/finalization turn among independent
 targets and retain the next target across runs. Whole-input queue tasks are batched
 within the evidence input budget with at most one task per target; publication
@@ -61,7 +69,7 @@ pending work, but a resumed large document does not always take the first turn.
   Do not infer a source's effective date from its filename or acquisition time.
   When a continued range omits those declarations, leave them unknown; reduction
   can join observations from another range containing the declarations.
-- `kind: reduce`: read both child observations and their evidence mapping. Compare
+- `kind: reduce`: read every child observation and its evidence mapping. Compare
   claims about the same subject under the same conditions and effective time.
   Preserve distinct source statements and useful relationships. Repetition,
   chronology and citation count alone do not settle a disagreement. Carry every

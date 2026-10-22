@@ -984,7 +984,8 @@ if action=='inspect':
     if request['kind']=='inspect':
         assert all('text' in item for item in request['input']['ranges'])
     else:
-        assert len(request['children'])==2
+        assert len(request['children'])>=2
+        row['child_count']=len(request['children'])
     unresolved=[concern for child in request.get('children', []) for concern in child['output']['unresolved']]
     output={'work_id':work_id, 'node_id':node_id, 'input_revision':request['input_revision'],
             'summary':'Fixture observation of this exact request; structural coverage is not factual verification.',
@@ -1216,6 +1217,11 @@ fn maintenance_prunes_published_work_only_after_exclusive_access_without_changin
 fn oversized_audit_completes_through_fresh_bounded_workers_on_both_hosts() {
     for engine in ["claude-code", "codex"] {
         let fixture = bounded_audit_fixture(engine, 64, RECORD_BOUNDED_AUDIT);
+        let path = fixture.root().join("vault/wiki/concepts/large.md");
+        let body = std::fs::read_to_string(&path).unwrap()
+            + &"\nEvidence clause with Unicode 한🙂 remains source scoped.\n".repeat(360);
+        std::fs::write(path, body).unwrap();
+        record_discovery(&fixture, "wiki/concepts/large.md");
         let before = explicit_large_audit(&fixture);
         assert_eq!(before["input"]["status"], "oversized");
         let (output, result) = fixture.run("knowledge");
@@ -1289,6 +1295,11 @@ fn oversized_audit_completes_through_fresh_bounded_workers_on_both_hosts() {
         assert!(
             inspected
                 .iter()
+                .any(|call| call["child_count"].as_u64().is_some_and(|count| count > 2))
+        );
+        assert!(
+            inspected
+                .iter()
                 .all(|call| call["input_bytes"].as_u64().unwrap() <= 8192)
         );
         let status = fixture
@@ -1304,6 +1315,7 @@ fn oversized_audit_completes_through_fresh_bounded_workers_on_both_hosts() {
             inspected.len()
         );
         assert!(status["parts"].as_u64().unwrap() > 1);
+        assert!(inspected.len() < status["parts"].as_u64().unwrap() as usize * 2 - 1);
         assert_eq!(
             explicit_large_audit(&fixture)["input"]["status"],
             "oversized"

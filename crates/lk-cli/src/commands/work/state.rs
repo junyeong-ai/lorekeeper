@@ -24,6 +24,22 @@ pub(crate) struct Work {
     pub plan: SemanticPlan,
     pub context: Value,
     pub max_input_bytes: usize,
+    #[serde(default, skip_serializing_if = "ReductionPolicy::is_binary")]
+    reduction: ReductionPolicy,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum ReductionPolicy {
+    #[default]
+    BinaryV1,
+    ByteBudgetedV1,
+}
+
+impl ReductionPolicy {
+    fn is_binary(&self) -> bool {
+        *self == Self::BinaryV1
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -103,7 +119,7 @@ pub(crate) struct WorkProgress {
 #[derive(Clone)]
 enum NodeKind {
     Inspect { part_id: String },
-    Reduce { children: [String; 2] },
+    Reduce { children: Vec<String> },
 }
 
 #[derive(Clone)]
@@ -435,6 +451,7 @@ impl Work {
             plan,
             context,
             max_input_bytes: limits.max_input_bytes,
+            reduction: ReductionPolicy::ByteBudgetedV1,
         };
         work.plan.verify_resources(resources).map_err(fail)?;
         Ok(work)
@@ -448,7 +465,8 @@ impl Work {
         limits: WorkLimits,
     ) -> miette::Result<Self> {
         require_settled(session.root())?;
-        let work = Self::build(resources, subject_revision, context, limits)?;
+        let work = Self::build(resources, subject_revision, context, limits)?
+            .with_saved_policy(session.root())?;
         let path = work_path(&work.plan.id, "plan.json")?;
         let before = read_optional(session.root(), &path)?;
         let after = encoded(&work)?;
@@ -459,12 +477,31 @@ impl Work {
                 "work id is occupied by a different manifest or context",
             ));
         }
+        if before.is_some() {
+            return Ok(work);
+        }
         let mut mutation = MutationPlan::default();
         mutation
             .publish_expected(session.root(), path, before, after)
             .map_err(fail)?;
         session.apply(mutation).map_err(fail)?;
         Ok(work)
+    }
+
+    pub fn with_saved_policy(mut self, root: &Path) -> miette::Result<Self> {
+        require_settled(root)?;
+        let Some(raw) = read_optional(root, &work_path(&self.plan.id, "plan.json")?)? else {
+            return Ok(self);
+        };
+        let saved: Self = serde_json::from_str(&raw).map_err(fail)?;
+        self.reduction = saved.reduction;
+        if self != saved {
+            return Err(fail(
+                "work id is occupied by a different manifest or context",
+            ));
+        }
+        saved.verify_context()?;
+        Ok(saved)
     }
 
     pub fn load(root: &Path, id: &str) -> miette::Result<Self> {
@@ -513,6 +550,9 @@ impl Work {
     }
 
     fn nodes(&self) -> miette::Result<Vec<Node>> {
+        if self.reduction == ReductionPolicy::ByteBudgetedV1 {
+            return self.budgeted_nodes(self.max_input_bytes);
+        }
         fn collect(
             work: &Work,
             parts: &[lk_core::semantic::SemanticPart],
@@ -536,7 +576,7 @@ impl Work {
             nodes.push(Node {
                 id: id.clone(),
                 kind: NodeKind::Reduce {
-                    children: [left, right],
+                    children: vec![left, right],
                 },
                 ranges: parts
                     .iter()
@@ -555,6 +595,109 @@ impl Work {
             return Err(fail("work tree contains duplicate node ids"));
         }
         Ok(nodes)
+    }
+
+    fn budgeted_nodes(&self, max_input_bytes: usize) -> miette::Result<Vec<Node>> {
+        if self.plan.parts.is_empty() {
+            return Err(fail("work plan has no inspect parts"));
+        }
+        let mut nodes = self
+            .plan
+            .parts
+            .iter()
+            .map(|part| Node {
+                id: part.id.clone(),
+                kind: NodeKind::Inspect {
+                    part_id: part.id.clone(),
+                },
+                ranges: part.ranges.clone(),
+            })
+            .collect::<Vec<_>>();
+        let mut level = nodes.clone();
+        while level.len() > 1 {
+            let mut next = Vec::new();
+            let mut at = 0;
+            while at < level.len() {
+                if at + 1 == level.len() {
+                    next.push(level[at].clone());
+                    break;
+                }
+                let mut count = 2;
+                while at + count < level.len()
+                    && self.reserved_reduce_bytes(&level[at..at + count + 1])? <= max_input_bytes
+                {
+                    count += 1;
+                }
+                let group = &level[at..at + count];
+                let children = group.iter().map(|node| node.id.clone()).collect::<Vec<_>>();
+                let node = Node {
+                    id: revision(&json!(["reduce-byte-budgeted-v1", self.plan.id, children]))?,
+                    kind: NodeKind::Reduce { children },
+                    ranges: group.iter().flat_map(|node| node.ranges.clone()).collect(),
+                };
+                nodes.push(node.clone());
+                next.push(node);
+                at += count;
+            }
+            level = next;
+        }
+        let unique: BTreeSet<_> = nodes.iter().map(|node| &node.id).collect();
+        if unique.len() != nodes.len() {
+            return Err(fail("work tree contains duplicate node ids"));
+        }
+        Ok(nodes)
+    }
+
+    fn reduction_request(
+        &self,
+        node_id: &str,
+        children: Vec<Value>,
+        evidence: Vec<Value>,
+    ) -> Value {
+        json!({
+            "work_id": self.plan.id,
+            "node_id": node_id,
+            "kind": "reduce",
+            "max_result_bytes": self.plan.max_result_bytes,
+            "context": self.context,
+            "children": children,
+            "evidence": evidence,
+        })
+    }
+
+    fn reserved_reduce_bytes(&self, children: &[Node]) -> miette::Result<usize> {
+        let placeholder = "0".repeat(64);
+        let evidence = self.resource_guards(
+            children
+                .iter()
+                .flat_map(|node| node.ranges.iter().map(|range| range.resource)),
+        )?;
+        let mut request = self.reduction_request(
+            &placeholder,
+            children
+                .iter()
+                .map(|child| {
+                    json!({"node_id": child.id, "result_revision": placeholder, "output": null})
+                })
+                .collect(),
+            evidence,
+        );
+        request["input_revision"] = placeholder.into();
+        encoded(&request)?
+            .len()
+            .checked_sub(
+                children
+                    .len()
+                    .checked_mul(4)
+                    .ok_or_else(|| fail("reduction size overflow"))?,
+            )
+            .and_then(|overhead| {
+                children
+                    .len()
+                    .checked_mul(self.plan.max_result_bytes)
+                    .and_then(|outputs| overhead.checked_add(outputs))
+            })
+            .ok_or_else(|| fail("reduction size overflow"))
     }
 
     fn node_input(
@@ -581,19 +724,11 @@ impl Work {
                         .iter()
                         .map(|stored| &stored.output)
                         .collect::<Vec<_>>(),
-                );
+                )?;
                 let children = children.iter().zip(outputs).map(|(id, child)| {
                     json!({"node_id": id, "result_revision": child.output_revision, "output": child.output})
                 }).collect::<Vec<_>>();
-                json!({
-                    "work_id": self.plan.id,
-                    "node_id": node.id,
-                    "kind": "reduce",
-                    "max_result_bytes": self.plan.max_result_bytes,
-                    "context": self.context,
-                    "children": children,
-                    "evidence": evidence,
-                })
+                self.reduction_request(&node.id, children, evidence)
             }
         };
         let input_revision = revision(&input)?;
@@ -607,31 +742,43 @@ impl Work {
         Ok(input)
     }
 
-    fn evidence_guards(&self, outputs: &[&WorkOutput]) -> Vec<Value> {
-        let indices: BTreeSet<_> = outputs
-            .iter()
-            .flat_map(|output| {
-                output
-                    .findings
-                    .iter()
-                    .flat_map(|finding| &finding.evidence)
-                    .chain(
-                        output
-                            .questions()
-                            .flat_map(|(_, question)| &question.evidence),
-                    )
-                    .chain(
-                        output
-                            .resolutions
-                            .iter()
-                            .flat_map(|resolution| &resolution.evidence),
-                    )
-                    .map(|range| range.resource)
-            })
-            .collect();
+    fn evidence_guards(&self, outputs: &[&WorkOutput]) -> miette::Result<Vec<Value>> {
+        let indices = outputs.iter().flat_map(|output| {
+            output
+                .findings
+                .iter()
+                .flat_map(|finding| &finding.evidence)
+                .chain(
+                    output
+                        .questions()
+                        .flat_map(|(_, question)| &question.evidence),
+                )
+                .chain(
+                    output
+                        .resolutions
+                        .iter()
+                        .flat_map(|resolution| &resolution.evidence),
+                )
+                .map(|range| range.resource)
+        });
+        self.resource_guards(indices)
+    }
+
+    fn resource_guards(
+        &self,
+        indices: impl IntoIterator<Item = usize>,
+    ) -> miette::Result<Vec<Value>> {
+        let indices = indices.into_iter().collect::<BTreeSet<_>>();
         indices
             .into_iter()
-            .map(|index| json!({"resource": index, "guard": self.plan.resources[index]}))
+            .map(|index| {
+                let guard = self
+                    .plan
+                    .resources
+                    .get(index)
+                    .ok_or_else(|| fail("work range names an unknown resource"))?;
+                Ok(json!({"resource": index, "guard": guard}))
+            })
             .collect()
     }
 
@@ -821,7 +968,7 @@ impl Work {
             "kind": "finalize", "work_id": self.plan.id, "node_id": node.id,
             "max_result_bytes": self.plan.max_result_bytes,
             "context": self.context, "result_revision": output.output_revision,
-            "output": output.output, "evidence": self.evidence_guards(&[&output.output]),
+            "output": output.output, "evidence": self.evidence_guards(&[&output.output])?,
         });
         let input_revision = revision(&result)?;
         result
@@ -1299,6 +1446,253 @@ mod tests {
         }
     }
 
+    fn evidence_pages(count: usize, repetitions: usize) -> Vec<SemanticResource> {
+        (0..count)
+            .map(|index| SemanticResource {
+                address: format!("wiki/documents/evidence-{index}.md"),
+                revision: format!("revision-{index}"),
+                authority: SemanticAuthority::Page,
+                text: "evidence ".repeat(repetitions),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn budgeted_topology_covers_every_leaf_once_without_unary_reductions() {
+        for count in [1, 3, 5, 8] {
+            let source = evidence_pages(count, 1100);
+            let work = Work::build(
+                &source,
+                "subject",
+                context("one"),
+                WorkLimits {
+                    max_input_bytes: 12_000,
+                    max_result_bytes: 1024,
+                },
+            )
+            .unwrap();
+            assert_eq!(work.plan.parts.len(), count);
+            let nodes = work.nodes().unwrap();
+            let mut children = BTreeSet::new();
+            for node in &nodes {
+                if let NodeKind::Reduce { children: ids } = &node.kind {
+                    assert!(ids.len() >= 2);
+                    for id in ids {
+                        assert!(children.insert(id));
+                    }
+                }
+            }
+            assert_eq!(children.len(), nodes.len() - 1);
+            assert!(!children.contains(&nodes.last().unwrap().id));
+            assert_eq!(
+                nodes
+                    .iter()
+                    .filter(|node| matches!(node.kind, NodeKind::Inspect { .. }))
+                    .count(),
+                count
+            );
+            if count > 2 {
+                assert!(nodes.iter().any(
+                    |node| matches!(&node.kind, NodeKind::Reduce { children } if children.len() > 2)
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn reduction_reservation_counts_exact_envelope_and_full_child_bounds() {
+        let source = evidence_pages(3, 1100);
+        let mut purpose = context("one");
+        purpose["purpose"]["notes"] = "quoted \" value\n\\".repeat(20).into();
+        let mut work = Work::build(
+            &source,
+            "subject",
+            purpose,
+            WorkLimits {
+                max_input_bytes: 12_000,
+                max_result_bytes: 1024,
+            },
+        )
+        .unwrap();
+        let leaves = work
+            .nodes()
+            .unwrap()
+            .into_iter()
+            .filter(|node| matches!(node.kind, NodeKind::Inspect { .. }))
+            .collect::<Vec<_>>();
+        assert_eq!(leaves.len(), 3);
+        let reserved = work.reserved_reduce_bytes(&leaves).unwrap();
+        let placeholder = "0".repeat(64);
+        let outputs = leaves
+            .iter()
+            .map(|node| {
+                let range = &node.ranges[0];
+                let mut output = WorkOutput {
+                    work_id: work.plan.id.clone(),
+                    node_id: node.id.clone(),
+                    input_revision: placeholder.clone(),
+                    summary: String::new(),
+                    findings: vec![WorkFinding {
+                        statement: "A source-scoped observation".into(),
+                        scope: None,
+                        effective_time: None,
+                        attribution: None,
+                        evidence: vec![SemanticRange {
+                            resource: range.resource,
+                            start: range.start,
+                            end: range.start + 1,
+                        }],
+                    }],
+                    source_questions: vec![],
+                    unresolved: vec![],
+                    resolutions: vec![],
+                };
+                output.summary =
+                    "x".repeat(work.plan.max_result_bytes - encoded(&output).unwrap().len());
+                assert_eq!(encoded(&output).unwrap().len(), work.plan.max_result_bytes);
+                output
+            })
+            .collect::<Vec<_>>();
+        let mut request = work.reduction_request(&placeholder,
+            outputs.iter().map(|output| json!({"node_id": output.node_id, "result_revision": placeholder, "output": output})).collect(),
+            work.evidence_guards(&outputs.iter().collect::<Vec<_>>()).unwrap(),
+        );
+        request["input_revision"] = placeholder.into();
+        assert_eq!(encoded(&request).unwrap().len(), reserved);
+        assert_eq!(work.budgeted_nodes(reserved).unwrap().len(), 4);
+        let below = work.budgeted_nodes(reserved - 1).unwrap();
+        assert_eq!(below.len(), 5);
+        assert!(below.iter().all(
+            |node| !matches!(&node.kind, NodeKind::Reduce { children } if children.len() > 2)
+        ));
+        work.plan.max_result_bytes = usize::MAX;
+        assert!(work.reserved_reduce_bytes(&leaves).is_err());
+    }
+
+    #[test]
+    fn legacy_manifest_retains_binary_nodes_seal_and_exact_bytes() {
+        let root = tempfile::tempdir().unwrap();
+        let source = resources();
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let mut legacy = Work::build(&source, "subject", context("one"), limits()).unwrap();
+        legacy.reduction = ReductionPolicy::BinaryV1;
+        let raw = encoded(&legacy).unwrap();
+        assert!(
+            !serde_json::from_str::<Value>(&raw)
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .contains_key("reduction")
+        );
+        let path = work_path(&legacy.plan.id, "plan.json").unwrap();
+        let mut mutation = MutationPlan::default();
+        mutation
+            .publish_expected(root.path(), &path, None, raw.clone())
+            .unwrap();
+        session.apply(mutation).unwrap();
+        let first = legacy.plan.parts[0].id.clone();
+        legacy
+            .record(
+                &session,
+                draft(&legacy, root.path(), &first, &source),
+                &source,
+            )
+            .unwrap();
+        let resumed = Work::create(&session, &source, "subject", context("one"), limits()).unwrap();
+        assert_eq!(resumed, legacy);
+        assert_eq!(
+            std::fs::read_to_string(root.path().join(&path)).unwrap(),
+            raw
+        );
+        assert_eq!(
+            resumed.progress(root.path(), &source).unwrap().total,
+            resumed.plan.parts.len() * 2 - 1
+        );
+        finish(&resumed, &session, &source);
+        let result = json!({"task_id":"task", "body":"sealed legacy result"});
+        resumed.seal(&session, &source, result.clone()).unwrap();
+        let expected = Work::build(&source, "subject", context("one"), limits())
+            .unwrap()
+            .with_saved_policy(root.path())
+            .unwrap();
+        expected
+            .guard_completion(&mut MutationPlan::default(), root.path(), &source, &result)
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.path().join(&path)).unwrap(),
+            raw
+        );
+        let mut unknown: Value = serde_json::from_str(&raw).unwrap();
+        unknown["reduction"] = "unknown-policy".into();
+        std::fs::write(root.path().join(&path), encoded(&unknown).unwrap()).unwrap();
+        assert!(Work::load(root.path(), &legacy.plan.id).is_err());
+        assert!(
+            Work::build(&source, "subject", context("one"), limits())
+                .unwrap()
+                .with_saved_policy(root.path())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn five_inspections_reduce_once_and_preserve_all_source_questions() {
+        let root = tempfile::tempdir().unwrap();
+        let source = evidence_pages(5, 25_000);
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let work = Work::create(
+            &session,
+            &source,
+            "subject",
+            context("one"),
+            WorkLimits {
+                max_input_bytes: 262_144,
+                max_result_bytes: 32_768,
+            },
+        )
+        .unwrap();
+        assert_eq!(work.plan.parts.len(), 5);
+        assert_eq!(work.nodes().unwrap().len(), 6);
+        let mut questions = Vec::new();
+        for (index, part) in work.plan.parts.iter().enumerate() {
+            let mut output = draft(&work, root.path(), &part.id, &source);
+            let range = &part.ranges[0];
+            for question in 0..if index == 0 { 10 } else { 8 } {
+                output.source_questions.push(WorkQuestion {
+                    id: format!("{}:{question}", part.id),
+                    question: "The source leaves its authority and effective scope unconfirmed. "
+                        .repeat(4),
+                    evidence: vec![SemanticRange {
+                        resource: range.resource,
+                        start: range.start,
+                        end: range.start + 1,
+                    }],
+                });
+            }
+            questions.extend(output.source_questions.clone());
+            work.record(&session, output, &source).unwrap();
+        }
+        let progress = work.progress(root.path(), &source).unwrap();
+        assert_eq!(progress.completed, 5);
+        assert_eq!(progress.ready.len(), 1);
+        let request = work
+            .input(root.path(), &progress.root_node, &source)
+            .unwrap();
+        assert_eq!(request["children"].as_array().unwrap().len(), 5);
+        assert!(encoded(&request).unwrap().len() <= work.max_input_bytes);
+        let output = draft(&work, root.path(), &progress.root_node, &source);
+        assert_eq!(output.source_questions, questions);
+        assert_eq!(questions.len(), 42);
+        let mut omitted = output.clone();
+        omitted.source_questions.pop();
+        assert!(work.record(&session, omitted, &source).is_err());
+        let mut oversized = output.clone();
+        oversized.summary = "x".repeat(work.plan.max_result_bytes);
+        assert!(work.record(&session, oversized, &source).is_err());
+        assert!(!work.progress(root.path(), &source).unwrap().complete);
+        work.record(&session, output, &source).unwrap();
+        assert!(work.progress(root.path(), &source).unwrap().complete);
+    }
+
     #[test]
     fn prepared_inspection_and_record_progress_match_the_revision_pinned_read_contract() {
         let root = tempfile::tempdir().unwrap();
@@ -1498,7 +1892,7 @@ mod tests {
         let node = Node {
             id: "parent".into(),
             kind: NodeKind::Reduce {
-                children: ["a".into(), "b".into()],
+                children: vec!["a".into(), "b".into()],
             },
             ranges: vec![range.clone()],
         };

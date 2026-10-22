@@ -139,6 +139,7 @@ pub(crate) fn limits(config: &lk_core::config::Config) -> miette::Result<WorkLim
 }
 
 fn expected(
+    root: &Path,
     prepared: &Prepared,
     config: &lk_core::config::Config,
     config_revision: &str,
@@ -148,7 +149,8 @@ fn expected(
         &prepared.revision(config_revision)?,
         prepared.context.clone(),
         limits(config)?,
-    )
+    )?
+    .with_saved_policy(root)
 }
 
 fn guard_prepared(
@@ -159,7 +161,7 @@ fn guard_prepared(
     result: Value,
     mutation: &mut lk_vault::MutationPlan,
 ) -> miette::Result<bool> {
-    let expected = expected(&prepared, config, config_revision)?;
+    let expected = expected(root, &prepared, config, config_revision)?;
     let manifest = root
         .join(".lorekeeper/work")
         .join(&expected.plan.id)
@@ -322,7 +324,7 @@ pub(super) fn prepare_queue_publication(
         let typed: lk_queue::TaskResult =
             serde_json::from_value(result.clone()).into_diagnostic()?;
         let source = resources::source_task(&root, config, task_id)?;
-        let source_work = expected(&source, config, config_revision)?;
+        let source_work = expected(&root, &source, config, config_revision)?;
         if prepared.context["purpose"]["source_observations"]["work_id"] != source_work.plan.id {
             return Err(miette::miette!(
                 "retained source observations differ from their current work identity"
@@ -401,7 +403,7 @@ pub(super) fn task_context(
             None => resources::task(&root, config, task_id)?,
         }
     };
-    let work = expected(&prepared, config, config_revision)?;
+    let work = expected(&root, &prepared, config, config_revision)?;
     let requires_bounded_work = work.plan.parts.len() > 1;
     let plan_command = if requires_bounded_work {
         let mut command = vec![
@@ -483,7 +485,7 @@ pub(super) fn needs_discovery(
         return Ok(false);
     }
     let prepared = resources::task(root, config, &task.task_id)?;
-    Ok(expected(&prepared, config, config_revision)?
+    Ok(expected(root, &prepared, config, config_revision)?
         .plan
         .parts
         .len()
@@ -615,7 +617,7 @@ fn screening(
         bounds.max_input_bytes,
         bounds.max_result_bytes,
     )? {
-        let work = expected(&inventory.source, config, config_revision)?;
+        let work = expected(root, &inventory.source, config, config_revision)?;
         if !work.is_planned(root)? || !work.progress(root, &inventory.source.resources)?.complete {
             return Ok(ScreeningPreparation::Source {
                 work: Box::new(work),
@@ -826,7 +828,7 @@ fn load(
 ) -> miette::Result<(Work, Prepared)> {
     let work = Work::load(root, id)?;
     let prepared = resources::refresh(root, config, config_revision, &work.context)?;
-    if expected(&prepared, config, config_revision)? != work {
+    if expected(root, &prepared, config, config_revision)? != work {
         return Err(miette::miette!(
             "work inputs, configuration or bounded execution policy changed; replan"
         ));
@@ -871,7 +873,7 @@ pub(super) fn prepare_task(
     } else {
         resources::task(&root, config, task_id)?
     };
-    let work = expected(&prepared, config, config_revision)?;
+    let work = expected(&root, &prepared, config, config_revision)?;
     let stored = root
         .join(".lorekeeper/work")
         .join(&work.plan.id)
@@ -923,7 +925,7 @@ pub(super) fn audit_needs_work(
 ) -> miette::Result<bool> {
     let root = root.canonicalize().into_diagnostic()?;
     let prepared = resources::audit_candidate(&root, config, candidate)?;
-    Ok(expected(&prepared, config, config_revision)?
+    Ok(expected(&root, &prepared, config, config_revision)?
         .plan
         .parts
         .len()

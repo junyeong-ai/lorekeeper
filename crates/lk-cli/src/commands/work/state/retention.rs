@@ -462,6 +462,27 @@ mod tests {
         task
     }
 
+    #[test]
+    fn corrupted_work_range_refuses_cleanup_without_removing_artifacts() {
+        let root = tempfile::tempdir().unwrap();
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let source = resources();
+        let work =
+            Work::create(&session, &source, "subject", context("subject"), limits()).unwrap();
+        assert!(work.plan.parts.len() >= 3);
+        let path = root
+            .path()
+            .join(work_path(&work.plan.id, "plan.json").unwrap());
+        let mut corrupt = work.clone();
+        corrupt.plan.parts[0].ranges[0].resource = corrupt.plan.resources.len();
+        let raw = encoded(&corrupt).unwrap();
+        std::fs::write(&path, &raw).unwrap();
+        for session in [None, Some(&session)] {
+            assert!(prune_published(root.path(), session, i64::MAX).is_err());
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), raw);
+        }
+    }
+
     fn publish(work: &Work, session: &MutationSession, resources: &[SemanticResource]) {
         finish(work, session, resources);
         let result = json!({"body":"Published typed result"});

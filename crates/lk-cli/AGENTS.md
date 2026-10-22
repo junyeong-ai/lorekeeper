@@ -57,6 +57,9 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   a bounded finalizer; small requests retain ordinary batching. `execution.work` limits
   serialized request/result bytes and agent calls per native run, resetting per knowledge
   batch. Exhaustion retains unfinished work and fails explicitly, without clipping evidence.
+  New work fixes reduction topology from the exact envelope plus each child's full result
+  allowance; every child and its evidence mapping participates. Persist the policy and
+  preserve missing-policy binary plans, node IDs and seals without rewriting them on resume.
   Completion requires exact sealed typed results and source/work guards in the canonical
   publication journal. Keep the queue target's guard in its publication edit: a separate
   unchanged guard for the same target would reject the journal's own recovery.
