@@ -46,7 +46,7 @@ thiserror = "2"
 miette = { version = "7", features = ["fancy"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-minijinja = { version = "3", features = ["serde", "json"] }
+minijinja = { version = "3.0.2", features = ["serde", "json"] }
 blake3 = "1"
 semver = "1"
 tar = "0.4"
