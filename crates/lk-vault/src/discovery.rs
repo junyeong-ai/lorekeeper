@@ -181,11 +181,12 @@ pub fn capture_discovery(
         crate::review::review_previews(&root, dirs)?
     };
     let mut guarded_pages = BTreeMap::new();
-    let mut roster = BTreeMap::<String, (String, String, String, BTreeSet<usize>)>::new();
+    let mut roster = BTreeMap::<String, DiscoveryCandidate>::new();
     if !queries.is_empty() {
         search::visit_pages(&root, dirs, false, |mut page, _| {
-            page.projection = Some(page.match_projection().into_owned());
-            let query_indexes = queries
+            let document = search::VisibleDocument::from_body(&page.page.body);
+            page.projection = Some(search::MatchProjection::from_document(&document));
+            let mut query_indexes = queries
                 .iter()
                 .zip(&plans)
                 .enumerate()
@@ -208,6 +209,7 @@ pub fn capture_discovery(
                     .then_some(index)
                 })
                 .collect::<BTreeSet<_>>();
+            page.projection = None;
             if query_indexes.is_empty() {
                 return Ok(());
             }
@@ -229,53 +231,66 @@ pub fn capture_discovery(
                 .to_str()
                 .ok_or_else(|| invalid("discovery owner address is not UTF-8"))?
                 .to_owned();
-            let path = page
+            let mut path = page
                 .rel_path
                 .to_str()
                 .ok_or_else(|| invalid("discovery candidate address is not UTF-8"))?
                 .to_owned();
             let authored = source_revision(&page.page);
-            match roster.entry(owner.clone()) {
-                std::collections::btree_map::Entry::Vacant(entry) => {
-                    entry.insert((path, page.file_revision, authored, query_indexes));
+            if let Some(previous) = roster.get(&owner) {
+                if previous.file_revision != page.file_revision
+                    || previous.source_revision != authored
+                {
+                    return Err(invalid("discovery owner changed during capture"));
                 }
-                std::collections::btree_map::Entry::Occupied(mut entry) => {
-                    let (previous_path, revision, previous_authored, previous_queries) =
-                        entry.get_mut();
-                    if *revision != page.file_revision || *previous_authored != authored {
-                        return Err(invalid("discovery owner changed during capture"));
-                    }
-                    if path == owner || (*previous_path != owner && path < *previous_path) {
-                        *previous_path = path;
-                    }
-                    previous_queries.extend(query_indexes);
+                if path != owner && (previous.path == owner || previous.path < path) {
+                    path.clone_from(&previous.path);
+                }
+                query_indexes.extend(previous.query_indexes.iter().copied());
+                if path == previous.path && query_indexes.len() == previous.query_indexes.len() {
+                    return Ok(());
                 }
             }
+            let mut counts = crate::ReviewCounts::default();
+            if let Some(previews) = reviews.get(&owner) {
+                for review in previews {
+                    counts.record(review.effective_state, 1);
+                }
+            }
+            let query_indexes = query_indexes.into_iter().collect::<Vec<_>>();
+            let card = build_card(
+                &page.page,
+                &document,
+                &path,
+                &query_indexes,
+                &queries,
+                &plans,
+                counts,
+            )?;
+            roster.insert(
+                owner.clone(),
+                DiscoveryCandidate {
+                    path,
+                    owner,
+                    file_revision: page.file_revision,
+                    source_revision: authored,
+                    query_indexes,
+                    card,
+                },
+            );
             Ok(())
         })?;
     }
-    let mut candidates = Vec::with_capacity(roster.len());
-    let mut review_identity = BTreeMap::new();
-    for (owner, (path, file_revision, source_revision, query_indexes)) in roster {
-        let raw = &guarded_pages[Path::new(&owner)];
-        let page = crate::parse_page(raw).map_err(VaultError::Frontmatter)?;
-        let previews = reviews.get(&owner).cloned().unwrap_or_default();
-        let mut counts = crate::ReviewCounts::default();
-        for review in &previews {
-            counts.record(review.effective_state, 1);
-        }
-        review_identity.insert(owner.clone(), previews);
-        let query_indexes = query_indexes.into_iter().collect::<Vec<_>>();
-        let card = build_card(&page, &path, &query_indexes, &queries, &plans, counts)?;
-        candidates.push(DiscoveryCandidate {
-            path,
-            owner,
-            file_revision,
-            source_revision,
-            query_indexes,
-            card,
-        });
-    }
+    let review_identity = roster
+        .keys()
+        .map(|owner| {
+            (
+                owner.clone(),
+                reviews.get(owner).cloned().unwrap_or_default(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let candidates = roster.into_values().collect::<Vec<_>>();
     let revision = file_revision(&serialized(&(
         DISCOVERY_CAPTURE_POLICY,
         &root,
@@ -295,13 +310,13 @@ pub fn capture_discovery(
 
 fn build_card(
     page: &crate::VaultPage,
+    document: &search::VisibleDocument,
     path: &str,
     query_indexes: &[usize],
     queries: &[DiscoveryQuery],
     plans: &[QueryPlan],
     reviews: crate::ReviewCounts,
 ) -> Result<DiscoveryCandidateCard, VaultError> {
-    let document = search::VisibleDocument::from_body(&page.body);
     let outline = crate::document::outline(&page.body);
     let opening = document.opening.as_deref();
     let aliases = page
@@ -855,6 +870,78 @@ mod tests {
         let changed = capture_discovery(root.path(), &dirs, &queries).unwrap();
         assert_eq!(changed.candidates.len(), 3);
         assert_ne!(changed.revision, capture.revision);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn candidate_cards_merge_alias_queries_with_the_preferred_address() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let raw = "---\ntype: document\n---\n## Summary\rUnrelated opening.\r\r## Match\r[Orbit][reference] is bright.\r\r## Definitions\r[reference]: https://destination.invalid\r";
+        write(root.path(), "backing/owner.md", raw);
+        for (path, target) in [
+            ("wiki/concepts/zeta.md", "../../backing/owner.md"),
+            ("wiki/documents/alpha.md", "../../backing/owner.md"),
+        ] {
+            let path = root.path().join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::os::unix::fs::symlink(target, path).unwrap();
+        }
+        let queries = ["zeta", "Orbit", "alpha"].map(|query| DiscoveryQuery {
+            query: query.into(),
+            phrase: true,
+            spacing: false,
+        });
+        let capture = capture_discovery(root.path(), &dirs, &queries).unwrap();
+        assert_eq!(capture.candidates.len(), 1);
+        assert_eq!(
+            capture
+                .queries
+                .iter()
+                .map(|query| query.query.as_str())
+                .collect::<Vec<_>>(),
+            ["Orbit", "alpha", "zeta"]
+        );
+        let candidate = &capture.candidates[0];
+        assert_eq!(candidate.path, "wiki/concepts/zeta.md");
+        assert_eq!(candidate.owner, "backing/owner.md");
+        assert_eq!(candidate.query_indexes, [0, 1, 2]);
+        assert_eq!(candidate.card.title.text, "zeta");
+        assert_eq!(candidate.card.opening.text.text, "Unrelated opening.");
+        assert_eq!(candidate.card.matches_total, 3);
+        assert!(candidate.card.matches_truncated);
+        let matched = &candidate.card.matches[0];
+        assert_eq!(capture.queries[matched.query_index].query, "Orbit");
+        assert_eq!(matched.preview.text.text, "Orbit is bright.");
+        assert_eq!(matched.preview.section, Some(2));
+        assert_eq!(matched.preview.kind, crate::ExcerptKind::MatchedBlock);
+        assert_eq!(capture.guarded_pages()[Path::new(&candidate.owner)], raw);
+        assert_eq!(candidate.file_revision, file_revision(raw));
+        assert_eq!(
+            serialized(&capture).unwrap(),
+            serialized(&capture_discovery(root.path(), &dirs, &queries).unwrap()).unwrap()
+        );
+
+        std::fs::rename(
+            root.path().join("backing/owner.md"),
+            root.path().join("wiki/documents/owner.md"),
+        )
+        .unwrap();
+        for path in ["wiki/concepts/zeta.md", "wiki/documents/alpha.md"] {
+            let path = root.path().join(path);
+            std::fs::remove_file(&path).unwrap();
+            std::os::unix::fs::symlink("../documents/owner.md", path).unwrap();
+        }
+        let direct = capture_discovery(root.path(), &dirs, &queries).unwrap();
+        assert_eq!(direct.candidates.len(), 1);
+        assert_eq!(direct.candidates[0].path, "wiki/documents/owner.md");
+        assert_eq!(direct.candidates[0].owner, "wiki/documents/owner.md");
+        assert_eq!(direct.candidates[0].card.title.text, "owner");
+        assert_eq!(direct.candidates[0].query_indexes, [0, 2]);
+        assert_eq!(
+            direct.guarded_pages()[Path::new("wiki/documents/owner.md")],
+            raw
+        );
     }
 
     #[test]
