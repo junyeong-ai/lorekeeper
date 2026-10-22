@@ -936,6 +936,7 @@ mod tests {
 
     fn page(id: &str, rel: &str, outgoing: &[&str]) -> ScannedPage {
         ScannedPage {
+            read_error: None,
             rss_evidence: false,
             revision: Some("revision".into()),
             id: id.to_owned(),

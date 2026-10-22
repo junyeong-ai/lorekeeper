@@ -1313,6 +1313,145 @@ fn the_json_envelope_agrees_with_the_exit_code() {
     check(&contradicted, "contradicted vault");
 }
 
+#[test]
+fn unreadable_managed_content_is_incomplete_without_erasing_its_address() {
+    let ws = Workspace::new();
+    ws.write(
+        "wiki/documents/source.md",
+        "---\ntype: document\n---\n[Target](target.md)\n",
+    );
+    let path = ws.root.path().join("vault/wiki/documents/target.md");
+    let original = b"---\ntype: document\n---\n[Missing](missing.md)\n\xff";
+    std::fs::write(&path, original).unwrap();
+
+    let output = ws.run(&["graph", "--json", "lint"]);
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["ok"], false);
+    assert_eq!(report["data"]["errors"].as_array().unwrap().len(), 1);
+    assert!(
+        report["data"]["errors"][0]
+            .as_str()
+            .unwrap()
+            .contains("wiki/documents/target.md")
+    );
+    assert_eq!(
+        report["data"]["violations"]["broken"],
+        serde_json::json!([])
+    );
+    for command in [
+        "broken",
+        "hubs",
+        "orphans",
+        "cluster",
+        "export",
+        "suggest-links",
+    ] {
+        assert_eq!(ws.code(&["graph", command]), 2, "{command}");
+    }
+    assert_eq!(
+        ws.code(&["graph", "neighbors", "wiki/documents/source.md"]),
+        2
+    );
+    assert_eq!(ws.code(&["graph", "normalize"]), 0, "address-only preview");
+
+    let output = ws.run(&["status"]);
+    assert!(output.status.success(), "status reports rather than gates");
+    let text = String::from_utf8(output.stderr).unwrap();
+    let pages = text.lines().find(|line| line.contains("! pages")).unwrap();
+    assert!(pages.contains("1 check error(s)"), "{text}");
+    assert!(!pages.contains("clean"), "{text}");
+    assert!(
+        text.lines()
+            .any(|line| line.contains("! graph") && line.contains("incomplete")),
+        "{text}"
+    );
+    assert_eq!(std::fs::read(path).unwrap(), original);
+}
+
+#[test]
+fn read_requirements_follow_the_content_each_graph_claim_consumes() {
+    let ws = excluding("private/**");
+    ws.write(
+        "wiki/documents/source.md",
+        "---\ntype: document\n---\nSource.\n",
+    );
+    ws.write("private/note.md", "[Source](../wiki/documents/source.md)\n");
+    let path = ws.root.path().join("vault/private/note.md");
+    std::fs::write(&path, b"\xff").unwrap();
+    for command in [
+        "hubs",
+        "broken",
+        "cluster",
+        "export",
+        "suggest-links",
+        "normalize",
+    ] {
+        assert_eq!(ws.code(&["graph", command]), 0, "{command}");
+    }
+    assert_eq!(
+        ws.code(&["graph", "orphans"]),
+        2,
+        "cross-scope incoming links are unknown"
+    );
+    assert_eq!(
+        ws.code(&["graph", "lint"]),
+        2,
+        "lint includes the orphan observation"
+    );
+    std::fs::remove_file(path).unwrap();
+    let guide = ws.root.path().join("vault/wiki/AGENTS.md");
+    std::fs::write(guide, b"\xff").unwrap();
+    assert_eq!(
+        ws.code(&["graph", "lint"]),
+        0,
+        "reserved guides are not graph content"
+    );
+}
+
+#[test]
+fn audit_coverage_cannot_silently_omit_unreadable_subjects_or_explicit_context() {
+    let ws = Workspace::new();
+    ws.write(
+        "wiki/concepts/first.md",
+        "---\ntype: concept\n---\nFirst.\n",
+    );
+    ws.write(
+        "wiki/concepts/second.md",
+        "---\ntype: concept\n---\nSecond.\n",
+    );
+    assert_eq!(ws.code(&["wiki", "prepare"]), 0);
+    let second = ws.root.path().join("vault/wiki/concepts/second.md");
+    std::fs::write(&second, b"\xff").unwrap();
+    assert_ne!(ws.code(&["wiki", "audit-plan"]), 0);
+    assert_ne!(
+        ws.code(&["wiki", "audit-plan", "--path", "wiki/concepts/second.md"]),
+        0
+    );
+    let selected = ws.run(&["wiki", "audit-plan", "--path", "wiki/concepts/first.md"]);
+    assert!(
+        selected.status.success(),
+        "unrelated selected scope: {selected:?}"
+    );
+    let plan: serde_json::Value = serde_json::from_slice(&selected.stdout).unwrap();
+    assert_eq!(plan["total"], 1);
+    ws.write(
+        "wiki/concepts/first.md",
+        "---\ntype: concept\n---\n[Second](second.md)\n",
+    );
+    assert_ne!(
+        ws.code(&["wiki", "audit-plan", "--path", "wiki/concepts/first.md"]),
+        0
+    );
+    assert_eq!(std::fs::read(second).unwrap(), b"\xff");
+    assert!(
+        !ws.root
+            .path()
+            .join("vault/.lorekeeper/knowledge-audit.json")
+            .exists()
+    );
+}
+
 /// A link that only resolves because the filesystem folds has its own violation.
 ///
 /// The fold is what lets `is_resolvable` answer "is there a file there" the way the filesystem

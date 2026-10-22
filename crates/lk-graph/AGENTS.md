@@ -15,6 +15,11 @@ and CLI discovery, not a second graph authority.
 - Keep three views distinct: scanned existence, configured link sources, and
   analysis pages. Excluded pages can still resolve and be repointed. Scope prefixes
   are folded consistently; do not let an analysis filter hide broken source links.
+- A failed content read retains its address and an explicit `PageReadError`, never
+  an empty-success interpretation. Require readable inputs for each claim: topology
+  uses analysis pages, checked links use their source scope, and orphan exemptions
+  use incoming links from all scanned nonreserved pages. Lint includes that full
+  orphan observation. Filename-only normalization previews need no content verdict.
 - Hidden directories are skipped except the exact verified evidence archive path:
   an archive is resolvable only through its existing hash validator. It is NOT a
   knowledge node, citation source, connectivity participant, or repoint target.
@@ -52,6 +57,9 @@ and CLI discovery, not a second graph authority.
   or a transitive audit. Scoped reviews retain explicit evidence for either kind.
   Receipts describe completed reads, never factual confidence or original/provider
   evidence that was not actually read. Aggregate and per-kind counts retain this scope.
+- Check unreadable potential subjects before filtering on parsed `type`; an unknown
+  format cannot shrink corpus coverage. Exact selections require their own subjects
+  and reached subject context, without newly requiring unrelated concept bodies.
 - Exact selected planning evaluates only selected discovery recipes;
   `coverage_scope` distinguishes selection counts from complete corpus accounting.
   Assessment recording evaluates current corpus inputs to preserve exact pending

@@ -1159,6 +1159,7 @@ mod tests {
 
     fn build_page(id: &str, rel: &str, outgoing: &[&str]) -> ScannedPage {
         ScannedPage {
+            read_error: None,
             rss_evidence: false,
             revision: Some(fixture_source_revision(id)),
             id: id.to_owned(),

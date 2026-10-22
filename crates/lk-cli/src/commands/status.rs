@@ -105,14 +105,22 @@ pub async fn run(opts: &super::GlobalOptions) -> miette::Result<()> {
         &vault_root,
         &in_flight.keys,
     );
-    let mut pages = match audit.defects() {
-        0 => format!("{} clean", audit.scanned),
-        n => format!("{n} defect(s) in {} pages", audit.scanned),
+    let mut pages = match (audit.defects(), audit.errors()) {
+        (0, 0) => format!("{} clean", audit.scanned),
+        (n, _) => format!("{n} defect(s) in {} pages", audit.scanned),
     };
+    if audit.errors() > 0 {
+        let _ = write!(pages, " · {} check error(s)", audit.errors());
+    }
     if audit.credentials() > 0 {
         let _ = write!(pages, " · {} credential form(s)", audit.credentials());
     }
-    line("pages", pages, audit.defects() == 0, "lore doctor");
+    line(
+        "pages",
+        pages,
+        audit.defects() == 0 && audit.errors() == 0,
+        "lore doctor",
+    );
 
     // The graph is resolved separately from the config above because `lore graph` carries its
     // own root and scope resolution, and reading it twice is what keeps this line the same

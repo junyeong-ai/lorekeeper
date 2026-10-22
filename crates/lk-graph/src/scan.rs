@@ -36,6 +36,27 @@ pub struct ScannedPage {
     pub format: Option<String>,
     pub outgoing: Vec<Link>,
     pub revision: Option<String>,
+    pub read_error: Option<PageReadError>,
+}
+
+/// A failed content read, retained separately from the page's address and parsed metadata.
+#[derive(Debug, Clone, thiserror::Error)]
+#[error("{message}")]
+pub struct PageReadError {
+    pub kind: std::io::ErrorKind,
+    pub message: String,
+}
+
+impl ScannedPage {
+    pub fn require_readable(&self) -> Result<(), GraphError> {
+        match &self.read_error {
+            Some(error) => Err(GraphError::UnreadablePage {
+                path: self.path.clone(),
+                error: error.clone(),
+            }),
+            None => Ok(()),
+        }
+    }
 }
 
 /// One resolved link, carried as both of the things a consumer asks it for.
@@ -155,21 +176,26 @@ pub(crate) fn scan_vault_with_revisions(
                     parse_content(path, root, &raw),
                     Some(lk_core::concept::file_revision(&raw)),
                 ),
-                Err(error) => {
-                    tracing::warn!(path = %path.display(), error = %error, "unreadable page: id only");
-                    (
-                        ScannedPage {
-                            rss_evidence: false,
-                            revision: None,
-                            id: page_id(rel),
-                            path: rel.to_path_buf(),
-                            format: None,
-                            title: path.file_stem().and_then(|s| s.to_str()).unwrap_or("untitled").to_owned(),
-                            outgoing: Vec::new(),
-                        },
-                        None,
-                    )
-                }
+                Err(error) => (
+                    ScannedPage {
+                        read_error: Some(PageReadError {
+                            kind: error.kind(),
+                            message: error.to_string(),
+                        }),
+                        rss_evidence: false,
+                        revision: None,
+                        id: page_id(rel),
+                        path: rel.to_path_buf(),
+                        format: None,
+                        title: path
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("untitled")
+                            .to_owned(),
+                        outgoing: Vec::new(),
+                    },
+                    None,
+                ),
             };
             (page, (rel.to_path_buf(), revision))
         })
@@ -435,6 +461,7 @@ fn parse_content(path: &Path, root: &Path, raw: &str) -> ScannedPage {
         format,
         title,
         outgoing,
+        read_error: None,
     }
 }
 
@@ -773,12 +800,14 @@ mod tests {
     fn pure_existence_never_infers_case_aliases_or_respells_exact_addresses() {
         let pages = vec![
             ScannedPage {
+                read_error: None,
                 rss_evidence: false,
                 id: "wiki/lower".into(),
                 path: "wiki/lower.md".into(),
                 ..Default::default()
             },
             ScannedPage {
+                read_error: None,
                 rss_evidence: false,
                 id: "wiki/Lower".into(),
                 path: "wiki/Lower.md".into(),
@@ -914,12 +943,14 @@ mod tests {
         );
         let pages = vec![
             ScannedPage {
+                read_error: None,
                 rss_evidence: false,
                 id: page_id(Path::new("wiki/a-b.md")),
                 path: "wiki/a-b.md".into(),
                 ..Default::default()
             },
             ScannedPage {
+                read_error: None,
                 rss_evidence: false,
                 id: page_id(Path::new("wiki/a_b.md")),
                 path: "wiki/a_b.md".into(),
@@ -1047,6 +1078,7 @@ mod tests {
         std::fs::write(wiki.join("broken.md"), "---\nid: broken\ntitle: unclosed\n").unwrap();
 
         let pages = scan_vault(tmp.path(), false).unwrap();
+        assert!(pages.iter().all(|page| page.read_error.is_none()));
 
         let ids: Vec<&str> = pages.iter().map(|p| p.id.as_str()).collect();
         assert_eq!(ids, vec!["wiki/broken", "wiki/good"]);
@@ -1055,6 +1087,32 @@ mod tests {
             unparseable.outgoing.is_empty(),
             "a page whose body did not parse contributes no links"
         );
+    }
+
+    #[test]
+    fn a_failed_read_retains_its_address_and_same_read_diagnostic() {
+        let root = tempfile::tempdir().unwrap();
+        let path = PathBuf::from("wiki/documents/unreadable.md");
+        std::fs::create_dir_all(root.path().join(path.parent().unwrap())).unwrap();
+        std::fs::write(root.path().join(&path), [0xff]).unwrap();
+        let scanned = scan_vault_with_revisions(root.path(), false).unwrap();
+        let page = &scanned.pages[0];
+        assert_eq!(page.path, path);
+        assert_eq!(page.id, "wiki/documents/unreadable");
+        assert!(page.outgoing.is_empty());
+        assert!(page.revision.is_none());
+        assert_eq!(scanned.file_revisions[&path], None);
+        assert_eq!(
+            page.read_error.as_ref().unwrap().kind,
+            std::io::ErrorKind::InvalidData
+        );
+        assert!(
+            matches!(page.require_readable(), Err(GraphError::UnreadablePage { path: failed, .. }) if failed == path)
+        );
+        let existence =
+            VaultExistence::build_at(root.path(), &scanned.pages, &VaultDirs::default()).unwrap();
+        assert!(existence.is_resolvable("wiki/documents/unreadable.md"));
+        assert_eq!(std::fs::read(root.path().join(path)).unwrap(), [0xff]);
     }
 
     #[test]
@@ -1214,12 +1272,14 @@ mod tests {
 
         let pages = vec![
             ScannedPage {
+                read_error: None,
                 rss_evidence: false,
                 id: path_slug(Path::new(&composed)),
                 path: PathBuf::from(&composed),
                 ..ScannedPage::default()
             },
             ScannedPage {
+                read_error: None,
                 rss_evidence: false,
                 id: path_slug(Path::new(&decomposed)),
                 path: PathBuf::from(&decomposed),
@@ -1289,6 +1349,7 @@ mod tests {
     fn vault_existence_tracks_ids_and_linked() {
         let pages = vec![
             ScannedPage {
+                read_error: None,
                 rss_evidence: false,
                 id: "daily/team-slack/2026-05-22".to_owned(),
                 path: PathBuf::from("daily/team-slack/2026-05-22.md"),
@@ -1298,6 +1359,7 @@ mod tests {
                 revision: None,
             },
             ScannedPage {
+                read_error: None,
                 rss_evidence: false,
                 id: "wiki/concepts/confluence-cloud".to_owned(),
                 path: PathBuf::from("wiki/concepts/confluence-cloud.md"),
@@ -1512,18 +1574,21 @@ mod tests {
     fn two_files_at_one_address_are_reported() {
         let pages = vec![
             ScannedPage {
+                read_error: None,
                 rss_evidence: false,
                 id: "wiki/documents/a-b".to_owned(),
                 path: PathBuf::from("wiki/documents/A B.md"),
                 ..ScannedPage::default()
             },
             ScannedPage {
+                read_error: None,
                 rss_evidence: false,
                 id: "wiki/documents/a-b".to_owned(),
                 path: PathBuf::from("wiki/documents/a-b.md"),
                 ..ScannedPage::default()
             },
             ScannedPage {
+                read_error: None,
                 rss_evidence: false,
                 id: "wiki/documents/c".to_owned(),
                 path: PathBuf::from("wiki/documents/c.md"),

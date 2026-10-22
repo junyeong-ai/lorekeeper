@@ -240,6 +240,7 @@ mod tests {
     fn build_page(path: &str, outgoing: &[&str]) -> ScannedPage {
         let rel = PathBuf::from(path);
         ScannedPage {
+            read_error: None,
             rss_evidence: false,
             revision: Some("revision".into()),
             id: path_slug(&rel),

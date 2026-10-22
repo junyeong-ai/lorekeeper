@@ -212,7 +212,7 @@ fn lint_report(
         .map_err(|e| format!("{e}"))?;
 
     Ok(output::LintReport {
-        errors: Vec::new(),
+        errors: content_errors(&views.scanned, &views.existence),
         pages: g.node_count(),
         links: g.edge_count(),
         components: g.component_count(),
@@ -237,6 +237,15 @@ fn lint_report(
             unresolved_conflicts: concept_lint::find_unresolved_conflicts(&concept_pages),
         },
     })
+}
+
+fn content_errors(pages: &[scan::ScannedPage], existence: &scan::VaultExistence) -> Vec<String> {
+    pages
+        .iter()
+        .filter(|page| !existence.is_reserved(&page.id))
+        .filter_map(|page| page.require_readable().err())
+        .map(|error| error.to_string())
+        .collect()
 }
 
 /// The lint verdict for a vault, resolved and scanned from nothing but the caller's options.
@@ -278,6 +287,19 @@ async fn run_inner(
 
     let views = scan::VaultViews::resolve(&rc.root, &rc.graph, &rc.vault_dirs)
         .map_err(|e| format!("{e}"))?;
+    let required: &[scan::ScannedPage] = match &cmd {
+        GraphCommand::Hubs { .. }
+        | GraphCommand::Cluster { .. }
+        | GraphCommand::Export { .. }
+        | GraphCommand::SuggestLinks { .. } => &views.pages,
+        GraphCommand::Neighbors { .. } | GraphCommand::Broken => &views.link_sources,
+        GraphCommand::Orphans => &views.scanned,
+        _ => &[],
+    };
+    let errors = content_errors(required, &views.existence);
+    if !errors.is_empty() {
+        return Err(errors.join("; "));
+    }
     let g = graph::WikiGraph::build_with_existence(&views.pages, &views.existence, &rc.vault_dirs);
 
     let violated = match cmd {

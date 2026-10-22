@@ -246,6 +246,10 @@ pub(crate) struct AuditReport {
 }
 
 impl AuditReport {
+    pub(crate) fn errors(&self) -> u32 {
+        self.errors
+    }
+
     /// A claim a page makes that does not hold: a defect this tool wrote, or a section whose
     /// input nothing has answered. Counted apart from a credential, which is a string a SOURCE
     /// sent — summing them under one word would report a number that answers neither question.

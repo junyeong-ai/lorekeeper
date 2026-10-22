@@ -99,6 +99,7 @@ pub fn record_discovery(
 ) -> Result<(), GraphError> {
     let root = session.root();
     let (before, mut receipts) = load(root)?;
+    require_readable_subjects(pages, dirs, Some(&BTreeSet::from([request.path.as_str()])))?;
     if !subject_kinds(pages, dirs).contains_key(Path::new(&request.path)) {
         return Err(error("discovery requires an exact audit subject"));
     }
@@ -1040,6 +1041,30 @@ fn review_dependency(
     Ok(result)
 }
 
+fn is_subject_address(path: &Path, dirs: &VaultDirs) -> bool {
+    crate::scan::is_concept_page(path, dirs)
+        || (path.extension().is_some_and(|extension| extension == "md")
+            && crate::scan::under(
+                &lk_core::vault_path::path_slug(path),
+                &lk_core::vault_path::documents_dir(dirs),
+            ))
+}
+
+fn require_readable_subjects(
+    pages: &[ScannedPage],
+    dirs: &VaultDirs,
+    selection: Option<&BTreeSet<&str>>,
+) -> Result<(), GraphError> {
+    for page in pages.iter().filter(|page| {
+        is_subject_address(&page.path, dirs)
+            && selection
+                .is_none_or(|selection| selection.contains(page.path.to_string_lossy().as_ref()))
+    }) {
+        page.require_readable()?;
+    }
+    Ok(())
+}
+
 fn subject_kinds(pages: &[ScannedPage], dirs: &VaultDirs) -> BTreeMap<PathBuf, AuditSubjectKind> {
     let documents = lk_core::vault_path::documents_dir(dirs);
     pages
@@ -1081,6 +1106,7 @@ fn inputs_selected(
     receipts: &Receipts,
     selection: Option<&BTreeSet<&str>>,
 ) -> Result<Vec<AuditCandidate>, GraphError> {
+    require_readable_subjects(pages, dirs, selection)?;
     let mut review_index = ReviewDependencyIndex::load(root, dirs)?;
     let evidence = crate::backlinks::concept_evidence(pages, root, dirs)?;
     let kinds = subject_kinds(pages, dirs);
@@ -1127,6 +1153,9 @@ fn inputs_selected(
             .filter_map(|link| existence.reached(link))
             .filter_map(|id| by_id.get(id))
         {
+            if is_subject_address(&related.path, dirs) {
+                related.require_readable()?;
+            }
             let is_context = match kind {
                 AuditSubjectKind::Concept => evidence.contains_key(&related.path),
                 AuditSubjectKind::Document => kinds.contains_key(&related.path),

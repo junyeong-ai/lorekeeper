@@ -21,6 +21,12 @@ use std::path::PathBuf;
 
 #[derive(Debug, thiserror::Error)]
 pub enum GraphError {
+    #[error("failed to read page {path}: {error}")]
+    UnreadablePage {
+        path: PathBuf,
+        #[source]
+        error: scan::PageReadError,
+    },
     #[error("cannot reconcile evidence while source page is unreadable: {0}")]
     UnreadableSource(PathBuf),
     #[error("scan directory not found: {0}")]
