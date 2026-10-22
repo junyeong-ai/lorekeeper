@@ -308,7 +308,7 @@ fn disabled_extraction_retains_document_and_rss_evidence_until_reactivated() {
         let temp = tempfile::TempDir::new().unwrap();
         let vault = temp.path().join("vault");
         let config = temp.path().join("config.yaml");
-        let at = jiff::Timestamp::now() - jiff::SignedDuration::from_hours(1);
+        let at: jiff::Timestamp = "2020-01-02T12:00:00Z".parse().unwrap();
         let date = at.to_zoned(jiff::tz::TimeZone::UTC).date().to_string();
         let server = LocalServer::new(move |url| {
             assert_eq!(url.path(), "/feed.xml");
@@ -326,11 +326,14 @@ fn disabled_extraction_retains_document_and_rss_evidence_until_reactivated() {
             )
         } else {
             std::fs::create_dir_all(vault.join("inbox")).unwrap();
-            std::fs::write(
-                vault.join("inbox/observation.md"),
-                "# Observation\n\nRecorded evidence.\n",
-            )
-            .unwrap();
+            let entry = vault.join("inbox/observation.md");
+            std::fs::write(&entry, "# Observation\n\nRecorded evidence.\n").unwrap();
+            std::fs::File::open(&entry)
+                .unwrap()
+                .set_modified(
+                    std::time::UNIX_EPOCH + std::time::Duration::from_secs(at.as_second() as u64),
+                )
+                .unwrap();
             "inbox_dir: inbox\n      archive_after_ingest: false".into()
         };
         let write_config = |policy| {
