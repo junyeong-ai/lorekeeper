@@ -126,6 +126,7 @@ impl Acquisition {
             return Ok(());
         }
         self.require_inbox(source, context)?;
+        let ownership = load_ownership(context).await?;
         let mut decoders = BTreeMap::new();
         for manifest in &self.manifests {
             let receipt = self
@@ -149,6 +150,8 @@ impl Acquisition {
                 .map_err(error)?
                 || !target_current(
                     &context.vault_root,
+                    &context.vault_dirs,
+                    &ownership,
                     self.state.inbox(),
                     &manifest.entry,
                     receipt,
@@ -204,7 +207,7 @@ impl Acquisition {
         }
     }
 
-    pub fn publication_plan(
+    pub async fn publication_plan(
         &mut self,
         root: &Path,
         result: &lk_pipeline::IngestResult,
@@ -218,6 +221,7 @@ impl Acquisition {
             ));
         }
         let inbox = self.state.inbox().to_owned();
+        let ownership = load_ownership(context).await?;
         let mut plan = lk_vault::MutationPlan::default();
         plan.require_unchanged(&self.marker_path, self.marker.clone());
         let entries = lk_source::manual_entry_names(&source.params, context)?;
@@ -236,7 +240,15 @@ impl Acquisition {
                     "verified publication or original changed during acquisition",
                 ));
             }
-            let Some(raw) = current_target(root, &inbox, &manifest.entry, receipt)? else {
+            let Some(raw) = current_target(
+                root,
+                &context.vault_dirs,
+                &ownership,
+                &inbox,
+                &manifest.entry,
+                receipt,
+            )?
+            else {
                 continue;
             };
             if !entries.contains(&manifest.entry)
@@ -267,6 +279,14 @@ impl Acquisition {
             };
             if Path::new(entry).components().count() != 1 {
                 return Err(error("rendered manual document is not a direct entry"));
+            }
+            let identity = lk_pipeline::DocumentIdentity::from_page(&page.frontmatter)
+                .map_err(error)?
+                .ok_or_else(|| error("rendered manual document has no source identity"))?;
+            if let Some(owner) = ownership.resolve(&identity).map_err(error)?
+                && !same_target(root, &context.vault_dirs, owner, output.path.as_ref())?
+            {
+                return Err(error("document ownership changed before publication"));
             }
             let reference: ManualOriginalReference = serde_json::from_value(
                 page.frontmatter
@@ -337,18 +357,32 @@ impl Acquisition {
 
 fn current_target(
     root: &Path,
+    dirs: &lk_core::config::VaultDirs,
+    ownership: &lk_pipeline::DocumentOwnership,
     inbox: &Path,
     entry: &str,
     receipt: &lk_source::ManualPublishedInput,
 ) -> Result<Option<String>, SourceError> {
+    let expected = inbox.join(entry);
+    let identity = lk_pipeline::DocumentIdentity::from_fields(None, expected.to_str(), None)
+        .map_err(error)?
+        .ok_or_else(|| error("manual input has no source identity"))?;
+    let Some(owner) = ownership.resolve(&identity).map_err(error)? else {
+        return Ok(None);
+    };
+    if !same_target(root, dirs, owner, Path::new(&receipt.target))? {
+        return Ok(None);
+    }
     let Some(raw) = read(root, Path::new(&receipt.target))? else {
         return Ok(None);
     };
     let page = lk_vault::parse_page(&raw).map_err(error)?;
-    let expected = inbox.join(entry);
     let fields = &page.frontmatter;
     let valid = fields.get("type").and_then(|value| value.as_str()) == Some("document")
-        && fields.get("source_file").and_then(|value| value.as_str()) == expected.to_str()
+        && lk_pipeline::DocumentIdentity::from_page(fields)
+            .map_err(error)?
+            .as_ref()
+            == Some(&identity)
         && fields
             .get("source_record")
             .and_then(|value| value.get(MANUAL_ORIGINAL_FIELD))
@@ -358,11 +392,35 @@ fn current_target(
 
 fn target_current(
     root: &Path,
+    dirs: &lk_core::config::VaultDirs,
+    ownership: &lk_pipeline::DocumentOwnership,
     inbox: &Path,
     entry: &str,
     receipt: &lk_source::ManualPublishedInput,
 ) -> Result<bool, SourceError> {
-    Ok(current_target(root, inbox, entry, receipt)?.is_some())
+    Ok(current_target(root, dirs, ownership, inbox, entry, receipt)?.is_some())
+}
+
+async fn load_ownership(
+    context: &ExtractContext,
+) -> Result<lk_pipeline::DocumentOwnership, SourceError> {
+    lk_pipeline::DocumentOwnership::load(
+        &lk_vault::FsVault::new(&context.vault_root),
+        &context.vault_dirs,
+    )
+    .await
+    .map_err(error)
+}
+
+fn same_target(
+    root: &Path,
+    dirs: &lk_core::config::VaultDirs,
+    owner: &str,
+    target: &Path,
+) -> Result<bool, SourceError> {
+    let owner = lk_core::vault_path::VaultPath::document(dirs, owner);
+    Ok(lk_vault::page_path(root, owner.as_ref()).map_err(error)?
+        == lk_vault::page_path(root, target).map_err(error)?)
 }
 
 fn state_paths(id: &str, inbox: &Path) -> (PathBuf, PathBuf, String) {
@@ -439,6 +497,7 @@ pub(super) async fn acquire(
     let mut decoders = BTreeMap::new();
     let mut verified = BTreeSet::new();
     let mut manifests = Vec::new();
+    let ownership = load_ownership(context).await?;
     for (entry, receipt) in state
         .published()
         .iter()
@@ -458,7 +517,14 @@ pub(super) async fn acquire(
         if !pipeline
             .document_recipe_current(id, source, &decoder, &recipe)
             .map_err(error)?
-            || !target_current(root, &inbox, entry, receipt)?
+            || !target_current(
+                root,
+                &context.vault_dirs,
+                &ownership,
+                &inbox,
+                entry,
+                receipt,
+            )?
         {
             continue;
         }
@@ -667,6 +733,141 @@ mod tests {
                 dry_run: false,
             }
         }
+
+        async fn publish(&mut self) {
+            let capture = self.capture(false).await;
+            let mut admission = capture.manual.unwrap();
+            let options = self.options();
+            let result = self
+                .pipeline
+                .plan(
+                    "notes",
+                    &self.config.sources["notes"],
+                    capture.observation.items,
+                    &options,
+                )
+                .await
+                .unwrap();
+            let session = lk_vault::MutationSession::acquire(&self.context.vault_root).unwrap();
+            for original in &capture.originals {
+                lk_vault::publish_manual_original(&session, original).unwrap();
+            }
+            let plan = admission
+                .publication_plan(
+                    session.root(),
+                    &result,
+                    &self.config.sources["notes"],
+                    &self.context,
+                )
+                .await
+                .unwrap();
+            let mut publication =
+                super::super::super::publication::Publication::new(&session, self.llm.clone());
+            publication
+                .publish_with_plan(&result.document_pages, plan)
+                .await
+                .unwrap();
+            publication.finish().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn duplicate_owner_after_capture_blocks_publication_and_retirement() {
+        let mut fixture = Fixture::build(&["a"]);
+        fixture.config.sources.get_mut("notes").unwrap().params["archive_after_ingest"] =
+            true.into();
+        fixture.publish().await;
+        let capture = fixture.capture(false).await;
+        assert!(capture.observation.items.is_empty());
+        let mut admission = capture.manual.unwrap();
+        let options = fixture.options();
+        let result = fixture
+            .pipeline
+            .plan(
+                "notes",
+                &fixture.config.sources["notes"],
+                Vec::new(),
+                &options,
+            )
+            .await
+            .unwrap();
+        let root = &fixture.context.vault_root;
+        let owner = root.join("wiki/documents/a.md");
+        let bytes = std::fs::read(&owner).unwrap();
+        std::fs::write(root.join("wiki/documents/duplicate.md"), &bytes).unwrap();
+        let before = read(root, &admission.path).unwrap();
+        let error = admission
+            .publication_plan(
+                root,
+                &result,
+                &fixture.config.sources["notes"],
+                &fixture.context,
+            )
+            .await
+            .err()
+            .expect("duplicate ownership must refuse");
+        assert!(error.to_string().contains("claimed by multiple pages"));
+        let error = admission
+            .retire(
+                &fixture.config.sources["notes"],
+                &fixture.context,
+                &fixture.pipeline,
+                &[],
+                "notes",
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("claimed by multiple pages"));
+        assert_eq!(read(root, &admission.path).unwrap(), before);
+        assert_eq!(std::fs::read(owner).unwrap(), bytes);
+        assert!(root.join("inbox/a.md").exists());
+    }
+
+    #[tokio::test]
+    async fn newly_established_owner_after_planning_blocks_a_second_publication() {
+        let mut fixture = Fixture::build(&["a"]);
+        let capture = fixture.capture(false).await;
+        let mut admission = capture.manual.unwrap();
+        let options = fixture.options();
+        let result = fixture
+            .pipeline
+            .plan(
+                "notes",
+                &fixture.config.sources["notes"],
+                capture.observation.items,
+                &options,
+            )
+            .await
+            .unwrap();
+        let session = lk_vault::MutationSession::acquire(&fixture.context.vault_root).unwrap();
+        for original in &capture.originals {
+            lk_vault::publish_manual_original(&session, original).unwrap();
+        }
+        let owner = session.root().join("wiki/documents/other.md");
+        std::fs::create_dir_all(owner.parent().unwrap()).unwrap();
+        std::fs::write(&owner, &result.document_pages[0].content).unwrap();
+        let before = read(session.root(), &admission.path).unwrap();
+        let error = admission
+            .publication_plan(
+                session.root(),
+                &result,
+                &fixture.config.sources["notes"],
+                &fixture.context,
+            )
+            .await
+            .err()
+            .expect("changed ownership must refuse");
+        assert!(
+            error
+                .to_string()
+                .contains("ownership changed before publication")
+        );
+        assert_eq!(read(session.root(), &admission.path).unwrap(), before);
+        assert!(!session.root().join("wiki/documents/a.md").exists());
+        assert_eq!(
+            std::fs::read_to_string(owner).unwrap(),
+            result.document_pages[0].content
+        );
     }
 
     #[tokio::test]
@@ -700,6 +901,7 @@ mod tests {
                     &fixture.config.sources["notes"],
                     &fixture.context
                 )
+                .await
                 .is_err()
         );
         let second = second.manual.unwrap();
@@ -742,6 +944,7 @@ mod tests {
                 &fixture.config.sources["notes"],
                 &fixture.context,
             )
+            .await
             .unwrap();
         let marker = std::fs::read(session.root().join(&admission.marker_path)).unwrap();
         std::fs::remove_file(session.root().join(&admission.marker_path)).unwrap();
@@ -775,6 +978,7 @@ mod tests {
                 &fixture.config.sources["notes"],
                 &fixture.context,
             )
+            .await
             .unwrap();
         let path = session.root().join(result.document_pages[0].path.as_ref());
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -866,6 +1070,7 @@ mod tests {
                     &fixture.config.sources["notes"],
                     &fixture.context,
                 )
+                .await
                 .unwrap();
             let mut publication =
                 super::super::super::publication::Publication::new(&session, fixture.llm.clone());
@@ -929,6 +1134,7 @@ mod tests {
                     &fixture.config.sources["notes"],
                     &fixture.context
                 )
+                .await
                 .is_err()
         );
         assert_eq!(read(root, &admission.path).unwrap(), before);

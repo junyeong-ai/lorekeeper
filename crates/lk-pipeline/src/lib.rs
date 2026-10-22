@@ -13,6 +13,7 @@ mod work_log;
 
 pub use concept_draft::RefusedAlias;
 pub use context::PipelineContext;
+pub use document_identity::{DocumentIdentity, DocumentOwnership};
 pub use document_recipe::{DocumentProcessingRecipe, DocumentRenderRecipe};
 pub use normalize::normalize_events;
 pub use render::RenderResult;
@@ -32,7 +33,6 @@ use lk_core::event::{Event, RawItem};
 use lk_vault::{FsVault, VaultStore};
 
 use concept_draft::{ConceptDrafts, Grounding};
-use document_identity::DocumentIdentity;
 
 #[derive(Debug, Error)]
 pub enum PipelineError {
@@ -135,7 +135,7 @@ pub struct Pipeline {
     /// neither sees the other's page on disk. Run-level reservation makes the later one
     /// disambiguate by its own identity instead of silently overwriting the earlier page.
     document_slugs: std::collections::HashSet<String>,
-    document_addresses: Option<BTreeMap<DocumentIdentity, Vec<String>>>,
+    document_addresses: Option<DocumentOwnership>,
     input_budgets: PlanningInputBudgets,
 }
 
@@ -1019,37 +1019,8 @@ impl Pipeline {
         if self.document_addresses.is_some() {
             return Ok(());
         }
-        let mut addresses: BTreeMap<DocumentIdentity, Vec<String>> = BTreeMap::new();
-        for path in self
-            .reader
-            .list_markdown_recursive(&lk_core::vault_path::documents_dir(&self.ctx.dirs))
-            .await?
-        {
-            let metadata = self.reader.read_frontmatter(&path).await?.ok_or_else(|| {
-                PipelineError::Render(format!(
-                    "document disappeared during address lookup: {}",
-                    path.display()
-                ))
-            })?;
-            if let Some(identity) = DocumentIdentity::from_page(&metadata)? {
-                let address = path
-                    .strip_prefix(lk_core::vault_path::documents_dir(&self.ctx.dirs))
-                    .map_err(|error| PipelineError::Render(error.to_string()))?
-                    .with_extension("");
-                let slug = address.to_str().ok_or_else(|| {
-                    PipelineError::Render(format!(
-                        "document address is not UTF-8: {}",
-                        path.display()
-                    ))
-                })?;
-                // Vault addresses use slash separators on every platform.
-                addresses
-                    .entry(identity)
-                    .or_default()
-                    .push(slug.replace(std::path::MAIN_SEPARATOR, "/"));
-            }
-        }
-        self.document_addresses = Some(addresses);
+        self.document_addresses =
+            Some(DocumentOwnership::load(self.reader.as_ref(), &self.ctx.dirs).await?);
         Ok(())
     }
 
@@ -1225,23 +1196,18 @@ impl Pipeline {
                 ));
             }
 
-            let established = match identity
+            let established = identity
                 .as_ref()
-                .and_then(|identity| self.document_addresses.as_ref()?.get(identity))
-            {
-                Some(addresses) if addresses.len() == 1 => Some(addresses[0].clone()),
-                Some(addresses) => {
-                    return Err(PipelineError::Render(format!(
-                        "document source {} is claimed by multiple pages: {}",
-                        identity
-                            .as_ref()
-                            .map(ToString::to_string)
-                            .unwrap_or_default(),
-                        addresses.join(", ")
-                    )));
-                }
-                None => adopted.clone(),
-            };
+                .map(|identity| {
+                    self.document_addresses
+                        .as_ref()
+                        .expect("document addresses loaded")
+                        .resolve(identity)
+                })
+                .transpose()?
+                .flatten()
+                .map(str::to_owned)
+                .or_else(|| adopted.clone());
             let base_slug = if let Some(address) = established {
                 address
             } else if let Some(slug) = lk_core::concept::slugify(&event.title).or_else(|| {

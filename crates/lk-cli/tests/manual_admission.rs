@@ -90,6 +90,120 @@ fn retained_entries_drain_bounded_turns_and_unchanged_receipts_do_not_republish(
 }
 
 #[test]
+fn receipt_reuse_refuses_duplicate_owners_without_retiring_or_rewriting_inputs() {
+    for archive in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let config = setup(root.path(), 2, archive);
+        let original = "# alpha\n\nExact original.\n";
+        note(root.path(), "alpha.md", original);
+        assert!(run(&config, false).status.success());
+        let owner = root.path().join("vault/wiki/documents/alpha.md");
+        let duplicate = owner.with_file_name("duplicate.md");
+        let page = std::fs::read(&owner).unwrap();
+        std::fs::write(&duplicate, &page).unwrap();
+        for body in [original, "# alpha\n\nChanged original.\n"] {
+            note(root.path(), "alpha.md", body);
+            for preview in [true, false] {
+                let before = std::fs::read(state_path(root.path())).unwrap();
+                let output = run(&config, preview);
+                assert!(!output.status.success(), "{}", stderr(&output));
+                assert!(
+                    stderr(&output).contains("claimed by multiple pages"),
+                    "{}",
+                    stderr(&output)
+                );
+                assert_eq!(std::fs::read(&owner).unwrap(), page);
+                assert_eq!(std::fs::read(&duplicate).unwrap(), page);
+                assert_eq!(std::fs::read(state_path(root.path())).unwrap(), before);
+                assert_eq!(
+                    std::fs::read_to_string(root.path().join("vault/inbox/alpha.md")).unwrap(),
+                    body
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn foreign_structured_owner_invalidates_receipt_without_overwriting_that_page() {
+    let root = tempfile::tempdir().unwrap();
+    let config = setup(root.path(), 2, true);
+    let original = "# alpha\n\nExact original.\n";
+    note(root.path(), "alpha.md", original);
+    assert!(run(&config, false).status.success());
+    let owner = root.path().join("vault/wiki/documents/alpha.md");
+    let page = std::fs::read_to_string(&owner).unwrap();
+    let foreign = page.replacen(
+        "---\n",
+        "---\nsource_identity: {repository: elsewhere, document: another}\n",
+        1,
+    );
+    std::fs::write(&owner, &foreign).unwrap();
+    note(root.path(), "alpha.md", original);
+    let output = run(&config, false);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(stderr(&output).contains("0 verified_published; 1 attempted"));
+    assert_eq!(std::fs::read_to_string(&owner).unwrap(), foreign);
+    let target = state(root.path())["published"]["alpha.md"]["target"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_ne!(target, "wiki/documents/alpha.md");
+    assert!(root.path().join("vault").join(target).exists());
+    assert!(!root.path().join("vault/inbox/alpha.md").exists());
+}
+
+#[test]
+fn invalid_structured_identity_never_falls_back_to_a_location_receipt() {
+    let root = tempfile::tempdir().unwrap();
+    let config = setup(root.path(), 2, false);
+    note(root.path(), "alpha.md", "# alpha\n\nSource.\n");
+    assert!(run(&config, false).status.success());
+    let owner = root.path().join("vault/wiki/documents/alpha.md");
+    let page = std::fs::read_to_string(&owner).unwrap().replacen(
+        "---\n",
+        "---\nsource_identity: {repository: elsewhere}\n",
+        1,
+    );
+    std::fs::write(&owner, &page).unwrap();
+    let before = std::fs::read(state_path(root.path())).unwrap();
+    for preview in [true, false] {
+        let refused = run(&config, preview);
+        assert!(!refused.status.success(), "{}", stderr(&refused));
+        assert_eq!(std::fs::read_to_string(&owner).unwrap(), page);
+        assert_eq!(std::fs::read(state_path(root.path())).unwrap(), before);
+        assert!(root.path().join("vault/inbox/alpha.md").exists());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn receipt_ownership_preserves_nested_directory_aliases_and_refuses_hardlink_owners() {
+    let root = tempfile::tempdir().unwrap();
+    let config = setup(root.path(), 2, false);
+    note(root.path(), "alpha.md", "# alpha\n\nSource.\n");
+    assert!(run(&config, false).status.success());
+    let documents = root.path().join("vault/wiki/documents");
+    let nested = documents.join("nested");
+    std::fs::create_dir(&nested).unwrap();
+    let owner = nested.join("alpha.md");
+    std::fs::rename(documents.join("alpha.md"), &owner).unwrap();
+    assert!(run(&config, false).status.success());
+    std::os::unix::fs::symlink(&nested, documents.join("alias")).unwrap();
+    let before = std::fs::read(&owner).unwrap();
+    let reused = run(&config, false);
+    assert!(reused.status.success(), "{}", stderr(&reused));
+    assert!(stderr(&reused).contains("1 verified_published; 0 attempted"));
+    assert_eq!(std::fs::read(&owner).unwrap(), before);
+    std::fs::hard_link(&owner, documents.join("hardlink.md")).unwrap();
+    let refused = run(&config, false);
+    assert!(!refused.status.success(), "{}", stderr(&refused));
+    assert!(stderr(&refused).contains("claimed by multiple pages"));
+    assert_eq!(std::fs::read(&owner).unwrap(), before);
+    assert!(root.path().join("vault/inbox/alpha.md").exists());
+}
+
+#[test]
 fn bootstrap_preview_and_lost_or_corrupt_known_state_are_distinct() {
     let root = tempfile::tempdir().unwrap();
     let config = setup(root.path(), 1, false);

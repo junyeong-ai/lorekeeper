@@ -62,6 +62,8 @@ source publication instead of dropping evidence. New disabled pages omit that se
   source_file/source_url fallback. Load all document descendants once and retain
   nested addresses. Unique owner keeps its address after title changes; multiple
   owners or overlapping document observations refuse before rendering.
+  `DocumentOwnership` shares this inventory and unique-owner resolution with manual
+  publication receipts; never replace structured identity with a raw location check.
 - Resolve established ownership and verified legacy adoption before deriving a new
   address. New addresses retain title/source_file slugs; when neither yields a slug,
   a structured source identity supplies a deterministic hashed address through the

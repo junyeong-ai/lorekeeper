@@ -778,20 +778,15 @@ async fn run_with_identity(
         for out in outputs.clone() {
             report_discards(out, false);
         }
-        let receipt_plan = p
-            .manual
-            .as_mut()
-            .map(|manual| {
-                manual.publication_plan(
-                    &vault_root,
-                    &p.result,
-                    &config.sources[&p.id],
-                    &extract_ctx,
-                )
-            })
-            .transpose();
+        let receipt_plan = if let Some(manual) = &mut p.manual {
+            manual
+                .publication_plan(&vault_root, &p.result, &config.sources[&p.id], &extract_ctx)
+                .await
+        } else {
+            Ok(lk_vault::MutationPlan::default())
+        };
         let receipt_plan = match receipt_plan {
-            Ok(plan) => plan.unwrap_or_default(),
+            Ok(plan) => plan,
             Err(error) => {
                 eprintln!("  ✗ manual publication receipt {}: {error}", p.id);
                 any_write_failed = true;

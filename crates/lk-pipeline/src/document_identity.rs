@@ -1,12 +1,73 @@
+use std::collections::BTreeMap;
+
+use lk_core::config::VaultDirs;
 use lk_core::frontmatter::Frontmatter;
 use lk_core::source_identity::SourceIdentity;
+use lk_vault::VaultStore;
 
 use crate::PipelineError;
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum DocumentIdentity {
+pub enum DocumentIdentity {
     Stable(SourceIdentity),
     Location(String),
+}
+
+#[derive(Default)]
+pub struct DocumentOwnership {
+    addresses: BTreeMap<DocumentIdentity, Vec<String>>,
+}
+
+impl DocumentOwnership {
+    pub async fn load(reader: &dyn VaultStore, dirs: &VaultDirs) -> Result<Self, PipelineError> {
+        let directory = lk_core::vault_path::documents_dir(dirs);
+        let mut ownership = Self::default();
+        for path in reader.list_markdown_recursive(&directory).await? {
+            let metadata = reader.read_frontmatter(&path).await?.ok_or_else(|| {
+                PipelineError::Render(format!(
+                    "document disappeared during address lookup: {}",
+                    path.display()
+                ))
+            })?;
+            if let Some(identity) = DocumentIdentity::from_page(&metadata)? {
+                let address = path
+                    .strip_prefix(&directory)
+                    .map_err(|error| PipelineError::Render(error.to_string()))?
+                    .with_extension("");
+                let slug = address.to_str().ok_or_else(|| {
+                    PipelineError::Render(format!(
+                        "document address is not UTF-8: {}",
+                        path.display()
+                    ))
+                })?;
+                ownership
+                    .addresses
+                    .entry(identity)
+                    .or_default()
+                    .push(slug.replace(std::path::MAIN_SEPARATOR, "/"));
+            }
+        }
+        Ok(ownership)
+    }
+
+    pub fn resolve(&self, identity: &DocumentIdentity) -> Result<Option<&str>, PipelineError> {
+        match self.get(identity) {
+            Some(addresses) if addresses.len() == 1 => Ok(Some(&addresses[0])),
+            Some(addresses) => Err(PipelineError::Render(format!(
+                "document source {identity} is claimed by multiple pages: {}",
+                addresses.join(", ")
+            ))),
+            None => Ok(None),
+        }
+    }
+
+    pub(crate) fn get(&self, identity: &DocumentIdentity) -> Option<&Vec<String>> {
+        self.addresses.get(identity)
+    }
+
+    pub(crate) fn insert(&mut self, identity: DocumentIdentity, addresses: Vec<String>) {
+        self.addresses.insert(identity, addresses);
+    }
 }
 
 impl DocumentIdentity {
