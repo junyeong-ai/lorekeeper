@@ -137,6 +137,8 @@ Use parser/token-state behavior, not regex replacement of arbitrary markup.
   empty, not positional duplication. Preserve spacing between link text and target.
 - ADF code and source Markdown retain literal whitespace. Converter-generated
   block separators must not be normalized by rewriting the complete document.
+- HTML attribute fallbacks are literal text; image alt/title remain image values.
+  Serialize them through shared Markdown events, preserving already-rendered children.
 - Do not claim fully lossless HTML normalization: the CDATA prepass has a documented
   raw-text interaction. Change that seam deliberately with a reproducing fixture,
   not an unrelated broad sanitizer rewrite.

@@ -127,7 +127,7 @@ pub fn md_link(text: &str, dest: &str) -> String {
 /// Keep an encoded URI's CommonMark value intact when embedding it in bare syntax.
 /// Character references keep whitespace/control values out of the source grammar;
 /// unlike path encoding, they preserve percent escapes and fragment separators.
-fn escape_destination(destination: &str) -> String {
+pub(crate) fn escape_destination(destination: &str) -> String {
     let mut escaped = String::with_capacity(destination.len());
     for character in destination.chars() {
         match character {

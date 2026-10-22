@@ -73,6 +73,15 @@ fn html_link(
     Some(rendered.into())
 }
 
+fn serialize_inline(events: &[pulldown_cmark::Event<'_>]) -> String {
+    lk_core::markdown::serialize(
+        events,
+        lk_core::markdown::OPTIONS,
+        pulldown_cmark_to_cmark::Options::default(),
+    )
+    .expect("serializing supported inline events into a String cannot fail")
+}
+
 /// GFM has one column-header row and no spanning cells. Read direct cells together,
 /// in DOM order, retaining empty cells and row labels. Structures
 /// GFM cannot express stay HTML instead of being flattened into a different table.
@@ -398,7 +407,7 @@ fn attribute_borne_text(
         .and_then(|attr| element.attrs.iter().find(|a| &*a.name.local == attr))
         .map(|a| a.value.to_string())
         .unwrap_or_default();
-    Some(value.into())
+    Some(serialize_inline(&[pulldown_cmark::Event::Text(value.into())]).into())
 }
 
 /// A link may carry BOTH halves of a reference: the label of the page it points at and the
@@ -886,26 +895,25 @@ fn img_without_data_uris(
     let src = attr("src")?;
     let alt = attr("alt").unwrap_or_default();
 
-    // A data: URI degrades to its alt text as PLAIN body content — not inside
-    // `![…]` — so it is emitted verbatim. Markdown escaping here would surface as
-    // literal backslashes in the rendered text.
+    use pulldown_cmark::{Event, LinkType, Tag, TagEnd};
+
     if is_data_uri(src) {
-        return Some(alt.to_string().into());
+        return Some(serialize_inline(&[Event::Text(alt.into())]).into());
     }
 
-    // A fetchable image: emit `![alt](src "title")`. Escape only what the syntax
-    // demands — parens in the URL, a space-bearing URL wrapped in `<…>`, and the
-    // `"`-delimited title's own quotes.
-    let src = src.replace('(', "\\(").replace(')', "\\)");
-    let (open, close) = if src.contains(' ') {
-        ("<", ">")
-    } else {
-        ("", "")
-    };
-    let title = attr("title").map_or(String::new(), |t| {
-        format!(" \"{}\"", t.replace('"', "\\\""))
-    });
-    Some(format!("![{alt}]({open}{src}{title}{close})").into())
+    Some(
+        serialize_inline(&[
+            Event::Start(Tag::Image {
+                link_type: LinkType::Inline,
+                dest_url: src.into(),
+                title: attr("title").unwrap_or_default().into(),
+                id: "".into(),
+            }),
+            Event::Text(alt.into()),
+            Event::End(TagEnd::Image),
+        ])
+        .into(),
+    )
 }
 
 /// Extract the readable article core from a full HTML page and convert it to
@@ -2362,12 +2370,150 @@ mod tests {
     }
 
     #[test]
+    fn html_attribute_scalars_cannot_introduce_markdown_structure() {
+        use pulldown_cmark::{Event, Tag, TagEnd};
+
+        let literal = "[Caption](../../wiki/concepts/target.md) | [표]";
+        let fixtures = [
+            format!(r#"<img src="data:image/png;base64,AAAA" alt="{literal}">"#),
+            format!(r#"<ri:page ri:content-title="{literal}"/>"#),
+            format!(r#"<ri:attachment ri:filename="{literal}"/>"#),
+            format!(r#"<ri:url ri:value="{literal}"/>"#),
+            format!(r#"<ac:emoticon ac:emoji-fallback="{literal}"/>"#),
+            format!(r#"<time datetime="{literal}"></time>"#),
+        ];
+        for html in fixtures {
+            for input in [
+                html.clone(),
+                format!("<table><tr><th>Value</th></tr><tr><td>{html}</td></tr></table>"),
+            ] {
+                let markdown = html_to_markdown(&input);
+                let mut text = String::new();
+                for event in pulldown_cmark::Parser::new_ext(&markdown, lk_core::markdown::OPTIONS)
+                {
+                    match event {
+                        Event::Text(value) => text.push_str(&value),
+                        Event::Start(
+                            Tag::Paragraph
+                            | Tag::Table(_)
+                            | Tag::TableHead
+                            | Tag::TableRow
+                            | Tag::TableCell,
+                        )
+                        | Event::End(
+                            TagEnd::Paragraph
+                            | TagEnd::Table
+                            | TagEnd::TableHead
+                            | TagEnd::TableRow
+                            | TagEnd::TableCell,
+                        ) => {}
+                        other => panic!("attribute introduced {other:?}: {markdown}"),
+                    }
+                }
+                assert!(text.ends_with(literal), "{markdown}");
+            }
+        }
+        let formatted =
+            html_to_markdown("<time datetime=\"2026-10-22\"><strong>Thursday</strong></time>");
+        assert_eq!(formatted, "**Thursday**");
+    }
+
+    #[test]
+    fn html_image_attributes_round_trip_as_values() {
+        use pulldown_cmark::{Event, Tag};
+
+        let fixtures = [
+            (
+                r#"<img src="https://remote.example/image.png" alt="first&#10;&#10;[Caption]" title="first&#10;&#10;last">"#,
+                "https://remote.example/image.png",
+                "first\n\n[Caption]",
+                "first\n\nlast",
+            ),
+            (
+                r#"<img src="https://remote.example/a&#9;b.png" alt="Caption" title="first&#10;&#10;last">"#,
+                "https://remote.example/a\tb.png",
+                "Caption",
+                "first\n\nlast",
+            ),
+            (
+                r#"<img src="https://remote.example/image.png" alt="x](https://remote.example/x.png) [Caption](../../wiki/concepts/target.md) ![x">"#,
+                "https://remote.example/image.png",
+                "x](https://remote.example/x.png) [Caption](../../wiki/concepts/target.md) ![x",
+                "",
+            ),
+            (
+                r#"<img src="https://remote.example/image.png" alt="Caption" title="first&#10;&#10;[Caption](../../wiki/concepts/target.md)&#10;&#10;last">"#,
+                "https://remote.example/image.png",
+                "Caption",
+                "first\n\n[Caption](../../wiki/concepts/target.md)\n\nlast",
+            ),
+            (
+                r#"<img src='https://remote.example/a (1).png?x=1&amp;y=2' alt='[한글] &amp; &lt;text&gt;' title='he said "hi"\there'>"#,
+                "https://remote.example/a (1).png?x=1&y=2",
+                "[한글] & <text>",
+                "he said \"hi\"\\there",
+            ),
+        ];
+        for (html, destination, alt, title) in fixtures {
+            let markdown = html_to_markdown(html);
+            let mut images = Vec::new();
+            let mut text = String::new();
+            for event in pulldown_cmark::Parser::new_ext(&markdown, lk_core::markdown::OPTIONS) {
+                match event {
+                    Event::Start(Tag::Image {
+                        dest_url, title, ..
+                    }) => {
+                        images.push((dest_url.into_string(), title.into_string()));
+                    }
+                    Event::Text(value) => text.push_str(&value),
+                    Event::Start(Tag::Link { .. }) | Event::Html(_) | Event::InlineHtml(_) => {
+                        panic!("image attribute introduced {event:?}: {markdown}");
+                    }
+                    _ => {}
+                }
+            }
+            assert_eq!(
+                images,
+                [(destination.to_string(), title.to_string())],
+                "{markdown}"
+            );
+            assert_eq!(text, alt, "{markdown}");
+        }
+    }
+
+    #[test]
+    fn html_attribute_line_breaks_do_not_introduce_blocks() {
+        use pulldown_cmark::{Event, Tag, TagEnd};
+
+        let markdown = html_to_markdown(
+            r#"<img src="data:image/png;base64,AAAA" alt="1. first&#10;&#10;# title&#10;- last">"#,
+        );
+        let mut text = String::new();
+        for event in pulldown_cmark::Parser::new_ext(&markdown, lk_core::markdown::OPTIONS) {
+            match event {
+                Event::Text(value) => text.push_str(&value),
+                Event::Start(Tag::Paragraph) | Event::End(TagEnd::Paragraph) | Event::SoftBreak => {
+                }
+                other => panic!("attribute introduced {other:?}: {markdown}"),
+            }
+        }
+        assert!(text.contains("1. first") && text.contains("# title") && text.contains("- last"));
+    }
+
+    #[test]
     fn html_img_http_src_keeps_standard_markdown() {
         let md = html_to_markdown(r#"<img src="https://x.io/a.png" alt="chart" title="Q2">"#);
         assert_eq!(md, "![chart](https://x.io/a.png \"Q2\")");
-        // Parentheses in the URL are escaped, as in htmd's built-in handler.
         let parens = html_to_markdown(r#"<img src="https://x.io/a(1).png">"#);
-        assert!(parens.contains("![](https://x.io/a\\(1\\).png)"));
+        let images = pulldown_cmark::Parser::new(&parens)
+            .filter_map(|event| match event {
+                pulldown_cmark::Event::Start(pulldown_cmark::Tag::Image { dest_url, .. }) => {
+                    Some(dest_url.into_string())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(images, ["https://x.io/a(1).png"]);
     }
 
     #[test]
@@ -2388,10 +2534,7 @@ mod tests {
     }
 
     #[test]
-    fn html_img_data_uri_alt_is_plain_text_not_markdown_escaped() {
-        // The degraded alt becomes PLAIN body text (not inside `![…]`), so a quote in
-        // it must appear verbatim — escaping it here would leak a literal backslash
-        // into the rendered prose.
+    fn html_img_data_uri_quotes_remain_text() {
         let md = html_to_markdown(r#"<img src='data:image/png;base64,AAAA' alt='he said "hi"'>"#);
         assert_eq!(md, r#"he said "hi""#);
     }

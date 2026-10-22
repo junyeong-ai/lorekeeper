@@ -54,8 +54,8 @@ config loading and the shared filesystem primitives intentionally perform I/O.
 
 ## Markdown and links (`link.rs`, `markdown.rs`, `text.rs`)
 
-- `markdown::serialize` preserves structured link/image title values, including
-  line breaks, without allowing attribute text to introduce Markdown structure.
+- `markdown::serialize` preserves structured link/image destinations and titles,
+  including whitespace, without allowing metadata to introduce Markdown structure.
 - `markdown::root_headings` owns CommonMark root structure. Semantic section bodies
   use `validate_section_body`: reject parent/sibling headings and syntax consuming
   the next section; preserve valid HTML and literal code without rewriting prose.

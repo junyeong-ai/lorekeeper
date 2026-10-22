@@ -11,8 +11,7 @@ pub const OPTIONS: Options = Options::ENABLE_TABLES
     .union(Options::ENABLE_STRIKETHROUGH)
     .union(Options::ENABLE_FOOTNOTES);
 
-/// Serialize structured Markdown, preserving multiline link/image titles as values.
-/// Attribute line breaks must not become blank lines in CommonMark link grammar.
+/// Serialize structured Markdown without promoting link/image metadata into syntax.
 pub fn serialize(
     events: &[Event<'_>],
     parser_options: Options,
@@ -21,11 +20,24 @@ pub fn serialize(
     use pulldown_cmark::{LinkType, Tag};
     use pulldown_cmark_to_cmark::Error;
 
+    fn needs_encoding(destination: &str, title: &str) -> bool {
+        title.contains(['\r', '\n'])
+            || destination
+                .chars()
+                .any(|character| character.is_whitespace() || character.is_control())
+    }
     let mut output = String::new();
-    let multiline = events.iter().any(|event| matches!(event,
-        Event::Start(Tag::Link { title, .. } | Tag::Image { title, .. }) if title.contains(['\r', '\n'])
-    ));
-    if !multiline {
+    if !events.iter().any(|event| match event {
+        Event::Start(
+            Tag::Link {
+                dest_url, title, ..
+            }
+            | Tag::Image {
+                dest_url, title, ..
+            },
+        ) => needs_encoding(dest_url, title),
+        _ => false,
+    }) {
         pulldown_cmark_to_cmark::cmark_with_options(
             events,
             &mut output,
@@ -34,28 +46,42 @@ pub fn serialize(
         )?;
         return Ok(output);
     }
-    let titles = events
+    let metadata = events
         .iter()
         .filter_map(|event| match event {
-            Event::Start(Tag::Link { title, .. } | Tag::Image { title, .. }) => {
-                Some(title.as_ref())
-            }
+            Event::Start(
+                Tag::Link {
+                    dest_url, title, ..
+                }
+                | Tag::Image {
+                    dest_url, title, ..
+                },
+            ) => Some((dest_url.as_ref(), title.as_ref())),
             _ => None,
         })
         .collect::<Vec<_>>();
+    const DESTINATION: &str = "lorekeeper-inline";
     let safe_events = events.iter().cloned().map(|mut event| {
         if let Event::Start(
             Tag::Link {
-                title, link_type, ..
+                dest_url,
+                title,
+                link_type,
+                id,
             }
             | Tag::Image {
-                title, link_type, ..
+                dest_url,
+                title,
+                link_type,
+                id,
             },
         ) = &mut event
-            && title.contains(['\r', '\n'])
+            && needs_encoding(dest_url, title)
         {
+            *dest_url = DESTINATION.into();
             *title = "".into();
             *link_type = LinkType::Inline;
+            *id = "".into();
         }
         event
     });
@@ -72,24 +98,26 @@ pub fn serialize(
             matches!(event, Event::Start(Tag::Link { .. } | Tag::Image { .. })).then_some(range)
         })
         .collect::<Vec<_>>();
-    if ranges.len() != titles.len() {
+    if ranges.len() != metadata.len() {
         return Err(Error::Unrepresentable);
     }
-    let mut insertions = Vec::new();
-    for (range, title) in ranges.into_iter().zip(titles) {
-        if title.contains(['\r', '\n']) {
-            let at = range.end.checked_sub(1).ok_or(Error::Unrepresentable)?;
-            if output.as_bytes().get(at) != Some(&b')') {
+    let suffix = format!("({DESTINATION})");
+    let mut replacements = Vec::new();
+    for (range, (destination, title)) in ranges.into_iter().zip(metadata) {
+        if needs_encoding(destination, title) {
+            if !output[range.clone()].ends_with(&suffix) {
                 return Err(Error::Unrepresentable);
             }
-            let mut encoded = String::new();
+            let at = range.end - suffix.len();
+            let mut encoded = format!("({}", crate::link::escape_destination(destination));
             crate::link::push_title(&mut encoded, title);
-            insertions.push((at, encoded));
+            encoded.push(')');
+            replacements.push((at..range.end, encoded));
         }
     }
-    insertions.sort_by_key(|(at, _)| std::cmp::Reverse(*at));
-    for (at, title) in insertions {
-        output.insert_str(at, &title);
+    replacements.sort_by_key(|(range, _)| std::cmp::Reverse(range.start));
+    for (range, metadata) in replacements {
+        output.replace_range(range, &metadata);
     }
     Ok(output)
 }
@@ -945,6 +973,112 @@ mod tests {
         );
         assert!(crate::link::extract_dests(&output).is_empty());
         assert!(output.ends_with(" suffix"));
+    }
+
+    #[test]
+    fn serialization_preserves_link_and_image_destination_whitespace() {
+        use super::{MarkdownInput, OPTIONS, serialize};
+        use pulldown_cmark::{Event, LinkType, Tag};
+
+        for destination in [
+            "https://example.com/a\tb",
+            "https://example.com/a\nb",
+            "https://example.com/a\rb",
+            "https://example.com/a\u{a0}b",
+            "../name (1).md",
+        ] {
+            for title in ["", "ordinary title", "first\n\nlast"] {
+                for image in [false, true] {
+                    let tag = if image {
+                        Tag::Image {
+                            link_type: LinkType::Inline,
+                            dest_url: destination.into(),
+                            title: title.into(),
+                            id: "".into(),
+                        }
+                    } else {
+                        Tag::Link {
+                            link_type: LinkType::Inline,
+                            dest_url: destination.into(),
+                            title: title.into(),
+                            id: "".into(),
+                        }
+                    };
+                    let end = tag.to_end();
+                    let output = serialize(
+                        &[
+                            Event::Start(tag),
+                            Event::Text("literal (lorekeeper-inline) [label]".into()),
+                            Event::End(end),
+                            Event::Text(" suffix".into()),
+                        ],
+                        OPTIONS,
+                        Default::default(),
+                    )
+                    .unwrap();
+                    let input = MarkdownInput::from_text(&output);
+                    let observed = input
+                        .events(OPTIONS)
+                        .filter_map(|event| match event {
+                            Event::Start(
+                                Tag::Link {
+                                    dest_url, title, ..
+                                }
+                                | Tag::Image {
+                                    dest_url, title, ..
+                                },
+                            ) => Some((dest_url.into_string(), title.into_string())),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>();
+                    assert_eq!(observed, [(destination.into(), title.into())], "{output}");
+                    let text = input
+                        .events(OPTIONS)
+                        .filter_map(|event| match event {
+                            Event::Text(value) => Some(value.into_string()),
+                            _ => None,
+                        })
+                        .collect::<String>();
+                    assert_eq!(text, "literal (lorekeeper-inline) [label] suffix");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn serialization_encodes_reference_metadata_without_retaining_reference_identity() {
+        use super::{MarkdownInput, OPTIONS, serialize};
+        use pulldown_cmark::{Event, Tag};
+
+        for source in [
+            "[Label][ref]\n\n[ref]: <https://example.com/a b> \"ordinary\"\n",
+            "![Label][ref]\n\n[ref]: <https://example.com/a b> \"ordinary\"\n",
+            "[Label][]\n\n[Label]: <https://example.com/a b> \"ordinary\"\n",
+            "[Label]\n\n[Label]: <https://example.com/a b> \"ordinary\"\n",
+        ] {
+            let input = MarkdownInput::from_text(source);
+            let events = input.events(OPTIONS).collect::<Vec<_>>();
+            let output = serialize(&events, OPTIONS, Default::default()).unwrap();
+            let parsed = MarkdownInput::from_text(&output);
+            let links = parsed
+                .events(OPTIONS)
+                .filter_map(|event| match event {
+                    Event::Start(
+                        Tag::Link {
+                            dest_url, title, ..
+                        }
+                        | Tag::Image {
+                            dest_url, title, ..
+                        },
+                    ) => Some((dest_url.into_string(), title.into_string())),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                links,
+                [("https://example.com/a b".into(), "ordinary".into())]
+            );
+        }
     }
 
     #[test]
