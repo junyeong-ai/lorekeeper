@@ -73,14 +73,16 @@ impl<'a> NativeRecipe<'a> {
 }
 
 fn rust_artifacts(format: InputFormat) -> String {
-    // Source and the embedded lock conservatively bind the Rust parser/serializer
-    // implementation. This can invalidate work after an unrelated artifact change;
-    // it never adopts an older result on package-version equality alone.
     let mut hash = blake3::Hasher::new();
+    for (name, version) in PARSER_IDENTITIES {
+        hash.update(name.as_bytes());
+        hash.update(&[0]);
+        hash.update(version.as_bytes());
+        hash.update(&[0]);
+    }
     for source in [
         include_str!("../../../lk-core/src/markdown.rs"),
         include_str!("../../../lk-core/src/link.rs"),
-        include_str!("../../../../Cargo.lock"),
     ] {
         hash.update(blake3::hash(source.as_bytes()).as_bytes());
     }
@@ -99,6 +101,28 @@ fn rust_artifacts(format: InputFormat) -> String {
     }
     hash.finalize().to_hex().to_string()
 }
+
+// Dependency updates must advance their meaning identity; the owner test binds
+// this list to the resolved lock without hashing workspace release stamps.
+const PARSER_IDENTITIES: &[(&str, &str)] = &[
+    ("dom_smoothie", "0.18.2"),
+    ("encoding_rs", "0.8.42"),
+    ("htmd", "0.5.6"),
+    ("html5ever", "0.38.0"),
+    ("html5ever", "0.39.0"),
+    ("markup5ever", "0.38.0"),
+    ("markup5ever", "0.39.0"),
+    ("markup5ever_rcdom", "0.38.0+unofficial"),
+    ("minijinja", "3.0.2"),
+    ("percent-encoding", "2.3.2"),
+    ("pulldown-cmark", "0.13.4"),
+    ("pulldown-cmark-to-cmark", "23.0.0"),
+    ("serde", "1.0.229"),
+    ("serde-saphyr", "2.0.0"),
+    ("serde_json", "1.0.154"),
+    ("unicode-normalization", "0.1.26"),
+    ("url", "2.5.8"),
+];
 
 #[derive(Serialize)]
 #[serde(tag = "mode", content = "policy", rename_all = "kebab-case")]
@@ -192,6 +216,33 @@ pub async fn processing_recipe(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parser_identities_match_resolved_external_packages_without_workspace_stamps() {
+        let packages = include_str!("../../../../Cargo.lock")
+            .split("[[package]]")
+            .skip(1)
+            .map(|package| {
+                let field = |key| package.lines().find_map(|line| line.strip_prefix(key));
+                (field("name = ").unwrap(), field("version = ").unwrap())
+            })
+            .collect::<Vec<_>>();
+        for (name, version) in PARSER_IDENTITIES {
+            let quoted_name = format!("{name:?}");
+            let quoted_version = format!("{version:?}");
+            assert!(packages.contains(&(quoted_name.as_str(), quoted_version.as_str())));
+        }
+        for (name, version) in packages {
+            if PARSER_IDENTITIES
+                .iter()
+                .any(|(known, _)| name == format!("{known:?}"))
+            {
+                assert!(PARSER_IDENTITIES.iter().any(|(known, resolved)| {
+                    name == format!("{known:?}") && version == format!("{resolved:?}")
+                }));
+            }
+        }
+    }
 
     fn configuration() -> InputProcessingConfig {
         serde_json::from_value(serde_json::json!({"python":"/missing/runtime"})).unwrap()
