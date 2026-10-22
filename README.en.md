@@ -690,6 +690,12 @@ the existing recovery protocol rather than deleting state to appear healthy. The
 rebuild derived SQLite with `lore wiki prepare`, run `lore graph lint` and inspect
 retained originals. SQLite and lock files cannot restore originals or work state.
 
+Manual inbox publication receipts bind the source ID and canonical path. Restoring
+at another location refuses automatic adoption: restore the original binding or
+plan an explicit ownership migration before collecting again. Deleting state or
+using a new source ID does not transfer existing document ownership. See
+[manual inbox state and resume](skills/lore-ingest/references/ingestion.md#manual-inbox-batches).
+
 ---
 
 ## Learn more

@@ -656,6 +656,11 @@ Git 이력과 별도로 **숨김 파일을 포함한 볼트 전체**를 백업�
 `lore wiki prepare`로 파생 SQLite를 재구축하고 `lore graph lint`와 원본 조회를 확인하세요.
 SQLite와 잠금 파일만으로는 보관 원본이나 작업 상태를 복원할 수 없습니다.
 
+수동 inbox의 게시 기록은 source ID와 실제 경로에 결속됩니다. 다른 위치로 복원하면
+자동 채택을 거부하므로, 수집을 재개하기 전에 기존 경로 결속을 복원하거나 별도의 소유권
+이전 계획을 정하세요. 상태 삭제나 새 source ID는 기존 문서의 소유권을 이전하지 않습니다.
+[수동 inbox 상태와 재개](skills/lore-ingest/references/ingestion.md#manual-inbox-batches)를 참고하세요.
+
 ---
 
 ## 더 알아보기
