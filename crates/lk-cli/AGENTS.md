@@ -244,6 +244,17 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
 `commands/installation.rs` performs artifact/schema synchronization using the NEW
 binary and refuses unsafe update over pending queue work. Uninstall never removes
 user vaults. Delegate byte coherence/target/release validation to lk-dist.
+Unix dispatch retains shared installation claims on absolute selected destinations;
+mutators exclusively claim changed resources and the selected vault workflow before
+writing. Native runs retain claims across collection and batch gaps. Pin the same
+Installation and data directory in children rather than rediscovering mutable records.
+Downloads occur without exclusive claims; recheck selection, binary bytes and queue
+under protection before replacement. The final mutation claim excludes writers but
+never recovers a pending journal. Drop it and the queue claim before delegated schema
+publication. New-binary deployment receives actual exclusive descriptors through a
+Unix socket, verifies their lock-file identities and never unlocks inherited claims.
+An environment marker alone grants no ownership. `--force` never bypasses active
+claims. Bootstrap/manual replacement requires all shared users to be quiescent.
 `input install` owns the optional native decoder environment. `input install-vision`
 owns separate Paddle layout and MLX recognition environments plus verified models;
 their dependencies must not share an environment. Installation is explicit, never

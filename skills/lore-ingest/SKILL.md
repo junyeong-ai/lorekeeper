@@ -56,7 +56,9 @@ manual/nodex/RSS/Drive cannot acquire authorship from mentions or inclusion alon
   each source's latest collection state and permanent streaming evidence logs.
 - `lore self status` checks deployed artifacts; `self deploy` restores copies from
   the running binary. `self update` refuses pending semantic work. Do not overwrite
-  intentional local artifact edits without accounting for them.
+  intentional local artifact edits without accounting for them. Unix installation
+  changes also refuse active shared users; `--force` cannot bypass those claims.
+  Stop shared sessions before bootstrap or manual binary replacement.
 - Scheduled pipelines do not auto-commit user edits. Review the vault separately.
 - Data goes to stdout and diagnostics to stderr. Use JSON/bare-value contracts,
   not parsed terminal tables. Graph violations gate; hubs/orphans/open reviews are

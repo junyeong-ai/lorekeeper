@@ -43,5 +43,5 @@
 | `lore self status` | What this installation is, and whether every deployed copy — interactive/runtime skills, templates, config example, `AGENTS.md` — still matches the running binary. Non-zero when any differs |
 | `lore workflow -- claude` or `lore workflow -- codex` | Start a manual Unix agent session under the semantic workflow lease before reading inputs; add `--wait` to wait for another consumer. Scheduled headless calls already acquire it |
 | `lore self deploy` | Rewrite those copies from what the binary carries. This is the repair `lore self status` reports, and what an install and an update both run |
-| `lore self update [--version V]` | Replace the binary with a published release, then redeploy. Refuses while the queue still holds work, and refuses a release older than the running one unless `--version` names it deliberately |
+| `lore self update [--version V]` | Replace the binary with a published release, then redeploy. Refuses active installation users and pending queue work; `--force` never overrides active claims. Older releases require explicit `--version` |
 | `lore self uninstall` | Remove the binary and everything it deployed. The vault is never touched |

@@ -268,6 +268,7 @@ pub async fn run() -> miette::Result<()> {
         config: cli.config,
         template_dir: cli.template_dir,
     };
+    let protection = commands::installation::Protection::prepare(&opts, &cli.command)?;
 
     // `lore graph` has its own exit-code convention (0=sound, 1=contradicted, 2=error) so
     // it returns ExitCode directly instead of going through miette.
@@ -295,8 +296,21 @@ pub async fn run() -> miette::Result<()> {
             batches,
             wait,
             json,
-        } => commands::run::run(&opts, operation, profile, batches.get(), wait, json).await,
-        Command::Workflow { wait, command } => commands::workflow::run(&opts, wait, command),
+        } => {
+            commands::run::run(
+                &opts,
+                protection.installation(),
+                operation,
+                profile,
+                batches.get(),
+                wait,
+                json,
+            )
+            .await
+        }
+        Command::Workflow { wait, command } => {
+            commands::workflow::run(&opts, protection.installation(), wait, command)
+        }
         Command::Init { target } => match target {
             InitTarget::Credentials { vault } => commands::init::credentials(&opts, vault).await,
             InitTarget::Schema { root } => commands::schema::run(&opts, root).await,

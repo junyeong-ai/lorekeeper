@@ -46,6 +46,9 @@ canonical; SQLite navigation is derived.
   and publish one guarded `MutationPlan`. Preflight every expected file; persist
   full before/after steps before edits. Recovery accepts expected states only and
   preserves conflicts. Lock order is mutation session before narrower queue locks.
+- `MutationClaim` acquires the same writer boundary without reading or recovering
+  journals. Installation uses it for settlement inspection and replacement; it is
+  not a publication session and must be released before schema publication.
 - Preflight rejects conflicting publication addresses resolving to one file entry,
   including absent case/Unicode aliases and missing descendants under directory aliases.
   Missing names use disposable directory-only probes beneath their existing parent;

@@ -25,6 +25,7 @@ impl Operation {
 
 pub async fn run(
     opts: &super::GlobalOptions,
+    installation: &lk_dist::Installation,
     operation: Operation,
     profile: Option<String>,
     batches: usize,
@@ -33,11 +34,11 @@ pub async fn run(
 ) -> miette::Result<()> {
     #[cfg(unix)]
     {
-        native::run(opts, operation, profile, batches, wait, json).await
+        native::run(opts, installation, operation, profile, batches, wait, json).await
     }
     #[cfg(not(unix))]
     {
-        let _ = (opts, operation, profile, batches, wait, json);
+        let _ = (opts, installation, operation, profile, batches, wait, json);
         Err(miette::miette!(
             "agent jobs require Unix workflow leases; Windows is unsupported"
         ))
@@ -141,6 +142,7 @@ mod native {
 
     struct Runner<'a> {
         opts: &'a GlobalOptions,
+        installation: &'a lk_dist::Installation,
         config: Config,
         config_revision: String,
         configuration_failed: bool,
@@ -228,6 +230,7 @@ mod native {
                 "LORE_CONFIG",
                 self.opts.config.as_ref().expect("resolved config"),
             );
+            command.env("LORE_INSTALL_DATA_DIR", self.installation.data_dir());
             if let Some(name) = self.config.execution.selected_profile() {
                 command.env(EXECUTION_PROFILE_ENV, name);
             } else {
@@ -367,18 +370,14 @@ mod native {
             }
             let profile = self.selected.as_ref().expect("prepared agent");
             let timeout = profile.timeout();
-            let command = lk_dist::Installation::detect()
-                .map_err(|e| miette::miette!("{e}"))
-                .and_then(|installation| {
-                    execution::agent_command(
-                        profile,
-                        skill,
-                        operation,
-                        &installation,
-                        self.opts.config.as_ref().expect("resolved config"),
-                        input_directory,
-                    )
-                });
+            let command = execution::agent_command(
+                profile,
+                skill,
+                operation,
+                self.installation,
+                self.opts.config.as_ref().expect("resolved config"),
+                input_directory,
+            );
             match command {
                 Ok(mut command) => {
                     self.result.semantic_calls += 1;
@@ -437,6 +436,7 @@ mod native {
             };
             let timeout = profile.timeout();
             let mut command = invocation.command;
+            command.env("LORE_INSTALL_DATA_DIR", self.installation.data_dir());
             if let Some(lease) = &self.lease {
                 lease.configure(command.as_std_mut());
             }
@@ -1393,6 +1393,7 @@ mod native {
 
     pub(super) async fn run(
         opts: &GlobalOptions,
+        installation: &lk_dist::Installation,
         operation: Operation,
         profile: Option<String>,
         batches: usize,
@@ -1445,6 +1446,7 @@ mod native {
         for _ in 0..batches {
             let result = execute(
                 &options,
+                installation,
                 config.clone(),
                 config_revision.clone(),
                 operation,
@@ -1503,6 +1505,7 @@ mod native {
 
     async fn execute(
         options: &GlobalOptions,
+        installation: &lk_dist::Installation,
         config: Config,
         config_revision: String,
         operation: Operation,
@@ -1515,6 +1518,7 @@ mod native {
             .and_then(|personal| personal.tasks.as_ref())
             .is_some();
         let mut runner = Runner {
+            installation,
             root: config.vault.root_path(),
             config,
             config_revision,

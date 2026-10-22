@@ -87,7 +87,12 @@ one source to infer that distinction.
   page/request publication succeeds; exact regeneration uses retained input,
   not a potentially changed refetch. Credentials are reported, never scrubbed from
   source text; rotation at the issuer is the repair.
-- **Installation and scheduling are explicit.** `lk-dist` owns embedded artifact
+- **Installation and scheduling are explicit.** Unix CLI dispatch holds shared
+  installation claims; deploy/update/uninstall acquire exclusive claims on changed
+  resources. Native runs and foreground workflow children retain protection across
+  collection and inference. Coordination files are persistent operational state,
+  separate from canonical or derived knowledge; never unlink held lock files.
+  `lk-dist` owns embedded artifact
   coherence. Native jobs compose guarded CLI stages and never auto-commit user edits.
   Full-source ingest alone rewrites the cross-source work-log; filtered ingest
   cannot replace it with a subset. Navigation refresh updates SQLite discovery and a small entry guide.

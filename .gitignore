@@ -4,6 +4,7 @@
 /config.yaml
 /credentials.json
 .lorekeeper/
+.lorekeeper-*.lock
 .DS_Store
 target/
 

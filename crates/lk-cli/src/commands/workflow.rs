@@ -126,11 +126,13 @@ impl WorkflowLease {
 
 pub fn run(
     opts: &super::GlobalOptions,
+    installation: &lk_dist::Installation,
     wait: bool,
     command: Vec<std::ffi::OsString>,
 ) -> miette::Result<()> {
     #[cfg(not(unix))]
     {
+        let _ = installation;
         let _ = (opts, wait, command);
         Err(miette::miette!(
             "workflow leases require Unix; Windows is unsupported"
@@ -156,6 +158,7 @@ pub fn run(
         }
         let mut child = std::process::Command::new(program);
         child.args(arguments);
+        child.env("LORE_INSTALL_DATA_DIR", installation.data_dir());
         lease.configure(&mut child);
         let error = child.exec();
         Err(miette::miette!(

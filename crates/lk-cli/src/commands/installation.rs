@@ -14,6 +14,12 @@
 use std::io::IsTerminal;
 use std::path::PathBuf;
 
+#[cfg(unix)]
+mod lease;
+mod protection;
+
+pub(crate) use protection::Protection;
+
 use lk_dist::{Decision, Installation, InstallationReport, ReleaseClient, SchemaState, SkillLevel};
 
 use super::{GlobalOptions, find_config, load_config};
@@ -120,7 +126,16 @@ pub async fn run(opts: &GlobalOptions, cmd: SelfCommand) -> miette::Result<()> {
             skills,
             agent,
             data_dir,
-        } => deploy(opts, &installation(data_dir)?, skills, agent).await,
+        } => {
+            deploy(
+                opts,
+                &installation(data_dir.clone())?,
+                data_dir,
+                skills,
+                agent,
+            )
+            .await
+        }
         SelfCommand::Update {
             version,
             force,
@@ -132,7 +147,13 @@ pub async fn run(opts: &GlobalOptions, cmd: SelfCommand) -> miette::Result<()> {
             yes,
             purge_config,
             data_dir,
-        } => uninstall(&installation(data_dir)?, yes, purge_config),
+        } => uninstall(
+            opts,
+            &installation(data_dir.clone())?,
+            data_dir,
+            yes,
+            purge_config,
+        ),
     }
 }
 
@@ -258,9 +279,18 @@ fn row(label: &str, state: &str, path: Option<&std::path::Path>) {
 async fn deploy(
     opts: &GlobalOptions,
     installation: &Installation,
+    override_dir: Option<PathBuf>,
     skills: Option<SkillScope>,
     agent: AgentTarget,
 ) -> miette::Result<()> {
+    let protection = Protection::mutation(
+        opts,
+        installation.clone(),
+        override_dir,
+        agent,
+        skills,
+        false,
+    )?;
     for engine in agent.engines() {
         let selected = installation.for_engine(*engine);
         let installation = &selected;
@@ -327,9 +357,10 @@ async fn deploy(
     // command OWNS has landed, and `AGENTS.md` lives in the user's vault — a drive not mounted
     // or a vault the process cannot reach would otherwise report a failed install for one that
     // is complete, and the advised re-run would fail identically forever.
-    if find_config(opts)
-        .and_then(|path| load_config(&path))
-        .is_ok()
+    if protection.schema_ready()
+        && find_config(opts)
+            .and_then(|path| load_config(&path))
+            .is_ok()
         && let Err(e) = super::schema::run(opts, None).await
     {
         eprintln!("warning: could not regenerate AGENTS.md ({e}) — run `lore schema`");
@@ -345,7 +376,7 @@ async fn update(
     yes: bool,
     data_dir: Option<PathBuf>,
 ) -> miette::Result<()> {
-    let installation = installation(data_dir)?;
+    let installation = installation(data_dir.clone())?;
     let target = lk_dist::ReleaseTarget::current()
         .ok_or_else(|| miette::miette!("{}", lk_dist::ReleaseTarget::unsupported_reason()))?;
     if !target.is_self_replaceable() {
@@ -398,12 +429,25 @@ async fn update(
         Decision::Replace { to, .. } => to,
     };
 
+    let mut initial = Protection::mutation(
+        opts,
+        installation.clone(),
+        data_dir.clone(),
+        AgentTarget::Both,
+        None,
+        true,
+    )?;
     refuse_while_work_is_queued(opts, force)?;
+    let baseline = lk_dist::sha256_hex(
+        &std::fs::read(installation.binary())
+            .map_err(|error| miette::miette!("read installed binary: {error}"))?,
+    );
 
     if !confirm(&format!("Replace lore {running} with {to}?"), yes)? {
         eprintln!("Cancelled");
         return Ok(());
     }
+    initial.release();
 
     let archive_name = lk_dist::archive_name(&to, target);
     let url = lk_dist::asset_url(&to, &archive_name);
@@ -428,11 +472,39 @@ async fn update(
         .map_err(|e| miette::miette!("{e}"))?
         .ok_or_else(|| miette::miette!("{archive_name} holds no {member}"))?;
 
+    let protection = Protection::mutation(
+        opts,
+        installation.clone(),
+        data_dir,
+        AgentTarget::Both,
+        None,
+        true,
+    )?;
+    initial.validate_staged(&protection)?;
+    let current = lk_dist::sha256_hex(
+        &std::fs::read(installation.binary())
+            .map_err(|error| miette::miette!("read installed binary: {error}"))?,
+    );
+    if current != baseline {
+        return Err(miette::miette!(
+            "installed binary changed during download; retry the update"
+        ));
+    }
+    let publication = protection.claim_publication()?;
+    refuse_while_work_is_queued(opts, force)?;
+    protection.recheck_configuration()?;
+
     lk_dist::install_binary(&binary, installation.binary(), &to)
         .map_err(|e| miette::miette!("{e}"))?;
     eprintln!("Replaced {}", installation.binary().display());
+    drop(publication);
 
-    redeploy_through(installation.binary(), opts, installation.data_dir());
+    redeploy_through(
+        installation.binary(),
+        opts,
+        installation.data_dir(),
+        &protection,
+    );
 
     eprintln!("\nlore {running} → {to}");
     Ok(())
@@ -504,7 +576,12 @@ fn refuse_while_work_is_queued(opts: &GlobalOptions, force: bool) -> miette::Res
 /// writing them from here would deploy the predecessor over the successor. Best-effort: the
 /// binary is already in place and working, so a data directory that cannot be written is a
 /// follow-up rather than a failed update.
-fn redeploy_through(binary: &std::path::Path, opts: &GlobalOptions, data_dir: &std::path::Path) {
+fn redeploy_through(
+    binary: &std::path::Path,
+    opts: &GlobalOptions,
+    data_dir: &std::path::Path,
+    protection: &Protection,
+) {
     let mut child = std::process::Command::new(binary);
     // The config the CALLER named, not whatever the child would auto-discover: `--config`
     // decides which vault's `AGENTS.md` the deploy regenerates, and a child that re-discovered
@@ -513,13 +590,33 @@ fn redeploy_through(binary: &std::path::Path, opts: &GlobalOptions, data_dir: &s
         child.arg("--config").arg(path);
     }
     child.args(["self", "deploy", "--data-dir"]).arg(data_dir);
+    if let Err(error) = protection.configure(&mut child) {
+        eprintln!(
+            "warning: could not hand off protected redeployment ({error}); run `lore self deploy`"
+        );
+        return;
+    }
     match child.status() {
         Ok(status) if status.success() => {}
         _ => eprintln!("warning: could not redeploy — run `lore self deploy`"),
     }
 }
 
-fn uninstall(installation: &Installation, yes: bool, purge_config: bool) -> miette::Result<()> {
+fn uninstall(
+    opts: &GlobalOptions,
+    installation: &Installation,
+    override_dir: Option<PathBuf>,
+    yes: bool,
+    purge_config: bool,
+) -> miette::Result<()> {
+    let _protection = Protection::mutation(
+        opts,
+        installation.clone(),
+        override_dir,
+        AgentTarget::Both,
+        None,
+        true,
+    )?;
     let deployments = AgentTarget::Both
         .engines()
         .iter()

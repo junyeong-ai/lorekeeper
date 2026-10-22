@@ -65,7 +65,7 @@ pub use self::log::{IngestLog, LogEntry, LogStatus};
 pub use self::manual_original::{
     OriginalOptions, OriginalView, inspect_original, is_manual_original, publish_manual_original,
 };
-pub use self::mutation::{MutationPlan, MutationSession};
+pub use self::mutation::{MutationClaim, MutationPlan, MutationSession};
 pub use self::navigation::{NAVIGATION_ENTRY_MARKER, plan_navigation_entry};
 pub use self::neighbors::{
     IndexedNeighbor, IndexedNeighborOptions, IndexedNeighbors, NeighborDirection,

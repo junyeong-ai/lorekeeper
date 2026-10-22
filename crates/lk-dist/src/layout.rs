@@ -47,11 +47,15 @@ impl Installation {
         // Follows a shim: a version manager puts one on `PATH` and the real file is what a
         // replacement has to land on.
         let binary = binary.canonicalize().unwrap_or(binary);
-        let home = home_dir();
+        let project = std::env::current_dir()
+            .map_err(|e| DistError::io("locating the installation project directory", e))?;
+        let home = home_dir().map(|path| absolute_path(&path)).transpose()?;
+        let config_dir = absolute_path(&config_dir(home.as_deref()))?;
+        let data_dir = absolute_path(&data_dir(home.as_deref()))?;
         Ok(Self {
-            data_dir: data_dir(home.as_deref()),
-            config_dir: config_dir(home.as_deref()),
-            project: std::env::current_dir().ok(),
+            data_dir,
+            config_dir,
+            project: Some(project),
             home,
             binary,
             engine: AgentEngine::ClaudeCode,
@@ -65,7 +69,7 @@ impl Installation {
     /// to a RELATIVE `.claude/skills` and deployed into whatever directory the command ran in.
     pub fn detect_with_data_dir(data_dir: PathBuf) -> Result<Self, DistError> {
         Ok(Self {
-            data_dir,
+            data_dir: absolute_path(&data_dir)?,
             ..Self::detect()?
         })
     }
@@ -489,6 +493,15 @@ pub(crate) enum FileIdentity {
     Named(PathBuf),
 }
 
+fn absolute_path(path: &Path) -> Result<PathBuf, DistError> {
+    std::path::absolute(path).map_err(|error| {
+        DistError::io(
+            format!("resolving installation path {}", path.display()),
+            error,
+        )
+    })
+}
+
 /// The home directory, in the order the platform's own tools read it.
 ///
 /// Windows first: `install.ps1` and Claude Code both use `USERPROFILE`, and a Git-for-Windows
@@ -554,6 +567,19 @@ fn config_dir(home: Option<&Path>) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn installation_paths_are_absolute_without_requiring_existing_directories() {
+        let relative = Path::new("relative installation").join("자료");
+        assert_eq!(
+            absolute_path(&relative).unwrap(),
+            std::env::current_dir().unwrap().join(relative)
+        );
+        let temporary = tempfile::tempdir().unwrap();
+        let missing = temporary.path().join("not installed").join("data");
+        assert!(!missing.exists());
+        assert_eq!(absolute_path(&missing).unwrap(), missing);
+    }
 
     fn file(relative: &'static str, contents: &'static str) -> EmbeddedFile {
         EmbeddedFile {

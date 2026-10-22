@@ -499,6 +499,21 @@ lore self uninstall   # remove what was installed; the vault is never touched
 
 The interactive/runtime skills, templates and both config examples are **compiled into the binary**, and deployed copies can drift; `lore self status` checks them, while `lore self deploy` writes the copies. `lore self update` uses the same settlement check as `lore queue check`: pending work, unreadable or unparseable input, staged results and interrupted publication all block replacement. `--force` permits inspectable unfinished work but never bypasses configuration or storage inspection errors. Older releases are refused unless explicitly selected with `--version`.
 
+Unix CLI commands retain shared claims on their selected installation resources. The entire
+`run`, including collection, and participating `workflow` children are protected. Deployment,
+replacement and removal refuse while another vault uses the same binary, runtime or skills;
+`--force` never overrides active claims. After downloading, updates reacquire protection and
+recheck configuration, binary bytes and queue settlement. Adjacent `.lorekeeper-*.lock` files
+are persistent operational state: never unlink them during execution or cache cleanup.
+Creating them requires write access to the resource's parent directory.
+
+Use `lore self update` for existing Unix installations. Bootstrap scripts, `cargo install`,
+manual binary replacement and older versions do not participate in installation locking.
+Before reinstalling through those paths, pause schedules and manual sessions for every vault
+sharing the installation, wait for their children to exit and require each vault's
+`lore queue check` to pass. After replacement, run `lore self deploy` and `lore self status`
+before resuming work.
+
 Custom templates use `markdown_text` for titles/authors, `markdown_fragment` for source
 bodies, and `url | markdown_link(label)` for source links. Bodies are parsed independently
 so headings, references, footnotes and code blocks cannot take over later generated sections.

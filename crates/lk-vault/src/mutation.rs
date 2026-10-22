@@ -164,20 +164,16 @@ impl MutationPlan {
     }
 }
 
-/// Serializes cooperating graph mutations and resumes their durable write plans.
-pub struct MutationSession {
+/// Excludes cooperating writers without reading or recovering pending mutations.
+pub struct MutationClaim {
     root: PathBuf,
     journal: PathBuf,
     _lock: File,
 }
 
-impl MutationSession {
+impl MutationClaim {
     pub fn acquire(root: &Path) -> Result<Self, VaultError> {
         Self::acquire_with_wait(root, false)
-    }
-
-    pub fn acquire_waiting(root: &Path) -> Result<Self, VaultError> {
-        Self::acquire_with_wait(root, true)
     }
 
     fn acquire_with_wait(root: &Path, wait: bool) -> Result<Self, VaultError> {
@@ -205,10 +201,44 @@ impl MutationSession {
             lock.try_lock()
                 .map_err(|e| io::Error::other(format!("vault mutation is busy: {e}")))?;
         }
-        let session = Self {
+        Ok(Self {
             root,
             journal: state.join("pending.json"),
             _lock: lock,
+        })
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+}
+
+/// Serializes cooperating graph mutations and resumes their durable write plans.
+pub struct MutationSession {
+    root: PathBuf,
+    journal: PathBuf,
+    _lock: File,
+}
+
+impl MutationSession {
+    pub fn acquire(root: &Path) -> Result<Self, VaultError> {
+        Self::acquire_with_wait(root, false)
+    }
+
+    pub fn acquire_waiting(root: &Path) -> Result<Self, VaultError> {
+        Self::acquire_with_wait(root, true)
+    }
+
+    fn acquire_with_wait(root: &Path, wait: bool) -> Result<Self, VaultError> {
+        let MutationClaim {
+            root,
+            journal,
+            _lock,
+        } = MutationClaim::acquire_with_wait(root, wait)?;
+        let session = Self {
+            root,
+            journal,
+            _lock,
         };
         match fs::read(&session.journal) {
             Ok(bytes) => {
@@ -630,6 +660,43 @@ mod tests {
         p.rename("Old.md", "new.md", "original".into());
         p.edit("links.md", "Old.md".into(), "new.md".into());
         p
+    }
+
+    #[test]
+    fn a_mutation_claim_preserves_pending_work_until_a_session_recovers_it() {
+        let root = tempfile::tempdir().unwrap();
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let mut plan = MutationPlan::default();
+        plan.create("page.md", "new".into());
+        let revision = lk_core::concept::file_revision(&serde_json::to_string(&plan).unwrap());
+        session.save(&Journal { version: 1, plan }).unwrap();
+        let journal = session.journal.clone();
+        let progress = journal.with_file_name("progress.json");
+        fs::write(
+            &progress,
+            serde_json::to_vec(&Progress::new(revision, 0)).unwrap(),
+        )
+        .unwrap();
+        let pending_bytes = fs::read(&journal).unwrap();
+        let progress_bytes = fs::read(&progress).unwrap();
+        drop(session);
+
+        let claim = MutationClaim::acquire(root.path()).unwrap();
+        assert_eq!(claim.root(), root.path().canonicalize().unwrap());
+        assert!(MutationClaim::acquire(root.path()).is_err());
+        assert!(MutationSession::acquire(root.path()).is_err());
+        assert!(!root.path().join("page.md").exists());
+        assert_eq!(fs::read(&journal).unwrap(), pending_bytes);
+        assert_eq!(fs::read(&progress).unwrap(), progress_bytes);
+        drop(claim);
+
+        let _session = MutationSession::acquire(root.path()).unwrap();
+        assert_eq!(
+            fs::read_to_string(root.path().join("page.md")).unwrap(),
+            "new"
+        );
+        assert!(!journal.exists());
+        assert!(!progress.exists());
     }
 
     #[cfg(unix)]
