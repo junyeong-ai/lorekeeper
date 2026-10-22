@@ -157,8 +157,13 @@ pub async fn processing_revision(
     let params: ManualParams = crate::parse_validated(params)?;
     let effective = params.build_processing_config(ctx.documents.as_ref())?;
     let decoder = crate::content::processing_recipe(format, effective.as_ref()).await?;
-    let artifacts = [include_str!("manual.rs"), include_str!("manual_bundle.rs")]
-        .map(lk_core::concept::file_revision);
+    let artifacts = [
+        include_str!("manual.rs"),
+        include_str!("manual_bundle.rs"),
+        include_str!("../../lk-core/src/frontmatter.rs"),
+        include_str!("../../lk-core/src/yaml.rs"),
+    ]
+    .map(lk_core::concept::file_revision);
     let recipe = serde_json::to_string(&(decoder, artifacts))
         .map_err(|error| SourceError::Parse(error.to_string()))?;
     Ok(lk_core::concept::file_revision(&recipe))
