@@ -67,7 +67,8 @@ pub use self::knowledge::{
 pub use self::links::{LinkDetail, LinkDetails, LinkOptions, inspect_links};
 pub use self::log::{IngestLog, LogEntry, LogStatus};
 pub use self::manual_original::{
-    OriginalOptions, OriginalView, inspect_original, is_manual_original, publish_manual_original,
+    OriginalOptions, OriginalView, inspect_original, is_manual_original,
+    load_manual_original_manifest, publish_manual_original,
 };
 pub use self::mutation::{MutationClaim, MutationPlan, MutationSession};
 pub use self::navigation::{NAVIGATION_ENTRY_MARKER, plan_navigation_entry};

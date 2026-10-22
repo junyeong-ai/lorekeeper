@@ -108,6 +108,23 @@ fn load_manifest(root: &Path, path: &str) -> Result<ManualBundleManifest, VaultE
     }
     Ok(manifest)
 }
+
+/// Validate a published bundle before reusing its acquisition receipt. Unlike a
+/// paginated original inventory, this verifies every preserved member's bytes.
+pub fn load_manual_original_manifest(
+    root: &Path,
+    reference: &ManualOriginalReference,
+) -> Result<ManualBundleManifest, VaultError> {
+    reference.validate().map_err(error)?;
+    let manifest = load_manifest(root, &reference.manifest_path)?;
+    if manifest.reference().map_err(error)? != *reference {
+        return Err(error("receipt reference differs from original manifest"));
+    }
+    for member in &manifest.members {
+        load_member(root, reference, &manifest, &member.path)?;
+    }
+    Ok(manifest)
+}
 fn load_member(
     root: &Path,
     reference: &ManualOriginalReference,
@@ -467,6 +484,24 @@ mod tests {
     fn page(root: &Path, reference: &ManualOriginalReference) {
         std::fs::create_dir_all(root.join("wiki/documents")).unwrap();
         std::fs::write(root.join("wiki/documents/n.md"),format!("---\ntype: document\nsource_file: /external/inbox/note.md\nsource_record: {}\n---\nDerived\n",serde_json::json!({"manual_original":reference}))).unwrap();
+    }
+
+    #[test]
+    fn publication_receipt_manifest_access_verifies_every_member_and_exact_reference() {
+        let root = TempDir::new().unwrap();
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let captured = capture();
+        let reference = publish_manual_original(&session, &captured).unwrap();
+        assert_eq!(
+            load_manual_original_manifest(root.path(), &reference).unwrap(),
+            captured.manifest
+        );
+        let mut other = reference.clone();
+        other.entry_revision = OriginalDigest::of(b"another original");
+        assert!(load_manual_original_manifest(root.path(), &other).is_err());
+        let base = reference.manifest_path.rsplit_once('/').unwrap().0;
+        std::fs::write(root.path().join(base).join("files/figure.png"), [0, 255, 2]).unwrap();
+        assert!(load_manual_original_manifest(root.path(), &reference).is_err());
     }
     #[test]
     fn originals_roundtrip_before_page_and_survive_mutable_source_absence() {
