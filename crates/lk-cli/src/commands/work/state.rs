@@ -148,6 +148,20 @@ struct Publication {
     published_at: jiff::Timestamp,
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Consumption {
+    work_id: String,
+    root_node: String,
+    root_output_revision: String,
+    task_id: String,
+    cache_hash: String,
+    target: String,
+    target_revision: String,
+    result_revision: String,
+    consumed_at: jiff::Timestamp,
+}
+
 struct Evaluation<'a> {
     inputs: SemanticInputs<'a>,
     nodes: Vec<Node>,
@@ -465,6 +479,18 @@ impl Work {
         Ok(work)
     }
 
+    pub fn is_planned(&self, root: &Path) -> miette::Result<bool> {
+        require_settled(root)?;
+        let Some(raw) = read_optional(root, &work_path(&self.plan.id, "plan.json")?)? else {
+            return Ok(false);
+        };
+        let current: Self = serde_json::from_str(&raw).map_err(fail)?;
+        if current != *self {
+            return Err(fail("work manifest changed"));
+        }
+        Ok(true)
+    }
+
     fn verify_context(&self) -> miette::Result<()> {
         if self
             .max_input_bytes
@@ -769,6 +795,23 @@ impl Work {
 
     pub fn result(&self, root: &Path, resources: &[SemanticResource]) -> miette::Result<Value> {
         let evaluated = self.evaluate(root, resources)?;
+        self.build_finalizer_result(&evaluated)
+    }
+
+    pub fn result_with_guards(
+        &self,
+        root: &Path,
+        resources: &[SemanticResource],
+    ) -> miette::Result<(Value, BTreeMap<PathBuf, String>)> {
+        let evaluated = self.evaluate(root, resources)?;
+        let result = self.build_finalizer_result(&evaluated)?;
+        let (path, raw) = self.manifest(root)?;
+        let mut guards = evaluated.raw;
+        guards.insert(path, raw);
+        Ok((result, guards))
+    }
+
+    fn build_finalizer_result(&self, evaluated: &Evaluation<'_>) -> miette::Result<Value> {
         let node = evaluated.nodes.last().expect("nonempty tree");
         let output = evaluated
             .current
@@ -1091,6 +1134,97 @@ impl Work {
         }
         Ok(())
     }
+
+    pub fn plan_consumption(
+        &self,
+        mutation: &mut MutationPlan,
+        root: &Path,
+        resources: &[SemanticResource],
+        result: &lk_queue::TaskResult,
+    ) -> miette::Result<()> {
+        if self.context["purpose"]["extraction_scope"]["policy"] != "source-proposals-v1"
+            || self.context["purpose"]["task_kind"] != "extract-concepts"
+            || result.selection.is_none()
+            || !matches!(
+                result.target.kind,
+                lk_queue::TargetKind::DailyConcepts | lk_queue::TargetKind::DocumentConcepts
+            )
+        {
+            return Err(fail("only progressive source observations can be consumed"));
+        }
+        let subject: super::resources::Subject = serde_json::from_value(
+            self.context
+                .get("subject")
+                .cloned()
+                .ok_or_else(|| fail("source observations have no queue subject"))?,
+        )
+        .map_err(fail)?;
+        let super::resources::Subject::Queue {
+            task_id,
+            cache_hash,
+            target,
+            target_revision,
+        } = subject
+        else {
+            return Err(fail("source observations require a queue subject"));
+        };
+        if result.task_id != task_id
+            || result.cache_hash != cache_hash
+            || result.target.vault_path != target
+            || result.target_revision != target_revision
+        {
+            return Err(fail("source observations belong to another extraction"));
+        }
+        let evaluated = self.evaluate(root, resources)?;
+        let node = evaluated.nodes.last().expect("nonempty tree");
+        let output = evaluated
+            .current
+            .get(&node.id)
+            .ok_or_else(|| fail("source observations are incomplete"))?;
+        if !output.output.unresolved.is_empty() {
+            return Err(fail("source observations retain processing blockers"));
+        }
+        let result_revision = revision(&serde_json::to_value(result).map_err(fail)?)?;
+        let path = work_path(&self.plan.id, "consumption.json")?;
+        let receipt = Consumption {
+            work_id: self.plan.id.clone(),
+            root_node: node.id.clone(),
+            root_output_revision: output.output_revision.clone(),
+            task_id,
+            cache_hash,
+            target,
+            target_revision,
+            result_revision,
+            consumed_at: jiff::Timestamp::now(),
+        };
+        let (manifest_path, manifest) = self.manifest(root)?;
+        mutation.require_unchanged(manifest_path, manifest);
+        for (path, raw) in evaluated.raw {
+            mutation.require_unchanged(path, raw);
+        }
+        if let Some(raw) = read_optional(root, &path)? {
+            let prior: Consumption = serde_json::from_str(&raw).map_err(fail)?;
+            if prior.work_id != receipt.work_id
+                || prior.root_node != receipt.root_node
+                || prior.root_output_revision != receipt.root_output_revision
+                || prior.task_id != receipt.task_id
+                || prior.cache_hash != receipt.cache_hash
+                || prior.target != receipt.target
+                || prior.target_revision != receipt.target_revision
+                || prior.result_revision != receipt.result_revision
+            {
+                return Err(fail(
+                    "source observation consumption differs from the extraction",
+                ));
+            }
+            mutation.require_unchanged(path, raw);
+        } else {
+            mutation
+                .publish_expected(root, path, None, encoded(&receipt)?)
+                .map_err(fail)?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -1198,6 +1332,50 @@ mod tests {
             );
         }
         assert_eq!(kinds, BTreeSet::from(["inspect".into(), "reduce".into()]));
+    }
+
+    #[test]
+    fn completed_observation_result_keeps_exact_derived_read_guards_without_a_seal() {
+        let root = tempfile::tempdir().unwrap();
+        let source = resources();
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let work = Work::create(&session, &source, "subject", context("one"), limits()).unwrap();
+        assert!(work.result_with_guards(root.path(), &source).is_err());
+        finish(&work, &session, &source);
+        let (result, guards) = work.result_with_guards(root.path(), &source).unwrap();
+        assert_eq!(result, work.result(root.path(), &source).unwrap());
+        assert_eq!(
+            guards.len(),
+            work.progress(root.path(), &source).unwrap().total + 1
+        );
+        let manifest = work_path(&work.plan.id, "plan.json").unwrap();
+        let node = output_path(&work.plan.id, &work.plan.parts[0].id).unwrap();
+        assert!(guards.contains_key(&manifest));
+        assert!(guards.contains_key(&node));
+        assert!(
+            !root
+                .path()
+                .join(work_path(&work.plan.id, "seal.json").unwrap())
+                .exists()
+        );
+
+        let guarded = || {
+            let mut mutation = MutationPlan::default();
+            for (path, raw) in &guards {
+                mutation.require_unchanged(path, raw.clone());
+            }
+            mutation
+        };
+        session.apply(guarded()).unwrap();
+        for path in [&node, &manifest] {
+            let raw = guards.get(path).unwrap();
+            std::fs::write(root.path().join(path), format!("{raw}\n")).unwrap();
+            let mut mutation = guarded();
+            mutation.create("guarded-publication.md", "must not publish".into());
+            assert!(session.apply(mutation).is_err());
+            assert!(!root.path().join("guarded-publication.md").exists());
+            std::fs::write(root.path().join(path), raw).unwrap();
+        }
     }
 
     #[test]

@@ -63,6 +63,13 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   Prepare a native node's progress and request from one captured evaluation. Refresh
   the complete scope after the host returns before recording; added discovery matches
   invalidate work too. Never retain a candidate capture across host execution.
+  Progressive extraction separates complete source observations, bounded candidate-card
+  screening and admitted full-body evidence. All candidate and scoped-review guards remain
+  pinned; unknown or deferred decisions block completion, and card-only rejection is not
+  a full-body assessment. Reused owners must be selected and read in full. Source work
+  never finishes extraction independently: canonical extraction publication journals its
+  exact supporting-consumption receipt with the knowledge edits. Retention validates that
+  receipt and preserves live queue/reuse references before removing expired source work.
 - Native inspection/reduction is a structured inference role (`execution/observation.rs`):
   stdin carries only the bounded node request and instructions, stdout is bounded and
   decoded by the host's explicit response contract. Rust owns recording the selected

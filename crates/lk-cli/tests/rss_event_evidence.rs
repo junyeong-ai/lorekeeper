@@ -25,7 +25,7 @@ impl Fixture {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         let config = root.join("config.yaml");
-        std::fs::write(&config, format!("vault:\n  root: {}\n  locale: en\nidentity:\n  name: Test\n  email: test@example.com\nsources:\n  notes:\n    type: manual\n    params:\n      inbox_dir: inbox\n", root.display())).unwrap();
+        std::fs::write(&config, format!("vault:\n  root: {}\n  locale: en\nidentity:\n  name: Test\n  email: test@example.com\nexecution:\n  work: {{extraction_context: full-context}}\nsources:\n  notes:\n    type: manual\n    params:\n      inbox_dir: inbox\n", root.display())).unwrap();
         let events = (1..=2).map(|n| serde_json::from_value::<lk_core::event::Event>(serde_json::json!({"id":format!("feed:2026-10-18:{n:016x}"),"source_id":"feed","source_type":"rss","timestamp":"2026-10-18T00:00:00Z","date":"2026-10-18","title":format!("Article {n}"),"body":format!("Independent mechanism {n}; historical observation, not a current guarantee."),"url":format!("https://example.com/{n}"),"author":null,"labels":[],"category":null,"performance_category":null,"is_self":false,"is_personal":false,"metadata":{}})).unwrap()).collect::<Vec<_>>();
         let capture = lk_core::rss_original::RssOriginalCapture::from_events(
             &events.iter().collect::<Vec<_>>(),

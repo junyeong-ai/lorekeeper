@@ -15,7 +15,7 @@ impl Workspace {
         std::fs::create_dir(root.path().join("vault")).unwrap();
         std::fs::write(
             root.path().join("config.yaml"),
-            "vault:\n  root: vault\n  locale: en\nidentity:\n  name: Tester\n  email: tester@example.com\nsources:\n  notes:\n    type: manual\n    params:\n      inbox_dir: inbox\n      archive_after_ingest: false\n",
+            "vault:\n  root: vault\n  locale: en\nidentity:\n  name: Tester\n  email: tester@example.com\nexecution:\n  work: {extraction_context: full-context}\nsources:\n  notes:\n    type: manual\n    params:\n      inbox_dir: inbox\n      archive_after_ingest: false\n",
         )
         .unwrap();
         Self { root }

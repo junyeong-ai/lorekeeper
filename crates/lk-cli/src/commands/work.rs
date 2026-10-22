@@ -7,6 +7,7 @@ use super::{GlobalOptions, find_config, load_config_with_revision};
 
 mod discovery;
 mod resources;
+mod selection;
 pub(crate) mod state;
 
 use resources::{Prepared, Subject};
@@ -14,6 +15,34 @@ use state::{Work, WorkLimits, WorkOutput};
 
 #[derive(clap::Subcommand)]
 pub enum WorkCommand {
+    /// Plan or resume one bounded candidate-screening packet without publishing knowledge
+    Select {
+        #[arg(long)]
+        task_id: String,
+        /// Reread this exact packet without creating or recovering state
+        #[arg(long)]
+        batch_id: Option<String>,
+        /// Receipt pagination limit (1..100); does not reduce candidate coverage
+        #[arg(long, default_value = "20")]
+        limit: usize,
+        #[arg(long, default_value = "0")]
+        offset: usize,
+    },
+    /// Record exact decisions for a candidate-screening packet
+    SelectRecord {
+        #[arg(long)]
+        task_id: String,
+        #[arg(long)]
+        file: PathBuf,
+        /// Exact receipt revision being reassessed; ordinary retries never overwrite decisions
+        #[arg(long)]
+        previous_revision: Option<String>,
+    },
+    /// Plan complete retained-source observations for an oversized screening context
+    SourcePlan {
+        #[arg(long)]
+        task_id: String,
+    },
     /// Record extraction discovery recipes against the exact target revision read
     Discover {
         /// Exact retained concept-extraction task identifier
@@ -213,6 +242,7 @@ pub(super) fn prepare_queue_publication(
 ) -> miette::Result<QueuePublicationGuard> {
     let root = root.canonicalize().into_diagnostic()?;
     let mut prepared = resources::task_for_publication(&root, config, task_id)?;
+    let mut selection_guards = lk_vault::MutationPlan::default();
     let mut owned_pages = std::collections::BTreeSet::new();
     let scoped_extraction = prepared.context["purpose"]["task_kind"]
         == serde_json::to_value(lk_queue::TaskKind::ExtractConcepts).into_diagnostic()?;
@@ -224,7 +254,22 @@ pub(super) fn prepare_queue_publication(
                 "nonempty concept extraction requires discovery before drafting"
             ));
         }
-        prepared = resources::with_discovery(&root, config, prepared, &typed.discovery)?;
+        let selected_owners = if let Some(selection) = &typed.selection {
+            let (selected, owners) = selected_task(
+                &root,
+                config,
+                config_revision,
+                task_id,
+                &typed.discovery,
+                selection,
+                &mut selection_guards,
+            )?;
+            prepared = selected;
+            Some(owners)
+        } else {
+            prepared = resources::with_discovery(&root, config, prepared, &typed.discovery)?;
+            None
+        };
         for concept in &typed.concepts {
             if let lk_queue::ConceptAdmission::Reuse { owner } = &concept.admission {
                 let canonical = lk_vault::page_path(&root, Path::new(&owner.path))
@@ -235,11 +280,16 @@ pub(super) fn prepare_queue_publication(
                     .strip_prefix(&root)
                     .into_diagnostic()?
                     .to_string_lossy();
-                if !prepared.resources.iter().any(|resource| {
-                    resource.authority == lk_core::semantic::SemanticAuthority::Context
-                        && resource.address == address
-                        && resource.revision == owner.revision
-                }) {
+                if selected_owners
+                    .as_ref()
+                    .is_some_and(|owners| !owners.contains(address.as_ref()))
+                    || !prepared.resources.iter().any(|resource| {
+                        (selected_owners.is_some()
+                            || resource.authority == lk_core::semantic::SemanticAuthority::Context)
+                            && resource.address == address
+                            && resource.revision == owner.revision
+                    })
+                {
                     return Err(miette::miette!(
                         "selected concept owner is outside the captured discovery context or its read revision changed"
                     ));
@@ -263,6 +313,18 @@ pub(super) fn prepare_queue_publication(
             ));
         }
     }
+    if scoped_extraction && !prepared.context["purpose"]["source_observations"].is_null() {
+        let typed: lk_queue::TaskResult =
+            serde_json::from_value(result.clone()).into_diagnostic()?;
+        let source = resources::source_task(&root, config, task_id)?;
+        let source_work = expected(&source, config, config_revision)?;
+        if prepared.context["purpose"]["source_observations"]["work_id"] != source_work.plan.id {
+            return Err(miette::miette!(
+                "retained source observations differ from their current work identity"
+            ));
+        }
+        source_work.plan_consumption(&mut selection_guards, &root, &source.resources, &typed)?;
+    }
     if let Subject::Queue { target, .. } = &prepared.subject {
         let target = lk_vault::page_path(&root, Path::new(target))
             .into_diagnostic()?
@@ -271,7 +333,7 @@ pub(super) fn prepare_queue_publication(
         owned_pages.insert(target.strip_prefix(&root).into_diagnostic()?.to_path_buf());
     }
     let pages = std::mem::take(&mut prepared.pages);
-    let mut work = lk_vault::MutationPlan::default();
+    let mut work = selection_guards;
     let bounded = guard_prepared(&root, config, config_revision, prepared, result, &mut work)?;
     Ok(QueuePublicationGuard {
         work,
@@ -290,9 +352,49 @@ pub(super) fn task_context(
     discovery_file: Option<&Path>,
 ) -> miette::Result<Value> {
     let root = root.canonicalize().into_diagnostic()?;
-    let prepared = match discovery {
-        Some(queries) => resources::task_with_discovery(&root, config, task_id, queries)?,
-        None => resources::task(&root, config, task_id)?,
+    let task = super::queue::select_task(
+        &root,
+        task_id,
+        super::queue::TaskSelection::CurrentOrDoneExtraction,
+    )?;
+    let prepared = if task.kind == lk_queue::TaskKind::ExtractConcepts && is_progressive(config)? {
+        let retained = progressive_discovery(&root, &task, discovery)?;
+        let Some(queries) = retained.as_deref() else {
+            return Ok(json!({"status":"needs-discovery", "context_revision":null,
+                "requires_screening":true,"selection":null,"resources":null,
+                "authority":"Record explicit discovery queries against the exact target before selecting candidate evidence. No semantic read or completion is certified."}));
+        };
+        match screening(&root, config, config_revision, task_id, queries)? {
+            ScreeningPreparation::Source { work, .. } => {
+                return Ok(
+                    json!({"status":"needs-source-observations","context_revision":null,
+                    "requires_screening":true,"requires_source_work":true,"selection":null,"resources":null,
+                    "part_count":work.plan.parts.len(),
+                    "plan_command":["lore","work","source-plan","--task-id",task_id]}),
+                );
+            }
+            ScreeningPreparation::Candidates(screening) => {
+                let planned = screening.selection.is_planned(&root)?;
+                let ledger = planned
+                    .then(|| screening.selection.ledger(&root))
+                    .transpose()?;
+                if let Some(ledger) = ledger.filter(|ledger| ledger.progress.complete) {
+                    admitted_task(&screening, &ledger.binding()?, &ledger.selected_owners)?
+                } else {
+                    return Ok(json!({"status":"needs-screening","context_revision":null,
+                        "requires_screening":true,"requires_source_work":false,"resources":null,
+                        "candidate_count":screening.inventory.capture.candidates.len(),
+                        "selection_id":screening.selection.id,"planned":planned,
+                        "plan_command":["lore","work","select","--task-id",task_id],
+                        "authority":"Complete retrieval is not a semantic assessment. Read and record each assigned candidate-card decision; unresolved applicability remains deferred. Selected bodies still require full evidence inspection before publication."}));
+                }
+            }
+        }
+    } else {
+        match discovery {
+            Some(queries) => resources::task_with_discovery(&root, config, task_id, queries)?,
+            None => resources::task(&root, config, task_id)?,
+        }
     };
     let work = expected(&prepared, config, config_revision)?;
     let requires_bounded_work = work.plan.parts.len() > 1;
@@ -322,6 +424,9 @@ pub(super) fn task_context(
         })).collect::<Vec<_>>())
     };
     Ok(json!({
+        "status":"ready",
+        "requires_screening":false,
+        "selection":prepared.context["purpose"]["extraction_scope"]["selection"],
         "context_revision": prepared.revision(config_revision)?,
         "subject": prepared.subject,
         "context": prepared.context,
@@ -356,6 +461,13 @@ pub(super) fn prune_discovery(
     discovery::prune(session, pending)
 }
 
+pub(super) fn prune_selection(
+    session: &lk_vault::MutationSession,
+    pending: &std::collections::BTreeSet<(String, String)>,
+) -> miette::Result<usize> {
+    selection::prune(session, pending)
+}
+
 pub(super) fn needs_discovery(
     root: &Path,
     config: &lk_core::config::Config,
@@ -371,6 +483,305 @@ pub(super) fn needs_discovery(
         .parts
         .len()
         > 1)
+}
+
+fn is_progressive(config: &lk_core::config::Config) -> miette::Result<bool> {
+    Ok(config
+        .execution
+        .effective_work()
+        .into_diagnostic()?
+        .extraction_context
+        == lk_core::execution::ExtractionContext::Progressive)
+}
+
+fn progressive_discovery(
+    root: &Path,
+    task: &lk_queue::QueueTask,
+    supplied: Option<&[lk_core::discovery::DiscoveryQuery]>,
+) -> miette::Result<Option<Vec<lk_core::discovery::DiscoveryQuery>>> {
+    let retained = discovery::current(root, task)?;
+    if let Some(supplied) = supplied {
+        let supplied = discovery::validate_queries(supplied)?;
+        let current = retained.as_ref().ok_or_else(|| {
+            miette::miette!(
+                "progressive --discovery-file requires current recorded recipes; run lore work discover before candidate examination"
+            )
+        })?;
+        if &supplied != current {
+            return Err(miette::miette!(
+                "--discovery-file differs from current recorded recipes; record the intended queries with lore work discover before progressive examination"
+            ));
+        }
+    }
+    Ok(retained)
+}
+
+fn task_for_plan(
+    root: &Path,
+    config: &lk_core::config::Config,
+    config_revision: &str,
+    task_id: &str,
+    discovery: Option<&[lk_core::discovery::DiscoveryQuery]>,
+) -> miette::Result<Prepared> {
+    let task = super::queue::select_task(
+        root,
+        task_id,
+        super::queue::TaskSelection::CurrentOrDoneExtraction,
+    )?;
+    if task.kind != lk_queue::TaskKind::ExtractConcepts || !is_progressive(config)? {
+        return match discovery {
+            Some(queries) => resources::task_with_discovery(root, config, task_id, queries),
+            None => resources::task(root, config, task_id),
+        };
+    }
+    let queries = progressive_discovery(root, &task, discovery)?.ok_or_else(|| {
+        miette::miette!(
+            "progressive extraction requires recorded discovery before planning; run lore work discover and inspect lore work context"
+        )
+    })?;
+    let ScreeningPreparation::Candidates(screening) =
+        screening(root, config, config_revision, task_id, &queries)?
+    else {
+        return Err(miette::miette!(
+            "source observations are incomplete; use lore work source-plan before planning selected evidence"
+        ));
+    };
+    if !screening.selection.is_planned(root)? {
+        return Err(miette::miette!(
+            "candidate screening is incomplete; use lore work select before planning selected evidence"
+        ));
+    }
+    let ledger = screening.selection.ledger(root)?;
+    admitted_task(&screening, &ledger.binding()?, &ledger.selected_owners)
+}
+
+struct Screening {
+    selection: selection::Selection,
+    inventory: resources::SelectionInventory,
+}
+
+enum ScreeningPreparation {
+    Source {
+        work: Box<Work>,
+        prepared: Box<Prepared>,
+    },
+    Candidates(Box<Screening>),
+}
+
+fn screening(
+    root: &Path,
+    config: &lk_core::config::Config,
+    config_revision: &str,
+    task_id: &str,
+    queries: &[lk_core::discovery::DiscoveryQuery],
+) -> miette::Result<ScreeningPreparation> {
+    let mut inventory = resources::selection_inventory(root, config, task_id, queries)?;
+    let Subject::Queue {
+        task_id,
+        cache_hash,
+        target,
+        target_revision,
+    } = &inventory.source.subject
+    else {
+        return Err(miette::miette!(
+            "candidate screening requires a queue subject"
+        ));
+    };
+    let binding = selection::SelectionBinding {
+        task_id: task_id.clone(),
+        cache_hash: cache_hash.clone(),
+        target: target.clone(),
+        target_revision: target_revision.clone(),
+        config_revision: config_revision.into(),
+        inventory_revision: inventory.revision.clone(),
+    };
+    let bounds = limits(config)?;
+    let source_revision = inventory.source.revision(config_revision)?;
+    let mut context = if inventory.capture.candidates.is_empty() {
+        json!({"role":"no-candidates", "source_revision":source_revision})
+    } else {
+        json!({"role":"complete-retained-input", "source_revision":source_revision,
+            "context":inventory.source.context, "resources":inventory.source.resources})
+    };
+    if !selection::Selection::source_fits(
+        &binding,
+        &context,
+        &inventory.capture,
+        bounds.max_input_bytes,
+        bounds.max_result_bytes,
+    )? {
+        let work = expected(&inventory.source, config, config_revision)?;
+        if !work.is_planned(root)? || !work.progress(root, &inventory.source.resources)?.complete {
+            return Ok(ScreeningPreparation::Source {
+                work: Box::new(work),
+                prepared: Box::new(inventory.source),
+            });
+        }
+        let (result, guards) = work.result_with_guards(root, &inventory.source.resources)?;
+        if result["output"]["unresolved"]
+            .as_array()
+            .is_some_and(|values| !values.is_empty())
+        {
+            return Err(miette::miette!(
+                "source observations retain processing blockers; resolve or replan before candidate screening"
+            ));
+        }
+        inventory.pages.extend(guards);
+        context = json!({"role":"complete-bounded-source-observations", "source_revision":source_revision,
+            "observation":result});
+    }
+    let selection = selection::Selection::build(
+        binding,
+        context,
+        &inventory.capture,
+        bounds.max_input_bytes,
+        bounds.max_result_bytes,
+    )?;
+    Ok(ScreeningPreparation::Candidates(Box::new(Screening {
+        selection,
+        inventory,
+    })))
+}
+
+fn current_screening(
+    root: &Path,
+    config: &lk_core::config::Config,
+    config_revision: &str,
+    task_id: &str,
+) -> miette::Result<ScreeningPreparation> {
+    let task = super::queue::select_task(
+        root,
+        task_id,
+        super::queue::TaskSelection::CurrentOrDoneExtraction,
+    )?;
+    let queries = discovery::current(root, &task)?.ok_or_else(|| {
+        miette::miette!(
+            "candidate screening requires current explicit discovery; record work discover first"
+        )
+    })?;
+    screening(root, config, config_revision, task_id, &queries)
+}
+
+impl ScreeningPreparation {
+    fn persist(
+        &self,
+        session: &lk_vault::MutationSession,
+        config: &lk_core::config::Config,
+        config_revision: &str,
+    ) -> miette::Result<()> {
+        match self {
+            Self::Source { prepared, .. } => {
+                Work::create(
+                    session,
+                    &prepared.resources,
+                    &prepared.revision(config_revision)?,
+                    prepared.context.clone(),
+                    limits(config)?,
+                )?;
+            }
+            Self::Candidates(screening) => screening
+                .selection
+                .create(session, &screening.inventory.pages)?,
+        }
+        Ok(())
+    }
+}
+
+pub(super) struct ScreeningTurn {
+    pub selection_id: String,
+    pub request: Option<Value>,
+    pub complete: bool,
+    pub unknown: usize,
+    pub deferred: usize,
+    pub completed_batches: usize,
+    pub batches: usize,
+}
+
+pub(super) fn prepare_screening(
+    root: &Path,
+    config: &lk_core::config::Config,
+    config_revision: &str,
+    task_id: &str,
+) -> miette::Result<ScreeningTurn> {
+    let root = root.canonicalize().into_diagnostic()?;
+    let prepared = current_screening(&root, config, config_revision, task_id)?;
+    let ScreeningPreparation::Candidates(screening) = prepared else {
+        return Err(miette::miette!(
+            "source observations are incomplete; resume source work before candidate screening"
+        ));
+    };
+    let (progress, request) = screening.selection.prepare(&root)?;
+    Ok(ScreeningTurn {
+        selection_id: screening.selection.id,
+        request,
+        complete: progress.complete,
+        unknown: progress.unknown,
+        deferred: progress.deferred,
+        completed_batches: progress.completed_batches,
+        batches: progress.batches,
+    })
+}
+
+pub(super) fn record_screening(
+    root: &Path,
+    config: &lk_core::config::Config,
+    config_revision: &str,
+    task_id: &str,
+    output: Value,
+    previous_revision: Option<&str>,
+) -> miette::Result<usize> {
+    let session = lk_vault::MutationSession::acquire(root).into_diagnostic()?;
+    let prepared = current_screening(session.root(), config, config_revision, task_id)?;
+    let ScreeningPreparation::Candidates(screening) = prepared else {
+        return Err(miette::miette!(
+            "candidate screening source scope changed; replan"
+        ));
+    };
+    Ok(screening
+        .selection
+        .record(
+            &session,
+            &screening.inventory.pages,
+            serde_json::from_value(output).into_diagnostic()?,
+            previous_revision,
+        )?
+        .completed_batches)
+}
+
+fn selected_task(
+    root: &Path,
+    config: &lk_core::config::Config,
+    config_revision: &str,
+    task_id: &str,
+    queries: &[lk_core::discovery::DiscoveryQuery],
+    binding: &lk_queue::ExtractionSelection,
+    mutation: &mut lk_vault::MutationPlan,
+) -> miette::Result<(Prepared, std::collections::BTreeSet<String>)> {
+    let ScreeningPreparation::Candidates(screening) =
+        screening(root, config, config_revision, task_id, queries)?
+    else {
+        return Err(miette::miette!(
+            "source observations are incomplete; retained extraction cannot publish"
+        ));
+    };
+    let ledger = screening.selection.guard(root, mutation, binding)?;
+    Ok((
+        admitted_task(&screening, binding, &ledger.selected_owners)?,
+        ledger.selected_owners,
+    ))
+}
+
+fn admitted_task(
+    screening: &Screening,
+    binding: &lk_queue::ExtractionSelection,
+    selected: &std::collections::BTreeSet<String>,
+) -> miette::Result<Prepared> {
+    let mut prepared = resources::task_with_selection(&screening.inventory, binding, selected)?;
+    if screening.selection.source_context()["role"] == "complete-bounded-source-observations" {
+        prepared.context["purpose"]["source_observations"] =
+            screening.selection.source_context()["observation"].clone();
+    }
+    Ok(prepared)
 }
 
 fn load_discovery(path: &Path) -> miette::Result<Vec<lk_core::discovery::DiscoveryQuery>> {
@@ -409,7 +820,7 @@ fn load(
     id: &str,
 ) -> miette::Result<(Work, Prepared)> {
     let work = Work::load(root, id)?;
-    let prepared = resources::refresh(root, config, &work.context)?;
+    let prepared = resources::refresh(root, config, config_revision, &work.context)?;
     if expected(&prepared, config, config_revision)? != work {
         return Err(miette::miette!(
             "work inputs, configuration or bounded execution policy changed; replan"
@@ -421,6 +832,8 @@ fn load(
 pub(super) enum TaskWork {
     WholeInput { bytes: usize },
     Partitioned { id: String },
+    Source { id: String },
+    Screening,
 }
 
 pub(super) fn prepare_task(
@@ -431,7 +844,28 @@ pub(super) fn prepare_task(
 ) -> miette::Result<TaskWork> {
     let root = root.canonicalize().into_diagnostic()?;
     let session = lk_vault::MutationSession::acquire(&root).into_diagnostic()?;
-    let prepared = resources::task(&root, config, task_id)?;
+    let task = super::queue::current_task(&root, task_id)?;
+    let prepared = if task.kind == lk_queue::TaskKind::ExtractConcepts
+        && is_progressive(config)?
+        && discovery::current(&root, &task)?.is_some()
+    {
+        let selected = current_screening(&root, config, config_revision, task_id)?;
+        selected.persist(&session, config, config_revision)?;
+        match selected {
+            ScreeningPreparation::Source { work, .. } => {
+                return Ok(TaskWork::Source { id: work.plan.id });
+            }
+            ScreeningPreparation::Candidates(screening) => {
+                let ledger = screening.selection.ledger(&root)?;
+                if !ledger.progress.complete {
+                    return Ok(TaskWork::Screening);
+                }
+                admitted_task(&screening, &ledger.binding()?, &ledger.selected_owners)?
+            }
+        }
+    } else {
+        resources::task(&root, config, task_id)?
+    };
     let work = expected(&prepared, config, config_revision)?;
     let stored = root
         .join(".lorekeeper/work")
@@ -650,6 +1084,95 @@ pub async fn run(opts: &GlobalOptions, command: WorkCommand) -> miette::Result<(
     let (config, config_revision) = load_config_with_revision(&find_config(opts)?)?;
     let root = config.vault.root_path().canonicalize().into_diagnostic()?;
     let output = match command {
+        WorkCommand::Select {
+            task_id,
+            batch_id,
+            limit,
+            offset,
+        } => {
+            if !(1..=100).contains(&limit) {
+                return Err(miette::miette!("receipt limit must be in 1..100"));
+            }
+            let session = batch_id
+                .is_none()
+                .then(|| lk_vault::MutationSession::acquire(&root).into_diagnostic())
+                .transpose()?;
+            let prepared = current_screening(&root, &config, &config_revision, &task_id)?;
+            if let Some(session) = &session {
+                prepared.persist(session, &config, &config_revision)?;
+            }
+            match prepared {
+                ScreeningPreparation::Source { work, prepared } => json!({
+                    "status":"needs-source-observations",
+                    "source_work":progress(&work, &root, &prepared, 20, 0)?,
+                    "plan_command":["lore","work","source-plan","--task-id",task_id],
+                }),
+                ScreeningPreparation::Candidates(screening) => {
+                    let (mut progress, mut request) = screening.selection.prepare(&root)?;
+                    if let Some(batch_id) = &batch_id {
+                        request = Some(screening.selection.packet(&root, batch_id)?);
+                    }
+                    let receipt = batch_id
+                        .as_ref()
+                        .and_then(|id| {
+                            progress
+                                .receipts
+                                .iter()
+                                .find(|receipt| &receipt.batch_id == id)
+                        })
+                        .map(serde_json::to_value)
+                        .transpose()
+                        .into_diagnostic()?;
+                    let receipt_total = progress.receipts.len();
+                    progress.receipts = progress
+                        .receipts
+                        .into_iter()
+                        .skip(offset)
+                        .take(limit)
+                        .collect();
+                    let next = offset.saturating_add(progress.receipts.len());
+                    let status = if progress.complete {
+                        "ready"
+                    } else if request.is_none() {
+                        "deferred"
+                    } else {
+                        "screening"
+                    };
+                    json!({"status":status, "progress":progress,"request":request,"receipt":receipt,
+                        "receipt_total":receipt_total,"receipt_limit":limit,"receipt_offset":offset,
+                        "receipt_next_offset":(next<receipt_total).then_some(next)})
+                }
+            }
+        }
+        WorkCommand::SelectRecord {
+            task_id,
+            file,
+            previous_revision,
+        } => {
+            let output = serde_json::from_slice(&std::fs::read(file).into_diagnostic()?)
+                .into_diagnostic()?;
+            let completed = record_screening(
+                &root,
+                &config,
+                &config_revision,
+                &task_id,
+                output,
+                previous_revision.as_deref(),
+            )?;
+            json!({"completed_batches":completed,"next_command":["lore","work","select","--task-id",task_id]})
+        }
+        WorkCommand::SourcePlan { task_id } => {
+            let session = lk_vault::MutationSession::acquire(&root).into_diagnostic()?;
+            let prepared = resources::source_task(&root, &config, &task_id)?;
+            let work = Work::create(
+                &session,
+                &prepared.resources,
+                &prepared.revision(&config_revision)?,
+                prepared.context.clone(),
+                limits(&config)?,
+            )?;
+            progress(&work, &root, &prepared, 20, 0)?
+        }
         WorkCommand::Discover { task_id, file } => {
             let request = serde_json::from_slice(&std::fs::read(file).into_diagnostic()?)
                 .into_diagnostic()?;
@@ -679,10 +1202,9 @@ pub async fn run(opts: &GlobalOptions, command: WorkCommand) -> miette::Result<(
             let session = lk_vault::MutationSession::acquire(&root).into_diagnostic()?;
             let discovery = discovery_file.as_deref().map(load_discovery).transpose()?;
             let prepared = match (task_id, path) {
-                (Some(id), None) => match discovery.as_deref() {
-                    Some(queries) => resources::task_with_discovery(&root, &config, &id, queries)?,
-                    None => resources::task(&root, &config, &id)?,
-                },
+                (Some(id), None) => {
+                    task_for_plan(&root, &config, &config_revision, &id, discovery.as_deref())?
+                }
                 (None, Some(path)) => resources::audit(&root, &config, &path)?,
                 _ => return Err(miette::miette!("select exactly one task or audit path")),
             };
@@ -750,6 +1272,11 @@ fn finish(
     prepared: &Prepared,
     result: Value,
 ) -> miette::Result<Value> {
+    if prepared.context["purpose"]["extraction_scope"]["policy"] == "source-proposals-v1" {
+        return Err(miette::miette!(
+            "source observations support candidate screening; they cannot publish a final knowledge result"
+        ));
+    }
     let result = match &prepared.subject {
         Subject::Queue { task_id, .. } => {
             match super::queue::current_task(session.root(), task_id)?.kind {
@@ -812,6 +1339,18 @@ fn finish(
                 lk_queue::TaskKind::ExtractConcepts => {
                     let typed: lk_queue::TaskResult =
                         serde_json::from_value(result.clone()).into_diagnostic()?;
+                    let selected = prepared.context["purpose"]["extraction_scope"]
+                        .get("selection")
+                        .map(|value| {
+                            serde_json::from_value::<lk_queue::ExtractionSelection>(value.clone())
+                        })
+                        .transpose()
+                        .into_diagnostic()?;
+                    if typed.selection != selected {
+                        return Err(miette::miette!(
+                            "final extraction selection differs from its captured evidence scope"
+                        ));
+                    }
                     if typed.context_revision != work.plan.subject_revision {
                         return Err(miette::miette!(
                             "extraction context revision does not match the work read scope"
@@ -911,11 +1450,227 @@ mod tests {
     }
 
     #[test]
+    fn progressive_plan_matches_ready_scope_and_requires_recorded_file_recipes() {
+        let directory = tempfile::tempdir().unwrap();
+        let config_path = directory.path().join("config.yaml");
+        std::fs::write(&config_path, "vault:\n  root: vault\n  locale: en\nidentity: {name: Tester, email: tester@example.com}\nsources:\n  notes:\n    type: manual\n    params: {inbox_dir: inbox}\n    concept_policy: supported-new\nexecution:\n  work: {extraction_context: progressive, max_input_bytes: 16384, max_result_bytes: 4096, max_calls: 4}\n").unwrap();
+        let (mut config, config_revision) =
+            lk_core::config::Config::load_with_revision(&config_path).unwrap();
+        std::fs::create_dir(directory.path().join("vault")).unwrap();
+        let root = directory.path().join("vault").canonicalize().unwrap();
+        let target = "wiki/documents/subject.md";
+        let selected = "wiki/concepts/keep.md";
+        let excluded = "wiki/documents/drop.md";
+        let task = lk_queue::QueueLlmClient::new(root.join(".lorekeeper/queue")).build_task(
+            "ext",
+            lk_queue::TaskKind::ExtractConcepts,
+            lk_queue::ExtractConceptsRequest {
+                concept_policy: lk_core::config::ConceptPolicy::SupportedNew,
+                rss_original: None,
+                text: "Candidate source evidence.".into(),
+                source_id: "notes".into(),
+                source_type: lk_core::config::SourceType::Manual,
+                date: jiff::civil::date(2026, 10, 22),
+                focus: None,
+                locale: lk_core::i18n::Locale::En,
+                categories: vec![],
+                target: lk_queue::TaskTarget {
+                    vault_path: target.into(),
+                    kind: lk_queue::TargetKind::DocumentConcepts,
+                    anchor: "## Related Concepts".into(),
+                },
+            },
+        );
+        let target_raw = format!(
+            "---\ntype: document\nllm_inputs:\n  concepts: {}\n---\n## Content\nCandidate source evidence.\n\n## Related Concepts\n",
+            serde_json::to_string(&task.cache_hash).unwrap()
+        );
+        write(&root, target, &target_raw);
+        write(
+            &root,
+            selected,
+            &format!(
+                "---\ntype: concept\ntitle: Candidate owner\n---\n## Synthesis\n{}\n",
+                "Candidate details. ".repeat(1200)
+            ),
+        );
+        write(
+            &root,
+            excluded,
+            &format!(
+                "---\ntype: document\ntitle: Other observation\n---\n## Content\n{}\n",
+                "Candidate unrelated. ".repeat(2000)
+            ),
+        );
+        write(
+            &root,
+            ".lorekeeper/queue/fixture.jsonl",
+            &serde_json::to_string(&task).unwrap(),
+        );
+        let queries = [lk_core::discovery::DiscoveryQuery {
+            query: "Candidate".into(),
+            phrase: true,
+            spacing: false,
+        }];
+        assert_eq!(
+            task_context(&root, &config, &config_revision, &task.task_id, None, None).unwrap()["status"],
+            "needs-discovery"
+        );
+        assert!(
+            task_context(
+                &root,
+                &config,
+                &config_revision,
+                &task.task_id,
+                Some(&queries),
+                None
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("recorded recipes")
+        );
+        config.execution.work.extraction_context =
+            lk_core::execution::ExtractionContext::FullContext;
+        let legacy = task_context(
+            &root,
+            &config,
+            &config_revision,
+            &task.task_id,
+            Some(&queries),
+            None,
+        )
+        .unwrap();
+        assert_eq!(legacy["status"], "ready");
+        assert!(legacy["selection"].is_null());
+        config.execution.work.extraction_context =
+            lk_core::execution::ExtractionContext::Progressive;
+        {
+            let session = MutationSession::acquire(&root).unwrap();
+            discovery::record(
+                &session,
+                &task.task_id,
+                serde_json::from_value(json!({
+                    "target_revision":file_revision(&target_raw),"queries":queries,
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        }
+        let different = [lk_core::discovery::DiscoveryQuery {
+            query: "Different".into(),
+            ..queries[0].clone()
+        }];
+        assert!(
+            task_context(
+                &root,
+                &config,
+                &config_revision,
+                &task.task_id,
+                Some(&different),
+                None
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("differs from current recorded recipes")
+        );
+        assert!(
+            task_for_plan(
+                &root,
+                &config,
+                &config_revision,
+                &task.task_id,
+                Some(&queries)
+            )
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("screening is incomplete")
+        );
+        {
+            let session = MutationSession::acquire(&root).unwrap();
+            current_screening(&root, &config, &config_revision, &task.task_id)
+                .unwrap()
+                .persist(&session, &config, &config_revision)
+                .unwrap();
+        }
+        let turn = prepare_screening(&root, &config, &config_revision, &task.task_id).unwrap();
+        let request = turn.request.unwrap();
+        let decisions = request["candidates"].as_array().unwrap().iter().map(|candidate| {
+            json!({"candidate_key":candidate["candidate_key"],
+                "decision":if candidate["candidate_key"] == selected {"inspect"} else {"not-selected"},
+                "reason":"Decide this source-scoped card before reading selected evidence."})
+        }).collect::<Vec<_>>();
+        record_screening(
+            &root,
+            &config,
+            &config_revision,
+            &task.task_id,
+            json!({
+                "selection_id":request["selection_id"],"batch_id":request["batch_id"],
+                "input_revision":request["input_revision"],"decisions":decisions,
+            }),
+            None,
+        )
+        .unwrap();
+        let ready = task_context(
+            &root,
+            &config,
+            &config_revision,
+            &task.task_id,
+            Some(&queries),
+            None,
+        )
+        .unwrap();
+        assert_eq!(ready["status"], "ready");
+        assert_eq!(ready["requires_bounded_work"], true);
+        let session = MutationSession::acquire(&root).unwrap();
+        let prepared = task_for_plan(
+            &root,
+            &config,
+            &config_revision,
+            &task.task_id,
+            Some(&queries),
+        )
+        .unwrap();
+        assert_eq!(
+            prepared.revision(&config_revision).unwrap(),
+            ready["context_revision"].as_str().unwrap()
+        );
+        assert_eq!(prepared.context, ready["context"]);
+        assert!(
+            prepared
+                .resources
+                .iter()
+                .any(|resource| resource.address == selected)
+        );
+        assert!(
+            !prepared
+                .resources
+                .iter()
+                .any(|resource| resource.address == excluded)
+        );
+        assert!(prepared.pages.contains_key(Path::new(excluded)));
+        let work = Work::create(
+            &session,
+            &prepared.resources,
+            &prepared.revision(&config_revision).unwrap(),
+            prepared.context,
+            limits(&config).unwrap(),
+        )
+        .unwrap();
+        assert!(work.plan.parts.len() > 1);
+        assert_eq!(
+            std::fs::read_to_string(root.join(target)).unwrap(),
+            target_raw
+        );
+    }
+
+    #[test]
     fn recording_prepared_inspection_refreshes_changed_and_new_discovery_context() {
         for added_candidate in [false, true] {
             let directory = tempfile::tempdir().unwrap();
             let config_path = directory.path().join("config.yaml");
-            std::fs::write(&config_path, "vault:\n  root: vault\n  locale: en\nidentity: {name: Tester, email: tester@example.com}\nsources:\n  notes:\n    type: manual\n    params: {inbox_dir: inbox}\n    concept_policy: supported-new\nexecution:\n  work: {max_input_bytes: 8192, max_result_bytes: 1024, max_calls: 1}\n").unwrap();
+            std::fs::write(&config_path, "vault:\n  root: vault\n  locale: en\nidentity: {name: Tester, email: tester@example.com}\nsources:\n  notes:\n    type: manual\n    params: {inbox_dir: inbox}\n    concept_policy: supported-new\nexecution:\n  work: {extraction_context: full-context, max_input_bytes: 8192, max_result_bytes: 1024, max_calls: 1}\n").unwrap();
             let (config, config_revision) =
                 lk_core::config::Config::load_with_revision(&config_path).unwrap();
             std::fs::create_dir(directory.path().join("vault")).unwrap();
@@ -1114,6 +1869,7 @@ mod tests {
                     "each origin is in the other result's discovery scope"
                 );
                 let result = lk_queue::TaskResult {
+                    selection: None,
                     concept_policy: lk_core::config::ConceptPolicy::SupportedNew,
                     task_id: task.task_id.clone(),
                     cache_hash: task.cache_hash.clone(),

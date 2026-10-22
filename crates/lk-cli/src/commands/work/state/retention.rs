@@ -6,8 +6,8 @@ use serde_json::Value;
 
 use super::super::resources::Subject;
 use super::{
-    Publication, Seal, StoredOutput, Work, fail, output_path, read_optional, require_id,
-    require_settled, revision, work_path,
+    Consumption, Publication, Seal, StoredOutput, Work, fail, output_path, read_optional,
+    require_id, require_settled, revision, work_path,
 };
 
 #[derive(Default)]
@@ -127,12 +127,12 @@ fn capture_retention(root: &Path, id: &str, cutoff: i64) -> miette::Result<Reten
             .ok_or_else(|| fail("work retention requires a known subject"))?,
     )
     .map_err(fail)?;
-    let queue_subject = match subject {
+    let queue_subject = match &subject {
         Subject::Queue {
             task_id,
             cache_hash,
             ..
-        } => Some((task_id, cache_hash)),
+        } => Some((task_id.clone(), cache_hash.clone())),
         Subject::Audit { .. } => None,
     };
     let directory = work_path(id, "")?;
@@ -142,6 +142,7 @@ fn capture_retention(root: &Path, id: &str, cutoff: i64) -> miette::Result<Reten
         "final.json",
         "assessment.json",
         "publication.json",
+        "consumption.json",
     ]
     .into_iter()
     .map(|name| work_path(id, name))
@@ -197,7 +198,14 @@ fn capture_retention(root: &Path, id: &str, cutoff: i64) -> miette::Result<Reten
             None => Ok(None),
         }
     };
-    let expired = if let Some(raw) = read("publication.json")? {
+    let publication = read("publication.json")?;
+    let consumption = read("consumption.json")?;
+    if publication.is_some() && consumption.is_some() {
+        return Err(fail(
+            "work cannot be both published and consumed source observations",
+        ));
+    }
+    let expired = if let Some(raw) = publication {
         let receipt: Publication = serde_json::from_str(&raw).map_err(fail)?;
         let seal: Seal = serde_json::from_str(
             &read("seal.json")?.ok_or_else(|| fail("published work seal is missing"))?,
@@ -215,6 +223,44 @@ fn capture_retention(root: &Path, id: &str, cutoff: i64) -> miette::Result<Reten
             return Err(fail("published work receipt, seal or result differs"));
         }
         !unknown && receipt.published_at.as_second() < cutoff
+    } else if let Some(raw) = consumption {
+        let receipt: Consumption = serde_json::from_str(&raw).map_err(fail)?;
+        let Subject::Queue {
+            task_id,
+            cache_hash,
+            target,
+            target_revision,
+        } = &subject
+        else {
+            return Err(fail("consumed source work has no queue subject"));
+        };
+        let node = nodes.last().expect("nonempty work tree");
+        let root_path = output_path(id, &node.id)?;
+        let output: StoredOutput = serde_json::from_str(&read_captured(
+            root,
+            &root_path,
+            revisions
+                .get(&root_path)
+                .ok_or_else(|| fail("consumed source root observation is missing"))?,
+        )?)
+        .map_err(fail)?;
+        if work.context["purpose"]["extraction_scope"]["policy"] != "source-proposals-v1"
+            || work.context["purpose"]["task_kind"] != "extract-concepts"
+            || receipt.work_id != id
+            || receipt.root_node != node.id
+            || receipt.root_output_revision != output.output_revision
+            || &receipt.task_id != task_id
+            || &receipt.cache_hash != cache_hash
+            || &receipt.target != target
+            || &receipt.target_revision != target_revision
+            || receipt.result_revision.trim().is_empty()
+            || !output.output.unresolved.is_empty()
+        {
+            return Err(fail(
+                "source consumption receipt or completed observation differs",
+            ));
+        }
+        !unknown && receipt.consumed_at.as_second() < cutoff
     } else {
         false
     };
@@ -237,7 +283,7 @@ fn read_captured(root: &Path, path: &Path, expected: &str) -> miette::Result<Str
 }
 
 /// Caller holds the workflow lease and mutation session when pruning. Unknown,
-/// unpublished and referenced work survives; no source or knowledge file is owned here.
+/// unconsumed/unpublished and referenced work survives; no source or knowledge file is owned here.
 pub(crate) fn prune_published(
     root: &Path,
     session: Option<&MutationSession>,
@@ -786,6 +832,131 @@ mod tests {
                 .path()
                 .join(work_path(&work.plan.id, "publication.json").unwrap())
                 .exists()
+        );
+    }
+
+    #[test]
+    fn consumed_source_observations_expire_only_after_canonical_commit_and_queue_release() {
+        let root = tempfile::tempdir().unwrap();
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let source = resources();
+        let queue = root.path().join(".lorekeeper/queue");
+        let task = lk_queue::QueueLlmClient::new(queue.clone()).build_task(
+            "extract",
+            lk_queue::TaskKind::ExtractConcepts,
+            lk_queue::ExtractConceptsRequest {
+                concept_policy: lk_core::config::ConceptPolicy::SupportedNew,
+                rss_original: None,
+                text: "Retained source observation.".into(),
+                source_id: "notes".into(),
+                source_type: lk_core::config::SourceType::Manual,
+                date: jiff::civil::date(2026, 10, 22),
+                focus: None,
+                locale: lk_core::i18n::Locale::En,
+                categories: vec![],
+                target: lk_queue::TaskTarget {
+                    vault_path: "wiki/documents/source.md".into(),
+                    kind: lk_queue::TargetKind::DocumentConcepts,
+                    anchor: "## Related Concepts".into(),
+                },
+            },
+        );
+        let context = json!({
+            "subject":Subject::Queue {task_id:task.task_id.clone(),cache_hash:task.cache_hash.clone(),
+                target:task.target.vault_path.clone(),target_revision:"captured-target".into()},
+            "purpose":{"task_kind":"extract-concepts","extraction_scope":{"policy":"source-proposals-v1"}},
+        });
+        let work = Work::create(&session, &source, "source-phase", context, limits()).unwrap();
+        let mut result = lk_queue::TaskResult {
+            concept_policy: lk_core::config::ConceptPolicy::SupportedNew,
+            task_id: task.task_id.clone(),
+            cache_hash: task.cache_hash.clone(),
+            target_revision: "captured-target".into(),
+            context_revision: "admitted-context".into(),
+            discovery: vec![],
+            selection: Some(lk_queue::ExtractionSelection {
+                policy: lk_queue::ExtractionSelectionPolicy::ProgressiveV1,
+                inventory_revision: "complete-inventory".into(),
+                decisions_revision: "screened".into(),
+            }),
+            target: task.target.clone(),
+            date: jiff::civil::date(2026, 10, 22),
+            concepts: vec![],
+        };
+        assert!(
+            work.plan_consumption(&mut MutationPlan::default(), root.path(), &source, &result)
+                .is_err()
+        );
+        finish(&work, &session, &source);
+        result.task_id.push_str("-different");
+        assert!(
+            work.plan_consumption(&mut MutationPlan::default(), root.path(), &source, &result)
+                .is_err()
+        );
+        result.task_id.clone_from(&task.task_id);
+        let receipt = work_path(&work.plan.id, "consumption.json").unwrap();
+        let mut blocked = MutationPlan::default();
+        work.plan_consumption(&mut blocked, root.path(), &source, &result)
+            .unwrap();
+        blocked.require_unchanged("wiki/documents/changed.md", "expected".into());
+        assert!(session.apply(blocked).is_err());
+        assert!(!root.path().join(&receipt).exists());
+        let mut canonical = MutationPlan::default();
+        work.plan_consumption(&mut canonical, root.path(), &source, &result)
+            .unwrap();
+        canonical.create(
+            &task.target.vault_path,
+            "Published exact extraction.".into(),
+        );
+        session.apply(canonical).unwrap();
+        assert!(root.path().join(&receipt).exists());
+        for name in ["seal.json", "final.json", "publication.json"] {
+            assert!(
+                !root
+                    .path()
+                    .join(work_path(&work.plan.id, name).unwrap())
+                    .exists()
+            );
+        }
+        std::fs::create_dir_all(&queue).unwrap();
+        lk_queue::write_tasks_atomic(&queue.join("pending.jsonl"), &[task]).unwrap();
+        let cutoff = jiff::Timestamp::now().as_second() + 1;
+        assert_eq!(
+            prune_published(root.path(), None, cutoff).unwrap().removed,
+            0
+        );
+        assert_eq!(
+            prune_published(root.path(), Some(&session), cutoff)
+                .unwrap()
+                .retained,
+            1
+        );
+        std::fs::remove_file(queue.join("pending.jsonl")).unwrap();
+        let raw = std::fs::read_to_string(root.path().join(&receipt)).unwrap();
+        std::fs::write(root.path().join(&receipt), "{}").unwrap();
+        assert!(prune_published(root.path(), Some(&session), cutoff).is_err());
+        assert!(Work::load(root.path(), &work.plan.id).is_ok());
+        std::fs::write(root.path().join(&receipt), &raw).unwrap();
+        assert_eq!(prune_published(root.path(), None, 0).unwrap().removed, 0);
+        assert_eq!(
+            prune_published(root.path(), None, cutoff).unwrap().removed,
+            1
+        );
+        assert_eq!(
+            prune_published(root.path(), Some(&session), cutoff)
+                .unwrap()
+                .removed,
+            1
+        );
+        assert!(
+            !root
+                .path()
+                .join(work_path(&work.plan.id, "").unwrap())
+                .exists()
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("wiki/documents/source.md")).unwrap(),
+            "Published exact extraction."
         );
     }
 }

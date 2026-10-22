@@ -83,6 +83,11 @@ lives in `lk-vault`/`lk-pipeline`.
   source-grounded synthesis; actual support still requires semantic review.
   Synthesis also pins its full source/review context. Changed context refuses
   publication rather than relabeling an old answer.
+- Extraction results may carry typed `selection` with the progressive policy, complete
+  inventory revision and decision revision. Absence preserves the legacy full-context
+  contract; never infer selection or relabel an old result. This result binding does not
+  change retained request serialization, generation policies or cache identities. Omit
+  absent selection during serialization so legacy result bytes remain compatible.
 
 ## RSS evidence policy
 

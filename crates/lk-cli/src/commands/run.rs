@@ -57,6 +57,23 @@ mod native {
     use std::path::{Path, PathBuf};
     use std::time::{Duration, Instant};
 
+    enum ObservationRole {
+        Evidence,
+        Screening,
+    }
+
+    struct ObservationReply {
+        engine: lk_core::execution::AgentEngine,
+        bytes: Vec<u8>,
+        limit: usize,
+    }
+
+    enum ObservationStep {
+        Recorded,
+        Complete,
+        Failed,
+    }
+
     enum WorkStep {
         Pending,
         Staged,
@@ -69,6 +86,12 @@ mod native {
         },
         Partitioned {
             id: String,
+            task: lk_queue::QueueTask,
+        },
+        Source {
+            id: String,
+        },
+        Screening {
             task: lk_queue::QueueTask,
         },
         WholeInput {
@@ -405,12 +428,11 @@ mod native {
             }
         }
 
-        async fn observe(
+        async fn request_observation(
             &mut self,
-            id: &str,
-            node: &str,
             request: serde_json::Value,
-        ) -> Option<crate::commands::work::state::WorkProgress> {
+            role: ObservationRole,
+        ) -> Option<ObservationReply> {
             if self.result.cancelled || !self.configuration_is_current() {
                 return None;
             }
@@ -445,7 +467,14 @@ mod native {
                 return None;
             }
             let profile = self.selected.as_ref().expect("prepared agent");
-            let invocation = match execution::observation::build_invocation(profile, &request) {
+            let invocation = match match role {
+                ObservationRole::Evidence => {
+                    execution::observation::build_invocation(profile, &request)
+                }
+                ObservationRole::Screening => {
+                    execution::observation::build_screening_invocation(profile, &request)
+                }
+            } {
                 Ok(invocation) => invocation,
                 Err(error) => {
                     self.failure("bounded work receipt", error);
@@ -511,17 +540,30 @@ mod native {
             if !self.configuration_is_current() {
                 return None;
             }
-            let output = match execution::observation::decode(
-                invocation.engine,
-                &child.stdout,
-                budget.max_result_bytes,
-            ) {
-                Ok(output) => output,
-                Err(error) => {
-                    self.failure("bounded work receipt", error);
-                    return None;
-                }
-            };
+            Some(ObservationReply {
+                engine: invocation.engine,
+                bytes: child.stdout,
+                limit: budget.max_result_bytes,
+            })
+        }
+
+        async fn observe(
+            &mut self,
+            id: &str,
+            node: &str,
+            request: serde_json::Value,
+        ) -> Option<crate::commands::work::state::WorkProgress> {
+            let reply = self
+                .request_observation(request, ObservationRole::Evidence)
+                .await?;
+            let output =
+                match execution::observation::decode(reply.engine, &reply.bytes, reply.limit) {
+                    Ok(output) => output,
+                    Err(error) => {
+                        self.failure("bounded work receipt", error);
+                        return None;
+                    }
+                };
             match crate::commands::work::record_inspection(
                 &self.root,
                 &self.config,
@@ -553,7 +595,7 @@ mod native {
             }
         }
 
-        async fn bounded_step(&mut self, id: &str, skill: &str) -> WorkStep {
+        async fn bounded_observation_step(&mut self, id: &str) -> ObservationStep {
             let (before, request) = match crate::commands::work::prepare_inspection(
                 &self.root,
                 &self.config,
@@ -563,33 +605,42 @@ mod native {
                 Ok(status) => status,
                 Err(error) => {
                     self.failure("bounded work progress", error);
-                    return WorkStep::Failed;
+                    return ObservationStep::Failed;
                 }
             };
             if !before.complete {
                 let Some(node) = before.ready.first() else {
                     self.failure("bounded work progress", "incomplete work has no ready node");
-                    return WorkStep::Failed;
+                    return ObservationStep::Failed;
                 };
                 let Some(request) = request else {
                     self.failure(
                         "bounded work progress",
                         "ready work has no inspection input",
                     );
-                    return WorkStep::Failed;
+                    return ObservationStep::Failed;
                 };
                 return match self.observe(id, node, request).await {
                     Some(after)
                         if after.completed > before.completed && !after.ready.contains(node) =>
                     {
-                        WorkStep::Pending
+                        ObservationStep::Recorded
                     }
                     Some(_) => {
                         self.failure("bounded work receipt", "worker exited without completing its selected node; unfinished work retained");
-                        WorkStep::Failed
+                        ObservationStep::Failed
                     }
-                    None => WorkStep::Failed,
+                    None => ObservationStep::Failed,
                 };
+            }
+            ObservationStep::Complete
+        }
+
+        async fn bounded_step(&mut self, id: &str, skill: &str) -> WorkStep {
+            match self.bounded_observation_step(id).await {
+                ObservationStep::Recorded => return WorkStep::Pending,
+                ObservationStep::Failed => return WorkStep::Failed,
+                ObservationStep::Complete => {}
             }
             match crate::commands::work::is_finished(
                 &self.root,
@@ -729,6 +780,16 @@ mod native {
                         batch_bytes = 0;
                         jobs.insert(target, QueueDispatch::Partitioned { id, task });
                     }
+                    crate::commands::work::TaskWork::Source { id } => {
+                        flush(&mut batch, &mut jobs);
+                        batch_bytes = 0;
+                        jobs.insert(target, QueueDispatch::Source { id });
+                    }
+                    crate::commands::work::TaskWork::Screening => {
+                        flush(&mut batch, &mut jobs);
+                        batch_bytes = 0;
+                        jobs.insert(target, QueueDispatch::Screening { task });
+                    }
                 }
             }
             flush(&mut batch, &mut jobs);
@@ -764,6 +825,8 @@ mod native {
                             &task.task_id,
                         )?,
                         crate::commands::work::TaskWork::Partitioned { .. }
+                            | crate::commands::work::TaskWork::Source { .. }
+                            | crate::commands::work::TaskWork::Screening
                     )
                 {
                     return Ok(false);
@@ -850,6 +913,65 @@ mod native {
                                 WorkStep::Staged => {}
                             }
                         }
+                        QueueDispatch::Source { id, .. } => {
+                            match self.bounded_observation_step(id).await {
+                                ObservationStep::Recorded => continue,
+                                ObservationStep::Complete => continue 'planning,
+                                ObservationStep::Failed => return false,
+                            }
+                        }
+                        QueueDispatch::Screening { task } => {
+                            let before = match crate::commands::work::prepare_screening(
+                                &self.root,
+                                &self.config,
+                                &self.config_revision,
+                                &task.task_id,
+                            ) {
+                                Ok(before) => before,
+                                Err(error) => return self.failure("candidate screening", error),
+                            };
+                            if before.complete {
+                                continue 'planning;
+                            }
+                            let Some(request) = before.request else {
+                                return self.failure("candidate screening", format!(
+                                    "{} deferred and {} unknown candidate decisions remain; work retained", before.deferred, before.unknown));
+                            };
+                            let selected_input = request["input_revision"].clone();
+                            let selected_batch = request["batch_id"].clone();
+                            let Some(reply) = self
+                                .request_observation(request, ObservationRole::Screening)
+                                .await
+                            else {
+                                return false;
+                            };
+                            let output = match execution::observation::decode_response(
+                                reply.engine,
+                                &reply.bytes,
+                                reply.limit,
+                            ) {
+                                Ok(output) => output,
+                                Err(error) => return self.failure("candidate screening", error),
+                            };
+                            if output["selection_id"] != before.selection_id
+                                || output["batch_id"] != selected_batch
+                                || output["input_revision"] != selected_input
+                            {
+                                return self.failure("candidate screening", "worker did not answer the exact selected screening packet; unfinished work retained");
+                            }
+                            let completed = match crate::commands::work::record_screening(
+                                &self.root, &self.config, &self.config_revision, &task.task_id, output, None) {
+                                Ok(completed) if completed > before.completed_batches => completed,
+                                Ok(_) => return self.failure("candidate screening", "worker did not advance the selected screening batch; work retained"),
+                                Err(error) => return self.failure("candidate screening", error),
+                            };
+                            self.record("candidate screening", StageState::Completed,
+                                Some(format!("{}/{} screening batches recorded; card decisions are not full-body assessments", completed, before.batches)));
+                            if completed == before.batches {
+                                continue 'planning;
+                            }
+                            continue;
+                        }
                         QueueDispatch::WholeInput { tasks } => {
                             let ids: Vec<_> = tasks.iter().map(|task| &task.task_id).collect();
                             let directory = match tempfile::Builder::new()
@@ -876,7 +998,7 @@ mod native {
                                 ""
                             };
                             let operation = format!(
-                                "selected. {context} The native controller selected one task per distinct target within the configured evidence input budget. Read the JSON array of exact task IDs from the selection manifest and process only those current tasks, then return. Do not drain the rest of the queue or run global finalization. Follow the ordinary typed staging/publication protocol for these tasks. For extraction, record exact discovery recipes and inspect lore work context before loading the expanded candidate corpus. If requires_bounded_work is true, execute its plan_command and stage no result for that task; finish other selected tasks and return so the controller can schedule its bounded inspections. Selected queue task manifest: {selection}"
+                                "selected. {context} The native controller selected one task per distinct target within the configured evidence input budget. Read the JSON array of exact task IDs from the selection manifest and process only those current tasks, then return. Do not drain the rest of the queue or run global finalization. Follow the ordinary typed staging/publication protocol for these tasks. For extraction, record exact discovery recipes and inspect lore work context before loading candidate bodies. Follow its needs-discovery, needs-source-observations, needs-screening and ready states. Complete ordinary small-source screening in this selected session when practical. If a phase requires source observations, bounded candidate screening or partitioned admitted evidence, execute its returned plan_command and stage no extraction result; finish other selected tasks and return so the controller can resume that exact source/screening/evidence phase. Draft only from ready context, carry its typed selection when present, and fully read every selected reused owner. Unknown or deferred candidates remain unfinished; not-selected is a candidate-card judgment rather than a whole-body finding. Selected queue task manifest: {selection}"
                             );
                             if !self
                                 .consumer("lore-process", &operation, Some(directory.path()))
@@ -897,6 +1019,9 @@ mod native {
                         QueueDispatch::Partitioned { task, .. } => std::slice::from_ref(task),
                         QueueDispatch::Discovery { .. } => {
                             unreachable!("discovery restarts planning")
+                        }
+                        QueueDispatch::Source { .. } | QueueDispatch::Screening { .. } => {
+                            unreachable!("preparation restarts planning without publication")
                         }
                     };
                     match crate::commands::queue::tasks_completed(&self.root, tasks) {

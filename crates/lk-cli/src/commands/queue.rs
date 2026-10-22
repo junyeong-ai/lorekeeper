@@ -1457,6 +1457,10 @@ fn prune_queue_with_session(
             if removed != 0 {
                 eprintln!("pruned {removed} unreferenced extraction discovery recipe(s)");
             }
+            let removed = super::work::prune_selection(session, &identities)?;
+            if removed != 0 {
+                eprintln!("pruned {removed} unreferenced extraction selection ledger(s)");
+            }
         }
     }
     Ok(summary)

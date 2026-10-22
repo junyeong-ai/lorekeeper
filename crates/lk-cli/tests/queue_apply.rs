@@ -40,7 +40,7 @@ impl Workspace {
             root.path().join("config.yaml"),
             "vault:\n  root: vault\n  locale: en\n\
              identity:\n  name: Tester\n  email: tester@example.com\n\
-             sources:\n  notes:\n    type: manual\n    params:\n      inbox_dir: inbox\n",
+             execution:\n  work: {extraction_context: full-context}\nsources:\n  notes:\n    type: manual\n    params:\n      inbox_dir: inbox\n",
         )
         .expect("config");
         Self { root }
@@ -1396,9 +1396,9 @@ fn missing_retained_extraction_refuses_small_and_large_sources_without_publicati
 
 fn bounded_config(ws: &Workspace) {
     let path = ws.root.path().join("config.yaml");
-    let mut config = std::fs::read_to_string(&path).unwrap();
-    config.push_str(
-        "execution:\n  work: {max_input_bytes: 8192, max_result_bytes: 1024, max_calls: 100}\n",
+    let config = std::fs::read_to_string(&path).unwrap().replace(
+        "work: {extraction_context: full-context}",
+        "work: {extraction_context: full-context, max_input_bytes: 8192, max_result_bytes: 1024, max_calls: 100}",
     );
     std::fs::write(path, config).unwrap();
 }
