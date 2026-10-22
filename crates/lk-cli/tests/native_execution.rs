@@ -989,6 +989,7 @@ if action=='inspect':
     output={'work_id':work_id, 'node_id':node_id, 'input_revision':request['input_revision'],
             'summary':'Fixture observation of this exact request; structural coverage is not factual verification.',
             'findings':[], 'unresolved':unresolved, 'resolutions':[]}
+    row['output_bytes']=len(json.dumps(output, ensure_ascii=False, separators=(',', ':')).encode())
     if native:
         if '--safe-mode' in sys.argv:
             print(json.dumps({'type':'result','subtype':'success','is_error':False,'structured_output':output}))
@@ -1070,6 +1071,17 @@ fn selected_profile_budget_reaches_controller_and_worker_commands() {
         );
         let calls = bounded_calls(&fixture);
         assert_eq!(calls.len(), 1, "{result}");
+        let steps = result["work_steps"].as_array().unwrap();
+        assert_eq!(steps.len(), 1, "no invented step after budget exhaustion");
+        assert_eq!(steps[0]["outcome"], "recorded");
+        assert_eq!(steps[0]["role"], "evidence");
+        assert_eq!(steps[0]["work_id"], calls[0]["work_id"]);
+        assert_eq!(
+            steps[0]["agent_duration_ms"],
+            result["semantic_duration_ms"]
+        );
+        assert_eq!(result["semantic_calls"], 1);
+        assert_eq!(result["work_steps_omitted"], 0);
         let arguments = std::fs::read_to_string(fixture.root().join("arguments")).unwrap();
         assert!(
             !arguments.contains("Evidence clause"),
@@ -1220,6 +1232,37 @@ fn oversized_audit_completes_through_fresh_bounded_workers_on_both_hosts() {
         );
         let calls = bounded_calls(&fixture);
         assert!(calls.len() > 3);
+        let steps = result["work_steps"].as_array().unwrap();
+        assert_eq!(steps.len(), calls.len());
+        let mut invocation_ms = 0;
+        for (step, call) in steps.iter().zip(&calls) {
+            assert_eq!(step["work_id"], call["work_id"]);
+            assert!(step["node_id"].as_str().is_some());
+            assert!(step["preparation_duration_ms"].as_u64().is_some());
+            invocation_ms += step["agent_duration_ms"].as_u64().unwrap();
+            if call["action"] == "finish" {
+                assert_eq!(step["role"], "finalizer");
+                assert_eq!(step["outcome"], "staged");
+                assert!(step["request_json_bytes"].is_null());
+                assert!(step["result_json_bytes"].is_null());
+                assert!(step["revalidation_record_duration_ms"].is_null());
+                assert!(step["verification_duration_ms"].as_u64().is_some());
+            } else {
+                assert_eq!(step["role"], "evidence");
+                assert_eq!(step["outcome"], "recorded");
+                assert_eq!(step["node_id"], call["node_id"]);
+                assert_eq!(step["node_kind"], call["kind"]);
+                assert_eq!(step["request_json_bytes"], call["input_bytes"]);
+                assert_eq!(step["result_json_bytes"], call["output_bytes"]);
+                assert!(step["revalidation_record_duration_ms"].as_u64().is_some());
+                assert!(step["verification_duration_ms"].is_null());
+            }
+        }
+        assert_eq!(
+            invocation_ms,
+            result["semantic_duration_ms"].as_u64().unwrap()
+        );
+        assert_eq!(result["work_steps_omitted"], 0);
         assert_eq!(
             calls
                 .iter()
@@ -1294,6 +1337,13 @@ fn native_observation_cannot_record_another_selected_node() {
                 .is_some_and(|detail| detail.contains("selected work node"))
     }));
     let calls = bounded_calls(&fixture);
+    let step = &result["work_steps"][0];
+    assert_eq!(result["work_steps"].as_array().unwrap().len(), 1);
+    assert_eq!(step["outcome"], "rejected");
+    assert_ne!(step["node_id"], "not-selected");
+    assert_eq!(step["result_json_bytes"], calls[0]["output_bytes"]);
+    assert!(step["revalidation_record_duration_ms"].as_u64().is_some());
+    assert!(step["agent_duration_ms"].as_u64().is_some());
     let id = calls[0]["work_id"].as_str().unwrap();
     let status = fixture
         .command()
@@ -1303,6 +1353,133 @@ fn native_observation_cannot_record_another_selected_node() {
     assert!(status.status.success());
     let status: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
     assert_eq!(status["completed"], 0);
+}
+
+#[test]
+fn bounded_telemetry_reports_failed_invocations_without_inventing_results() {
+    let fixture = bounded_audit_fixture("codex", 1, "exit 23");
+    let (output, report) = fixture.run("knowledge");
+    assert!(!output.status.success());
+    assert_eq!(report["semantic_calls"], 1);
+    let steps = report["work_steps"].as_array().unwrap();
+    assert_eq!(steps.len(), 1);
+    let step = &steps[0];
+    assert_eq!(step["role"], "evidence");
+    assert_eq!(step["outcome"], "failed");
+    assert!(step["preparation_duration_ms"].as_u64().is_some());
+    assert!(step["agent_duration_ms"].as_u64().is_some());
+    assert_eq!(step["agent_duration_ms"], report["semantic_duration_ms"]);
+    assert!(step["request_json_bytes"].as_u64().is_some());
+    assert!(step["result_json_bytes"].is_null());
+    assert!(step["revalidation_record_duration_ms"].is_null());
+    assert!(!step.to_string().contains("Evidence clause"));
+    assert!(!step.to_string().contains("test@example.com"));
+
+    std::fs::write(
+        fixture.root().join("agent executable"),
+        "#!/bin/sh\nexit 23\n",
+    )
+    .unwrap();
+    let (output, report) = fixture.run("knowledge");
+    assert!(!output.status.success());
+    assert_eq!(report["semantic_calls"], 0);
+    let steps = report["work_steps"].as_array().unwrap();
+    assert_eq!(steps.len(), 1);
+    assert_eq!(steps[0]["outcome"], "failed");
+    assert!(steps[0]["preparation_duration_ms"].as_u64().is_some());
+    assert!(steps[0]["agent_duration_ms"].is_null());
+    assert!(steps[0]["result_json_bytes"].is_null());
+    assert!(steps[0]["revalidation_record_duration_ms"].is_null());
+}
+
+#[test]
+fn bounded_telemetry_rejects_finalizer_exit_zero_without_a_sealed_result() {
+    let behavior = RECORD_BOUNDED_AUDIT.replace(
+        "    request=cli('work', 'result', work_id)",
+        "    raise SystemExit(0)\n    request=cli('work', 'result', work_id)",
+    );
+    let fixture = bounded_audit_fixture("codex", 64, &behavior);
+    let (output, report) = fixture.run("knowledge");
+    assert!(!output.status.success());
+    let steps = report["work_steps"].as_array().unwrap();
+    let step = steps.last().unwrap();
+    assert_eq!(step["role"], "finalizer");
+    assert_eq!(step["outcome"], "rejected");
+    assert!(step["agent_duration_ms"].as_u64().is_some());
+    assert!(step["verification_duration_ms"].as_u64().is_some());
+    assert!(step["request_json_bytes"].is_null());
+    assert!(step["result_json_bytes"].is_null());
+    assert!(step["revalidation_record_duration_ms"].is_null());
+    assert_eq!(
+        steps
+            .iter()
+            .map(|step| step["agent_duration_ms"].as_u64().unwrap())
+            .sum::<u64>(),
+        report["semantic_duration_ms"].as_u64().unwrap(),
+    );
+    let receipts: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(
+            fixture
+                .root()
+                .join("vault/.lorekeeper/knowledge-audit.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(receipts["entries"].as_object().unwrap().is_empty());
+}
+
+#[test]
+fn bounded_telemetry_preserves_cancelled_attempt_and_unfinished_work() {
+    let fixture = bounded_audit_fixture(
+        "codex",
+        1,
+        "printf 'started' > \"$TEST_EXECUTION_ROOT/started\"\nexec sleep 30",
+    );
+    let stdout = std::fs::File::create(fixture.root().join("result.json")).unwrap();
+    let stderr = std::fs::File::create(fixture.root().join("stderr.log")).unwrap();
+    let mut child = fixture
+        .command()
+        .args(["run", "knowledge", "--json"])
+        .stdout(stdout)
+        .stderr(stderr)
+        .stdin(Stdio::null())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !fixture.root().join("started").exists() {
+        assert!(Instant::now() < deadline, "agent never started");
+        assert!(child.try_wait().unwrap().is_none());
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let pid = rustix::process::Pid::from_raw(i32::try_from(child.id()).unwrap()).unwrap();
+    rustix::process::kill_process(pid, rustix::process::Signal::TERM).unwrap();
+    while child.try_wait().unwrap().is_none() {
+        assert!(
+            Instant::now() < deadline,
+            "cancelled controller did not stop"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let report: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(fixture.root().join("result.json")).unwrap())
+            .unwrap();
+    assert_eq!(report["cancelled"], true, "{report}");
+    assert_eq!(report["semantic_calls"], 1);
+    let steps = report["work_steps"].as_array().unwrap();
+    assert_eq!(steps.len(), 1);
+    let step = &steps[0];
+    assert_eq!(step["outcome"], "cancelled");
+    assert!(step["agent_duration_ms"].as_u64().is_some());
+    assert_eq!(step["agent_duration_ms"], report["semantic_duration_ms"]);
+    assert!(step["result_json_bytes"].is_null());
+    assert!(step["revalidation_record_duration_ms"].is_null());
+    let status = execution_json(
+        &fixture,
+        &["work", "status", step["work_id"].as_str().unwrap()],
+    );
+    assert_eq!(status["completed"], 0);
+    assert_eq!(status["complete"], false);
 }
 
 #[test]
@@ -2004,7 +2181,9 @@ if native:
         'decision':'inspect' if candidate['candidate_key'].endswith('/candidate-000.md') else 'not-selected',
         'reason':'This assigned card has a fixture-defined scope; not-selected is not a full-body judgment.'}
         for candidate in request['candidates']]
-    log({'action':'screen','batch_id':request['batch_id'],
+    log({'action':'screen','selection_id':request['selection_id'],'batch_id':request['batch_id'],
+         'input_bytes':len(json.dumps(request, ensure_ascii=False, separators=(',', ':')).encode()),
+         'output_bytes':len(json.dumps(output, ensure_ascii=False, separators=(',', ':')).encode()),
          'keys':[candidate['candidate_key'] for candidate in request['candidates']]})
     if '--safe-mode' in sys.argv:
         print(json.dumps({'type':'result','subtype':'success','is_error':False,'structured_output':output}))
@@ -2172,6 +2351,21 @@ fn progressive_native_screening_keeps_complete_inventory_and_reads_only_admitted
             .filter(|call| call["action"] == "screen")
             .collect::<Vec<_>>();
         assert!(batches.len() > 1);
+        let steps = report["work_steps"].as_array().unwrap();
+        assert_eq!(steps.len(), batches.len());
+        for (step, batch) in steps.iter().zip(&batches) {
+            assert_eq!(step["role"], "screening");
+            assert_eq!(step["selection_id"], batch["selection_id"]);
+            assert_eq!(step["batch_id"], batch["batch_id"]);
+            assert!(step["work_id"].is_null());
+            assert!(step["node_id"].is_null());
+            assert_eq!(step["request_json_bytes"], batch["input_bytes"]);
+            assert_eq!(step["result_json_bytes"], batch["output_bytes"]);
+            assert!(step["preparation_duration_ms"].as_u64().is_some());
+            assert!(step["agent_duration_ms"].as_u64().is_some());
+            assert!(step["revalidation_record_duration_ms"].as_u64().is_some());
+            assert_eq!(step["outcome"], "recorded");
+        }
         let keys = batches
             .iter()
             .flat_map(|batch| batch["keys"].as_array().unwrap())
@@ -2728,6 +2922,13 @@ fn bounded_audit_resumes_call_budgets_and_exit_zero_cannot_forge_a_receipt() {
         .unwrap();
         assert!(receipts["entries"].as_object().unwrap().is_empty());
         assert!(bounded_calls(&no_receipt).is_empty());
+        let step = &result["work_steps"][0];
+        assert_eq!(result["work_steps"].as_array().unwrap().len(), 1);
+        assert_eq!(step["outcome"], "rejected");
+        assert!(step["request_json_bytes"].as_u64().is_some());
+        assert!(step["agent_duration_ms"].as_u64().is_some());
+        assert!(step["result_json_bytes"].is_null());
+        assert!(step["revalidation_record_duration_ms"].is_null());
         let manifests = std::fs::read_dir(no_receipt.root().join("vault/.lorekeeper/work"))
             .unwrap()
             .map(|entry| entry.unwrap().path())
