@@ -69,8 +69,14 @@ impl Protection {
             },
             _ => None,
         };
-        let installation = super::installation(override_dir.clone())?;
         let config = Configuration::capture(opts);
+        let installation = super::installation(override_dir.clone())?;
+        let installation = match (command, &config) {
+            (crate::Command::Run { .. }, Some(config)) => {
+                installation.with_project(config.root.clone())
+            }
+            _ => installation,
+        };
         let protection = Self {
             installation,
             config,
@@ -117,6 +123,37 @@ impl Protection {
 
     pub(crate) fn installation(&self) -> &Installation {
         &self.installation
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn native_project(
+        installation: &Installation,
+        opts: &GlobalOptions,
+        root: &Path,
+    ) -> miette::Result<Self> {
+        let root = root
+            .canonicalize()
+            .map_err(|error| miette::miette!("resolve native project: {error}"))?;
+        let mut protection = Self {
+            installation: installation.clone().with_project(root),
+            config: None,
+            schema_ready: false,
+            lease: None,
+        };
+        let requests = protection.requests(
+            opts,
+            Mode::Shared,
+            AgentTarget::Both,
+            Some(SkillScope::Project),
+            false,
+            false,
+        )?;
+        let lease = acquire(&requests)?;
+        lease
+            .inherit()
+            .map_err(|error| miette::miette!("inherit native project protection: {error}"))?;
+        protection.lease = Some(lease);
+        Ok(protection)
     }
 
     pub(super) fn mutation(
@@ -306,7 +343,10 @@ impl Protection {
         for engine in agent.engines() {
             let selected = installation.for_engine(*engine);
             let levels = if mode == Mode::Shared {
-                vec![SkillLevel::User, SkillLevel::Project]
+                match skills {
+                    Some(scope) => scope.level().into_iter().collect(),
+                    None => vec![SkillLevel::User, SkillLevel::Project],
+                }
             } else {
                 match skills {
                     Some(scope) => scope.level().into_iter().collect(),

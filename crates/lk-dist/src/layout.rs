@@ -98,6 +98,11 @@ impl Installation {
         }
     }
 
+    pub fn with_project(mut self, project: PathBuf) -> Self {
+        self.project = Some(project);
+        self
+    }
+
     pub fn engine(&self) -> AgentEngine {
         self.engine
     }

@@ -17,7 +17,10 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempfile::Builder::new()
+            .prefix("lore-install-한글 space-")
+            .tempdir()
+            .unwrap();
         let binary = directory.path().join("bin/lore");
         std::fs::create_dir(binary.parent().unwrap()).unwrap();
         std::fs::copy(env!("CARGO_BIN_EXE_lore"), &binary).unwrap();
@@ -541,4 +544,117 @@ fn symlinked_host_skills_exclude_deployment_across_otherwise_distinct_installati
             .output()
             .unwrap(),
     );
+}
+
+#[test]
+fn native_consumer_protects_project_skills_in_its_vault_working_directory() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::{Duration, Instant};
+
+    let first = Fixture::new();
+    let second = Fixture::new();
+    assert_success(&first.deploy());
+    let vault = first.directory.path().join("first");
+    let deploy_project = || {
+        second
+            .command(&second.config)
+            .current_dir(&vault)
+            .args(["self", "deploy", "--skills", "project", "--agent", "codex"])
+            .output()
+            .unwrap()
+    };
+    assert_success(&deploy_project());
+    let project_skills = vault.join(".agents/skills");
+    let snapshot = || {
+        walkdir::WalkDir::new(&project_skills)
+            .into_iter()
+            .map(Result::unwrap)
+            .filter(|entry| entry.file_type().is_file())
+            .map(|entry| {
+                (
+                    entry
+                        .path()
+                        .strip_prefix(&project_skills)
+                        .unwrap()
+                        .to_path_buf(),
+                    revision(entry.path()),
+                )
+            })
+            .collect::<BTreeMap<_, _>>()
+    };
+    let before = snapshot();
+    assert!(!before.is_empty());
+
+    let fake_host = first.directory.path().join("fake-codex");
+    std::fs::write(
+        &fake_host,
+        "#!/bin/sh\nif [ \"$1\" = --version ]; then printf 'codex-cli 0.163.0\\n'; exit 0; fi\npwd -P > \"$TEST_INSTALLATION_ROOT/host-cwd\"\n: > \"$TEST_INSTALLATION_ROOT/host-ready\"\nattempt=0\nwhile [ ! -e \"$TEST_INSTALLATION_ROOT/host-release\" ]; do\n  attempt=$((attempt + 1))\n  [ \"$attempt\" -lt 3000 ] || exit 92\n  sleep 0.01\ndone\nexit 91\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake_host, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(
+        &first.config,
+        format!(
+            "vault:\n  root: first\n  locale: en\nidentity: {{name: Test, email: test@example.invalid}}\nllm: {{provider: queue}}\nsources:\n  notes:\n    type: manual\n    params: {{inbox_dir: inbox}}\nexecution:\n  default_profile: fixture\n  profiles:\n    fixture:\n      engine: codex\n      executable: {}\n      timeout_seconds: 60\n",
+            serde_json::to_string(&fake_host).unwrap(),
+        ),
+    )
+    .unwrap();
+    std::fs::create_dir(vault.join("inbox")).unwrap();
+    std::fs::write(
+        vault.join("inbox/source.md"),
+        "# Deployment evidence\n\nAn active consumer reads its project skills from the vault working directory.\n",
+    )
+    .unwrap();
+    assert_success(&first.command(&first.config).arg("ingest").output().unwrap());
+    let stdout_path = first.directory.path().join("native.stdout");
+    let stderr_path = first.directory.path().join("native.stderr");
+    let mut consumer = Held(
+        first
+            .command(&first.config)
+            .env("TEST_INSTALLATION_ROOT", first.directory.path())
+            .args(["run", "process", "--json"])
+            .stdin(Stdio::null())
+            .stdout(std::fs::File::create(&stdout_path).unwrap())
+            .stderr(std::fs::File::create(&stderr_path).unwrap())
+            .spawn()
+            .unwrap(),
+    );
+    let ready_path = first.directory.path().join("host-ready");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let ready = loop {
+        if ready_path.is_file() {
+            break true;
+        }
+        if consumer.0.try_wait().unwrap().is_some() || Instant::now() >= deadline {
+            break false;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let observed_cwd = std::fs::read_to_string(first.directory.path().join("host-cwd"));
+    let deploy = deploy_project();
+    let after = snapshot();
+    std::fs::write(first.directory.path().join("host-release"), "release\n").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let status = loop {
+        if let Some(status) = consumer.0.try_wait().unwrap() {
+            break status;
+        }
+        assert!(Instant::now() < deadline, "native fixture did not finish");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let diagnostic = std::fs::read_to_string(&stderr_path).unwrap();
+    assert!(ready, "fake native consumer did not start: {diagnostic}");
+    assert_eq!(
+        PathBuf::from(observed_cwd.as_ref().unwrap().trim()),
+        vault.canonicalize().unwrap(),
+    );
+    assert_installation_busy(&deploy);
+    assert_eq!(after, before);
+    assert!(!status.success(), "fake host must not report completion");
+    let result: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(stdout_path).unwrap()).unwrap();
+    assert_eq!(result["semantic_calls"], 1);
+    assert_eq!(result["ok"], false);
+    assert_success(&deploy_project());
 }

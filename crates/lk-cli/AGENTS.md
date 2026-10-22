@@ -249,6 +249,9 @@ schedule rendering creates no files and does not acquire installation claims.
 Mutators exclusively claim changed resources and the selected vault workflow before
 writing. Native runs retain claims across collection and batch gaps. Pin the same
 Installation and data directory in children rather than rediscovering mutable records.
+Native project-skill claims use the vault CWD, not the invoking directory. Reacquire
+that scope before the first host invocation so a vault created by Daily collection
+is protected too; retain it through the rest of that run.
 Downloads occur without exclusive claims; recheck selection, binary bytes and queue
 under protection before replacement. The final mutation claim excludes writers but
 never recovers a pending journal. Drop it and the queue claim before delegated schema

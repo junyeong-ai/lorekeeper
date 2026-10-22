@@ -150,6 +150,7 @@ mod native {
         supervisor: &'a mut execution::Supervisor,
         lease: Option<workflow::WorkflowLease>,
         selected: Option<ExecutionProfile>,
+        project_protection: Option<crate::commands::installation::Protection>,
         drain_blocked: bool,
         audit_batch: Option<Vec<lk_graph::audit::AuditCandidate>>,
         started_at: Instant,
@@ -287,6 +288,14 @@ mod native {
         }
 
         async fn prepare_agent(&mut self) -> miette::Result<()> {
+            if self.project_protection.is_none() {
+                self.project_protection =
+                    Some(crate::commands::installation::Protection::native_project(
+                        self.installation,
+                        self.opts,
+                        &self.root,
+                    )?);
+            }
             if self.selected.is_some() {
                 return Ok(());
             }
@@ -1527,6 +1536,7 @@ mod native {
             supervisor,
             lease: None,
             selected: None,
+            project_protection: None,
             drain_blocked: false,
             audit_batch: None,
             started_at: Instant::now(),
