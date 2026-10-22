@@ -64,7 +64,7 @@ one source to infer that distinction.
   core/vault/queue RSS contracts before changing these paths.
 - **Cooperating writers use `MutationSession`.** Recover pending journals before
   deriving writes; journal complete guarded plans before mutation. External editors
-  are outside that lock. Read-only queries never write or recover. Publication
+  are outside that lock. Read-only queries never publish or recover vault data. Publication
   previews never publish or recover; missing-address validation uses disposable
   private directory probes in the destination filesystem, without page payloads.
   Derived document projections use separate per-identity cache claims before

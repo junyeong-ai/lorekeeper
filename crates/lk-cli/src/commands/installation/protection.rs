@@ -80,16 +80,16 @@ impl Protection {
         };
         #[cfg(unix)]
         let mut protection = protection;
-        let mutation = matches!(
+        let unclaimed = matches!(
             command,
             crate::Command::Installation {
                 cmd: SelfCommand::Deploy { .. }
                     | SelfCommand::Update { .. }
                     | SelfCommand::Uninstall { .. }
-            }
+            } | crate::Command::Schedule { .. }
         );
         #[cfg(unix)]
-        if !mutation {
+        if !unclaimed {
             if std::env::var_os(HANDOFF).is_some() {
                 return Err(miette::miette!(
                     "installation handoff is only valid for delegated deployment"
@@ -111,7 +111,7 @@ impl Protection {
             protection.lease = Some(lease);
         }
         #[cfg(not(unix))]
-        let _ = mutation;
+        let _ = unclaimed;
         Ok(protection)
     }
 

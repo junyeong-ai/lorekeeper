@@ -506,6 +506,7 @@ replacement and removal refuse while another vault uses the same binary, runtime
 recheck configuration, binary bytes and queue settlement. Adjacent `.lorekeeper-*.lock` files
 are persistent operational state: never unlink them during execution or cache cleanup.
 Creating them requires write access to the resource's parent directory.
+Schedule rendering does not acquire installation claims or create files.
 
 Use `lore self update` for existing Unix installations. Bootstrap scripts, `cargo install`,
 manual binary replacement and older versions do not participate in installation locking.

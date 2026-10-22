@@ -245,7 +245,8 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
 binary and refuses unsafe update over pending queue work. Uninstall never removes
 user vaults. Delegate byte coherence/target/release validation to lk-dist.
 Unix dispatch retains shared installation claims on absolute selected destinations;
-mutators exclusively claim changed resources and the selected vault workflow before
+schedule rendering creates no files and does not acquire installation claims.
+Mutators exclusively claim changed resources and the selected vault workflow before
 writing. Native runs retain claims across collection and batch gaps. Pin the same
 Installation and data directory in children rather than rediscovering mutable records.
 Downloads occur without exclusive claims; recheck selection, binary bytes and queue
