@@ -359,8 +359,15 @@ pub(crate) fn review_previews(
     root: &Path,
     dirs: &VaultDirs,
 ) -> Result<BTreeMap<String, Vec<ReviewPreview>>, VaultError> {
+    review_previews_from_reports(root, &list_reviews(root, dirs)?)
+}
+
+pub(crate) fn review_previews_from_reports(
+    root: &Path,
+    reports: &[ReviewReport],
+) -> Result<BTreeMap<String, Vec<ReviewPreview>>, VaultError> {
     let mut result: BTreeMap<String, Vec<ReviewPreview>> = BTreeMap::new();
-    for report in list_reviews(root, dirs)? {
+    for report in reports {
         let mut subjects = BTreeSet::new();
         let mut evidence = BTreeSet::new();
         for (address, subject) in report.subjects().iter().map(|path| (path, true)).chain(

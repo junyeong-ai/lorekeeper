@@ -141,6 +141,26 @@ pub fn capture_discovery(
     dirs: &VaultDirs,
     queries: &[DiscoveryQuery],
 ) -> Result<DiscoveryCapture, VaultError> {
+    capture_discovery_inner(root, dirs, queries, None)
+}
+
+/// Share freshly read review reports within one discovery/dependency checkpoint.
+/// Callers must still reread the complete scope after external execution.
+pub fn capture_discovery_with_reviews(
+    root: &Path,
+    dirs: &VaultDirs,
+    queries: &[DiscoveryQuery],
+    reviews: &[crate::ReviewReport],
+) -> Result<DiscoveryCapture, VaultError> {
+    capture_discovery_inner(root, dirs, queries, Some(reviews))
+}
+
+fn capture_discovery_inner(
+    root: &Path,
+    dirs: &VaultDirs,
+    queries: &[DiscoveryQuery],
+    reports: Option<&[crate::ReviewReport]>,
+) -> Result<DiscoveryCapture, VaultError> {
     let root = root.canonicalize()?;
     for query in queries {
         query.validate().map_err(std::io::Error::other)?;
@@ -177,6 +197,8 @@ pub fn capture_discovery(
         .collect::<Vec<_>>();
     let reviews = if queries.is_empty() {
         BTreeMap::new()
+    } else if let Some(reports) = reports {
+        crate::review::review_previews_from_reports(&root, reports)?
     } else {
         crate::review::review_previews(&root, dirs)?
     };

@@ -755,6 +755,10 @@ struct ReviewDependencyIndex {
 impl ReviewDependencyIndex {
     fn load(root: &Path, dirs: &VaultDirs) -> Result<Self, GraphError> {
         let reports = lk_vault::list_reviews(root, dirs).map_err(error)?;
+        Self::from_reports(root, reports)
+    }
+
+    fn from_reports(root: &Path, reports: Vec<lk_vault::ReviewReport>) -> Result<Self, GraphError> {
         let mut subjects = review_subjects(root, &reports)?;
         let mut by_subject: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         let mut indexed_subjects = BTreeMap::new();
@@ -826,10 +830,30 @@ pub fn review_dependencies(
 ) -> Result<BTreeMap<String, Vec<AuditReviewDependency>>, GraphError> {
     let (_, receipts) = load(root)?;
     let mut index = ReviewDependencyIndex::load(root, dirs)?;
+    scoped_review_dependencies(root, pages, &mut index, &receipts)
+}
+
+/// Reuse freshly read reports within one capture, retaining current review/evidence guards.
+pub fn review_dependencies_with_reports(
+    root: &Path,
+    pages: &BTreeMap<String, lk_vault::VaultPage>,
+    reports: Vec<lk_vault::ReviewReport>,
+) -> Result<BTreeMap<String, Vec<AuditReviewDependency>>, GraphError> {
+    let (_, receipts) = load(root)?;
+    let mut index = ReviewDependencyIndex::from_reports(root, reports)?;
+    scoped_review_dependencies(root, pages, &mut index, &receipts)
+}
+
+fn scoped_review_dependencies(
+    root: &Path,
+    pages: &BTreeMap<String, lk_vault::VaultPage>,
+    index: &mut ReviewDependencyIndex,
+    receipts: &Receipts,
+) -> Result<BTreeMap<String, Vec<AuditReviewDependency>>, GraphError> {
     pages
         .iter()
         .map(|(path, page)| {
-            scoped_reviews(root, Path::new(path), page, &mut index, &receipts)
+            scoped_reviews(root, Path::new(path), page, index, receipts)
                 .map(|reviews| (path.clone(), reviews))
         })
         .collect()
@@ -1832,6 +1856,55 @@ mod tests {
         )
     }
 
+    fn assert_review_checkpoint_parity(root: &Path, dirs: &VaultDirs, paths: &[&str]) {
+        let pages = paths
+            .iter()
+            .map(|path| {
+                let raw = std::fs::read_to_string(root.join(path)).unwrap();
+                ((*path).into(), lk_vault::parse_page(&raw).unwrap())
+            })
+            .collect();
+        let expected = review_dependencies(root, dirs, &pages).unwrap();
+        let actual = review_dependencies_with_reports(
+            root,
+            &pages,
+            lk_vault::list_reviews(root, dirs).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_vec(&expected).unwrap(),
+            serde_json::to_vec(&actual).unwrap()
+        );
+    }
+
+    #[test]
+    fn shared_review_reports_reject_changed_metadata_and_evidence() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let path = "wiki/concepts/topic.md";
+        let source = "wiki/documents/source.md";
+        let review = "wiki/explorations/review.md";
+        let body = "---\ntype: concept\n---\nA claim.\n";
+        write(root.path(), path, body);
+        write(root.path(), source, "Source evidence.\n");
+        let revision = source_revision(&lk_vault::parse_page("Source evidence.\n").unwrap());
+        let raw = review_body(path, source, &revision);
+        write(root.path(), review, &raw);
+        let pages = BTreeMap::from([(path.into(), lk_vault::parse_page(body).unwrap())]);
+        let reports = lk_vault::list_reviews(root.path(), &dirs).unwrap();
+        write(
+            root.path(),
+            review,
+            &raw.replace("\"open\"", "\"resolved\""),
+        );
+        assert!(review_dependencies_with_reports(root.path(), &pages, reports).is_err());
+        write(root.path(), review, &raw);
+        let reports = lk_vault::list_reviews(root.path(), &dirs).unwrap();
+        write(root.path(), source, "Changed source evidence.\n");
+        assert!(review_dependencies_with_reports(root.path(), &pages, reports).is_err());
+        assert_review_checkpoint_parity(root.path(), &dirs, &[path]);
+    }
+
     #[test]
     fn unavailable_pending_subjects_do_not_block_later_ready_work_or_claim_completion() {
         let root = tempfile::tempdir().unwrap();
@@ -2683,6 +2756,7 @@ mod tests {
         let candidate = &ready.candidates[0];
         assert!(candidate.evidence.is_empty());
         assert!(candidate.related_pages.is_empty());
+        assert_review_checkpoint_parity(root.path(), &dirs, &[path, source]);
         assert_eq!(candidate.reviews.len(), 1);
         assert_eq!(candidate.reviews[0].evidence.len(), 2);
         assert_eq!(ready.coverage_scope, AuditCoverageScope::Selection);
@@ -3118,6 +3192,7 @@ mod tests {
         let invalid = review_body(path, source, &revision)
             .replace("\"evidence\":[", "\"invalid_field\":true,\"evidence\":[");
         write(root.path(), review, &invalid);
+        assert_review_checkpoint_parity(root.path(), &dirs, &[path]);
         let selected = plan_selected(
             root.path(),
             &dirs,
@@ -3152,6 +3227,7 @@ mod tests {
                 &format!("type: concept\nknowledge_review: {review}"),
             ),
         );
+        assert_review_checkpoint_parity(root.path(), &dirs, &[path]);
         let selected = plan_selected(
             root.path(),
             &dirs,
@@ -3254,6 +3330,7 @@ mod tests {
         assert_eq!(dep.state, AuditReviewState::Open);
         assert!(dep.evidence[0].current.is_none());
         assert!(dep.evidence[0].archived.is_some());
+        assert_review_checkpoint_parity(root.path(), &dirs, &[path]);
         assert_eq!(ready.input.pages, 3);
         let session = MutationSession::acquire(root.path()).unwrap();
         let mut guarded = MutationPlan::default();
@@ -3274,6 +3351,7 @@ mod tests {
         )
         .unwrap();
         std::fs::remove_file(root.path().join(review)).unwrap();
+        assert_review_checkpoint_parity(root.path(), &dirs, &[path]);
         let missing = plan(root.path(), &dirs, &scan(root.path()), 1, u64::MAX).unwrap();
         assert_eq!(
             missing.candidates[0].reviews[0].state,

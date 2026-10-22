@@ -197,6 +197,25 @@ impl<'a> Capture<'a> {
     }
 }
 
+fn capture_reviews(
+    captured: &mut Capture<'_>,
+    context: &mut Value,
+    reviews: &BTreeMap<String, Vec<lk_graph::audit::AuditReviewDependency>>,
+) -> miette::Result<()> {
+    let mut paths = BTreeSet::new();
+    for review in reviews.values().flatten() {
+        if paths.insert(review.path.clone()) {
+            captured.review(review)?;
+        }
+    }
+    context["purpose"]["review_dependencies"] = json!({
+        "subject_count":reviews.len(),
+        "review_count":paths.len(),
+        "revision":file_revision(&serde_json::to_string(reviews).into_diagnostic()?),
+    });
+    Ok(())
+}
+
 pub(super) fn task(root: &Path, config: &Config, task_id: &str) -> miette::Result<Prepared> {
     let task = super::super::queue::select_task(
         root,
@@ -248,21 +267,84 @@ pub(super) fn selection_inventory(
     task_id: &str,
     queries: &[lk_core::discovery::DiscoveryQuery],
 ) -> miette::Result<SelectionInventory> {
-    let source = source_task(root, config, task_id)?;
+    let task = super::super::queue::select_task(
+        root,
+        task_id,
+        super::super::queue::TaskSelection::CurrentOrDoneExtraction,
+    )?;
+    let mut source = capture_task(root, config, task)?;
+    if source.context["purpose"]["task_kind"]
+        != serde_json::to_value(lk_queue::TaskKind::ExtractConcepts).into_diagnostic()?
+    {
+        return Err(miette::miette!(
+            "discovery recipes require concept extraction"
+        ));
+    }
     let target = match &source.subject {
-        Subject::Queue { target, .. } => target,
+        Subject::Queue { target, .. } => target.clone(),
         _ => {
             return Err(miette::miette!(
                 "extraction inventory requires a queue subject"
             ));
         }
     };
-    let target_owner = lk_vault::resolve_page_owner(root, Path::new(target)).into_diagnostic()?;
+    let target_owner = lk_vault::resolve_page_owner(root, Path::new(&target)).into_diagnostic()?;
+    let reports = lk_vault::list_reviews(root, &config.vault.dirs).into_diagnostic()?;
     let mut capture =
-        lk_vault::capture_discovery(root, &config.vault.dirs, queries).into_diagnostic()?;
+        lk_vault::capture_discovery_with_reviews(root, &config.vault.dirs, queries, &reports)
+            .into_diagnostic()?;
     capture
         .candidates
         .retain(|candidate| Path::new(&candidate.owner) != target_owner.as_path());
+    let target_raw = source
+        .pages
+        .get(&target_owner)
+        .ok_or_else(|| miette::miette!("captured extraction target is missing"))?;
+    let mut subjects = BTreeMap::from([(
+        target.clone(),
+        lk_vault::parse_page(target_raw).map_err(|error| miette::miette!("{target}: {error}"))?,
+    )]);
+    for candidate in &capture.candidates {
+        let raw = capture
+            .guarded_pages()
+            .get(Path::new(&candidate.owner))
+            .ok_or_else(|| miette::miette!("candidate owner is outside the exact capture"))?;
+        if file_revision(raw) != candidate.file_revision {
+            return Err(miette::miette!(
+                "candidate file revision changed during capture"
+            ));
+        }
+        let page = lk_vault::parse_page(raw)
+            .map_err(|error| miette::miette!("{}: {error}", candidate.owner))?;
+        if source_revision(&page) != candidate.source_revision {
+            return Err(miette::miette!(
+                "candidate source revision changed during capture"
+            ));
+        }
+        subjects.insert(candidate.owner.clone(), page);
+    }
+    let reviews = lk_graph::audit::review_dependencies_with_reports(root, &subjects, reports)
+        .into_diagnostic()?;
+    let target_reviews = BTreeMap::from([(
+        target.clone(),
+        reviews.get(&target).cloned().unwrap_or_default(),
+    )]);
+    let mut source_capture = Capture {
+        root,
+        pages: std::mem::take(&mut source.pages),
+        resources: std::mem::take(&mut source.resources)
+            .into_iter()
+            .map(|resource| (resource.address.clone(), resource))
+            .collect(),
+    };
+    capture_reviews(&mut source_capture, &mut source.context, &target_reviews)?;
+    source.context["purpose"]["discovery"] = json!({
+        "queries":[],
+        "match_count":0,
+        "match_revision":lk_core::concept::citation_digest(&[]),
+    });
+    source.context["purpose"]["extraction_scope"] = json!({"policy":"source-proposals-v1"});
+    source = source_capture.finish(source.subject, source.context);
     let mut guarded = Capture {
         root,
         pages: source.pages.clone(),
@@ -281,48 +363,6 @@ pub(super) fn selection_inventory(
             None,
             SemanticAuthority::Context,
         )?;
-    }
-    let target_raw = guarded
-        .pages
-        .get(&target_owner)
-        .ok_or_else(|| miette::miette!("captured extraction target is missing"))?;
-    let mut subjects = BTreeMap::from([(
-        target.clone(),
-        lk_vault::parse_page(target_raw).map_err(|error| miette::miette!("{target}: {error}"))?,
-    )]);
-    for candidate in &capture.candidates {
-        let raw = guarded
-            .pages
-            .get(Path::new(&candidate.owner))
-            .ok_or_else(|| miette::miette!("candidate owner is outside the exact capture"))?;
-        if file_revision(raw) != candidate.file_revision {
-            return Err(miette::miette!(
-                "candidate file revision changed during capture"
-            ));
-        }
-        let page = lk_vault::parse_page(raw)
-            .map_err(|error| miette::miette!("{}: {error}", candidate.owner))?;
-        if source_revision(&page) != candidate.source_revision {
-            return Err(miette::miette!(
-                "candidate source revision changed during capture"
-            ));
-        }
-        subjects.insert(candidate.owner.clone(), page);
-    }
-    let reviews = lk_graph::audit::review_dependencies(root, &config.vault.dirs, &subjects)
-        .into_diagnostic()?;
-    let target_reviews = BTreeMap::from([(
-        target.clone(),
-        reviews.get(target).cloned().unwrap_or_default(),
-    )]);
-    let target_reviews_revision =
-        file_revision(&serde_json::to_string(&target_reviews).into_diagnostic()?);
-    if source.context["purpose"]["review_dependencies"]["revision"].as_str()
-        != Some(target_reviews_revision.as_str())
-    {
-        return Err(miette::miette!(
-            "target review scope changed during candidate capture"
-        ));
     }
     let mut review_resources = BTreeMap::new();
     let mut seen_reviews = BTreeSet::new();
@@ -543,17 +583,7 @@ pub(super) fn with_discovery(
     }
     let reviews = lk_graph::audit::review_dependencies(root, &config.vault.dirs, &review_subjects)
         .into_diagnostic()?;
-    let mut review_paths = std::collections::BTreeSet::new();
-    for review in reviews.values().flatten() {
-        if review_paths.insert(review.path.clone()) {
-            captured.review(review)?;
-        }
-    }
-    prepared.context["purpose"]["review_dependencies"] = json!({
-        "subject_count":review_subjects.len(),
-        "review_count":review_paths.len(),
-        "revision":file_revision(&serde_json::to_string(&reviews).into_diagnostic()?),
-    });
+    capture_reviews(&mut captured, &mut prepared.context, &reviews)?;
     prepared.context["purpose"]["discovery"] = json!({
         "queries":queries,
         "match_count":selected.len(),
@@ -798,6 +828,19 @@ mod tests {
         std::fs::write(path, raw).unwrap();
     }
 
+    fn assert_same_prepared(expected: &Prepared, actual: &Prepared) {
+        let encoded = |prepared: &Prepared| {
+            serde_json::to_vec(&(
+                &prepared.subject,
+                &prepared.context,
+                &prepared.resources,
+                &prepared.pages,
+            ))
+            .unwrap()
+        };
+        assert_eq!(encoded(expected), encoded(actual));
+    }
+
     #[test]
     fn progressive_capture_keeps_all_guards_and_only_admitted_semantic_inputs() {
         let directory = tempfile::tempdir().unwrap();
@@ -898,6 +941,7 @@ mod tests {
             );
         }
         let inventory = selection_inventory(&root, &config, &task.task_id, &queries).unwrap();
+        assert_same_prepared(&source, &inventory.source);
         assert_eq!(inventory.capture.candidates.len(), 2);
         assert!(
             !inventory
@@ -992,6 +1036,10 @@ mod tests {
             ),
         );
         let mandatory = selection_inventory(&root, &config, &task.task_id, &queries).unwrap();
+        assert_same_prepared(
+            &source_task(&root, &config, &task.task_id).unwrap(),
+            &mandatory.source,
+        );
         let selection = lk_queue::ExtractionSelection {
             inventory_revision: mandatory.revision.clone(),
             ..selection
@@ -1006,6 +1054,62 @@ mod tests {
                 .any(|resource| resource.address == selected
                     && resource.authority == SemanticAuthority::Page)
         );
+
+        write(
+            &root,
+            &review_paths[0],
+            &format!(
+                "---\ntype: exploration\nreview:\n  status: open\n  subjects: [{target}, {selected}]\n  evidence: [{{path: {selected}, revision: {selected_revision}}}]\n---\nA shared source assessment.\n"
+            ),
+        );
+        let invalid_review = std::fs::read_to_string(root.join(&review_paths[1])).unwrap();
+        write(
+            &root,
+            &review_paths[1],
+            &invalid_review.replace("status: open", "status: unresolved"),
+        );
+        let archive = lk_vault::archive_evidence(&root, &[selected.into()]).unwrap();
+        write(
+            &root,
+            selected,
+            &format!("{selected_raw}\nChanged evidence.\n"),
+        );
+        let shared = selection_inventory(&root, &config, &task.task_id, &queries).unwrap();
+        assert_same_prepared(
+            &source_task(&root, &config, &task.task_id).unwrap(),
+            &shared.source,
+        );
+        assert_eq!(shared.reviews[selected].len(), 2);
+        let card = &shared
+            .capture
+            .candidates
+            .iter()
+            .find(|candidate| candidate.owner == selected)
+            .unwrap()
+            .card;
+        assert_eq!(card.reviews.invalid, 1);
+        assert_eq!(card.reviews.needs_reassessment, 1);
+        assert!(shared.reviews[selected].iter().any(|review| {
+            review.path == review_paths[1]
+                && review.state == lk_graph::audit::AuditReviewState::Invalid
+        }));
+        let archived = lk_vault::evidence_archive_path(&archive.citations[0].revision).unwrap();
+        assert!(shared.source.resources.iter().any(|resource| {
+            resource.address == archived.to_string_lossy()
+                && resource.authority == SemanticAuthority::Archive
+        }));
+        let binding = lk_queue::ExtractionSelection {
+            inventory_revision: shared.revision.clone(),
+            ..selection
+        };
+        let admitted =
+            task_with_selection(&shared, &binding, &BTreeSet::from([selected.into()])).unwrap();
+        assert!(admitted.resources.iter().any(|resource| {
+            resource.address == selected && resource.authority == SemanticAuthority::Page
+        }));
+        let empty = selection_inventory(&root, &config, &task.task_id, &[]).unwrap();
+        assert!(empty.capture.candidates.is_empty());
+        assert_same_prepared(&shared.source, &empty.source);
     }
 
     #[test]
