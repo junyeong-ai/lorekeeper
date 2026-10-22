@@ -12,9 +12,11 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::time::Instant;
 
 mod cache;
+mod recipe;
 mod vision;
 
 pub use cache::{CacheAccess, CacheError, ProjectionCache, prune as prune_projection_cache};
+pub use recipe::processing_recipe;
 pub use vision::{
     MLX_REQUIREMENTS, REQUIREMENTS as VISION_REQUIREMENTS, install as install_vision,
 };
@@ -204,13 +206,7 @@ async fn project_components(
         ));
     }
     captured.verify()?;
-    let uses_vision = config.vision.is_some()
-        && (format.is_image()
-            || (format == InputFormat::Pdf
-                && matches!(
-                    config.pdf_policy(),
-                    lk_core::content::PdfProjectionPolicy::Visual { .. }
-                )));
+    let uses_vision = uses_vision(format, config);
     let mut projection = if format.is_image() && uses_vision {
         InputProjection {
             policy: PROJECTION_POLICY.into(),
@@ -301,13 +297,17 @@ async fn terminate(child: &mut tokio::process::Child) -> std::io::Result<()> {
     Ok(())
 }
 
-async fn project_native(
-    captured: &lk_core::captured_file::CapturedFile,
-    format: InputFormat,
-    config: &InputProcessingConfig,
-    cache: Option<&ProjectionCache>,
-    deadline: Instant,
-) -> Result<InputProjection, ProcessingError> {
+fn uses_vision(format: InputFormat, config: &InputProcessingConfig) -> bool {
+    config.vision.is_some()
+        && (format.is_image()
+            || (format == InputFormat::Pdf
+                && matches!(
+                    config.pdf_policy(),
+                    lk_core::content::PdfProjectionPolicy::Visual { .. }
+                )))
+}
+
+fn native_config(format: InputFormat, config: &InputProcessingConfig) -> InputProcessingConfig {
     let pdf_ocr = config.is_pdf_ocr_enabled();
     let mut native_config = config.clone();
     native_config.vision = None;
@@ -315,6 +315,17 @@ async fn project_native(
     if !format.is_image() && !(format == InputFormat::Pdf && pdf_ocr) {
         native_config.ocr = None;
     }
+    native_config
+}
+
+async fn project_native(
+    captured: &lk_core::captured_file::CapturedFile,
+    format: InputFormat,
+    config: &InputProcessingConfig,
+    cache: Option<&ProjectionCache>,
+    deadline: Instant,
+) -> Result<InputProjection, ProcessingError> {
+    let native_config = native_config(format, config);
     let mut expected_models = None;
     let claim = if let Some(cache) = cache {
         let runtime = match run_processor(None, format, &native_config, true, deadline).await? {
@@ -322,24 +333,8 @@ async fn project_native(
             Response::Failed { code } => return Err(ProcessingError::Failed(code)),
             _ => return Err(ProcessingError::Protocol),
         };
-        let ocr = native_config
-            .ocr
-            .as_ref()
-            .map(|ocr| (&ocr.languages, ocr.layout, ocr.pdf));
-        let identity = blake3::hash(
-            &serde_json::to_vec(&(
-                captured.revision(),
-                format,
-                PROJECTION_POLICY,
-                blake3::hash(PROCESSOR.as_bytes()).to_hex().as_str(),
-                &runtime.packages,
-                &runtime.ocr_models,
-                ocr,
-            ))
-            .map_err(|_| ProcessingError::Protocol)?,
-        )
-        .to_hex()
-        .to_string();
+        let identity = recipe::NativeRecipe::build(format, &native_config, &runtime)
+            .cache_identity(captured.revision())?;
         expected_models = Some(runtime.ocr_models);
         Some(cache.claim(
             &identity,
@@ -524,13 +519,7 @@ fn validate_projection_parts(
         ("pillow".into(), "13.0.0".into()),
     ]
     .into();
-    let uses_vision = config.vision.is_some()
-        && (format.is_image()
-            || (format == InputFormat::Pdf
-                && matches!(
-                    config.pdf_policy(),
-                    lk_core::content::PdfProjectionPolicy::Visual { .. }
-                )));
+    let uses_vision = uses_vision(format, config);
     if value.policy != PROJECTION_POLICY
         || value.format != format
         || (if format.is_image() && uses_vision {
