@@ -156,6 +156,19 @@ struct Evaluation<'a> {
     ready: Vec<String>,
 }
 
+impl Evaluation<'_> {
+    fn progress(&self) -> WorkProgress {
+        let root_node = self.nodes.last().expect("nonempty tree").id.clone();
+        WorkProgress {
+            complete: self.current.contains_key(&root_node),
+            root_node,
+            ready: self.ready.clone(),
+            completed: self.current.len(),
+            total: self.nodes.len(),
+        }
+    }
+}
+
 enum NodeInputError {
     Bound,
     Other(miette::Report),
@@ -694,15 +707,32 @@ impl Work {
         root: &Path,
         resources: &[SemanticResource],
     ) -> miette::Result<WorkProgress> {
+        Ok(self.evaluate(root, resources)?.progress())
+    }
+
+    pub fn prepare_inspection(
+        &self,
+        root: &Path,
+        resources: &[SemanticResource],
+    ) -> miette::Result<(WorkProgress, Option<Value>)> {
         let evaluated = self.evaluate(root, resources)?;
-        let root_node = evaluated.nodes.last().expect("nonempty tree").id.clone();
-        Ok(WorkProgress {
-            complete: evaluated.current.contains_key(&root_node),
-            root_node,
-            ready: evaluated.ready,
-            completed: evaluated.current.len(),
-            total: evaluated.nodes.len(),
-        })
+        let progress = evaluated.progress();
+        let input = if progress.complete {
+            None
+        } else if let Some(id) = progress.ready.first() {
+            let node = evaluated
+                .nodes
+                .iter()
+                .find(|node| &node.id == id)
+                .expect("ready node belongs to the evaluated tree");
+            Some(
+                self.node_input(node, &evaluated.inputs, &evaluated.current)
+                    .map_err(NodeInputError::report)?,
+            )
+        } else {
+            None
+        };
+        Ok((progress, input))
     }
 
     pub fn input(
@@ -1133,6 +1163,41 @@ mod tests {
                 .unwrap();
             }
         }
+    }
+
+    #[test]
+    fn prepared_inspection_and_record_progress_match_the_revision_pinned_read_contract() {
+        let root = tempfile::tempdir().unwrap();
+        let source = resources();
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let work = Work::create(&session, &source, "subject", context("one"), limits()).unwrap();
+        let mut kinds = BTreeSet::new();
+        loop {
+            let (before, input) = work.prepare_inspection(root.path(), &source).unwrap();
+            assert_eq!(
+                serde_json::to_value(&before).unwrap(),
+                serde_json::to_value(work.progress(root.path(), &source).unwrap()).unwrap(),
+            );
+            if before.complete {
+                assert!(input.is_none());
+                break;
+            }
+            let node = before.ready.first().unwrap();
+            let input = input.unwrap();
+            assert_eq!(input, work.input(root.path(), node, &source).unwrap());
+            assert_eq!(input["node_id"].as_str(), Some(node.as_str()));
+            kinds.insert(input["kind"].as_str().unwrap().to_owned());
+            let after = work
+                .record(&session, draft(&work, root.path(), node, &source), &source)
+                .unwrap();
+            assert!(after.completed > before.completed);
+            assert!(!after.ready.contains(node));
+            assert_eq!(
+                serde_json::to_value(after).unwrap(),
+                serde_json::to_value(work.progress(root.path(), &source).unwrap()).unwrap(),
+            );
+        }
+        assert_eq!(kinds, BTreeSet::from(["inspect".into(), "reduce".into()]));
     }
 
     #[test]

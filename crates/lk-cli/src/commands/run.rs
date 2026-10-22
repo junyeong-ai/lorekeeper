@@ -400,25 +400,35 @@ mod native {
             }
         }
 
-        async fn observe(&mut self, id: &str, node: &str) -> bool {
+        async fn observe(
+            &mut self,
+            id: &str,
+            node: &str,
+            request: serde_json::Value,
+        ) -> Option<crate::commands::work::state::WorkProgress> {
             if self.result.cancelled || !self.configuration_is_current() {
-                return false;
+                return None;
             }
             if self.config.llm.provider == lk_core::config::LlmProvider::Noop {
-                return self.failure(
+                self.failure(
                     "bounded work receipt",
                     "semantic execution is disabled by llm.provider",
                 );
+                return None;
             }
             let budget = match self.config.execution.effective_work() {
                 Ok(budget) => budget,
-                Err(error) => return self.failure("semantic work budget", error),
+                Err(error) => {
+                    self.failure("semantic work budget", error);
+                    return None;
+                }
             };
             if self.result.semantic_calls >= budget.max_calls {
-                return self.failure("semantic call budget", "configured execution.work.max_calls exhausted; unfinished work is retained for the next run");
+                self.failure("semantic call budget", "configured execution.work.max_calls exhausted; unfinished work is retained for the next run");
+                return None;
             }
             if let Err(error) = self.prepare_agent().await {
-                return if self.result.cancelled {
+                if self.result.cancelled {
                     self.record(
                         "bounded work receipt",
                         StageState::Cancelled,
@@ -427,21 +437,15 @@ mod native {
                 } else {
                     self.failure("bounded work receipt", error)
                 };
+                return None;
             }
-            let request = match crate::commands::work::inspection_input(
-                &self.root,
-                &self.config,
-                &self.config_revision,
-                id,
-                node,
-            ) {
-                Ok(input) => input,
-                Err(error) => return self.failure("bounded work receipt", error),
-            };
             let profile = self.selected.as_ref().expect("prepared agent");
             let invocation = match execution::observation::build_invocation(profile, &request) {
                 Ok(invocation) => invocation,
-                Err(error) => return self.failure("bounded work receipt", error),
+                Err(error) => {
+                    self.failure("bounded work receipt", error);
+                    return None;
+                }
             };
             let timeout = profile.timeout();
             let mut command = invocation.command;
@@ -461,10 +465,11 @@ mod native {
                 .checked_mul(3)
                 .and_then(|limit| limit.checked_add(16384))
             else {
-                return self.failure(
+                self.failure(
                     "bounded work receipt",
                     "host output envelope limit overflow",
                 );
+                return None;
             };
             self.result.semantic_calls += 1;
             let started_at = Instant::now();
@@ -480,7 +485,10 @@ mod native {
             self.result.semantic_duration_ms += started_at.elapsed().as_millis() as u64;
             let child = match outcome {
                 Ok(child) => child,
-                Err(error) => return self.failure("bounded work receipt", error),
+                Err(error) => {
+                    self.failure("bounded work receipt", error);
+                    return None;
+                }
             };
             if !child.success {
                 self.record(
@@ -493,10 +501,10 @@ mod native {
                     child.detail,
                 );
                 self.configuration_is_current();
-                return false;
+                return None;
             }
             if !self.configuration_is_current() {
-                return false;
+                return None;
             }
             let output = match execution::observation::decode(
                 invocation.engine,
@@ -504,7 +512,10 @@ mod native {
                 budget.max_result_bytes,
             ) {
                 Ok(output) => output,
-                Err(error) => return self.failure("bounded work receipt", error),
+                Err(error) => {
+                    self.failure("bounded work receipt", error);
+                    return None;
+                }
             };
             match crate::commands::work::record_inspection(
                 &self.root,
@@ -514,12 +525,18 @@ mod native {
                 node,
                 output,
             ) {
-                Ok(()) => self.record(
-                    "bounded work receipt",
-                    StageState::Completed,
-                    Some(node.into()),
-                ),
-                Err(error) => self.failure("bounded work receipt", error),
+                Ok(progress) => {
+                    self.record(
+                        "bounded work receipt",
+                        StageState::Completed,
+                        Some(node.into()),
+                    );
+                    Some(progress)
+                }
+                Err(error) => {
+                    self.failure("bounded work receipt", error);
+                    None
+                }
             }
         }
 
@@ -532,7 +549,7 @@ mod native {
         }
 
         async fn bounded_step(&mut self, id: &str, skill: &str) -> WorkStep {
-            let before = match crate::commands::work::current_progress(
+            let (before, request) = match crate::commands::work::prepare_inspection(
                 &self.root,
                 &self.config,
                 &self.config_revision,
@@ -549,28 +566,24 @@ mod native {
                     self.failure("bounded work progress", "incomplete work has no ready node");
                     return WorkStep::Failed;
                 };
-                if !self.observe(id, node).await {
+                let Some(request) = request else {
+                    self.failure(
+                        "bounded work progress",
+                        "ready work has no inspection input",
+                    );
                     return WorkStep::Failed;
-                }
-                return match crate::commands::work::current_progress(
-                    &self.root,
-                    &self.config,
-                    &self.config_revision,
-                    id,
-                ) {
-                    Ok(after)
+                };
+                return match self.observe(id, node, request).await {
+                    Some(after)
                         if after.completed > before.completed && !after.ready.contains(node) =>
                     {
                         WorkStep::Pending
                     }
-                    Ok(_) => {
+                    Some(_) => {
                         self.failure("bounded work receipt", "worker exited without completing its selected node; unfinished work retained");
                         WorkStep::Failed
                     }
-                    Err(error) => {
-                        self.failure("bounded work receipt", error);
-                        WorkStep::Failed
-                    }
+                    None => WorkStep::Failed,
                 };
             }
             match crate::commands::work::is_finished(

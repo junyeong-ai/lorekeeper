@@ -60,6 +60,9 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   Completion requires exact sealed typed results and source/work guards in the canonical
   publication journal. Keep the queue target's guard in its publication edit: a separate
   unchanged guard for the same target would reject the journal's own recovery.
+  Prepare a native node's progress and request from one captured evaluation. Refresh
+  the complete scope after the host returns before recording; added discovery matches
+  invalidate work too. Never retain a candidate capture across host execution.
 - Native inspection/reduction is a structured inference role (`execution/observation.rs`):
   stdin carries only the bounded node request and instructions, stdout is bounded and
   decoded by the host's explicit response contract. Rust owns recording the selected

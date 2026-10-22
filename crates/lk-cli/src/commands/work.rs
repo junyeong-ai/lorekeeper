@@ -491,26 +491,15 @@ pub(super) fn audit_needs_work(
         > 1)
 }
 
-pub(super) fn current_progress(
+pub(super) fn prepare_inspection(
     root: &Path,
     config: &lk_core::config::Config,
     config_revision: &str,
     id: &str,
-) -> miette::Result<state::WorkProgress> {
+) -> miette::Result<(state::WorkProgress, Option<Value>)> {
     let root = root.canonicalize().into_diagnostic()?;
     let (work, prepared) = load(&root, config, config_revision, id)?;
-    work.progress(&root, &prepared.resources)
-}
-
-pub(super) fn inspection_input(
-    root: &Path,
-    config: &lk_core::config::Config,
-    config_revision: &str,
-    id: &str,
-    node: &str,
-) -> miette::Result<Value> {
-    let (work, prepared) = load(root, config, config_revision, id)?;
-    work.input(root, node, &prepared.resources)
+    work.prepare_inspection(&root, &prepared.resources)
 }
 
 pub(super) fn record_inspection(
@@ -520,7 +509,7 @@ pub(super) fn record_inspection(
     id: &str,
     node: &str,
     output: WorkOutput,
-) -> miette::Result<()> {
+) -> miette::Result<state::WorkProgress> {
     if output.work_id != id || output.node_id != node {
         return Err(miette::miette!(
             "observation does not answer the selected work node"
@@ -529,7 +518,6 @@ pub(super) fn record_inspection(
     let session = lk_vault::MutationSession::acquire(root).into_diagnostic()?;
     let (work, prepared) = load(root, config, config_revision, id)?;
     work.record(&session, output, &prepared.resources)
-        .map(|_| ())
 }
 
 pub(super) fn verify_finished(
@@ -920,6 +908,123 @@ mod tests {
         let path = root.join(path);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, raw).unwrap();
+    }
+
+    #[test]
+    fn recording_prepared_inspection_refreshes_changed_and_new_discovery_context() {
+        for added_candidate in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let config_path = directory.path().join("config.yaml");
+            std::fs::write(&config_path, "vault:\n  root: vault\n  locale: en\nidentity: {name: Tester, email: tester@example.com}\nsources:\n  notes:\n    type: manual\n    params: {inbox_dir: inbox}\n    concept_policy: supported-new\nexecution:\n  work: {max_input_bytes: 8192, max_result_bytes: 1024, max_calls: 1}\n").unwrap();
+            let (config, config_revision) =
+                lk_core::config::Config::load_with_revision(&config_path).unwrap();
+            std::fs::create_dir(directory.path().join("vault")).unwrap();
+            let root = directory.path().join("vault").canonicalize().unwrap();
+            let target = "wiki/documents/subject.md";
+            let context = "wiki/documents/context.md";
+            let added = "wiki/documents/new-context.md";
+            let client = lk_queue::QueueLlmClient::new(root.join(".lorekeeper/queue"));
+            let task = client.build_task(
+                "ext",
+                lk_queue::TaskKind::ExtractConcepts,
+                lk_queue::ExtractConceptsRequest {
+                    concept_policy: lk_core::config::ConceptPolicy::SupportedNew,
+                    rss_original: None,
+                    text: "Selected Candidate has source-scoped evidence.\n\n".repeat(400),
+                    source_id: "notes".into(),
+                    source_type: lk_core::config::SourceType::Manual,
+                    date: jiff::civil::date(2026, 10, 20),
+                    focus: None,
+                    locale: lk_core::i18n::Locale::En,
+                    categories: vec![],
+                    target: lk_queue::TaskTarget {
+                        vault_path: target.into(),
+                        kind: lk_queue::TargetKind::DocumentConcepts,
+                        anchor: "## Related Concepts".into(),
+                    },
+                },
+            );
+            let subject = format!(
+                "---\ntype: document\nllm_inputs:\n  concepts: {}\n---\n## Content\nSelected Candidate is the exact subject.\n\n## Related Concepts\n",
+                task.cache_hash,
+            );
+            let original_context =
+                "---\ntype: document\n---\nSelected Candidate has separate context.\n";
+            write(&root, target, &subject);
+            write(&root, context, original_context);
+            write(
+                &root,
+                ".lorekeeper/queue/fixture.jsonl",
+                &serde_json::to_string(&task).unwrap(),
+            );
+            {
+                let session = MutationSession::acquire(&root).unwrap();
+                discovery::record(
+                    &session,
+                    &task.task_id,
+                    serde_json::from_value(json!({
+                        "target_revision":file_revision(&subject),
+                        "queries":[{"query":"Selected Candidate","phrase":true,"spacing":false}],
+                    }))
+                    .unwrap(),
+                )
+                .unwrap();
+            }
+            let TaskWork::Partitioned { id } =
+                prepare_task(&root, &config, &config_revision, &task.task_id).unwrap()
+            else {
+                panic!("fixture must require bounded work");
+            };
+            let (before, input) =
+                prepare_inspection(&root, &config, &config_revision, &id).unwrap();
+            let input = input.unwrap();
+            let node = before.ready.first().unwrap();
+            assert_eq!(input["node_id"].as_str(), Some(node.as_str()));
+            let output = WorkOutput {
+                work_id: id.clone(),
+                node_id: node.clone(),
+                input_revision: input["input_revision"].as_str().unwrap().into(),
+                summary: "Read the assigned exact source ranges.".into(),
+                findings: vec![],
+                source_questions: vec![],
+                unresolved: vec![],
+                resolutions: vec![],
+            };
+            if added_candidate {
+                write(
+                    &root,
+                    added,
+                    "---\ntype: document\n---\nSelected Candidate is newly discoverable.\n",
+                );
+            } else {
+                write(
+                    &root,
+                    context,
+                    "---\ntype: document\n---\nSelected Candidate context changed after inspection.\n",
+                );
+            }
+            assert!(
+                record_inspection(&root, &config, &config_revision, &id, node, output.clone())
+                    .is_err()
+            );
+            assert!(
+                !root
+                    .join(".lorekeeper/work")
+                    .join(&id)
+                    .join("nodes")
+                    .join(format!("{node}.json"))
+                    .exists()
+            );
+            if added_candidate {
+                std::fs::remove_file(root.join(added)).unwrap();
+            } else {
+                write(&root, context, original_context);
+            }
+            let after =
+                record_inspection(&root, &config, &config_revision, &id, node, output).unwrap();
+            assert!(after.completed > before.completed);
+            assert!(!after.ready.contains(node));
+        }
     }
 
     #[test]
