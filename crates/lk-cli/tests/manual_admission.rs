@@ -257,7 +257,7 @@ fn changing_canonical_inbox_under_known_source_refuses_instead_of_bootstrapping(
 #[test]
 fn individually_oversized_normalized_first_entry_cannot_starve_a_later_fit() {
     let root = tempfile::tempdir().unwrap();
-    let config = setup(root.path(), 2048, false);
+    let config = setup(root.path(), 2048, true);
     note(
         root.path(),
         "a-large.md",
@@ -282,6 +282,18 @@ fn individually_oversized_normalized_first_entry_cannot_starve_a_later_fit() {
         ),
     )
     .unwrap();
+    let preview = run(&config, true);
+    assert!(!preview.status.success(), "{}", stderr(&preview));
+    assert!(
+        stderr(&preview).contains("retirement blocked"),
+        "{}",
+        stderr(&preview)
+    );
+    assert!(
+        !stderr(&preview).contains("retirement eligible"),
+        "{}",
+        stderr(&preview)
+    );
     let first = run(&config, false);
     assert!(!first.status.success(), "{}", stderr(&first));
     assert!(stderr(&first).contains("2 admitted"), "{}", stderr(&first));

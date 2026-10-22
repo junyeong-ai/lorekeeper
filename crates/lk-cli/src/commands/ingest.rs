@@ -670,7 +670,8 @@ async fn run_with_identity(
                 } else if manual_retirement_blocked
                     || shared
                     || manual.as_ref().is_some_and(|manual| {
-                        manual.inventory.is_referenced(&capture.manifest.entry)
+                        manual.has_refusals()
+                            || manual.inventory.is_referenced(&capture.manifest.entry)
                             || !manual.inventory.diagnostics().is_empty()
                     })
                     || !capture.manifest.unsupported.is_empty()

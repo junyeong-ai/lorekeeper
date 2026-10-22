@@ -106,6 +106,10 @@ impl Acquisition {
         self.state.pending_count() > 0
     }
 
+    pub fn has_refusals(&self) -> bool {
+        !self.refused.is_empty()
+    }
+
     pub fn preview_has_pending(&self, result: &lk_pipeline::IngestResult) -> bool {
         self.state.pending_count() > result.document_recipes.len()
     }
@@ -118,7 +122,7 @@ impl Acquisition {
         captures: &[lk_core::manual_original::ManualBundleCapture],
         id: &str,
     ) -> Result<(), SourceError> {
-        if !self.refused.is_empty() {
+        if self.has_refusals() {
             return Ok(());
         }
         self.require_inbox(source, context)?;
