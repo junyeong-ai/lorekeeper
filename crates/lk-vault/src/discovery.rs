@@ -2,12 +2,437 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, OpenFlags};
+use serde::{Deserialize, Serialize};
 
-use lk_core::concept::{Citation, identity_key, source_revision};
+use lk_core::concept::{Citation, file_revision, identity_key, source_revision};
 use lk_core::config::VaultDirs;
 pub use lk_core::discovery::DiscoveryQuery;
 
 use crate::{SearchOptions, VaultError, search};
+
+pub const DISCOVERY_CAPTURE_POLICY: &str = "discovery-candidates-v1";
+/// The bound covers the serialized card, excluding exact candidate identities.
+pub const DISCOVERY_CARD_MAX_BYTES: usize = 2048;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DiscoveryText {
+    pub text: String,
+    pub truncated: bool,
+}
+
+impl DiscoveryText {
+    fn build(value: &str, budget: usize) -> Self {
+        let mut bytes = 0;
+        let mut end = 0;
+        for (at, character) in value.char_indices() {
+            let width = serde_json::to_string(&character)
+                .expect("a Unicode scalar serializes")
+                .len()
+                - 2;
+            if bytes + width > budget {
+                break;
+            }
+            bytes += width;
+            end = at + character.len_utf8();
+        }
+        Self {
+            text: value[..end].into(),
+            truncated: end < value.len(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DiscoveryPreview {
+    pub text: DiscoveryText,
+    pub kind: crate::ExcerptKind,
+    /// Accepted by a read pinned to the candidate's file_revision; HTML has no locator.
+    pub section: Option<usize>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DiscoveryMatch {
+    pub query_index: usize,
+    pub preview: DiscoveryPreview,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DiscoveryHeading {
+    pub section: usize,
+    pub level: u8,
+    pub title: DiscoveryText,
+}
+
+/// A bounded discovery projection, never a full-body read or a semantic definition.
+/// Each match previews one visible block for its recipe, not all occurrences.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DiscoveryCandidateCard {
+    pub title: DiscoveryText,
+    pub aliases: Vec<DiscoveryText>,
+    pub aliases_total: usize,
+    pub aliases_truncated: bool,
+    pub format: Option<DiscoveryText>,
+    pub knowledge_status: lk_core::frontmatter::KnowledgeStatus,
+    pub opening: DiscoveryPreview,
+    pub matches: Vec<DiscoveryMatch>,
+    pub matches_total: usize,
+    pub matches_truncated: bool,
+    pub outline: Vec<DiscoveryHeading>,
+    pub outline_total: usize,
+    pub outline_truncated: bool,
+    pub reviews: crate::ReviewCounts,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DiscoveryCandidate {
+    pub path: String,
+    /// Exact canonical vault-relative owner, not a name or content-equivalence key.
+    pub owner: String,
+    pub file_revision: String,
+    pub source_revision: String,
+    pub query_indexes: Vec<usize>,
+    pub card: DiscoveryCandidateCard,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct DiscoveryCapture {
+    pub policy: String,
+    pub revision: String,
+    pub queries: Vec<DiscoveryQuery>,
+    pub candidates: Vec<DiscoveryCandidate>,
+    #[serde(skip)]
+    guarded_pages: BTreeMap<PathBuf, String>,
+}
+
+impl DiscoveryCapture {
+    /// Full candidate bytes stay local for guards; cards do not replace those guards.
+    /// Graph-owned review/evidence dependencies must be captured by the caller.
+    pub fn guarded_pages(&self) -> &BTreeMap<PathBuf, String> {
+        &self.guarded_pages
+    }
+}
+
+fn serialized<T: Serialize>(value: &T) -> Result<String, VaultError> {
+    serde_json::to_string(value).map_err(|error| VaultError::Serialization(error.to_string()))
+}
+
+fn invalid(message: &str) -> VaultError {
+    std::io::Error::other(message).into()
+}
+
+struct QueryPlan {
+    identity: Option<String>,
+    spellings: Vec<String>,
+    terms: Vec<String>,
+}
+
+/// Capture every lexical candidate, including retired knowledge, without ranking or
+/// pagination. Each physical symlink owner occurs once; hard-link addresses stay distinct.
+/// This observes current files rather than freezing external editors. Recompute the capture
+/// before recording decisions/publication; callers own cooperating workflow/mutation leases.
+pub fn capture_discovery(
+    root: &Path,
+    dirs: &VaultDirs,
+    queries: &[DiscoveryQuery],
+) -> Result<DiscoveryCapture, VaultError> {
+    let root = root.canonicalize()?;
+    for query in queries {
+        query.validate().map_err(std::io::Error::other)?;
+    }
+    let queries = queries
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let mut vocabulary = Vec::new();
+    if !queries.is_empty() {
+        search::visit_collections(
+            &root,
+            dirs,
+            vec![lk_core::vault_path::concepts_dir(dirs)],
+            |mut page, _| {
+                page.page.body.clear();
+                vocabulary.push(page);
+                Ok(())
+            },
+        )?;
+    }
+    let plans = queries
+        .iter()
+        .map(|query| {
+            let identity = identity_key(&query.query);
+            QueryPlan {
+                spellings: search::spellings_of(identity.as_deref(), &vocabulary),
+                terms: search::query_terms(&query.query, query.phrase),
+                identity,
+            }
+        })
+        .collect::<Vec<_>>();
+    let reviews = if queries.is_empty() {
+        BTreeMap::new()
+    } else {
+        crate::review::review_previews(&root, dirs)?
+    };
+    let mut guarded_pages = BTreeMap::new();
+    let mut roster = BTreeMap::<String, (String, String, String, BTreeSet<usize>)>::new();
+    if !queries.is_empty() {
+        search::visit_pages(&root, dirs, false, |mut page, _| {
+            page.projection = Some(page.match_projection().into_owned());
+            let query_indexes = queries
+                .iter()
+                .zip(&plans)
+                .enumerate()
+                .filter_map(|(index, (query, plan))| {
+                    let options = SearchOptions {
+                        query: Some(&query.query),
+                        phrase: query.phrase,
+                        spacing: query.spacing,
+                        knowledge_status: None,
+                        ..Default::default()
+                    };
+                    search::match_query(
+                        &page,
+                        &options,
+                        &plan.spellings,
+                        &plan.terms,
+                        plan.identity.as_deref(),
+                    )
+                    .is_some()
+                    .then_some(index)
+                })
+                .collect::<BTreeSet<_>>();
+            if query_indexes.is_empty() {
+                return Ok(());
+            }
+            let full = crate::page_path(&root, &page.rel_path)?;
+            let owner = full
+                .canonicalize()?
+                .strip_prefix(&root)
+                .map_err(std::io::Error::other)?
+                .to_path_buf();
+            let raw = std::fs::read_to_string(&full)?;
+            if file_revision(&raw) != page.file_revision {
+                return Err(invalid("discovery candidate changed during capture"));
+            }
+            if guarded_pages.get(&owner).is_some_and(|prior| prior != &raw) {
+                return Err(invalid("discovery aliases changed during capture"));
+            }
+            guarded_pages.insert(owner.clone(), raw);
+            let owner = owner
+                .to_str()
+                .ok_or_else(|| invalid("discovery owner address is not UTF-8"))?
+                .to_owned();
+            let path = page
+                .rel_path
+                .to_str()
+                .ok_or_else(|| invalid("discovery candidate address is not UTF-8"))?
+                .to_owned();
+            let authored = source_revision(&page.page);
+            match roster.entry(owner.clone()) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert((path, page.file_revision, authored, query_indexes));
+                }
+                std::collections::btree_map::Entry::Occupied(mut entry) => {
+                    let (previous_path, revision, previous_authored, previous_queries) =
+                        entry.get_mut();
+                    if *revision != page.file_revision || *previous_authored != authored {
+                        return Err(invalid("discovery owner changed during capture"));
+                    }
+                    if path == owner || (*previous_path != owner && path < *previous_path) {
+                        *previous_path = path;
+                    }
+                    previous_queries.extend(query_indexes);
+                }
+            }
+            Ok(())
+        })?;
+    }
+    let mut candidates = Vec::with_capacity(roster.len());
+    let mut review_identity = BTreeMap::new();
+    for (owner, (path, file_revision, source_revision, query_indexes)) in roster {
+        let raw = &guarded_pages[Path::new(&owner)];
+        let page = crate::parse_page(raw).map_err(VaultError::Frontmatter)?;
+        let previews = reviews.get(&owner).cloned().unwrap_or_default();
+        let mut counts = crate::ReviewCounts::default();
+        for review in &previews {
+            counts.record(review.effective_state, 1);
+        }
+        review_identity.insert(owner.clone(), previews);
+        let query_indexes = query_indexes.into_iter().collect::<Vec<_>>();
+        let card = build_card(&page, &path, &query_indexes, &queries, &plans, counts)?;
+        candidates.push(DiscoveryCandidate {
+            path,
+            owner,
+            file_revision,
+            source_revision,
+            query_indexes,
+            card,
+        });
+    }
+    let revision = file_revision(&serialized(&(
+        DISCOVERY_CAPTURE_POLICY,
+        &root,
+        dirs,
+        &queries,
+        &candidates,
+        &review_identity,
+    ))?);
+    Ok(DiscoveryCapture {
+        policy: DISCOVERY_CAPTURE_POLICY.into(),
+        revision,
+        queries,
+        candidates,
+        guarded_pages,
+    })
+}
+
+fn build_card(
+    page: &crate::VaultPage,
+    path: &str,
+    query_indexes: &[usize],
+    queries: &[DiscoveryQuery],
+    plans: &[QueryPlan],
+    reviews: crate::ReviewCounts,
+) -> Result<DiscoveryCandidateCard, VaultError> {
+    let document = search::VisibleDocument::from_body(&page.body);
+    let outline = crate::document::outline(&page.body);
+    let opening = document.opening.as_deref();
+    let aliases = page
+        .frontmatter
+        .get("aliases")
+        .and_then(serde_json::Value::as_array);
+    let aliases = aliases
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .collect::<Vec<_>>();
+    let matches = query_indexes
+        .iter()
+        .take(2)
+        .map(|&query_index| {
+            let plan = &plans[query_index];
+            let selected =
+                document.matching_block(&plan.terms, &plan.spellings, queries[query_index].spacing);
+            let (text, kind, section) = match selected {
+                Some((block, kind)) => {
+                    let section = block.source.as_ref().and_then(|source| {
+                        outline
+                            .iter()
+                            .rev()
+                            .find(|section| {
+                                section.start <= source.start && source.end <= section.end
+                            })
+                            .map(|section| section.id)
+                    });
+                    (block.text.as_str(), kind, section)
+                }
+                None => ("", crate::ExcerptKind::Unavailable, None),
+            };
+            DiscoveryMatch {
+                query_index,
+                preview: DiscoveryPreview {
+                    text: DiscoveryText::build(text, 256),
+                    kind,
+                    section,
+                },
+            }
+        })
+        .collect::<Vec<_>>();
+    let outline_total = outline.len().saturating_sub(1);
+    let mut card = DiscoveryCandidateCard {
+        title: DiscoveryText::build(
+            page.frontmatter
+                .get("title")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_else(|| {
+                    Path::new(path)
+                        .file_stem()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("")
+                }),
+            128,
+        ),
+        aliases: aliases
+            .iter()
+            .take(2)
+            .map(|value| DiscoveryText::build(value, 64))
+            .collect(),
+        aliases_total: aliases.len(),
+        aliases_truncated: aliases.len() > 2,
+        format: page
+            .frontmatter
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .map(|value| DiscoveryText::build(value, 32)),
+        knowledge_status: page
+            .frontmatter
+            .knowledge_status()
+            .map_err(VaultError::Frontmatter)?,
+        opening: DiscoveryPreview {
+            text: DiscoveryText::build(opening.unwrap_or_default(), 192),
+            kind: if opening.is_some() {
+                crate::ExcerptKind::Opening
+            } else {
+                crate::ExcerptKind::Unavailable
+            },
+            section: None,
+        },
+        matches_total: query_indexes.len(),
+        matches_truncated: query_indexes.len() > matches.len(),
+        matches,
+        outline: outline
+            .into_iter()
+            .skip(1)
+            .take(3)
+            .map(|section| DiscoveryHeading {
+                section: section.id,
+                level: section.level,
+                title: DiscoveryText::build(&section.title, 48),
+            })
+            .collect(),
+        outline_total,
+        outline_truncated: outline_total > 3,
+        reviews,
+    };
+    while serialized(&card)?.len() > DISCOVERY_CARD_MAX_BYTES {
+        if card.outline.pop().is_some() {
+            card.outline_truncated = true;
+        } else if card.aliases.pop().is_some() {
+            card.aliases_truncated = true;
+        } else if card.matches.len() > 1 {
+            card.matches.pop();
+            card.matches_truncated = true;
+        } else {
+            let mut texts = vec![&mut card.title, &mut card.opening.text];
+            texts.extend(card.format.iter_mut());
+            texts.extend(
+                card.matches
+                    .iter_mut()
+                    .map(|preview| &mut preview.preview.text),
+            );
+            let longest = texts
+                .into_iter()
+                .max_by_key(|text| text.text.len())
+                .expect("title and opening are present");
+            if longest.text.is_empty() {
+                return Err(invalid(
+                    "discovery card metadata exceeds its serialized bound",
+                ));
+            }
+            let budget = serialized(&longest.text)?.len().saturating_sub(2) / 2;
+            *longest = DiscoveryText::build(&longest.text, budget);
+            longest.truncated = true;
+        }
+    }
+    Ok(card)
+}
 
 /// Complete lexical candidates, including retired knowledge. Matches are context,
 /// never inferred citations, equivalence or contradiction judgments.
@@ -156,6 +581,280 @@ mod tests {
         let path = root.join(path);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, body).unwrap();
+    }
+
+    #[test]
+    fn candidate_capture_is_complete_guarded_and_invalidates_changed_membership() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let queries = [DiscoveryQuery {
+            query: "Helios".into(),
+            phrase: true,
+            spacing: false,
+        }];
+        for index in 0..127 {
+            write(
+                root.path(),
+                &format!("wiki/documents/{index:03}.md"),
+                "---\ntype: document\nknowledge_status: retired\n---\n## Summary\nHelios observation.\n",
+            );
+        }
+        let capture = capture_discovery(root.path(), &dirs, &queries).unwrap();
+        assert_eq!(capture.candidates.len(), 127);
+        assert_eq!(capture.guarded_pages().len(), 127);
+        let legacy = discover_queries(root.path(), &dirs, &queries).unwrap();
+        assert_eq!(
+            capture
+                .candidates
+                .iter()
+                .map(|candidate| candidate.path.clone())
+                .collect::<Vec<_>>(),
+            legacy[&queries[0]]
+                .iter()
+                .map(|citation| citation.path.clone())
+                .collect::<Vec<_>>()
+        );
+        for candidate in &capture.candidates {
+            assert_eq!(candidate.query_indexes, [0]);
+            let raw = &capture.guarded_pages()[Path::new(&candidate.owner)];
+            assert_eq!(candidate.file_revision, file_revision(raw));
+            assert_eq!(
+                candidate.source_revision,
+                source_revision(&crate::parse_page(raw).unwrap())
+            );
+            assert!(serialized(&candidate.card).unwrap().len() <= DISCOVERY_CARD_MAX_BYTES);
+        }
+        assert_eq!(
+            capture_discovery(root.path(), &dirs, &queries)
+                .unwrap()
+                .revision,
+            capture.revision
+        );
+        write(
+            root.path(),
+            "wiki/documents/126.md",
+            "---\ntype: document\nknowledge_status: retired\n---\n## Summary\nHelios observation.\n\n## Later\nChanged beyond the opening preview.\n",
+        );
+        let edited = capture_discovery(root.path(), &dirs, &queries).unwrap();
+        assert_ne!(edited.revision, capture.revision);
+        write(
+            root.path(),
+            "wiki/documents/new.md",
+            "---\ntype: document\n---\nHelios arrives.\n",
+        );
+        let added = capture_discovery(root.path(), &dirs, &queries).unwrap();
+        assert_eq!(added.candidates.len(), 128);
+        assert_ne!(added.revision, edited.revision);
+        std::fs::remove_file(root.path().join("wiki/documents/new.md")).unwrap();
+        assert_eq!(
+            capture_discovery(root.path(), &dirs, &queries)
+                .unwrap()
+                .revision,
+            edited.revision
+        );
+        assert!(!serialized(&capture).unwrap().contains("guarded_pages"));
+    }
+
+    #[test]
+    fn candidate_cards_use_full_document_projection_and_truthful_original_locations() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let query = DiscoveryQuery {
+            query: "Helios".into(),
+            phrase: true,
+            spacing: false,
+        };
+        let fragment = crate::render_markdown_fragment(
+            "Note[^private-marker].\n\n[^private-marker]: [Helios](https://destination.invalid)\n",
+        )
+        .unwrap();
+        let cases = [
+            ("## Summary\nUnrelated.\n\n## Match\n[Helios][ref]\n\n## Definitions\n[ref]: https://destination.invalid\n".to_owned(), Some(2)),
+            (format!("## Summary\nUnrelated.\n\n## Match\n{fragment}"), Some(2)),
+            ((1..=7).map(|index| format!("## Section {index}\n{}\n\n", if index == 7 { "Helios" } else { "Unrelated." })).collect::<String>(), Some(7)),
+            ("## Summary\nUnrelated.\n\n## Match\n<div>Helios <strong>scope</strong>.</div>\n".into(), None),
+        ];
+        for (body, section) in cases {
+            for ending in ["\n", "\r\n", "\r"] {
+                let body = body.replace('\n', ending);
+                let raw = format!("---\ntype: document\ntitle: Source scope\n---\n{body}");
+                let path = "wiki/documents/source.md";
+                write(root.path(), path, &raw);
+                let capture =
+                    capture_discovery(root.path(), &dirs, std::slice::from_ref(&query)).unwrap();
+                assert_eq!(capture.candidates.len(), 1);
+                let candidate = &capture.candidates[0];
+                let preview = &candidate.card.matches[0].preview;
+                assert!(preview.text.text.contains("Helios"));
+                assert_eq!(preview.kind, crate::ExcerptKind::MatchedBlock);
+                assert_eq!(preview.section, section, "{body}");
+                if let Some(section) = section {
+                    let view = crate::inspect_document(
+                        root.path(),
+                        Path::new(path),
+                        &crate::DocumentOptions {
+                            section: Some(section),
+                            offset: 0,
+                            limit: 1000,
+                            revision: Some(&candidate.file_revision),
+                        },
+                    )
+                    .unwrap();
+                    assert!(view.content.unwrap().text.contains("Helios"));
+                }
+                if section == Some(7) {
+                    assert_eq!(candidate.card.outline_total, 7);
+                    assert!(candidate.card.outline_truncated);
+                }
+                assert_eq!(
+                    std::fs::read_to_string(root.path().join(path)).unwrap(),
+                    raw
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn candidate_capture_matches_alias_expansion_without_conflating_identity() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        write(
+            root.path(),
+            "wiki/concepts/topic.md",
+            "---\ntype: concept\ntitle: Retention policy\naliases: [보존 정책]\n---\n## Synthesis\nA scoped definition.\n",
+        );
+        write(
+            root.path(),
+            "wiki/documents/source.md",
+            "---\ntype: document\ntitle: Source\n---\nThe Retention policy is scoped.\n",
+        );
+        let queries = [DiscoveryQuery {
+            query: "보존정책".into(),
+            phrase: false,
+            spacing: true,
+        }];
+        let capture = capture_discovery(root.path(), &dirs, &queries).unwrap();
+        assert_eq!(capture.candidates.len(), 2);
+        let legacy = discover_queries(root.path(), &dirs, &queries).unwrap();
+        assert_eq!(
+            capture
+                .candidates
+                .iter()
+                .map(|candidate| candidate.path.clone())
+                .collect::<Vec<_>>(),
+            legacy[&queries[0]]
+                .iter()
+                .map(|citation| citation.path.clone())
+                .collect::<Vec<_>>()
+        );
+        write(
+            root.path(),
+            "wiki/concepts/other.md",
+            "---\ntype: concept\ntitle: 보존 정책\n---\nAnother declared owner.\n",
+        );
+        let ambiguous = capture_discovery(root.path(), &dirs, &queries).unwrap();
+        assert_ne!(ambiguous.revision, capture.revision);
+        assert!(
+            !ambiguous
+                .candidates
+                .iter()
+                .any(|candidate| candidate.path.ends_with("source.md"))
+        );
+    }
+
+    #[test]
+    fn candidate_cards_bound_unicode_and_json_escaping_with_explicit_truncation() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let title = "가🙂\\\"\u{0001}".repeat(200);
+        let aliases = vec![title.clone(); 20];
+        let mut body = format!("## Summary\n{}\n\n", "가🙂 ".repeat(300));
+        for index in 0..12 {
+            body.push_str(&format!(
+                "## Section {index}\n{} Helios\n\n",
+                "긴 문장🙂 ".repeat(100)
+            ));
+        }
+        write(
+            root.path(),
+            "wiki/documents/source.md",
+            &format!(
+                "---\ntype: document\ntitle: {}\naliases: {}\n---\n{body}",
+                serialized(&title).unwrap(),
+                serialized(&aliases).unwrap()
+            ),
+        );
+        let capture = capture_discovery(
+            root.path(),
+            &dirs,
+            &[DiscoveryQuery {
+                query: "Helios".into(),
+                phrase: true,
+                spacing: false,
+            }],
+        )
+        .unwrap();
+        let card = &capture.candidates[0].card;
+        assert!(serialized(card).unwrap().len() <= DISCOVERY_CARD_MAX_BYTES);
+        assert!(card.title.truncated);
+        assert!(card.aliases_truncated);
+        assert!(card.opening.text.truncated);
+        assert!(card.matches[0].preview.text.truncated);
+        assert!(card.outline_truncated);
+        assert_eq!(card.aliases_total, 20);
+        assert_eq!(card.outline_total, 13);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn candidate_capture_deduplicates_verified_owners_and_detects_alias_retargeting() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let raw = "---\ntype: concept\ntitle: Helios\n---\nA source-backed definition.\n";
+        write(root.path(), "backing/one.md", raw);
+        write(root.path(), "backing/two.md", raw);
+        for directory in ["wiki/concepts", "wiki/documents"] {
+            std::fs::create_dir_all(root.path().join(directory)).unwrap();
+        }
+        std::os::unix::fs::symlink(
+            "../../backing/one.md",
+            root.path().join("wiki/concepts/topic.md"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(
+            "../../backing/one.md",
+            root.path().join("wiki/documents/topic.md"),
+        )
+        .unwrap();
+        std::fs::hard_link(
+            root.path().join("backing/one.md"),
+            root.path().join("wiki/documents/hard.md"),
+        )
+        .unwrap();
+        let queries = [DiscoveryQuery {
+            query: "Helios".into(),
+            phrase: true,
+            spacing: false,
+        }];
+        let capture = capture_discovery(root.path(), &dirs, &queries).unwrap();
+        assert_eq!(capture.candidates.len(), 2);
+        assert_eq!(
+            capture
+                .candidates
+                .iter()
+                .filter(|candidate| candidate.owner == "backing/one.md")
+                .count(),
+            1
+        );
+        std::fs::remove_file(root.path().join("wiki/documents/topic.md")).unwrap();
+        std::os::unix::fs::symlink(
+            "../../backing/two.md",
+            root.path().join("wiki/documents/topic.md"),
+        )
+        .unwrap();
+        let changed = capture_discovery(root.path(), &dirs, &queries).unwrap();
+        assert_eq!(changed.candidates.len(), 3);
+        assert_ne!(changed.revision, capture.revision);
     }
 
     #[test]

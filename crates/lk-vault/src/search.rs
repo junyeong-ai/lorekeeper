@@ -52,7 +52,7 @@ pub enum MatchField {
 
 /// What the excerpt's source block establishes. A bounded preview may clip that block;
 /// `excerpt_section` locates its complete content under the hit's file revision.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ExcerptKind {
     Opening,
@@ -1394,32 +1394,7 @@ pub(super) fn excerpt_details(
             section: None,
         };
     }
-    let contains = |text: &str, term: &str| {
-        contains_term(text, term) || spacing && contains_spacing_term(text, term)
-    };
-    let matches_all = |line: &str| {
-        let text = fold(line);
-        if spellings.is_empty() {
-            terms.iter().all(|term| contains(&text, term))
-        } else {
-            spellings.iter().any(|name| contains(&text, name))
-        }
-    };
-    let selected = document
-        .blocks
-        .iter()
-        .find(|block| matches_all(&block.text))
-        .map(|block| (block, ExcerptKind::MatchedBlock))
-        .or_else(|| {
-            document
-                .blocks
-                .iter()
-                .find(|block| {
-                    let text = fold(&block.text);
-                    terms.iter().any(|term| contains(&text, term))
-                })
-                .map(|block| (block, ExcerptKind::PartialMatch))
-        });
+    let selected = document.matching_block(terms, spellings, spacing);
     let Some((block, kind)) = selected else {
         return SearchExcerpt {
             text: String::new(),
@@ -1448,21 +1423,21 @@ fn search_text(body: &str) -> String {
     VisibleDocument::from_body(body).text()
 }
 
-struct VisibleBlock {
-    text: String,
-    source: Option<Range<usize>>,
+pub(super) struct VisibleBlock {
+    pub text: String,
+    pub source: Option<Range<usize>>,
 }
 
 /// One complete parse supplies visible blocks and the opening statement. Inline
 /// formatting preserves phrases; blocks and code lines remain separate. HTML text
 /// comes from the complete DOM, excluding non-content containers and attributes.
-struct VisibleDocument {
+pub(super) struct VisibleDocument {
     blocks: Vec<VisibleBlock>,
-    opening: Option<String>,
+    pub opening: Option<String>,
 }
 
 impl VisibleDocument {
-    fn from_body(body: &str) -> Self {
+    pub fn from_body(body: &str) -> Self {
         let markdown = lk_core::markdown::MarkdownInput::from_text(body);
         let events: Vec<_> = markdown
             .offset_events(lk_core::markdown::OPTIONS)
@@ -1499,6 +1474,38 @@ impl VisibleDocument {
         let opening = section.and_then(|section| html_opening(body, &events, section));
         let blocks = html_search_blocks(events.into_iter().map(|(event, _)| event), body.len());
         Self { blocks, opening }
+    }
+
+    pub fn matching_block(
+        &self,
+        terms: &[String],
+        spellings: &[String],
+        spacing: bool,
+    ) -> Option<(&VisibleBlock, ExcerptKind)> {
+        let contains = |text: &str, term: &str| {
+            contains_term(text, term) || spacing && contains_spacing_term(text, term)
+        };
+        let matches_all = |line: &str| {
+            let text = fold(line);
+            if spellings.is_empty() {
+                terms.iter().all(|term| contains(&text, term))
+            } else {
+                spellings.iter().any(|name| contains(&text, name))
+            }
+        };
+        self.blocks
+            .iter()
+            .find(|block| matches_all(&block.text))
+            .map(|block| (block, ExcerptKind::MatchedBlock))
+            .or_else(|| {
+                self.blocks
+                    .iter()
+                    .find(|block| {
+                        let text = fold(&block.text);
+                        terms.iter().any(|term| contains(&text, term))
+                    })
+                    .map(|block| (block, ExcerptKind::PartialMatch))
+            })
     }
 
     fn text(&self) -> String {

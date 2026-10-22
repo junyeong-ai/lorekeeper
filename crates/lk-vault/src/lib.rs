@@ -48,7 +48,11 @@ pub use self::context::{
     ContextEvidence, ContextOptions, ContextRelations, ContextReviews, PageContext, ReviewCounts,
     inspect_page_context,
 };
-pub use self::discovery::{DiscoveryQuery, discover_queries};
+pub use self::discovery::{
+    DISCOVERY_CAPTURE_POLICY, DISCOVERY_CARD_MAX_BYTES, DiscoveryCandidate, DiscoveryCandidateCard,
+    DiscoveryCapture, DiscoveryHeading, DiscoveryMatch, DiscoveryPreview, DiscoveryQuery,
+    DiscoveryText, capture_discovery, discover_queries,
+};
 pub use self::document::{
     DocumentContent, DocumentOptions, DocumentSection, DocumentView, inspect_document,
 };
