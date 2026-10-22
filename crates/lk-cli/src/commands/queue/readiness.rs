@@ -5,7 +5,7 @@ use strum::IntoEnumIterator;
 
 use super::{QueueTask, TaskStatus, classify_task, read_pending_tasks, resolve_target_path};
 
-pub(crate) struct AuditReadiness {
+pub(crate) struct InputReadiness {
     tasks: BTreeMap<PathBuf, Vec<QueueTask>>,
     staged: BTreeSet<(String, String)>,
     pages: BTreeMap<PathBuf, ApprovedPage>,
@@ -42,7 +42,7 @@ pub(crate) fn unfinished_inputs(page: &lk_vault::VaultPage) -> Result<Vec<&'stat
         .collect())
 }
 
-impl AuditReadiness {
+impl InputReadiness {
     pub fn load(root: &Path) -> miette::Result<Self> {
         let pending = read_pending_tasks(&root.join(".lorekeeper/queue"))?;
         if pending.unparseable != 0 {
@@ -52,7 +52,7 @@ impl AuditReadiness {
         }
         let queue = root.join(".lorekeeper/queue");
         let batch = lk_queue::read_results(&queue)
-            .map_err(|error| miette::miette!("audit staged results: {error}"))?;
+            .map_err(|error| miette::miette!("semantic staged results: {error}"))?;
         if !batch.unreadable.is_empty() {
             return Err(miette::miette!(
                 "unreadable staged results have unknown targets; repair them before assessing knowledge"
@@ -65,7 +65,7 @@ impl AuditReadiness {
         let entries = match std::fs::read_dir(queue.join(lk_queue::RESULTS_SUBDIR)) {
             Ok(entries) => Some(entries),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-            Err(error) => return Err(miette::miette!("audit staged results: {error}")),
+            Err(error) => return Err(miette::miette!("semantic staged results: {error}")),
         };
         for entry in entries.into_iter().flatten() {
             let path = entry.map_err(|error| miette::miette!("{error}"))?.path();
@@ -194,6 +194,33 @@ impl AuditReadiness {
         Ok(())
     }
 
+    pub fn unfinished_synthesis(
+        &mut self,
+        root: &Path,
+        task: &QueueTask,
+    ) -> miette::Result<Vec<String>> {
+        let citations: Vec<lk_core::concept::Citation> = serde_json::from_value(
+            task.input
+                .get("citations")
+                .cloned()
+                .ok_or_else(|| miette::miette!("synthesis input has no citations"))?,
+        )
+        .map_err(|error| miette::miette!("synthesis citations: {error}"))?;
+        let target = lk_vault::page_path(root, Path::new(&task.target.vault_path))
+            .and_then(|path| path.canonicalize().map_err(Into::into))
+            .map_err(|error| miette::miette!("synthesis target: {error}"))?;
+        let mut reasons = BTreeSet::new();
+        for citation in citations {
+            let owner = lk_vault::page_path(root, Path::new(&citation.path))
+                .and_then(|path| path.canonicalize().map_err(Into::into))
+                .map_err(|error| miette::miette!("{}: {error}", citation.path))?;
+            if owner != target {
+                reasons.extend(self.page(root, &citation.path)?);
+            }
+        }
+        Ok(reasons.into_iter().collect())
+    }
+
     pub fn unfinished(
         &mut self,
         root: &Path,
@@ -266,6 +293,88 @@ mod tests {
         std::fs::write(path, body).unwrap();
     }
 
+    fn synthesis(citations: Vec<lk_core::concept::Citation>) -> QueueTask {
+        lk_queue::QueueLlmClient::new(PathBuf::new()).build_task(
+            "synthesis",
+            lk_queue::TaskKind::SynthesizeConcept,
+            lk_queue::ConceptSynthesisRequest {
+                citations,
+                locale: Default::default(),
+                related_anchor: Some("## Related Concepts".into()),
+                target: lk_queue::TaskTarget {
+                    vault_path: "wiki/concepts/topic.md".into(),
+                    kind: lk_queue::TargetKind::ConceptSynthesis,
+                    anchor: "## Synthesis".into(),
+                },
+            },
+        )
+    }
+
+    #[test]
+    fn synthesis_waits_for_its_mutable_origins_without_waiting_for_unrelated_inputs() {
+        let root = tempfile::tempdir().unwrap();
+        write(
+            root.path(),
+            "wiki/concepts/topic.md",
+            "---\ntype: concept\nllm_inputs: {synthesis: pending}\n---\n## Synthesis\n\n",
+        );
+        let pending = "---\ntype: document\nllm_inputs: {summary: pending}\n---\n## Summary\n\n";
+        write(root.path(), "wiki/documents/source.md", pending);
+        write(root.path(), "wiki/documents/unrelated.md", pending);
+        let citation = lk_core::concept::Citation::new(
+            Path::new("wiki/documents/source.md"),
+            &lk_vault::parse_page(pending).unwrap(),
+        );
+        let task = synthesis(vec![citation.clone()]);
+        let blocked = InputReadiness::load(root.path())
+            .unwrap()
+            .unfinished_synthesis(root.path(), &task)
+            .unwrap();
+        assert_eq!(blocked, ["wiki/documents/source.md: unfinished summary"]);
+        write(
+            root.path(),
+            "wiki/documents/source.md",
+            &pending.replace(
+                "summary: pending",
+                "summary: pending, summary_done: pending",
+            ),
+        );
+        assert!(
+            InputReadiness::load(root.path())
+                .unwrap()
+                .unfinished_synthesis(root.path(), &task)
+                .unwrap()
+                .is_empty()
+        );
+        let own = synthesis(vec![lk_core::concept::Citation::at_revision(
+            Path::new("wiki/concepts/topic.md"),
+            "captured".into(),
+        )]);
+        assert!(
+            InputReadiness::load(root.path())
+                .unwrap()
+                .unfinished_synthesis(root.path(), &own)
+                .unwrap()
+                .is_empty()
+        );
+        write(root.path(), "wiki/documents/source.md", pending);
+        let selected = synthesis(vec![lk_core::concept::Citation {
+            rss_event: Some(lk_core::rss_evidence::RssEventSelector {
+                schema: lk_core::rss_evidence::RSS_EVIDENCE_SCHEMA.into(),
+                event_id: "news:2026-10-22:0000000000000000".into(),
+            }),
+            revision: "a".repeat(64),
+            ..citation
+        }]);
+        assert_eq!(
+            InputReadiness::load(root.path())
+                .unwrap()
+                .unfinished_synthesis(root.path(), &selected)
+                .unwrap(),
+            blocked
+        );
+    }
+
     #[test]
     fn authored_pages_need_no_markers_but_exact_context_requires_completed_owned_inputs() {
         let root = tempfile::tempdir().unwrap();
@@ -280,7 +389,7 @@ mod tests {
             "---\ntype: document\nllm_inputs: {summary: pending}\n---\n## Summary\nDraft.\n",
         );
         let selected = candidate(root.path());
-        let mut readiness = AuditReadiness::load(root.path()).unwrap();
+        let mut readiness = InputReadiness::load(root.path()).unwrap();
         let error = readiness.require_ready(root.path(), &selected).unwrap_err();
         assert!(error.to_string().contains("context.md: unfinished summary"));
         write(
@@ -288,7 +397,7 @@ mod tests {
             "wiki/documents/context.md",
             "---\ntype: document\nllm_inputs: {summary: pending, summary_done: pending}\n---\n## Summary\n\n",
         );
-        AuditReadiness::load(root.path())
+        InputReadiness::load(root.path())
             .unwrap()
             .require_ready(root.path(), &candidate(root.path()))
             .unwrap();
@@ -318,7 +427,7 @@ mod tests {
                 Path::new("annual/2025.md"),
                 "captured".into(),
             ));
-        AuditReadiness::load(root.path())
+        InputReadiness::load(root.path())
             .unwrap()
             .require_ready(root.path(), &subject)
             .unwrap();
@@ -339,7 +448,7 @@ mod tests {
             );
         }
         let pages = lk_graph::scan::scan_vault(root.path(), false).unwrap();
-        let mut readiness = AuditReadiness::load(root.path()).unwrap();
+        let mut readiness = InputReadiness::load(root.path()).unwrap();
         let plan = lk_graph::audit::plan_available_partitioned(
             root.path(),
             &Default::default(),
@@ -364,7 +473,7 @@ mod tests {
             "---\ntype: document\nllm_inputs: unstructured\n---\nAuthored source.\n",
         );
         assert!(
-            AuditReadiness::load(root.path())
+            InputReadiness::load(root.path())
                 .unwrap()
                 .require_ready(root.path(), &candidate(root.path()))
                 .is_err()
@@ -378,7 +487,7 @@ mod tests {
         let changed = ready.replace(", summary_done: captured", "");
         write(root.path(), "wiki/documents/subject.md", ready);
         let selected = candidate(root.path());
-        let mut readiness = AuditReadiness::load(root.path()).unwrap();
+        let mut readiness = InputReadiness::load(root.path()).unwrap();
         readiness.require_ready(root.path(), &selected).unwrap();
         write(root.path(), "wiki/documents/subject.md", &changed);
         assert!(
@@ -436,13 +545,13 @@ mod tests {
             ".lorekeeper/queue/pending.jsonl",
             &(serde_json::to_string(&task).unwrap() + "\n"),
         );
-        AuditReadiness::load(root.path())
+        InputReadiness::load(root.path())
             .unwrap()
             .require_ready(root.path(), &candidate(root.path()))
             .unwrap();
         write(root.path(), ".lorekeeper/queue/pending.jsonl", "not-json\n");
         assert!(
-            AuditReadiness::load(root.path())
+            InputReadiness::load(root.path())
                 .err()
                 .unwrap()
                 .to_string()
@@ -483,7 +592,7 @@ mod tests {
             ".lorekeeper/queue/pending.jsonl",
             &(serde_json::to_string(&task).unwrap() + "\n"),
         );
-        AuditReadiness::load(root.path())
+        InputReadiness::load(root.path())
             .unwrap()
             .require_ready(root.path(), &candidate(root.path()))
             .unwrap();
@@ -498,7 +607,7 @@ mod tests {
             ".lorekeeper/queue/results/pending.section.json",
             &serde_json::to_string(&result).unwrap(),
         );
-        AuditReadiness::load(root.path())
+        InputReadiness::load(root.path())
             .unwrap()
             .require_ready(root.path(), &candidate(root.path()))
             .unwrap();
@@ -507,7 +616,7 @@ mod tests {
             "wiki/documents/subject.md",
             "---\ntype: document\nllm_inputs: {summary: newer, summary_done: newer}\n---\n## Summary\nA completed newer interpretation.\n",
         );
-        AuditReadiness::load(root.path())
+        InputReadiness::load(root.path())
             .unwrap()
             .require_ready(root.path(), &candidate(root.path()))
             .unwrap();
@@ -546,13 +655,29 @@ mod tests {
         write(root.path(), "wiki/documents/subject.md", &page);
         write(
             root.path(),
+            "wiki/concepts/topic.md",
+            "---\ntype: concept\n---\n## Synthesis\n\n",
+        );
+        let dependent = synthesis(vec![lk_core::concept::Citation::new(
+            Path::new("wiki/documents/subject.md"),
+            &lk_vault::parse_page(&page).unwrap(),
+        )]);
+        write(
+            root.path(),
             ".lorekeeper/queue/pending.jsonl",
             &(serde_json::to_string(&task).unwrap() + "\n"),
         );
-        AuditReadiness::load(root.path())
+        InputReadiness::load(root.path())
             .unwrap()
             .require_ready(root.path(), &candidate(root.path()))
             .unwrap();
+        assert!(
+            InputReadiness::load(root.path())
+                .unwrap()
+                .unfinished_synthesis(root.path(), &dependent)
+                .unwrap()
+                .is_empty()
+        );
         let result = lk_queue::TaskResult {
             task_id: task.task_id,
             cache_hash: task.cache_hash,
@@ -570,12 +695,20 @@ mod tests {
             &serde_json::to_string(&result).unwrap(),
         );
         assert!(
-            AuditReadiness::load(root.path())
+            InputReadiness::load(root.path())
                 .unwrap()
                 .require_ready(root.path(), &candidate(root.path()))
                 .unwrap_err()
                 .to_string()
                 .contains("unpublished result")
+        );
+        assert!(
+            InputReadiness::load(root.path())
+                .unwrap()
+                .unfinished_synthesis(root.path(), &dependent)
+                .unwrap()
+                .iter()
+                .any(|reason| reason.contains("unpublished result"))
         );
         write(
             root.path(),
@@ -584,7 +717,7 @@ mod tests {
                 "---\ntype: document\nllm_inputs: {{concepts: newer, concepts_done: newer}}\n---\n## {heading}\n\n"
             ),
         );
-        AuditReadiness::load(root.path())
+        InputReadiness::load(root.path())
             .unwrap()
             .require_ready(root.path(), &candidate(root.path()))
             .unwrap();
@@ -626,7 +759,7 @@ mod tests {
             &(serde_json::to_string(&invalid).unwrap() + "\n"),
         );
         assert!(
-            AuditReadiness::load(root.path())
+            InputReadiness::load(root.path())
                 .unwrap()
                 .require_ready(root.path(), &candidate(root.path()))
                 .is_err()
@@ -642,7 +775,7 @@ mod tests {
             ".lorekeeper/queue/pending.jsonl",
             &(serde_json::to_string(&invalid).unwrap() + "\n"),
         );
-        AuditReadiness::load(root.path())
+        InputReadiness::load(root.path())
             .unwrap()
             .require_ready(root.path(), &candidate(root.path()))
             .unwrap();

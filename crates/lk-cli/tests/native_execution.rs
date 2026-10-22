@@ -1488,6 +1488,226 @@ fn native_queue_resumes_an_explicit_single_part_work_plan() {
     assert_eq!(calls[0]["work_id"], plan["work_id"]);
 }
 
+fn write_synthesis_pair(
+    fixture: &Fixture,
+    name: &str,
+    pending_summary: Option<&str>,
+    repetitions: usize,
+) {
+    let root = fixture.root().join("vault");
+    std::fs::create_dir_all(root.join("wiki/documents")).unwrap();
+    std::fs::create_dir_all(root.join("wiki/concepts")).unwrap();
+    let inputs = pending_summary
+        .map(|hash| format!("llm_inputs:\n  summary: {hash}\n"))
+        .unwrap_or_default();
+    std::fs::write(
+        root.join(format!("wiki/documents/{name}-source.md")),
+        format!(
+            "---\ntype: document\ntitle: {name} source\n{inputs}---\n## Summary\nSource interpretation.\n\n## Content\n{}\n## Related Concepts\n- [{name}](../concepts/{name}.md)\n",
+            "A source-scoped observation retains its conditions and attribution.\n".repeat(repetitions)
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        root.join(format!("wiki/concepts/{name}.md")),
+        format!(
+            "---\ntype: concept\ntitle: {name}\nllm_inputs:\n  synthesis: previous\n---\n## Synthesis\nEstablished source-scoped knowledge.\n\n## Sources\n\n## Related\n"
+        ),
+    )
+    .unwrap();
+}
+
+fn planned_queue_subjects(fixture: &Fixture) -> Vec<serde_json::Value> {
+    let directory = fixture.root().join("vault/.lorekeeper/work");
+    if !directory.exists() {
+        return Vec::new();
+    }
+    std::fs::read_dir(directory)
+        .unwrap()
+        .map(|entry| {
+            let raw = std::fs::read(entry.unwrap().path().join("plan.json")).unwrap();
+            let plan: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+            plan["context"]["subject"].clone()
+        })
+        .collect()
+}
+
+#[test]
+fn synthesis_waits_for_source_publication_before_preparing_bounded_work() {
+    let behavior = r#"
+exec python3 - "$@" <<'SELECTED'
+import json, os, subprocess, sys
+from pathlib import Path
+root=Path(os.environ['TEST_EXECUTION_ROOT'])
+prompt='\n'.join(sys.argv[1:])
+path,_=json.JSONDecoder().raw_decode(prompt.split('Selected queue task manifest: ',1)[1])
+ids=json.loads(Path(path).read_text())
+lore=os.environ['LORE_BIN']
+rows={row['task_id']:row for row in json.loads(subprocess.check_output([lore,'queue','status','--json']))['data']['tasks']}
+tasks=[json.loads(line) for file in (root/'vault/.lorekeeper/queue').glob('*.jsonl') for line in file.read_text().splitlines()]
+selected=[task for task in tasks if task['task_id'] in ids]
+assert len(selected)==1 and selected[0]['kind']=='summarize', selected
+assert not (root/'vault/.lorekeeper/work').exists(), 'dependent synthesis must not be prepared before source publication'
+task=selected[0]
+result={key:task[key] for key in ['task_id','cache_hash']}
+result.update(target_revision=rows[task['task_id']]['target_revision'],body='Completed the source interpretation before dependent synthesis.')
+results=root/'vault/.lorekeeper/queue/results'
+results.mkdir(exist_ok=True)
+(results/(task['task_id']+'.section.json')).write_text(json.dumps(result))
+SELECTED
+"#;
+    for (engine, repetitions) in [
+        ("claude-code", 1),
+        ("codex", 1),
+        ("claude-code", 400),
+        ("codex", 400),
+    ] {
+        let fixture = Fixture::new(engine, 30, behavior);
+        let config = std::fs::read_to_string(&fixture.config).unwrap().replace(
+            "  default_profile: primary\n",
+            "  default_profile: primary\n  work: {max_input_bytes: 8192, max_result_bytes: 1024, max_calls: 1}\n",
+        );
+        std::fs::write(&fixture.config, config).unwrap();
+        let queue = fixture.root().join("vault/.lorekeeper/queue");
+        let client = lk_queue::QueueLlmClient::new(queue.clone());
+        let summary = client.build_task(
+            "summary",
+            lk_queue::TaskKind::Summarize,
+            lk_queue::SummarizeRequest {
+                text: "A source-scoped observation retains its conditions and attribution.".into(),
+                max_sentences: 3,
+                focus: None,
+                locale: lk_core::i18n::Locale::En,
+                source_type: None,
+                target: lk_queue::TaskTarget {
+                    vault_path: "wiki/documents/a-dependent-source.md".into(),
+                    kind: lk_queue::TargetKind::DocumentSummary,
+                    anchor: "## Summary".into(),
+                },
+            },
+        );
+        write_synthesis_pair(
+            &fixture,
+            "a-dependent",
+            Some(&summary.cache_hash),
+            repetitions,
+        );
+        std::fs::create_dir_all(&queue).unwrap();
+        std::fs::write(
+            queue.join("source.jsonl"),
+            serde_json::to_string(&summary).unwrap() + "\n",
+        )
+        .unwrap();
+        let prepared = fixture
+            .command()
+            .args(["graph", "backlinks-sync"])
+            .output()
+            .unwrap();
+        assert!(prepared.status.success(), "{engine}: {prepared:?}");
+        let status = fixture
+            .command()
+            .args(["queue", "status", "--json"])
+            .output()
+            .unwrap();
+        let status: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
+        let original = status["data"]["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|task| task["kind"] == "synthesize-concept")
+            .unwrap()["task_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let (output, result) = fixture.run("process");
+        assert!(
+            !output.status.success(),
+            "one call retains synthesis: {result}"
+        );
+        assert_eq!(result["semantic_calls"], 1, "{engine}: {result}");
+        let status = fixture
+            .command()
+            .args(["queue", "status", "--json"])
+            .output()
+            .unwrap();
+        let status: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
+        let rows = status["data"]["tasks"].as_array().unwrap();
+        assert!(
+            rows.iter()
+                .any(|task| task["task_id"] == summary.task_id && task["status"] == "done"),
+            "{engine}: {status}"
+        );
+        assert!(
+            rows.iter()
+                .any(|task| task["task_id"] == original && task["status"] == "stale"),
+            "{engine}: {status}"
+        );
+        assert!(
+            rows.iter().any(|task| task["kind"] == "synthesize-concept"
+                && task["task_id"] != original
+                && task["status"] == "current"),
+            "{engine}: {status}"
+        );
+        assert!(
+            planned_queue_subjects(&fixture)
+                .iter()
+                .all(|subject| subject["task_id"] != original)
+        );
+    }
+}
+
+#[test]
+fn independent_synthesis_progresses_while_another_sources_publication_is_blocked() {
+    let fixture = Fixture::new("codex", 30, RECORD_BOUNDED_AUDIT);
+    let config = std::fs::read_to_string(&fixture.config).unwrap().replace(
+        "  default_profile: primary\n",
+        "  default_profile: primary\n  work: {max_input_bytes: 8192, max_result_bytes: 1024, max_calls: 1}\n",
+    );
+    std::fs::write(&fixture.config, config).unwrap();
+    write_synthesis_pair(&fixture, "a-blocked", Some("pending"), 400);
+    write_synthesis_pair(&fixture, "z-ready", None, 400);
+    for _ in 0..2 {
+        let (output, result) = fixture.run("process");
+        assert!(
+            !output.status.success(),
+            "bounded work remains pending: {result}"
+        );
+        assert_eq!(result["semantic_calls"], 1, "{result}");
+        let subjects = planned_queue_subjects(&fixture);
+        assert!(!subjects.is_empty());
+        assert!(
+            subjects
+                .iter()
+                .all(|subject| subject["target"] == "wiki/concepts/z-ready.md")
+        );
+    }
+    let calls = bounded_calls(&fixture);
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0]["work_id"], calls[1]["work_id"]);
+    assert_ne!(calls[0]["node_id"], calls[1]["node_id"]);
+}
+
+#[test]
+fn blocked_synthesis_reports_dependencies_without_planning_or_launching_a_host() {
+    let fixture = Fixture::new("codex", 30, "exit 0");
+    write_synthesis_pair(&fixture, "blocked", Some("pending"), 400);
+    let (output, result) = fixture.run("process");
+    assert!(!output.status.success(), "{result}");
+    assert_eq!(result["semantic_calls"], 0, "{result}");
+    assert!(
+        result["stages"].as_array().unwrap().iter().any(|stage| {
+            stage["name"] == "queue dependencies"
+                && stage["state"] == "failed"
+                && stage["detail"]
+                    .as_str()
+                    .is_some_and(|detail| detail.contains("blocked-source.md: unfinished summary"))
+        }),
+        "{result}"
+    );
+    assert!(!fixture.root().join("arguments").exists());
+    assert!(planned_queue_subjects(&fixture).is_empty());
+}
+
 fn build_extraction_behavior(discovery_handler: &str) -> String {
     let mut behavior = RECORD_BOUNDED_AUDIT.replace(
         "    if match is None:\n        raise SystemExit('expected an exact bounded native request')",

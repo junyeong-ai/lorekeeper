@@ -645,7 +645,7 @@ pub async fn run(opts: &super::GlobalOptions, cmd: WikiCommand) -> miette::Resul
                 ));
             }
             let _queue_claim = super::queue::claim_writer(&root.join(".lorekeeper/queue"), false)?;
-            let mut readiness = super::queue::readiness::AuditReadiness::load(&root)?;
+            let mut readiness = super::queue::readiness::InputReadiness::load(&root)?;
             for candidate in &selected.candidates {
                 readiness.require_ready(&root, candidate)?;
             }

@@ -76,6 +76,11 @@ mod native {
         },
     }
 
+    struct QueuePlan {
+        jobs: std::collections::BTreeMap<String, QueueDispatch>,
+        deferred: std::collections::BTreeMap<String, Vec<String>>,
+    }
+
     #[derive(Serialize)]
     #[serde(rename_all = "kebab-case")]
     enum StageState {
@@ -642,9 +647,7 @@ mod native {
             }
         }
 
-        fn queue_dispatches(
-            &self,
-        ) -> miette::Result<std::collections::BTreeMap<String, QueueDispatch>> {
+        fn queue_dispatches(&self) -> miette::Result<QueuePlan> {
             fn flush(
                 batch: &mut Vec<lk_queue::QueueTask>,
                 jobs: &mut std::collections::BTreeMap<String, QueueDispatch>,
@@ -664,10 +667,16 @@ mod native {
             });
             let mut targets = std::collections::BTreeMap::new();
             for task in tasks {
-                targets
-                    .entry(task.target.vault_path.clone())
-                    .or_insert(task);
+                let owner = lk_vault::page_path(&self.root, Path::new(&task.target.vault_path))
+                    .and_then(|path| path.canonicalize().map_err(Into::into))
+                    .map_err(|error| miette::miette!("queue target: {error}"))?;
+                targets.entry(owner).or_insert(task);
             }
+            let mut readiness = targets
+                .values()
+                .any(|task| task.kind == lk_queue::TaskKind::SynthesizeConcept)
+                .then(|| super::super::queue::readiness::InputReadiness::load(&self.root))
+                .transpose()?;
             let limit = self
                 .config
                 .execution
@@ -675,9 +684,21 @@ mod native {
                 .map_err(|error| miette::miette!("{error}"))?
                 .max_input_bytes;
             let mut jobs = std::collections::BTreeMap::new();
+            let mut deferred = std::collections::BTreeMap::new();
             let mut batch = Vec::new();
             let mut batch_bytes = 0usize;
-            for (target, task) in targets {
+            for task in targets.into_values() {
+                let target = task.target.vault_path.clone();
+                if task.kind == lk_queue::TaskKind::SynthesizeConcept {
+                    let reasons = readiness
+                        .as_mut()
+                        .expect("synthesis readiness was loaded")
+                        .unfinished_synthesis(&self.root, &task)?;
+                    if !reasons.is_empty() {
+                        deferred.insert(target, reasons);
+                        continue;
+                    }
+                }
                 if crate::commands::work::needs_discovery(
                     &self.root,
                     &self.config,
@@ -711,7 +732,7 @@ mod native {
                 }
             }
             flush(&mut batch, &mut jobs);
-            Ok(jobs)
+            Ok(QueuePlan { jobs, deferred })
         }
 
         fn expanded_extraction_handoff(
@@ -753,11 +774,22 @@ mod native {
 
         async fn dispatch_queue(&mut self) -> bool {
             'planning: loop {
-                let jobs = match self.queue_dispatches() {
-                    Ok(jobs) => jobs,
+                let plan = match self.queue_dispatches() {
+                    Ok(plan) => plan,
                     Err(error) => return self.failure("queue planning", error),
                 };
+                let jobs = plan.jobs;
                 if jobs.is_empty() {
+                    if let Some((target, reasons)) = plan.deferred.first_key_value() {
+                        return self.failure(
+                            "queue dependencies",
+                            format!(
+                                "{} synthesis target(s) await source publication; {target}: {}; unfinished work retained",
+                                plan.deferred.len(),
+                                reasons.join("; ")
+                            ),
+                        );
+                    }
                     return true;
                 }
                 loop {
@@ -886,6 +918,18 @@ mod native {
                         }
                         Err(error) => return self.failure("selected queue receipt", error),
                     }
+                    if tasks
+                        .iter()
+                        .any(|task| task.kind != lk_queue::TaskKind::SynthesizeConcept)
+                        && !self
+                            .native(
+                                "queue publication reconciliation",
+                                &["graph", "backlinks-sync"],
+                            )
+                            .await
+                    {
+                        return false;
+                    }
                     break;
                 }
             }
@@ -895,18 +939,36 @@ mod native {
             if self.result.cancelled {
                 return false;
             }
-            match crate::commands::queue::check::inspect(&self.root) {
-                Ok(state) if state.current == 0 => self.record(
+            let state = match crate::commands::queue::check::inspect(&self.root) {
+                Ok(state) => state,
+                Err(error) => return self.failure("queue inspection", error),
+            };
+            let state = if !state.staged_results.is_empty() || state.pending_mutation {
+                if !self
+                    .native("pending queue apply", &["queue", "apply"])
+                    .await
+                {
+                    return false;
+                }
+                match crate::commands::queue::check::inspect(&self.root) {
+                    Ok(state) => state,
+                    Err(error) => return self.failure("queue inspection", error),
+                }
+            } else {
+                state
+            };
+            match state {
+                state if state.current == 0 => self.record(
                     "queue drain",
                     StageState::Skipped,
                     Some("no current tasks".into()),
                 ),
-                Ok(_) if self.config.llm.provider == lk_core::config::LlmProvider::Noop => self
+                _ if self.config.llm.provider == lk_core::config::LlmProvider::Noop => self
                     .failure(
                         "queue drain",
                         "semantic processing is disabled by llm.provider",
                     ),
-                Ok(_) if self.drain_blocked => {
+                _ if self.drain_blocked => {
                     self.record(
                         "queue drain",
                         StageState::Skipped,
@@ -914,12 +976,11 @@ mod native {
                     );
                     false
                 }
-                Ok(_) => {
+                _ => {
                     let completed = self.dispatch_queue().await;
                     self.drain_blocked = !completed;
                     completed
                 }
-                Err(error) => self.failure("queue inspection", error),
             }
         }
 
@@ -1001,7 +1062,7 @@ mod native {
             let pages =
                 lk_graph::scan::scan_vault(&self.root, self.config.graph.scope.follow_links)
                     .map_err(|e| miette::miette!("{e}"))?;
-            let mut readiness = super::super::queue::readiness::AuditReadiness::load(&self.root)?;
+            let mut readiness = super::super::queue::readiness::InputReadiness::load(&self.root)?;
             if paths.is_empty() {
                 let mut deferred = Vec::new();
                 let plan = lk_graph::audit::plan_available_partitioned(
@@ -1051,7 +1112,7 @@ mod native {
                     .map_err(|error| miette::miette!("{error}"))?;
             let _queue =
                 super::super::queue::claim_writer(&self.root.join(".lorekeeper/queue"), false)?;
-            let mut readiness = super::super::queue::readiness::AuditReadiness::load(&self.root)?;
+            let mut readiness = super::super::queue::readiness::InputReadiness::load(&self.root)?;
             let mut deferred = Vec::new();
             let plan = lk_graph::audit::admit_available_partitioned(
                 &session,
@@ -1074,7 +1135,7 @@ mod native {
                 },
                 |candidates, mutation| {
                     let mut selected =
-                        super::super::queue::readiness::AuditReadiness::load(&self.root)
+                        super::super::queue::readiness::InputReadiness::load(&self.root)
                             .map_err(|error| lk_graph::GraphError::Io(error.to_string()))?;
                     for candidate in candidates {
                         selected
@@ -1144,7 +1205,7 @@ mod native {
                 self.config.graph.audit.max_input_bytes,
             )
             .map_err(|error| miette::miette!("{error}"))?;
-            let mut readiness = super::super::queue::readiness::AuditReadiness::load(&self.root)?;
+            let mut readiness = super::super::queue::readiness::InputReadiness::load(&self.root)?;
             for candidate in &selected.candidates {
                 readiness.require_ready(&self.root, candidate)?;
             }

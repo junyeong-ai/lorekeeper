@@ -72,6 +72,10 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
 - Native queue scheduling chooses one task per target so publication cannot invalidate
   another simultaneous task on the same page. Whole-input tasks share an evidence-bounded
   batch; oversized work gets one inspection/reduction/finalization turn at a time.
+  Verify target owners before batching. Defer concept synthesis while its cited origin
+  pages have unfinished inputs or publishable pending work; unrelated context is not
+  a dependency barrier. Reconcile backlinks after a source publication wave and replan
+  before selecting another task. A dependency-only queue remains explicitly incomplete.
   `.lorekeeper/execution-cursor.json` stores the next queue/audit target under a guarded
   short mutation, preserving turns across budget-limited runs. Reserve before external
   execution, never infer priority or semantic quality from size/progress/citation counts.
