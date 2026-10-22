@@ -401,6 +401,7 @@ llm:
 execution:
   default_profile: primary
   work:
+    extraction_context: progressive
     max_input_bytes: 262144
     max_result_bytes: 32768
     max_calls: 64
@@ -419,6 +420,12 @@ execution:
 `executable`, `model`, Claude의 `config_directory`, Codex의 `profile`은 필요한 프로필에만
 지정합니다. `execution.work`는 요청·결과 JSON의 바이트 수와 실행당 호출 수를 제한하며,
 큰 근거는 새 세션에서 분할 검수·종합합니다. 모델 토큰 수나 요금 한도를 뜻하지 않습니다.
+기본 `extraction_context: progressive`는 빠짐없이 찾은 후보의 제한된 미리보기를 먼저 검토하고,
+선택한 후보의 본문과 필요한 검토·근거를 읽습니다. 선택하지 않은 본문까지 검사했다는 뜻은
+아니며, 보류한 판단은 추출 완료를 막습니다. 원본 입력은 끝까지 읽고 후보·검토의 변경도
+계속 검사합니다. 모든 검색 후보의 본문을 읽으려면 `full-context`를 선택하세요. 이 설정도
+프로필의 `work`에서 재정의할 수 있습니다. 수동 처리와 재개 절차는
+[개념 추출 탐색](skills/lore-process/references/discovery.md)에 있습니다.
 미완료 작업은 보존하고 실패로 보고합니다. 프로필별 예산과 수동 실행은
 [실행 설정](skills/lore-setup/references/config.md#execution-profiles),
 분할 결과 규약은 [Bounded work](skills/lore-process/references/bounded-work.md)를 따릅니다.

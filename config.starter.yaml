@@ -53,6 +53,7 @@ execution:
   # JSON byte limits for bounded workers; calls reset per run/knowledge batch.
   # A profile's optional work fields override these shared defaults.
   work:
+    extraction_context: progressive  # screen complete candidate cards, then read selected bodies
     max_input_bytes: 262144
     max_result_bytes: 32768
     max_calls: 64

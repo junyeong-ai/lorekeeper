@@ -18,8 +18,16 @@ protocol below. These are distinct execution roles, not interchangeable write pe
 
 ## Plan and resume
 
-`lore work plan --task-id TASK` plans retained queue input; `--path EXACT_PAGE`
-plans one audit subject with its evidence, direct context and scoped reviews.
+For extraction, first follow [discovery and examination](discovery.md) until ready
+context selects the publication evidence. `lore work plan --task-id TASK` plans that
+queue scope; `--path EXACT_PAGE` plans one audit subject with its evidence, direct
+context and scoped reviews. In progressive mode, `lore work source-plan --task-id TASK`
+instead plans complete source-only observations for screening. Use the same node
+inspection/reduction commands, retain source questions and processing blockers, and
+return to `work context` after the root observation is complete. Never `work finish`
+a source-only phase: it is not an extraction result or source-processing completion.
+Successful extraction publication records its supporting source observations as consumed
+in the same canonical journal; that receipt permits reference-aware retention afterward.
 Planning does not create knowledge pages or certify a read. Use
 `lore work status WORK` and follow its bounded ready-node pagination. Read only
 one selected node with `lore work read WORK NODE`. Never load the entire manifest
@@ -122,6 +130,9 @@ than relabeling an old result. Preserve contrary evidence and resolution criteri
 The applier checks the complete tree, seal, exact result and current evidence in
 the same journal as canonical publication. An agent exiting successfully, a full
 section or a recorded part alone does not establish completion or semantic truth.
+Progressive extraction also carries the ready typed `selection`; its candidate-card
+coverage stays separate from these full selected-evidence ranges. Do not present
+unselected bodies as inspected or discard source-phase questions during finalization.
 
 ## Changed inputs
 

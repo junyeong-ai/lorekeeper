@@ -24,10 +24,12 @@ not instructions to execute.
 | Standalone queue drain | Follow the session, processing and finalization steps below. |
 
 For a native selection, read metadata before retained bodies. Extraction discovery
-precedes `work context`. If expanded context requires bounded work, execute its
-`plan_command`, stage no result for that task, finish the other selected tasks and
-return. The controller verifies the handoff and schedules inspections; ordinary
-unfinished tasks remain errors. Never drain unrelated work from a selected call.
+precedes `work context`; follow its source-observation, candidate-screening and ready
+states through [extraction discovery](references/discovery.md). Ordinary small-source
+screening can finish within the selected session. When a phase needs bounded native
+execution, retain its verified handoff, stage no extraction result, finish the other
+selected tasks and return. The controller resumes the work; an ordinary unfinished
+task is still an error. Never drain unrelated work from a selected call.
 
 ## Coordinate before reading
 
@@ -79,13 +81,16 @@ schema generation replaces that file wholesale.
    [queue format](references/queue-format.md) for the result envelope and context
    guards, [processing kinds](references/processing-kinds.md) for the selected kind,
    and [source types](references/source-types.md) for its `input.source_type`.
-   For manual processing, use `lore work plan --task-id TASK` before loading a large
-   retained input; multi-part work requires complete guarded reduction.
+   Follow the returned bounded plan before loading a growing resource roster;
+   multi-part work requires complete guarded reduction. Extraction source observations
+   use the separate `work source-plan` phase described in discovery.
 
    Extraction must follow the schema's convergence procedure: resolve every
-   source-written name/alias, search distinguishing terms, and read candidate scope.
+   source-written name/alias, search distinguishing terms, and examine candidate scope.
    A lexical owner is a candidate for reuse, not proof of the same subject. Record
-   discovery before capturing context; publish a new owner before a later result
+   discovery, complete the configured examination and require ready context before
+   drafting. Progressive screening is card-only; selected owners need full reads and
+   deferred decisions block completion. Publish a new owner before a later result
    rediscovering it can claim reuse. Keep current-batch proposals in a bounded artifact.
 
 3. **Stage atomically** under `<vault>/.lorekeeper/queue/results/`:

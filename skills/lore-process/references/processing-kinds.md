@@ -281,19 +281,21 @@ input hash and is enforced by the native applier, not inferred from source type.
 Write one file per task to `<vault>/.lorekeeper/queue/results/{task_id}.json`:
 
 Before drafting, choose retrieval recipes through [extraction discovery](discovery.md)
-and capture `lore work context --task-id TASK`. Read the returned candidate resources
-and source evidence under their exact revisions. Lexical candidates are context, not
-automatic duplicates or support. Return the captured `context_revision` and exact
-`discovery` recipes. An empty result can use an empty recipe list; a nonempty result
-requires at least one meaningful query. Bounded work plans those same candidates before
-inspection, not after its final answer has been written.
-The scope also includes reviews declared for the target or discovered candidates,
-their explicit review pointers and retained audit dependencies, and current or verified
-archived review evidence. Review text need not match the query. Open reviews are
-assessments to consider, not automatic proof of a contradiction.
-When `requires_bounded_work` is true, `resources` is null: use `plan_command` and the
-bounded-work protocol. A native selected worker records the recipe, plans that work,
-finishes the other selected tasks and returns without drafting this extraction.
+and require `lore work context --task-id TASK` to report `status: ready`. The default
+progressive scope first examines the complete candidate-card inventory, then reads
+selected bodies and their required reviews/evidence in full. `not-selected` certifies
+no whole-body negative judgment; unresolved `defer` blocks completion. `full-context`
+instead reads every retrieved body. Both read the complete retained source and guard
+the target, candidate inventory and scoped review/evidence dependencies.
+
+Read the ready resource roster under its exact revisions. Lexical candidates are
+context, not automatic duplicates or support; open reviews are assessments to consider,
+not proof of contradiction. Return `context_revision`, exact `discovery` recipes and
+the ready `selection` when present. An empty result can use an empty recipe list;
+a nonempty result requires at least one meaningful query. Source-observation work
+alone cannot finish extraction. If ready context has `requires_bounded_work: true`,
+use `plan_command` and the [bounded-work protocol](bounded-work.md). Native selected
+workers retain the verified handoff and return without drafting that extraction.
 
 ```json
 {
@@ -303,11 +305,19 @@ finishes the other selected tasks and returns without drafting this extraction.
   "target_revision": "<queue status target_revision captured before reading>",
   "context_revision": "<work context or plan revision captured before drafting>",
   "discovery": [{"query":"source-written subject", "phrase":true, "spacing":false}],
+  "selection": {
+    "policy": "progressive-evidence-v1",
+    "inventory_revision": "<ready selection inventory_revision>",
+    "decisions_revision": "<ready selection decisions_revision>"
+  },
   "target": <task.target verbatim>,
   "date": "<task.input.date>",
   "concepts": [{ "name": "…", "category": "…", "aliases": ["…"], "admission":{"decision":"new"}, "synthesis": "…" }]
 }
 ```
+
+Copy `selection` verbatim when ready context provides it. Omit it only for a
+full-context result; absence retains the full-body contract rather than bypassing guards.
 
 Each concept declares `admission`: `{"decision":"new"}` requires a nonempty
 source-grounded synthesis and no owner for its declared name or aliases, including
@@ -322,13 +332,14 @@ publishes an owner, rediscover and redraft explicit reuse. Use
 `{"decision":"reuse","owner":{"path":"<exact concept path>","revision":"<full file revision read>"}}`
 to select an existing owner explicitly, including a matching homonym whose scope you
 verified. The owner must occur among the captured discovery resources at that exact
-full file revision; add an appropriate query and recapture scope before drafting if
+full file revision and, in progressive mode, have an `inspect` decision and full read.
+Add an appropriate query and recapture scope before drafting if
 the selected owner is absent. Reuse preserves its canonical title, lifecycle and accumulated prose.
 An exact address and revision do not prove equivalence; judge the complete scope before
-selecting it. The context also binds declared reviews of the target and discovered
-candidates, their current pointers/prior assessment dependencies and verified current or
-archived evidence. Read these even when their prose did not match a search query. Open
-reviews inform judgment; their presence alone does not prove contradiction.
+selecting it. Read every review/evidence dependency in the ready resource scope even
+when its prose did not match a query. The guard also retains dependencies of excluded
+candidates; it does not assert that their bodies were read. Open reviews inform judgment;
+their presence alone does not prove contradiction.
 Uncertain identity can remain an empty extraction with a durable scoped
 review when a conflict warrants one. Never manufacture a new owner to bypass ambiguity.
 

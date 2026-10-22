@@ -4,6 +4,7 @@
 
 - [Queue lifecycle](#queue-file-lifecycle)
 - [Task schema](#queue-task-schema)
+- [Extraction read scope](#extraction-read-scope)
 - [Completion keys](#completion-keys)
 - [Lost extraction recovery](#recovering-a-lost-extraction-task)
 - [Synthesis results](#synthesis-result)
@@ -126,6 +127,28 @@ pagination; selecting `--event ID --revision PAYLOAD_REV` reads that exact histo
 selection even when the current collection manifest has moved. The inventory revision
 pins inventory pagination; it is not the selected payload revision. Validate current task
 status and target bytes normally. Do not replace a stale answer's guards.
+
+## Extraction read scope
+
+Follow [extraction discovery](discovery.md) before drafting an extraction result.
+`work context` must be `ready`; source-observation completion or a recorded screening
+batch alone cannot authorize publication. The result envelope is in
+[processing kinds](processing-kinds.md#kind-extract-concepts).
+
+Progressive results carry the exact ready context's optional typed `selection`:
+`policy: "progressive-evidence-v1"`, `inventory_revision` for the complete guarded
+inventory and `decisions_revision` for its current complete decision ledger.
+
+The inventory includes every candidate and scoped review/evidence guard, including
+excluded candidates. The ledger distinguishes selected full-body inputs from card-only
+`not-selected` assessments; unknown or deferred candidates block completion. Reused
+owners must be selected and read at their exact full file revisions. Changed membership,
+bytes, ownership or review dependencies invalidate selection and the final draft.
+
+Omitting `selection` preserves the legacy/full-context contract, including all retrieved
+bodies and their dependencies. Never remove it from a progressive draft or copy a new
+inventory/decision/context revision onto old prose. Source uncertainty remains attributed;
+processing blockers must be resolved before an extraction can publish.
 
 ## Completion keys
 

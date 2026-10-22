@@ -414,6 +414,7 @@ llm:
 execution:
   default_profile: primary
   work:
+    extraction_context: progressive
     max_input_bytes: 262144
     max_result_bytes: 32768
     max_calls: 64
@@ -432,7 +433,14 @@ Selection is explicit `--profile`, then operation profile, then default profile;
 an unavailable host never switches automatically. Set optional `executable`, `model`,
 Claude `config_directory` or Codex `profile` only where needed. `execution.work` bounds
 request/result JSON bytes and calls per run; large evidence uses fresh inspection
-and reduction sessions. These are not token or billing caps. Unfinished work is
+and reduction sessions. These are not token or billing caps. Default
+`extraction_context: progressive` examines bounded cards for the complete candidate set,
+then reads selected bodies and their required reviews/evidence. It does not certify
+unselected bodies; deferred decisions block extraction completion. The retained source
+still requires complete reading, and candidate/review changes remain guarded. Select
+`full-context` to read every retrieved candidate body; profiles can override this setting
+under `work`. See [extraction discovery](skills/lore-process/references/discovery.md)
+for manual processing and resumption. Unfinished work is
 preserved and reported as failure. See [execution configuration](skills/lore-setup/references/config.md#execution-profiles)
 for profile-specific limits and manual selection, and [bounded work](skills/lore-process/references/bounded-work.md)
 for result contracts.
