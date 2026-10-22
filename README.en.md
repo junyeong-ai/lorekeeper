@@ -445,6 +445,13 @@ preserved and reported as failure. See [execution configuration](skills/lore-set
 for profile-specific limits and manual selection, and [bounded work](skills/lore-process/references/bounded-work.md)
 for result contracts.
 
+New bounded plans group observations using request and maximum result sizes; saved
+plans resume with their existing topology. Native `lore run process --json` reports
+per-step JSON sizes and preparation, agent invocation and validation wall times in
+`work_steps`. Unobserved values are `null`; these are not token counts or billed cost.
+See [native run measurements](skills/lore-process/references/bounded-work.md#native-run-measurements)
+for coverage and limits.
+
 `llm.provider: queue` retains semantic requests separately from host selection.
 `noop` creates no LLM work. Search, navigation and deterministic collection need no agent.
 

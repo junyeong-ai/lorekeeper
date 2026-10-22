@@ -38,6 +38,10 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   does not establish full-corpus coverage. Existing receipts resume verified work.
   Report elapsed job time and agent-invocation time separately, including failures
   and cancellation. Invocation counts and wall time are not tokens or billed cost.
+  Native work telemetry retains at most 1024 evidence/screening/finalizer steps and counts
+  omissions. Measure existing operations only; unknown/inapplicable fields are null.
+  Compact request/decoded-result bytes exclude prompts and host envelopes; finalizer
+  JSON sizes are unobserved. Revalidation and recording share one measured operation.
   Native consumers own selected semantic reads and guarded publication; the controller
   owns final global reconciliation/checks. Keep this boundary explicit in the host
   instruction and shared skills; standalone skills still perform their own final checks.

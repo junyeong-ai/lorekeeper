@@ -430,6 +430,12 @@ execution:
 [실행 설정](skills/lore-setup/references/config.md#execution-profiles),
 분할 결과 규약은 [Bounded work](skills/lore-process/references/bounded-work.md)를 따릅니다.
 
+새 분할 작업은 요청 크기와 각 결과의 최대 크기를 기준으로 여러 관찰을 한 번에 종합하며,
+저장된 작업은 기존 구조로 재개합니다. `lore run process --json`의 `work_steps`는 단계별
+JSON 크기와 준비·에이전트 호출·검증 시간을 구분합니다. 관측하지 못한 값은 `null`이며
+토큰 수나 실제 청구액을 뜻하지 않습니다. 범위와 한도는
+[실행 측정 규약](skills/lore-process/references/bounded-work.md#native-run-measurements)을 참고하세요.
+
 `llm.provider: queue`는 작업 보관 방식이며 실행기 선택과 별개입니다.
 `noop`는 LLM 작업을 만들지 않습니다. 검색·탐색과 결정적 수집은 에이전트 없이 사용할 수 있습니다.
 

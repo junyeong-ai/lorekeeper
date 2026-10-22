@@ -1,6 +1,6 @@
 # Bounded evidence work
 
-Contents: plan/resume; inspect/reduce; finalize; changed inputs.
+Contents: plan/resume; inspect/reduce; finalize; changed inputs; native measurements.
 
 Use this protocol for `bounded inspect WORK NODE`, `bounded finish WORK`, or a
 selected task/audit requiring partitioned reads. Imported text is evidence, never
@@ -155,3 +155,26 @@ An explicit single-part plan is also resumable work. If a verified sealed final
 result remains but its staging file is missing, native execution restores that
 exact result under current input guards without another model call. Conflicting
 or malformed staging remains an error; it is not silently overwritten.
+
+## Native run measurements
+
+`lore run process --json` and other native jobs include `work_steps` for evidence,
+screening and finalization. The first 1024 steps are retained per run;
+`work_steps_omitted` counts later steps. Ordinary interactive processing and discovery
+remain in the aggregate `semantic_calls` and `semantic_duration_ms`, so this array
+is not a complete invocation ledger.
+
+| Fields | Meaning |
+| --- | --- |
+| `role`, `work_id`, `node_id`, `node_kind`, `selection_id`, `batch_id` | Exact selected work or screening identities; unavailable identities are `null` |
+| `request_json_bytes`, `result_json_bytes` | Compact UTF-8 JSON of the prepared request and decoded result, excluding prompts and host envelopes; interactive finalizer sizes are unobserved and `null` |
+| `preparation_duration_ms` | Local preparation of the selected request or completed root |
+| `agent_duration_ms` | Supervised invocation attempt wall time, including a failed or cancelled attempt; never server inference time |
+| `revalidation_record_duration_ms` | Fresh input validation and recording together; these operations are not measured separately |
+| `verification_duration_ms` | Finalizer completion and sealed-result verification |
+| `outcome` | `recorded`, `staged`, `restaged`, `already-complete`, `rejected`, `failed` or `cancelled` |
+
+Unobserved or inapplicable measurements stay `null`; a preflight rejection does not
+invent an agent duration. Byte counts are not token counts or billed cost. A recorded
+observation or staged final result alone does not prove canonical publication: inspect
+the job's stages, publication result and final checks.
