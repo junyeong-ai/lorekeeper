@@ -13,7 +13,7 @@ use pulldown_cmark::{Event, LinkType, Options, Tag};
 use crate::SourceError;
 #[cfg(test)]
 const MAX_TEXT_BYTES: usize = lk_core::manual_original::MAX_ORIGINAL_ENTRY_BYTES;
-const MAX_DEPTH: usize = 32;
+pub(crate) const MAX_DEPTH: usize = 32;
 const SERIALIZER_OPTIONS: Options = Options::ENABLE_TABLES
     .union(Options::ENABLE_TASKLISTS)
     .union(Options::ENABLE_STRIKETHROUGH)
@@ -63,7 +63,7 @@ fn read_bounded(path: &Path, limit: usize) -> Result<Vec<u8>, SourceError> {
     }
     Ok(bytes)
 }
-fn text_kind(path: &Path) -> Option<bool> {
+pub(crate) fn text_kind(path: &Path) -> Option<bool> {
     match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {
         "html" | "htm" => Some(true),
         "md" | "markdown" => Some(false),
@@ -71,7 +71,7 @@ fn text_kind(path: &Path) -> Option<bool> {
     }
 }
 /// None is a nonlocal URI or same-document fragment, never a guessed local filename.
-fn local_path(
+pub(crate) fn local_path(
     root: &Path,
     member: &Path,
     dest: &str,
@@ -151,7 +151,7 @@ fn unsupported_url_attribute(tag: &str, key: &str, namespace: &str) -> bool {
     )
 }
 
-fn html_references(text: &str) -> (Vec<String>, BTreeSet<String>) {
+pub(crate) fn html_references(text: &str) -> (Vec<String>, BTreeSet<String>) {
     let mut refs = Vec::new();
     let mut unsupported = BTreeSet::new();
     crate::remote_text::visit_html_elements(text, |tag, namespace, attrs| {
@@ -219,7 +219,9 @@ fn validate_wikilink(dest: &str, piped: bool, image: bool) -> Result<(), SourceE
     Ok(())
 }
 
-fn markdown_references(text: &str) -> Result<(Vec<String>, BTreeSet<String>), SourceError> {
+pub(crate) fn markdown_references(
+    text: &str,
+) -> Result<(Vec<String>, BTreeSet<String>), SourceError> {
     let mut refs = Vec::new();
     let mut issues = BTreeSet::new();
     let markdown = lk_core::markdown::MarkdownInput::from_text(text);
