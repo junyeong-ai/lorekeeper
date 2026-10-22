@@ -218,6 +218,9 @@ Use parser/token-state behavior, not regex replacement of arbitrary markup.
   roots and protects referenced entries/cycles; unknown reach forbids retirement.
   The CLI journals receipts with actual page/request publication. Render meaning
   belongs to the pipeline; source processing identity excludes admission budgets.
+  Native collection uses `capture_manual_batch`. The complete-source inspection
+  helper `capture_manual` still refuses more than2048 selected entries; never make
+  that helper return an apparently complete clipped batch.
 
 ## Document projection (`content.rs`, `content/`)
 
