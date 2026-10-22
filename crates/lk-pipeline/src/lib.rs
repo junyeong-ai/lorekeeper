@@ -38,6 +38,8 @@ use document_identity::DocumentIdentity;
 pub enum PipelineError {
     #[error(transparent)]
     Input(#[from] lk_core::input::InputError),
+    #[error("relocated manual Markdown exceeds the {max_bytes}-byte projection limit")]
+    ProjectionLimit { max_bytes: usize },
     #[error("event-log: {0}")]
     EventLog(String),
     #[error("render: {0}")]
@@ -1321,13 +1323,15 @@ impl Pipeline {
                 )
                 .map_err(|error| PipelineError::Render(error.to_string()))?;
                 manual_projection_bytes = manual_projection_bytes.saturating_add(body.len());
-                if body.len() > self.ctx.manual_projection_limit
-                    || manual_projection_bytes > lk_core::manual_original::MAX_MANUAL_BATCH_BYTES
-                {
-                    return Err(PipelineError::Render(
-                        "relocated manual Markdown exceeds the configured projection or source batch limit"
-                            .into(),
-                    ));
+                if body.len() > self.ctx.manual_projection_limit {
+                    return Err(PipelineError::ProjectionLimit {
+                        max_bytes: self.ctx.manual_projection_limit,
+                    });
+                }
+                if manual_projection_bytes > lk_core::manual_original::MAX_MANUAL_BATCH_BYTES {
+                    return Err(PipelineError::ProjectionLimit {
+                        max_bytes: lk_core::manual_original::MAX_MANUAL_BATCH_BYTES,
+                    });
                 }
                 let mut projected = event.clone();
                 projected.body = body;

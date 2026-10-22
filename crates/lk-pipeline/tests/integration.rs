@@ -456,11 +456,7 @@ async fn manual_projection_relocation_preserves_observation_identity_and_enforce
             .await;
         if limited {
             assert!(
-                second
-                    .err()
-                    .unwrap()
-                    .to_string()
-                    .contains("projection or source batch limit")
+                matches!(second, Err(lk_pipeline::PipelineError::ProjectionLimit { max_bytes }) if max_bytes == body.len())
             );
             assert!(llm.take_requests().await.is_empty());
             assert_eq!(
