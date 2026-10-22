@@ -17,6 +17,9 @@ use lk_core::event::RawItem;
 
 use crate::{ExtractContext, Source, SourceError};
 
+mod admission;
+pub use admission::{ManualAdmission, ManualPublishedInput};
+
 pub struct ManualSource;
 
 #[derive(Debug, Deserialize)]

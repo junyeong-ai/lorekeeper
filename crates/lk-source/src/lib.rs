@@ -21,9 +21,9 @@ mod tasks;
 /// this only once a source's vault writes and the queue flush have succeeded, so a
 /// write/flush failure leaves the inbox intact for retry.
 pub use manual::{
-    ManualExtraction, UnprocessedInput, archive_consumed_files, archive_manual_originals,
-    capture_manual, inbox_dir as manual_inbox_dir,
-    validate_processing as validate_manual_processing,
+    ManualAdmission, ManualExtraction, ManualPublishedInput, UnprocessedInput,
+    archive_consumed_files, archive_manual_originals, capture_manual,
+    inbox_dir as manual_inbox_dir, validate_processing as validate_manual_processing,
 };
 
 use std::sync::Arc;
