@@ -809,11 +809,11 @@ impl Work {
     ) -> miette::Result<Evaluation<'a>> {
         require_settled(root)?;
         self.verify_context()?;
-        self.manifest(root)?;
+        let manifest = self.manifest(root)?;
         let inputs = self.plan.build_inputs(resources).map_err(fail)?;
         let nodes = self.nodes()?;
         let mut current: BTreeMap<String, StoredOutput> = BTreeMap::new();
-        let mut raw = BTreeMap::new();
+        let mut raw = BTreeMap::from([manifest]);
         let mut ready = Vec::new();
         for node in &nodes {
             let path = output_path(&self.plan.id, &node.id)?;
@@ -952,10 +952,7 @@ impl Work {
     ) -> miette::Result<(Value, BTreeMap<PathBuf, String>)> {
         let evaluated = self.evaluate(root, resources)?;
         let result = self.build_finalizer_result(&evaluated)?;
-        let (path, raw) = self.manifest(root)?;
-        let mut guards = evaluated.raw;
-        guards.insert(path, raw);
-        Ok((result, guards))
+        Ok((result, evaluated.raw))
     }
 
     fn build_finalizer_result(&self, evaluated: &Evaluation<'_>) -> miette::Result<Value> {
@@ -1047,8 +1044,6 @@ impl Work {
         let path = output_path(&self.plan.id, &node.id)?;
         let before = read_optional(session.root(), &path)?;
         let mut mutation = MutationPlan::default();
-        let (manifest_path, manifest) = self.manifest(session.root())?;
-        mutation.require_unchanged(manifest_path, manifest);
         // The node edit owns its before/after guard. A separate unchanged guard
         // would reject our own replacement when an interrupted journal resumes.
         for (dependency, raw) in evaluated.raw {
@@ -1209,8 +1204,6 @@ impl Work {
         let path = work_path(&self.plan.id, "seal.json")?;
         let before = read_optional(session.root(), &path)?;
         let mut mutation = MutationPlan::default();
-        let (manifest_path, manifest) = self.manifest(session.root())?;
-        mutation.require_unchanged(manifest_path, manifest);
         for (path, raw) in evaluated.raw {
             mutation.require_unchanged(path, raw);
         }
@@ -1244,8 +1237,6 @@ impl Work {
         {
             return Err(fail("sealed result or completed reduction changed"));
         }
-        let (manifest_path, manifest) = self.manifest(root)?;
-        mutation.require_unchanged(manifest_path, manifest);
         for (path, raw) in evaluated.raw {
             mutation.require_unchanged(path, raw);
         }
@@ -1344,8 +1335,6 @@ impl Work {
             result_revision,
             consumed_at: jiff::Timestamp::now(),
         };
-        let (manifest_path, manifest) = self.manifest(root)?;
-        mutation.require_unchanged(manifest_path, manifest);
         for (path, raw) in evaluated.raw {
             mutation.require_unchanged(path, raw);
         }
@@ -1768,6 +1757,16 @@ mod tests {
             mutation.create("guarded-publication.md", "must not publish".into());
             assert!(session.apply(mutation).is_err());
             assert!(!root.path().join("guarded-publication.md").exists());
+            assert_eq!(
+                std::fs::read_to_string(root.path().join(path)).unwrap(),
+                format!("{raw}\n")
+            );
+            assert!(
+                !root
+                    .path()
+                    .join(".lorekeeper/mutation/pending.json")
+                    .exists()
+            );
             std::fs::write(root.path().join(path), raw).unwrap();
         }
     }
