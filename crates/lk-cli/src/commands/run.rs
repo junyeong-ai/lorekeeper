@@ -57,9 +57,88 @@ mod native {
     use std::path::{Path, PathBuf};
     use std::time::{Duration, Instant};
 
-    enum ObservationRole {
+    #[derive(Clone, Copy, Serialize)]
+    #[serde(rename_all = "kebab-case")]
+    enum WorkRole {
         Evidence,
         Screening,
+        Finalizer,
+    }
+
+    #[derive(Serialize)]
+    #[serde(rename_all = "kebab-case")]
+    enum NodeKind {
+        Inspect,
+        Reduce,
+    }
+
+    #[derive(Serialize)]
+    #[serde(rename_all = "kebab-case")]
+    enum WorkOutcome {
+        Recorded,
+        Staged,
+        Restaged,
+        AlreadyComplete,
+        Rejected,
+        Failed,
+        Cancelled,
+    }
+
+    #[derive(Serialize)]
+    struct WorkStepMetrics {
+        role: WorkRole,
+        work_id: Option<String>,
+        node_id: Option<String>,
+        node_kind: Option<NodeKind>,
+        selection_id: Option<String>,
+        batch_id: Option<String>,
+        // Compact UTF-8 JSON, excluding prompts and host envelopes. Results measure
+        // the decoded value before recording; interactive finalizers are unobserved.
+        request_json_bytes: Option<usize>,
+        result_json_bytes: Option<usize>,
+        preparation_duration_ms: Option<u64>,
+        agent_duration_ms: Option<u64>,
+        revalidation_record_duration_ms: Option<u64>,
+        verification_duration_ms: Option<u64>,
+        outcome: WorkOutcome,
+    }
+
+    impl WorkStepMetrics {
+        fn new(role: WorkRole) -> Self {
+            Self {
+                role,
+                work_id: None,
+                node_id: None,
+                node_kind: None,
+                selection_id: None,
+                batch_id: None,
+                request_json_bytes: None,
+                result_json_bytes: None,
+                preparation_duration_ms: None,
+                agent_duration_ms: None,
+                revalidation_record_duration_ms: None,
+                verification_duration_ms: None,
+                outcome: WorkOutcome::Rejected,
+            }
+        }
+    }
+
+    #[derive(Default, Serialize)]
+    struct WorkTelemetry {
+        work_steps: Vec<WorkStepMetrics>,
+        work_steps_omitted: usize,
+    }
+
+    impl WorkTelemetry {
+        const MAX_STEPS: usize = 1024;
+
+        fn record(&mut self, step: WorkStepMetrics) {
+            if self.work_steps.len() < Self::MAX_STEPS {
+                self.work_steps.push(step);
+            } else {
+                self.work_steps_omitted += 1;
+            }
+        }
     }
 
     struct ObservationReply {
@@ -70,7 +149,10 @@ mod native {
 
     enum ObservationStep {
         Recorded,
-        Complete,
+        Complete {
+            root_node: String,
+            preparation_duration_ms: u64,
+        },
         Failed,
     }
 
@@ -159,6 +241,8 @@ mod native {
         execution: Option<ExecutionInfo>,
         workflow_id: Option<lk_core::execution::WorkflowId>,
         semantic_calls: usize,
+        #[serde(flatten)]
+        work_telemetry: WorkTelemetry,
         audit: Option<Vec<lk_graph::audit::AuditCompletion>>,
         audit_progress: Option<AuditProgress>,
         audit_blocked: Vec<lk_graph::audit::AuditBlockedInput>,
@@ -431,9 +515,17 @@ mod native {
         async fn request_observation(
             &mut self,
             request: serde_json::Value,
-            role: ObservationRole,
+            metrics: &mut WorkStepMetrics,
         ) -> Option<ObservationReply> {
+            metrics.request_json_bytes = Some(
+                serde_json::to_vec(&request)
+                    .expect("JSON request serializes")
+                    .len(),
+            );
             if self.result.cancelled || !self.configuration_is_current() {
+                if self.result.cancelled {
+                    metrics.outcome = WorkOutcome::Cancelled;
+                }
                 return None;
             }
             if self.config.llm.provider == lk_core::config::LlmProvider::Noop {
@@ -456,24 +548,25 @@ mod native {
             }
             if let Err(error) = self.prepare_agent().await {
                 if self.result.cancelled {
+                    metrics.outcome = WorkOutcome::Cancelled;
                     self.record(
                         "bounded work receipt",
                         StageState::Cancelled,
                         Some(error.to_string()),
                     )
                 } else {
+                    metrics.outcome = WorkOutcome::Failed;
                     self.failure("bounded work receipt", error)
                 };
                 return None;
             }
             let profile = self.selected.as_ref().expect("prepared agent");
-            let invocation = match match role {
-                ObservationRole::Evidence => {
-                    execution::observation::build_invocation(profile, &request)
-                }
-                ObservationRole::Screening => {
+            let invocation = match match metrics.role {
+                WorkRole::Evidence => execution::observation::build_invocation(profile, &request),
+                WorkRole::Screening => {
                     execution::observation::build_screening_invocation(profile, &request)
                 }
+                WorkRole::Finalizer => unreachable!("finalizers use the interactive consumer"),
             } {
                 Ok(invocation) => invocation,
                 Err(error) => {
@@ -516,15 +609,23 @@ mod native {
                     Some(&invocation.prompt),
                 )
                 .await;
-            self.result.semantic_duration_ms += started_at.elapsed().as_millis() as u64;
+            let duration_ms = started_at.elapsed().as_millis() as u64;
+            metrics.agent_duration_ms = Some(duration_ms);
+            self.result.semantic_duration_ms += duration_ms;
             let child = match outcome {
                 Ok(child) => child,
                 Err(error) => {
+                    metrics.outcome = WorkOutcome::Failed;
                     self.failure("bounded work receipt", error);
                     return None;
                 }
             };
             if !child.success {
+                metrics.outcome = if child.cancelled {
+                    WorkOutcome::Cancelled
+                } else {
+                    WorkOutcome::Failed
+                };
                 self.record(
                     "bounded work receipt",
                     if child.cancelled {
@@ -552,10 +653,9 @@ mod native {
             id: &str,
             node: &str,
             request: serde_json::Value,
+            metrics: &mut WorkStepMetrics,
         ) -> Option<crate::commands::work::state::WorkProgress> {
-            let reply = self
-                .request_observation(request, ObservationRole::Evidence)
-                .await?;
+            let reply = self.request_observation(request, metrics).await?;
             let output =
                 match execution::observation::decode(reply.engine, &reply.bytes, reply.limit) {
                     Ok(output) => output,
@@ -564,14 +664,22 @@ mod native {
                         return None;
                     }
                 };
-            match crate::commands::work::record_inspection(
+            metrics.result_json_bytes = Some(
+                serde_json::to_vec(&output)
+                    .expect("decoded observation serializes")
+                    .len(),
+            );
+            let started_at = Instant::now();
+            let recorded = crate::commands::work::record_inspection(
                 &self.root,
                 &self.config,
                 &self.config_revision,
                 id,
                 node,
                 output,
-            ) {
+            );
+            metrics.revalidation_record_duration_ms = Some(started_at.elapsed().as_millis() as u64);
+            match recorded {
                 Ok(progress) => {
                     self.record(
                         "bounded work receipt",
@@ -596,34 +704,50 @@ mod native {
         }
 
         async fn bounded_observation_step(&mut self, id: &str) -> ObservationStep {
-            let (before, request) = match crate::commands::work::prepare_inspection(
+            let mut metrics = WorkStepMetrics::new(WorkRole::Evidence);
+            metrics.work_id = Some(id.into());
+            let started_at = Instant::now();
+            let prepared = crate::commands::work::prepare_inspection(
                 &self.root,
                 &self.config,
                 &self.config_revision,
                 id,
-            ) {
+            );
+            let preparation_duration_ms = started_at.elapsed().as_millis() as u64;
+            metrics.preparation_duration_ms = Some(preparation_duration_ms);
+            let (before, request) = match prepared {
                 Ok(status) => status,
                 Err(error) => {
+                    self.result.work_telemetry.record(metrics);
                     self.failure("bounded work progress", error);
                     return ObservationStep::Failed;
                 }
             };
             if !before.complete {
                 let Some(node) = before.ready.first() else {
+                    self.result.work_telemetry.record(metrics);
                     self.failure("bounded work progress", "incomplete work has no ready node");
                     return ObservationStep::Failed;
                 };
+                metrics.node_id = Some(node.clone());
                 let Some(request) = request else {
+                    self.result.work_telemetry.record(metrics);
                     self.failure(
                         "bounded work progress",
                         "ready work has no inspection input",
                     );
                     return ObservationStep::Failed;
                 };
-                return match self.observe(id, node, request).await {
+                metrics.node_kind = match request["kind"].as_str() {
+                    Some("inspect") => Some(NodeKind::Inspect),
+                    Some("reduce") => Some(NodeKind::Reduce),
+                    _ => None,
+                };
+                let result = match self.observe(id, node, request, &mut metrics).await {
                     Some(after)
                         if after.completed > before.completed && !after.ready.contains(node) =>
                     {
+                        metrics.outcome = WorkOutcome::Recorded;
                         ObservationStep::Recorded
                     }
                     Some(_) => {
@@ -632,32 +756,55 @@ mod native {
                     }
                     None => ObservationStep::Failed,
                 };
+                self.result.work_telemetry.record(metrics);
+                return result;
             }
-            ObservationStep::Complete
+            ObservationStep::Complete {
+                root_node: before.root_node,
+                preparation_duration_ms,
+            }
         }
 
         async fn bounded_step(&mut self, id: &str, skill: &str) -> WorkStep {
+            let mut metrics = WorkStepMetrics::new(WorkRole::Finalizer);
+            metrics.work_id = Some(id.into());
             match self.bounded_observation_step(id).await {
                 ObservationStep::Recorded => return WorkStep::Pending,
                 ObservationStep::Failed => return WorkStep::Failed,
-                ObservationStep::Complete => {}
+                ObservationStep::Complete {
+                    root_node,
+                    preparation_duration_ms,
+                } => {
+                    metrics.node_id = Some(root_node);
+                    metrics.preparation_duration_ms = Some(preparation_duration_ms);
+                }
             }
-            match crate::commands::work::is_finished(
+            let started_at = Instant::now();
+            let finished = crate::commands::work::is_finished(
                 &self.root,
                 &self.config,
                 &self.config_revision,
                 id,
-            ) {
+            );
+            metrics.verification_duration_ms = Some(started_at.elapsed().as_millis() as u64);
+            match finished {
                 Ok(true) => {
-                    if let Err(error) = crate::commands::work::restage_finished(
+                    let started_at = Instant::now();
+                    let restaged = crate::commands::work::restage_finished(
                         &self.root,
                         &self.config,
                         &self.config_revision,
                         id,
-                    ) {
+                    );
+                    metrics.revalidation_record_duration_ms =
+                        Some(started_at.elapsed().as_millis() as u64);
+                    if let Err(error) = restaged {
+                        self.result.work_telemetry.record(metrics);
                         self.failure("bounded work completion", error);
                         return WorkStep::Failed;
                     }
+                    metrics.outcome = WorkOutcome::Restaged;
+                    self.result.work_telemetry.record(metrics);
                     self.record(
                         "bounded work completion",
                         StageState::Skipped,
@@ -667,6 +814,7 @@ mod native {
                 }
                 Ok(false) => {}
                 Err(error) => {
+                    self.result.work_telemetry.record(metrics);
                     self.failure("bounded work completion", error);
                     return WorkStep::Failed;
                 }
@@ -674,16 +822,38 @@ mod native {
             let operation = format!(
                 "bounded finish {id}. Read the bounded-work reference and lore work result for this exact work. Produce the normal typed final result using its completed root observation and selected generation specification. Submit with lore work finish. Do not read the whole corpus or drain other tasks. Leave the staged queue result or audit assessment for native controller publication. The controller owns global checks. Preserve source_questions as attributed uncertainty in the final prose; do not invent answers. Material conflicts need a scoped open review and follow-up audit disposition. Processing blockers in unresolved cannot be silently removed or marked reviewed."
             );
-            if !self.consumer(skill, &operation, None).await {
+            let calls_before = self.result.semantic_calls;
+            let duration_before = self.result.semantic_duration_ms;
+            let completed = self.consumer(skill, &operation, None).await;
+            if self.result.semantic_calls > calls_before {
+                metrics.agent_duration_ms =
+                    Some(self.result.semantic_duration_ms - duration_before);
+            }
+            if !completed {
+                metrics.outcome = if self.result.cancelled {
+                    WorkOutcome::Cancelled
+                } else if self.configuration_failed {
+                    WorkOutcome::Rejected
+                } else {
+                    WorkOutcome::Failed
+                };
+                self.result.work_telemetry.record(metrics);
                 return WorkStep::Failed;
             }
-            match crate::commands::work::verify_finished(
+            let started_at = Instant::now();
+            let verified = crate::commands::work::verify_finished(
                 &self.root,
                 &self.config,
                 &self.config_revision,
                 id,
-            ) {
+            );
+            *metrics
+                .verification_duration_ms
+                .as_mut()
+                .expect("measured check") += started_at.elapsed().as_millis() as u64;
+            let result = match verified {
                 Ok(()) => {
+                    metrics.outcome = WorkOutcome::Staged;
                     self.record(
                         "bounded work completion",
                         StageState::Completed,
@@ -695,7 +865,108 @@ mod native {
                     self.failure("bounded work completion", error);
                     WorkStep::Failed
                 }
+            };
+            self.result.work_telemetry.record(metrics);
+            result
+        }
+
+        async fn screening_step(&mut self, task: &lk_queue::QueueTask) -> Option<bool> {
+            let mut metrics = WorkStepMetrics::new(WorkRole::Screening);
+            let result = self.screen_candidates(task, &mut metrics).await;
+            self.result.work_telemetry.record(metrics);
+            result
+        }
+
+        async fn screen_candidates(
+            &mut self,
+            task: &lk_queue::QueueTask,
+            metrics: &mut WorkStepMetrics,
+        ) -> Option<bool> {
+            let started_at = Instant::now();
+            let prepared = crate::commands::work::prepare_screening(
+                &self.root,
+                &self.config,
+                &self.config_revision,
+                &task.task_id,
+            );
+            metrics.preparation_duration_ms = Some(started_at.elapsed().as_millis() as u64);
+            let before = match prepared {
+                Ok(before) => before,
+                Err(error) => {
+                    self.failure("candidate screening", error);
+                    return None;
+                }
+            };
+            metrics.selection_id = Some(before.selection_id.clone());
+            if before.complete {
+                metrics.outcome = WorkOutcome::AlreadyComplete;
+                return Some(true);
             }
+            let Some(request) = before.request else {
+                self.failure(
+                    "candidate screening",
+                    format!(
+                        "{} deferred and {} unknown candidate decisions remain; work retained",
+                        before.deferred, before.unknown
+                    ),
+                );
+                return None;
+            };
+            let selected_input = request["input_revision"].clone();
+            let selected_batch = request["batch_id"].clone();
+            metrics.batch_id = selected_batch.as_str().map(str::to_owned);
+            let reply = self.request_observation(request, metrics).await?;
+            let output = match execution::observation::decode_response(
+                reply.engine,
+                &reply.bytes,
+                reply.limit,
+            ) {
+                Ok(output) => output,
+                Err(error) => {
+                    self.failure("candidate screening", error);
+                    return None;
+                }
+            };
+            metrics.result_json_bytes = Some(
+                serde_json::to_vec(&output)
+                    .expect("decoded screening serializes")
+                    .len(),
+            );
+            if output["selection_id"] != before.selection_id
+                || output["batch_id"] != selected_batch
+                || output["input_revision"] != selected_input
+            {
+                self.failure("candidate screening", "worker did not answer the exact selected screening packet; unfinished work retained");
+                return None;
+            }
+            let started_at = Instant::now();
+            let recorded = crate::commands::work::record_screening(
+                &self.root,
+                &self.config,
+                &self.config_revision,
+                &task.task_id,
+                output,
+                None,
+            );
+            metrics.revalidation_record_duration_ms = Some(started_at.elapsed().as_millis() as u64);
+            let completed = match recorded {
+                Ok(completed) if completed > before.completed_batches => completed,
+                Ok(_) => {
+                    self.failure(
+                        "candidate screening",
+                        "worker did not advance the selected screening batch; work retained",
+                    );
+                    return None;
+                }
+                Err(error) => {
+                    self.failure("candidate screening", error);
+                    return None;
+                }
+            };
+            metrics.outcome = WorkOutcome::Recorded;
+            self.record("candidate screening", StageState::Completed,
+                Some(format!("{}/{} screening batches recorded; card decisions are not full-body assessments", completed, before.batches)));
+            Some(completed == before.batches)
         }
 
         fn queue_dispatches(&self) -> miette::Result<QueuePlan> {
@@ -916,61 +1187,27 @@ mod native {
                         QueueDispatch::Source { id, .. } => {
                             match self.bounded_observation_step(id).await {
                                 ObservationStep::Recorded => continue,
-                                ObservationStep::Complete => continue 'planning,
+                                ObservationStep::Complete {
+                                    root_node,
+                                    preparation_duration_ms,
+                                } => {
+                                    let mut metrics = WorkStepMetrics::new(WorkRole::Evidence);
+                                    metrics.work_id = Some(id.clone());
+                                    metrics.node_id = Some(root_node);
+                                    metrics.preparation_duration_ms = Some(preparation_duration_ms);
+                                    metrics.outcome = WorkOutcome::AlreadyComplete;
+                                    self.result.work_telemetry.record(metrics);
+                                    continue 'planning;
+                                }
                                 ObservationStep::Failed => return false,
                             }
                         }
                         QueueDispatch::Screening { task } => {
-                            let before = match crate::commands::work::prepare_screening(
-                                &self.root,
-                                &self.config,
-                                &self.config_revision,
-                                &task.task_id,
-                            ) {
-                                Ok(before) => before,
-                                Err(error) => return self.failure("candidate screening", error),
-                            };
-                            if before.complete {
-                                continue 'planning;
+                            match self.screening_step(task).await {
+                                Some(true) => continue 'planning,
+                                Some(false) => continue,
+                                None => return false,
                             }
-                            let Some(request) = before.request else {
-                                return self.failure("candidate screening", format!(
-                                    "{} deferred and {} unknown candidate decisions remain; work retained", before.deferred, before.unknown));
-                            };
-                            let selected_input = request["input_revision"].clone();
-                            let selected_batch = request["batch_id"].clone();
-                            let Some(reply) = self
-                                .request_observation(request, ObservationRole::Screening)
-                                .await
-                            else {
-                                return false;
-                            };
-                            let output = match execution::observation::decode_response(
-                                reply.engine,
-                                &reply.bytes,
-                                reply.limit,
-                            ) {
-                                Ok(output) => output,
-                                Err(error) => return self.failure("candidate screening", error),
-                            };
-                            if output["selection_id"] != before.selection_id
-                                || output["batch_id"] != selected_batch
-                                || output["input_revision"] != selected_input
-                            {
-                                return self.failure("candidate screening", "worker did not answer the exact selected screening packet; unfinished work retained");
-                            }
-                            let completed = match crate::commands::work::record_screening(
-                                &self.root, &self.config, &self.config_revision, &task.task_id, output, None) {
-                                Ok(completed) if completed > before.completed_batches => completed,
-                                Ok(_) => return self.failure("candidate screening", "worker did not advance the selected screening batch; work retained"),
-                                Err(error) => return self.failure("candidate screening", error),
-                            };
-                            self.record("candidate screening", StageState::Completed,
-                                Some(format!("{}/{} screening batches recorded; card decisions are not full-body assessments", completed, before.batches)));
-                            if completed == before.batches {
-                                continue 'planning;
-                            }
-                            continue;
                         }
                         QueueDispatch::WholeInput { tasks } => {
                             let ids: Vec<_> = tasks.iter().map(|task| &task.task_id).collect();
@@ -1748,6 +1985,7 @@ mod native {
                 execution: None,
                 workflow_id: None,
                 semantic_calls: 0,
+                work_telemetry: WorkTelemetry::default(),
                 audit: None,
                 audit_progress: None,
                 audit_blocked: Vec::new(),
@@ -1812,5 +2050,36 @@ mod native {
             "Vault changes and Git staging remain available for explicit review; no automatic commit."
         );
         runner.finish()
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn work_telemetry_is_bounded_and_preserves_unobserved_nulls() {
+            let mut telemetry = WorkTelemetry::default();
+            for index in 0..WorkTelemetry::MAX_STEPS + 2 {
+                let mut step = WorkStepMetrics::new(WorkRole::Evidence);
+                step.work_id = Some(index.to_string());
+                telemetry.record(step);
+            }
+            let json = serde_json::to_value(telemetry).unwrap();
+            let steps = json["work_steps"].as_array().unwrap();
+            assert_eq!(steps.len(), WorkTelemetry::MAX_STEPS);
+            assert_eq!(json["work_steps_omitted"], 2);
+            assert_eq!(steps[0]["work_id"], "0");
+            assert_eq!(steps.last().unwrap()["work_id"], "1023");
+            for field in [
+                "request_json_bytes",
+                "result_json_bytes",
+                "preparation_duration_ms",
+                "agent_duration_ms",
+                "revalidation_record_duration_ms",
+                "verification_duration_ms",
+            ] {
+                assert!(steps[0][field].is_null(), "{field}");
+            }
+        }
     }
 }
