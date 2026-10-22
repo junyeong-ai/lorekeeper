@@ -361,13 +361,15 @@ pub fn suggest_links(
 
         // Precompute neighbour sets once per node for shared-neighbour counting.
         let neighbor_sets: Vec<Vec<usize>> = indices.iter().map(|&i| graph.neighbors(i)).collect();
-        let mut postings: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+        let mut postings: HashMap<usize, Vec<usize>> = HashMap::new();
         for (member, neighbors) in neighbor_sets.iter().enumerate() {
             for &neighbor in neighbors {
                 postings.entry(neighbor).or_default().push(member);
             }
         }
 
+        let mut candidates = vec![(0usize, 0.0); indices.len()];
+        let mut touched = Vec::new();
         for i in 0..indices.len() {
             let neighbors = &neighbor_sets[i];
             if neighbors.len() < minimum {
@@ -394,13 +396,12 @@ pub fn suggest_links(
             } else {
                 None
             };
-            let mut candidates = BTreeMap::<usize, (usize, f64)>::new();
             if let Some(eligible) = direct {
                 for j in eligible {
                     let shared = shared_indices(neighbors, &neighbor_sets[j]);
                     if shared.len() >= minimum {
-                        candidates
-                            .insert(j, (shared.len(), adamic_adar(graph, &shared, &mut degree)));
+                        candidates[j] = (shared.len(), adamic_adar(graph, &shared, &mut degree));
+                        touched.push(j);
                     }
                 }
             } else {
@@ -416,13 +417,17 @@ pub fn suggest_links(
                         if neighbor_sets[j].len() < minimum {
                             continue;
                         }
-                        let (count, score) = candidates.entry(j).or_default();
+                        let (count, score) = &mut candidates[j];
+                        if *count == 0 {
+                            touched.push(j);
+                        }
                         *count += 1;
                         *score += weight;
                     }
                 }
             }
-            for (j, (shared_neighbors, score)) in candidates {
+            for j in touched.drain(..) {
+                let (shared_neighbors, score) = std::mem::take(&mut candidates[j]);
                 if shared_neighbors < minimum || graph.has_edge_between(indices[i], indices[j]) {
                     continue;
                 }
@@ -927,6 +932,35 @@ mod tests {
             for minimum in [0, 1, 2, 46, usize::MAX] {
                 assert_suggestion_parity(&graph, &cluster, minimum);
             }
+        }
+    }
+
+    #[test]
+    fn suggestion_candidates_match_complete_bipartite_graphs() {
+        for size in [2, 5, 20] {
+            let names: Vec<_> = (0..2 * size).map(|index| format!("n{index}")).collect();
+            let pages: Vec<_> = names
+                .iter()
+                .enumerate()
+                .map(|(a, name)| {
+                    let outgoing: Vec<_> = names
+                        .iter()
+                        .enumerate()
+                        .filter(|(b, _)| (a < size) != (*b < size))
+                        .map(|(_, target)| target.as_str())
+                        .collect();
+                    build_page(name, &outgoing)
+                })
+                .collect();
+            let graph = WikiGraph::build(&pages, &VaultDirs::default());
+            let cluster = explicit_cluster(&names.iter().map(String::as_str).collect::<Vec<_>>());
+            for minimum in [0, 1, size, size + 1] {
+                assert_suggestion_parity(&graph, &cluster, minimum);
+            }
+            assert_eq!(
+                suggest_links(&graph, &cluster, 1).pairs.len(),
+                size * (size - 1)
+            );
         }
     }
 }
