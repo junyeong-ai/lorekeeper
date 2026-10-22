@@ -121,6 +121,7 @@ impl Acquisition {
         if !self.refused.is_empty() {
             return Ok(());
         }
+        self.require_inbox(source, context)?;
         let mut decoders = BTreeMap::new();
         for manifest in &self.manifests {
             let receipt = self
@@ -206,6 +207,7 @@ impl Acquisition {
         source: &SourceConfig,
         context: &ExtractContext,
     ) -> Result<lk_vault::MutationPlan, SourceError> {
+        self.require_inbox(source, context)?;
         if read(root, &self.path)?.as_deref() != Some(&self.before) {
             return Err(error(
                 "reservation changed during acquisition; no publication receipt was adopted",
@@ -311,6 +313,21 @@ impl Acquisition {
                 .map_err(error)?;
         }
         Ok(plan)
+    }
+
+    fn require_inbox(
+        &self,
+        source: &SourceConfig,
+        context: &ExtractContext,
+    ) -> Result<(), SourceError> {
+        if lk_source::manual_inbox_dir(&source.params, &context.vault_root, &context.vault_dirs)?
+            != self.state.inbox()
+        {
+            return Err(error(
+                "canonical inbox changed during acquisition; restore the selected source binding before retrying",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -459,6 +476,9 @@ pub(super) async fn acquire(
         }
         .map_err(error)?;
         validate_config().map_err(error)?;
+        if lk_source::manual_inbox_dir(&source.params, root, &context.vault_dirs)? != inbox {
+            return Err(error("canonical inbox changed before reservation"));
+        }
         if lk_source::manual_entry_names(&source.params, context)? != entries {
             return Err(error("inbox entry inventory changed before reservation"));
         }
@@ -868,5 +888,47 @@ mod tests {
                 .contains("Original a.")
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn canonical_inbox_alias_drift_refuses_publication_even_with_identical_entry_names() {
+        let mut fixture = Fixture::build(&["a"]);
+        let root = &fixture.context.vault_root;
+        let alias = root.join("input-alias");
+        std::os::unix::fs::symlink(root.join("inbox"), &alias).unwrap();
+        fixture.config.sources.get_mut("notes").unwrap().params["inbox_dir"] = "input-alias".into();
+        let capture = fixture.capture(false).await;
+        let mut admission = capture.manual.unwrap();
+        let options = fixture.options();
+        let result = fixture
+            .pipeline
+            .plan(
+                "notes",
+                &fixture.config.sources["notes"],
+                capture.observation.items,
+                &options,
+            )
+            .await
+            .unwrap();
+        let other = root.join("other");
+        std::fs::create_dir(&other).unwrap();
+        std::fs::write(other.join("a.md"), "# a\n\nAnother authority.\n").unwrap();
+        std::fs::remove_file(&alias).unwrap();
+        std::os::unix::fs::symlink(&other, &alias).unwrap();
+        let before = read(root, &admission.path).unwrap();
+        assert!(
+            admission
+                .publication_plan(
+                    root,
+                    &result,
+                    &fixture.config.sources["notes"],
+                    &fixture.context
+                )
+                .is_err()
+        );
+        assert_eq!(read(root, &admission.path).unwrap(), before);
+        assert!(!root.join(result.document_pages[0].path.as_ref()).exists());
+        assert!(other.join("a.md").exists());
     }
 }
