@@ -951,6 +951,43 @@ mod tests {
             &root.path().join("vault"),
             super::super::CacheAccess::ReadWrite,
         );
+        let mut config = configuration(root.path());
+        let normal_timeout = config.timeout_seconds;
+        executable(
+            root.path(),
+            "layout",
+            &(inventory(2)
+                + "IFS= read -r control\n"
+                + &emit(serde_json::json!({"status":"unit","unit":unit(1,"first")}))
+                + &emit(serde_json::json!({"status":"failed","code":"incomplete-vision"}))),
+        );
+        executable(
+            root.path(),
+            "recognition",
+            &(emit(serde_json::json!({"status":"ready","runtime":runtime()}))
+                + "exec /bin/cat >/dev/null\n"),
+        );
+        assert!(matches!(
+            super::super::project_file_with_cache(
+                &captured,
+                InputFormat::Tiff,
+                Some(&config),
+                Some(&cache)
+            )
+            .await,
+            Err(ProcessingError::Failed(ProcessingFailure::IncompleteVision))
+        ));
+        let checkpoints: Vec<_> = std::fs::read_dir(
+            root.path()
+                .join("vault")
+                .join(lk_core::vault_path::PROJECTION_CACHE_DIR),
+        )
+        .unwrap()
+        .map(|entry| entry.unwrap().path().join("1.json"))
+        .filter(|path| path.is_file())
+        .collect();
+        assert_eq!(checkpoints.len(), 1);
+        let checkpoint = std::fs::read(&checkpoints[0]).unwrap();
         let record_process =
             "printf '%s' \"$$\" > \"$0.pid\"\nprintf '%s' \"$6\" > \"$0.options\"\n";
         executable(
@@ -959,7 +996,7 @@ mod tests {
             &(record_process.to_string()
                 + &inventory(2)
                 + "IFS= read -r control\n"
-                + &emit(serde_json::json!({"status":"unit","unit":unit(1,"first")}))
+                + &format!("test \"$control\" = {}\n", quote("{\"skip\":[1]}"))
                 + "exec /bin/sleep 30\n"),
         );
         executable(
@@ -969,7 +1006,6 @@ mod tests {
                 + &emit(serde_json::json!({"status":"ready","runtime":runtime()}))
                 + "exec /bin/sleep 30\n"),
         );
-        let mut config = configuration(root.path());
         config.timeout_seconds = std::num::NonZeroU64::new(1).unwrap();
         assert!(matches!(
             super::super::project_file_with_cache(
@@ -997,6 +1033,8 @@ mod tests {
             .unwrap();
             assert!(!Path::new(options["scratch_dir"].as_str().unwrap()).exists());
         }
+        assert_eq!(std::fs::read(&checkpoints[0]).unwrap(), checkpoint);
+        config.timeout_seconds = normal_timeout;
         executable(
             root.path(),
             "layout",
