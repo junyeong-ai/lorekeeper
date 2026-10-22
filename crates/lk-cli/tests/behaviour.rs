@@ -177,6 +177,18 @@ const EXEMPT: &[(&[&str], &str)] = &[
         "requires a binary fixture and optional runtime; input tests cover bounded regular-file reads and content runtime tests preserve page/sheet/formula scope",
     ),
     (
+        &["work", "select"],
+        "requires a retained extraction and revision-bound runtime screening ledger; native_execution tests complete candidate coverage, deferred resumption and excluded-input guards",
+    ),
+    (
+        &["work", "select-record"],
+        "requires exact runtime packet and receipt revisions; selection tests validate assigned coverage and reassessment, and native_execution verifies guarded publication",
+    ),
+    (
+        &["work", "source-plan"],
+        "requires an oversized retained source and current discovery; native_execution verifies complete source observations, standalone publication refusal and atomic consumption",
+    ),
+    (
         &["work", "plan"],
         "captures exact retained input/audit revisions; native_execution tests real partitioned plans and queue_apply tests publication guards",
     ),

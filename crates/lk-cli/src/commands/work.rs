@@ -17,6 +17,7 @@ use state::{Work, WorkLimits, WorkOutput};
 pub enum WorkCommand {
     /// Plan or resume one bounded candidate-screening packet without publishing knowledge
     Select {
+        /// Exact retained concept-extraction task identifier
         #[arg(long)]
         task_id: String,
         /// Reread this exact packet without creating or recovering state
@@ -25,13 +26,16 @@ pub enum WorkCommand {
         /// Receipt pagination limit (1..100); does not reduce candidate coverage
         #[arg(long, default_value = "20")]
         limit: usize,
+        /// Skip this many recorded receipt summaries; candidate coverage is unchanged
         #[arg(long, default_value = "0")]
         offset: usize,
     },
     /// Record exact decisions for a candidate-screening packet
     SelectRecord {
+        /// Exact retained concept-extraction task identifier
         #[arg(long)]
         task_id: String,
+        /// JSON decisions for every candidate in the exact selected packet
         #[arg(long)]
         file: PathBuf,
         /// Exact receipt revision being reassessed; ordinary retries never overwrite decisions
@@ -40,6 +44,7 @@ pub enum WorkCommand {
     },
     /// Plan complete retained-source observations for an oversized screening context
     SourcePlan {
+        /// Exact retained concept-extraction task identifier
         #[arg(long)]
         task_id: String,
     },
