@@ -488,6 +488,14 @@ pub fn render_document_page(
     engine: &TemplateEngine,
     dirs: &VaultDirs,
 ) -> Result<RenderResult, PipelineError> {
+    render_document_page_with_inputs(ctx, engine, dirs).map(|(page, _)| page)
+}
+
+pub(crate) fn render_document_page_with_inputs(
+    ctx: &DocumentRenderContext<'_>,
+    engine: &TemplateEngine,
+    dirs: &VaultDirs,
+) -> Result<(RenderResult, lk_vault::TemplateInputs), PipelineError> {
     lk_core::markdown::validate_section_body(ctx.summary)
         .map_err(|error| PipelineError::Render(error.to_string()))?;
     let DocumentRenderContext {
@@ -570,11 +578,11 @@ pub fn render_document_page(
         (field::LLM_INPUTS): llm_inputs_json,
     });
 
-    let content = engine
-        .render("document.md.jinja", &context)
+    let (content, inputs) = engine
+        .render_with_inputs("document.md.jinja", &context)
         .map_err(|e| PipelineError::Render(e.to_string()))?;
 
-    Ok(RenderResult::fresh(path, content))
+    Ok((RenderResult::fresh(path, content), inputs))
 }
 
 /// Splice cached LLM-filled bodies into a freshly-rendered page. Each

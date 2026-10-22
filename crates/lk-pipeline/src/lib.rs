@@ -3,6 +3,7 @@ mod concept_draft;
 mod context;
 mod dedup;
 mod document_identity;
+mod document_recipe;
 mod event_log;
 mod llm_cache;
 mod normalize;
@@ -12,6 +13,7 @@ mod work_log;
 
 pub use concept_draft::RefusedAlias;
 pub use context::PipelineContext;
+pub use document_recipe::{DocumentProcessingRecipe, DocumentRenderRecipe};
 pub use normalize::normalize_events;
 pub use render::RenderResult;
 pub use synthesis::{Synthesizer, completed_input, iso_week_range, month_range, quarter_range};
@@ -66,6 +68,7 @@ pub struct IngestResult {
     pub concepts: Vec<ExtractedConcept>,
     pub daily_pages: Vec<RenderResult>,
     pub document_pages: Vec<RenderResult>,
+    pub document_recipes: BTreeMap<String, DocumentRenderRecipe>,
 }
 
 impl IngestResult {
@@ -740,6 +743,7 @@ impl Pipeline {
             concepts: all_concepts,
             daily_pages,
             document_pages: vec![],
+            document_recipes: BTreeMap::new(),
         })
     }
 
@@ -1184,6 +1188,7 @@ impl Pipeline {
         let concepts_heading = strings.related_concepts;
 
         let mut document_pages: Vec<RenderResult> = Vec::new();
+        let mut document_recipes = BTreeMap::new();
         // Run-level state (slug claims, concept drafts) is staged locally and committed to
         // `self` only after the whole source plan succeeds, so a mid-source render failure
         // (which returns `Err` and is rolled back by the CLI) never poisons the shared slug
@@ -1466,7 +1471,7 @@ impl Pipeline {
                 concepts_done,
             };
 
-            let fresh = render::render_document_page(
+            let (fresh, template_inputs) = render::render_document_page_with_inputs(
                 &render::DocumentRenderContext {
                     slug: &slug,
                     event,
@@ -1496,10 +1501,14 @@ impl Pipeline {
                 render::retain_concept_section(fresh.content, concepts_heading, retained_concepts)?
             };
             match render::splice_preserved_sections(content, splices) {
-                Some(spliced) => document_pages.push(
-                    render::RenderResult::spliced(fresh.path, spliced)
-                        .with_original(existing.as_ref())?,
-                ),
+                Some(spliced) => {
+                    let recipe = self.document_render_recipe(source_id, config, template_inputs)?;
+                    document_recipes.insert(fresh.path.to_string(), recipe);
+                    document_pages.push(
+                        render::RenderResult::spliced(fresh.path, spliced)
+                            .with_original(existing.as_ref())?,
+                    );
+                }
                 None => tracing::warn!(
                     source = source_id,
                     slug = %slug,
@@ -1552,6 +1561,7 @@ impl Pipeline {
             concepts: all_concepts,
             daily_pages: vec![],
             document_pages,
+            document_recipes,
         })
     }
 }
@@ -1565,6 +1575,7 @@ fn empty_result(source_id: &str) -> IngestResult {
         concepts: vec![],
         daily_pages: vec![],
         document_pages: vec![],
+        document_recipes: BTreeMap::new(),
     }
 }
 

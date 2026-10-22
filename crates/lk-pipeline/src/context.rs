@@ -11,6 +11,7 @@ use crate::PipelineError;
 pub struct PipelineContext {
     pub(crate) engine: TemplateEngine,
     pub(crate) llm: Arc<dyn LlmClient>,
+    pub(crate) llm_provider: lk_core::config::LlmProvider,
     pub(crate) dirs: VaultDirs,
     /// The personal-productivity module config, or `None` for a domain-neutral engine.
     /// When `None`, no work-log, reviews, or performance categorization run.
@@ -41,6 +42,7 @@ impl PipelineContext {
         Ok(Self {
             engine,
             llm,
+            llm_provider: config.llm.provider,
             dirs: config.vault.dirs.clone(),
             personal: config.personal.clone(),
             timezone: config.vault.timezone(),
