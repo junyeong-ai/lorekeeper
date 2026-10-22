@@ -364,7 +364,9 @@ impl Protection {
                 }
             }
         }
-        if let Some(path) = &opts.template_dir {
+        if mode == Mode::Shared
+            && let Some(path) = &opts.template_dir
+        {
             resources.push((path.clone(), mode));
         }
         let resources = resources
@@ -497,4 +499,117 @@ fn skill_lock(path: &Path, mode: Mode) -> miette::Result<Option<PathBuf>> {
         ".lorekeeper-{}.lock",
         lk_dist::sha256_hex(relative.as_os_str().as_encoded_bytes())
     ))))
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    fn protection(root: &Path) -> Protection {
+        let installation = Installation::at(
+            root.join("bin/lore"),
+            root.join("data"),
+            root.join("config"),
+            None,
+            None,
+        );
+        std::fs::create_dir_all(installation.binary().parent().unwrap()).unwrap();
+        std::fs::write(installation.binary(), b"binary").unwrap();
+        std::fs::create_dir_all(installation.templates_dir()).unwrap();
+        std::fs::create_dir_all(installation.config_dir()).unwrap();
+        Protection {
+            installation,
+            config: None,
+            schema_ready: false,
+            lease: None,
+        }
+    }
+
+    #[test]
+    fn installation_mutation_owns_only_deployed_templates() {
+        let temporary = tempfile::tempdir().unwrap();
+        let mut protection = protection(temporary.path());
+        let external = temporary.path().join("external/nested/templates");
+        let options = GlobalOptions {
+            config: None,
+            template_dir: Some(external.clone()),
+        };
+        let selected = protection
+            .requests(
+                &options,
+                Mode::Exclusive,
+                AgentTarget::Both,
+                Some(SkillScope::None),
+                true,
+                false,
+            )
+            .unwrap();
+        let default = protection
+            .requests(
+                &GlobalOptions {
+                    config: None,
+                    template_dir: None,
+                },
+                Mode::Exclusive,
+                AgentTarget::Both,
+                Some(SkillScope::None),
+                true,
+                false,
+            )
+            .unwrap();
+        assert_eq!(
+            selected
+                .iter()
+                .map(|r| (&r.path, r.mode))
+                .collect::<Vec<_>>(),
+            default
+                .iter()
+                .map(|r| (&r.path, r.mode))
+                .collect::<Vec<_>>()
+        );
+        assert!(!temporary.path().join("external").exists());
+        let _mutation = Lease::acquire(&selected).unwrap();
+    }
+
+    #[test]
+    fn external_templates_are_protected_for_consumers_only() {
+        let temporary = tempfile::tempdir().unwrap();
+        let mut protection = protection(temporary.path());
+        let external = temporary.path().join("external templates");
+        std::fs::create_dir_all(&external).unwrap();
+        let options = GlobalOptions {
+            config: None,
+            template_dir: Some(external.clone()),
+        };
+        let external_request = Request {
+            path: destination_lock(&external).unwrap(),
+            mode: Mode::Exclusive,
+        };
+        let _external_mutation = Lease::acquire(&[external_request]).unwrap();
+        let consumer = protection
+            .requests(
+                &options,
+                Mode::Shared,
+                AgentTarget::Both,
+                Some(SkillScope::None),
+                false,
+                false,
+            )
+            .unwrap();
+        assert_eq!(
+            Lease::acquire(&consumer).unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        let mutation = protection
+            .requests(
+                &options,
+                Mode::Exclusive,
+                AgentTarget::Both,
+                Some(SkillScope::None),
+                true,
+                false,
+            )
+            .unwrap();
+        let _installation_mutation = Lease::acquire(&mutation).unwrap();
+    }
 }
