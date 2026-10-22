@@ -102,7 +102,33 @@ pub struct TemplateEngine {
     env: Environment<'static>,
     user_dir: Option<PathBuf>,
     render_claim: Mutex<()>,
-    requested: Arc<Mutex<Option<BTreeSet<String>>>>,
+    requested: Arc<Mutex<Option<TemplateCapture>>>,
+}
+
+#[derive(Default)]
+struct TemplateCapture {
+    names: BTreeSet<String>,
+    loaded: TemplateInputs,
+    conflicted: bool,
+}
+
+impl TemplateCapture {
+    fn observe_source(&mut self, name: &str, source: Option<&str>) -> Result<(), minijinja::Error> {
+        let revision = source.map(|source| blake3::hash(source.as_bytes()).to_hex().to_string());
+        if self
+            .loaded
+            .get(name)
+            .is_some_and(|previous| previous != &revision)
+        {
+            self.conflicted = true;
+            return Err(minijinja::Error::new(
+                minijinja::ErrorKind::InvalidOperation,
+                format!("template {name} changed during rendering"),
+            ));
+        }
+        self.loaded.insert(name.into(), revision);
+        Ok(())
+    }
 }
 
 fn load_source(user_dir: Option<&Path>, name: &str) -> Result<Option<String>, minijinja::Error> {
@@ -139,14 +165,27 @@ impl TemplateEngine {
         env.add_filter("markdown_link", crate::fragment::link);
         let user_dir = user_dir.map(Path::to_path_buf);
         let dir = user_dir.clone();
-        env.set_loader(move |name| load_source(dir.as_deref(), name));
-        let requested: Arc<Mutex<Option<BTreeSet<String>>>> = Arc::new(Mutex::new(None));
+        let requested: Arc<Mutex<Option<TemplateCapture>>> = Arc::new(Mutex::new(None));
+        let observations = requested.clone();
+        env.set_loader(move |name| {
+            let source = load_source(dir.as_deref(), name)?;
+            let mut active = observations.lock().map_err(|_| {
+                minijinja::Error::new(
+                    minijinja::ErrorKind::InvalidOperation,
+                    recipe_lock_error().to_string(),
+                )
+            })?;
+            if let Some(capture) = active.as_mut() {
+                capture.observe_source(name, source.as_deref())?;
+            }
+            Ok(source)
+        });
         let dependencies = requested.clone();
         env.set_path_join_callback(move |name, _| {
             if let Ok(mut active) = dependencies.lock()
-                && let Some(names) = active.as_mut()
+                && let Some(capture) = active.as_mut()
             {
-                names.insert(name.to_owned());
+                capture.names.insert(name.to_owned());
             }
             name.into()
         });
@@ -176,29 +215,36 @@ impl TemplateEngine {
         context: &serde_json::Value,
     ) -> Result<(String, TemplateInputs), VaultError> {
         let _claim = self.render_claim.lock().map_err(|_| recipe_lock_error())?;
-        *self.requested.lock().map_err(|_| recipe_lock_error())? =
-            Some(BTreeSet::from([template_name.into()]));
+        *self.requested.lock().map_err(|_| recipe_lock_error())? = Some(TemplateCapture {
+            names: BTreeSet::from([template_name.into()]),
+            ..Default::default()
+        });
         let rendered = self
             .env
             .get_template(template_name)
             .and_then(|template| template.render(Serde(context)));
-        let names = self
+        let mut capture = self
             .requested
             .lock()
             .map_err(|_| recipe_lock_error())?
             .take()
             .ok_or_else(recipe_lock_error)?;
         let rendered = rendered?;
+        if capture.conflicted {
+            return Err(
+                std::io::Error::other("template dependencies changed during rendering").into(),
+            );
+        }
         let mut inputs = BTreeMap::new();
-        for name in names {
-            let revision = match self.env.get_template(&name) {
-                Ok(template) => Some(
-                    blake3::hash(template.source().as_bytes())
+        for name in capture.names {
+            let revision = match capture.loaded.remove(&name) {
+                Some(observed) => observed,
+                // A requested name with no loader observation came from the compiled cache.
+                None => Some(
+                    blake3::hash(self.env.get_template(&name)?.source().as_bytes())
                         .to_hex()
                         .to_string(),
                 ),
-                Err(error) if error.kind() == minijinja::ErrorKind::TemplateNotFound => None,
-                Err(error) => return Err(error.into()),
             };
             inputs.insert(name, revision);
         }
@@ -206,10 +252,7 @@ impl TemplateEngine {
     }
 
     /// Check fresh loader bytes rather than this environment's compiled cache.
-    pub fn inputs_current(
-        &self,
-        inputs: &TemplateInputs,
-    ) -> Result<bool, VaultError> {
+    pub fn inputs_current(&self, inputs: &TemplateInputs) -> Result<bool, VaultError> {
         for (name, expected) in inputs {
             let revision = load_source(self.user_dir.as_deref(), name)?
                 .map(|source| blake3::hash(source.as_bytes()).to_hex().to_string());
@@ -244,6 +287,70 @@ impl TemplateEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn render_inputs_keep_missing_lookup_when_template_appears_during_render() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory.path().join("entry"),
+            "{% include 'optional' ignore missing %}{{ marker | create_optional }}",
+        )
+        .unwrap();
+        let mut engine = TemplateEngine::build(Some(directory.path())).unwrap();
+        let optional = directory.path().join("optional");
+        engine
+            .env
+            .add_filter("create_optional", move |value: String| {
+                std::fs::write(&optional, "appeared during render").unwrap();
+                value
+            });
+
+        let (body, inputs) = engine
+            .render_with_inputs("entry", &serde_json::json!({"marker": "after"}))
+            .unwrap();
+        assert_eq!(body, "after");
+        assert!(directory.path().join("optional").exists());
+        assert_eq!(inputs["optional"], None);
+        assert!(!engine.inputs_current(&inputs).unwrap());
+    }
+
+    #[test]
+    fn render_inputs_refuse_changed_loader_observations_and_clear_failed_capture() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory.path().join("entry"),
+            "{% include 'optional' ignore missing %}{{ marker | create_optional }}{% include 'optional' %}",
+        )
+        .unwrap();
+        std::fs::write(directory.path().join("stable"), "stable").unwrap();
+        let mut engine = TemplateEngine::build(Some(directory.path())).unwrap();
+        let optional = directory.path().join("optional");
+        engine
+            .env
+            .add_filter("create_optional", move |value: String| {
+                std::fs::write(&optional, "appeared during render").unwrap();
+                value
+            });
+
+        let error = engine
+            .render_with_inputs("entry", &serde_json::json!({"marker": "after"}))
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("optional changed during rendering")
+        );
+        assert!(engine.requested.lock().unwrap().is_none());
+        let (body, inputs) = engine
+            .render_with_inputs("stable", &serde_json::json!({}))
+            .unwrap();
+        assert_eq!(body, "stable");
+        assert_eq!(
+            inputs.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["stable"]
+        );
+        assert!(engine.inputs_current(&inputs).unwrap());
+    }
 
     #[test]
     fn render_inputs_follow_cached_dynamic_includes_and_ignored_missing_templates() {
