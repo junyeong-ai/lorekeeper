@@ -8,6 +8,7 @@
 //! publication failure leaves files in the inbox for safe retry. Each file's
 //! content-fingerprinted id makes a re-render idempotent.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
@@ -18,7 +19,11 @@ use lk_core::event::RawItem;
 use crate::{ExtractContext, Source, SourceError};
 
 mod admission;
+mod inventory;
+mod retirement;
 pub use admission::{ManualAdmission, ManualPublishedInput};
+pub use inventory::ManualDependencyInventory;
+pub use retirement::archive_verified_manual_originals;
 
 pub struct ManualSource;
 
@@ -45,6 +50,9 @@ struct ManualParams {
     archive_after_ingest: bool,
     #[serde(default)]
     pdf: Option<lk_core::content::PdfProjectionPolicy>,
+    /// Bound an explicitly reserved admission turn, independently of inbox size.
+    #[serde(default = "default_entry_limit")]
+    max_entries_per_run: usize,
 }
 
 impl ManualParams {
@@ -91,6 +99,71 @@ fn default_archive() -> bool {
     true
 }
 
+fn default_entry_limit() -> usize {
+    lk_core::manual_original::MAX_ORIGINAL_MEMBERS
+}
+
+pub fn entry_limit(params: &serde_json::Value) -> Result<usize, SourceError> {
+    Ok(crate::parse_validated::<ManualParams>(params)?.max_entries_per_run)
+}
+
+/// Enumerate eligible direct entries without capturing their bytes or clipping the inventory.
+pub fn entry_names(
+    params: &serde_json::Value,
+    ctx: &ExtractContext,
+) -> Result<BTreeSet<String>, SourceError> {
+    let params: ManualParams = crate::parse_validated(params)?;
+    let mut effective = ctx.clone();
+    effective.documents = params.build_processing_config(ctx.documents.as_ref())?;
+    let inbox = resolve_inbox_dir(&params.inbox_dir, &ctx.vault_root, &ctx.vault_dirs)?;
+    selected_entry_names(&params, &effective, &inbox)
+}
+
+fn selected_entry_names(
+    params: &ManualParams,
+    ctx: &ExtractContext,
+    inbox: &Path,
+) -> Result<BTreeSet<String>, SourceError> {
+    let mut names = BTreeSet::new();
+    for entry in std::fs::read_dir(inbox).map_err(|error| SourceError::Parse(error.to_string()))? {
+        let entry = entry.map_err(|error| SourceError::Parse(error.to_string()))?;
+        if !entry
+            .file_type()
+            .map_err(|error| SourceError::Parse(error.to_string()))?
+            .is_file()
+        {
+            continue;
+        }
+        if entry
+            .path()
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_some_and(|extension| params.selects(extension, ctx))
+        {
+            let name = entry.file_name().into_string().map_err(|_| {
+                SourceError::Parse("manual admission requires UTF-8 entry names".into())
+            })?;
+            names.insert(name);
+        }
+    }
+    Ok(names)
+}
+
+pub async fn processing_revision(
+    params: &serde_json::Value,
+    ctx: &ExtractContext,
+    format: lk_core::content::InputFormat,
+) -> Result<String, SourceError> {
+    let params: ManualParams = crate::parse_validated(params)?;
+    let effective = params.build_processing_config(ctx.documents.as_ref())?;
+    let decoder = crate::content::processing_recipe(format, effective.as_ref()).await?;
+    let artifacts = [include_str!("manual.rs"), include_str!("manual_bundle.rs")]
+        .map(lk_core::concept::file_revision);
+    let recipe = serde_json::to_string(&(decoder, artifacts))
+        .map_err(|error| SourceError::Parse(error.to_string()))?;
+    Ok(lk_core::concept::file_revision(&recipe))
+}
+
 /// Validate this source's params at config-load time, before any I/O.
 pub fn validate_params(params: &serde_json::Value) -> Result<(), SourceError> {
     crate::parse_validated::<ManualParams>(params).map(|_| ())
@@ -121,6 +194,11 @@ pub fn inbox_dir(
 
 impl crate::ValidatedParams for ManualParams {
     fn validate(&self) -> Result<(), SourceError> {
+        if self.max_entries_per_run == 0 || self.max_entries_per_run > default_entry_limit() {
+            return Err(SourceError::InvalidParams(
+                "manual max_entries_per_run must be 1..=2048".into(),
+            ));
+        }
         if let Some(policy) = &self.pdf {
             policy
                 .validate()
@@ -739,6 +817,7 @@ pub struct ManualExtraction {
     /// Per-entry refusal remains visible to the CLI even when other entries succeeded.
     pub failures: Vec<String>,
     pub unprocessed: Vec<UnprocessedInput>,
+    pub deferred: Vec<String>,
     projection_limit: usize,
     max_input_bytes: usize,
 }
@@ -748,6 +827,17 @@ pub struct UnprocessedInput {
     pub format: lk_core::content::InputFormat,
 }
 impl ManualExtraction {
+    fn new(ctx: &ExtractContext) -> Self {
+        Self {
+            items: Vec::new(),
+            originals: Vec::new(),
+            failures: Vec::new(),
+            unprocessed: Vec::new(),
+            deferred: Vec::new(),
+            projection_limit: projection_limit(ctx),
+            max_input_bytes: ctx.max_input_bytes,
+        }
+    }
     pub fn project_links(&mut self, documents: &Path) -> Result<(), SourceError> {
         let attempted = self.items.len();
         let originals = self
@@ -833,6 +923,232 @@ fn projection_limit(ctx: &ExtractContext) -> usize {
         .unwrap_or(lk_core::manual_original::MAX_ORIGINAL_ENTRY_BYTES)
 }
 
+async fn capture_entry(
+    root: &Path,
+    path: &Path,
+    ctx: &ExtractContext,
+    remaining: usize,
+) -> Result<(RawItem, lk_core::manual_original::ManualBundleCapture), SourceError> {
+    let canonical = root.join(
+        path.file_name()
+            .ok_or_else(|| SourceError::Parse("manual entry has no filename".into()))?,
+    );
+    let mut capture = crate::manual_bundle::capture_with_limits(
+        root,
+        &canonical,
+        remaining,
+        &ctx.originals,
+        projection_limit(ctx),
+    )?;
+    capture.source_file = path.display().to_string();
+    let item = read_captured_item(path, &capture, ctx).await?;
+    Ok((item, capture))
+}
+
+fn admit_batch_input(
+    budget: &mut lk_core::input::InputBudget,
+    item: &impl serde::Serialize,
+) -> Result<bool, SourceError> {
+    match budget.admit(item) {
+        Ok(()) => Ok(true),
+        Err(lk_core::input::InputError::Limit { .. }) => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Capture only an explicitly reserved admission turn. `deferred` names capacity
+/// refusals within this turn; omitted inventory entries remain outside its scope.
+/// This operation never establishes complete inbox coverage or retires input.
+pub async fn capture_manual_batch(
+    params: &serde_json::Value,
+    ctx: &ExtractContext,
+    entries: &[String],
+    documents: &Path,
+) -> Result<ManualExtraction, SourceError> {
+    let params: ManualParams = crate::parse_validated(params)?;
+    if entries.len() > params.max_entries_per_run {
+        return Err(SourceError::InvalidParams(
+            "manual admission turn exceeds max_entries_per_run".into(),
+        ));
+    }
+    let mut names = BTreeSet::new();
+    for name in entries {
+        lk_core::manual_original::validate_member_path(name).map_err(SourceError::InvalidParams)?;
+        if Path::new(name).components().count() != 1 || !names.insert(name) {
+            return Err(SourceError::InvalidParams(
+                "manual admission requires unique direct entry names".into(),
+            ));
+        }
+    }
+    let mut effective = ctx.clone();
+    effective.documents = params.build_processing_config(ctx.documents.as_ref())?;
+    let ctx = &effective;
+    let inbox = resolve_inbox_dir(&params.inbox_dir, &ctx.vault_root, &ctx.vault_dirs)?;
+    let root = inbox
+        .canonicalize()
+        .map_err(|error| SourceError::Parse(error.to_string()))?;
+    let available = selected_entry_names(&params, ctx, &inbox)?;
+    if entries.iter().any(|name| !available.contains(name)) {
+        return Err(SourceError::InvalidParams(
+            "manual admission names an entry outside the current selected inbox inventory".into(),
+        ));
+    }
+    let mut result = ManualExtraction::new(ctx);
+    let mut originals = 0usize;
+    let mut members = 0usize;
+    let mut derived = 0usize;
+    let mut budget = lk_core::input::InputBudget::new(ctx.max_input_bytes);
+    for name in entries {
+        let path = inbox.join(name);
+        let observation = async {
+            let (mut item, capture) =
+                capture_entry(&root, &path, ctx, ctx.originals.max_source_bytes.get()).await?;
+            item.body = crate::manual_bundle::project_links(
+                &item.body,
+                &root,
+                &root.join(name),
+                &capture,
+                documents,
+                projection_limit(ctx),
+            )?;
+            Ok::<_, SourceError>((item, capture))
+        }
+        .await;
+        let (item, capture) = match observation {
+            Ok(value) => value,
+            Err(error) => {
+                result.failures.push(format!("{}: {error}", path.display()));
+                continue;
+            }
+        };
+        let next_originals = originals.saturating_add(capture.byte_len());
+        let next_members = members.saturating_add(capture.manifest.members.len());
+        let next_derived = derived.saturating_add(item.body.len());
+        let mut next_budget = budget.clone();
+        let input_fit = admit_batch_input(&mut next_budget, &item)?;
+        if next_originals > ctx.originals.max_source_bytes.get()
+            || next_members > 8192
+            || next_derived > lk_core::manual_original::MAX_MANUAL_BATCH_BYTES
+            || !input_fit
+        {
+            result.deferred.push(name.clone());
+            continue;
+        }
+        budget = next_budget;
+        originals = next_originals;
+        members = next_members;
+        derived = next_derived;
+        result.items.push(item);
+        result.originals.push(capture);
+    }
+    Ok(result)
+}
+
+fn current_member(root: &Path, relative: &Path) -> Result<Option<PathBuf>, SourceError> {
+    match crate::manual_bundle::direct_member(root, relative) {
+        Ok(path) => Ok(Some(path)),
+        Err(failure) => {
+            // direct_member intentionally exposes only the source error surface.
+            // Inspect a refusal with typed IO errors so unreadable data cannot
+            // masquerade as a changed/missing member that was actually checked.
+            let mut path = root.to_path_buf();
+            for component in relative.components() {
+                path.push(component);
+                match path.symlink_metadata() {
+                    Ok(metadata)
+                        if metadata.file_type().is_symlink()
+                            || (!metadata.is_file() && !metadata.is_dir()) =>
+                    {
+                        return Ok(None);
+                    }
+                    Ok(_) => {}
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                        ) =>
+                    {
+                        return Ok(None);
+                    }
+                    Err(error) => return Err(SourceError::Parse(error.to_string())),
+                }
+            }
+            if !path
+                .metadata()
+                .map_err(|error| SourceError::Parse(error.to_string()))?
+                .is_file()
+            {
+                return Ok(None);
+            }
+            Err(failure)
+        }
+    }
+}
+
+/// Compare every preserved bundle member with its current inbox bytes without decoding.
+/// Manifest paths are inbox-relative; the `files/` store prefix belongs only to references.
+pub fn original_current(
+    inbox: &Path,
+    manifest: &lk_core::manual_original::ManualBundleManifest,
+) -> Result<bool, SourceError> {
+    use std::io::Read;
+
+    manifest.validate().map_err(SourceError::Parse)?;
+    let root = match inbox.canonicalize() {
+        Ok(root) => root,
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            return Ok(false);
+        }
+        Err(error) => return Err(SourceError::Parse(error.to_string())),
+    };
+    if !root
+        .metadata()
+        .map_err(|error| SourceError::Parse(error.to_string()))?
+        .is_dir()
+    {
+        return Ok(false);
+    }
+    for member in &manifest.members {
+        let relative = Path::new(&member.path);
+        let Some(path) = current_member(&root, relative)? else {
+            return Ok(false);
+        };
+        let file = match std::fs::File::open(path) {
+            Ok(file) => file,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                return Ok(false);
+            }
+            Err(error) => return Err(SourceError::Parse(error.to_string())),
+        };
+        let metadata = file
+            .metadata()
+            .map_err(|error| SourceError::Parse(error.to_string()))?;
+        if !metadata.is_file() || metadata.len() != member.bytes as u64 {
+            return Ok(false);
+        }
+        let (bytes, revision) =
+            lk_core::captured_file::hash_reader(file.take(member.bytes as u64 + 1))
+                .map_err(|error| SourceError::Parse(error.to_string()))?;
+        if bytes != member.bytes
+            || revision != member.revision
+            || current_member(&root, relative)?.is_none()
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 pub async fn capture_manual(
     params: &serde_json::Value,
     ctx: &ExtractContext,
@@ -845,14 +1161,7 @@ pub async fn capture_manual(
     let root = inbox
         .canonicalize()
         .map_err(|e| SourceError::Parse(format!("read inbox: {e}")))?;
-    let mut result = ManualExtraction {
-        items: Vec::new(),
-        originals: Vec::new(),
-        failures: Vec::new(),
-        unprocessed: Vec::new(),
-        projection_limit: projection_limit(ctx),
-        max_input_bytes: ctx.max_input_bytes,
-    };
+    let mut result = ManualExtraction::new(ctx);
     let mut total = 0usize;
     let mut total_members = 0usize;
     let mut total_derived = 0usize;
@@ -890,19 +1199,12 @@ pub async fn capture_manual(
                 "manual batch exceeds 2048 entries; split the inbox batch".into(),
             ));
         }
-        let canonical = root.join(entry.file_name());
-        let observation: Result<_, SourceError> = async {
-            let mut capture = crate::manual_bundle::capture_with_limits(
-                &root,
-                &canonical,
-                ctx.originals.max_source_bytes.get().saturating_sub(total),
-                &ctx.originals,
-                projection_limit(ctx),
-            )?;
-            capture.source_file = path.display().to_string();
-            let item = read_captured_item(&path, &capture, ctx).await?;
-            Ok((item, capture))
-        }
+        let observation = capture_entry(
+            &root,
+            &path,
+            ctx,
+            ctx.originals.max_source_bytes.get().saturating_sub(total),
+        )
         .await;
         match observation {
             Ok((item, capture)) => {
@@ -1005,6 +1307,343 @@ mod tests {
             max_input_bytes: lk_core::config::IngestInputLimits::default()
                 .max_source_bytes
                 .get(),
+        }
+    }
+
+    mod bounded_admission {
+        use super::*;
+
+        fn setup() -> (TempDir, ExtractContext, serde_json::Value) {
+            let temp = TempDir::new().unwrap();
+            std::fs::create_dir(temp.path().join("inbox")).unwrap();
+            let context = new_capture_context(temp.path().to_path_buf());
+            (temp, context, serde_json::json!({"inbox_dir":"inbox"}))
+        }
+
+        fn names(entries: &[&str]) -> Vec<String> {
+            entries.iter().map(|entry| (*entry).into()).collect()
+        }
+
+        async fn batch(
+            params: &serde_json::Value,
+            ctx: &ExtractContext,
+            entries: &[&str],
+        ) -> ManualExtraction {
+            capture_manual_batch(params, ctx, &names(entries), Path::new("wiki/documents"))
+                .await
+                .unwrap()
+        }
+
+        #[test]
+        fn configuration_limits_explicit_turns_without_clipping_inventory() {
+            for value in [serde_json::json!(1), serde_json::json!(2048)] {
+                let params = serde_json::json!({"inbox_dir":"inbox","max_entries_per_run":value});
+                validate_params(&params).unwrap();
+                assert_eq!(
+                    entry_limit(&params).unwrap(),
+                    value.as_u64().unwrap() as usize
+                );
+            }
+            for value in [
+                serde_json::json!(0),
+                serde_json::json!(2049),
+                serde_json::json!(-1),
+                serde_json::json!(1.5),
+                serde_json::json!(true),
+                serde_json::json!("1"),
+                serde_json::Value::Null,
+            ] {
+                assert!(
+                    validate_params(&serde_json::json!({
+                        "inbox_dir":"inbox", "max_entries_per_run":value
+                    }))
+                    .is_err()
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn inventory_beyond_2048_can_be_captured_in_complete_reserved_turns() {
+            let (temp, ctx, mut params) = setup();
+            params["max_entries_per_run"] = serde_json::json!(1024);
+            for index in 0..2049 {
+                write(
+                    &temp.path().join(format!("inbox/{index:04}.md")),
+                    "Observed source.",
+                );
+            }
+            let inventory = entry_names(&params, &ctx).unwrap();
+            assert_eq!(inventory.len(), 2049);
+            let inventory = inventory.into_iter().collect::<Vec<_>>();
+            let mut observed = BTreeSet::new();
+            for entries in inventory.chunks(1024) {
+                let result =
+                    capture_manual_batch(&params, &ctx, entries, Path::new("wiki/documents"))
+                        .await
+                        .unwrap();
+                assert_eq!(result.items.len(), entries.len());
+                assert_eq!(result.originals.len(), entries.len());
+                assert!(result.failures.is_empty());
+                assert!(result.deferred.is_empty());
+                observed.extend(
+                    result
+                        .originals
+                        .iter()
+                        .map(|capture| capture.manifest.entry.clone()),
+                );
+            }
+            assert_eq!(observed.len(), 2049);
+            assert_eq!(entry_names(&params, &ctx).unwrap().len(), 2049);
+            assert!(!temp.path().join(".lorekeeper").exists());
+        }
+
+        #[tokio::test]
+        async fn closures_keep_shared_attachments_entry_links_and_cycles_indivisible() {
+            let (temp, ctx, params) = setup();
+            let inbox = temp.path().join("inbox");
+            write(
+                &inbox.join("a.md"),
+                "# A\n\n[B](b.md)\n![shared](asset.png)\n",
+            );
+            write(
+                &inbox.join("b.md"),
+                "# B\n\n[A](a.md)\n![shared](asset.png)\n",
+            );
+            std::fs::write(inbox.join("asset.png"), b"preserved binary attachment").unwrap();
+            let mut observed = BTreeSet::new();
+            for entry in ["a.md", "b.md"] {
+                let result = batch(&params, &ctx, &[entry]).await;
+                assert_eq!(result.items.len(), 1);
+                assert!(result.failures.is_empty());
+                let capture = &result.originals[0];
+                assert_eq!(capture.manifest.members.len(), 3);
+                assert_eq!(capture.contents.len(), 3);
+                assert!(original_current(&inbox, &capture.manifest).unwrap());
+                assert!(
+                    result.items[0]
+                        .body
+                        .contains(".lorekeeper/evidence/manual/")
+                );
+                observed.insert(capture.manifest.entry.clone());
+            }
+            assert_eq!(observed, BTreeSet::from(["a.md".into(), "b.md".into()]));
+            let inventory = ManualDependencyInventory::capture(&inbox, 4096).unwrap();
+            assert!(inventory.is_referenced("a.md"));
+            assert!(inventory.is_referenced("b.md"));
+            assert_eq!(
+                std::fs::read(inbox.join("asset.png")).unwrap(),
+                b"preserved binary attachment"
+            );
+        }
+
+        #[tokio::test]
+        async fn refused_closures_do_not_block_later_independent_entries() {
+            let (temp, mut ctx, params) = setup();
+            let inbox = temp.path().join("inbox");
+            write(&inbox.join("a-malformed.md"), "[missing](absent.png)");
+            write(&inbox.join("b-oversized.md"), "[large](large.bin)");
+            std::fs::write(inbox.join("large.bin"), vec![0; 4097]).unwrap();
+            write(&inbox.join("c-good.md"), "# Good\n\nAn independent source.");
+            ctx.originals.max_entry_bytes = std::num::NonZeroUsize::new(4096).unwrap();
+            ctx.originals.max_member_bytes = std::num::NonZeroUsize::new(4096).unwrap();
+            ctx.originals.max_source_bytes = std::num::NonZeroUsize::new(4096).unwrap();
+            let result = batch(
+                &params,
+                &ctx,
+                &["a-malformed.md", "b-oversized.md", "c-good.md"],
+            )
+            .await;
+            assert_eq!(result.items.len(), 1);
+            assert_eq!(result.items[0].title, "Good");
+            assert_eq!(result.failures.len(), 2);
+            assert!(
+                result
+                    .failures
+                    .iter()
+                    .any(|failure| failure.contains("a-malformed.md"))
+            );
+            assert!(
+                result
+                    .failures
+                    .iter()
+                    .any(|failure| failure.contains("b-oversized.md"))
+            );
+            assert!(result.deferred.is_empty());
+            assert_eq!(result.originals[0].manifest.entry, "c-good.md");
+            assert_eq!(std::fs::read_dir(&inbox).unwrap().count(), 4);
+        }
+
+        #[tokio::test]
+        async fn capacity_defers_whole_entries_and_later_fitting_entries_progress() {
+            let (temp, ctx, params) = setup();
+            let inbox = temp.path().join("inbox");
+            for (entry, size) in [("a.md", 800), ("b.md", 1600), ("c.md", 100)] {
+                write(&inbox.join(entry), &"x".repeat(size));
+            }
+            let mut sizes = Vec::new();
+            for entry in ["a.md", "b.md", "c.md"] {
+                let result = batch(&params, &ctx, &[entry]).await;
+                sizes.push(serde_json::to_vec(&result.items[0]).unwrap().len());
+            }
+            assert!(sizes[1] <= sizes[0] + sizes[2]);
+            for original_limit in [false, true] {
+                let mut bounded = ctx.clone();
+                if original_limit {
+                    bounded.originals.max_entry_bytes = std::num::NonZeroUsize::new(2048).unwrap();
+                    bounded.originals.max_member_bytes = std::num::NonZeroUsize::new(2048).unwrap();
+                    bounded.originals.max_source_bytes = std::num::NonZeroUsize::new(2048).unwrap();
+                } else {
+                    bounded.max_input_bytes = sizes[0] + sizes[2];
+                }
+                let result = batch(&params, &bounded, &["a.md", "b.md", "c.md"]).await;
+                assert_eq!(result.deferred, names(&["b.md"]));
+                assert!(result.failures.is_empty());
+                assert_eq!(result.items.len(), 2);
+                assert_eq!(
+                    result
+                        .originals
+                        .iter()
+                        .map(|capture| capture.manifest.entry.as_str())
+                        .collect::<Vec<_>>(),
+                    vec!["a.md", "c.md"]
+                );
+                let next = batch(&params, &bounded, &["b.md"]).await;
+                assert_eq!(next.items.len(), 1);
+                assert!(next.deferred.is_empty());
+                assert!(next.failures.is_empty());
+            }
+        }
+
+        #[tokio::test]
+        async fn explicit_turns_refuse_duplicates_foreign_names_and_over_limit_selections() {
+            let (temp, ctx, mut params) = setup();
+            write(&temp.path().join("inbox/a.md"), "A source");
+            write(&temp.path().join("inbox/b.txt"), "Another source");
+            std::fs::create_dir(temp.path().join("inbox/directory.md")).unwrap();
+            for entries in [
+                names(&["a.md", "a.md"]),
+                names(&["../a.md"]),
+                names(&["/a.md"]),
+                names(&["nested/a.md"]),
+                names(&["C:/a.md"]),
+                names(&["absent.md"]),
+                names(&["directory.md"]),
+            ] {
+                assert!(matches!(
+                    capture_manual_batch(&params, &ctx, &entries, Path::new("wiki/documents"))
+                        .await,
+                    Err(SourceError::InvalidParams(_))
+                ));
+            }
+            params["extensions"] = serde_json::json!(["md"]);
+            assert!(
+                capture_manual_batch(
+                    &params,
+                    &ctx,
+                    &names(&["b.txt"]),
+                    Path::new("wiki/documents")
+                )
+                .await
+                .is_err()
+            );
+            params["extensions"] = serde_json::Value::Null;
+            params["max_entries_per_run"] = serde_json::json!(1);
+            assert!(
+                capture_manual_batch(
+                    &params,
+                    &ctx,
+                    &names(&["a.md", "b.txt"]),
+                    Path::new("wiki/documents")
+                )
+                .await
+                .is_err()
+            );
+            assert_eq!(
+                capture_manual(&params, &ctx).await.unwrap().items.len(),
+                2,
+                "the legacy full capture retains its established behavior"
+            );
+        }
+
+        #[test]
+        fn input_serialization_errors_propagate_instead_of_becoming_capacity_deferrals() {
+            struct InvalidInput;
+            impl serde::Serialize for InvalidInput {
+                fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+                    Err(serde::ser::Error::custom("invalid input fixture"))
+                }
+            }
+            let mut budget = lk_core::input::InputBudget::new(1024);
+            assert!(matches!(
+                admit_batch_input(&mut budget, &InvalidInput),
+                Err(SourceError::Input(
+                    lk_core::input::InputError::Serialization
+                ))
+            ));
+            assert_eq!(budget.bytes(), 0);
+            let mut budget = lk_core::input::InputBudget::new(1);
+            assert!(!admit_batch_input(&mut budget, &"too large").unwrap());
+            assert_eq!(budget.bytes(), 0);
+        }
+
+        #[tokio::test]
+        async fn current_original_checks_all_exact_member_bytes_without_decoding() {
+            let (temp, ctx, params) = setup();
+            let inbox = temp.path().join("inbox");
+            std::fs::create_dir(inbox.join("files")).unwrap();
+            write(&inbox.join("a.md"), "[member](files/asset.bin)");
+            std::fs::write(inbox.join("files/asset.bin"), b"first bytes").unwrap();
+            let result = batch(&params, &ctx, &["a.md"]).await;
+            let manifest = &result.originals[0].manifest;
+            assert!(original_current(&inbox, manifest).unwrap());
+            std::fs::write(inbox.join("files/asset.bin"), b"other bytes").unwrap();
+            assert!(
+                !original_current(&inbox, manifest).unwrap(),
+                "equal byte lengths still require exact hashes"
+            );
+            std::fs::write(inbox.join("files/asset.bin"), b"first bytes").unwrap();
+            assert!(
+                original_current(&inbox, manifest).unwrap(),
+                "a real files/ directory must not be stripped"
+            );
+            std::fs::remove_file(inbox.join("files/asset.bin")).unwrap();
+            assert!(!original_current(&inbox, manifest).unwrap());
+            std::fs::create_dir(inbox.join("files/asset.bin")).unwrap();
+            assert!(!original_current(&inbox, manifest).unwrap());
+            let mut invalid = manifest.clone();
+            invalid.members[0].path = "../outside".into();
+            assert!(original_current(&inbox, &invalid).is_err());
+        }
+
+        #[cfg(unix)]
+        #[tokio::test]
+        async fn current_original_refuses_symlink_members_and_propagates_unreadable_files() {
+            use std::os::unix::fs::{PermissionsExt, symlink};
+
+            let (temp, ctx, params) = setup();
+            let inbox = temp.path().join("inbox");
+            write(&inbox.join("a.md"), "[member](asset.bin)");
+            std::fs::write(inbox.join("asset.bin"), b"preserved").unwrap();
+            let result = batch(&params, &ctx, &["a.md"]).await;
+            let manifest = &result.originals[0].manifest;
+            std::fs::rename(inbox.join("asset.bin"), inbox.join("renamed.bin")).unwrap();
+            symlink(inbox.join("renamed.bin"), inbox.join("asset.bin")).unwrap();
+            assert!(!original_current(&inbox, manifest).unwrap());
+            std::fs::remove_file(inbox.join("asset.bin")).unwrap();
+            std::fs::rename(inbox.join("renamed.bin"), inbox.join("asset.bin")).unwrap();
+            std::fs::set_permissions(
+                inbox.join("asset.bin"),
+                std::fs::Permissions::from_mode(0o0),
+            )
+            .unwrap();
+            if std::fs::File::open(inbox.join("asset.bin")).is_err() {
+                assert!(original_current(&inbox, manifest).is_err());
+            }
+            std::fs::set_permissions(
+                inbox.join("asset.bin"),
+                std::fs::Permissions::from_mode(0o600),
+            )
+            .unwrap();
         }
     }
 

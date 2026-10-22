@@ -93,6 +93,14 @@ impl ManualDependencyInventory {
                     adjacency.insert(member.clone(), dependencies);
                 }
                 for next in &adjacency[&member] {
+                    if next.components().count() == 1 && !membership.contains_key(next.as_os_str())
+                    {
+                        diagnostics.insert(format!(
+                            "{}: reference is not an exact top-level entry: {}",
+                            member.display(),
+                            next.display()
+                        ));
+                    }
                     if next != &entry
                         && next.components().count() == 1
                         && let Some(name) = next.to_str()
@@ -130,6 +138,14 @@ impl ManualDependencyInventory {
 
     pub fn diagnostics(&self) -> &[String] {
         &self.diagnostics
+    }
+
+    pub(super) fn is_for_root(&self, root: &Path) -> bool {
+        self.root == root
+    }
+
+    pub(super) fn has_entry(&self, entry: &str) -> bool {
+        self.membership.get(std::ffi::OsStr::new(entry)) == Some(&EntryKind::File)
     }
 
     /// Recheck exact membership, contained regular paths, and bytes before retirement.
@@ -425,6 +441,57 @@ mod tests {
         assert!(!inventory.is_current().unwrap());
         let inventory = ManualDependencyInventory::capture(root.path(), 4096).unwrap();
         std::fs::remove_file(root.path().join("a.md")).unwrap();
+        assert!(!inventory.is_current().unwrap());
+    }
+
+    #[test]
+    fn reference_spelling_never_uses_filesystem_folding_as_retirement_proof() {
+        let root = tempfile::tempdir().unwrap();
+        write(root.path(), "owner.md", "[attachment](TARGET.pdf)");
+        write(root.path(), "target.pdf", "original attachment");
+        let inventory = ManualDependencyInventory::capture(root.path(), 4096).unwrap();
+        assert!(inventory.diagnostics().iter().any(|message| {
+            message.contains("not an exact top-level entry") && message.contains("TARGET.pdf")
+        }));
+        assert!(!inventory.is_current().unwrap());
+        assert_eq!(
+            std::fs::read(root.path().join("target.pdf")).unwrap(),
+            b"original attachment"
+        );
+    }
+
+    #[test]
+    fn exact_text_limit_is_allowed_and_overflow_refuses_without_truncation() {
+        let root = tempfile::tempdir().unwrap();
+        write(root.path(), "entry.md", "1234");
+        let exact = ManualDependencyInventory::capture(root.path(), 4).unwrap();
+        assert!(exact.diagnostics().is_empty());
+        assert!(exact.is_current().unwrap());
+        let oversized = ManualDependencyInventory::capture(root.path(), 3).unwrap();
+        assert!(!oversized.diagnostics().is_empty());
+        assert!(!oversized.is_current().unwrap());
+        assert_eq!(
+            std::fs::read(root.path().join("entry.md")).unwrap(),
+            b"1234"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inbox_root_alias_is_pinned_even_when_replacement_contents_match() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        for name in ["first", "second"] {
+            std::fs::create_dir(directory.path().join(name)).unwrap();
+            write(&directory.path().join(name), "entry.md", "same source");
+        }
+        let alias = directory.path().join("inbox");
+        symlink(directory.path().join("first"), &alias).unwrap();
+        let inventory = ManualDependencyInventory::capture(&alias, 4096).unwrap();
+        assert!(inventory.is_current().unwrap());
+        std::fs::remove_file(&alias).unwrap();
+        symlink(directory.path().join("second"), &alias).unwrap();
         assert!(!inventory.is_current().unwrap());
     }
 
