@@ -158,7 +158,7 @@ pub fn render_markdown_fragment(value: &str) -> Result<String, Error> {
                 for event in input.by_ref() {
                     match event {
                         Event::End(TagEnd::HtmlBlock) => break,
-                        Event::Html(text) => block.push_str(&text),
+                        Event::Html(text) | Event::Text(text) => block.push_str(&text),
                         _ => {
                             return Err(Error::new(
                                 ErrorKind::InvalidOperation,
@@ -458,6 +458,25 @@ mod tests {
     }
 
     #[test]
+    fn indented_html_preserves_content_and_sibling_sections() {
+        for indent in [" ", "  ", "   "] {
+            let html = format!("{indent}<div>\n## Literal heading\n</div>\n");
+            for ending in ["\n", "\r\n", "\r"] {
+                let source = html.replace('\n', ending);
+                let output = render_markdown_fragment(&source).unwrap();
+                assert!(output.replace("\r\n", "\n").contains(&html), "{output:?}");
+                assert!(has_sibling_boundary(&output), "{output:?}");
+                let page = format!("## Source\n\n{output}\n\n## Related\n\nowned\n");
+                assert_eq!(
+                    crate::section_body(&page, "Related").unwrap().trim(),
+                    "owned"
+                );
+                assert_eq!(lk_core::markdown::root_headings(&page).len(), 2);
+            }
+        }
+    }
+
+    #[test]
     fn raw_html_is_preserved_unless_it_consumes_the_next_section() {
         let table = "<table><tr><td colspan=\"2\">value</td></tr></table>\n";
         assert!(
@@ -465,7 +484,12 @@ mod tests {
                 .unwrap()
                 .contains(table.trim())
         );
-        for value in ["<!-- unclosed", "<script>unterminated"] {
+        for value in [
+            "<!-- unclosed",
+            "<script>unterminated",
+            " <!-- unclosed",
+            " <script>unterminated",
+        ] {
             let output = render_markdown_fragment(value).unwrap();
             assert!(output.contains("```html"), "{output}");
             assert!(output.contains(value), "{output}");

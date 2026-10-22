@@ -190,7 +190,9 @@ mod tests {
     fn daily_templates_preserve_literal_source_and_semantic_code() {
         let engine = TemplateEngine::build(None).unwrap();
         let code = "value = \"\"\"first\n\n\nsecond\"\"\"\n";
-        let body = format!("```python\n{code}```\n\n<pre>\n# literal heading\n\n\ntext\n</pre>\n");
+        let body = format!(
+            "```python\n{code}```\n\n<pre>\n# literal heading\n\n\ntext\n</pre>\n\n   <div>\nIndented source.\n</div>\n"
+        );
         let summary = format!("```python\n{code}```");
         let i18n = serde_json::to_value(lk_core::i18n::Locale::En.strings()).unwrap();
         let mut context = daily_context(&i18n);
@@ -203,6 +205,7 @@ mod tests {
             let output = engine.render(name, &context).unwrap();
             assert!(output.contains(code), "{name}: {output}");
             assert!(output.contains("<pre>\n# literal heading\n\n\ntext\n</pre>"));
+            assert!(output.contains("   <div>\nIndented source.\n</div>\n"));
             assert_eq!(
                 crate::section_body(&output, "Summary").unwrap().trim(),
                 summary,
