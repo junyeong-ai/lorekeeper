@@ -9,7 +9,7 @@ use crate::search::{MatchProjection, Page, SearchOptions, SearchResult, fold_nam
 use crate::{MutationSession, VaultError};
 
 pub(super) const INDEX_PATH: &str = ".lorekeeper/search.sqlite";
-const VERSION: i32 = 26;
+const VERSION: i32 = 27;
 
 #[derive(Serialize)]
 pub struct SearchSnapshot {
@@ -1313,6 +1313,108 @@ mod tests {
                     std::fs::read_to_string(root.path().join(path)).unwrap(),
                     raw
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn footnote_search_keeps_namespaced_fragment_prose_and_source_ranges() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let session = MutationSession::acquire(root.path()).unwrap();
+        for ending in ["\n", "\r\n", "\r"] {
+            for suffix in ["", "\n<div>Later HTML.</div>\n"] {
+                let mut originals = BTreeMap::new();
+                for (name, definition) in [
+                    ("single", "Helios"),
+                    ("linked", "[Helios](https://destination-secret.invalid)"),
+                    ("paragraph", "Helios is bright."),
+                ] {
+                    let fragment = crate::render_markdown_fragment(&format!(
+                        "Alpha[^opaque-marker] Beta.\n\n[^opaque-marker]: {definition}\n"
+                    ))
+                    .unwrap();
+                    assert!(fragment.contains("[^lk-"));
+                    let later = if name == "linked" {
+                        "Helios again."
+                    } else {
+                        "Later observation."
+                    };
+                    let body = format!(
+                        "## Summary\nUnrelated opening.\n\n## Content\n{fragment}\n\n## Later\n{later}\n{suffix}"
+                    )
+                    .replace('\n', ending);
+                    let raw = format!("---\ntitle: Footnote {name}\ntype: document\n---\n{body}");
+                    let path = format!("wiki/documents/{name}.md");
+                    write(root.path(), &path, &raw);
+                    originals.insert(path, raw);
+                }
+                let capture = prepare_search(&session, &dirs).unwrap();
+                for query in [
+                    "Helios",
+                    "Alpha Beta",
+                    "opaque-marker",
+                    "destination-secret",
+                ] {
+                    let mut options = SearchOptions {
+                        query: Some(query),
+                        phrase: true,
+                        ..Default::default()
+                    };
+                    let live = crate::search(root.path(), &dirs, &options).unwrap();
+                    options.snapshot = Some(&capture.snapshot);
+                    let captured = crate::search(root.path(), &dirs, &options).unwrap();
+                    assert_eq!(
+                        serde_json::to_value(&live.hits).unwrap(),
+                        serde_json::to_value(&captured.hits).unwrap()
+                    );
+                    let expected = if matches!(query, "Helios" | "Alpha Beta") {
+                        3
+                    } else {
+                        0
+                    };
+                    assert_eq!(live.total, expected, "{query}: {ending:?}: {suffix:?}");
+                    for hit in &captured.hits {
+                        let expected_excerpt = if query == "Alpha Beta" {
+                            "Alpha Beta."
+                        } else if hit.path.ends_with("paragraph.md") {
+                            "Helios is bright."
+                        } else {
+                            "Helios"
+                        };
+                        assert_eq!(hit.excerpt, expected_excerpt);
+                        assert_eq!(hit.excerpt_kind, crate::ExcerptKind::MatchedBlock);
+                        assert_eq!(
+                            hit.excerpt_section,
+                            suffix.is_empty().then_some(2),
+                            "{query}: {}: {ending:?}: {suffix:?}: {:?}",
+                            hit.path,
+                            originals[&hit.path]
+                        );
+                        if let Some(section) = hit.excerpt_section {
+                            let selected = crate::inspect_document(
+                                root.path(),
+                                Path::new(&hit.path),
+                                &crate::DocumentOptions {
+                                    section: Some(section),
+                                    offset: 0,
+                                    limit: 1000,
+                                    revision: Some(&hit.file_revision),
+                                },
+                            )
+                            .unwrap();
+                            let text = selected.content.unwrap().text;
+                            assert!(text.contains("Helios"), "{text}");
+                            assert!(!text.contains("## Later"), "{text}");
+                        }
+                    }
+                }
+                for (path, raw) in originals {
+                    assert_eq!(
+                        std::fs::read_to_string(root.path().join(path)).unwrap(),
+                        raw
+                    );
+                }
             }
         }
     }

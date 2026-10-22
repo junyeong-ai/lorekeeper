@@ -20,7 +20,7 @@ use lk_core::concept::identity_key;
 use lk_core::config::{SourceType, VaultDirs};
 use lk_core::frontmatter::KnowledgeStatus;
 use lk_core::vault_path::{concepts_dir, documents_dir, explorations_dir};
-use pulldown_cmark::{Event, Options, Tag, TagEnd};
+use pulldown_cmark::{Event, Tag, TagEnd};
 use unicode_normalization::UnicodeNormalization;
 
 use crate::VaultError;
@@ -1463,10 +1463,21 @@ struct VisibleDocument {
 
 impl VisibleDocument {
     fn from_body(body: &str) -> Self {
-        let options =
-            Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
         let markdown = lk_core::markdown::MarkdownInput::from_text(body);
-        let events: Vec<_> = markdown.offset_events(options).collect();
+        let events: Vec<_> = markdown
+            .offset_events(lk_core::markdown::OPTIONS)
+            .filter_map(|(event, range)| {
+                // Footnote markers navigate to separately searchable blocks; their
+                // identifiers and generated numbering are not authored prose.
+                let event = match event {
+                    Event::FootnoteReference(_) => return None,
+                    Event::Start(Tag::FootnoteDefinition(_)) => Event::Start(Tag::BlockQuote(None)),
+                    Event::End(TagEnd::FootnoteDefinition) => Event::End(TagEnd::BlockQuote(None)),
+                    event => event,
+                };
+                Some((event, range))
+            })
+            .collect();
         let section = crate::section::first_section_range(body);
         let has_html = events
             .iter()
@@ -2023,6 +2034,31 @@ mod tests {
         let markdown = "## Heading\n\nsoft\nbreak and  \nhard break\n\n- first\n- second\n\n```html\n<p>literal</p>\nnext\n```\n\n| Key | Value |\n| --- | --- |\n| one | two |\n";
         let with_html = format!("{markdown}\n<span></span>");
         assert_eq!(search_text(markdown), search_text(&with_html));
+    }
+
+    #[test]
+    fn visible_footnotes_keep_prose_and_inline_phrases_without_navigation_markers() {
+        for (definition, expected) in [
+            ("Helios", "Helios"),
+            ("[Helios](https://destination-secret.invalid)", "Helios"),
+            ("Helios is bright.", "Helios is bright."),
+        ] {
+            let body = format!(
+                "## Summary\n\nAlpha[^opaque-marker] Beta.\n\n## Content\n\n[^opaque-marker]: {definition}\n"
+            );
+            let expected = format!("Summary\nAlpha Beta.\nContent\n{expected}");
+            for suffix in ["", "\n<span></span>\n"] {
+                let body = format!("{body}{suffix}");
+                assert_eq!(search_text(&body), expected, "{body}");
+                assert_eq!(MatchProjection::from_body(&body).summary, "alpha beta.");
+            }
+        }
+        assert_eq!(
+            search_text(
+                "## Summary\n\n[Visible][reference-secret].\n\n[reference-secret]: destination-secret\n"
+            ),
+            "Summary\nVisible."
+        );
     }
 
     #[test]
