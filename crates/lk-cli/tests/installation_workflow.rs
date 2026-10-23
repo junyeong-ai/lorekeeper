@@ -389,6 +389,7 @@ fn daily_collection_excludes_deployment_before_acquiring_the_vault_workflow() {
                 Err(error) => return Err(error),
             }
         };
+        stream.set_nonblocking(false)?;
         stream.set_read_timeout(Some(Duration::from_secs(10)))?;
         stream.set_write_timeout(Some(Duration::from_secs(10)))?;
         let mut buffer = [0; 4096];
