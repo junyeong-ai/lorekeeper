@@ -1961,6 +1961,8 @@ fn synthesis_read_scope_guards_scoped_reviews_and_context_for_whole_and_bounded_
             "unrelated-review",
             "related-changed",
             "config-changed",
+            "config-formatting",
+            "operational-config-changed",
         ] {
             let ws = Workspace::new();
             if bounded {
@@ -2064,13 +2066,34 @@ fn synthesis_read_scope_guards_scoped_reviews_and_context_for_whole_and_bounded_
                 ),
                 "config-changed" => {
                     let path = ws.root.path().join("config.yaml");
+                    let config = std::fs::read_to_string(&path).unwrap();
+                    std::fs::write(path, config.replace("locale: en", "locale: ko")).unwrap();
+                }
+                "config-formatting" => {
+                    let path = ws.root.path().join("config.yaml");
                     let mut config = std::fs::read_to_string(&path).unwrap();
                     config.push_str("\n# Selected configuration revision changed.\n");
                     std::fs::write(path, config).unwrap();
                 }
+                "operational-config-changed" => {
+                    let path = ws.root.path().join("config.yaml");
+                    let config = std::fs::read_to_string(&path).unwrap();
+                    let config = if bounded {
+                        config.replace("max_calls: 100", "max_calls: 99")
+                    } else {
+                        config.replace(
+                            "work: {extraction_context:",
+                            "work: {max_calls: 9, extraction_context:",
+                        )
+                    };
+                    std::fs::write(path, config).unwrap();
+                }
                 _ => {}
             }
-            let should_apply = matches!(scenario, "current" | "unrelated-review");
+            let should_apply = matches!(
+                scenario,
+                "current" | "unrelated-review" | "config-formatting" | "operational-config-changed"
+            );
             for dry in [true, false] {
                 let out = if dry {
                     ws.run(&["queue", "apply", "--dry-run"])

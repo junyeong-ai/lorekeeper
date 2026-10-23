@@ -191,7 +191,8 @@ unselected bodies as inspected or discard source-phase questions during finaliza
 ## Changed inputs
 
 Changed semantic configuration, targets, evidence or review dependencies invalidate work.
-New Work and candidate selections exclude only `max_calls`, `max_parallel`,
+New Work and candidate selections use parsed configuration values, so comments and
+YAML formatting do not participate. They exclude only `max_calls`, `max_parallel`,
 `max_screening_batches` and profile `timeout_seconds` from configuration identity.
 Adjust these only between workflows: every configuration byte remains pinned during
 execution. Model/effort, input/result limits, extraction policy and other settings
