@@ -146,9 +146,7 @@ pub(super) fn build(
             command.arg("-");
         }
     }
-    if let Some(model) = profile.model() {
-        command.arg(format!("--model={model}"));
-    }
+    super::apply_profile_options(&mut command, profile);
     let request = serde_json::to_string(input)
         .map_err(|error| miette::miette!("observation request: {error}"))?;
     let prompt = format!("{instruction}\nNative request:\n{request}").into_bytes();
@@ -207,6 +205,38 @@ pub(in crate::commands) fn decode_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn all_structured_roles_apply_the_selected_engine_options() {
+        for (engine, options) in [
+            ("codex", "model_reasoning_effort: low"),
+            ("claude-code", "effort: medium"),
+        ] {
+            let profile: ExecutionProfile = lk_core::yaml::from_str(&format!(
+                "engine: {engine}\nmodel: selected-model\ntimeout_seconds: 1\n{options}"
+            ))
+            .unwrap();
+            let input = json!({});
+            for invocation in [
+                build_invocation(&profile, &input),
+                build_screening_invocation(&profile, &input),
+                super::super::finalization::build_invocation(&profile, &input),
+            ] {
+                let invocation = invocation.unwrap();
+                let command = invocation.command.as_std();
+                let args = command.get_args().collect::<Vec<_>>();
+                assert!(args.contains(&std::ffi::OsStr::new("--model=selected-model")));
+                if engine == "codex" {
+                    assert!(args.contains(&std::ffi::OsStr::new("model_reasoning_effort=\"low\"")));
+                } else {
+                    assert!(command.get_envs().any(|(name, value)| {
+                        name == "CLAUDE_CODE_EFFORT_LEVEL"
+                            && value == Some(std::ffi::OsStr::new("medium"))
+                    }));
+                }
+            }
+        }
+    }
 
     #[test]
     fn only_successful_structured_results_are_decoded_without_text_fallback() {
