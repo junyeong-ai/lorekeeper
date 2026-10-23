@@ -985,6 +985,7 @@ pub(super) fn record_inspection(
     work.record(&session, output, &prepared.resources)
 }
 
+#[cfg(unix)]
 pub(super) struct SectionFinalization {
     pub request: Value,
     pub max_response_bytes: usize,
@@ -992,12 +993,14 @@ pub(super) struct SectionFinalization {
     result: lk_queue::SectionResult,
 }
 
+#[cfg(unix)]
 pub(super) enum SectionPreparation {
     Interactive,
     Ready(SectionFinalization),
     NeedsAction(String),
 }
 
+#[cfg(unix)]
 fn event_headings(body: &str) -> Vec<String> {
     lk_core::markdown::root_headings(body)
         .into_iter()
@@ -1006,6 +1009,7 @@ fn event_headings(body: &str) -> Vec<String> {
         .collect()
 }
 
+#[cfg(unix)]
 fn refinement_events(
     root: &Path,
     prepared: &Prepared,
@@ -1049,6 +1053,7 @@ fn refinement_events(
     Ok(json!(events))
 }
 
+#[cfg(unix)]
 pub(super) fn prepare_section_finalization(
     root: &Path,
     config: &lk_core::config::Config,
@@ -1119,6 +1124,7 @@ pub(super) fn prepare_section_finalization(
     }))
 }
 
+#[cfg(unix)]
 pub(super) fn record_finalization_action(
     root: &Path,
     config: &lk_core::config::Config,
@@ -1141,6 +1147,7 @@ pub(super) fn record_finalization_action(
     Ok(())
 }
 
+#[cfg(unix)]
 pub(super) fn finish_section(
     root: &Path,
     config: &lk_core::config::Config,
