@@ -132,6 +132,9 @@ pub enum WikiCommand {
         /// Re-read exact original batch members after repairs; repeat for each address
         #[arg(long = "path")]
         paths: Vec<String>,
+        /// Preview native input readiness; automatic plans skip deferred subjects, --path retains them
+        #[arg(long)]
+        ready: bool,
     },
     /// Record revision-guarded search queries for related-document discovery (JSON)
     AuditDiscover {
@@ -573,11 +576,30 @@ pub async fn run(opts: &super::GlobalOptions, cmd: WikiCommand) -> miette::Resul
         WikiCommand::DocumentIdentity { command } => {
             super::document_identity::run(opts, command).await
         }
-        WikiCommand::AuditPlan { limit, paths } => {
+        WikiCommand::AuditPlan {
+            limit,
+            paths,
+            ready,
+        } => {
             let config = load_config(&find_config(opts)?)?;
             let root = config.vault.root_path();
             let pages = lk_graph::scan::scan_vault(&root, config.graph.scope.follow_links)
                 .map_err(|error| miette::miette!("{error}"))?;
+            if ready {
+                let result = super::audit::plan_ready(
+                    &root,
+                    &config,
+                    &pages,
+                    limit.unwrap_or(config.graph.audit.batch_size),
+                    &paths,
+                )?;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&result)
+                        .map_err(|error| miette::miette!("{error}"))?
+                );
+                return Ok(());
+            }
             let result = lk_graph::audit::plan_selected_partitioned(
                 &root,
                 &config.vault.dirs,

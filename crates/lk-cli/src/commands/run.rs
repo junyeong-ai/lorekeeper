@@ -49,6 +49,7 @@ pub async fn run(
 mod native {
     use super::scheduler;
     use super::*;
+    use crate::commands::audit::{DeferredAudit, InputAvailability};
     use crate::commands::{
         CONFIG_REVISION_ENV, EXECUTION_PROFILE_ENV, GlobalOptions, execution, workflow,
     };
@@ -226,12 +227,6 @@ mod native {
     }
 
     #[derive(Serialize)]
-    struct DeferredAudit {
-        path: String,
-        reasons: Vec<String>,
-    }
-
-    #[derive(Serialize)]
     struct JobResult {
         operation: Operation,
         ok: bool,
@@ -248,6 +243,7 @@ mod native {
         audit_blocked: Vec<lk_graph::audit::AuditBlockedInput>,
         audit_blocked_count: usize,
         audit_deferred: Vec<DeferredAudit>,
+        audit_deferred_count: usize,
         review_health: Option<ReviewHealth>,
         stages: Vec<StageResult>,
     }
@@ -1424,31 +1420,19 @@ mod native {
             let pages =
                 lk_graph::scan::scan_vault(&self.root, self.config.graph.scope.follow_links)
                     .map_err(|e| miette::miette!("{e}"))?;
-            let mut readiness = super::super::queue::readiness::InputReadiness::load(&self.root)?;
+            let mut readiness = InputAvailability::load(&self.root)?;
             if paths.is_empty() {
-                let mut deferred = Vec::new();
                 let plan = lk_graph::audit::plan_available_partitioned(
                     &self.root,
                     &self.config.vault.dirs,
                     &pages,
                     self.config.graph.audit.batch_size,
                     self.config.graph.audit.max_input_bytes,
-                    &mut |candidate| {
-                        let reasons = readiness
-                            .unfinished(&self.root, candidate)
-                            .map_err(|error| lk_graph::GraphError::Io(error.to_string()))?;
-                        if reasons.is_empty() {
-                            return Ok(true);
-                        }
-                        deferred.push(DeferredAudit {
-                            path: candidate.path.clone(),
-                            reasons,
-                        });
-                        Ok(false)
-                    },
+                    &mut |candidate| readiness.check(candidate),
                 )
                 .map_err(|error| miette::miette!("{error}"))?;
-                self.result.audit_deferred = deferred;
+                self.result.audit_deferred = readiness.deferred().to_vec();
+                self.result.audit_deferred_count = readiness.deferred_count();
                 return Ok(plan);
             }
             let plan = lk_graph::audit::plan_selected_partitioned(
@@ -1461,7 +1445,7 @@ mod native {
             )
             .map_err(|e| miette::miette!("{e}"))?;
             for candidate in &plan.candidates {
-                readiness.require_ready(&self.root, candidate)?;
+                readiness.require_ready(candidate)?;
             }
             Ok(plan)
         }
@@ -1474,43 +1458,30 @@ mod native {
                     .map_err(|error| miette::miette!("{error}"))?;
             let _queue =
                 super::super::queue::claim_writer(&self.root.join(".lorekeeper/queue"), false)?;
-            let mut readiness = super::super::queue::readiness::InputReadiness::load(&self.root)?;
-            let mut deferred = Vec::new();
+            let mut readiness = InputAvailability::load(&self.root)?;
             let plan = lk_graph::audit::admit_available_partitioned(
                 &session,
                 &self.config.vault.dirs,
                 &pages,
                 self.config.graph.audit.batch_size,
                 self.config.graph.audit.max_input_bytes,
-                &mut |candidate| {
-                    let reasons = readiness
-                        .unfinished(&self.root, candidate)
-                        .map_err(|error| lk_graph::GraphError::Io(error.to_string()))?;
-                    if reasons.is_empty() {
-                        return Ok(true);
-                    }
-                    deferred.push(DeferredAudit {
-                        path: candidate.path.clone(),
-                        reasons,
-                    });
-                    Ok(false)
-                },
+                &mut |candidate| readiness.check(candidate),
                 |candidates, mutation| {
-                    let mut selected =
-                        super::super::queue::readiness::InputReadiness::load(&self.root)
-                            .map_err(|error| lk_graph::GraphError::Io(error.to_string()))?;
+                    let mut selected = InputAvailability::load(&self.root)
+                        .map_err(|error| lk_graph::GraphError::Io(error.to_string()))?;
                     for candidate in candidates {
                         selected
-                            .require_ready(&self.root, candidate)
+                            .require_ready(candidate)
                             .map_err(|error| lk_graph::GraphError::Io(error.to_string()))?;
                     }
                     selected
-                        .guard(&self.root, mutation)
+                        .guard(mutation)
                         .map_err(|error| lk_graph::GraphError::Io(error.to_string()))
                 },
             )
             .map_err(|error| miette::miette!("{error}"))?;
-            self.result.audit_deferred = deferred;
+            self.result.audit_deferred = readiness.deferred().to_vec();
+            self.result.audit_deferred_count = readiness.deferred_count();
             Ok(plan)
         }
 
@@ -1991,6 +1962,7 @@ mod native {
                 audit_blocked: Vec::new(),
                 audit_blocked_count: 0,
                 audit_deferred: Vec::new(),
+                audit_deferred_count: 0,
                 review_health: None,
                 stages: Vec::new(),
             },
