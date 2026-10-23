@@ -11,8 +11,10 @@ edit pages during the audit. Execute separately authorized repairs after reporti
 Read AGENTS.md to
 resolve section headings before inspecting pages.
 
-1. **Structural** — run `lore graph --json lint`. ONE pass returns ALL of it, in two
-   channels: `violations` (`broken`, `respelled_links`, `invalid_categories`, `duplicate_concepts`,
+1. **Structural** — run `lore graph --json lint`. Check `ok` and `errors` first:
+   unreadable inputs or execution errors prevent a clean verdict even when no
+   violations are reported. The same pass returns `violations` (`broken`,
+   `respelled_links`, `invalid_categories`, `duplicate_concepts`,
    `address_collisions` — distinct addresses that would collide under slug normalization —
    and `unnormalized` — a filename that is not its own slug) and `observations`
    (`orphans`, `hubs`, `unresolved_conflicts`). Surface every non-empty list from both.

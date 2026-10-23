@@ -105,7 +105,10 @@ Enable `graph.audit.schedule` deliberately: each run uses the LLM to review at m
 execution profile; structural lint alone cannot perform the semantic read.
 For an explicitly requested initial campaign, `lore run knowledge --batches N`
 repeats bounded batches, releasing the lease between them and resuming from current
-receipts. A failed/cancelled batch stops the campaign and preserves unfinished work.
+receipts. Verified selected-audit progress can advance the campaign despite unrelated
+scoped queue rejections; the overall outcome remains incomplete/nonzero. Fatal or unknown
+failures, cancellation, or no verified audit progress stop it. See the
+[campaign and measurement contract](../../lore-wiki/references/maintenance.md#operating-budget-and-measurement).
 `batch-limit` is a completed execution budget, not full-corpus semantic completion.
 `max_input_bytes` includes scoped reviews, their evidence and available prior archives;
 it measures distinct source bytes rather than accumulated model usage. Oversized subjects
