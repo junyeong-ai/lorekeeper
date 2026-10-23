@@ -23,6 +23,18 @@ def cli(*args):
 def record(value):
     with (root/'calls.jsonl').open('a') as output:
         output.write(json.dumps(value)+'\n')
+if '--output-schema' in sys.argv or '--safe-mode' in sys.argv:
+    request=json.loads(sys.stdin.read().split('\nNative request:\n',1)[1])
+    assert request['kind']=='whole-section'
+    subject=request['work']['context']['subject']
+    target=subject['target']
+    assert target=='wiki/documents/b-independent.md', 'rejected or dependent work must not invoke the host'
+    record({'role':'queue','task_id':subject['task_id'],'target':target})
+    output={'status':'complete','body':'Independent source interpretation completed.','reason':None}
+    if engine=='claude-code':
+        output={'type':'result','subtype':'success','is_error':False,'structured_output':output}
+    print(json.dumps(output))
+    raise SystemExit()
 if 'Selected queue task manifest: ' in prompt:
     selection,_=json.JSONDecoder().raw_decode(prompt.split('Selected queue task manifest: ',1)[1])
     ids=json.loads(Path(selection).read_text())

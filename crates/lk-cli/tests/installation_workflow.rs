@@ -588,14 +588,14 @@ fn native_consumer_protects_project_skills_in_its_vault_working_directory() {
     let fake_host = first.directory.path().join("fake-codex");
     std::fs::write(
         &fake_host,
-        "#!/bin/sh\nif [ \"$1\" = --version ]; then printf 'codex-cli 0.163.0\\n'; exit 0; fi\npwd -P > \"$TEST_INSTALLATION_ROOT/host-cwd\"\n: > \"$TEST_INSTALLATION_ROOT/host-ready\"\nattempt=0\nwhile [ ! -e \"$TEST_INSTALLATION_ROOT/host-release\" ]; do\n  attempt=$((attempt + 1))\n  [ \"$attempt\" -lt 3000 ] || exit 92\n  sleep 0.01\ndone\nexit 91\n",
+        "#!/bin/sh\nif [ \"$1\" = --version ]; then printf 'codex-cli 0.163.0\\n'; exit 0; fi\ncase \"$*\" in *--output-schema*) cat > /dev/null; printf '%s\\n' '{\"status\":\"complete\",\"body\":\"An active consumer reads project skills from its vault.\",\"reason\":null}'; exit 0 ;; esac\npwd -P > \"$TEST_INSTALLATION_ROOT/host-cwd\"\n: > \"$TEST_INSTALLATION_ROOT/host-ready\"\nattempt=0\nwhile [ ! -e \"$TEST_INSTALLATION_ROOT/host-release\" ]; do\n  attempt=$((attempt + 1))\n  [ \"$attempt\" -lt 3000 ] || exit 92\n  sleep 0.01\ndone\nexit 91\n",
     )
     .unwrap();
     std::fs::set_permissions(&fake_host, std::fs::Permissions::from_mode(0o755)).unwrap();
     std::fs::write(
         &first.config,
         format!(
-            "vault:\n  root: first\n  locale: en\nidentity: {{name: Test, email: test@example.invalid}}\nllm: {{provider: queue}}\nsources:\n  notes:\n    type: manual\n    params: {{inbox_dir: inbox}}\nexecution:\n  default_profile: fixture\n  profiles:\n    fixture:\n      engine: codex\n      executable: {}\n      timeout_seconds: 60\n",
+            "vault:\n  root: first\n  locale: en\nidentity: {{name: Test, email: test@example.invalid}}\nllm: {{provider: queue}}\nsources:\n  notes:\n    type: manual\n    params: {{inbox_dir: inbox}}\n    concept_policy: supported-new\nexecution:\n  default_profile: fixture\n  profiles:\n    fixture:\n      engine: codex\n      executable: {}\n      timeout_seconds: 60\n",
             serde_json::to_string(&fake_host).unwrap(),
         ),
     )
@@ -654,7 +654,7 @@ fn native_consumer_protects_project_skills_in_its_vault_working_directory() {
     assert!(!status.success(), "fake host must not report completion");
     let result: serde_json::Value =
         serde_json::from_slice(&std::fs::read(stdout_path).unwrap()).unwrap();
-    assert_eq!(result["semantic_calls"], 1);
+    assert_eq!(result["semantic_calls"], 2);
     assert_eq!(result["ok"], false);
     assert_success(&deploy_project());
 }
