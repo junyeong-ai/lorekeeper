@@ -1131,8 +1131,7 @@ save('external-sheet.xlsx', invalid)
             root.path(),
             "/bin/cat >/dev/null\nprintf '%s' 'private input text' >&2\nprintf '%s' '{\"status\":\"failed\",\"code\":\"no-text\"}'",
         );
-        let mut config = configuration(&python);
-        config.timeout_seconds = std::num::NonZeroU64::new(1).unwrap();
+        let config = configuration(&python);
         let result = project(b"captured bytes", InputFormat::Pdf, Some(&config)).await;
         assert!(matches!(
             result,
