@@ -1196,28 +1196,20 @@ save('external-sheet.xlsx', invalid)
         let root = tempfile::tempdir().unwrap();
         let python = executable(
             root.path(),
-            "printf '%s' \"$$\" > \"$0.pid\"\nexec /bin/sleep 60",
+            "printf '%s' \"$$\" > \"$0.pid\"\n/bin/ps -o pgid= -p \"$$\" > \"$0.group\"\nexec /bin/sleep 60",
         );
-        let pid_path = python.with_extension("pid");
         let mut config = configuration(&python);
         config.timeout_seconds = std::num::NonZeroU64::new(2).unwrap();
-        let task = tokio::spawn(async move { project(b"", InputFormat::Pdf, Some(&config)).await });
-        let pid = tokio::time::timeout(Duration::from_secs(1), async {
-            loop {
-                if let Ok(value) = std::fs::read_to_string(&pid_path)
-                    && let Ok(value) = value.parse::<i32>()
-                    && let Some(pid) = rustix::process::Pid::from_raw(value)
-                {
-                    break pid;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .unwrap();
-        let group = rustix::process::getpgid(Some(pid)).unwrap();
-        assert!(matches!(task.await.unwrap(), Err(ProcessingError::Timeout)));
-        assert_eq!(group, rustix::process::getpgrp());
+        assert!(matches!(
+            project(b"", InputFormat::Pdf, Some(&config)).await,
+            Err(ProcessingError::Timeout)
+        ));
+        let read_process_id = |extension| {
+            let value = std::fs::read_to_string(python.with_extension(extension)).unwrap();
+            rustix::process::Pid::from_raw(value.trim().parse::<i32>().unwrap()).unwrap()
+        };
+        let pid = read_process_id("pid");
+        assert_eq!(read_process_id("group"), rustix::process::getpgrp());
         assert_eq!(
             rustix::process::getpgid(Some(pid)),
             Err(rustix::io::Errno::SRCH)
