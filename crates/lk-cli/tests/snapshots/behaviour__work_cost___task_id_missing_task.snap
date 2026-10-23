@@ -1,0 +1,9 @@
+---
+source: crates/lk-cli/tests/behaviour.rs
+assertion_line: 624
+expression: "observe(staged.path(), argv)"
+---
+exit: 1
+--- stdout ---
+--- stderr ---
+Error:   × current task not found: missing-task

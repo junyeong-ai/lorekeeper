@@ -80,6 +80,7 @@ const SWEEP: &[&[&str]] = &[
     &["queue", "count"],
     &["queue", "prune"],
     &["work", "context", "--task-id", "missing-task"],
+    &["work", "cost", "--task-id", "missing-task"],
     &[
         "work",
         "discover",
