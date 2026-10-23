@@ -1,6 +1,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
+#[cfg(unix)]
+use std::time::Instant;
 
 use lk_core::execution::{AgentEngine, ExecutionProfile};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -15,6 +17,28 @@ pub(super) struct ChildResult {
     pub cancelled: bool,
     pub detail: Option<String>,
     pub stdout: Vec<u8>,
+}
+
+#[cfg(unix)]
+pub(super) struct ChildRequest {
+    pub command: tokio::process::Command,
+    pub timeout: Option<Duration>,
+    pub capture_limit: Option<usize>,
+    pub input: Option<Vec<u8>>,
+}
+
+#[cfg(unix)]
+pub(super) struct ChildAttempt {
+    pub duration_ms: u64,
+    pub result: miette::Result<ChildResult>,
+}
+
+#[cfg(unix)]
+fn child_attempt(started: Instant, result: miette::Result<ChildResult>) -> ChildAttempt {
+    ChildAttempt {
+        duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        result,
+    }
 }
 
 #[cfg(unix)]
@@ -88,94 +112,98 @@ impl Supervisor {
 
     pub async fn run_request(
         &mut self,
-        mut command: tokio::process::Command,
+        command: tokio::process::Command,
         timeout: Option<Duration>,
         capture_limit: Option<usize>,
         input: Option<&[u8]>,
     ) -> miette::Result<ChildResult> {
-        use rustix::process::{Pid, Signal};
+        let mut child = RunningChild::spawn(command, input.is_some())?;
+        let cancellation = async {
+            tokio::select! {
+                _ = self.interrupt.recv() => ChildCancellation::Interrupted,
+                _ = self.terminate.recv() => ChildCancellation::Terminated,
+            }
+        };
+        run_child(&mut child, timeout, capture_limit, input, cancellation).await
+    }
+
+    pub async fn run_requests(&mut self, requests: Vec<ChildRequest>) -> Vec<ChildAttempt> {
+        let cancellation = async {
+            tokio::select! {
+                _ = self.interrupt.recv() => ChildCancellation::Interrupted,
+                _ = self.terminate.recv() => ChildCancellation::Terminated,
+            }
+        };
+        run_children(requests, cancellation).await
+    }
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy)]
+enum ChildCancellation {
+    Interrupted,
+    Terminated,
+    SupervisionFailed,
+}
+
+#[cfg(unix)]
+impl ChildCancellation {
+    fn detail(self) -> &'static str {
+        match self {
+            Self::Interrupted => "interrupted",
+            Self::Terminated => "terminated",
+            Self::SupervisionFailed => "parallel supervision failed",
+        }
+    }
+
+    fn is_user_cancelled(self) -> bool {
+        matches!(self, Self::Interrupted | Self::Terminated)
+    }
+}
+
+#[cfg(unix)]
+struct RunningChild {
+    child: tokio::process::Child,
+    group: rustix::process::Pid,
+    cleaned: bool,
+}
+
+#[cfg(unix)]
+impl RunningChild {
+    fn spawn(mut command: tokio::process::Command, input: bool) -> miette::Result<Self> {
+        use rustix::process::Pid;
         command
             .process_group(0)
             .kill_on_drop(true)
-            .stdin(if input.is_some() {
-                Stdio::piped()
-            } else {
-                Stdio::null()
-            })
+            .stdin(if input { Stdio::piped() } else { Stdio::null() })
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
-        let mut child = command
+        let child = command
             .spawn()
             .map_err(|e| miette::miette!("start child: {e}"))?;
-        let pid = child
+        let group = child
             .id()
             .and_then(|id| i32::try_from(id).ok())
             .and_then(Pid::from_raw)
             .filter(|pid| *pid != Pid::INIT)
             .ok_or_else(|| miette::miette!("child has no usable process group"))?;
-        let mut stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| miette::miette!("child stdout missing"))?;
-        let stdin = child.stdin.take();
-        let send = async move {
-            if let (Some(mut stdin), Some(input)) = (stdin, input) {
-                stdin.write_all(input).await?;
-                stdin.shutdown().await?;
-                drop(stdin);
-            }
-            Ok::<_, std::io::Error>(())
-        };
-        let output = async move {
-            let mut captured = Vec::new();
-            let mut buffer = [0; 8192];
-            let mut stderr = tokio::io::stderr();
-            loop {
-                let count = stdout.read(&mut buffer).await?;
-                if count == 0 {
-                    break;
-                }
-                if let Some(limit) = capture_limit {
-                    if count > limit.saturating_sub(captured.len()) {
-                        return Err(std::io::Error::other(
-                            "child output exceeds its capture limit",
-                        ));
-                    }
-                    captured.extend_from_slice(&buffer[..count]);
-                } else {
-                    stderr.write_all(&buffer[..count]).await?;
-                }
-            }
-            Ok(captured)
-        };
-        let deadline = async {
-            match timeout {
-                Some(duration) => tokio::time::sleep(duration).await,
-                None => std::future::pending::<()>().await,
-            }
-        };
-        let (cancelled, mut detail) = tokio::select! {
-            result = async { tokio::try_join!(child.wait(), output, send) } => {
-                match result {
-                    Ok((status, stdout, ())) => {
-                        signal_group(pid, Signal::KILL)?;
-                        return Ok(ChildResult {
-                            success: status.success(), cancelled: false,
-                            detail: (!status.success()).then(|| format!("child {status}")), stdout,
-                        });
-                    },
-                    Err(error) => (false, format!("child IO: {error}")),
-                }
-            }
-            _ = self.interrupt.recv() => (true, "interrupted".to_string()),
-            _ = self.terminate.recv() => (true, "terminated".to_string()),
-            _ = deadline => (false, "session deadline exceeded".to_string()),
-        };
-        if let Err(error) = signal_group(pid, Signal::TERM) {
+        Ok(Self {
+            child,
+            group,
+            cleaned: false,
+        })
+    }
+
+    async fn stop(&mut self, detail: &mut String) {
+        use rustix::process::Signal;
+        if self.cleaned {
+            return;
+        }
+        if let Err(error) = signal_group(self.group, Signal::TERM) {
             detail.push_str(&format!("; {error}"));
         }
         // Allow foreground children to finish their atomic writes before forced termination.
-        let reaped = match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
+        let reaped = match tokio::time::timeout(Duration::from_secs(5), self.child.wait()).await {
             Ok(Ok(_)) => true,
             Ok(Err(error)) => {
                 detail.push_str(&format!("; reap child: {error}"));
@@ -183,22 +211,230 @@ impl Supervisor {
             }
             Err(_) => false,
         };
-        match signal_group(pid, Signal::KILL) {
+        match signal_group(self.group, Signal::KILL) {
             Ok(()) if !reaped => {
-                if let Err(error) = child.wait().await {
+                if let Err(error) = self.child.wait().await {
                     detail.push_str(&format!("; reap child: {error}"));
                 }
             }
             Err(error) => detail.push_str(&format!("; {error}")),
             Ok(()) => {}
         }
-        Ok(ChildResult {
-            success: false,
-            cancelled,
-            detail: Some(detail),
-            stdout: Vec::new(),
-        })
+        self.cleaned = true;
     }
+}
+
+#[cfg(unix)]
+impl Drop for RunningChild {
+    fn drop(&mut self) {
+        if !self.cleaned {
+            let _ = signal_group(self.group, rustix::process::Signal::KILL);
+            let _ = self.child.start_kill();
+        }
+    }
+}
+
+#[cfg(unix)]
+async fn run_child(
+    running: &mut RunningChild,
+    timeout: Option<Duration>,
+    capture_limit: Option<usize>,
+    input: Option<&[u8]>,
+    cancellation: impl std::future::Future<Output = ChildCancellation>,
+) -> miette::Result<ChildResult> {
+    use rustix::process::Signal;
+    let child = &mut running.child;
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| miette::miette!("child stdout missing"))?;
+    let stdin = child.stdin.take();
+    let send = async move {
+        if let (Some(mut stdin), Some(input)) = (stdin, input) {
+            stdin.write_all(input).await?;
+            stdin.shutdown().await?;
+            drop(stdin);
+        }
+        Ok::<_, std::io::Error>(())
+    };
+    let output = async move {
+        let mut captured = Vec::new();
+        let mut buffer = [0; 8192];
+        let mut stderr = tokio::io::stderr();
+        loop {
+            let count = stdout.read(&mut buffer).await?;
+            if count == 0 {
+                break;
+            }
+            if let Some(limit) = capture_limit {
+                if count > limit.saturating_sub(captured.len()) {
+                    return Err(std::io::Error::other(
+                        "child output exceeds its capture limit",
+                    ));
+                }
+                captured.extend_from_slice(&buffer[..count]);
+            } else {
+                stderr.write_all(&buffer[..count]).await?;
+            }
+        }
+        Ok(captured)
+    };
+    let deadline = async {
+        match timeout {
+            Some(duration) => tokio::time::sleep(duration).await,
+            None => std::future::pending::<()>().await,
+        }
+    };
+    let (cancelled, mut detail) = tokio::select! {
+        result = async { tokio::try_join!(child.wait(), output, send) } => {
+            match result {
+                Ok((status, stdout, ())) => {
+                    signal_group(running.group, Signal::KILL)?;
+                    running.cleaned = true;
+                    return Ok(ChildResult {
+                        success: status.success(), cancelled: false,
+                        detail: (!status.success()).then(|| format!("child {status}")), stdout,
+                    });
+                },
+                Err(error) => (false, format!("child IO: {error}")),
+            }
+        }
+        reason = cancellation => (reason.is_user_cancelled(), reason.detail().to_string()),
+        _ = deadline => (false, "session deadline exceeded".to_string()),
+    };
+    running.stop(&mut detail).await;
+    Ok(ChildResult {
+        success: false,
+        cancelled,
+        detail: Some(detail),
+        stdout: Vec::new(),
+    })
+}
+
+#[cfg(unix)]
+async fn run_children(
+    requests: Vec<ChildRequest>,
+    cancellation: impl std::future::Future<Output = ChildCancellation>,
+) -> Vec<ChildAttempt> {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    let mut results = (0..requests.len()).map(|_| None).collect::<Vec<_>>();
+    let mut starts = Vec::with_capacity(requests.len());
+    let mut children = Vec::new();
+    let mut tasks = tokio::task::JoinSet::new();
+    let mut indices = HashMap::new();
+    let (cancel, receiver) = tokio::sync::watch::channel(None);
+    for (index, request) in requests.into_iter().enumerate() {
+        let started = Instant::now();
+        starts.push(started);
+        let running = match RunningChild::spawn(request.command, request.input.is_some()) {
+            Ok(running) => Arc::new(tokio::sync::Mutex::new(running)),
+            Err(error) => {
+                results[index] = Some(child_attempt(started, Err(error)));
+                continue;
+            }
+        };
+        children.push((index, running.clone(), started));
+        let mut receiver = receiver.clone();
+        let task = tasks.spawn(async move {
+            let mut running = running.lock().await;
+            let cancellation = async move {
+                loop {
+                    if let Some(reason) = *receiver.borrow_and_update() {
+                        return reason;
+                    }
+                    if receiver.changed().await.is_err() {
+                        return ChildCancellation::SupervisionFailed;
+                    }
+                }
+            };
+            let result = run_child(
+                &mut running,
+                request.timeout,
+                request.capture_limit,
+                request.input.as_deref(),
+                cancellation,
+            )
+            .await;
+            child_attempt(started, result)
+        });
+        indices.insert(task.id(), index);
+    }
+    tokio::pin!(cancellation);
+    let mut cancelled = None;
+    while !tasks.is_empty() {
+        tokio::select! {
+            reason = &mut cancellation, if cancelled.is_none() => {
+                cancel.send_replace(Some(reason));
+                cancelled = Some(reason);
+            }
+            joined = tasks.join_next_with_id() => {
+                let Some(joined) = joined else { break };
+                match joined {
+                    Ok((id, result)) => {
+                        if let Some(index) = indices.remove(&id) {
+                            results[index] = Some(result);
+                        }
+                    }
+                    Err(error) => {
+                        if cancelled.is_none() {
+                            cancel.send_replace(Some(ChildCancellation::SupervisionFailed));
+                            cancelled = Some(ChildCancellation::SupervisionFailed);
+                        }
+                        if let Some(index) = indices.remove(&error.id())
+                            && let Some((_, running, started)) = children.iter().find(|(input, _, _)| *input == index)
+                        {
+                            let mut detail = format!("supervised child task: {error}");
+                            running.lock().await.stop(&mut detail).await;
+                            let result = if cancelled.is_some_and(ChildCancellation::is_user_cancelled) {
+                                Ok(ChildResult {success:false,cancelled:true,detail:Some(detail),stdout:Vec::new()})
+                            } else {
+                                Err(miette::miette!("{detail}"))
+                            };
+                            results[index] = Some(child_attempt(*started, result));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    for (index, running, started) in children {
+        let mut running = running.lock().await;
+        if !running.cleaned {
+            let mut detail = "supervised child did not complete cleanup".to_string();
+            running.stop(&mut detail).await;
+            if let Some(ChildAttempt {
+                result: Err(error), ..
+            }) = results[index].take()
+            {
+                detail.push_str(&format!("; {error}"));
+            }
+            let result = if cancelled.is_some_and(ChildCancellation::is_user_cancelled) {
+                Ok(ChildResult {
+                    success: false,
+                    cancelled: true,
+                    detail: Some(detail),
+                    stdout: Vec::new(),
+                })
+            } else {
+                Err(miette::miette!("{detail}"))
+            };
+            results[index] = Some(child_attempt(started, result));
+        }
+    }
+    results
+        .into_iter()
+        .zip(starts)
+        .map(|(result, started)| {
+            result.unwrap_or_else(|| {
+                child_attempt(
+                    started,
+                    Err(miette::miette!("supervised child result missing")),
+                )
+            })
+        })
+        .collect()
 }
 
 #[cfg(unix)]
@@ -434,6 +670,170 @@ pub(super) fn executable_path(path: &Path) -> miette::Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    fn shell_request(script: &str) -> ChildRequest {
+        let mut command = tokio::process::Command::new("/bin/sh");
+        command.args(["-c", script]);
+        ChildRequest {
+            command,
+            timeout: Some(Duration::from_secs(3)),
+            capture_limit: Some(1024),
+            input: None,
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn parallel_children_overlap_and_return_in_request_order() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut first = shell_request(
+            "printf ready > \"$TEST_ROOT/first\"; while [ ! -f \"$TEST_ROOT/second\" ]; do sleep 0.01; done; sleep 0.05; /bin/cat",
+        );
+        first.command.env("TEST_ROOT", directory.path());
+        first.input = Some(b"first".to_vec());
+        let mut second = shell_request(
+            "printf ready > \"$TEST_ROOT/second\"; while [ ! -f \"$TEST_ROOT/first\" ]; do sleep 0.01; done; printf second",
+        );
+        second.command.env("TEST_ROOT", directory.path());
+        let mut supervisor = Supervisor::new().unwrap();
+        let results = supervisor.run_requests(vec![first, second]).await;
+        assert_eq!(results.len(), 2);
+        for result in &results {
+            let result = result.result.as_ref().unwrap();
+            assert!(result.success, "{:?}", result.detail);
+            assert!(!result.cancelled);
+        }
+        assert_eq!(results[0].result.as_ref().unwrap().stdout, b"first");
+        assert_eq!(results[1].result.as_ref().unwrap().stdout, b"second");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn parallel_child_failures_preserve_independent_results() {
+        let refused = ChildRequest {
+            command: tokio::process::Command::new("/unavailable/lore-test-child"),
+            timeout: None,
+            capture_limit: Some(100),
+            input: None,
+        };
+        let mut timed = shell_request("exec sleep 30");
+        timed.timeout = Some(Duration::from_millis(30));
+        let mut overflow = shell_request("printf output-too-large");
+        overflow.capture_limit = Some(2);
+        let results = Supervisor::new()
+            .unwrap()
+            .run_requests(vec![
+                refused,
+                shell_request("printf accepted"),
+                timed,
+                overflow,
+                shell_request("exit 7"),
+            ])
+            .await;
+        assert!(results[0].result.is_err());
+        assert!(results[1].result.as_ref().unwrap().success);
+        assert_eq!(results[1].result.as_ref().unwrap().stdout, b"accepted");
+        for index in [2, 3, 4] {
+            let result = results[index].result.as_ref().unwrap();
+            assert!(!result.success);
+            assert!(!result.cancelled);
+        }
+        assert!(
+            results[2]
+                .result
+                .as_ref()
+                .unwrap()
+                .detail
+                .as_ref()
+                .unwrap()
+                .contains("deadline")
+        );
+        assert!(results[2].duration_ms >= 30);
+        assert!(
+            results[3]
+                .result
+                .as_ref()
+                .unwrap()
+                .detail
+                .as_ref()
+                .unwrap()
+                .contains("capture limit")
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn batch_cancellation_stops_and_reaps_every_process_group() {
+        for reason in [
+            ChildCancellation::Interrupted,
+            ChildCancellation::SupervisionFailed,
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let requests = ["first", "second"].map(|name| {
+                let mut request = shell_request(
+                    "trap 'exit 0' TERM\n/bin/sh -c 'trap \"\" TERM; printf \"%s\" \"$$\" > \"$TEST_ROOT/$TEST_NAME-descendant\"; while :; do sleep 1; done' &\nprintf '%s' \"$$\" > \"$TEST_ROOT/$TEST_NAME-parent\"\nwait",
+                );
+                request.timeout = None;
+                request.command.env("TEST_ROOT", directory.path()).env("TEST_NAME", name);
+                request
+            });
+            let paths = [
+                "first-parent",
+                "first-descendant",
+                "second-parent",
+                "second-descendant",
+            ]
+            .map(|name| directory.path().join(name));
+            let cancellation = async {
+                tokio::time::timeout(Duration::from_secs(3), async {
+                    while paths.iter().any(|path| {
+                        std::fs::read_to_string(path)
+                            .ok()
+                            .and_then(|value| value.parse::<u32>().ok())
+                            .is_none_or(|pid| pid <= 1)
+                    }) {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .expect("both child groups must start");
+                reason
+            };
+            let results = run_children(requests.into(), cancellation).await;
+            for result in results {
+                let result = result.result.unwrap();
+                assert!(!result.success);
+                assert_eq!(result.cancelled, reason.is_user_cancelled());
+                assert!(result.detail.unwrap().starts_with(reason.detail()));
+            }
+            for path in paths {
+                let pid = std::fs::read_to_string(&path).unwrap();
+                let parent = path
+                    .file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .ends_with("-parent");
+                tokio::time::timeout(Duration::from_secs(2), async {
+                    loop {
+                        let process = tokio::process::Command::new("/bin/ps")
+                            .args(["-o", "stat=", "-p", &pid])
+                            .output()
+                            .await
+                            .unwrap();
+                        let state = String::from_utf8(process.stdout).unwrap();
+                        if state.trim().is_empty() || (!parent && state.trim().starts_with('Z')) {
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .unwrap_or_else(|_| panic!("process {pid} was not stopped and parent reaped"));
+            }
+        }
+    }
 
     #[test]
     fn unsupported_or_ambiguous_cli_versions_are_refused() {
