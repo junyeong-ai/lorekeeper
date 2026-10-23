@@ -6,8 +6,8 @@ use serde_json::Value;
 
 use super::super::resources::Subject;
 use super::{
-    Consumption, Publication, Seal, StoredOutput, Work, fail, output_path, read_optional,
-    require_id, require_settled, revision, work_path,
+    Consumption, FinalizationAction, Publication, Seal, StoredOutput, Work, fail, output_path,
+    read_optional, require_id, require_settled, revision, work_path,
 };
 
 #[derive(Default)]
@@ -143,6 +143,7 @@ fn capture_retention(root: &Path, id: &str, cutoff: i64) -> miette::Result<Reten
         "assessment.json",
         "publication.json",
         "consumption.json",
+        "finalization-action.json",
     ]
     .into_iter()
     .map(|name| work_path(id, name))
@@ -173,6 +174,12 @@ fn capture_retention(root: &Path, id: &str, cutoff: i64) -> miette::Result<Reten
         }
         let raw = read_optional(root, &path)?
             .ok_or_else(|| fail("work artifact disappeared during retention capture"))?;
+        if path
+            .file_name()
+            .is_some_and(|name| name == "finalization-action.json")
+        {
+            FinalizationAction::decode(&raw, &work)?;
+        }
         if path.parent() == Some(directory.join("nodes").as_path()) {
             let stored: StoredOutput = serde_json::from_str(&raw).map_err(fail)?;
             if stored.output.work_id != id
@@ -502,6 +509,67 @@ mod tests {
         session.apply(plan).unwrap();
     }
 
+    fn record_action(work: &Work, session: &MutationSession, resources: &[SemanticResource]) {
+        let completed = work.result(session.root(), resources).unwrap();
+        let request = json!({"work":completed,"instructions":"historical generation rules"});
+        let plan = work
+            .plan_finalization_action(
+                session.root(),
+                resources,
+                &completed,
+                &request,
+                "Explicit review was required.".into(),
+            )
+            .unwrap();
+        session.apply(plan).unwrap();
+    }
+
+    #[test]
+    fn expired_completed_action_receipts_are_cleaned_without_current_input_checks() {
+        let root = tempfile::tempdir().unwrap();
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let source = resources();
+        let work =
+            Work::create(&session, &source, "subject", context("subject"), limits()).unwrap();
+        publish(&work, &session, &source);
+        record_action(&work, &session, &source);
+        let directory = root.path().join(work_path(&work.plan.id, "").unwrap());
+        let cutoff = jiff::Timestamp::now().as_second() + 1;
+        assert_eq!(
+            prune_published(root.path(), None, cutoff).unwrap().removed,
+            1
+        );
+        assert!(directory.exists());
+        assert_eq!(
+            prune_published(root.path(), Some(&session), cutoff)
+                .unwrap()
+                .removed,
+            1
+        );
+        assert!(!directory.exists());
+    }
+
+    #[test]
+    fn malformed_action_receipts_refuse_retention_without_deleting_completed_work() {
+        let root = tempfile::tempdir().unwrap();
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let source = resources();
+        let work =
+            Work::create(&session, &source, "subject", context("subject"), limits()).unwrap();
+        publish(&work, &session, &source);
+        record_action(&work, &session, &source);
+        let path = root
+            .path()
+            .join(work_path(&work.plan.id, "finalization-action.json").unwrap());
+        std::fs::write(&path, "{}").unwrap();
+        let cutoff = jiff::Timestamp::now().as_second() + 1;
+        for mode in [None, Some(&session)] {
+            assert!(prune_published(root.path(), mode, cutoff).is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), b"{}");
+            assert!(Work::load(root.path(), &work.plan.id).is_ok());
+        }
+    }
+
     #[test]
     fn pending_queue_keeps_its_published_work_and_reuse_ancestors_without_blocking_other_cleanup() {
         let root = tempfile::tempdir().unwrap();
@@ -511,6 +579,7 @@ mod tests {
         let ancestor =
             Work::create(&session, &source, "ancestor", context("ancestor"), limits()).unwrap();
         publish(&ancestor, &session, &source);
+        record_action(&ancestor, &session, &source);
         let middle =
             Work::create(&session, &source, "middle", context("middle"), limits()).unwrap();
         middle
@@ -543,6 +612,7 @@ mod tests {
             )
             .unwrap();
         publish(&current, &session, &source);
+        record_action(&current, &session, &source);
         let independent = Work::create(
             &session,
             &source,

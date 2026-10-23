@@ -174,6 +174,7 @@ mod native {
     enum WorkStep {
         Pending,
         Staged,
+        Deferred(String),
         Failed,
     }
 
@@ -543,7 +544,7 @@ mod native {
                 WorkRole::Screening => {
                     execution::observation::build_screening_invocation(profile, request)
                 }
-                WorkRole::Finalizer => unreachable!("finalizers use the interactive consumer"),
+                WorkRole::Finalizer => execution::finalization::build_invocation(profile, request),
             }?;
             invocation
                 .command
@@ -1064,6 +1065,83 @@ mod native {
             }
         }
 
+        async fn finalize_section(
+            &mut self,
+            id: &str,
+            section: crate::commands::work::SectionFinalization,
+            metrics: &mut WorkStepMetrics,
+        ) -> WorkStep {
+            let Some(reply) = self
+                .request_observation(section.request.clone(), metrics)
+                .await
+            else {
+                return WorkStep::Failed;
+            };
+            let (response, bytes) = match execution::finalization::decode(
+                reply.engine,
+                &reply.bytes,
+                section.max_response_bytes,
+            ) {
+                Ok(decoded) => decoded,
+                Err(error) => {
+                    self.failure("bounded section finalization", error);
+                    return WorkStep::Failed;
+                }
+            };
+            metrics.result_json_bytes = Some(bytes);
+            let started_at = Instant::now();
+            let (finished, action) = match response {
+                execution::finalization::SectionResponse::Complete(body) => (
+                    crate::commands::work::finish_section(
+                        &self.root,
+                        &self.config,
+                        &self.config_revision,
+                        id,
+                        section,
+                        body,
+                    ),
+                    None,
+                ),
+                execution::finalization::SectionResponse::NeedsAction(reason) => (
+                    crate::commands::work::record_finalization_action(
+                        &self.root,
+                        &self.config,
+                        &self.config_revision,
+                        id,
+                        section,
+                        reason.clone(),
+                    ),
+                    Some(reason),
+                ),
+            };
+            metrics.revalidation_record_duration_ms = Some(started_at.elapsed().as_millis() as u64);
+            match finished {
+                Ok(()) => match action {
+                    Some(reason) => {
+                        self.record(
+                            "bounded section action",
+                            StageState::Skipped,
+                            Some(reason.clone()),
+                        );
+                        WorkStep::Deferred(reason)
+                    }
+                    None => {
+                        metrics.outcome = WorkOutcome::Staged;
+                        self.record(
+                            "bounded work completion",
+                            StageState::Completed,
+                            Some(id.into()),
+                        );
+                        WorkStep::Staged
+                    }
+                },
+                Err(error) => {
+                    self.failure("bounded section finalization", error);
+                    WorkStep::Failed
+                }
+            }
+        }
+
         async fn bounded_step(&mut self, id: &str, skill: &str) -> WorkStep {
             let mut metrics = WorkStepMetrics::new(WorkRole::Finalizer);
             metrics.work_id = Some(id.into());
@@ -1115,6 +1193,39 @@ mod native {
                 Err(error) => {
                     self.result.work_telemetry.record(metrics);
                     self.failure("bounded work completion", error);
+                    return WorkStep::Failed;
+                }
+            }
+            let started_at = Instant::now();
+            let section = crate::commands::work::prepare_section_finalization(
+                &self.root,
+                &self.config,
+                &self.config_revision,
+                id,
+            );
+            *metrics
+                .preparation_duration_ms
+                .as_mut()
+                .expect("measured preparation") += started_at.elapsed().as_millis() as u64;
+            match section {
+                Ok(crate::commands::work::SectionPreparation::Interactive) => {}
+                Ok(crate::commands::work::SectionPreparation::NeedsAction(reason)) => {
+                    self.record(
+                        "bounded section action",
+                        StageState::Skipped,
+                        Some(reason.clone()),
+                    );
+                    self.result.work_telemetry.record(metrics);
+                    return WorkStep::Deferred(reason);
+                }
+                Ok(crate::commands::work::SectionPreparation::Ready(section)) => {
+                    let result = self.finalize_section(id, section, &mut metrics).await;
+                    self.result.work_telemetry.record(metrics);
+                    return result;
+                }
+                Err(error) => {
+                    self.result.work_telemetry.record(metrics);
+                    self.failure("bounded section finalization", error);
                     return WorkStep::Failed;
                 }
             }
@@ -1436,22 +1547,32 @@ mod native {
         }
 
         async fn dispatch_queue(&mut self) -> bool {
+            let mut blocked = std::collections::BTreeMap::<String, String>::new();
             'planning: loop {
                 let started_at = Instant::now();
                 self.result.queue_planning.attempts += 1;
                 let planned = self.queue_dispatches();
                 self.result.queue_planning.duration_ms += started_at.elapsed().as_millis() as u64;
-                let plan = match planned {
+                let mut plan = match planned {
                     Ok(plan) => plan,
                     Err(error) => return self.failure("queue planning", error),
                 };
+                plan.jobs.retain(|target, job| {
+                    if let QueueDispatch::Partitioned { id, .. } = job
+                        && let Some(reason) = blocked.get(id)
+                    {
+                        plan.deferred.insert(target.clone(), vec![reason.clone()]);
+                        return false;
+                    }
+                    true
+                });
                 let jobs = plan.jobs;
                 if jobs.is_empty() {
                     if let Some((target, reasons)) = plan.deferred.first_key_value() {
                         return self.failure(
                             "queue dependencies",
                             format!(
-                                "{} synthesis target(s) await source publication; {target}: {}; unfinished work retained",
+                                "{} queue target(s) await source publication or explicit action; {target}: {}; unfinished work retained",
                                 plan.deferred.len(),
                                 reasons.join("; ")
                             ),
@@ -1535,6 +1656,10 @@ mod native {
                         QueueDispatch::Partitioned { id, .. } => {
                             match self.bounded_step(id, "lore-process").await {
                                 WorkStep::Pending => continue,
+                                WorkStep::Deferred(reason) => {
+                                    blocked.insert(id.clone(), reason);
+                                    continue 'planning;
+                                }
                                 WorkStep::Failed => return false,
                                 WorkStep::Staged => {}
                             }
@@ -2139,6 +2264,10 @@ mod native {
                     }
                     match self.bounded_step(work, "lore-wiki").await {
                         WorkStep::Pending => continue,
+                        WorkStep::Deferred(reason) => {
+                            self.failure("bounded audit action", reason);
+                            return;
+                        }
                         WorkStep::Failed => return,
                         WorkStep::Staged => {}
                     }

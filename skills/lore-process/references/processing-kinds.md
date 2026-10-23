@@ -416,11 +416,15 @@ When `input.categories` is absent or empty, omit the field unconditionally.
 
 ## Per-kind target formatting
 
+### Concept-link targets
+
 - **`daily-concepts`, `document-concepts`**: nothing to format. These are the
   `extract-concepts` kinds, and they write a RESULT FILE rather than editing the
   target — `lore queue apply` writes both the concept pages and the origin
   page's links, through the same merge the synchronous ingest path uses. Report
   the concepts; the link format and slug rule are not yours to restate.
+
+### Work-log synthesis
 
 - **`work-log-synthesis`**: the input text contains personal events from
   multiple sources, each prefixed with `[source_id]`. Instead of a plain
@@ -441,6 +445,8 @@ When `input.categories` is absent or empty, omit the field unconditionally.
   Note decisions made, blockers encountered, and next steps. Skip trivial
   notifications (calendar accepts, read receipts, approvals). Preserve
   source links for traceability.
+
+### Synthesis narratives
 
 - **Synthesis narratives** (`weekly-*`, `monthly-*`, etc.): these pages
   contain multiple `## ` sections (period, categories, etc.) — only the one

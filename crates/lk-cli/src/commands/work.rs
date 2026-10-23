@@ -984,6 +984,204 @@ pub(super) fn record_inspection(
     work.record(&session, output, &prepared.resources)
 }
 
+pub(super) struct SectionFinalization {
+    pub request: Value,
+    pub max_response_bytes: usize,
+    completed: Value,
+    result: lk_queue::SectionResult,
+}
+
+pub(super) enum SectionPreparation {
+    Interactive,
+    Ready(SectionFinalization),
+    NeedsAction(String),
+}
+
+fn event_headings(body: &str) -> Vec<String> {
+    lk_core::markdown::root_headings(body)
+        .into_iter()
+        .filter(|heading| heading.level as usize == 3)
+        .map(|heading| body[heading.range].trim_end().to_owned())
+        .collect()
+}
+
+fn refinement_events(
+    root: &Path,
+    prepared: &Prepared,
+    task: &lk_queue::QueueTask,
+) -> miette::Result<Value> {
+    let owner = lk_vault::page_path(root, Path::new(&task.target.vault_path))
+        .into_diagnostic()?
+        .canonicalize()
+        .into_diagnostic()?;
+    let owner = owner.strip_prefix(root).into_diagnostic()?;
+    let raw = prepared
+        .pages
+        .get(owner)
+        .ok_or_else(|| miette::miette!("refinement target is absent from the captured scope"))?;
+    let anchor = task
+        .target
+        .anchor
+        .strip_prefix("## ")
+        .ok_or_else(|| miette::miette!("invalid refinement section anchor"))?;
+    let body = lk_vault::section_body(raw, anchor)
+        .ok_or_else(|| miette::miette!("missing refinement event section"))?;
+    let headings = lk_core::markdown::root_headings(body)
+        .into_iter()
+        .filter(|heading| heading.level as usize == 3)
+        .collect::<Vec<_>>();
+    let events = headings
+        .iter()
+        .enumerate()
+        .map(|(index, heading)| {
+            let end = headings
+                .get(index + 1)
+                .map_or(body.len(), |next| next.range.start);
+            let mut links = Vec::new();
+            lk_core::link::rewrite_links_outside_code(&body[heading.range.end..end], |link| {
+                links.push(format!("[{}]({})", link.raw_text, link.raw_destination));
+                None
+            });
+            json!({"heading":body[heading.range.clone()].trim_end(), "inline_links":links})
+        })
+        .collect::<Vec<_>>();
+    Ok(json!(events))
+}
+
+pub(super) fn prepare_section_finalization(
+    root: &Path,
+    config: &lk_core::config::Config,
+    config_revision: &str,
+    id: &str,
+) -> miette::Result<SectionPreparation> {
+    let root = root.canonicalize().into_diagnostic()?;
+    let (work, prepared) = load(&root, config, config_revision, id)?;
+    let Subject::Queue {
+        task_id,
+        cache_hash,
+        target_revision,
+        ..
+    } = &prepared.subject
+    else {
+        return Ok(SectionPreparation::Interactive);
+    };
+    let task = super::queue::current_task(&root, task_id)?;
+    if !super::execution::finalization::supports(task.kind) {
+        return Ok(SectionPreparation::Interactive);
+    }
+    let completed = work.result(&root, &prepared.resources)?;
+    let result = lk_queue::SectionResult {
+        task_id: task_id.clone(),
+        cache_hash: cache_hash.clone(),
+        target_revision: target_revision.clone(),
+        body: String::new(),
+    };
+    let envelope_bytes = serde_json::to_vec(&result).into_diagnostic()?.len();
+    let response_bytes = super::execution::finalization::empty_response_bytes();
+    let max_response_bytes = work
+        .plan
+        .max_result_bytes
+        .checked_sub(envelope_bytes)
+        .and_then(|limit| limit.checked_add(response_bytes))
+        .ok_or_else(|| miette::miette!("section result identity exceeds max_result_bytes"))?;
+    let events = (task.kind == lk_queue::TaskKind::RefineEvents)
+        .then(|| refinement_events(&root, &prepared, &task))
+        .transpose()?;
+    let request = super::execution::finalization::request(&completed, events, max_response_bytes)?;
+    if serde_json::to_vec(&request).into_diagnostic()?.len()
+        > config
+            .execution
+            .effective_work()
+            .map_err(|error| miette::miette!("{error}"))?
+            .max_input_bytes
+    {
+        return Err(miette::miette!(
+            "complete section finalizer request including generation rules exceeds max_input_bytes; existing work is retained"
+        ));
+    }
+    if let Some(reason) = work.load_finalization_action(&root, &request)? {
+        return Ok(SectionPreparation::NeedsAction(reason));
+    }
+    if completed["output"]["unresolved"]
+        .as_array()
+        .is_some_and(|items| !items.is_empty())
+    {
+        return Ok(SectionPreparation::NeedsAction(
+            "unresolved work concerns prevent section finalization".into(),
+        ));
+    }
+    Ok(SectionPreparation::Ready(SectionFinalization {
+        request,
+        completed,
+        result,
+        max_response_bytes,
+    }))
+}
+
+pub(super) fn record_finalization_action(
+    root: &Path,
+    config: &lk_core::config::Config,
+    config_revision: &str,
+    id: &str,
+    section: SectionFinalization,
+    reason: String,
+) -> miette::Result<()> {
+    let session = lk_vault::MutationSession::acquire(root).into_diagnostic()?;
+    let (work, prepared) = load(session.root(), config, config_revision, id)?;
+    let mut plan = work.plan_finalization_action(
+        session.root(),
+        &prepared.resources,
+        &section.completed,
+        &section.request,
+        reason,
+    )?;
+    prepared.guard_pages(&mut plan);
+    session.apply(plan).into_diagnostic()?;
+    Ok(())
+}
+
+pub(super) fn finish_section(
+    root: &Path,
+    config: &lk_core::config::Config,
+    config_revision: &str,
+    id: &str,
+    prepared_section: SectionFinalization,
+    body: String,
+) -> miette::Result<()> {
+    lk_core::markdown::validate_section_body(&body).into_diagnostic()?;
+    if let Some(events) = prepared_section.request["events"].as_array() {
+        let expected = events
+            .iter()
+            .map(|event| {
+                event["heading"]
+                    .as_str()
+                    .expect("native event heading")
+                    .to_owned()
+            })
+            .collect::<Vec<_>>();
+        if expected != event_headings(&body) {
+            return Err(miette::miette!(
+                "refinement must preserve the event heading sequence"
+            ));
+        }
+    }
+    let session = lk_vault::MutationSession::acquire(root).into_diagnostic()?;
+    let (work, prepared) = load(session.root(), config, config_revision, id)?;
+    let result = lk_queue::SectionResult {
+        body,
+        ..prepared_section.result
+    };
+    let (_, mutation) = plan_finish_expected(
+        &session,
+        &work,
+        &prepared,
+        serde_json::to_value(result).into_diagnostic()?,
+        Some(&prepared_section.completed),
+    )?;
+    session.apply(mutation).into_diagnostic()?;
+    Ok(())
+}
+
 pub(super) fn verify_finished(
     root: &Path,
     config: &lk_core::config::Config,
@@ -1313,6 +1511,16 @@ fn plan_finish(
     prepared: &Prepared,
     result: Value,
 ) -> miette::Result<(PathBuf, lk_vault::MutationPlan)> {
+    plan_finish_expected(session, work, prepared, result, None)
+}
+
+fn plan_finish_expected(
+    session: &lk_vault::MutationSession,
+    work: &Work,
+    prepared: &Prepared,
+    result: Value,
+    expected: Option<&Value>,
+) -> miette::Result<(PathBuf, lk_vault::MutationPlan)> {
     if prepared.context["purpose"]["extraction_scope"]["policy"] == "source-proposals-v1" {
         return Err(miette::miette!(
             "source observations support candidate screening; they cannot publish a final knowledge result"
@@ -1360,6 +1568,11 @@ fn plan_finish(
         ));
     }
     let completed = work.capture_completion(session.root(), &prepared.resources)?;
+    if expected.is_some_and(|expected| expected != completed.result()) {
+        return Err(miette::miette!(
+            "completed observations changed during section finalization; result retained without publication"
+        ));
+    }
     let unresolved = completed.result()["output"]["unresolved"]
         .as_array()
         .is_some_and(|items| !items.is_empty());

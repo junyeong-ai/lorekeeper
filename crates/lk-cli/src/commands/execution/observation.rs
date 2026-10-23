@@ -78,7 +78,7 @@ pub(in crate::commands) fn build_screening_invocation(
     )
 }
 
-fn build(
+pub(super) fn build(
     profile: &ExecutionProfile,
     input: &Value,
     response_schema: Value,

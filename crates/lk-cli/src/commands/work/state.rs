@@ -178,6 +178,40 @@ struct Consumption {
     consumed_at: jiff::Timestamp,
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FinalizationAction {
+    schema: String,
+    work_id: String,
+    root_node: String,
+    completion_revision: String,
+    request_revision: String,
+    reason: String,
+}
+
+impl FinalizationAction {
+    fn decode(raw: &str, work: &Work) -> miette::Result<Self> {
+        let value: Value = serde_json::from_str(raw).map_err(fail)?;
+        if !value.is_object() {
+            return Err(fail("finalization action receipt must be a JSON object"));
+        }
+        let action: Self = serde_json::from_value(value).map_err(fail)?;
+        let root = work.nodes()?.last().expect("nonempty work tree").id.clone();
+        if action.schema != "section-finalization-action-v1"
+            || action.work_id != work.plan.id
+            || action.root_node != root
+            || action.reason.trim().is_empty()
+        {
+            return Err(fail(
+                "invalid finalization action receipt identity or schema",
+            ));
+        }
+        require_id(&action.completion_revision)?;
+        require_id(&action.request_revision)?;
+        Ok(action)
+    }
+}
+
 struct Evaluation<'a> {
     inputs: SemanticInputs<'a>,
     nodes: Vec<Node>,
@@ -994,6 +1028,71 @@ impl Work {
         Ok(encoded(&request)?.len())
     }
 
+    pub fn load_finalization_action(
+        &self,
+        root: &Path,
+        request: &Value,
+    ) -> miette::Result<Option<String>> {
+        let Some(raw) =
+            read_optional(root, &work_path(&self.plan.id, "finalization-action.json")?)?
+        else {
+            return Ok(None);
+        };
+        let action = FinalizationAction::decode(&raw, self)?;
+        let request_revision =
+            lk_core::rss_original::digest(&serde_json::to_vec(request).map_err(fail)?);
+        if action.request_revision != request_revision {
+            return Ok(None);
+        }
+        if request["work"]["result_revision"].as_str() != Some(action.completion_revision.as_str())
+        {
+            return Err(fail(
+                "finalization action completion differs from its request",
+            ));
+        }
+        Ok(Some(action.reason))
+    }
+
+    pub fn plan_finalization_action(
+        &self,
+        root: &Path,
+        resources: &[SemanticResource],
+        expected: &Value,
+        request: &Value,
+        reason: String,
+    ) -> miette::Result<MutationPlan> {
+        let completed = self.capture_completion(root, resources)?;
+        if completed.result() != expected {
+            return Err(fail(
+                "completed observations changed before recording required finalization action",
+            ));
+        }
+        let action = FinalizationAction {
+            schema: "section-finalization-action-v1".into(),
+            work_id: self.plan.id.clone(),
+            root_node: completed.root_node,
+            completion_revision: completed.root_output_revision,
+            request_revision: lk_core::rss_original::digest(
+                &serde_json::to_vec(request).map_err(fail)?,
+            ),
+            reason,
+        };
+        let raw = encoded(&action)?;
+        FinalizationAction::decode(&raw, self)?;
+        let path = work_path(&self.plan.id, "finalization-action.json")?;
+        let before = read_optional(root, &path)?;
+        if let Some(before) = &before {
+            FinalizationAction::decode(before, self)?;
+        }
+        let mut plan = MutationPlan::default();
+        for (path, raw) in completed.guards {
+            plan.require_unchanged(path, raw);
+        }
+        plan.publish_expected(root, path, before, raw)
+            .map_err(fail)?;
+        Ok(plan)
+    }
+
     pub fn result(&self, root: &Path, resources: &[SemanticResource]) -> miette::Result<Value> {
         Ok(self.capture_completion(root, resources)?.result)
     }
@@ -1502,6 +1601,164 @@ mod tests {
                 )
                 .unwrap();
             }
+        }
+    }
+
+    #[test]
+    fn finalization_actions_bind_the_exact_request_and_refuse_corrupt_receipts() {
+        let root = tempfile::tempdir().unwrap();
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let mut source = resources();
+        source[0].text = "One guarded source observation.".into();
+        let work =
+            Work::create(&session, &source, "subject", context("subject"), limits()).unwrap();
+        finish(&work, &session, &source);
+        let completed = work.result(root.path(), &source).unwrap();
+        let request = json!({"work":completed,"instructions":"exact current generation rules"});
+        let plan = work
+            .plan_finalization_action(
+                root.path(),
+                &source,
+                &completed,
+                &request,
+                "Record a scoped review first.".into(),
+            )
+            .unwrap();
+        session.apply(plan).unwrap();
+        assert_eq!(
+            work.load_finalization_action(root.path(), &request)
+                .unwrap()
+                .as_deref(),
+            Some("Record a scoped review first.")
+        );
+        let mut changed = request.clone();
+        changed["instructions"] = json!("changed generation rules");
+        assert!(
+            work.load_finalization_action(root.path(), &changed)
+                .unwrap()
+                .is_none()
+        );
+        let path = root
+            .path()
+            .join(work_path(&work.plan.id, "finalization-action.json").unwrap());
+        let original = std::fs::read(&path).unwrap();
+        for corrupt in [b"{}".as_slice(), b"[]".as_slice()] {
+            std::fs::write(&path, corrupt).unwrap();
+            assert!(
+                work.load_finalization_action(root.path(), &changed)
+                    .is_err()
+            );
+            assert!(
+                work.plan_finalization_action(
+                    root.path(),
+                    &source,
+                    &completed,
+                    &changed,
+                    "Still needs review.".into()
+                )
+                .is_err()
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), corrupt);
+        }
+        std::fs::write(&path, original).unwrap();
+    }
+
+    #[test]
+    fn finalization_action_publication_guards_the_completed_observation_and_manifest() {
+        for changed_artifact in ["plan.json", "observation"] {
+            let root = tempfile::tempdir().unwrap();
+            let session = MutationSession::acquire(root.path()).unwrap();
+            let mut source = resources();
+            source[0].text = "One guarded source observation.".into();
+            let work =
+                Work::create(&session, &source, "subject", context("subject"), limits()).unwrap();
+            finish(&work, &session, &source);
+            let completed = work.result(root.path(), &source).unwrap();
+            let request = json!({"work":completed});
+            let mutation = work
+                .plan_finalization_action(
+                    root.path(),
+                    &source,
+                    &completed,
+                    &request,
+                    "Review required.".into(),
+                )
+                .unwrap();
+            let path = if changed_artifact == "observation" {
+                output_path(&work.plan.id, &work.plan.parts[0].id).unwrap()
+            } else {
+                work_path(&work.plan.id, changed_artifact).unwrap()
+            };
+            let path = root.path().join(path);
+            let before = std::fs::read_to_string(&path).unwrap();
+            std::fs::write(&path, format!("{before}\n")).unwrap();
+            assert!(session.apply(mutation).is_err());
+            assert!(
+                !root
+                    .path()
+                    .join(work_path(&work.plan.id, "finalization-action.json").unwrap())
+                    .exists()
+            );
+        }
+    }
+
+    #[test]
+    fn interrupted_finalization_actions_recover_only_with_unchanged_dependencies() {
+        for edit_receipted in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let session = MutationSession::acquire(root.path()).unwrap();
+            let mut source = resources();
+            source[0].text = "One guarded source observation.".into();
+            let work =
+                Work::create(&session, &source, "subject", context("subject"), limits()).unwrap();
+            finish(&work, &session, &source);
+            let completed = work.result(root.path(), &source).unwrap();
+            let request = json!({"work":completed});
+            let plan = work
+                .plan_finalization_action(
+                    root.path(),
+                    &source,
+                    &completed,
+                    &request,
+                    "Review required.".into(),
+                )
+                .unwrap();
+            let plan_revision = lk_core::concept::file_revision(&encoded(&plan).unwrap());
+            let plan = serde_json::to_value(plan).unwrap();
+            let steps = plan["steps"].as_array().unwrap();
+            let edit = steps.last().unwrap();
+            let action = root.path().join(edit["path"].as_str().unwrap());
+            let completed = steps.len() - usize::from(!edit_receipted);
+            drop(session);
+            let directory = root.path().join(".lorekeeper/mutation");
+            let pending = directory.join("pending.json");
+            let progress = directory.join("progress.json");
+            let journal = encoded(&json!({"version":1,"plan":plan})).unwrap();
+            std::fs::write(&pending, &journal).unwrap();
+            std::fs::write(&action, edit["after"].as_str().unwrap()).unwrap();
+            std::fs::write(&progress, encoded(&json!({
+                "plan_revision":plan_revision,"completed":completed,
+                "checksum":lk_core::concept::file_revision(&format!("{plan_revision}:{completed}")),
+            })).unwrap()).unwrap();
+            assert!(work.result(root.path(), &source).is_err());
+            assert_eq!(std::fs::read_to_string(&pending).unwrap(), journal);
+            let dependency = root
+                .path()
+                .join(output_path(&work.plan.id, &work.plan.parts[0].id).unwrap());
+            let original = std::fs::read(&dependency).unwrap();
+            std::fs::write(&dependency, "external edit").unwrap();
+            assert!(MutationSession::acquire(root.path()).is_err());
+            assert_eq!(std::fs::read_to_string(&pending).unwrap(), journal);
+            std::fs::write(&dependency, original).unwrap();
+            let _session = MutationSession::acquire(root.path()).unwrap();
+            assert!(!pending.exists());
+            assert!(!progress.exists());
+            assert_eq!(
+                work.load_finalization_action(root.path(), &request)
+                    .unwrap()
+                    .as_deref(),
+                Some("Review required.")
+            );
         }
     }
 
