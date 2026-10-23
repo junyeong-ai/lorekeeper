@@ -1,7 +1,7 @@
 """Bounded MLX recognition for requests routed by the owning Rust process."""
 
 PACKAGES = {
-    "mlx-vlm": "0.7.9", "mlx": "0.32.4", "transformers": "5.20.2",
+    "mlx-vlm": "0.7.10", "mlx": "0.32.4", "transformers": "5.20.2",
     "pillow": "13.0.0", "opencv-python": "5.0.0.93",
 }
 
