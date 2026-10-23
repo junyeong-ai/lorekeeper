@@ -556,10 +556,30 @@ pub(super) fn agent_command(
     if let Some(directory) = input_directory {
         command.arg("--add-dir").arg(directory);
     }
+    apply_profile_options(&mut command, profile);
+    Ok(command)
+}
+
+fn apply_profile_options(command: &mut tokio::process::Command, profile: &ExecutionProfile) {
     if let Some(model) = profile.model() {
         command.arg(format!("--model={model}"));
     }
-    Ok(command)
+    match profile {
+        ExecutionProfile::ClaudeCode { effort, .. } => {
+            if let Some(effort) = effort {
+                command.env("CLAUDE_CODE_EFFORT_LEVEL", effort.as_str());
+            }
+        }
+        ExecutionProfile::Codex {
+            model_reasoning_effort,
+            ..
+        } => {
+            if let Some(effort) = model_reasoning_effort {
+                let value = serde_json::Value::String(effort.clone());
+                command.args(["-c", &format!("model_reasoning_effort={value}")]);
+            }
+        }
+    }
 }
 
 fn claude_binary_permission(binary: &str) -> miette::Result<String> {
@@ -674,6 +694,82 @@ pub(super) fn executable_path(path: &Path) -> miette::Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn omitted_profile_options_preserve_child_inheritance() {
+        for engine in ["claude-code", "codex"] {
+            let profile: ExecutionProfile =
+                lk_core::yaml::from_str(&format!("engine: {engine}\ntimeout_seconds: 1")).unwrap();
+            let mut command = tokio::process::Command::new("host");
+            apply_profile_options(&mut command, &profile);
+            assert_eq!(command.as_std().get_args().count(), 0);
+            assert_eq!(command.as_std().get_envs().count(), 0);
+
+            command.env("CLAUDE_CODE_EFFORT_LEVEL", "xhigh");
+            apply_profile_options(&mut command, &profile);
+            assert_eq!(
+                command.as_std().get_envs().collect::<Vec<_>>(),
+                vec![(
+                    std::ffi::OsStr::new("CLAUDE_CODE_EFFORT_LEVEL"),
+                    Some(std::ffi::OsStr::new("xhigh"))
+                )]
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_profile_options_are_literal_and_child_local() {
+        for (engine, fields, expected) in [
+            (
+                "claude-code",
+                "model: claude-sonnet-5-5\neffort: medium",
+                vec!["--model=claude-sonnet-5-5".to_owned()],
+            ),
+            (
+                "codex",
+                "model: gpt-6.1-sol\nmodel_reasoning_effort: 'future \"level\"\\variant'",
+                vec![
+                    "--model=gpt-6.1-sol".to_owned(),
+                    "-c".to_owned(),
+                    "model_reasoning_effort=\"future \\\"level\\\"\\\\variant\"".to_owned(),
+                ],
+            ),
+        ] {
+            let profile: ExecutionProfile =
+                lk_core::yaml::from_str(&format!("engine: {engine}\ntimeout_seconds: 1\n{fields}"))
+                    .unwrap();
+            let mut command = tokio::process::Command::new("host");
+            command
+                .env("CLAUDE_CODE_EFFORT_LEVEL", "xhigh")
+                .env("CODEX_HOME", "/selected/account")
+                .env("HTTPS_PROXY", "http://127.0.0.1:9000");
+            apply_profile_options(&mut command, &profile);
+            assert_eq!(
+                command.as_std().get_args().collect::<Vec<_>>(),
+                expected
+                    .iter()
+                    .map(std::ffi::OsStr::new)
+                    .collect::<Vec<_>>()
+            );
+            let env: std::collections::BTreeMap<_, _> = command.as_std().get_envs().collect();
+            assert_eq!(
+                env[std::ffi::OsStr::new("CLAUDE_CODE_EFFORT_LEVEL")],
+                Some(std::ffi::OsStr::new(if engine == "claude-code" {
+                    "medium"
+                } else {
+                    "xhigh"
+                }))
+            );
+            assert_eq!(
+                env[std::ffi::OsStr::new("CODEX_HOME")],
+                Some(std::ffi::OsStr::new("/selected/account"))
+            );
+            assert_eq!(
+                env[std::ffi::OsStr::new("HTTPS_PROXY")],
+                Some(std::ffi::OsStr::new("http://127.0.0.1:9000"))
+            );
+        }
+    }
 
     #[cfg(unix)]
     #[tokio::test]

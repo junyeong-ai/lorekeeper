@@ -176,6 +176,19 @@ SECTION
 esac
 "#;
 
+fn configure_profile_options(fixture: &Fixture, engine: &str) {
+    let fields = if engine == "claude-code" {
+        "model: claude-sonnet-5-5\n      effort: medium"
+    } else {
+        "model: gpt-6.1-sol\n      model_reasoning_effort: low"
+    };
+    let config = std::fs::read_to_string(&fixture.config).unwrap().replace(
+        &format!("      engine: {engine}\n"),
+        &format!("      engine: {engine}\n      {fields}\n"),
+    );
+    std::fs::write(&fixture.config, config).unwrap();
+}
+
 const RECORD_FIRST_AUDIT: &str = r#"
 "$LORE_BIN" wiki audit-plan > "$TEST_EXECUTION_ROOT/plan.json" || exit 31
 python3 - <<'ASSESS'
@@ -493,6 +506,12 @@ fn both_hosts_receive_distinct_contracts_and_exit_zero_does_not_prove_completion
             r#"python3 - "$@" <<'CHECK'
 import json, os, sys
 from pathlib import Path
+if sys.argv[1]=='exec':
+    assert '--model=gpt-6.1-sol' in sys.argv
+    assert 'model_reasoning_effort="low"' in sys.argv
+else:
+    assert '--model=claude-sonnet-5-5' in sys.argv
+    assert os.environ['CLAUDE_CODE_EFFORT_LEVEL']=='medium'
 prompt='\n'.join(sys.argv[1:])
 selection,_=json.JSONDecoder().raw_decode(prompt.split('Selected queue task manifest: ',1)[1])
 path=Path(selection)
@@ -503,6 +522,7 @@ assert path.parent.resolve() in granted, 'selection must be readable inside an e
 CHECK
 "#,
         );
+        configure_profile_options(&fixture, engine);
         fixture.ingest();
         fixture.settle_sections_for_interactive_contract();
         let (output, result) = fixture.run("process");
@@ -1139,7 +1159,14 @@ fn bounded_calls(fixture: &Fixture) -> Vec<serde_json::Value> {
 #[test]
 fn selected_profile_budget_reaches_controller_and_worker_commands() {
     for engine in ["claude-code", "codex"] {
-        let fixture = bounded_audit_fixture(engine, 64, RECORD_BOUNDED_AUDIT);
+        let fixture = bounded_audit_fixture(
+            engine,
+            64,
+            &format!(
+                "printf '%s' \"$CLAUDE_CODE_EFFORT_LEVEL\" > \"$TEST_EXECUTION_ROOT/effort\"\n{RECORD_BOUNDED_AUDIT}"
+            ),
+        );
+        configure_profile_options(&fixture, engine);
         let config = std::fs::read_to_string(&fixture.config).unwrap().replace(
             "      work: {extraction_context: full-context}\n",
             "      work: {max_input_bytes: 16384, max_result_bytes: 2048, max_calls: 1, extraction_context: full-context}\n",
@@ -1183,9 +1210,16 @@ fn selected_profile_budget_reaches_controller_and_worker_commands() {
         if engine == "codex" {
             assert!(arguments.contains("--sandbox\nread-only\n"));
             assert!(arguments.contains("--disable\nshell_tool\n"));
+            assert!(arguments.contains("--model=gpt-6.1-sol\n"));
+            assert!(arguments.contains("model_reasoning_effort=\"low\"\n"));
         } else {
             assert!(arguments.contains("--safe-mode\n--tools\n\n"));
             assert!(!arguments.contains("--plugin-dir"));
+            assert!(arguments.contains("--model=claude-sonnet-5-5\n"));
+            assert_eq!(
+                std::fs::read_to_string(fixture.root().join("effort")).unwrap(),
+                "medium"
+            );
         }
         let cwd = std::fs::read_to_string(fixture.root().join("observation-cwd")).unwrap();
         assert_ne!(Path::new(cwd.trim()), fixture.root().join("vault"));

@@ -147,6 +147,28 @@ impl Default for SemanticWorkConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ClaudeCodeEffort {
+    Low,
+    Medium,
+    High,
+    Xhigh,
+    Max,
+}
+
+impl ClaudeCodeEffort {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Xhigh => "xhigh",
+            Self::Max => "max",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "engine", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum ExecutionProfile {
@@ -158,6 +180,8 @@ pub enum ExecutionProfile {
         #[serde(default)]
         model: Option<String>,
         #[serde(default)]
+        effort: Option<ClaudeCodeEffort>,
+        #[serde(default)]
         config_directory: Option<PathBuf>,
         timeout_seconds: NonZeroU64,
     },
@@ -168,6 +192,8 @@ pub enum ExecutionProfile {
         executable: PathBuf,
         #[serde(default)]
         model: Option<String>,
+        #[serde(default)]
+        model_reasoning_effort: Option<String>,
         #[serde(default)]
         profile: Option<String>,
         timeout_seconds: NonZeroU64,
@@ -254,6 +280,13 @@ impl ExecutionConfig {
             )?;
             if let Some(model) = profile.model() {
                 validate_text("execution model", model)?;
+            }
+            if let ExecutionProfile::Codex {
+                model_reasoning_effort: Some(effort),
+                ..
+            } = profile
+            {
+                validate_text("Codex model_reasoning_effort", effort)?;
             }
             match profile {
                 ExecutionProfile::ClaudeCode {
@@ -543,6 +576,101 @@ mod tests {
                 .resolve_profile(ExecutionOperation::Process, None)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn engine_options_are_optional_and_keep_the_hosts_own_value_contracts() {
+        let config = config();
+        assert!(matches!(
+            &config.profiles["main"],
+            ExecutionProfile::ClaudeCode { effort: None, .. }
+        ));
+        assert!(matches!(
+            &config.profiles["review"],
+            ExecutionProfile::Codex {
+                model_reasoning_effort: None,
+                ..
+            }
+        ));
+        for (engine, field) in [
+            ("claude-code", "effort"),
+            ("codex", "model_reasoning_effort"),
+        ] {
+            let config: ExecutionConfig = crate::yaml::from_str(&format!(
+                "profiles: {{x: {{engine: {engine}, {field}: null, timeout_seconds: 1}}}}"
+            ))
+            .unwrap();
+            config.validate().unwrap();
+            match &config.profiles["x"] {
+                ExecutionProfile::ClaudeCode { effort, .. } => assert!(effort.is_none()),
+                ExecutionProfile::Codex {
+                    model_reasoning_effort,
+                    ..
+                } => assert!(model_reasoning_effort.is_none()),
+            }
+        }
+        for effort in ["low", "medium", "high", "xhigh", "max"] {
+            let config: ExecutionConfig = crate::yaml::from_str(&format!(
+                "profiles: {{x: {{engine: claude-code, effort: {effort}, timeout_seconds: 1}}}}"
+            ))
+            .unwrap();
+            config.validate().unwrap();
+            let ExecutionProfile::ClaudeCode {
+                effort: Some(actual),
+                ..
+            } = config.profiles["x"]
+            else {
+                panic!("missing Claude effort");
+            };
+            assert_eq!(actual.as_str(), effort);
+        }
+        for effort in [
+            "none",
+            "minimal",
+            "low",
+            "max",
+            "ultra",
+            "future-model-level",
+        ] {
+            let config: ExecutionConfig = crate::yaml::from_str(&format!(
+                "profiles: {{x: {{engine: codex, model_reasoning_effort: {effort}, timeout_seconds: 1}}}}"
+            ))
+            .unwrap();
+            config.validate().unwrap();
+            let ExecutionProfile::Codex {
+                model_reasoning_effort: Some(actual),
+                ..
+            } = &config.profiles["x"]
+            else {
+                panic!("missing Codex reasoning effort");
+            };
+            assert_eq!(actual, effort);
+        }
+    }
+
+    #[test]
+    fn engine_options_refuse_cross_engine_fields_and_invalid_values() {
+        for body in [
+            "profiles: {x: {engine: codex, effort: low, timeout_seconds: 1}}",
+            "profiles: {x: {engine: claude-code, model_reasoning_effort: low, timeout_seconds: 1}}",
+            "profiles: {x: {engine: claude-code, effort: ultracode, timeout_seconds: 1}}",
+            "profiles: {x: {engine: claude-code, effort: automatic, timeout_seconds: 1}}",
+            "effort: low",
+            "profiles: {x: {engine: codex, model_reasoning_effort: 1, timeout_seconds: 1}}",
+        ] {
+            assert!(
+                crate::yaml::from_str::<ExecutionConfig>(body).is_err(),
+                "{body}"
+            );
+        }
+        for effort in ["", " low", "low ", "low\n", "low\0"] {
+            let body = format!(
+                "profiles: {{x: {{engine: codex, model_reasoning_effort: {}, timeout_seconds: 1}}}}",
+                serde_json::to_string(effort).unwrap()
+            );
+            let config: ExecutionConfig = crate::yaml::from_str(&body).unwrap();
+            assert!(config.validate().is_err(), "{effort:?}");
+        }
     }
 
     #[test]
