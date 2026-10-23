@@ -1261,6 +1261,64 @@ fn inputs_selected(
     Ok(result)
 }
 
+/// Load exact subject inputs together within one planning checkpoint. This does not
+/// select an audit batch, limit evidence, or record completion. Returned subjects
+/// follow the requested order; every dependency retains its current revision checks.
+pub fn load_selected_inputs(
+    root: &Path,
+    dirs: &VaultDirs,
+    pages: &[ScannedPage],
+    selection: &[String],
+) -> Result<Vec<AuditCandidate>, GraphError> {
+    let unique = selection
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    if unique.len() != selection.len() {
+        return Err(error("audit selection requires distinct paths"));
+    }
+    if selection.is_empty() {
+        return Ok(Vec::new());
+    }
+    let (_, receipts) = load(root)?;
+    let candidates = inputs_selected(root, dirs, pages, &receipts, Some(&unique))?;
+    let selected = select_candidates(&candidates, selection, &receipts)?;
+    measure_inputs(root, &selected, u64::MAX)?;
+    Ok(selected)
+}
+
+fn select_candidates(
+    candidates: &[AuditCandidate],
+    selection: &[String],
+    receipts: &Receipts,
+) -> Result<Vec<AuditCandidate>, GraphError> {
+    if selection.is_empty() {
+        return Ok(Vec::new());
+    }
+    let by_path = candidates
+        .iter()
+        .map(|candidate| (candidate.path.as_str(), candidate))
+        .collect::<BTreeMap<_, _>>();
+    selection
+        .iter()
+        .map(|path| {
+            let mut candidate = by_path
+                .get(path.as_str())
+                .copied()
+                .cloned()
+                .ok_or_else(|| {
+                    error("audit selection is not an exact concept or document address")
+                })?;
+            candidate.reason = match receipts.entries.get(path) {
+                Some(receipt) if receipt_is_current(receipt, &candidate) => "current",
+                Some(_) => "changed",
+                None => "unreviewed",
+            };
+            Ok(candidate)
+        })
+        .collect()
+}
+
 fn receipt_is_current(receipt: &AuditAssessment, candidate: &AuditCandidate) -> bool {
     receipt.input_revision == candidate.input_revision
         && candidate
@@ -1511,20 +1569,7 @@ fn plan_selected_inner(
         }
     }
     let total = candidates.len();
-    let mut selected = Vec::new();
-    for path in selection {
-        let mut candidate = candidates
-            .iter()
-            .find(|candidate| candidate.path == *path)
-            .ok_or_else(|| error("audit selection is not an exact concept or document address"))?
-            .clone();
-        candidate.reason = match receipts.entries.get(path) {
-            Some(receipt) if receipt_is_current(receipt, &candidate) => "current",
-            Some(_) => "changed",
-            None => "unreviewed",
-        };
-        selected.push(candidate);
-    }
+    let selected = select_candidates(&candidates, selection, &receipts)?;
     let (pending, counts_by_kind) = pending(candidates, &receipts);
     receipts.pending = pending
         .iter()
@@ -1875,6 +1920,212 @@ mod tests {
             serde_json::to_vec(&expected).unwrap(),
             serde_json::to_vec(&actual).unwrap()
         );
+    }
+
+    #[test]
+    fn selected_inputs_match_individual_plans_in_requested_order_and_scope() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let a = "wiki/concepts/a.md";
+        let b = "wiki/concepts/b.md";
+        let source = "wiki/documents/source.md";
+        let unrelated = "wiki/documents/unrelated.md";
+        let source_body = "---\ntype: document\n---\nProduction retention evidence.\n[A](../concepts/a.md) [B](../concepts/b.md)\n";
+        write(root.path(), a, "---\ntype: concept\n---\nA claim.\n");
+        write(root.path(), b, "---\ntype: concept\n---\nB claim.\n");
+        write(root.path(), source, source_body);
+        write(
+            root.path(),
+            unrelated,
+            "---\ntype: document\n---\nUnrelated.\n",
+        );
+        write(
+            root.path(),
+            "wiki/explorations/review.md",
+            &review_body(
+                a,
+                source,
+                &source_revision(&lk_vault::parse_page(source_body).unwrap()),
+            ),
+        );
+        let pages = scan(root.path());
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let initial = plan_selected(root.path(), &dirs, &pages, 1, &[a.into()], u64::MAX)
+            .unwrap()
+            .candidates
+            .remove(0);
+        record_discovery(
+            &session,
+            &dirs,
+            &pages,
+            AuditDiscoveryRequest {
+                path: a.into(),
+                file_revision: initial.file_revision,
+                queries: vec![lk_vault::DiscoveryQuery {
+                    query: "production retention".into(),
+                    phrase: true,
+                    spacing: false,
+                }],
+            },
+        )
+        .unwrap();
+        let (_, mut receipts) = load(root.path()).unwrap();
+        for path in [a, b] {
+            let candidate = plan_selected(root.path(), &dirs, &pages, 1, &[path.into()], u64::MAX)
+                .unwrap()
+                .candidates
+                .remove(0);
+            receipts.entries.insert(path.into(), assessment(&candidate));
+        }
+        receipts.discovery.insert(
+            unrelated.into(),
+            DiscoveryPlan {
+                subject_revision: pages
+                    .iter()
+                    .find(|page| page.path == Path::new(unrelated))
+                    .unwrap()
+                    .revision
+                    .clone()
+                    .unwrap(),
+                queries: Vec::new(),
+            },
+        );
+        write(
+            root.path(),
+            STATE,
+            &serde_json::to_string(&receipts).unwrap(),
+        );
+        write(
+            root.path(),
+            b,
+            "---\ntype: concept\n---\nChanged B claim.\n",
+        );
+        let pages = scan(root.path());
+        let selection = [source, b, a].map(str::to_owned);
+        let before = std::fs::read(root.path().join(STATE)).unwrap();
+        let expected = selection
+            .iter()
+            .map(|path| {
+                plan_selected(
+                    root.path(),
+                    &dirs,
+                    &pages,
+                    1,
+                    std::slice::from_ref(path),
+                    u64::MAX,
+                )
+                .unwrap()
+                .candidates
+                .remove(0)
+            })
+            .collect::<Vec<_>>();
+        let actual = load_selected_inputs(root.path(), &dirs, &pages, &selection).unwrap();
+        assert_eq!(
+            serde_json::to_vec(&actual).unwrap(),
+            serde_json::to_vec(&expected).unwrap()
+        );
+        assert_eq!(
+            actual
+                .iter()
+                .map(|candidate| candidate.reason)
+                .collect::<Vec<_>>(),
+            ["unreviewed", "changed", "current"]
+        );
+        assert_eq!(actual[2].evidence.len(), 1);
+        assert_eq!(actual[2].reviews.len(), 1);
+        assert!(actual[2].discovery.is_some());
+        assert_eq!(actual[0].related_pages.len(), 2);
+        assert_eq!(std::fs::read(root.path().join(STATE)).unwrap(), before);
+    }
+
+    #[test]
+    fn selected_inputs_have_no_audit_batch_limit_and_reject_inexact_selection() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let selection = (0..101)
+            .rev()
+            .map(|number| {
+                let path = format!("wiki/concepts/subject-{number:03}.md");
+                write(root.path(), &path, "---\ntype: concept\n---\nA claim.\n");
+                path
+            })
+            .collect::<Vec<_>>();
+        let pages = scan(root.path());
+        let actual = load_selected_inputs(root.path(), &dirs, &pages, &selection).unwrap();
+        assert_eq!(
+            actual
+                .iter()
+                .map(|candidate| &candidate.path)
+                .collect::<Vec<_>>(),
+            selection.iter().collect::<Vec<_>>()
+        );
+        assert!(plan_selected(root.path(), &dirs, &pages, 101, &selection, u64::MAX).is_err());
+        assert!(
+            load_selected_inputs(
+                root.path(),
+                &dirs,
+                &pages,
+                &[selection[0].clone(), selection[0].clone()],
+            )
+            .is_err()
+        );
+        assert!(
+            load_selected_inputs(
+                root.path(),
+                &dirs,
+                &pages,
+                &["wiki/concepts/missing.md".into()]
+            )
+            .is_err()
+        );
+        assert!(
+            load_selected_inputs(root.path(), &dirs, &pages, &[])
+                .unwrap()
+                .is_empty()
+        );
+        assert!(!root.path().join(STATE).exists());
+    }
+
+    #[test]
+    fn selected_inputs_preserve_subject_evidence_and_review_mutation_guards() {
+        let dirs = VaultDirs::default();
+        let subject = "wiki/concepts/a.md";
+        let source = "wiki/documents/source.md";
+        let review = "wiki/explorations/review.md";
+        for changed in [subject, source, review] {
+            let root = tempfile::tempdir().unwrap();
+            let source_body = "---\ntype: document\n---\nSource evidence.\n[A](../concepts/a.md)\n";
+            write(root.path(), subject, "---\ntype: concept\n---\nA claim.\n");
+            write(root.path(), source, source_body);
+            write(
+                root.path(),
+                review,
+                &review_body(
+                    subject,
+                    source,
+                    &source_revision(&lk_vault::parse_page(source_body).unwrap()),
+                ),
+            );
+            let pages = scan(root.path());
+            let selected =
+                load_selected_inputs(root.path(), &dirs, &pages, &[subject.into()]).unwrap();
+            let raw = std::fs::read_to_string(root.path().join(changed)).unwrap();
+            write(root.path(), changed, &(raw + "Changed after capture.\n"));
+            assert!(
+                measure_inputs(root.path(), &selected, u64::MAX).is_err(),
+                "{changed}"
+            );
+            assert!(
+                guard_candidate(&mut MutationPlan::default(), root.path(), &selected[0]).is_err(),
+                "{changed}"
+            );
+            if changed != review {
+                assert!(
+                    load_selected_inputs(root.path(), &dirs, &pages, &[subject.into()]).is_err(),
+                    "{changed}"
+                );
+            }
+        }
     }
 
     #[test]
