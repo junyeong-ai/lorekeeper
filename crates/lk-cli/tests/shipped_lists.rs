@@ -554,10 +554,8 @@ fn every_source_in_the_example_config_validates_against_its_adapter() {
     assert!(checked > 0, "the example config declares no sources");
 }
 
-/// `rust-version` is the one the toolchain enforces, and the READMEs are the only other place it
-/// belongs: they are what a person reads to decide whether they can build this. CI reads it out of
-/// the manifest, so a restatement there would be a fourth copy of one number and there is nothing
-/// in the workflow to compare.
+/// Source builds follow the checked-in stable toolchain. CI and user guidance must
+/// enforce the same declared support floor.
 #[test]
 fn both_readmes_state_the_msrv_the_manifest_declares() {
     let root = repo_root();
@@ -567,6 +565,16 @@ fn both_readmes_state_the_msrv_the_manifest_declares() {
         .find_map(|line| line.strip_prefix("rust-version = "))
         .map(|value| value.trim().trim_matches('"').to_string())
         .expect("workspace.package must declare rust-version");
+    let toolchain = read(&root.join("rust-toolchain.toml"));
+    let build = toolchain
+        .lines()
+        .find_map(|line| line.strip_prefix("channel = "))
+        .map(|value| value.trim().trim_matches('"'))
+        .expect("rust-toolchain.toml must pin a stable toolchain");
+    assert_eq!(
+        msrv, build,
+        "source support must follow the pinned stable toolchain"
+    );
 
     for readme in ["README.md", "README.en.md"] {
         let body = read(&root.join(readme));

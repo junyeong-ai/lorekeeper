@@ -227,39 +227,28 @@ jobs:
           shared-key: doc
       - run: cargo doc --locked --workspace --no-deps --all-features
 
-  # The MSRV is read out of the manifest rather than restated here. It used to appear in the job
-  # name and in the toolchain pin as well, so the one number lived in four places and nothing
-  # compared them — and neither copy is read by a human deciding whether they can build this,
-  # which is what the two READMEs are for.
   msrv:
     name: MSRV
+    needs: clippy
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.ref }}
           persist-credentials: false
-      - id: msrv
+      - name: Verify source-build support policy
         run: |
-          version=$(awk -F'"' '
-            /^[[:space:]]*\[workspace\.package\][[:space:]]*$/ { in_section = 1; next }
-            /^[[:space:]]*\[/                                   { in_section = 0 }
-            in_section && /^[[:space:]]*rust-version[[:space:]]*=/ { print $2; exit }
-          ' Cargo.toml)
-          [ -n "$version" ] || { echo "Cargo.toml declares no rust-version" >&2; exit 1; }
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master commit (2026-10-16)
-        with:
-          toolchain: ${{ steps.msrv.outputs.version }}
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-        with:
-          shared-key: msrv
-      # `+<toolchain>` rather than a bare `cargo`: `rust-toolchain.toml` pins the build
-      # toolchain for this checkout and would otherwise override the one installed above,
-      # turning the only job that tests the declared floor into a duplicate of `doc`.
-      - env:
-          MSRV: ${{ steps.msrv.outputs.version }}
-        run: cargo "+$MSRV" check --locked --workspace --all-targets --all-features
+          python3 - <<'PY'
+          import tomllib
+          from pathlib import Path
+          manifest = tomllib.loads(Path("Cargo.toml").read_text())
+          toolchain = tomllib.loads(Path("rust-toolchain.toml").read_text())
+          supported = manifest["workspace"]["package"]["rust-version"]
+          pinned = toolchain["toolchain"]["channel"]
+          if supported != pinned:
+              raise SystemExit(f"supported Rust {supported} differs from pinned toolchain {pinned}")
+          print(f"Clippy checks all targets/features with supported Rust {supported}")
+          PY
 
   audit:
     name: cargo audit

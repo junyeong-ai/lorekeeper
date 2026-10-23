@@ -42,16 +42,17 @@ gate doc
 RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps --all-features
 
 gate msrv
-msrv=$(awk -F'"' '
-  /^[[:space:]]*\[workspace\.package\][[:space:]]*$/ { in_section = 1; next }
-  /^[[:space:]]*\[/                                   { in_section = 0 }
-  in_section && /^[[:space:]]*rust-version[[:space:]]*=/ { print $2; exit }
-' Cargo.toml)
-[ -n "$msrv" ] || { echo "Cargo.toml declares no rust-version" >&2; exit 1; }
-# `+<toolchain>` rather than a bare `cargo`: `rust-toolchain.toml` pins the build toolchain for
-# this checkout and would otherwise override the declared floor, turning this into a duplicate
-# of the gate above it.
-cargo "+$msrv" check --locked --workspace --all-targets --all-features
+python3 - <<'PY'
+import tomllib
+from pathlib import Path
+manifest = tomllib.loads(Path("Cargo.toml").read_text())
+toolchain = tomllib.loads(Path("rust-toolchain.toml").read_text())
+supported = manifest["workspace"]["package"]["rust-version"]
+pinned = toolchain["toolchain"]["channel"]
+if supported != pinned:
+    raise SystemExit(f"supported Rust {supported} differs from pinned toolchain {pinned}")
+print(f"Clippy checks all targets/features with supported Rust {supported}")
+PY
 
 gate audit
 cargo audit --deny warnings
