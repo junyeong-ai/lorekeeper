@@ -201,6 +201,7 @@ mod native {
         jobs: std::collections::BTreeMap<String, QueueDispatch>,
         deferred: std::collections::BTreeMap<String, Vec<String>>,
         keys: std::collections::BTreeSet<String>,
+        needs_application: bool,
     }
 
     const MAX_PREPARED_QUEUE_TARGETS: usize = 64;
@@ -218,6 +219,16 @@ mod native {
         audit_captures: usize,
         prepared_targets: usize,
         discovery_captures: usize,
+    }
+
+    #[derive(Default, Serialize)]
+    struct QueueApplicationMetrics {
+        attempts: usize,
+        duration_ms: u64,
+        applied: usize,
+        dropped: usize,
+        rejected: usize,
+        latest: Option<crate::commands::queue::application::Report>,
     }
 
     #[derive(Serialize)]
@@ -264,6 +275,7 @@ mod native {
         operation: Operation,
         ok: bool,
         cancelled: bool,
+        halted: bool,
         duration_ms: u64,
         semantic_duration_ms: u64,
         execution: Option<ExecutionInfo>,
@@ -272,6 +284,7 @@ mod native {
         #[serde(flatten)]
         work_telemetry: WorkTelemetry,
         queue_planning: QueuePlanningMetrics,
+        queue_application: QueueApplicationMetrics,
         audit: Option<Vec<lk_graph::audit::AuditCompletion>>,
         audit_progress: Option<AuditProgress>,
         audit_blocked: Vec<lk_graph::audit::AuditBlockedInput>,
@@ -332,7 +345,12 @@ mod native {
         }
 
         fn failure(&mut self, name: &str, error: impl std::fmt::Display) -> bool {
+            self.result.halted = true;
             self.record(name, StageState::Failed, Some(error.to_string()))
+        }
+
+        fn deferred(&mut self, name: &str, detail: impl std::fmt::Display) -> bool {
+            self.record(name, StageState::Failed, Some(detail.to_string()))
         }
 
         fn configuration_is_current(&mut self) -> bool {
@@ -364,9 +382,33 @@ mod native {
             mut command: tokio::process::Command,
             timeout: Option<Duration>,
         ) -> bool {
-            if self.result.cancelled || !self.configuration_is_current() {
+            if self.result.halted || self.result.cancelled || !self.configuration_is_current() {
                 return false;
             }
+            self.configure_child(&mut command);
+            let completed = match self.supervisor.run(command, timeout, false).await {
+                Ok(result) => {
+                    if !result.success && self.lease.is_some() {
+                        self.result.halted = true;
+                    }
+                    self.record(
+                        name,
+                        if result.cancelled {
+                            StageState::Cancelled
+                        } else if result.success {
+                            StageState::Completed
+                        } else {
+                            StageState::Failed
+                        },
+                        result.detail,
+                    )
+                }
+                Err(error) => self.failure(name, error),
+            };
+            self.configuration_is_current() && completed
+        }
+
+        fn configure_child(&self, command: &mut tokio::process::Command) {
             if let Some(lease) = &self.lease {
                 lease.configure(command.as_std_mut());
             }
@@ -380,26 +422,17 @@ mod native {
             } else {
                 command.env_remove(EXECUTION_PROFILE_ENV);
             }
-            let completed = match self.supervisor.run(command, timeout, false).await {
-                Ok(result) => self.record(
-                    name,
-                    if result.cancelled {
-                        StageState::Cancelled
-                    } else if result.success {
-                        StageState::Completed
-                    } else {
-                        StageState::Failed
-                    },
-                    result.detail,
-                ),
-                Err(error) => self.failure(name, error),
-            };
-            self.configuration_is_current() && completed
         }
 
         async fn native(&mut self, name: &str, args: &[&str]) -> bool {
-            if self.result.cancelled || !self.configuration_is_current() {
+            if self.result.halted || self.result.cancelled || !self.configuration_is_current() {
                 return false;
+            }
+            if args == ["queue", "apply"] {
+                return self.apply_queue(name).await;
+            }
+            if args == ["queue", "check"] {
+                return self.check_queue(name);
             }
             match execution::lore_command(self.opts, args) {
                 Ok(command) => self.child(name, command, None).await,
@@ -407,8 +440,106 @@ mod native {
             }
         }
 
-        async fn acquire(&mut self, wait: bool) -> bool {
+        fn check_queue(&mut self, name: &str) -> bool {
+            let state = match crate::commands::queue::check::inspect(&self.root) {
+                Ok(state) => state,
+                Err(error) => return self.failure(name, error),
+            };
+            if state.pending_mutation || state.unreadable != 0 || state.unparseable_lines != 0 {
+                return self.failure(name, "queue contains an interrupted mutation or unknown inputs; inspect `lore queue check`");
+            }
+            if !state.staged_results.is_empty()
+                && let Err(error) =
+                    crate::commands::queue::readiness::InputReadiness::load(&self.root)
+            {
+                return self.failure(name, error);
+            }
+            if state.is_settled() {
+                return self.record(name, StageState::Completed, None);
+            }
+            self.deferred(
+                name,
+                format!(
+                    "{} current tasks and {} staged results remain; inspect `lore queue check`",
+                    state.current,
+                    state.staged_results.len()
+                ),
+            )
+        }
+
+        async fn apply_queue(&mut self, name: &str) -> bool {
+            let mut command =
+                match execution::lore_command(self.opts, &["queue", "apply", "--json"]) {
+                    Ok(command) => command,
+                    Err(error) => return self.failure(name, error),
+                };
+            self.configure_child(&mut command);
+            let started_at = Instant::now();
+            self.result.queue_application.attempts += 1;
+            let outcome = self
+                .supervisor
+                .run_with_output(command, None, Some(8 * 1024 * 1024))
+                .await;
+            self.result.queue_application.duration_ms += started_at.elapsed().as_millis() as u64;
+            let outcome = match outcome {
+                Ok(outcome) => outcome,
+                Err(error) => return self.failure(name, error),
+            };
+            if outcome.cancelled {
+                self.record(name, StageState::Cancelled, outcome.detail);
+                return false;
+            }
             if !self.configuration_is_current() {
+                return false;
+            }
+            let report: crate::commands::queue::application::Report =
+                match serde_json::from_slice(&outcome.stdout) {
+                    Ok(report) => report,
+                    Err(error) => {
+                        return self.failure(
+                            name,
+                            format!("queue application report is unavailable or invalid: {error}"),
+                        );
+                    }
+                };
+            if outcome.success != report.ok || outcome.exit_code != Some(i32::from(!report.ok)) {
+                return self.failure(
+                    name,
+                    "queue application report disagrees with its process exit",
+                );
+            }
+            let can_continue = report.can_continue();
+            self.result.queue_application.applied += report.applied;
+            self.result.queue_application.dropped += report.dropped;
+            self.result.queue_application.rejected += report.rejected;
+            let detail = format!(
+                "{} applied, {} dropped, {} rejected; {}",
+                report.applied,
+                report.dropped,
+                report.rejected,
+                if can_continue {
+                    "independent work may continue"
+                } else {
+                    "unsafe or unknown state stops further work"
+                }
+            );
+            let success = report.ok;
+            self.result.queue_application.latest = Some(report);
+            self.record(
+                name,
+                if success {
+                    StageState::Completed
+                } else {
+                    StageState::Failed
+                },
+                Some(detail),
+            );
+            self.result.halted |= !can_continue;
+            can_continue
+        }
+
+        async fn acquire(&mut self, wait: bool) -> bool {
+            if self.result.halted || self.result.cancelled || !self.configuration_is_current() {
                 return false;
             }
             match self
@@ -500,7 +631,7 @@ mod native {
             operation: &str,
             input_directory: Option<&Path>,
         ) -> bool {
-            if self.result.cancelled || !self.configuration_is_current() {
+            if self.result.halted || self.result.cancelled || !self.configuration_is_current() {
                 return false;
             }
             if self.config.llm.provider == lk_core::config::LlmProvider::Noop {
@@ -511,7 +642,7 @@ mod native {
                 Err(error) => return self.failure("semantic work budget", error),
             };
             if self.result.semantic_calls >= budget.max_calls {
-                return self.failure("semantic call budget", "configured execution.work.max_calls exhausted; unfinished work is retained for the next run");
+                return self.deferred("semantic call budget", "configured execution.work.max_calls exhausted; unfinished work is retained for the next run");
             }
             if let Err(error) = self.prepare_agent().await {
                 return if self.result.cancelled {
@@ -594,7 +725,7 @@ mod native {
                     .expect("JSON request serializes")
                     .len(),
             );
-            if self.result.cancelled || !self.configuration_is_current() {
+            if self.result.halted || self.result.cancelled || !self.configuration_is_current() {
                 if self.result.cancelled {
                     metrics.outcome = WorkOutcome::Cancelled;
                 }
@@ -615,7 +746,7 @@ mod native {
                 }
             };
             if self.result.semantic_calls >= budget.max_calls {
-                self.failure("semantic call budget", "configured execution.work.max_calls exhausted; unfinished work is retained for the next run");
+                self.deferred("semantic call budget", "configured execution.work.max_calls exhausted; unfinished work is retained for the next run");
                 return None;
             }
             if let Err(error) = self.prepare_agent().await {
@@ -667,6 +798,7 @@ mod native {
                 }
             };
             if !child.success {
+                self.result.halted |= !child.cancelled;
                 metrics.outcome = if child.cancelled {
                     WorkOutcome::Cancelled
                 } else {
@@ -744,7 +876,7 @@ mod native {
         fn call_budget_available(&mut self) -> bool {
             match self.config.execution.effective_work() {
                 Ok(budget) if self.result.semantic_calls < budget.max_calls => true,
-                Ok(_) => self.failure("semantic call budget", "configured execution.work.max_calls exhausted; unfinished work is retained for the next run"),
+                Ok(_) => self.deferred("semantic call budget", "configured execution.work.max_calls exhausted; unfinished work is retained for the next run"),
                 Err(error) => self.failure("semantic work budget", error),
             }
         }
@@ -878,7 +1010,7 @@ mod native {
             if turns.is_empty() {
                 return None;
             }
-            if self.result.cancelled || !self.configuration_is_current() {
+            if self.result.halted || self.result.cancelled || !self.configuration_is_current() {
                 return Some(false);
             }
             if self.config.llm.provider == lk_core::config::LlmProvider::Noop {
@@ -962,6 +1094,7 @@ mod native {
                     Ok(child) if child.success => child,
                     Ok(child) => {
                         accepted = false;
+                        self.result.halted = true;
                         turn.metrics.outcome = WorkOutcome::Failed;
                         self.record("bounded work receipt", StageState::Failed, child.detail);
                         self.result.work_telemetry.record(turn.metrics);
@@ -1453,8 +1586,26 @@ mod native {
                 .map_err(|error| miette::miette!("{error}"))?;
             let mut deferred = std::collections::BTreeMap::new();
             let mut targets = std::collections::BTreeMap::new();
+            let rejected = crate::commands::queue::rejections::blocked_tasks(
+                session.root(),
+                &self.config,
+                &self.config_revision,
+            )?;
+            let mut needs_application = false;
             for task in owners.into_values() {
                 let target = task.target.vault_path.clone();
+                if let Some(rejection) =
+                    rejected.get(&(task.task_id.clone(), task.cache_hash.clone()))
+                {
+                    let owner = lk_vault::resolve_page_owner(session.root(), Path::new(&target))
+                        .map_err(|error| miette::miette!("rejected queue target: {error}"))?;
+                    if owner != Path::new(&rejection.owner) {
+                        return Err(miette::miette!("rejected result target owner changed"));
+                    }
+                    needs_application |= rejection.needs_revalidation;
+                    deferred.insert(target, vec![rejection.reason.clone()]);
+                    continue;
+                }
                 if task.kind == lk_queue::TaskKind::SynthesizeConcept {
                     let reasons = readiness
                         .as_mut()
@@ -1469,11 +1620,14 @@ mod native {
             }
             let mut keys = targets.keys().cloned().collect();
             let mut jobs = std::collections::BTreeMap::new();
-            if !targets.is_empty() && self.result.semantic_calls >= budget.max_calls {
+            if needs_application
+                || !targets.is_empty() && self.result.semantic_calls >= budget.max_calls
+            {
                 return Ok(QueuePlan {
                     jobs,
                     deferred,
                     keys,
+                    needs_application,
                 });
             }
             let order = scheduler::order(session.root(), scheduler::Stage::Queue, &keys)?;
@@ -1586,6 +1740,7 @@ mod native {
                 jobs,
                 deferred,
                 keys,
+                needs_application,
             })
         }
 
@@ -1631,6 +1786,9 @@ mod native {
         async fn dispatch_queue(&mut self) -> bool {
             let mut blocked = std::collections::BTreeMap::<String, String>::new();
             'planning: loop {
+                if self.result.halted || self.result.cancelled || !self.configuration_is_current() {
+                    return false;
+                }
                 self.queue_turn = None;
                 let started_at = Instant::now();
                 self.result.queue_planning.attempts += 1;
@@ -1640,13 +1798,19 @@ mod native {
                     Ok(plan) => plan,
                     Err(error) => return self.failure("queue planning", error),
                 };
+                if plan.needs_application {
+                    if !self.apply_queue("changed rejected-result validation").await {
+                        return false;
+                    }
+                    continue;
+                }
                 let jobs = plan.jobs;
                 if jobs.is_empty() {
                     if !plan.keys.is_empty() && !self.call_budget_available() {
                         return false;
                     }
                     if let Some((target, reasons)) = plan.deferred.first_key_value() {
-                        return self.failure(
+                        return self.deferred(
                             "queue dependencies",
                             format!(
                                 "{} queue target(s) await source publication or explicit action; {target}: {}; unfinished work retained",
@@ -1832,28 +1996,33 @@ mod native {
                             unreachable!("preparation restarts planning without publication")
                         }
                     };
-                    match crate::commands::queue::tasks_completed(&self.root, tasks) {
-                        Ok(true) => {}
-                        Ok(false) => {
-                            if matches!(jobs[&selected], QueueDispatch::WholeInput { .. }) {
-                                match self.expanded_extraction_handoff(tasks) {
-                                    Ok(true) => {
-                                        self.record("expanded extraction work", StageState::Completed, Some("discovery expanded unfinished extraction beyond the whole-input budget; replanning bounded inspections".into()));
-                                        continue 'planning;
-                                    }
-                                    Ok(false) => {}
-                                    Err(error) => {
-                                        return self.failure("selected queue receipt", error);
-                                    }
-                                }
-                            }
-                            return self.failure("selected queue receipt", "selected tasks are not completed against their retained inputs; unfinished work retained");
+                    let mut unfinished = Vec::new();
+                    for task in tasks {
+                        match crate::commands::queue::tasks_completed(
+                            &self.root,
+                            std::slice::from_ref(task),
+                        ) {
+                            Ok(true) => {}
+                            Ok(false) => unfinished.push(task.clone()),
+                            Err(error) => return self.failure("selected queue receipt", error),
                         }
-                        Err(error) => return self.failure("selected queue receipt", error),
                     }
-                    if tasks
-                        .iter()
-                        .any(|task| task.kind != lk_queue::TaskKind::SynthesizeConcept)
+                    let published_sources = self
+                        .result
+                        .queue_application
+                        .latest
+                        .as_ref()
+                        .is_some_and(|report| {
+                            report.groups.iter().any(|group| {
+                                matches!(
+                                    group.outcome,
+                                    crate::commands::queue::application::Outcome::Applied
+                                ) && group.identity.as_ref().is_some_and(|identity| {
+                                    identity.target.kind != lk_queue::TargetKind::ConceptSynthesis
+                                })
+                            })
+                        });
+                    if published_sources
                         && !self
                             .native(
                                 "queue publication reconciliation",
@@ -1863,13 +2032,43 @@ mod native {
                     {
                         return false;
                     }
+                    if !unfinished.is_empty() {
+                        let rejected = match crate::commands::queue::rejections::blocked_tasks(
+                            &self.root,
+                            &self.config,
+                            &self.config_revision,
+                        ) {
+                            Ok(rejected) => rejected,
+                            Err(error) => {
+                                return self.failure("selected queue rejection", error);
+                            }
+                        };
+                        if unfinished.iter().all(|task| {
+                            rejected.contains_key(&(task.task_id.clone(), task.cache_hash.clone()))
+                        }) {
+                            continue 'planning;
+                        }
+                        if matches!(jobs[&selected], QueueDispatch::WholeInput { .. }) {
+                            match self.expanded_extraction_handoff(&unfinished) {
+                                Ok(true) => {
+                                    self.record("expanded extraction work", StageState::Completed, Some("discovery expanded unfinished extraction beyond the whole-input budget; replanning bounded inspections".into()));
+                                    continue 'planning;
+                                }
+                                Ok(false) => {}
+                                Err(error) => {
+                                    return self.failure("selected queue receipt", error);
+                                }
+                            }
+                        }
+                        return self.failure("selected queue receipt", "selected tasks are not completed against their retained inputs; unfinished work retained");
+                    }
                     break;
                 }
             }
         }
 
         async fn drain(&mut self) -> bool {
-            if self.result.cancelled {
+            if self.result.halted || self.result.cancelled {
                 return false;
             }
             let state = match crate::commands::queue::check::inspect(&self.root) {
@@ -1911,7 +2110,7 @@ mod native {
                 }
                 _ => {
                     let completed = self.dispatch_queue().await;
-                    self.drain_blocked = !completed;
+                    self.drain_blocked = self.result.halted;
                     completed
                 }
             }
@@ -1934,6 +2133,49 @@ mod native {
                 ("queue completion", vec!["queue", "check"]),
             ] {
                 self.native(name, &args).await;
+            }
+        }
+
+        async fn inspect_halted_state(&mut self) {
+            if !self.result.halted || self.result.cancelled || !self.configuration_is_current() {
+                return;
+            }
+            for (name, args) in [
+                ("graph lint", vec!["graph", "lint"]),
+                ("knowledge reviews", vec!["wiki", "reviews", "--check"]),
+            ] {
+                if self.result.cancelled || !self.configuration_is_current() {
+                    return;
+                }
+                let mut command = match execution::lore_command(self.opts, &args) {
+                    Ok(command) => command,
+                    Err(error) => {
+                        self.failure(name, error);
+                        continue;
+                    }
+                };
+                self.configure_child(&mut command);
+                match self.supervisor.run(command, None, false).await {
+                    Ok(outcome) => {
+                        self.record(
+                            name,
+                            if outcome.cancelled {
+                                StageState::Cancelled
+                            } else if outcome.success {
+                                StageState::Completed
+                            } else {
+                                StageState::Failed
+                            },
+                            outcome.detail,
+                        );
+                    }
+                    Err(error) => {
+                        self.failure(name, error);
+                    }
+                }
+            }
+            if !self.result.cancelled && self.configuration_is_current() {
+                self.check_queue("queue completion");
             }
         }
 
@@ -2148,6 +2390,7 @@ mod native {
                 health.open, health.resolved, health.needs_reassessment, health.invalid,
             );
             let valid = health.invalid == 0;
+            self.result.halted |= !valid;
             self.result.review_health = Some(health);
             self.record(
                 "knowledge review health",
@@ -2162,7 +2405,7 @@ mod native {
 
         async fn knowledge(&mut self) {
             self.reconcile_audit_inputs().await;
-            if !self.result.ok || self.result.cancelled {
+            if self.result.halted || self.result.cancelled {
                 return;
             }
             self.audit().await;
@@ -2205,7 +2448,9 @@ mod native {
                 ("wiki refresh", vec!["wiki", "refresh"]),
                 ("graph lint", vec!["graph", "lint"]),
             ] {
-                self.native(name, &args).await;
+                if !self.native(name, &args).await {
+                    return;
+                }
             }
         }
 
@@ -2243,7 +2488,7 @@ mod native {
             }
             if plan.candidates.is_empty() {
                 if !self.result.audit_deferred.is_empty() {
-                    self.failure("audit dependencies", "pending subjects have unfinished semantic inputs; retained for later assessment");
+                    self.deferred("audit dependencies", "pending subjects have unfinished semantic inputs; retained for later assessment");
                     return;
                 }
                 self.result.audit = Some(Vec::new());
@@ -2386,6 +2631,13 @@ mod native {
                     {
                         return;
                     }
+                    self.audit_batch.get_or_insert_with(Vec::new).push(
+                        plan.candidates
+                            .iter()
+                            .find(|candidate| candidate.path == selected)
+                            .expect("prepared audit belongs to the selected batch")
+                            .clone(),
+                    );
                     jobs.remove(&selected);
                 }
             } else {
@@ -2465,7 +2717,17 @@ mod native {
             {
                 "blocked"
             } else if !result.ok {
-                "failed"
+                if result.halted {
+                    "failed"
+                } else if result
+                    .audit
+                    .as_ref()
+                    .is_some_and(|completed| !completed.is_empty())
+                {
+                    "batch-limit"
+                } else {
+                    "deferred"
+                }
             } else if result.audit.as_ref().is_some_and(Vec::is_empty)
                 && result
                     .audit_progress
@@ -2540,6 +2802,7 @@ mod native {
                 operation,
                 ok: true,
                 cancelled: false,
+                halted: false,
                 duration_ms: 0,
                 semantic_duration_ms: 0,
                 execution: None,
@@ -2547,6 +2810,7 @@ mod native {
                 semantic_calls: 0,
                 work_telemetry: WorkTelemetry::default(),
                 queue_planning: QueuePlanningMetrics::default(),
+                queue_application: QueueApplicationMetrics::default(),
                 audit: None,
                 audit_progress: None,
                 audit_blocked: Vec::new(),
@@ -2607,6 +2871,7 @@ mod native {
                 Operation::Knowledge => runner.knowledge().await,
             }
         }
+        runner.inspect_halted_state().await;
         runner.configuration_is_current();
         eprintln!(
             "Vault changes and Git staging remain available for explicit review; no automatic commit."

@@ -15,6 +15,7 @@ pub(super) const UNATTENDED: &str = "This is one unattended Lorekeeper vault-dat
 #[derive(Debug)]
 pub(super) struct ChildResult {
     pub success: bool,
+    pub exit_code: Option<i32>,
     pub cancelled: bool,
     pub detail: Option<String>,
     pub stdout: Vec<u8>,
@@ -293,7 +294,7 @@ async fn run_child(
                     signal_group(running.group, Signal::KILL)?;
                     running.cleaned = true;
                     return Ok(ChildResult {
-                        success: status.success(), cancelled: false,
+                        success: status.success(), exit_code: status.code(), cancelled: false,
                         detail: (!status.success()).then(|| format!("child {status}")), stdout,
                     });
                 },
@@ -306,6 +307,7 @@ async fn run_child(
     running.stop(&mut detail).await;
     Ok(ChildResult {
         success: false,
+        exit_code: None,
         cancelled,
         detail: Some(detail),
         stdout: Vec::new(),
@@ -389,7 +391,7 @@ async fn run_children(
                             let mut detail = format!("supervised child task: {error}");
                             running.lock().await.stop(&mut detail).await;
                             let result = if cancelled.is_some_and(ChildCancellation::is_user_cancelled) {
-                                Ok(ChildResult {success:false,cancelled:true,detail:Some(detail),stdout:Vec::new()})
+                                Ok(ChildResult {success:false,exit_code:None,cancelled:true,detail:Some(detail),stdout:Vec::new()})
                             } else {
                                 Err(miette::miette!("{detail}"))
                             };
@@ -414,6 +416,7 @@ async fn run_children(
             let result = if cancelled.is_some_and(ChildCancellation::is_user_cancelled) {
                 Ok(ChildResult {
                     success: false,
+                    exit_code: None,
                     cancelled: true,
                     detail: Some(detail),
                     stdout: Vec::new(),
@@ -671,6 +674,29 @@ pub(super) fn executable_path(path: &Path) -> miette::Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn captured_failure_distinguishes_normal_exit_from_signal_termination() {
+        for (ending, expected) in [("exit 1", Some(1)), ("kill -TERM $$", None)] {
+            let mut command = tokio::process::Command::new("sh");
+            command.args(["-c", &format!("printf '%s' '{{\"ok\":false}}'; {ending}")]);
+            let mut child = RunningChild::spawn(command, false).unwrap();
+            let result = run_child(
+                &mut child,
+                Some(Duration::from_secs(5)),
+                Some(1024),
+                None,
+                std::future::pending(),
+            )
+            .await
+            .unwrap();
+            assert!(!result.success);
+            assert!(!result.cancelled);
+            assert_eq!(result.exit_code, expected);
+            assert_eq!(result.stdout, b"{\"ok\":false}");
+        }
+    }
 
     #[cfg(unix)]
     fn shell_request(script: &str) -> ChildRequest {

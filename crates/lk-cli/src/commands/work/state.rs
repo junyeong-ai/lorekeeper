@@ -12,6 +12,26 @@ use serde_json::{Value, json};
 mod retention;
 pub(crate) use retention::prune_published;
 
+#[derive(Debug)]
+pub(super) enum CompletionRefusal {
+    IncompleteReduction,
+    UnsealedResult,
+    ChangedResult,
+}
+
+impl std::fmt::Display for CompletionRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::IncompleteReduction => "work reduction is incomplete",
+            Self::UnsealedResult => "work final result is not sealed",
+            Self::ChangedResult => "sealed result or completed reduction changed",
+        })
+    }
+}
+
+impl std::error::Error for CompletionRefusal {}
+impl miette::Diagnostic for CompletionRefusal {}
+
 #[derive(Clone, Copy)]
 pub(crate) struct WorkLimits {
     pub max_input_bytes: usize,
@@ -957,6 +977,15 @@ impl Work {
         Ok(self.evaluate(root, resources)?.progress())
     }
 
+    pub(super) fn capture_progress(
+        &self,
+        root: &Path,
+        resources: &[SemanticResource],
+    ) -> miette::Result<(WorkProgress, BTreeMap<PathBuf, String>)> {
+        let evaluated = self.evaluate(root, resources)?;
+        Ok((evaluated.progress(), evaluated.raw))
+    }
+
     pub fn prepare_inspection(
         &self,
         root: &Path,
@@ -1394,17 +1423,17 @@ impl Work {
         let output = evaluated
             .current
             .get(&node.id)
-            .ok_or_else(|| fail("work reduction is incomplete"))?;
+            .ok_or_else(|| miette::Report::new(CompletionRefusal::IncompleteReduction))?;
         let seal_path = work_path(&self.plan.id, "seal.json")?;
         let raw = read_optional(root, &seal_path)?
-            .ok_or_else(|| fail("work final result is not sealed"))?;
+            .ok_or_else(|| miette::Report::new(CompletionRefusal::UnsealedResult))?;
         let seal: Seal = serde_json::from_str(&raw).map_err(fail)?;
         if seal.work_id != self.plan.id
             || seal.root_node != node.id
             || seal.root_output_revision != output.output_revision
             || seal.final_result_revision != revision(final_result)?
         {
-            return Err(fail("sealed result or completed reduction changed"));
+            return Err(miette::Report::new(CompletionRefusal::ChangedResult));
         }
         for (path, raw) in evaluated.raw {
             mutation.require_unchanged(path, raw);

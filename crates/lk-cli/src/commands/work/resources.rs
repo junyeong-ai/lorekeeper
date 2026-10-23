@@ -443,8 +443,9 @@ pub(super) fn task_with_selection(
     selected: &BTreeSet<String>,
 ) -> miette::Result<Prepared> {
     if selection.inventory_revision != inventory.revision {
-        return Err(miette::miette!(
-            "extraction candidate inventory changed; reselect evidence"
+        return Err(super::publication_rejection(
+            super::RejectionKind::SelectionInventoryChanged,
+            "extraction candidate inventory changed; reselect evidence",
         ));
     }
     let candidates = inventory
@@ -462,7 +463,10 @@ pub(super) fn task_with_selection(
         .collect::<BTreeMap<_, _>>();
     for owner in selected {
         let candidate = candidates.get(owner.as_str()).ok_or_else(|| {
-            miette::miette!("selected owner is outside the complete candidate inventory")
+            super::publication_rejection(
+                super::RejectionKind::EvidenceScopeChanged,
+                "selected owner is outside the complete candidate inventory",
+            )
         })?;
         let mut resource = inventory
             .resources
@@ -470,7 +474,10 @@ pub(super) fn task_with_selection(
             .ok_or_else(|| miette::miette!("selected candidate input is missing"))?
             .clone();
         if resource.revision != candidate.file_revision {
-            return Err(miette::miette!("selected candidate input revision changed"));
+            return Err(super::publication_rejection(
+                super::RejectionKind::EvidenceScopeChanged,
+                "selected candidate input revision changed",
+            ));
         }
         resource.authority = SemanticAuthority::Context;
         resources.entry(owner.clone()).or_insert(resource);
@@ -851,8 +858,9 @@ pub(super) fn refresh(
         Subject::Audit { path, .. } => audit(root, config, path)?,
     };
     if prepared.subject != subject || prepared.context != *context {
-        return Err(miette::miette!(
-            "semantic work inputs changed; replan and reread changed evidence"
+        return Err(super::publication_rejection(
+            super::RejectionKind::SemanticContextChanged,
+            "semantic work inputs changed; replan and reread changed evidence",
         ));
     }
     Ok(prepared)

@@ -235,6 +235,16 @@ the same target can be prepared again. `prepared_targets` counts detailed prepar
 attempts; capture counts cover successful shared discovery batches and attempted
 synthesis captures, not later resource revalidation or model work.
 
+`queue_application` accumulates deterministic application `attempts`, `duration_ms`,
+`applied`, `dropped` and `rejected` counts and retains the `latest` typed report.
+Repeated rejection counts are attempts, not distinct tasks. Native report capture
+is limited to 8 MiB; invalid, oversized or abnormally terminated reports stop the job.
+`halted` distinguishes a stopped controller from known scoped deferrals; `ok` remains
+false for either. A halted controller starts no further semantic or mutating stages;
+read-only final checks still report preserved state when configuration is current.
+An incomplete job can still publish independent work and verify selected audits;
+neither field implies full-corpus semantic coverage.
+
 Queue planning validates the complete task inventory, target owners and typed input
 readiness, then prepares at most 64 targets in fair cursor order per window. Small
 whole-input batches also obey the serialized input limit. Unprepared targets remain

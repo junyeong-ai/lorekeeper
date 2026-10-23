@@ -651,6 +651,17 @@ impl Selection {
         Ok(self.capture_ledger(root)?.ledger)
     }
 
+    pub(super) fn publication_state(
+        &self,
+        root: &Path,
+    ) -> miette::Result<Option<(SelectionLedger, BTreeMap<PathBuf, String>)>> {
+        if !self.is_planned(root)? {
+            return Ok(None);
+        }
+        let captured = self.capture_ledger(root)?;
+        Ok(Some((captured.ledger, captured.raw)))
+    }
+
     pub fn guard(
         &self,
         root: &Path,
@@ -658,15 +669,34 @@ impl Selection {
         binding: &lk_queue::ExtractionSelection,
     ) -> miette::Result<SelectionLedger> {
         if binding.inventory_revision != self.manifest.binding.inventory_revision {
-            return Err(fail(
-                "staged selection inventory differs from current inputs; inspect `lore work context`, rescreen and regenerate the extraction result",
+            return Err(super::publication_rejection(
+                super::RejectionKind::SelectionInventoryChanged,
+                "candidate screening: staged selection inventory differs from current inputs; inspect `lore work context`, rescreen and regenerate the extraction result",
+            ));
+        }
+        if !self.is_planned(root)? {
+            return Err(super::publication_rejection(
+                super::RejectionKind::EvidenceScopeChanged,
+                "candidate screening: current selection manifest is missing; inspect `lore work context` for the required plan; earlier selections do not establish the current scope",
             ));
         }
         let captured = self.capture_ledger(root)?;
+        if !captured.ledger.progress.complete {
+            return Err(super::publication_rejection(
+                super::RejectionKind::SelectionDecisionsChanged,
+                format!(
+                    "candidate screening is incomplete: {} unknown, {} deferred; not-selected covers candidate cards only",
+                    captured.ledger.progress.unknown, captured.ledger.progress.deferred,
+                ),
+            ));
+        }
         if serde_json::to_value(captured.ledger.binding()?).into_diagnostic()?
             != serde_json::to_value(binding).into_diagnostic()?
         {
-            return Err(fail("selection decisions changed since drafting"));
+            return Err(super::publication_rejection(
+                super::RejectionKind::SelectionDecisionsChanged,
+                "candidate screening: selection decisions changed since drafting",
+            ));
         }
         for (path, raw) in captured.raw {
             plan.require_unchanged(path, raw);
@@ -1270,8 +1300,14 @@ mod tests {
         assert!(!current.is_planned(&fixture.root).unwrap());
         let error = current
             .guard(&fixture.root, &mut MutationPlan::default(), &binding)
-            .expect_err("changed inventory must refuse publication")
-            .to_string();
+            .expect_err("changed inventory must refuse publication");
+        assert_eq!(
+            error
+                .downcast_ref::<crate::commands::queue::application::PublicationRejection>()
+                .map(|error| error.kind),
+            Some(super::super::RejectionKind::SelectionInventoryChanged),
+        );
+        let error = error.to_string();
         assert!(
             error.contains("staged selection inventory differs from current inputs"),
             "{error}"
@@ -1298,8 +1334,14 @@ mod tests {
         std::fs::remove_file(&manifest).unwrap();
         let error = selection
             .guard(&fixture.root, &mut MutationPlan::default(), &binding)
-            .expect_err("missing current manifest must refuse publication")
-            .to_string();
+            .expect_err("missing current manifest must refuse publication");
+        assert_eq!(
+            error
+                .downcast_ref::<crate::commands::queue::application::PublicationRejection>()
+                .map(|error| error.kind),
+            Some(super::super::RejectionKind::EvidenceScopeChanged),
+        );
+        let error = error.to_string();
         assert!(
             error.contains("current selection manifest is missing"),
             "{error}"

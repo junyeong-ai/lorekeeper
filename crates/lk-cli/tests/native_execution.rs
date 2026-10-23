@@ -660,6 +660,8 @@ fn daily_preserves_collection_when_the_selected_agent_is_unavailable() {
     .unwrap();
     let (output, result) = fixture.run("daily");
     assert!(!output.status.success());
+    assert_eq!(result["halted"], true);
+    assert_eq!(result["semantic_calls"], 0);
     assert_eq!(result["stages"][0]["name"], "ingest");
     assert_eq!(result["stages"][0]["state"], "completed");
     assert!(
@@ -674,7 +676,7 @@ fn daily_preserves_collection_when_the_selected_agent_is_unavailable() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|stage| stage["name"] == "wiki refresh" && stage["state"] == "completed")
+            .any(|stage| stage["name"] == "graph lint" && stage["state"] == "completed")
     );
 }
 
@@ -3404,7 +3406,7 @@ fn daily_finishes_clean_late_period_publication() {
 }
 
 #[test]
-fn a_failed_base_stage_does_not_start_dependent_periods() {
+fn a_failed_host_stops_period_planning_and_preserves_final_read_checks() {
     let fixture = Fixture::new(
         "codex",
         30,
@@ -3419,19 +3421,18 @@ fn a_failed_base_stage_does_not_start_dependent_periods() {
         .iter()
         .map(|stage| stage["name"].as_str().unwrap())
         .collect::<Vec<_>>();
-    assert!(names.contains(&"period resume base"));
-    assert!(!names.contains(&"period resume quarter"));
-    assert!(!names.contains(&"period resume annual"));
-    let period_resume = names
+    assert_eq!(result["halted"], true);
+    assert!(!names.iter().any(|name| name.starts_with("period resume")));
+    let failed_host = names
         .iter()
-        .position(|name| *name == "period resume base")
+        .position(|name| *name == "lore-process")
         .unwrap();
-    let final_stages = &result["stages"].as_array().unwrap()[period_resume + 1..];
+    let final_stages = &result["stages"].as_array().unwrap()[failed_host + 1..];
     assert!(
         final_stages
             .iter()
             .any(|stage| { stage["name"] == "queue completion" && stage["state"] == "failed" }),
-        "Final queue check must preserve refusal after period failure: {result}"
+        "Final queue check must preserve refusal after host failure: {result}"
     );
     assert!(
         final_stages.iter().any(|stage| {
@@ -3440,7 +3441,7 @@ fn a_failed_base_stage_does_not_start_dependent_periods() {
                 .is_some_and(|name| name.contains("reviews"))
                 && stage["state"] == "completed"
         }),
-        "Final reviews must still be inspected after period failure: {result}"
+        "Final reviews must still be inspected after host failure: {result}"
     );
     let pending = fixture.command().args(["queue", "count"]).output().unwrap();
     assert!(pending.status.success());
@@ -4377,4 +4378,65 @@ fn native_queue_shares_discovery_without_changing_existing_task_selection_ids() 
         expected.contains(report["work_steps"][0]["selection_id"].as_str().unwrap()),
         "existing selection IDs remain valid: {report}"
     );
+}
+
+#[test]
+fn knowledge_campaign_retains_partial_bounded_batch_completion_at_the_call_limit() {
+    for engine in ["claude-code", "codex"] {
+        let fixture = bounded_audit_fixture(engine, 3, RECORD_BOUNDED_AUDIT);
+        write_audit_concept(&fixture, "large");
+        write_audit_concept(&fixture, "second");
+        record_discovery(&fixture, "wiki/concepts/large.md");
+        record_discovery(&fixture, "wiki/concepts/second.md");
+        let config = std::fs::read_to_string(&fixture.config)
+            .unwrap()
+            .replace("batch_size: 1", "batch_size: 2")
+            .replace("max_input_bytes: 4096", "max_input_bytes: 512");
+        std::fs::write(&fixture.config, config).unwrap();
+        let output = fixture
+            .command()
+            .args(["run", "knowledge", "--batches", "2", "--json"])
+            .output()
+            .unwrap();
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(
+            !output.status.success(),
+            "the first exhausted batch remains incomplete: {report}"
+        );
+        let runs = report["runs"].as_array().unwrap();
+        assert_eq!(
+            runs.len(),
+            2,
+            "{report}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        for (index, run) in runs.iter().enumerate() {
+            assert_eq!(run["cancelled"], false, "{report}");
+            assert_eq!(run["halted"], false, "{report}");
+            assert_eq!(
+                run["semantic_calls"],
+                if index == 0 { 3 } else { 1 },
+                "{report}"
+            );
+            assert_eq!(run["audit"].as_array().unwrap().len(), 1, "{report}");
+            assert_eq!(
+                run["audit_progress"]["after"]["reviewed_current"],
+                index + 1,
+                "{report}"
+            );
+        }
+        assert_ne!(
+            runs[0]["audit"][0]["assessed_path"],
+            runs[1]["audit"][0]["assessed_path"]
+        );
+        assert_eq!(bounded_calls(&fixture).len(), 4);
+        let plan = fixture
+            .command()
+            .args(["wiki", "audit-plan"])
+            .output()
+            .unwrap();
+        assert!(plan.status.success());
+        let plan: serde_json::Value = serde_json::from_slice(&plan.stdout).unwrap();
+        assert_eq!(plan["reviewed_current"], 2);
+    }
 }

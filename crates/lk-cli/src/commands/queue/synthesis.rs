@@ -16,6 +16,7 @@ pub(super) struct ApplyResult {
     pub failed: usize,
     pub unreadable: usize,
     pub quarantined: usize,
+    pub report: super::application::Report,
 }
 
 pub(super) fn apply(
@@ -50,7 +51,10 @@ pub(super) fn apply(
     paths.sort();
     let pending = read_pending_tasks(queue)?;
 
-    let mut report = ApplyResult::default();
+    let mut report = ApplyResult {
+        report: super::application::Report::new(dry_run),
+        ..Default::default()
+    };
     let mut proposals: BTreeMap<_, Vec<_>> = BTreeMap::new();
     for path in paths {
         let section = path
@@ -60,8 +64,10 @@ pub(super) fn apply(
             Ok(raw) => raw,
             Err(error) => {
                 report.failed += 1;
-                eprintln!("  ✗ {}: {error}", path.display());
-                continue;
+                report
+                    .report
+                    .fail(format!("read staged result {}: {error}", path.display()));
+                return Ok(report);
             }
         };
         let decoded = if section {
@@ -80,16 +86,23 @@ pub(super) fn apply(
             Ok(result) => result,
             Err(error) => {
                 report.unreadable += 1;
-                report.quarantined += super::quarantine(
+                report.report.unreadable += 1;
+                report.report.fail(format!(
+                    "unreadable staged section payload {}: {error}",
+                    path.display()
+                ));
+                let moved = super::quarantine(
                     &dir.join(lk_queue::CORRUPT_SUBDIR),
                     &[(path.clone(), error.to_string())],
                     dry_run,
                 );
+                report.quarantined += moved;
+                report.report.quarantined += moved;
                 eprintln!(
                     "  ✗ {}: invalid staged section payload: {error}",
                     path.display()
                 );
-                continue;
+                return Ok(report);
             }
         };
         proposals
@@ -97,10 +110,46 @@ pub(super) fn apply(
             .or_default()
             .push((path, result));
     }
+    let mut formats = BTreeMap::new();
+    for (section, task_id, cache_hash) in proposals.keys() {
+        if formats.insert((task_id, cache_hash), section).is_some() {
+            report
+                .report
+                .fail("one retained task has incompatible section and synthesis result formats");
+            return Ok(report);
+        }
+    }
     let mut proposals = proposals.into_iter().collect::<Vec<_>>();
     proposals.sort_by(|left, right| left.1[0].0.cmp(&right.1[0].0));
     for ((section, _, _), group) in proposals {
         let (path, result) = &group[0];
+        let captured = if section {
+            let values = group
+                .iter()
+                .map(|(path, result)| {
+                    (
+                        path.clone(),
+                        SectionResult {
+                            task_id: result.task_id.clone(),
+                            cache_hash: result.cache_hash.clone(),
+                            target_revision: result.target_revision.clone(),
+                            body: result.synthesis.clone(),
+                        },
+                    )
+                })
+                .collect::<Vec<_>>();
+            super::application::capture_group(root, &values)
+        } else {
+            super::application::capture_group(root, &group)
+        };
+        let snapshots = match captured {
+            Ok(snapshots) => snapshots,
+            Err(error) => {
+                report.report.fail(error);
+                return Ok(report);
+            }
+        };
+        let mut identity = None;
         let result = (|| -> miette::Result<bool> {
             let Some(task) = pending
                 .tasks
@@ -144,9 +193,15 @@ pub(super) fn apply(
                 TaskStatus::Done | TaskStatus::Stale | TaskStatus::MissingTarget
             ) {
                 if !dry_run {
-                    for (path, _) in &group {
-                        std::fs::remove_file(path).map_err(|e| miette::miette!("{e}"))?;
+                    let mut plan = lk_vault::MutationPlan::default();
+                    super::rejections::remove_matching(root, task, &mut plan)?;
+                    for snapshot in &snapshots {
+                        plan.remove(&snapshot.proposal.path, snapshot.raw.clone());
                     }
+                    session
+                        .ok_or_else(|| miette::miette!("retirement requires mutation session"))?
+                        .apply(plan)
+                        .map_err(|error| miette::miette!("{error}"))?;
                 }
                 return Ok(false);
             }
@@ -155,11 +210,13 @@ pub(super) fn apply(
                     "unreadable target or inconsistent synthesis input"
                 ));
             }
+            identity = Some(super::application::TaskIdentity::capture(root, task)?);
             let expected = serde_json::to_value(result).map_err(|e| miette::miette!("{e}"))?;
             for (_, proposal) in group.iter().skip(1) {
                 if serde_json::to_value(proposal).map_err(|e| miette::miette!("{e}"))? != expected {
-                    return Err(miette::miette!(
-                        "conflicting section/synthesis results for the same retained task and input; review and reconcile all retained proposals to one agreed value before retrying"
+                    return Err(super::application::rejection(
+                        super::application::RejectionKind::ConflictingProposals,
+                        "conflicting section/synthesis results for the same retained task and input; review and reconcile all retained proposals to one agreed value before retrying",
                     ));
                 }
             }
@@ -167,8 +224,9 @@ pub(super) fn apply(
                 .ok_or_else(|| miette::miette!("invalid target"))?;
             let original = super::read_page(root, &target).map_err(|e| miette::miette!("{e}"))?;
             if revision(&original) != result.target_revision {
-                return Err(miette::miette!(
-                    "target changed; read the current page and regenerate this result"
+                return Err(super::application::rejection(
+                    super::application::RejectionKind::TargetChanged,
+                    "target changed; read the current page and regenerate this result",
                 ));
             }
             let mut plan = lk_vault::MutationPlan::default();
@@ -192,8 +250,9 @@ pub(super) fn apply(
                 &mut plan,
             )?;
             if !section && result.synthesis.trim().is_empty() {
-                return Err(miette::miette!(
-                    "synthesis must state the evidence or its limits"
+                return Err(super::application::rejection(
+                    super::application::RejectionKind::InvalidSection,
+                    "synthesis must state the evidence or its limits",
                 ));
             }
             if task.kind == lk_queue::TaskKind::RefineEvents {
@@ -205,16 +264,18 @@ pub(super) fn apply(
                 let previous = lk_vault::section_body(&original, heading)
                     .ok_or_else(|| miette::miette!("missing event section"))?;
                 if event_headings(previous) != event_headings(&result.synthesis) {
-                    return Err(miette::miette!(
-                        "refinement must preserve the event heading sequence"
+                    return Err(super::application::rejection(
+                        super::application::RejectionKind::InvalidSection,
+                        "refinement must preserve the event heading sequence",
                     ));
                 }
             }
             let mut content = original.clone();
             let anchors = task.anchors();
             if (anchors.len() == 2) != result.related.is_some() {
-                return Err(miette::miette!(
-                    "related section must match the task's anchors"
+                return Err(super::application::rejection(
+                    super::application::RejectionKind::InvalidSection,
+                    "related section must match the task's anchors",
                 ));
             }
             for (anchor, body) in anchors
@@ -260,22 +321,58 @@ pub(super) fn apply(
                     .unwrap_or_default();
                 guard_citations(&mut plan, root, &target, &citations)?;
                 plan.edit(&target, original, content);
+                super::rejections::remove_matching(root, task, &mut plan)?;
+                for snapshot in &snapshots {
+                    plan.remove(&snapshot.proposal.path, snapshot.raw.clone());
+                }
                 session
                     .ok_or_else(|| miette::miette!("publication requires mutation session"))?
                     .apply(plan)
                     .map_err(|e| miette::miette!("{e}"))?;
-                for (path, _) in &group {
-                    std::fs::remove_file(path).map_err(|e| miette::miette!("{e}"))?;
-                }
             }
             Ok(true)
         })();
         match result {
-            Ok(true) => report.applied += 1,
-            Ok(false) => report.dropped += group.len(),
+            Ok(true) => {
+                report.applied += 1;
+                report
+                    .report
+                    .outcome(identity, &snapshots, super::application::Outcome::Applied);
+            }
+            Ok(false) => {
+                report.dropped += group.len();
+                report.report.outcome(
+                    None,
+                    &snapshots,
+                    super::application::Outcome::Dropped {
+                        reason: "done, stale or missing target".into(),
+                    },
+                );
+            }
             Err(error) => {
                 report.failed += 1;
                 eprintln!("  ✗ {}: {error}", path.display());
+                let task = pending
+                    .tasks
+                    .get(&(group[0].1.task_id.clone(), group[0].1.cache_hash.clone()));
+                if let Some(task) = task {
+                    if let Err(fatal) = super::application::reject_group(
+                        &mut report.report,
+                        root,
+                        config,
+                        config_revision,
+                        task,
+                        &snapshots,
+                        &error,
+                        session,
+                    ) {
+                        report.report.fail(fatal);
+                        return Ok(report);
+                    }
+                } else {
+                    report.report.fail(error);
+                    return Ok(report);
+                }
             }
         }
     }
@@ -339,14 +436,34 @@ pub(super) fn quarantine_orphan(queue: &Path, path: &Path, reason: &str) -> miet
 /// page reference introduced by a staged section must already have a destination.
 fn validate_links(root: &Path, target: &Path, body: &str) -> miette::Result<()> {
     for destination in lk_core::link::extract_dests(body) {
-        let path = lk_core::link::resolve_dest(target, &destination)
-            .ok_or_else(|| miette::miette!("section link escapes the vault: {destination}"))?;
+        let path = lk_core::link::resolve_dest(target, &destination).ok_or_else(|| {
+            super::application::rejection(
+                super::application::RejectionKind::InvalidResultLink,
+                format!("section link escapes the vault: {destination}"),
+            )
+        })?;
+        if path.as_os_str().is_empty() {
+            return Err(super::application::rejection(
+                super::application::RejectionKind::InvalidResultLink,
+                format!("section link must address a page: {destination}"),
+            ));
+        }
         let full = lk_vault::page_path(root, &path)
             .map_err(|error| miette::miette!("invalid section link {destination}: {error}"))?;
-        if !full.is_file() {
-            return Err(miette::miette!(
-                "section links to a missing page: {}",
-                path.display()
+        let metadata = match std::fs::metadata(full) {
+            Ok(metadata) => Some(metadata),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                return Err(miette::miette!(
+                    "read section link {}: {error}",
+                    path.display()
+                ));
+            }
+        };
+        if metadata.is_none_or(|metadata| !metadata.is_file()) {
+            return Err(super::application::rejection(
+                super::application::RejectionKind::InvalidResultLink,
+                format!("section links to a missing page: {}", path.display()),
             ));
         }
     }
@@ -365,6 +482,18 @@ fn event_headings(body: &str) -> Vec<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn root_link_is_a_typed_invalid_page_address() {
+        let root = tempfile::tempdir().unwrap();
+        let body = "See [root](/).";
+        assert_eq!(lk_core::link::extract_dests(body), vec!["/"]);
+        let error =
+            validate_links(root.path(), Path::new("wiki/documents/source.md"), body).unwrap_err();
+        assert!(
+            matches!(error.downcast_ref::<super::super::application::PublicationRejection>(), Some(rejection) if rejection.kind == super::super::application::RejectionKind::InvalidResultLink)
+        );
+    }
 
     #[test]
     fn ordinary_citation_guards_refuse_changes_before_publication_and_recovery() {

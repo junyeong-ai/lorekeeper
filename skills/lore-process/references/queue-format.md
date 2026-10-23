@@ -3,6 +3,7 @@
 ## Contents
 
 - [Queue lifecycle](#queue-file-lifecycle)
+- [Application outcomes](#application-outcomes)
 - [Task schema](#queue-task-schema)
 - [Extraction read scope](#extraction-read-scope)
 - [Completion keys](#completion-keys)
@@ -39,6 +40,27 @@ If several extraction result files carry the same task/input identity, apply fol
 identical typed values once and retires every matching file only after publication.
 Different values remain unpublished for review. Reconcile all retained proposals to
 one agreed value before retrying; adding a third draft does not resolve the conflict.
+
+## Application outcomes
+
+`lore queue apply --json` emits a typed report even when application fails. `ok`
+matches the exit verdict. Counts and `groups` distinguish applied, dropped and
+retained rejected proposals; each known group carries its task/cache/target owner
+and exact proposal file revisions. Rejected groups include their current validation
+scope and receipt. `fatal` reports a failure whose ownership or safety could not be
+established; partial publications remain real.
+
+Native jobs can continue independent work only after known scoped rejections.
+`.lorekeeper/queue/rejections/` binds their exact request, proposals, current scope
+and validation policy. These records are not completion or semantic approval.
+Native planning revalidates changed attempts before another host call; deterministic
+apply is retried even when the previous rejection is unchanged. Do not delete these
+records to bypass a refusal. Preserve rejected answers separately before explicitly
+replacing an active proposal with a newly reviewed result; never relabel its guards.
+
+The native job stays incomplete/nonzero while work remains. Corrupt records,
+unmatched result identities, storage failures and unknown state stop further work.
+Standalone processing still stops to inspect a nonzero application result.
 
 ## Queue task schema
 

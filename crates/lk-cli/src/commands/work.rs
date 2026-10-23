@@ -6,12 +6,16 @@ use serde_json::{Value, json};
 use super::{GlobalOptions, find_config, load_config_with_revision};
 
 mod discovery;
+mod publication;
 mod resources;
 mod selection;
 pub(crate) mod state;
 
+pub(super) use publication::publication_scope;
 use resources::{Prepared, Subject};
 use state::{Work, WorkLimits, WorkOutput};
+
+use super::queue::application::{RejectionKind, rejection as publication_rejection};
 
 #[derive(clap::Subcommand)]
 pub enum WorkCommand {
@@ -173,8 +177,9 @@ fn guard_prepared(
             return Ok(false);
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Err(miette::miette!(
-                "bounded evidence work is required before publication; plan work for this exact subject"
+            return Err(publication_rejection(
+                RejectionKind::EvidenceScopeChanged,
+                "bounded evidence work is required before publication; plan work for this exact subject",
             ));
         }
         Err(error) => return Err(miette::miette!("inspect bounded work: {error}")),
@@ -182,11 +187,19 @@ fn guard_prepared(
     }
     let work = Work::load(root, &expected.plan.id)?;
     if work != expected {
-        return Err(miette::miette!(
-            "bounded work manifest differs from current inputs"
+        return Err(publication_rejection(
+            RejectionKind::SemanticContextChanged,
+            "bounded work manifest differs from current inputs",
         ));
     }
-    work.guard_completion(mutation, root, &prepared.resources, &result)?;
+    work.guard_completion(mutation, root, &prepared.resources, &result)
+        .map_err(|error| {
+            if error.downcast_ref::<state::CompletionRefusal>().is_some() {
+                publication_rejection(RejectionKind::EvidenceScopeChanged, error.to_string())
+            } else {
+                error
+            }
+        })?;
     work.plan_publication(mutation, root, &result)?;
     prepared.guard_pages(mutation);
     Ok(true)
@@ -208,9 +221,12 @@ impl QueuePublicationGuard {
         for (path, captured) in self.pages {
             if let Some(original) = owned.get(&path) {
                 if original != &captured {
-                    return Err(miette::miette!(
-                        "publication input differs from captured read context: {}",
-                        path.display()
+                    return Err(publication_rejection(
+                        RejectionKind::EvidenceScopeChanged,
+                        format!(
+                            "publication input differs from captured read context: {}",
+                            path.display()
+                        ),
                     ));
                 }
             } else {
@@ -257,8 +273,9 @@ pub(super) fn prepare_queue_publication(
         let typed: lk_queue::TaskResult =
             serde_json::from_value(result.clone()).into_diagnostic()?;
         if !typed.concepts.is_empty() && typed.discovery.is_empty() {
-            return Err(miette::miette!(
-                "nonempty concept extraction requires discovery before drafting"
+            return Err(publication_rejection(
+                RejectionKind::EvidenceScopeChanged,
+                "nonempty concept extraction requires discovery before drafting",
             ));
         }
         let selected_owners = if let Some(selection) = &typed.selection {
@@ -279,10 +296,18 @@ pub(super) fn prepare_queue_publication(
         };
         for concept in &typed.concepts {
             if let lk_queue::ConceptAdmission::Reuse { owner } = &concept.admission {
-                let canonical = lk_vault::page_path(&root, Path::new(&owner.path))
-                    .into_diagnostic()?
-                    .canonicalize()
-                    .into_diagnostic()?;
+                let canonical = match lk_vault::page_path(&root, Path::new(&owner.path))
+                    .and_then(|path| path.canonicalize())
+                {
+                    Ok(path) => path,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        return Err(publication_rejection(
+                            RejectionKind::EvidenceScopeChanged,
+                            "selected concept owner is missing from the current evidence scope; reread current discovery and regenerate the result",
+                        ));
+                    }
+                    Err(error) => return Err(error).into_diagnostic(),
+                };
                 let address = canonical
                     .strip_prefix(&root)
                     .into_diagnostic()?
@@ -297,8 +322,9 @@ pub(super) fn prepare_queue_publication(
                             && resource.revision == owner.revision
                     })
                 {
-                    return Err(miette::miette!(
-                        "selected concept owner is outside the captured discovery context or its read revision changed"
+                    return Err(publication_rejection(
+                        RejectionKind::EvidenceScopeChanged,
+                        "selected concept owner is outside the captured discovery context or its read revision changed",
                     ));
                 }
                 owned_pages.insert(
@@ -315,8 +341,9 @@ pub(super) fn prepare_queue_publication(
     if scoped_synthesis || scoped_extraction {
         let revision = prepared.revision(config_revision)?;
         if result.get("context_revision").and_then(Value::as_str) != Some(revision.as_str()) {
-            return Err(miette::miette!(
-                "semantic read scope changed or was not captured before drafting; reread current context and regenerate the result"
+            return Err(publication_rejection(
+                RejectionKind::SemanticContextChanged,
+                "semantic read scope changed or was not captured before drafting; reread current context and regenerate the result",
             ));
         }
     }
@@ -326,8 +353,9 @@ pub(super) fn prepare_queue_publication(
         let source = resources::source_task(&root, config, task_id)?;
         let source_work = expected(&root, &source, config, config_revision)?;
         if prepared.context["purpose"]["source_observations"]["work_id"] != source_work.plan.id {
-            return Err(miette::miette!(
-                "retained source observations differ from their current work identity"
+            return Err(publication_rejection(
+                RejectionKind::SemanticContextChanged,
+                "retained source observations differ from their current work identity",
             ));
         }
         source_work.plan_consumption(&mut selection_guards, &root, &source.resources, &typed)?;
@@ -776,8 +804,9 @@ fn selected_task(
     let ScreeningPreparation::Candidates(screening) =
         screening(root, config, config_revision, task_id, queries)?
     else {
-        return Err(miette::miette!(
-            "source observations are incomplete; retained extraction cannot publish"
+        return Err(publication_rejection(
+            RejectionKind::EvidenceScopeChanged,
+            "source observations are incomplete; retained extraction cannot publish",
         ));
     };
     let ledger = screening.selection.guard(root, mutation, binding)?;
@@ -1019,11 +1048,8 @@ pub(super) fn audit_needs_work(
 ) -> miette::Result<bool> {
     let root = root.canonicalize().into_diagnostic()?;
     let prepared = resources::audit_candidate(&root, config, candidate)?;
-    Ok(expected(&root, &prepared, config, config_revision)?
-        .plan
-        .parts
-        .len()
-        > 1)
+    let work = expected(&root, &prepared, config, config_revision)?;
+    Ok(work.plan.parts.len() > 1 || work.is_planned(&root)?)
 }
 
 pub(super) fn prepare_inspection(

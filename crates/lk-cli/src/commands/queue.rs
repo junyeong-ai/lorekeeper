@@ -1,7 +1,9 @@
+pub(super) mod application;
 pub(super) mod check;
 mod packet;
 pub(super) mod readiness;
 mod regenerate;
+pub(super) mod rejections;
 mod synthesis;
 
 use std::collections::BTreeMap;
@@ -46,6 +48,9 @@ pub enum QueueCommand {
         /// Report what would be written, and write nothing
         #[arg(long)]
         dry_run: bool,
+        /// Emit typed task outcomes and retained rejection scopes as JSON.
+        #[arg(long)]
+        json: bool,
     },
     /// Regenerate one retained task from its original input, without remote fetching.
     Regenerate {
@@ -209,7 +214,11 @@ pub async fn run(opts: &super::GlobalOptions, cmd: QueueCommand) -> miette::Resu
         } => packet::run(opts, root, task_ids, include_content),
         QueueCommand::Status { root, json } => status(opts, root, json).await,
         QueueCommand::Count { root } => count(opts, root).await,
-        QueueCommand::Apply { root, dry_run } => apply(opts, root, dry_run).await,
+        QueueCommand::Apply {
+            root,
+            dry_run,
+            json,
+        } => apply(opts, root, dry_run, json).await,
         QueueCommand::Prune {
             root,
             json,
@@ -526,6 +535,44 @@ async fn apply(
     opts: &super::GlobalOptions,
     root: Option<PathBuf>,
     dry_run: bool,
+    json: bool,
+) -> miette::Result<()> {
+    let mut report = application::Report::new(dry_run);
+    if let Err(error) = apply_into(opts, root, dry_run, &mut report).await {
+        report.fail(error);
+    }
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report).map_err(|error| miette::miette!("{error}"))?
+        );
+    }
+    eprintln!(
+        "queue apply: {} applied, {} dropped, {} failed{}",
+        report.applied,
+        report.dropped,
+        report.rejected + usize::from(report.fatal.is_some()),
+        if dry_run { " (dry-run)" } else { "" }
+    );
+    if report.ok {
+        Ok(())
+    } else if let Some(fatal) = &report.fatal {
+        Err(miette::miette!(
+            "queue application stopped: {}",
+            fatal.detail
+        ))
+    } else {
+        Err(miette::miette!(
+            "queue application is incomplete; rejected proposals and unfinished work are retained"
+        ))
+    }
+}
+
+async fn apply_into(
+    opts: &super::GlobalOptions,
+    root: Option<PathBuf>,
+    dry_run: bool,
+    report: &mut application::Report,
 ) -> miette::Result<()> {
     let (config, config_revision) = load_config_with_revision(&find_config(opts)?)?;
     let vault_root = root.unwrap_or_else(|| config.vault.root_path());
@@ -538,9 +585,63 @@ async fn apply(
         .transpose()
         .map_err(|error| miette::miette!("claim vault mutation: {error}"))?;
     let _claim = claim_writer(&queue_dir, dry_run)?;
+    rejections::validate_store(&vault_root)?;
+
+    let pending = read_pending_tasks(&queue_dir)?;
+    if pending.unparseable != 0 {
+        return Err(miette::miette!(
+            "repair unparseable queue lines before applying staged results"
+        ));
+    }
+    let staged = rejections::load_proposals(&vault_root)?;
+    if !staged.unreadable.is_empty() {
+        report.unreadable += staged.unreadable.len();
+        report.quarantined += quarantine(
+            &queue_dir
+                .join(lk_queue::RESULTS_SUBDIR)
+                .join(lk_queue::CORRUPT_SUBDIR),
+            &staged.unreadable,
+            dry_run,
+        );
+        report.fail("unreadable staged result payloads have unknown task identities");
+        return Ok(());
+    }
+    let mut orphaned = false;
+    for (identity, proposals) in &staged.groups {
+        if !pending.tasks.contains_key(identity) {
+            orphaned = true;
+            if !dry_run {
+                for proposal in proposals {
+                    synthesis::quarantine_orphan(
+                        &queue_dir,
+                        &vault_root.join(&proposal.proposal.path),
+                        "no matching pending task; its run was retired or the task identity is invalid",
+                    )?;
+                    report.quarantined += 1;
+                }
+            }
+        }
+    }
+    if orphaned {
+        report.fail("no matching pending task for staged results; results are quarantined or retained without publishing independent work");
+        return Ok(());
+    }
 
     let batch = lk_queue::read_results(&queue_dir)
         .map_err(|e| miette::miette!("read queue results: {e}"))?;
+
+    if !batch.unreadable.is_empty() {
+        report.unreadable += batch.unreadable.len();
+        report.quarantined += quarantine(
+            &queue_dir
+                .join(lk_queue::RESULTS_SUBDIR)
+                .join(lk_queue::CORRUPT_SUBDIR),
+            &batch.unreadable,
+            dry_run,
+        );
+        report.fail("unreadable extraction result payloads have unknown targets");
+        return Ok(());
+    }
 
     let synthesis_result = synthesis::apply(
         &vault_root,
@@ -551,24 +652,12 @@ async fn apply(
         mutation.as_ref(),
     )?;
 
-    let unusable = batch.unreadable;
-    let results = batch.ready;
-    // A file that will never parse is moved out of the apply path, once and loudly. Leaving
-    // it would fail this command — and so the scheduled pipeline — on every run forever,
-    // while the concepts it held are re-derived anyway: its page carries no completion
-    // marker, so the next ingest that re-renders that page re-enqueues the task.
-    // Quarantining is housekeeping, so its own failures must not do what it exists to
-    // prevent: a `?` here would strand every ready result behind an unwritable directory,
-    // which is the same "one bad file blocks the batch" shape, reached through I/O instead
-    // of through parsing. A file that cannot be moved simply stays put and is retried.
-    let unreadable = unusable.len() + synthesis_result.unreadable;
-    let mut moved = synthesis_result.quarantined;
-    if !unusable.is_empty() {
-        let corrupt_dir = queue_dir
-            .join(lk_queue::RESULTS_SUBDIR)
-            .join(lk_queue::CORRUPT_SUBDIR);
-        moved += quarantine(&corrupt_dir, &unusable, dry_run);
+    let synthesis_fatal = synthesis_result.report.fatal.is_some();
+    report.append(synthesis_result.report);
+    if synthesis_fatal {
+        return Ok(());
     }
+    let results = batch.ready;
 
     if results.is_empty() {
         eprintln!(
@@ -578,7 +667,7 @@ async fn apply(
             synthesis_result.failed,
             if dry_run { " (dry-run)" } else { "" }
         );
-        return finish_apply(synthesis_result.failed, unreadable, moved, dry_run);
+        return Ok(());
     }
 
     let ctx = std::sync::Arc::new(
@@ -603,12 +692,11 @@ async fn apply(
     // prevent. Within a batch, the pending version IS the page.
     // Each page carries the results that produced it, because whether they may be deleted is
     // decided by whether that page WROTE, and one page can hold several.
-    let pending = read_pending_tasks(&queue_dir)?;
     let mut origin_revisions: BTreeMap<PathBuf, String> = BTreeMap::new();
     let mut origin_pages: BTreeMap<PathBuf, (String, Vec<PathBuf>)> = BTreeMap::new();
-    let mut consumed: Vec<PathBuf> = Vec::new();
     let mut completed_tasks = std::collections::BTreeSet::new();
     let mut work_guards = Vec::new();
+    let mut applied_groups = Vec::new();
     let mut proposals: BTreeMap<_, Vec<_>> = BTreeMap::new();
     for (path, result) in results {
         proposals
@@ -619,11 +707,11 @@ async fn apply(
     let mut proposals = proposals.into_values().collect::<Vec<_>>();
     proposals.sort_by(|left, right| left[0].0.cmp(&right[0].0));
 
-    // Everything a result can get wrong is that result's problem, not the batch's: aborting
-    // would strand every other valid extraction in the run. A RETRYABLE failure leaves the
-    // file in place so a fixed page picks it up next time, and the run exits non-zero.
+    // Only typed, trusted proposal refusals permit independent publication. Unknown
+    // validation and IO failures retain the batch and stop at this boundary.
     for group in &proposals {
         let result = &group[0].1;
+        let snapshots = application::capture_group(&vault_root, group)?;
         let paths = group
             .iter()
             .map(|(path, _)| path.clone())
@@ -661,16 +749,14 @@ async fn apply(
                 }
             }
             fail(reason.into());
-            failed += 1;
-            continue;
+            report.fail(reason);
+            return Ok(());
         };
         if let Err(error) = task
             .validate_retained_input()
             .and_then(|()| task.generation_policy().map(|_| ()))
         {
-            fail(error);
-            failed += 1;
-            continue;
+            return Err(miette::miette!("{error}"));
         }
         if group.iter().any(|(_, proposal)| {
             task.kind != lk_queue::TaskKind::ExtractConcepts
@@ -685,7 +771,21 @@ async fn apply(
                             .expect("concept policy serializes"),
                     )
         }) {
-            fail("extraction result does not match its pending task".into());
+            let error = application::rejection(
+                application::RejectionKind::InvalidProposalIdentity,
+                "extraction result does not match its pending task",
+            );
+            application::reject_group(
+                report,
+                &vault_root,
+                &config,
+                &config_revision,
+                task,
+                &snapshots,
+                &error,
+                mutation.as_ref(),
+            )?;
+            fail(error.to_string());
             failed += 1;
             continue;
         }
@@ -694,13 +794,27 @@ async fn apply(
         let Some(rel_path) = resolve_target_path(&task.target.vault_path) else {
             drop_dead("target path escapes the vault root");
             dropped += 1;
-            consumed.extend(paths.iter().cloned());
+            application::retire_group(&vault_root, task, &snapshots, mutation.as_ref())?;
+            report.outcome(
+                None,
+                &snapshots,
+                application::Outcome::Dropped {
+                    reason: "target path escapes the vault root".into(),
+                },
+            );
             continue;
         };
         if policy_request_status(&vault_root, task) == Some(TaskStatus::Stale) {
             drop_dead("superseded generation policy");
             dropped += 1;
-            consumed.extend(paths.iter().cloned());
+            application::retire_group(&vault_root, task, &snapshots, mutation.as_ref())?;
+            report.outcome(
+                None,
+                &snapshots,
+                application::Outcome::Dropped {
+                    reason: "superseded generation policy".into(),
+                },
+            );
             continue;
         }
         match classify_against_page(
@@ -720,30 +834,31 @@ async fn apply(
             // one-line fix that brings it back — consuming it here would spend that answer on
             // a page that could not receive it, with nothing left to say what was lost.
             Ok(TaskStatus::Unreadable) => {
-                fail("target page will not parse; repair it and this result applies".into());
-                failed += 1;
-                continue;
+                return Err(miette::miette!(
+                    "target page will not parse; repair it and this result applies"
+                ));
             }
             Ok(status @ (TaskStatus::Done | TaskStatus::Stale | TaskStatus::MissingTarget)) => {
                 drop_dead(status.as_str());
                 dropped += 1;
-                consumed.extend(paths.iter().cloned());
+                application::retire_group(&vault_root, task, &snapshots, mutation.as_ref())?;
+                report.outcome(
+                    None,
+                    &snapshots,
+                    application::Outcome::Dropped {
+                        reason: status.as_str().into(),
+                    },
+                );
                 continue;
             }
-            Err(e) => {
-                fail(e.to_string());
-                failed += 1;
-                continue;
-            }
+            Err(error) => return Err(error),
         }
         let content = match origin_pages.get(&rel_path) {
             Some((pending, _)) => pending.clone(),
             None => match read_page(&vault_root, &rel_path) {
                 Ok(c) => c,
                 Err(e) => {
-                    fail(format!("read {}: {e}", rel_path.display()));
-                    failed += 1;
-                    continue;
+                    return Err(miette::miette!("read {}: {e}", rel_path.display()));
                 }
             },
         };
@@ -758,7 +873,14 @@ async fn apply(
         {
             drop_dead("already materialized");
             dropped += 1;
-            consumed.extend(paths.iter().cloned());
+            application::retire_group(&vault_root, task, &snapshots, mutation.as_ref())?;
+            report.outcome(
+                None,
+                &snapshots,
+                application::Outcome::Dropped {
+                    reason: "already materialized".into(),
+                },
+            );
             continue;
         }
         let expected = serde_json::to_value(result).map_err(|error| miette::miette!("{error}"))?;
@@ -772,12 +894,40 @@ async fn apply(
             }
         }
         if ambiguous {
-            fail("conflicting extraction results for the same retained task and input; review and reconcile all retained proposals to one agreed value before retrying".into());
+            let error = application::rejection(
+                application::RejectionKind::ConflictingProposals,
+                "conflicting extraction results for the same retained task and input; review and reconcile all retained proposals to one agreed value before retrying",
+            );
+            application::reject_group(
+                report,
+                &vault_root,
+                &config,
+                &config_revision,
+                task,
+                &snapshots,
+                &error,
+                mutation.as_ref(),
+            )?;
+            fail(error.to_string());
             failed += 1;
             continue;
         }
         if original_revision != result.target_revision {
-            fail("target changed; read the current page and regenerate this result".into());
+            let error = application::rejection(
+                application::RejectionKind::TargetChanged,
+                "target changed; read the current page and regenerate this result",
+            );
+            application::reject_group(
+                report,
+                &vault_root,
+                &config,
+                &config_revision,
+                task,
+                &snapshots,
+                &error,
+                mutation.as_ref(),
+            )?;
+            fail(error.to_string());
             failed += 1;
             continue;
         }
@@ -791,6 +941,16 @@ async fn apply(
         let result_guards = match guarded {
             Ok(guards) => guards,
             Err(error) => {
+                application::reject_group(
+                    report,
+                    &vault_root,
+                    &config,
+                    &config_revision,
+                    task,
+                    &snapshots,
+                    &error,
+                    mutation.as_ref(),
+                )?;
                 fail(error.to_string());
                 failed += 1;
                 continue;
@@ -818,12 +978,30 @@ async fn apply(
                 page.1.extend(paths.iter().cloned());
                 completed_tasks.insert((result.task_id.clone(), result.cache_hash.clone()));
                 work_guards.push(result_guards);
+                applied_groups.push((
+                    application::TaskIdentity::capture(&vault_root, task)?,
+                    task.clone(),
+                    snapshots,
+                ));
                 applied += 1;
             }
-            Err(e) => {
-                fail(e.to_string());
+            Err(lk_pipeline::PipelineError::RejectedResult(detail)) => {
+                let error =
+                    application::rejection(application::RejectionKind::InvalidProposal, detail);
+                application::reject_group(
+                    report,
+                    &vault_root,
+                    &config,
+                    &config_revision,
+                    task,
+                    &snapshots,
+                    &error,
+                    mutation.as_ref(),
+                )?;
+                fail(error.to_string());
                 failed += 1;
             }
+            Err(error) => return Err(miette::miette!("{error}")),
         }
     }
 
@@ -893,6 +1071,12 @@ async fn apply(
         guard.append_to(&mut plan, &owned)?;
     }
     plan.extend(publications);
+    for (_, task, snapshots) in &applied_groups {
+        rejections::remove_matching(&vault_root, task, &mut plan)?;
+        for snapshot in snapshots {
+            plan.remove(&snapshot.proposal.path, snapshot.raw.clone());
+        }
+    }
     if dry_run {
         plan.validate_addresses(&vault_root)
             .map_err(|error| miette::miette!("validate extraction addresses: {error}"))?;
@@ -904,7 +1088,14 @@ async fn apply(
              {} concept page(s)",
             concept_pages.len()
         );
-        return finish_apply(failed, unreadable, moved, dry_run);
+        for (identity, _, snapshots) in &applied_groups {
+            report.outcome(
+                Some(identity.clone()),
+                snapshots,
+                application::Outcome::Applied,
+            );
+        }
+        return Ok(());
     }
     for identity in completed_tasks {
         super::work::retire_discovery(&vault_root, &pending.tasks[&identity], &mut plan)?;
@@ -917,11 +1108,12 @@ async fn apply(
     for page in &concept_pages {
         super::report_refusals(page, false);
     }
-    consumed.extend(committed_results);
-
-    for path in &consumed {
-        std::fs::remove_file(path)
-            .map_err(|e| miette::miette!("remove {}: {e}", path.display()))?;
+    for (identity, _, snapshots) in &applied_groups {
+        report.outcome(
+            Some(identity.clone()),
+            snapshots,
+            application::Outcome::Applied,
+        );
     }
 
     eprintln!(
@@ -929,7 +1121,8 @@ async fn apply(
          {} concept page(s)",
         concept_pages.len()
     );
-    finish_apply(failed, unreadable, moved, dry_run)
+    let _ = committed_results;
+    Ok(())
 }
 
 fn register_publication_owner(
@@ -957,46 +1150,6 @@ fn register_publication_owner(
     }
     owned.insert(relative, original.into());
     Ok(())
-}
-
-/// Exit non-zero when anything needs a human: a retryable failure, or a file that could not
-/// be parsed. `unreadable` counts every such file whether or not it was successfully moved —
-/// one left in place still needs attention — while the per-file lines above say what actually
-/// happened to each, which under `--dry-run` is nothing.
-fn finish_apply(
-    failed: usize,
-    unreadable: usize,
-    moved: usize,
-    dry_run: bool,
-) -> miette::Result<()> {
-    // The last line of the run is what a pipeline log ends on, so it states what actually
-    // happened to the files rather than what was attempted: under `--dry-run` nothing moved,
-    // and a move can also fail, in which case the file is still sitting in `results/`.
-    let fate = match (dry_run, moved, unreadable) {
-        (true, ..) => format!(
-            "none moved yet; would go to results/{}/",
-            lk_queue::CORRUPT_SUBDIR
-        ),
-        (false, m, u) if m == u => format!("moved to results/{}/", lk_queue::CORRUPT_SUBDIR),
-        (false, 0, _) => "none could be moved; they stay in results/".to_string(),
-        (false, m, u) => format!(
-            "{m} of {u} moved to results/{}/, the rest stay in results/",
-            lk_queue::CORRUPT_SUBDIR
-        ),
-    };
-    match (failed, unreadable) {
-        (0, 0) => Ok(()),
-        (0, u) => Err(miette::miette!(
-            "{u} unreadable result file(s) ({fate}); the concepts they held re-enqueue on the \
-             next ingest that re-renders their page"
-        )),
-        (f, 0) => Err(miette::miette!(
-            "{f} result(s) could not be applied; their files were kept for retry"
-        )),
-        (f, u) => Err(miette::miette!(
-            "{f} result(s) could not be applied (kept for retry); {u} unreadable file(s) ({fate})"
-        )),
-    }
 }
 
 fn policy_request_status(root: &Path, task: &QueueTask) -> Option<TaskStatus> {
@@ -1348,6 +1501,7 @@ fn prune_queue_with_session(
 ) -> miette::Result<PruneSummary> {
     let dry_run = session.is_none();
     let _claim = claim_writer(queue_dir, dry_run)?;
+    rejections::validate_store(vault_root)?;
     let mut revisions = BTreeMap::new();
     let mut summary = PruneSummary::default();
     for file in pending_queue_files(queue_dir)? {
@@ -1429,6 +1583,13 @@ fn prune_queue_with_session(
                     .map_err(|e| miette::miette!("rewrite {}: {e}", file.display()))?;
             }
         }
+    }
+    let removed = rejections::prune(vault_root, session)?;
+    if removed != 0 {
+        eprintln!(
+            "{}pruned {removed} unreferenced queue rejection receipt(s)",
+            if dry_run { "[dry-run] " } else { "" }
+        );
     }
     if let Some(session) = session {
         let mut identities = std::collections::BTreeSet::new();
@@ -2039,14 +2200,15 @@ mod tests {
         assert_eq!(quarantine(&corrupt, &unreadable, false), 0);
         assert!(stuck.exists(), "the file must stay put for the next run");
 
-        // The summary must not say they moved.
-        let err = finish_apply(0, 1, 0, false).unwrap_err().to_string();
-        assert!(err.contains("none could be moved"), "{err}");
-        assert!(!err.contains("moved to results/corrupt/"), "{err}");
+        assert_eq!(std::fs::read_to_string(&stuck).unwrap(), "{trunc");
+        assert_eq!(
+            std::fs::read_to_string(&corrupt).unwrap(),
+            "not a directory"
+        );
     }
 
     #[test]
-    fn a_partly_successful_quarantine_says_how_many_moved() {
+    fn a_partly_successful_quarantine_retains_exact_bytes_and_reason() {
         // A rename can fail for one file and not another; the summary must not round that
         // to all-or-nothing in either direction.
         let dir = TempDir::new().unwrap();
@@ -2066,8 +2228,14 @@ mod tests {
         assert_eq!(moved, 1);
         assert!(!real.exists(), "the one that could move did");
 
-        let err = finish_apply(0, 2, moved, false).unwrap_err().to_string();
-        assert!(err.contains("1 of 2 moved"), "{err}");
+        assert_eq!(
+            std::fs::read_to_string(corrupt.join("ext-1.json")).unwrap(),
+            "{trunc"
+        );
+        assert_eq!(
+            std::fs::read_to_string(corrupt.join("ext-1.json.reason.txt")).unwrap(),
+            "parse error\n"
+        );
     }
 
     #[test]
@@ -2084,8 +2252,7 @@ mod tests {
         assert!(file.exists());
         assert!(!corrupt.exists(), "dry-run must not create the directory");
 
-        let err = finish_apply(0, 1, 0, true).unwrap_err().to_string();
-        assert!(err.contains("none moved yet"), "{err}");
+        assert_eq!(std::fs::read_to_string(file).unwrap(), "{trunc");
     }
 
     #[test]

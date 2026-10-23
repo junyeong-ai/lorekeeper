@@ -407,9 +407,9 @@ fn directory_alias_targets_keep_one_publication_owner_and_refuse_duplicate_owner
             .collect();
         for dry_run in [true, false] {
             let output = ws.run(if dry_run {
-                &["queue", "apply", "--dry-run"]
+                &["queue", "apply", "--dry-run", "--json"]
             } else {
-                &["queue", "apply"]
+                &["queue", "apply", "--json"]
             });
             assert_eq!(
                 output.status.success(),
@@ -419,8 +419,10 @@ fn directory_alias_targets_keep_one_publication_owner_and_refuse_duplicate_owner
             );
             if duplicate {
                 assert!(
+                    serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()["fatal"]["detail"].as_str().unwrap()
+                        .contains("multiple publication addresses resolve to the same page"),
+                    "{}",
                     String::from_utf8_lossy(&output.stderr)
-                        .contains("multiple publication addresses resolve to the same page")
                 );
             }
             if dry_run || duplicate {
@@ -609,13 +611,30 @@ fn extraction_proposal_groups_classify_before_comparing_answers() {
             assert!(!ws.vault().join(original_path).exists(), "{scenario}");
             assert!(!ws.vault().join(alias_path).exists(), "{scenario}");
         }
-        assert!(ws.read(other).contains("concepts_done:"), "{scenario}");
-        assert!(
+        let fatal = matches!(
+            scenario,
+            "orphan" | "unparseable-pending" | "unreadable" | "invalid-input"
+        );
+        assert_eq!(
+            ws.read(other).contains("concepts_done:"),
+            !fatal,
+            "{scenario}"
+        );
+        assert_eq!(
             ws.vault()
                 .join("wiki/concepts/independent-subject.md")
                 .exists(),
+            !fatal,
             "{scenario}"
         );
+        if fatal {
+            assert!(
+                ws.vault()
+                    .join(".lorekeeper/queue/results/independent.json")
+                    .exists(),
+                "{scenario}"
+            );
+        }
     }
 }
 
@@ -1055,7 +1074,9 @@ fn existing_only_policy_requires_explicit_reuse_after_an_owner_appears() {
     assert!(!rejected.status.success());
     assert!(
         String::from_utf8_lossy(&rejected.stderr)
-            .contains("existing-only concept policy refuses new concept")
+            .contains("existing-only concept policy refuses new concept"),
+        "{}",
+        String::from_utf8_lossy(&rejected.stderr)
     );
     assert_eq!(ws.read(PAGE), before);
     assert!(!ws.vault().join("wiki/concepts/known-alias.md").exists());
@@ -1092,7 +1113,7 @@ fn existing_only_policy_requires_explicit_reuse_after_an_owner_appears() {
 /// repair — aborting would hold them on this run and on every run after it, since nothing
 /// prunes results.
 #[test]
-fn a_result_whose_page_will_not_parse_is_kept_and_holds_up_nothing() {
+fn an_unreadable_target_preserves_the_batch_before_independent_publication() {
     const BROKEN: &str = "daily/notes/2026-05-24.md";
     let ws = Workspace::new();
     ws.write(PAGE, &daily_page("h"));
@@ -1104,26 +1125,31 @@ fn a_result_whose_page_will_not_parse_is_kept_and_holds_up_nothing() {
     ws.drop_result("ext-good", PAGE, "h", "Concept A");
     ws.drop_result("ext-broken", BROKEN, "h", "Concept B");
 
-    let out = ws.run(&["queue", "apply"]);
+    let page_before = ws.read(PAGE);
+    let broken_before = ws.read(BROKEN);
+    let good_result = ws.read(".lorekeeper/queue/results/ext-good.json");
+    let broken_result = ws.read(".lorekeeper/queue/results/ext-broken.json");
+    let out = ws.run(&["queue", "apply", "--json"]);
     assert!(
         !out.status.success(),
         "a result nothing could apply must fail the run"
     );
 
-    assert!(
-        ws.read(PAGE).contains("wiki/concepts/concept-a.md"),
-        "the page that could be written must be cited:\n{}",
-        ws.read(PAGE)
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(report["fatal"].is_object());
+    assert_eq!(report["applied"], 0);
+    assert_eq!(ws.read(PAGE), page_before);
+    assert_eq!(ws.read(BROKEN), broken_before);
+    assert_eq!(
+        ws.read(".lorekeeper/queue/results/ext-good.json"),
+        good_result
     );
     assert_eq!(
-        json_files(&results_dir(&ws))
-            .iter()
-            .filter_map(|p| p.file_name().and_then(|n| n.to_str()))
-            .map(str::to_owned)
-            .collect::<Vec<_>>(),
-        vec!["ext-broken.json".to_string()],
-        "the unapplicable result is kept and the applied one consumed"
+        ws.read(".lorekeeper/queue/results/ext-broken.json"),
+        broken_result
     );
+    assert!(!ws.vault().join("wiki/concepts/concept-a.md").exists());
+    assert!(!ws.vault().join("wiki/concepts/concept-b.md").exists());
 }
 
 /// `--dry-run` reports without touching the vault or consuming a result.
@@ -1450,7 +1476,8 @@ fn multipart_extraction_requires_completed_work_without_poisoning_valid_results(
         assert!(
             ws.vault()
                 .join("wiki/concepts/published-subject.md")
-                .exists()
+                .exists(),
+            "prepared={prepared}: {diagnostic}"
         );
         assert!(ws.read(small).contains("concepts_done:"));
         assert!(results_dir(&ws).join("a-large.json").exists());
@@ -2097,11 +2124,13 @@ fn orphan_synthesis_is_preserved_with_a_reason_and_does_not_fail_forever() {
 }
 
 #[test]
-fn orphan_quarantine_failure_preserves_bytes_and_allows_independent_extraction() {
+fn orphan_quarantine_failure_preserves_bytes_and_halts_independent_extraction() {
     for suffix in ["json", "section.json", "synthesis.json"] {
         let ws = Workspace::new();
         ws.write(PAGE, &daily_page("independent"));
         ws.drop_result("z-independent", PAGE, "independent", "Independent Subject");
+        let page_before = ws.read(PAGE);
+        let independent_before = ws.read(".lorekeeper/queue/results/z-independent.json");
         let identity = serde_json::json!({
             "task_id": "orphan", "cache_hash": "retired", "target_revision": "captured",
         });
@@ -2137,18 +2166,16 @@ fn orphan_quarantine_failure_preserves_bytes_and_allows_independent_extraction()
         assert!(!out.status.success(), "{suffix}");
         assert_eq!(ws.read(&path), orphan, "{suffix}");
         assert_eq!(ws.read(quarantine), "occupied quarantine address");
-        let published = ws.read(PAGE);
+        assert_eq!(ws.read(PAGE), page_before, "{suffix}");
         assert!(
-            published.contains("concepts_done:"),
-            "{suffix}: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        assert!(
-            ws.vault()
+            !ws.vault()
                 .join("wiki/concepts/independent-subject.md")
                 .exists()
         );
-        assert!(!results_dir(&ws).join("z-independent.json").exists());
+        assert_eq!(
+            ws.read(".lorekeeper/queue/results/z-independent.json"),
+            independent_before
+        );
 
         std::fs::remove_file(ws.vault().join(quarantine)).unwrap();
         let retried = ws.run(&["queue", "apply"]);
@@ -2162,12 +2189,19 @@ fn orphan_quarantine_failure_preserves_bytes_and_allows_independent_extraction()
             ws.read(&format!("{quarantine}/a-orphan.{suffix}.reason.txt"))
                 .contains("no matching pending task")
         );
+        assert_eq!(ws.read(PAGE), page_before);
         assert_eq!(
-            ws.read(PAGE),
-            published,
-            "retry must not reapply completed work"
+            ws.read(".lorekeeper/queue/results/z-independent.json"),
+            independent_before
         );
         assert!(ws.run(&["queue", "apply"]).status.success());
+        assert!(ws.read(PAGE).contains("concepts_done:"));
+        assert!(
+            ws.vault()
+                .join("wiki/concepts/independent-subject.md")
+                .exists()
+        );
+        assert!(!results_dir(&ws).join("z-independent.json").exists());
     }
 }
 
@@ -2185,7 +2219,7 @@ fn malformed_pending_task_prevents_orphan_disposition() {
 }
 
 #[test]
-fn corrupt_result_payloads_are_preserved_once_without_blocking_valid_synthesis() {
+fn corrupt_result_payloads_are_preserved_before_independent_synthesis_can_publish() {
     for suffix in ["json", "synthesis.json", "section.json"] {
         for bytes in [
             b"{\"task_id\":".as_slice(),
@@ -2219,9 +2253,11 @@ fn corrupt_result_payloads_are_preserved_once_without_blocking_valid_synthesis()
             assert_eq!(std::fs::read(&bad).unwrap(), bytes);
             assert!(ws.read("wiki/concepts/example.md").contains("Old."));
             assert!(!ws.run(&["queue", "apply"]).status.success());
+            assert!(ws.read("wiki/concepts/example.md").contains("Old."));
             assert!(
-                ws.read("wiki/concepts/example.md")
-                    .contains("Grounded evidence.")
+                ws.vault()
+                    .join(".lorekeeper/queue/results/good.synthesis.json")
+                    .exists()
             );
             assert!(!bad.exists());
             let preserved = ws
@@ -2234,6 +2270,10 @@ fn corrupt_result_payloads_are_preserved_once_without_blocking_valid_synthesis()
                     .is_file()
             );
             assert!(ws.run(&["queue", "apply"]).status.success());
+            assert!(
+                ws.read("wiki/concepts/example.md")
+                    .contains("Grounded evidence.")
+            );
         }
     }
 }

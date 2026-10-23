@@ -466,6 +466,15 @@ prepares at most 64 targets in fair order. Discovery computation is shared withi
 that checkpoint while preserving each task's complete candidates and revisions;
 recording freshly validates inputs after execution. Unprepared work stays pending.
 
+`lore queue apply --json` reports each result's task, exact files, validation scope
+and applied, dropped or rejected outcome. A rejection with verified ownership and
+scope defers that task and its dependents while native execution can continue
+independent tasks and ready audits. The job remains incomplete and nonzero.
+An unchanged rejected attempt does not trigger another agent invocation; deterministic
+application is still retried. Corrected conditions or proposals are revalidated;
+stale evidence requires fresh reading and a regenerated answer. Corrupt records,
+unknown ownership, storage errors and host failures stop further processing.
+
 `llm.provider: queue` retains semantic requests separately from host selection.
 `noop` creates no LLM work. Search, navigation and deterministic collection need no agent.
 

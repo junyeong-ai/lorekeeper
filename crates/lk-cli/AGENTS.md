@@ -34,7 +34,9 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   send group SIGKILL once before reaping a forced foreground child.
   Knowledge --batches is an explicit initial-campaign budget. Each batch uses a fresh
   workflow lease, while configuration revision and cancellation supervision remain pinned
-  across the campaign. Stop on failure/cancellation or an empty plan; batch-limit success
+  across the campaign. Stop on fatal or unknown state, cancellation, no verified progress,
+  or an empty plan. Verified selected audits can advance subsequent budgeted batches despite
+  unrelated queue rejections; the campaign remains incomplete/nonzero. Batch-limit success
   does not establish full-corpus coverage. Existing receipts resume verified work.
   Report elapsed job time and agent-invocation time separately, including failures
   and cancellation. Invocation counts and wall time are not tokens or billed cost.
@@ -67,6 +69,8 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   a bounded finalizer; small requests retain ordinary batching. `execution.work` limits
   serialized request/result bytes and agent calls per native run, resetting per knowledge
   batch. Exhaustion retains unfinished work and fails explicitly, without clipping evidence.
+  Resume current explicit Work plans even when the remaining batch fits whole input;
+  validate their exact manifest before using recorded observations.
   New work fixes reduction topology from the exact envelope plus each child's full result
   allowance; every child and its evidence mapping participates. Persist the policy and
   preserve missing-policy binary plans, node IDs and seals without rewriting them on resume.
@@ -239,6 +243,12 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
 - Hold the vault claim for each apply, not an entire LLM session; vault→queue is the
   lock order. Distinguish a page-local failure, quarantined malformed result, and
   fatal IO. Aggregate output honestly reports all/some/none applied.
+  `queue apply --json` retains typed group identities, exact proposal revisions and
+  verified rejection scope. Native orchestration separates safe independent progress
+  from aggregate success; retained rejections keep the final job nonzero. Queue-owned
+  exact rejection receipts suppress host retries, never deterministic apply or input
+  readiness. Changed scope/proposals require revalidation before host admission.
+  Unknown/fatal state and abnormal child termination stop; never classify error text.
 - Synthesis owns both sections and its completion marker atomically, with exact
   source/target/queue guards. Do not split core and related publication. Explicit
   year/date conflicts with `--previous` fail before flushing work.

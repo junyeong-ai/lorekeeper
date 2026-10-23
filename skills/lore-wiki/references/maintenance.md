@@ -203,8 +203,11 @@ No lint or receipt count certifies that the entire corpus is semantically consis
 ## Operating budget and measurement
 
 Use `lore run knowledge --profile NAME --batches N --json` for an explicitly bounded
-initial campaign. Each batch releases its workflow lease; a failure or cancellation
-stops the campaign with unfinished work retained. `batch-limit` means the execution
+initial campaign. Each batch releases its workflow lease. A selected audit that
+actually completes can advance to the next explicitly budgeted batch despite unrelated
+scoped queue rejections; the campaign remains incomplete/nonzero. Fatal or unknown
+failures, cancellation, and a batch without verified audit progress stop the campaign
+with unfinished work retained. `batch-limit` means the execution
 budget was reached; `settled` means no subjects remain pending in the current scope.
 Neither outcome certifies truth or a read of every external original.
 

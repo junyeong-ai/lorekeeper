@@ -353,10 +353,15 @@ impl ConceptDrafts {
         dirs: &VaultDirs,
         policy: ConceptPolicy,
     ) -> Result<StagedConcept, PipelineError> {
+        if policy != ConceptPolicy::SupportedNew {
+            return Err(PipelineError::RejectedResult(
+                "existing-only concept policy refuses new concept admission".into(),
+            ));
+        }
         self.ensure_registry(reader, dirs).await?;
         let resolution = self.registry.as_ref().unwrap().resolve(&concept.name);
         if !matches!(resolution, Resolution::Absent) {
-            return Err(PipelineError::Render(format!(
+            return Err(PipelineError::RejectedResult(format!(
                 "new admission requires an unowned name; select an exact existing owner for `{}`",
                 concept.name
             )));
@@ -365,7 +370,7 @@ impl ConceptDrafts {
             match self.registry.as_ref().unwrap().resolve(alias) {
                 Resolution::Absent => {}
                 _ => {
-                    return Err(PipelineError::Render(format!(
+                    return Err(PipelineError::RejectedResult(format!(
                         "new concept alias `{alias}` has another owner; resolve it before admission"
                     )));
                 }
@@ -384,7 +389,7 @@ impl ConceptDrafts {
         let path = std::path::Path::new(&owner.path);
         let directory = lk_core::vault_path::concepts_dir(dirs);
         let relative = path.strip_prefix(&directory).map_err(|_| {
-            PipelineError::Render(
+            PipelineError::RejectedResult(
                 "concept owner must be an exact address in the configured concepts collection"
                     .into(),
             )
@@ -394,18 +399,21 @@ impl ConceptDrafts {
                 .components()
                 .any(|component| !matches!(component, std::path::Component::Normal(_)))
         {
-            return Err(PipelineError::Render(
+            return Err(PipelineError::RejectedResult(
                 "invalid concept owner address".into(),
             ));
         }
         let page = reader.read_page(path).await?.ok_or_else(|| {
-            PipelineError::Render(format!("selected concept owner is absent: {}", owner.path))
+            PipelineError::RejectedResult(format!(
+                "selected concept owner is absent: {}",
+                owner.path
+            ))
         })?;
         let original = page.original.as_ref().ok_or_else(|| {
             PipelineError::Render("concept reader omitted its original input snapshot".into())
         })?;
         if lk_core::concept::file_revision(original) != owner.revision {
-            return Err(PipelineError::Render(
+            return Err(PipelineError::RejectedResult(
                 "selected concept owner changed; rediscover before reuse".into(),
             ));
         }
@@ -415,7 +423,7 @@ impl ConceptDrafts {
             .and_then(serde_json::Value::as_str)
             != Some("concept")
         {
-            return Err(PipelineError::Render(
+            return Err(PipelineError::RejectedResult(
                 "selected owner is not a concept page".into(),
             ));
         }

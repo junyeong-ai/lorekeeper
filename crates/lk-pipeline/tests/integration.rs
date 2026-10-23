@@ -3726,7 +3726,9 @@ async fn new_concept_grounding_is_required_before_staging_and_can_be_retried() {
             .apply_concept_result(&result("daily/a/2026-05-23.md", grounding), page)
             .await
             .unwrap_err();
-        assert!(error.to_string().contains("source-grounded synthesis"));
+        assert!(
+            matches!(&error, lk_pipeline::PipelineError::RejectedResult(message) if message.contains("source-grounded synthesis"))
+        );
         assert!(pipeline.render_concept_pages().await.unwrap().is_empty());
     }
     for grounding in ["<!--", "Injected\n---\n", "```text\nunclosed"] {
@@ -3734,7 +3736,9 @@ async fn new_concept_grounding_is_required_before_staging_and_can_be_retried() {
             .apply_concept_result(&result("daily/a/2026-05-23.md", Some(grounding)), page)
             .await
             .unwrap_err();
-        assert!(error.to_string().contains("section content"));
+        assert!(
+            matches!(&error, lk_pipeline::PipelineError::RejectedResult(message) if message.contains("section content"))
+        );
         assert!(pipeline.render_concept_pages().await.unwrap().is_empty());
     }
     pipeline
@@ -5987,7 +5991,9 @@ async fn new_admission_cannot_reuse_an_unpublished_alias_owner() {
         .apply_concept_result(&alias, origin)
         .await
         .unwrap_err();
-    assert!(error.to_string().contains("unowned name"));
+    assert!(
+        matches!(&error, lk_pipeline::PipelineError::RejectedResult(message) if message.contains("unowned name"))
+    );
     let after: Vec<_> = pipeline
         .render_concept_pages()
         .await

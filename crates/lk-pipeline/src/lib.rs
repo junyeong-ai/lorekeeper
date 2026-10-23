@@ -44,6 +44,8 @@ pub enum PipelineError {
     EventLog(String),
     #[error("render: {0}")]
     Render(String),
+    #[error("rejected semantic result: {0}")]
+    RejectedResult(String),
     #[error(transparent)]
     Vault(#[from] lk_vault::VaultError),
     #[error(transparent)]
@@ -826,7 +828,7 @@ impl Pipeline {
         manifest: Option<&lk_core::rss_original::RssOriginalManifest>,
     ) -> Result<String, PipelineError> {
         if !result.concept_policy.is_enabled() {
-            return Err(PipelineError::Render(
+            return Err(PipelineError::RejectedResult(
                 "concept extraction is disabled".into(),
             ));
         }
@@ -882,19 +884,21 @@ impl Pipeline {
             .filter_map(|concept| concept.synthesis.as_deref())
         {
             lk_core::markdown::validate_section_body(body)
-                .map_err(|error| PipelineError::Render(error.to_string()))?;
+                .map_err(|error| PipelineError::RejectedResult(error.to_string()))?;
         }
         let mut staged = Vec::with_capacity(result.concepts.len());
         for reported in &result.concepts {
             if manifest.is_some() && reported.rss_evidence.is_empty() {
-                return Err(PipelineError::Render(
+                return Err(PipelineError::RejectedResult(
                     "each RSS concept requires selected article evidence from the task manifest"
                         .into(),
                 ));
             }
             if !reported.rss_evidence.is_empty() {
                 let provided = manifest.ok_or_else(|| {
-                    PipelineError::Render("RSS selections require a versioned task manifest".into())
+                    PipelineError::RejectedResult(
+                        "RSS selections require a versioned task manifest".into(),
+                    )
                 })?;
                 for selection in &reported.rss_evidence {
                     lk_vault::load_rss_selected_payload(&self.vault_root, provided, selection)?;
@@ -906,7 +910,7 @@ impl Pipeline {
                 filter_valid_concepts(vec![reported.concept.clone()], &self.ctx.concept_categories)
                     .pop()
                     .ok_or_else(|| {
-                        PipelineError::Render("reported concept has no valid name".into())
+                        PipelineError::RejectedResult("reported concept has no valid name".into())
                     })?;
             let selected = match &reported.admission {
                 lk_queue::ConceptAdmission::New => {
@@ -915,7 +919,7 @@ impl Pipeline {
                         .as_deref()
                         .is_none_or(|text| text.trim().is_empty())
                     {
-                        return Err(PipelineError::Render(
+                        return Err(PipelineError::RejectedResult(
                             "a new concept requires a nonempty source-grounded synthesis".into(),
                         ));
                     }
