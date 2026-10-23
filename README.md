@@ -429,9 +429,10 @@ execution:
 계속 검사합니다. 모든 검색 후보의 본문을 읽으려면 `full-context`를 선택하세요. 이 설정도
 프로필의 `work`에서 재정의할 수 있습니다. 수동 처리와 재개 절차는
 [개념 추출 탐색](skills/lore-process/references/discovery.md)에 있습니다.
-`lore work cost --task-id ID`로 후보별 본문을 읽기 전 패킷 수·검색식별 일치 수·JSON 크기와
-남은 검토 범위를 확인할 수 있습니다. 선택적 `max_screening_batches`를 넘으면 전체 후보를
-보존하고 해당 작업만 보류합니다. 이 수치는 토큰·요금이나 후보의 의미적 적절성 판정이 아닙니다.
+`lore work cost --task-id ID`로 모델에 후보 본문을 보내기 전 패킷 수·검색식별 일치 수·JSON 크기와
+남은 검토 범위를 확인할 수 있습니다. 선택적 `max_screening_batches`를 넘는 미완료 선별은
+전체 후보를 보존하고 해당 작업만 보류하며, 완료한 선별 기록은 계속 사용합니다.
+이 수치는 토큰·요금이나 후보의 의미적 적절성 판정이 아닙니다.
 미완료 작업은 보존하고 실패로 보고합니다. 프로필별 예산과 수동 실행은
 [실행 설정](skills/lore-setup/references/config.md#execution-profiles),
 분할 결과 규약은 [Bounded work](skills/lore-process/references/bounded-work.md)를 따릅니다.

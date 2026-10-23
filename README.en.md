@@ -443,13 +443,21 @@ unselected bodies; deferred decisions block extraction completion. The retained 
 still requires complete reading, and candidate/review changes remain guarded. Select
 `full-context` to read every retrieved candidate body; profiles can override this setting
 under `work`. See [extraction discovery](skills/lore-process/references/discovery.md)
-for manual processing and resumption. Unfinished work is
+for manual processing and resumption.
+Before sending candidate bodies to a model, `lore work cost --task-id ID` reports
+complete candidate/packet counts, per-query matches, compact JSON bytes and remaining
+screening coverage. Optional `max_screening_batches` defers oversized incomplete
+screening without removing candidates; completed ledgers remain usable. These counts
+are not tokens, prices or semantic judgments. Unfinished work is
 preserved and reported as failure. See [execution configuration](skills/lore-setup/references/config.md#execution-profiles)
 for profile-specific limits and manual selection, and [bounded work](skills/lore-process/references/bounded-work.md)
 for result contracts.
 
-Bounded summaries, event refinement and theme extraction receive completed observations
-and their applicable generation rules, then return a section body. Rust owns task identity,
+Small summaries, event refinement and theme extraction use one structured request with
+source text, scoped reviews and applicable generation rules. Saved bounded work resumes
+its observations before using those same section rules. A complete request exceeding
+the input bound defers only that target; independent work continues. The model returns
+a section body. Rust owns task identity,
 revision checks, staging and publication. A required read or review defers the task without
 calling the same unchanged request again; independent work continues. Concept extraction,
 synthesis and audits retain tool-using finalization.
@@ -683,6 +691,12 @@ Use `lore wiki audit-plan --ready` to preview ready subjects and blockers.
 reads within the call budget; recording and publication stay serial. Measure local
 preparation and invocation time before adjusting it. Summed parallel invocation
 times can exceed elapsed job time.
+New Work and candidate selections use parsed configuration values rather than comments
+or YAML formatting. Only call/parallel/screening-packet limits and profile timeouts are
+excluded from semantic identity, so these can change between workflows. Every config byte
+remains pinned during execution; model/effort, input/result bounds and semantic policies
+still invalidate derived work. Legacy byte-bound records resume with their exact original
+configuration; operational edits do not migrate them.
 See [semantic maintenance](skills/lore-wiki/references/maintenance.md)
 for discovery scope, complete evidence reads, repair and reassessment.
 
