@@ -94,6 +94,7 @@ fn rust_artifacts(format: InputFormat) -> String {
         InputFormat::Html => {
             hash.update(blake3::hash(include_str!("../fetch.rs").as_bytes()).as_bytes());
             hash.update(blake3::hash(include_str!("../markdown.rs").as_bytes()).as_bytes());
+            hash.update(blake3::hash(include_str!("../remote_text.rs").as_bytes()).as_bytes());
         }
         _ => {
             hash.update(blake3::hash(include_str!("../content.rs").as_bytes()).as_bytes());
@@ -105,22 +106,36 @@ fn rust_artifacts(format: InputFormat) -> String {
 // Dependency updates must advance their meaning identity; the owner test binds
 // this list to the resolved lock without hashing workspace release stamps.
 const PARSER_IDENTITIES: &[(&str, &str)] = &[
+    ("cssparser", "0.37.0"),
+    ("dom_query", "0.28.0"),
     ("dom_smoothie", "0.18.2"),
     ("encoding_rs", "0.8.42"),
     ("htmd", "0.5.6"),
+    ("html-escape", "0.2.15"),
     ("html5ever", "0.38.0"),
     ("html5ever", "0.39.0"),
+    ("icu_collections", "2.4.0"),
+    ("icu_locale_core", "2.4.0"),
+    ("icu_normalizer", "2.4.0"),
+    ("icu_normalizer_data", "2.4.0"),
+    ("icu_properties", "2.4.0"),
+    ("icu_properties_data", "2.4.0"),
+    ("icu_provider", "2.4.0"),
+    ("idna", "1.1.0"),
+    ("idna_adapter", "1.2.2"),
     ("markup5ever", "0.38.0"),
     ("markup5ever", "0.39.0"),
     ("markup5ever_rcdom", "0.38.0+unofficial"),
     ("minijinja", "3.0.2"),
     ("percent-encoding", "2.3.2"),
-    ("pulldown-cmark", "0.13.4"),
+    ("pulldown-cmark", "0.13.5"),
     ("pulldown-cmark-to-cmark", "23.0.0"),
+    ("selectors", "0.38.0"),
     ("serde", "1.0.229"),
     ("serde-saphyr", "2.0.0"),
     ("serde_json", "1.0.154"),
     ("unicode-normalization", "0.1.26"),
+    ("unicode-segmentation", "1.13.3"),
     ("url", "2.5.8"),
 ];
 
