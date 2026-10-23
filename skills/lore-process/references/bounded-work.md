@@ -54,8 +54,13 @@ declaration retain binary reduction and resume without rewriting their observati
 Actual request and result limits still apply. Fewer reduction calls do not establish
 semantic equivalence, lower billed cost or complete corpus coverage.
 
-Native jobs rotate one inspection/reduction/finalization turn among independent
-targets and retain the next target across runs. Whole-input queue tasks are batched
+Native jobs reserve fair inspection/reduction/finalization turns and retain the next
+target across runs. With `execution.work.max_parallel` above its default 1, ready
+evidence requests can run concurrently within the remaining call budget. Requests
+in a wave never depend on another request in that wave. Recording reloads current
+inputs and runs serially; changed evidence refuses an old response. Screening,
+interactive sessions and finalizers remain serial, as does canonical publication.
+Whole-input queue tasks are batched
 within the evidence input budget with at most one task per target; publication
 refreshes selection before another task on that page. The call budget can leave
 pending work, but a resumed large document does not always take the first turn.
@@ -182,3 +187,12 @@ Unobserved or inapplicable measurements stay `null`; a preflight rejection does 
 invent an agent duration. Byte counts are not token counts or billed cost. A recorded
 observation or staged final result alone does not prove canonical publication: inspect
 the job's stages, publication result and final checks.
+
+When one evaluation prepares several ready requests, its preparation time belongs
+to the first selected node; later nodes from that evaluation leave that field null.
+`semantic_duration_ms` sums invocation attempt wall times, so parallel attempts can
+exceed the job's elapsed `duration_ms`. `queue_planning` reports local planning
+`attempts`, cumulative `duration_ms`, `synthesis_subjects` and `audit_captures`.
+The last two count subjects and shared captures encountered during queue planning,
+not all later resource revalidation or model work. Each planning checkpoint uses a
+fresh complete evidence universe; it is never reused across a host invocation.

@@ -57,6 +57,7 @@ execution:
     max_input_bytes: 262144
     max_result_bytes: 32768
     max_calls: 64
+    max_parallel: 1  # ready evidence observers; screening and publication remain serial
   profiles:
     primary:
       engine: claude-code

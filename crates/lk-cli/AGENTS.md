@@ -42,6 +42,9 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   omissions. Measure existing operations only; unknown/inapplicable fields are null.
   Compact request/decoded-result bytes exclude prompts and host envelopes; finalizer
   JSON sizes are unobserved. Revalidation and recording share one measured operation.
+  Parallel invocation durations are summed and can exceed elapsed job time.
+  Queue-planning metrics count local checkpoints and shared synthesis captures,
+  separately from later revalidation and host work.
   Native consumers own selected semantic reads and guarded publication; the controller
   owns final global reconciliation/checks. Keep this boundary explicit in the host
   instruction and shared skills; standalone skills still perform their own final checks.
@@ -54,6 +57,9 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   Recheck readiness under those claims before recording,
   and verify selected receipts after final reconciliation even when unrelated backlog
   leaves the overall job incomplete. Authored pages require no invented done markers.
+  `wiki audit-plan --ready` uses the same readiness owner without reserving work;
+  automatic plans skip blockers, while exact selections retain them with bounded
+  diagnostics and a complete count for that checked scope.
   Grant each temporary selection manifest's directory explicitly to the selected host;
   keep it alive through the foreground consumer and remove it afterward.
   `commands/work.rs` binds retained input and audit dependencies to resumable derived
@@ -67,7 +73,7 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   Completion requires exact sealed typed results and source/work guards in the canonical
   publication journal. Keep the queue target's guard in its publication edit: a separate
   unchanged guard for the same target would reject the journal's own recovery.
-  Prepare a native node's progress and request from one captured evaluation. Refresh
+  Prepare ready native nodes and their progress from one captured evaluation. Refresh
   the complete scope after the host returns before recording; added discovery matches
   invalidate work too. Never retain a candidate capture across host execution.
   Progressive extraction separates complete source observations, bounded candidate-card
@@ -85,11 +91,17 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   This restriction does not describe the interactive finalizer/maintenance role.
 - Native queue scheduling chooses one task per target so publication cannot invalidate
   another simultaneous task on the same page. Whole-input tasks share an evidence-bounded
-  batch; oversized work gets one inspection/reduction/finalization turn at a time.
+  batch; oversized work reserves fair inspection/reduction/finalization turns.
+  `execution.work.max_parallel` defaults to 1 and bounds simultaneous dependency-ready
+  evidence observers within remaining calls. Screening, interactive roles, finalizers
+  and publication remain serial. Supervise every child through exit and cleanup;
+  record returned observations serially against freshly loaded inputs.
   Verify target owners before batching. Defer concept synthesis while its cited origin
   pages have unfinished inputs or publishable pending work; unrelated context is not
   a dependency barrier. Reconcile backlinks after a source publication wave and replan
   before selecting another task. A dependency-only queue remains explicitly incomplete.
+  One queue-planning checkpoint captures all ready synthesis inputs against the
+  complete graph universe; discard that view before host execution.
   `.lorekeeper/execution-cursor.json` stores the next queue/audit target under a guarded
   short mutation, preserving turns across budget-limited runs. Reserve before external
   execution, never infer priority or semantic quality from size/progress/citation counts.

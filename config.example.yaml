@@ -551,6 +551,7 @@ execution:
     max_input_bytes: 262144        # >=4096; serialized evidence request, not total model context
     max_result_bytes: 32768        # >=1024 and <=max_input_bytes/4
     max_calls: 64                  # per daily/process run, or per knowledge batch; >0
+    max_parallel: 1               # concurrent ready evidence observers; >0, also bounded by remaining calls
   profiles:
     primary:
       engine: claude-code

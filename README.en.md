@@ -658,6 +658,11 @@ Size the initial campaign from `lore wiki audit-plan`
 and a small run's actual completions, calls and duration; then check that recurring
 capacity keeps up with new and changed subjects. `batch_size` caps selected subjects,
 not completions or cost when work is deferred, partitioned or fails.
+Use `lore wiki audit-plan --ready` to preview ready subjects and blockers.
+`execution.work.max_parallel` defaults to 1 and permits concurrent ready evidence
+reads within the call budget; recording and publication stay serial. Measure local
+preparation and invocation time before adjusting it. Summed parallel invocation
+times can exceed elapsed job time.
 See [semantic maintenance](skills/lore-wiki/references/maintenance.md)
 for discovery scope, complete evidence reads, repair and reassessment.
 

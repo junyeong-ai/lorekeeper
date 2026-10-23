@@ -200,6 +200,11 @@ names an existing profile in that CLI. Credentials remain with the host.
 knowledge batch. These bound serialized JSON and invocation attempts, not total
 context, tokens or billing. Large requests are inspected/reduced in fresh sessions;
 exhaustion preserves verified work and reports incompletion.
+`execution.work.max_parallel` defaults to 1. Raising it permits concurrent ready
+evidence inspection/reduction requests, bounded by the remaining call budget.
+Screening, interactive sessions, finalization and publication remain serial.
+Recording reloads current inputs after the observers return; changed inputs refuse
+old observations. Parallelism does not increase `max_calls` or guarantee a speedup.
 `execution.work.extraction_context` defaults to `progressive`: examine bounded cards
 for the complete candidate inventory, then read selected bodies and their required
 reviews/evidence. Card-only exclusions do not establish whole-body findings; deferred
@@ -207,7 +212,7 @@ decisions block completion. `full-context` reads every retrieved candidate body.
 Both retain complete source reads and exact candidate/review guards. See
 [extraction discovery](../../lore-process/references/discovery.md) for the staged protocol.
 Input must be at least 4096 bytes; results at least 1024 bytes and at most one quarter
-of the input limit; calls must be positive. A profile's optional `work` overrides
+of the input limit; calls and parallelism must be positive. A profile's optional `work` overrides
 only specified fields, and the effective combination is validated. Native children
 inherit the pinned profile through `LORE_EXECUTION_PROFILE`; standalone bounded
 commands can set that variable explicitly. Run JSON reports effective limits.

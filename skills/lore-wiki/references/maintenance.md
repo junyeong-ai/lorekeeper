@@ -60,7 +60,7 @@ assessments or performs repairs.
 
 ## Assessment
 
-1. Run `lore wiki audit-plan` once. When the caller supplies exact batch addresses,
+1. Run `lore wiki audit-plan --ready` once. When the caller supplies exact batch addresses,
    use repeated `--path` for those addresses instead of choosing a new batch.
    Keep its candidate addresses as this run's scope.
    `graph.audit.batch_size` bounds subject count (1..100). Selection preserves fair
@@ -77,6 +77,15 @@ assessments or performs repairs.
    assessment. `audit-record` rechecks these inputs under the publication locks.
    Complete authored pages need no synthetic completion markers. Do not clear an
    owned input or bypass a blocker to record a receipt; report it for later processing.
+   `--ready` adds `readiness` to the ordinary plan. Automatic selection skips blocked
+   subjects; explicit `--path` retains every requested candidate, and only
+   `readiness.ready` identifies ready subjects. Deferred details include exact input
+   revisions and reasons, at most 100 entries with an exact `deferred_count` for the
+   checked scope. `scope: encountered` describes automatic selection, not the whole
+   corpus; `scope: selection` describes explicit subjects. This read-only preview
+   does not reserve turns, acquire a workflow, authenticate, run structural preflight
+   or certify discovery/evidence reading. Native admission and publication recheck
+   readiness. Omit `--ready` when only the original assessment-coverage plan is needed.
    Check `input.status` before reading: `oversized` retains the exact candidates
    because their complete page, scoped review/evidence and selected RSS payload bytes exceed
    `graph.audit.max_input_bytes`. Report the measured bytes and configured bound;
@@ -204,8 +213,9 @@ reports before/after coverage counts; `semantic_calls` counts agent invocation a
 One invocation can make multiple model requests and tool calls, so `execution.work.max_calls`
 does not cap provider requests, tokens or billing. `duration_ms` includes waiting and
 cleanup; campaigns report total and per-batch time. `semantic_duration_ms` measures
-the batch's agent invocations, including failed or cancelled attempts, not provider
-processing time or billed cost.
+the sum of the batch's agent invocation wall times, including failed or cancelled
+attempts. Concurrent evidence observers can make that sum exceed elapsed job time;
+it is not provider processing time or billed cost.
 
 Compare actual completions, calls and elapsed time with first-time/changed backlog
 and incoming work. `batch_size` bounds selected subjects, not successful completion
