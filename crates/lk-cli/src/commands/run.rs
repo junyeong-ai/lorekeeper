@@ -200,6 +200,14 @@ mod native {
     struct QueuePlan {
         jobs: std::collections::BTreeMap<String, QueueDispatch>,
         deferred: std::collections::BTreeMap<String, Vec<String>>,
+        keys: std::collections::BTreeSet<String>,
+    }
+
+    const MAX_PREPARED_QUEUE_TARGETS: usize = 64;
+
+    struct QueueTurn {
+        keys: std::collections::BTreeSet<String>,
+        targets: Vec<String>,
     }
 
     #[derive(Default, Serialize)]
@@ -208,6 +216,8 @@ mod native {
         duration_ms: u64,
         synthesis_subjects: usize,
         audit_captures: usize,
+        prepared_targets: usize,
+        discovery_captures: usize,
     }
 
     #[derive(Serialize)]
@@ -285,6 +295,7 @@ mod native {
         project_protection: Option<crate::commands::installation::Protection>,
         drain_blocked: bool,
         audit_batch: Option<Vec<lk_graph::audit::AuditCandidate>>,
+        queue_turn: Option<QueueTurn>,
         started_at: Instant,
         result: JobResult,
     }
@@ -521,6 +532,9 @@ mod native {
             );
             match command {
                 Ok(mut command) => {
+                    if !self.reserve_queue_turn() {
+                        return false;
+                    }
                     self.result.semantic_calls += 1;
                     command.current_dir(&self.root);
                     let started_at = Instant::now();
@@ -627,6 +641,9 @@ mod native {
                     }
                 };
             let timeout = self.selected.as_ref().expect("prepared agent").timeout();
+            if !self.reserve_queue_turn() {
+                return None;
+            }
             self.result.semantic_calls += 1;
             let started_at = Instant::now();
             let outcome = self
@@ -732,6 +749,21 @@ mod native {
             }
         }
 
+        fn reserve_queue_turn(&mut self) -> bool {
+            let Some(turn) = self.queue_turn.take() else {
+                return true;
+            };
+            match scheduler::reserve(
+                &self.root,
+                scheduler::Stage::Queue,
+                &turn.keys,
+                &turn.targets,
+            ) {
+                Ok(()) => true,
+                Err(error) => self.failure("queue scheduling", error),
+            }
+        }
+
         async fn bounded_observation_wave(
             &mut self,
             selected: &str,
@@ -768,6 +800,7 @@ mod native {
                     .clone();
             }
             let mut turns = Vec::new();
+            let mut reserved_targets = Vec::new();
             let mut target = selected.to_owned();
             while turns.len() < limit {
                 let Some(id) = jobs.get(&target) else { break };
@@ -806,16 +839,7 @@ mod native {
                 let Some(request) = work.requests.pop_front() else {
                     break;
                 };
-                if !turns.is_empty() {
-                    match scheduler::select(&self.root, stage, keys) {
-                        Ok(Some(reserved)) if reserved == target => {}
-                        Ok(_) => return Some(self.failure(
-                            "bounded work scheduling",
-                            "execution turn changed during preparation; unfinished work retained",
-                        )),
-                        Err(error) => return Some(self.failure("bounded work scheduling", error)),
-                    }
-                }
+                reserved_targets.push(target.clone());
                 let node_id = request["node_id"]
                     .as_str()
                     .expect("prepared node id")
@@ -896,6 +920,14 @@ mod native {
                 let (request, directory) = invocation.into_request(timeout, capture_limit);
                 requests.push(request);
                 directories.push(directory);
+            }
+            let reservations = if stage == scheduler::Stage::Queue {
+                reserved_targets.as_slice()
+            } else {
+                &reserved_targets[1..]
+            };
+            if let Err(error) = scheduler::reserve(&self.root, stage, keys, reservations) {
+                return Some(self.failure("bounded work scheduling", error));
             }
             self.result.semantic_calls += requests.len();
             let attempts = self.supervisor.run_requests(requests).await;
@@ -1379,132 +1411,182 @@ mod native {
             Some(completed == before.batches)
         }
 
-        fn queue_dispatches(&mut self) -> miette::Result<QueuePlan> {
+        fn queue_dispatches(
+            &mut self,
+            blocked: &std::collections::BTreeMap<String, String>,
+        ) -> miette::Result<QueuePlan> {
             fn flush(
                 batch: &mut Vec<lk_queue::QueueTask>,
                 jobs: &mut std::collections::BTreeMap<String, QueueDispatch>,
             ) {
-                if let Some(last) = batch.last() {
+                if let Some(first) = batch.first() {
                     jobs.insert(
-                        last.target.vault_path.clone(),
+                        first.target.vault_path.clone(),
                         QueueDispatch::WholeInput {
                             tasks: std::mem::take(batch),
                         },
                     );
                 }
             }
-            let mut tasks = crate::commands::queue::current_tasks(&self.root)?;
+            let session = lk_vault::MutationSession::acquire(&self.root)
+                .map_err(|error| miette::miette!("{error}"))?;
+            let mut tasks = crate::commands::queue::current_tasks(session.root())?;
             tasks.sort_by(|left, right| {
                 (left.created_at, &left.task_id).cmp(&(right.created_at, &right.task_id))
             });
-            let mut targets = std::collections::BTreeMap::new();
+            let mut owners = std::collections::BTreeMap::new();
             for task in tasks {
-                let owner = lk_vault::page_path(&self.root, Path::new(&task.target.vault_path))
+                let owner = lk_vault::page_path(session.root(), Path::new(&task.target.vault_path))
                     .and_then(|path| path.canonicalize())
                     .map_err(|error| miette::miette!("queue target: {error}"))?;
-                targets.entry(owner).or_insert(task);
+                owners.entry(owner).or_insert(task);
             }
-            let mut readiness = targets
+            let mut readiness = owners
                 .values()
                 .any(|task| task.kind == lk_queue::TaskKind::SynthesizeConcept)
-                .then(|| super::super::queue::readiness::InputReadiness::load(&self.root))
+                .then(|| super::super::queue::readiness::InputReadiness::load(session.root()))
                 .transpose()?;
-            let limit = self
+            let budget = self
                 .config
                 .execution
                 .effective_work()
-                .map_err(|error| miette::miette!("{error}"))?
-                .max_input_bytes;
-            let mut jobs = std::collections::BTreeMap::new();
+                .map_err(|error| miette::miette!("{error}"))?;
             let mut deferred = std::collections::BTreeMap::new();
-            let mut eligible = Vec::new();
-            for task in targets.into_values() {
+            let mut targets = std::collections::BTreeMap::new();
+            for task in owners.into_values() {
                 let target = task.target.vault_path.clone();
                 if task.kind == lk_queue::TaskKind::SynthesizeConcept {
                     let reasons = readiness
                         .as_mut()
                         .expect("synthesis readiness was loaded")
-                        .unfinished_synthesis(&self.root, &task)?;
+                        .unfinished_synthesis(session.root(), &task)?;
                     if !reasons.is_empty() {
                         deferred.insert(target, reasons);
                         continue;
                     }
                 }
-                eligible.push(task);
+                targets.insert(target, task);
             }
-            let synthesis_paths = eligible
-                .iter()
-                .filter(|task| task.kind == lk_queue::TaskKind::SynthesizeConcept)
-                .map(|task| task.target.vault_path.clone())
-                .collect::<Vec<_>>();
-            let synthesis_inputs = if synthesis_paths.is_empty() {
-                std::collections::BTreeMap::new()
-            } else {
-                self.result.queue_planning.synthesis_subjects += synthesis_paths.len();
-                self.result.queue_planning.audit_captures += 1;
-                let pages =
-                    lk_graph::scan::scan_vault(&self.root, self.config.graph.scope.follow_links)
-                        .map_err(|error| miette::miette!("{error}"))?;
-                lk_graph::audit::load_selected_inputs(
-                    &self.root,
-                    &self.config.vault.dirs,
-                    &pages,
-                    &synthesis_paths,
-                )
-                .map_err(|error| miette::miette!("{error}"))?
-                .into_iter()
-                .map(|candidate| (candidate.path.clone(), candidate))
-                .collect()
-            };
-            let mut batch = Vec::new();
-            let mut batch_bytes = 0usize;
-            for task in eligible {
-                let target = task.target.vault_path.clone();
-                if crate::commands::work::needs_discovery(
-                    &self.root,
-                    &self.config,
-                    &self.config_revision,
-                    &task,
-                )? {
-                    flush(&mut batch, &mut jobs);
-                    batch_bytes = 0;
-                    jobs.insert(target, QueueDispatch::Discovery { task });
-                    continue;
+            let mut keys = targets.keys().cloned().collect();
+            let mut jobs = std::collections::BTreeMap::new();
+            if !targets.is_empty() && self.result.semantic_calls >= budget.max_calls {
+                return Ok(QueuePlan {
+                    jobs,
+                    deferred,
+                    keys,
+                });
+            }
+            let order = scheduler::order(session.root(), scheduler::Stage::Queue, &keys)?;
+            for window in order.chunks(MAX_PREPARED_QUEUE_TARGETS) {
+                let mut materialize = Vec::new();
+                for target in window {
+                    let task = &targets[target];
+                    if crate::commands::work::needs_discovery(
+                        session.root(),
+                        &self.config,
+                        &self.config_revision,
+                        task,
+                    )? {
+                        jobs.insert(
+                            target.clone(),
+                            QueueDispatch::Discovery { task: task.clone() },
+                        );
+                    } else {
+                        materialize.push(task.clone());
+                    }
                 }
-                match crate::commands::work::prepare_task_with_audit(
-                    &self.root,
+                let synthesis_paths = materialize
+                    .iter()
+                    .filter(|task| task.kind == lk_queue::TaskKind::SynthesizeConcept)
+                    .map(|task| task.target.vault_path.clone())
+                    .collect::<Vec<_>>();
+                let synthesis_inputs = if synthesis_paths.is_empty() {
+                    std::collections::BTreeMap::new()
+                } else {
+                    self.result.queue_planning.synthesis_subjects += synthesis_paths.len();
+                    self.result.queue_planning.audit_captures += 1;
+                    let pages = lk_graph::scan::scan_vault(
+                        session.root(),
+                        self.config.graph.scope.follow_links,
+                    )
+                    .map_err(|error| miette::miette!("{error}"))?;
+                    lk_graph::audit::load_selected_inputs(
+                        session.root(),
+                        &self.config.vault.dirs,
+                        &pages,
+                        &synthesis_paths,
+                    )
+                    .map_err(|error| miette::miette!("{error}"))?
+                    .into_iter()
+                    .map(|candidate| (candidate.path.clone(), candidate))
+                    .collect()
+                };
+                self.result.queue_planning.prepared_targets += materialize.len();
+                let (prepared, captures) = crate::commands::work::prepare_tasks_with_audit(
+                    &session,
                     &self.config,
                     &self.config_revision,
-                    &task.task_id,
-                    synthesis_inputs.get(&target),
-                )? {
-                    crate::commands::work::TaskWork::WholeInput { bytes } => {
-                        if bytes > limit.saturating_sub(batch_bytes) {
+                    &materialize,
+                    &synthesis_inputs,
+                )?;
+                self.result.queue_planning.discovery_captures += captures;
+                let mut prepared = materialize
+                    .into_iter()
+                    .zip(prepared)
+                    .map(|(task, work)| (task.target.vault_path.clone(), (task, work)))
+                    .collect::<std::collections::BTreeMap<_, _>>();
+                let mut batch = Vec::new();
+                let mut batch_bytes = 0usize;
+                for target in window {
+                    let Some((task, work)) = prepared.remove(target) else {
+                        flush(&mut batch, &mut jobs);
+                        batch_bytes = 0;
+                        continue;
+                    };
+                    match work {
+                        crate::commands::work::TaskWork::WholeInput { bytes } => {
+                            if bytes > budget.max_input_bytes.saturating_sub(batch_bytes) {
+                                flush(&mut batch, &mut jobs);
+                                batch_bytes = 0;
+                            }
+                            batch_bytes += bytes;
+                            batch.push(task);
+                        }
+                        crate::commands::work::TaskWork::Partitioned { id } => {
                             flush(&mut batch, &mut jobs);
                             batch_bytes = 0;
+                            if let Some(reason) = blocked.get(&id) {
+                                keys.remove(target);
+                                deferred.insert(target.clone(), vec![reason.clone()]);
+                            } else {
+                                jobs.insert(
+                                    target.clone(),
+                                    QueueDispatch::Partitioned { id, task },
+                                );
+                            }
                         }
-                        batch_bytes += bytes;
-                        batch.push(task);
-                    }
-                    crate::commands::work::TaskWork::Partitioned { id } => {
-                        flush(&mut batch, &mut jobs);
-                        batch_bytes = 0;
-                        jobs.insert(target, QueueDispatch::Partitioned { id, task });
-                    }
-                    crate::commands::work::TaskWork::Source { id } => {
-                        flush(&mut batch, &mut jobs);
-                        batch_bytes = 0;
-                        jobs.insert(target, QueueDispatch::Source { id });
-                    }
-                    crate::commands::work::TaskWork::Screening => {
-                        flush(&mut batch, &mut jobs);
-                        batch_bytes = 0;
-                        jobs.insert(target, QueueDispatch::Screening { task });
+                        crate::commands::work::TaskWork::Source { id } => {
+                            flush(&mut batch, &mut jobs);
+                            batch_bytes = 0;
+                            jobs.insert(target.clone(), QueueDispatch::Source { id });
+                        }
+                        crate::commands::work::TaskWork::Screening => {
+                            flush(&mut batch, &mut jobs);
+                            batch_bytes = 0;
+                            jobs.insert(target.clone(), QueueDispatch::Screening { task });
+                        }
                     }
                 }
+                flush(&mut batch, &mut jobs);
+                if !jobs.is_empty() {
+                    break;
+                }
             }
-            flush(&mut batch, &mut jobs);
-            Ok(QueuePlan { jobs, deferred })
+            Ok(QueuePlan {
+                jobs,
+                deferred,
+                keys,
+            })
         }
 
         fn expanded_extraction_handoff(
@@ -1549,25 +1631,20 @@ mod native {
         async fn dispatch_queue(&mut self) -> bool {
             let mut blocked = std::collections::BTreeMap::<String, String>::new();
             'planning: loop {
+                self.queue_turn = None;
                 let started_at = Instant::now();
                 self.result.queue_planning.attempts += 1;
-                let planned = self.queue_dispatches();
+                let planned = self.queue_dispatches(&blocked);
                 self.result.queue_planning.duration_ms += started_at.elapsed().as_millis() as u64;
-                let mut plan = match planned {
+                let plan = match planned {
                     Ok(plan) => plan,
                     Err(error) => return self.failure("queue planning", error),
                 };
-                plan.jobs.retain(|target, job| {
-                    if let QueueDispatch::Partitioned { id, .. } = job
-                        && let Some(reason) = blocked.get(id)
-                    {
-                        plan.deferred.insert(target.clone(), vec![reason.clone()]);
-                        return false;
-                    }
-                    true
-                });
                 let jobs = plan.jobs;
                 if jobs.is_empty() {
+                    if !plan.keys.is_empty() && !self.call_budget_available() {
+                        return false;
+                    }
                     if let Some((target, reasons)) = plan.deferred.first_key_value() {
                         return self.failure(
                             "queue dependencies",
@@ -1592,18 +1669,21 @@ mod native {
                     if !self.call_budget_available() {
                         return false;
                     }
-                    let keys = jobs.keys().cloned().collect();
-                    let selected =
-                        match scheduler::select(&self.root, scheduler::Stage::Queue, &keys) {
-                            Ok(Some(selected)) => selected,
-                            Ok(None) => return true,
-                            Err(error) => return self.failure("queue scheduling", error),
-                        };
+                    let keys = &plan.keys;
+                    let selected = match scheduler::order(&self.root, scheduler::Stage::Queue, keys)
+                    {
+                        Ok(order) if !order.is_empty() => order[0].clone(),
+                        Ok(_) => return true,
+                        Err(error) => return self.failure("queue scheduling", error),
+                    };
+                    if !jobs.contains_key(&selected) {
+                        continue 'planning;
+                    }
                     if let Some(completed) = self
                         .bounded_observation_wave(
                             &selected,
                             &bounded_jobs,
-                            &keys,
+                            keys,
                             scheduler::Stage::Queue,
                         )
                         .await
@@ -1613,6 +1693,16 @@ mod native {
                         }
                         continue;
                     }
+                    self.queue_turn = Some(QueueTurn {
+                        keys: keys.clone(),
+                        targets: match &jobs[&selected] {
+                            QueueDispatch::WholeInput { tasks } => tasks
+                                .iter()
+                                .map(|task| task.target.vault_path.clone())
+                                .collect(),
+                            _ => vec![selected.clone()],
+                        },
+                    });
                     match &jobs[&selected] {
                         QueueDispatch::Discovery { task } => {
                             let directory = match tempfile::Builder::new()
@@ -1725,6 +1815,7 @@ mod native {
                             }
                         }
                     }
+                    self.queue_turn = None;
                     if !self
                         .native("selected queue apply", &["queue", "apply"])
                         .await
@@ -2443,6 +2534,7 @@ mod native {
             project_protection: None,
             drain_blocked: false,
             audit_batch: None,
+            queue_turn: None,
             started_at: Instant::now(),
             result: JobResult {
                 operation,

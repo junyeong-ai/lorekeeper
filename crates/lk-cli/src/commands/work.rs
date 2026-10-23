@@ -582,7 +582,16 @@ fn screening(
     task_id: &str,
     queries: &[lk_core::discovery::DiscoveryQuery],
 ) -> miette::Result<ScreeningPreparation> {
-    let mut inventory = resources::selection_inventory(root, config, task_id, queries)?;
+    let inventory = resources::selection_inventory(root, config, task_id, queries)?;
+    screening_with_inventory(root, config, config_revision, inventory)
+}
+
+fn screening_with_inventory(
+    root: &Path,
+    config: &lk_core::config::Config,
+    config_revision: &str,
+    mut inventory: resources::SelectionInventory,
+) -> miette::Result<ScreeningPreparation> {
     let Subject::Queue {
         task_id,
         cache_hash,
@@ -862,18 +871,93 @@ pub(super) fn prepare_task_with_audit(
     let root = root.canonicalize().into_diagnostic()?;
     let session = lk_vault::MutationSession::acquire(&root).into_diagnostic()?;
     let task = super::queue::current_task(&root, task_id)?;
+    prepare_task_in_session(&session, config, config_revision, &task, audit, None)
+}
+
+pub(super) fn prepare_tasks_with_audit(
+    session: &lk_vault::MutationSession,
+    config: &lk_core::config::Config,
+    config_revision: &str,
+    tasks: &[lk_queue::QueueTask],
+    audits: &std::collections::BTreeMap<String, lk_graph::audit::AuditCandidate>,
+) -> miette::Result<(Vec<TaskWork>, usize)> {
+    let root = session.root();
+    let mut recipes = Vec::new();
+    let mut positions = Vec::new();
+    if is_progressive(config)? {
+        for (index, task) in tasks.iter().enumerate() {
+            if task.kind == lk_queue::TaskKind::ExtractConcepts
+                && let Some(queries) = discovery::current(root, task)?
+            {
+                positions.push(index);
+                recipes.push(queries);
+            }
+        }
+    }
+    let discovery_captures = usize::from(recipes.iter().any(|queries| !queries.is_empty()));
+    let reports = if recipes.is_empty() {
+        Vec::new()
+    } else {
+        lk_vault::list_reviews(root, &config.vault.dirs).into_diagnostic()?
+    };
+    let captures =
+        lk_vault::capture_discovery_batch(root, &config.vault.dirs, &recipes, Some(&reports))
+            .into_diagnostic()?;
+    let mut captures = positions.into_iter().zip(captures).peekable();
+    let work = tasks
+        .iter()
+        .enumerate()
+        .map(|(index, task)| {
+            let task = super::queue::current_task(root, &task.task_id)?;
+            let inventory = if captures.peek().is_some_and(|(at, _)| *at == index) {
+                let (_, capture) = captures.next().expect("indexed capture");
+                Some(resources::selection_inventory_with_capture(
+                    root,
+                    config,
+                    &task.task_id,
+                    capture,
+                    reports.clone(),
+                )?)
+            } else {
+                None
+            };
+            prepare_task_in_session(
+                session,
+                config,
+                config_revision,
+                &task,
+                audits.get(&task.target.vault_path),
+                inventory,
+            )
+        })
+        .collect::<miette::Result<Vec<_>>>()?;
+    Ok((work, discovery_captures))
+}
+
+fn prepare_task_in_session(
+    session: &lk_vault::MutationSession,
+    config: &lk_core::config::Config,
+    config_revision: &str,
+    task: &lk_queue::QueueTask,
+    audit: Option<&lk_graph::audit::AuditCandidate>,
+    inventory: Option<resources::SelectionInventory>,
+) -> miette::Result<TaskWork> {
+    let root = session.root();
     let prepared = if task.kind == lk_queue::TaskKind::ExtractConcepts
         && is_progressive(config)?
-        && discovery::current(&root, &task)?.is_some()
+        && discovery::current(root, task)?.is_some()
     {
-        let selected = current_screening(&root, config, config_revision, task_id)?;
-        selected.persist(&session, config, config_revision)?;
+        let selected = match inventory {
+            Some(inventory) => screening_with_inventory(root, config, config_revision, inventory)?,
+            None => current_screening(root, config, config_revision, &task.task_id)?,
+        };
+        selected.persist(session, config, config_revision)?;
         match selected {
             ScreeningPreparation::Source { work, .. } => {
                 return Ok(TaskWork::Source { id: work.plan.id });
             }
             ScreeningPreparation::Candidates(screening) => {
-                let ledger = screening.selection.ledger(&root)?;
+                let ledger = screening.selection.ledger(root)?;
                 if !ledger.progress.complete {
                     return Ok(TaskWork::Screening);
                 }
@@ -881,9 +965,9 @@ pub(super) fn prepare_task_with_audit(
             }
         }
     } else {
-        resources::task_with_audit(&root, config, task_id, audit)?
+        resources::task_with_audit(root, config, &task.task_id, audit)?
     };
-    let work = expected(&root, &prepared, config, config_revision)?;
+    let work = expected(root, &prepared, config, config_revision)?;
     let stored = root
         .join(".lorekeeper/work")
         .join(&work.plan.id)
@@ -899,7 +983,7 @@ pub(super) fn prepare_task_with_audit(
         });
     }
     Work::create(
-        &session,
+        session,
         &prepared.resources,
         &prepared.revision(config_revision)?,
         prepared.context,

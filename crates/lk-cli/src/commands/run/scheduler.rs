@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 const CURSOR: &str = ".lorekeeper/execution-cursor.json";
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Stage {
     Queue,
     Audit,
@@ -19,6 +19,88 @@ struct Cursor {
     audit: Option<String>,
 }
 
+fn load(root: &Path) -> miette::Result<(Option<String>, Cursor)> {
+    let full = lk_vault::page_path(root, Path::new(CURSOR)).into_diagnostic()?;
+    let before = match std::fs::read_to_string(full) {
+        Ok(raw) => Some(raw),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(miette::miette!("execution cursor: {error}")),
+    };
+    let cursor = before
+        .as_deref()
+        .map(serde_json::from_str)
+        .transpose()
+        .into_diagnostic()?
+        .unwrap_or_default();
+    Ok((before, cursor))
+}
+
+fn ordered(cursor: &Cursor, stage: Stage, candidates: &BTreeSet<String>) -> Vec<String> {
+    let next = match stage {
+        Stage::Queue => &cursor.queue,
+        Stage::Audit => &cursor.audit,
+    };
+    let mut values = candidates.iter().cloned().collect::<Vec<_>>();
+    if let Some(start) = next
+        .as_ref()
+        .and_then(|next| candidates.range(next.clone()..).next())
+    {
+        let index = values.binary_search(start).expect("candidate exists");
+        values.rotate_left(index);
+    }
+    values
+}
+
+pub(super) fn order(
+    root: &Path,
+    stage: Stage,
+    candidates: &BTreeSet<String>,
+) -> miette::Result<Vec<String>> {
+    if candidates.is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(ordered(&load(root)?.1, stage, candidates))
+}
+
+pub(super) fn reserve(
+    root: &Path,
+    stage: Stage,
+    candidates: &BTreeSet<String>,
+    expected: &[String],
+) -> miette::Result<()> {
+    if expected.is_empty() {
+        return Ok(());
+    }
+    let session = lk_vault::MutationSession::acquire(root).into_diagnostic()?;
+    let (before, mut cursor) = load(session.root())?;
+    let order = ordered(&cursor, stage, candidates);
+    if order.is_empty()
+        || expected
+            .iter()
+            .zip(order.iter().cycle())
+            .any(|(expected, actual)| expected != actual)
+    {
+        return Err(miette::miette!(
+            "execution turn changed during preparation; unfinished work retained"
+        ));
+    }
+    let next = Some(order[expected.len() % order.len()].clone());
+    match stage {
+        Stage::Queue => cursor.queue = next,
+        Stage::Audit => cursor.audit = next,
+    }
+    let mut mutation = lk_vault::MutationPlan::default();
+    mutation
+        .publish_expected(
+            session.root(),
+            PathBuf::from(CURSOR),
+            before,
+            serde_json::to_string(&cursor).into_diagnostic()?,
+        )
+        .into_diagnostic()?;
+    session.apply(mutation).into_diagnostic()
+}
+
 /// Reserve one round-robin turn before starting its external worker. A cancelled
 /// worker keeps its work but does not monopolize the next resumed run.
 pub(super) fn select(
@@ -29,48 +111,11 @@ pub(super) fn select(
     if candidates.is_empty() {
         return Ok(None);
     }
-    let session = lk_vault::MutationSession::acquire(root).into_diagnostic()?;
-    let path = PathBuf::from(CURSOR);
-    let full = lk_vault::page_path(session.root(), &path).into_diagnostic()?;
-    let before = match std::fs::read_to_string(full) {
-        Ok(raw) => Some(raw),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(error) => return Err(miette::miette!("execution cursor: {error}")),
-    };
-    let mut cursor: Cursor = before
-        .as_deref()
-        .map(serde_json::from_str)
-        .transpose()
-        .into_diagnostic()?
-        .unwrap_or_default();
-    let next = match stage {
-        Stage::Queue => &mut cursor.queue,
-        Stage::Audit => &mut cursor.audit,
-    };
-    let selected = next
-        .as_ref()
-        .and_then(|next| candidates.range(next.clone()..).next())
-        .or_else(|| candidates.first())
-        .expect("nonempty candidates")
-        .clone();
-    *next = candidates
-        .range((
-            std::ops::Bound::Excluded(selected.clone()),
-            std::ops::Bound::Unbounded,
-        ))
+    let selected = order(root, stage, candidates)?
+        .into_iter()
         .next()
-        .or_else(|| candidates.first())
-        .cloned();
-    let mut mutation = lk_vault::MutationPlan::default();
-    mutation
-        .publish_expected(
-            session.root(),
-            path,
-            before,
-            serde_json::to_string(&cursor).into_diagnostic()?,
-        )
-        .into_diagnostic()?;
-    session.apply(mutation).into_diagnostic()?;
+        .expect("nonempty candidates");
+    reserve(root, stage, candidates, std::slice::from_ref(&selected))?;
     Ok(Some(selected))
 }
 
@@ -160,6 +205,54 @@ mod tests {
                 .unwrap()
                 .as_deref(),
             Some("a")
+        );
+    }
+
+    #[test]
+    fn planning_order_is_read_only_and_legacy_next_target_keeps_lower_bound_meaning() {
+        let root = tempfile::tempdir().unwrap();
+        let keys = ["a".into(), "m".into(), "z".into()].into();
+        assert_eq!(
+            order(root.path(), Stage::Queue, &keys).unwrap(),
+            ["a", "m", "z"]
+        );
+        assert!(!root.path().join(".lorekeeper").exists());
+        std::fs::create_dir(root.path().join(".lorekeeper")).unwrap();
+        let raw = "{\"queue\":\"k\",\"audit\":\"old\"}";
+        std::fs::write(root.path().join(CURSOR), raw).unwrap();
+        assert_eq!(
+            order(root.path(), Stage::Queue, &keys).unwrap(),
+            ["m", "z", "a"]
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.path().join(CURSOR)).unwrap(),
+            raw
+        );
+    }
+
+    #[test]
+    fn wrapped_batch_reserves_only_consecutive_actual_turns_and_rejects_stale_order() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join(".lorekeeper")).unwrap();
+        std::fs::write(
+            root.path().join(CURSOR),
+            "{\"queue\":\"z\",\"audit\":\"keep\"}",
+        )
+        .unwrap();
+        let keys = ["a".into(), "m".into(), "z".into()].into();
+        reserve(root.path(), Stage::Queue, &keys, &["z".into(), "a".into()]).unwrap();
+        assert_eq!(
+            order(root.path(), Stage::Queue, &keys).unwrap(),
+            ["m", "z", "a"]
+        );
+        let before = std::fs::read_to_string(root.path().join(CURSOR)).unwrap();
+        let cursor: Cursor = serde_json::from_str(&before).unwrap();
+        assert_eq!(cursor.audit.as_deref(), Some("keep"));
+        assert!(reserve(root.path(), Stage::Queue, &keys, &["z".into()]).is_err());
+        assert!(reserve(root.path(), Stage::Queue, &keys, &["m".into(), "a".into()]).is_err());
+        assert_eq!(
+            std::fs::read_to_string(root.path().join(CURSOR)).unwrap(),
+            before
         );
     }
 }

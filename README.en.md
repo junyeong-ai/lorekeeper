@@ -461,6 +461,11 @@ per-step JSON sizes and preparation, agent invocation and validation wall times 
 See [native run measurements](skills/lore-process/references/bounded-work.md#native-run-measurements)
 for coverage and limits.
 
+Queue planning validates the full task inventory, owners and dependencies, then
+prepares at most 64 targets in fair order. Discovery computation is shared within
+that checkpoint while preserving each task's complete candidates and revisions;
+recording freshly validates inputs after execution. Unprepared work stays pending.
+
 `llm.provider: queue` retains semantic requests separately from host selection.
 `noop` creates no LLM work. Search, navigation and deterministic collection need no agent.
 

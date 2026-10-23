@@ -276,6 +276,20 @@ pub(super) fn selection_inventory(
     task_id: &str,
     queries: &[lk_core::discovery::DiscoveryQuery],
 ) -> miette::Result<SelectionInventory> {
+    let reports = lk_vault::list_reviews(root, &config.vault.dirs).into_diagnostic()?;
+    let capture =
+        lk_vault::capture_discovery_with_reviews(root, &config.vault.dirs, queries, &reports)
+            .into_diagnostic()?;
+    selection_inventory_with_capture(root, config, task_id, capture, reports)
+}
+
+pub(super) fn selection_inventory_with_capture(
+    root: &Path,
+    config: &Config,
+    task_id: &str,
+    mut capture: lk_vault::DiscoveryCapture,
+    reports: Vec<lk_vault::ReviewReport>,
+) -> miette::Result<SelectionInventory> {
     let task = super::super::queue::select_task(
         root,
         task_id,
@@ -298,10 +312,6 @@ pub(super) fn selection_inventory(
         }
     };
     let target_owner = lk_vault::resolve_page_owner(root, Path::new(&target)).into_diagnostic()?;
-    let reports = lk_vault::list_reviews(root, &config.vault.dirs).into_diagnostic()?;
-    let mut capture =
-        lk_vault::capture_discovery_with_reviews(root, &config.vault.dirs, queries, &reports)
-            .into_diagnostic()?;
     capture
         .candidates
         .retain(|candidate| Path::new(&candidate.owner) != target_owner.as_path());

@@ -229,7 +229,18 @@ When one evaluation prepares several ready requests, its preparation time belong
 to the first selected node; later nodes from that evaluation leave that field null.
 `semantic_duration_ms` sums invocation attempt wall times, so parallel attempts can
 exceed the job's elapsed `duration_ms`. `queue_planning` reports local planning
-`attempts`, cumulative `duration_ms`, `synthesis_subjects` and `audit_captures`.
-The last two count subjects and shared captures encountered during queue planning,
-not all later resource revalidation or model work. Each planning checkpoint uses a
-fresh complete evidence universe; it is never reused across a host invocation.
+`attempts`, cumulative `duration_ms`, `prepared_targets`, `synthesis_subjects`,
+`audit_captures` and `discovery_captures`. Counts accumulate across checkpoints:
+the same target can be prepared again. `prepared_targets` counts detailed preparation
+attempts; capture counts cover successful shared discovery batches and attempted
+synthesis captures, not later resource revalidation or model work.
+
+Queue planning validates the complete task inventory, target owners and typed input
+readiness, then prepares at most 64 targets in fair cursor order per window. Small
+whole-input batches also obey the serialized input limit. Unprepared targets remain
+pending; deferred windows do not establish settlement. Lookahead consumes no execution
+turns. Actual invocation reserves its target sequence, including all whole-input
+batch members. Discovery shares a fresh traversal and exact immutable bytes within
+the selected window, preserving each task's complete candidates and revision identity.
+Shared captures are discarded before host execution; recording recaptures current
+inputs, including added candidates, aliases and scoped reviews.

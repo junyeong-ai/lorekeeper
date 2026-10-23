@@ -279,7 +279,11 @@ impl Selection {
                 max_reason_json_bytes: 256,
                 batches: Vec::new(),
             },
-            captured_pages: capture.guarded_pages().clone(),
+            captured_pages: capture
+                .guarded_pages()
+                .iter()
+                .map(|(path, raw)| (path.clone(), raw.as_ref().clone()))
+                .collect(),
         };
         for index in 0..selection.manifest.candidates.len() {
             let size = encoded(&selection.output_shape(&[index], ""))?.len();

@@ -110,7 +110,14 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   a dependency barrier. Reconcile backlinks after a source publication wave and replan
   before selecting another task. A dependency-only queue remains explicitly incomplete.
   One queue-planning checkpoint captures all ready synthesis inputs against the
-  complete graph universe; discard that view before host execution.
+  complete graph universe for its selected window; discard that view before host execution.
+  Enumerate and validate the complete queue and physical target owners before selecting
+  a fair preparation window of at most 64 targets. Small tasks also obey the input-byte
+  bound. Share discovery traversal, projection and immutable raw bytes within that
+  checkpoint while preserving task-local recipes, reviews, guards and identities.
+  Unprepared targets remain pending. Empty or deferred windows never prove settlement.
+  Planning does not consume cursor turns; reserve actual invocation targets together
+  immediately before execution, including every member of a whole-input batch.
   `.lorekeeper/execution-cursor.json` stores the next queue/audit target under a guarded
   short mutation, preserving turns across budget-limited runs. Reserve before external
   execution, never infer priority or semantic quality from size/progress/citation counts.

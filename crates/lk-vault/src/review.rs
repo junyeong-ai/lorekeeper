@@ -8,14 +8,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::{VaultError, parse_page};
 
-#[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum ReviewStatus {
     Open,
     Resolved,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct KnowledgeReview {
     pub status: ReviewStatus,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -420,7 +420,7 @@ impl ReviewEffectiveState {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct ReviewScope {
     subjects: Vec<String>,
 }
@@ -436,7 +436,7 @@ impl ReviewScope {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct ReviewReport {
     pub path: String,
     pub review: Option<KnowledgeReview>,
