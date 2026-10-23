@@ -81,7 +81,13 @@ impl Fixture {
         let semantic = json["semantic_duration_ms"]
             .as_u64()
             .expect("agent wall time");
-        assert!(semantic <= duration, "{json}");
+        if json["execution"]["work"]["max_parallel"]
+            .as_u64()
+            .unwrap_or(1)
+            == 1
+        {
+            assert!(semantic <= duration, "{json}");
+        }
         if json["semantic_calls"] == 0 {
             assert_eq!(semantic, 0, "{json}");
         }
@@ -1060,7 +1066,7 @@ fn selected_profile_budget_reaches_controller_and_worker_commands() {
         );
         assert_eq!(
             result["execution"]["work"],
-            serde_json::json!({"max_input_bytes":16384,"max_result_bytes":2048,"max_calls":1,"extraction_context":"full-context"})
+            serde_json::json!({"max_input_bytes":16384,"max_result_bytes":2048,"max_calls":1,"max_parallel":1,"extraction_context":"full-context"})
         );
         assert!(
             result["stages"]
@@ -3688,6 +3694,411 @@ fn cancellation_stops_further_stages_when_zombie_group_cleanup_returns_eperm() {
             .unwrap()
             .success()
     );
+}
+
+const PARALLEL_OBSERVATIONS: &str = r#"
+case "$*" in
+  *--output-schema*|*--safe-mode*)
+    export TEST_PARALLEL_REQUEST="$TEST_EXECUTION_ROOT/parallel-request-$$.txt"
+    /bin/cat > "$TEST_PARALLEL_REQUEST"
+    ;;
+  *) echo 'unexpected interactive invocation in bounded observation test' >&2; exit 47 ;;
+esac
+exec python3 - "$@" <<'PARALLEL'
+import json, os, sys, time
+from pathlib import Path
+root=Path(os.environ['TEST_EXECUTION_ROOT'])
+request=json.loads(Path(os.environ['TEST_PARALLEL_REQUEST']).read_text().split('\nNative request:\n',1)[1])
+node=request['node_id']
+mode=(root/'parallel-mode').read_text()
+expected=int((root/'parallel-expected').read_text())
+record={'node_id':node,'work_id':request['work_id'],'kind':request['kind'],'pid':os.getpid()}
+marker=root/('parallel-start-'+node+'.json')
+pending=marker.with_suffix('.tmp')
+with pending.open('x') as stream:
+    json.dump(record,stream)
+os.link(pending,marker)
+pending.unlink()
+deadline=time.monotonic()+15
+while len(list(root.glob('parallel-start-*.json')))<expected:
+    if time.monotonic()>=deadline:
+        raise SystemExit('peer never entered the observation barrier')
+    time.sleep(.01)
+peers=sorted(path.name for path in root.glob('parallel-start-*.json'))
+with (root/('parallel-overlap-'+node+'.json')).open('x') as stream:
+    json.dump(peers,stream)
+leader=('parallel-start-'+node+'.json')==peers[0]
+if mode=='wait':
+    while True:
+        time.sleep(1)
+if leader and mode=='source-drift':
+    with (root/'vault/wiki/concepts/large.md').open('a') as stream:
+        stream.write('\nChanged inside the private observation fixture.\n')
+if leader and mode=='config-drift':
+    with (root/'config.yaml').open('a') as stream:
+        stream.write('\n# Changed inside the private observation fixture.\n')
+if leader and mode=='failed':
+    raise SystemExit('intentional failed observation peer')
+if leader and mode=='malformed':
+    print('not a structured observation')
+    raise SystemExit(0)
+output={key:request[key] for key in ['work_id','node_id','input_revision']}
+output.update(summary='Read this exact fixture request without a factual correctness claim.',findings=[],source_questions=[],unresolved=[],resolutions=[])
+if '--safe-mode' in sys.argv:
+    print(json.dumps({'type':'result','subtype':'success','is_error':False,'structured_output':output}))
+else:
+    print(json.dumps(output))
+PARALLEL
+"#;
+
+fn parallel_observation_fixture(
+    engine: &str,
+    calls: usize,
+    parallel: usize,
+    targets: usize,
+    mode: &str,
+) -> Fixture {
+    let fixture = bounded_audit_fixture(engine, calls, PARALLEL_OBSERVATIONS);
+    let mut config = std::fs::read_to_string(&fixture.config).unwrap().replace(
+        &format!("max_calls: {calls}}}"),
+        &format!("max_calls: {calls}, max_parallel: {parallel}}}"),
+    );
+    if targets == 2 {
+        config = config.replace("batch_size: 1", "batch_size: 2");
+        write_audit_concept(&fixture, "second");
+        let path = fixture.root().join("vault/wiki/concepts/second.md");
+        let body = std::fs::read_to_string(&path).unwrap()
+            + &"\nAnother scoped fixture observation.\n".repeat(350);
+        std::fs::write(path, body).unwrap();
+        record_discovery(&fixture, "wiki/concepts/second.md");
+    }
+    std::fs::write(&fixture.config, config).unwrap();
+    std::fs::write(fixture.root().join("parallel-mode"), mode).unwrap();
+    std::fs::write(
+        fixture.root().join("parallel-expected"),
+        calls.min(parallel).to_string(),
+    )
+    .unwrap();
+    fixture
+}
+
+fn parallel_starts(fixture: &Fixture) -> Vec<serde_json::Value> {
+    let mut paths = std::fs::read_dir(fixture.root())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "json")
+                && path
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("parallel-start-")
+        })
+        .collect::<Vec<_>>();
+    paths.sort();
+    paths
+        .iter()
+        .map(|path| serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap())
+        .collect()
+}
+
+fn parallel_receipts(fixture: &Fixture) -> usize {
+    parallel_starts(fixture)
+        .iter()
+        .map(|row| row["work_id"].as_str().unwrap().to_owned())
+        .collect::<std::collections::BTreeSet<_>>()
+        .iter()
+        .map(|work| {
+            std::fs::read_dir(
+                fixture
+                    .root()
+                    .join("vault/.lorekeeper/work")
+                    .join(work)
+                    .join("nodes"),
+            )
+            .into_iter()
+            .flatten()
+            .count()
+        })
+        .sum()
+}
+
+fn assert_parallel_no_publication(fixture: &Fixture) {
+    let settlement = execution_json(fixture, &["queue", "check"]);
+    assert_eq!(settlement["data"]["pending_mutation"], false);
+    assert!(
+        settlement["data"]["staged_results"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let receipts: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(
+            fixture
+                .root()
+                .join("vault/.lorekeeper/knowledge-audit.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(receipts["entries"].as_object().unwrap().is_empty());
+}
+
+#[test]
+fn parallel_native_observers_overlap_on_both_hosts_with_same_and_distinct_work() {
+    for engine in ["claude-code", "codex"] {
+        for targets in [1, 2] {
+            let fixture = parallel_observation_fixture(engine, 2, 2, targets, "good");
+            let (output, report) = fixture.run("knowledge");
+            assert!(
+                !output.status.success(),
+                "two calls do not complete this work: {report}"
+            );
+            assert_eq!(report["semantic_calls"], 2);
+            let starts = parallel_starts(&fixture);
+            assert_eq!(starts.len(), 2, "{engine}: {report}");
+            assert_eq!(
+                starts
+                    .iter()
+                    .map(|row| row["work_id"].as_str().unwrap())
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .len(),
+                targets
+            );
+            for row in &starts {
+                let peers: Vec<String> = serde_json::from_slice(
+                    &std::fs::read(fixture.root().join(format!(
+                        "parallel-overlap-{}.json",
+                        row["node_id"].as_str().unwrap()
+                    )))
+                    .unwrap(),
+                )
+                .unwrap();
+                assert_eq!(
+                    peers.len(),
+                    2,
+                    "both observation processes reached the barrier"
+                );
+            }
+            assert_eq!(parallel_receipts(&fixture), 2);
+            assert_eq!(
+                report["work_steps"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|step| step["outcome"] == "recorded")
+                    .count(),
+                2
+            );
+            assert_parallel_no_publication(&fixture);
+        }
+    }
+}
+
+#[test]
+fn parallel_native_observers_respect_remaining_call_budget() {
+    for engine in ["claude-code", "codex"] {
+        let fixture = parallel_observation_fixture(engine, 1, 4, 1, "good");
+        let (output, report) = fixture.run("knowledge");
+        assert!(!output.status.success(), "{report}");
+        assert_eq!(report["semantic_calls"], 1);
+        assert_eq!(parallel_starts(&fixture).len(), 1);
+        assert_eq!(parallel_receipts(&fixture), 1);
+        assert!(report["stages"].as_array().unwrap().iter().any(|stage| {
+            stage["name"] == "semantic call budget" && stage["state"] == "failed"
+        }));
+        assert_parallel_no_publication(&fixture);
+    }
+}
+
+#[test]
+fn parallel_native_observer_failure_retains_an_independent_good_receipt() {
+    for mode in ["malformed", "failed"] {
+        let fixture = parallel_observation_fixture("codex", 2, 2, 1, mode);
+        let (output, report) = fixture.run("knowledge");
+        assert!(!output.status.success(), "{report}");
+        assert_eq!(report["semantic_calls"], 2);
+        assert_eq!(parallel_starts(&fixture).len(), 2);
+        assert_eq!(parallel_receipts(&fixture), 1, "{mode}: {report}");
+        assert_eq!(
+            report["work_steps"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|step| step["outcome"] == "recorded")
+                .count(),
+            1
+        );
+        assert_parallel_no_publication(&fixture);
+    }
+}
+
+#[test]
+fn parallel_native_observers_revalidate_source_and_configuration_after_all_hosts_return() {
+    for mode in ["source-drift", "config-drift"] {
+        let fixture = parallel_observation_fixture("codex", 2, 2, 1, mode);
+        let (output, report) = fixture.run("knowledge");
+        assert!(!output.status.success(), "{report}");
+        assert_eq!(report["semantic_calls"], 2);
+        assert_eq!(parallel_starts(&fixture).len(), 2);
+        assert_eq!(parallel_receipts(&fixture), 0, "{mode}: {report}");
+        assert!(
+            report["work_steps"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|step| step["outcome"] != "recorded")
+        );
+        assert_parallel_no_publication(&fixture);
+    }
+}
+
+#[test]
+fn cancellation_stops_both_parallel_observers_without_recording_or_publishing() {
+    let fixture = parallel_observation_fixture("codex", 2, 2, 1, "wait");
+    let mut child = fixture
+        .command()
+        .args(["run", "knowledge", "--json"])
+        .stdout(std::fs::File::create(fixture.root().join("parallel-result.json")).unwrap())
+        .stderr(std::fs::File::create(fixture.root().join("parallel-stderr.log")).unwrap())
+        .stdin(Stdio::null())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let starts = parallel_starts(&fixture);
+        if starts.len() == 2
+            && starts.iter().all(|row| {
+                fixture
+                    .root()
+                    .join(format!(
+                        "parallel-overlap-{}.json",
+                        row["node_id"].as_str().unwrap()
+                    ))
+                    .exists()
+            })
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "parallel observers never reached the barrier"
+        );
+        assert!(child.try_wait().unwrap().is_none());
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let pid = rustix::process::Pid::from_raw(i32::try_from(child.id()).unwrap()).unwrap();
+    rustix::process::kill_process(pid, rustix::process::Signal::INT).unwrap();
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "cancelled parallel controller did not stop"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert!(!status.success());
+    let report: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(fixture.root().join("parallel-result.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(report["cancelled"], true, "{report}");
+    assert_eq!(report["semantic_calls"], 2);
+    assert_eq!(parallel_receipts(&fixture), 0);
+    for row in parallel_starts(&fixture) {
+        assert!(
+            !Command::new("kill")
+                .args(["-0", &row["pid"].as_i64().unwrap().to_string()])
+                .output()
+                .unwrap()
+                .status
+                .success(),
+            "cancelled observer remains alive: {row}"
+        );
+    }
+    assert_parallel_no_publication(&fixture);
+    assert!(
+        fixture
+            .command()
+            .args(["workflow", "--", "/usr/bin/true"])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+}
+
+#[test]
+fn parallel_native_audit_completes_reduction_and_one_serial_finalizer_on_both_hosts() {
+    let behavior = RECORD_BOUNDED_AUDIT
+        .replace(
+            "/bin/cat > \"$TEST_EXECUTION_ROOT/native-request.txt\"",
+            "export TEST_BOUNDED_REQUEST=\"$TEST_EXECUTION_ROOT/native-request-$$.txt\"; /bin/cat > \"$TEST_BOUNDED_REQUEST\"",
+        )
+        .replace(
+            "(root/'native-request.txt').read_text()",
+            "Path(os.environ['TEST_BOUNDED_REQUEST']).read_text()",
+        );
+    for engine in ["claude-code", "codex"] {
+        let fixture = bounded_audit_fixture(engine, 64, &behavior);
+        let config = std::fs::read_to_string(&fixture.config)
+            .unwrap()
+            .replace("max_calls: 64}", "max_calls: 64, max_parallel: 3}");
+        std::fs::write(&fixture.config, config).unwrap();
+        let (output, report) = fixture.run("knowledge");
+        assert!(output.status.success(), "{engine}: {report}");
+        let calls = bounded_calls(&fixture);
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|call| call["action"] == "finish")
+                .count(),
+            1
+        );
+        assert_eq!(calls.last().unwrap()["action"], "finish");
+        assert!(calls.iter().any(|call| call["kind"] == "inspect"));
+        assert!(calls.iter().any(|call| call["kind"] == "reduce"));
+        assert_eq!(
+            report["semantic_calls"].as_u64().unwrap() as usize,
+            calls.len()
+        );
+        let work = calls[0]["work_id"].as_str().unwrap();
+        assert!(calls.iter().all(|call| call["work_id"] == work));
+        let status = execution_json(&fixture, &["work", "status", work]);
+        assert_eq!(status["complete"], true);
+        assert_eq!(
+            status["completed"].as_u64().unwrap() as usize,
+            calls.len() - 1
+        );
+        assert_eq!(
+            report["audit"][0]["assessed_path"],
+            "wiki/concepts/large.md"
+        );
+        let plan = execution_json(&fixture, &["wiki", "audit-plan"]);
+        assert_eq!(plan["reviewed_current"], 1);
+        assert_eq!(plan["unreviewed"], 0);
+        assert!(plan["candidates"].as_array().unwrap().is_empty());
+        let settlement = execution_json(&fixture, &["queue", "check"]);
+        assert_eq!(settlement["data"]["pending_mutation"], false);
+        assert!(
+            settlement["data"]["staged_results"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            fixture
+                .command()
+                .args(["workflow", "--", "/usr/bin/true"])
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
+    }
 }
 
 #[test]

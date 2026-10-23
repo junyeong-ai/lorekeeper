@@ -91,6 +91,7 @@ pub struct SemanticWorkConfig {
     pub max_input_bytes: usize,
     pub max_result_bytes: usize,
     pub max_calls: usize,
+    pub max_parallel: usize,
     pub extraction_context: ExtractionContext,
 }
 
@@ -100,6 +101,7 @@ pub struct SemanticWorkOverrides {
     pub max_input_bytes: Option<usize>,
     pub max_result_bytes: Option<usize>,
     pub max_calls: Option<usize>,
+    pub max_parallel: Option<usize>,
     pub extraction_context: Option<ExtractionContext>,
 }
 
@@ -109,6 +111,7 @@ impl SemanticWorkOverrides {
             max_input_bytes: self.max_input_bytes.unwrap_or(defaults.max_input_bytes),
             max_result_bytes: self.max_result_bytes.unwrap_or(defaults.max_result_bytes),
             max_calls: self.max_calls.unwrap_or(defaults.max_calls),
+            max_parallel: self.max_parallel.unwrap_or(defaults.max_parallel),
             extraction_context: self
                 .extraction_context
                 .unwrap_or(defaults.extraction_context),
@@ -122,9 +125,10 @@ impl SemanticWorkConfig {
             || self.max_result_bytes < 1024
             || self.max_result_bytes > self.max_input_bytes / 4
             || self.max_calls == 0
+            || self.max_parallel == 0
         {
             return Err(ConfigError::Validation(
-                "semantic work requires max_input_bytes >= 4096, max_result_bytes >= 1024 and <= max_input_bytes/4, and max_calls > 0".into(),
+                "semantic work requires max_input_bytes >= 4096, max_result_bytes >= 1024 and <= max_input_bytes/4, max_calls > 0, and max_parallel > 0".into(),
             ));
         }
         Ok(())
@@ -137,6 +141,7 @@ impl Default for SemanticWorkConfig {
             max_input_bytes: 262_144,
             max_result_bytes: 32_768,
             max_calls: 64,
+            max_parallel: 1,
             extraction_context: ExtractionContext::Progressive,
         }
     }
@@ -418,6 +423,8 @@ mod tests {
             "work: {max_calls: 64, unknown: true}",
             "work: {max_calls: -1}",
             "work: {max_calls: 1.5}",
+            "work: {max_parallel: -1}",
+            "work: {max_parallel: true}",
             "work: {max_input_bytes: true}",
             "work: {max_result_bytes: many}",
             "work: {extraction_context: automatic}",
@@ -427,6 +434,26 @@ mod tests {
                 crate::yaml::from_str::<ExecutionConfig>(body).is_err(),
                 "{body}"
             );
+        }
+    }
+
+    #[test]
+    fn parallel_work_limits_are_positive_inherited_and_profile_scoped() {
+        let mut config: ExecutionConfig = crate::yaml::from_str(
+            "work: {max_parallel: 10}\nprofiles:\n  inherited: {engine: codex, timeout_seconds: 60}\n  serial: {engine: codex, timeout_seconds: 60, work: {max_parallel: 1}}\n",
+        )
+        .unwrap();
+        config.validate().unwrap();
+        config.select_profile("inherited").unwrap();
+        assert_eq!(config.effective_work().unwrap().max_parallel, 10);
+        config.select_profile("serial").unwrap();
+        assert_eq!(config.effective_work().unwrap().max_parallel, 1);
+        for body in [
+            "work: {max_parallel: 0}",
+            "profiles:\n  broken: {engine: codex, timeout_seconds: 60, work: {max_parallel: 0}}",
+        ] {
+            let config: ExecutionConfig = crate::yaml::from_str(body).unwrap();
+            assert!(config.validate().is_err());
         }
     }
 
@@ -444,6 +471,7 @@ mod tests {
                 max_input_bytes: 16384,
                 max_result_bytes: 4096,
                 max_calls: 2,
+                max_parallel: 1,
                 extraction_context: ExtractionContext::Progressive,
             }
         );

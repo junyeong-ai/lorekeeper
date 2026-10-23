@@ -953,6 +953,18 @@ pub(super) fn prepare_inspection(
     work.prepare_inspection(&root, &prepared.resources)
 }
 
+pub(super) fn prepare_inspections(
+    root: &Path,
+    config: &lk_core::config::Config,
+    config_revision: &str,
+    id: &str,
+    limit: usize,
+) -> miette::Result<(state::WorkProgress, Vec<Value>)> {
+    let root = root.canonicalize().into_diagnostic()?;
+    let (work, prepared) = load(&root, config, config_revision, id)?;
+    work.prepare_inspections(&root, &prepared.resources, limit)
+}
+
 pub(super) fn record_inspection(
     root: &Path,
     config: &lk_core::config::Config,

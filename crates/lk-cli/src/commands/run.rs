@@ -157,6 +157,20 @@ mod native {
         Failed,
     }
 
+    struct PreparedObservations {
+        completed: usize,
+        requests: std::collections::VecDeque<serde_json::Value>,
+        preparation_duration_ms: Option<u64>,
+    }
+
+    struct ObservationTurn {
+        work_id: String,
+        node_id: String,
+        completed: usize,
+        request: serde_json::Value,
+        metrics: WorkStepMetrics,
+    }
+
     enum WorkStep {
         Pending,
         Staged,
@@ -517,6 +531,44 @@ mod native {
             }
         }
 
+        fn observation_invocation(
+            &self,
+            request: &serde_json::Value,
+            role: WorkRole,
+            budget: lk_core::execution::SemanticWorkConfig,
+        ) -> miette::Result<(execution::observation::Invocation, usize)> {
+            let profile = self.selected.as_ref().expect("prepared agent");
+            let mut invocation = match role {
+                WorkRole::Evidence => execution::observation::build_invocation(profile, request),
+                WorkRole::Screening => {
+                    execution::observation::build_screening_invocation(profile, request)
+                }
+                WorkRole::Finalizer => unreachable!("finalizers use the interactive consumer"),
+            }?;
+            invocation
+                .command
+                .env("LORE_INSTALL_DATA_DIR", self.installation.data_dir());
+            if let Some(lease) = &self.lease {
+                lease.configure(invocation.command.as_std_mut());
+            }
+            invocation
+                .command
+                .env(CONFIG_REVISION_ENV, &self.config_revision)
+                .env(
+                    "LORE_CONFIG",
+                    self.opts.config.as_ref().expect("resolved config"),
+                );
+            if let Some(name) = self.config.execution.selected_profile() {
+                invocation.command.env(EXECUTION_PROFILE_ENV, name);
+            }
+            let limit = budget
+                .max_result_bytes
+                .checked_mul(3)
+                .and_then(|limit| limit.checked_add(16384))
+                .ok_or_else(|| miette::miette!("host output envelope limit overflow"))?;
+            Ok((invocation, limit))
+        }
+
         async fn request_observation(
             &mut self,
             request: serde_json::Value,
@@ -565,50 +617,21 @@ mod native {
                 };
                 return None;
             }
-            let profile = self.selected.as_ref().expect("prepared agent");
-            let invocation = match match metrics.role {
-                WorkRole::Evidence => execution::observation::build_invocation(profile, &request),
-                WorkRole::Screening => {
-                    execution::observation::build_screening_invocation(profile, &request)
-                }
-                WorkRole::Finalizer => unreachable!("finalizers use the interactive consumer"),
-            } {
-                Ok(invocation) => invocation,
-                Err(error) => {
-                    self.failure("bounded work receipt", error);
-                    return None;
-                }
-            };
-            let timeout = profile.timeout();
-            let mut command = invocation.command;
-            command.env("LORE_INSTALL_DATA_DIR", self.installation.data_dir());
-            if let Some(lease) = &self.lease {
-                lease.configure(command.as_std_mut());
-            }
-            command.env(CONFIG_REVISION_ENV, &self.config_revision).env(
-                "LORE_CONFIG",
-                self.opts.config.as_ref().expect("resolved config"),
-            );
-            if let Some(name) = self.config.execution.selected_profile() {
-                command.env(EXECUTION_PROFILE_ENV, name);
-            }
-            let Some(limit) = budget
-                .max_result_bytes
-                .checked_mul(3)
-                .and_then(|limit| limit.checked_add(16384))
-            else {
-                self.failure(
-                    "bounded work receipt",
-                    "host output envelope limit overflow",
-                );
-                return None;
-            };
+            let (invocation, limit) =
+                match self.observation_invocation(&request, metrics.role, budget) {
+                    Ok(invocation) => invocation,
+                    Err(error) => {
+                        self.failure("bounded work receipt", error);
+                        return None;
+                    }
+                };
+            let timeout = self.selected.as_ref().expect("prepared agent").timeout();
             self.result.semantic_calls += 1;
             let started_at = Instant::now();
             let outcome = self
                 .supervisor
                 .run_request(
-                    command,
+                    invocation.command,
                     Some(timeout),
                     Some(limit),
                     Some(&invocation.prompt),
@@ -706,6 +729,277 @@ mod native {
                 Ok(_) => self.failure("semantic call budget", "configured execution.work.max_calls exhausted; unfinished work is retained for the next run"),
                 Err(error) => self.failure("semantic work budget", error),
             }
+        }
+
+        async fn bounded_observation_wave(
+            &mut self,
+            selected: &str,
+            jobs: &std::collections::BTreeMap<String, String>,
+            keys: &std::collections::BTreeSet<String>,
+            stage: scheduler::Stage,
+        ) -> Option<bool> {
+            let budget = match self.config.execution.effective_work() {
+                Ok(budget) => budget,
+                Err(error) => return Some(self.failure("semantic work budget", error)),
+            };
+            let limit = budget
+                .max_parallel
+                .min(budget.max_calls.saturating_sub(self.result.semantic_calls));
+            if limit <= 1 || !jobs.contains_key(selected) {
+                return None;
+            }
+            let mut prepared = std::collections::BTreeMap::<String, PreparedObservations>::new();
+            let mut request_counts = std::collections::BTreeMap::<String, usize>::new();
+            let mut planned_target = selected.to_owned();
+            for _ in 0..limit {
+                let Some(id) = jobs.get(&planned_target) else {
+                    break;
+                };
+                *request_counts.entry(id.clone()).or_default() += 1;
+                planned_target = keys
+                    .range((
+                        std::ops::Bound::Excluded(planned_target),
+                        std::ops::Bound::Unbounded,
+                    ))
+                    .next()
+                    .or_else(|| keys.first())
+                    .expect("selected keys")
+                    .clone();
+            }
+            let mut turns = Vec::new();
+            let mut target = selected.to_owned();
+            while turns.len() < limit {
+                let Some(id) = jobs.get(&target) else { break };
+                if let std::collections::btree_map::Entry::Vacant(entry) =
+                    prepared.entry(id.clone())
+                {
+                    let started_at = Instant::now();
+                    let captured = crate::commands::work::prepare_inspections(
+                        &self.root,
+                        &self.config,
+                        &self.config_revision,
+                        id,
+                        request_counts[id],
+                    );
+                    let duration_ms = started_at.elapsed().as_millis() as u64;
+                    let (progress, requests) = match captured {
+                        Ok(captured) => captured,
+                        Err(error) => return Some(self.failure("bounded work progress", error)),
+                    };
+                    if progress.complete {
+                        break;
+                    }
+                    if requests.is_empty() {
+                        return Some(self.failure(
+                            "bounded work progress",
+                            "incomplete work has no ready node",
+                        ));
+                    }
+                    entry.insert(PreparedObservations {
+                        completed: progress.completed,
+                        requests: requests.into(),
+                        preparation_duration_ms: Some(duration_ms),
+                    });
+                }
+                let work = prepared.get_mut(id).expect("captured work");
+                let Some(request) = work.requests.pop_front() else {
+                    break;
+                };
+                if !turns.is_empty() {
+                    match scheduler::select(&self.root, stage, keys) {
+                        Ok(Some(reserved)) if reserved == target => {}
+                        Ok(_) => return Some(self.failure(
+                            "bounded work scheduling",
+                            "execution turn changed during preparation; unfinished work retained",
+                        )),
+                        Err(error) => return Some(self.failure("bounded work scheduling", error)),
+                    }
+                }
+                let node_id = request["node_id"]
+                    .as_str()
+                    .expect("prepared node id")
+                    .to_owned();
+                let mut metrics = WorkStepMetrics::new(WorkRole::Evidence);
+                metrics.work_id = Some(id.clone());
+                metrics.node_id = Some(node_id.clone());
+                metrics.node_kind = match request["kind"].as_str() {
+                    Some("inspect") => Some(NodeKind::Inspect),
+                    Some("reduce") => Some(NodeKind::Reduce),
+                    _ => unreachable!("prepared evidence node kind"),
+                };
+                metrics.preparation_duration_ms = work.preparation_duration_ms.take();
+                metrics.request_json_bytes = Some(
+                    serde_json::to_vec(&request)
+                        .expect("JSON request serializes")
+                        .len(),
+                );
+                turns.push(ObservationTurn {
+                    work_id: id.clone(),
+                    node_id,
+                    completed: work.completed,
+                    request,
+                    metrics,
+                });
+                target = keys
+                    .range((
+                        std::ops::Bound::Excluded(target),
+                        std::ops::Bound::Unbounded,
+                    ))
+                    .next()
+                    .or_else(|| keys.first())
+                    .expect("selected keys")
+                    .clone();
+            }
+            if turns.is_empty() {
+                return None;
+            }
+            if self.result.cancelled || !self.configuration_is_current() {
+                return Some(false);
+            }
+            if self.config.llm.provider == lk_core::config::LlmProvider::Noop {
+                return Some(self.failure(
+                    "bounded work receipt",
+                    "semantic execution is disabled by llm.provider",
+                ));
+            }
+            if let Err(error) = self.prepare_agent().await {
+                for mut turn in turns {
+                    turn.metrics.outcome = if self.result.cancelled {
+                        WorkOutcome::Cancelled
+                    } else {
+                        WorkOutcome::Failed
+                    };
+                    self.result.work_telemetry.record(turn.metrics);
+                }
+                return Some(if self.result.cancelled {
+                    self.record(
+                        "bounded work receipt",
+                        StageState::Cancelled,
+                        Some(error.to_string()),
+                    )
+                } else {
+                    self.failure("bounded work receipt", error)
+                });
+            }
+            let timeout = self.selected.as_ref().expect("prepared agent").timeout();
+            let mut requests = Vec::new();
+            let mut directories = Vec::new();
+            let mut engines = Vec::new();
+            for turn in &turns {
+                let (invocation, capture_limit) =
+                    match self.observation_invocation(&turn.request, WorkRole::Evidence, budget) {
+                        Ok(invocation) => invocation,
+                        Err(error) => return Some(self.failure("bounded work receipt", error)),
+                    };
+                engines.push(invocation.engine);
+                let (request, directory) = invocation.into_request(timeout, capture_limit);
+                requests.push(request);
+                directories.push(directory);
+            }
+            self.result.semantic_calls += requests.len();
+            let attempts = self.supervisor.run_requests(requests).await;
+            drop(directories);
+            let cancelled = attempts
+                .iter()
+                .any(|attempt| attempt.result.as_ref().is_ok_and(|child| child.cancelled));
+            let current = self.configuration_is_current();
+            if cancelled {
+                self.record(
+                    "bounded work receipt",
+                    StageState::Cancelled,
+                    Some(
+                        "parallel evidence inspection interrupted; unfinished work retained".into(),
+                    ),
+                );
+            }
+            let mut accepted = current && !cancelled;
+            for ((mut turn, attempt), engine) in turns.into_iter().zip(attempts).zip(engines) {
+                turn.metrics.agent_duration_ms = Some(attempt.duration_ms);
+                self.result.semantic_duration_ms += attempt.duration_ms;
+                if cancelled || !current {
+                    turn.metrics.outcome = if cancelled {
+                        WorkOutcome::Cancelled
+                    } else {
+                        WorkOutcome::Rejected
+                    };
+                    self.result.work_telemetry.record(turn.metrics);
+                    continue;
+                }
+                let child = match attempt.result {
+                    Ok(child) if child.success => child,
+                    Ok(child) => {
+                        accepted = false;
+                        turn.metrics.outcome = WorkOutcome::Failed;
+                        self.record("bounded work receipt", StageState::Failed, child.detail);
+                        self.result.work_telemetry.record(turn.metrics);
+                        continue;
+                    }
+                    Err(error) => {
+                        accepted = false;
+                        turn.metrics.outcome = WorkOutcome::Failed;
+                        self.failure("bounded work receipt", error);
+                        self.result.work_telemetry.record(turn.metrics);
+                        continue;
+                    }
+                };
+                let output = match execution::observation::decode(
+                    engine,
+                    &child.stdout,
+                    budget.max_result_bytes,
+                ) {
+                    Ok(output) => output,
+                    Err(error) => {
+                        accepted = false;
+                        self.failure("bounded work receipt", error);
+                        self.result.work_telemetry.record(turn.metrics);
+                        continue;
+                    }
+                };
+                turn.metrics.result_json_bytes = Some(
+                    serde_json::to_vec(&output)
+                        .expect("observation serializes")
+                        .len(),
+                );
+                if !self.configuration_is_current() {
+                    accepted = false;
+                    self.result.work_telemetry.record(turn.metrics);
+                    continue;
+                }
+                let started_at = Instant::now();
+                let recorded = crate::commands::work::record_inspection(
+                    &self.root,
+                    &self.config,
+                    &self.config_revision,
+                    &turn.work_id,
+                    &turn.node_id,
+                    output,
+                );
+                turn.metrics.revalidation_record_duration_ms =
+                    Some(started_at.elapsed().as_millis() as u64);
+                match recorded {
+                    Ok(progress)
+                        if progress.completed > turn.completed
+                            && !progress.ready.contains(&turn.node_id) =>
+                    {
+                        turn.metrics.outcome = WorkOutcome::Recorded;
+                        self.record(
+                            "bounded work receipt",
+                            StageState::Completed,
+                            Some(turn.node_id),
+                        );
+                    }
+                    Ok(_) => {
+                        accepted = false;
+                        self.failure("bounded work receipt", "worker exited without completing its selected node; unfinished work retained");
+                    }
+                    Err(error) => {
+                        accepted = false;
+                        self.failure("bounded work receipt", error);
+                    }
+                }
+                self.result.work_telemetry.record(turn.metrics);
+            }
+            Some(accepted)
         }
 
         async fn bounded_observation_step(&mut self, id: &str) -> ObservationStep {
@@ -1165,6 +1459,14 @@ mod native {
                     }
                     return true;
                 }
+                let bounded_jobs =
+                    jobs.iter()
+                        .filter_map(|(target, job)| match job {
+                            QueueDispatch::Partitioned { id, .. }
+                            | QueueDispatch::Source { id } => Some((target.clone(), id.clone())),
+                            _ => None,
+                        })
+                        .collect();
                 loop {
                     if !self.call_budget_available() {
                         return false;
@@ -1176,6 +1478,20 @@ mod native {
                             Ok(None) => return true,
                             Err(error) => return self.failure("queue scheduling", error),
                         };
+                    if let Some(completed) = self
+                        .bounded_observation_wave(
+                            &selected,
+                            &bounded_jobs,
+                            &keys,
+                            scheduler::Stage::Queue,
+                        )
+                        .await
+                    {
+                        if !completed {
+                            return false;
+                        }
+                        continue;
+                    }
                     match &jobs[&selected] {
                         QueueDispatch::Discovery { task } => {
                             let directory = match tempfile::Builder::new()
@@ -1812,6 +2128,15 @@ mod native {
                             }
                         };
                     let work = &jobs[&selected];
+                    if let Some(completed) = self
+                        .bounded_observation_wave(&selected, &jobs, &keys, scheduler::Stage::Audit)
+                        .await
+                    {
+                        if !completed {
+                            return;
+                        }
+                        continue;
+                    }
                     match self.bounded_step(work, "lore-wiki").await {
                         WorkStep::Pending => continue,
                         WorkStep::Failed => return,

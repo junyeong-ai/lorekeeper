@@ -10,6 +10,25 @@ pub(in crate::commands) struct Invocation {
     _directory: tempfile::TempDir,
 }
 
+impl Invocation {
+    #[cfg(unix)]
+    pub(in crate::commands) fn into_request(
+        self,
+        timeout: std::time::Duration,
+        capture_limit: usize,
+    ) -> (super::ChildRequest, tempfile::TempDir) {
+        (
+            super::ChildRequest {
+                command: self.command,
+                timeout: Some(timeout),
+                capture_limit: Some(capture_limit),
+                input: Some(self.prompt),
+            },
+            self._directory,
+        )
+    }
+}
+
 fn schema() -> Value {
     let range = json!({"type":"object", "additionalProperties":false,
         "properties":{"resource":{"type":"integer","minimum":0},"start":{"type":"integer","minimum":0},"end":{"type":"integer","minimum":0}},
