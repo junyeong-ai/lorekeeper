@@ -433,6 +433,11 @@ execution:
 [실행 설정](skills/lore-setup/references/config.md#execution-profiles),
 분할 결과 규약은 [Bounded work](skills/lore-process/references/bounded-work.md)를 따릅니다.
 
+분할 작업의 요약·이벤트 정제·주제 추출은 완료된 관측과 해당 생성 규칙을 받아 섹션 본문을
+반환합니다. Rust가 작업 식별자·리비전 검증과 결과 저장·게시를 담당합니다. 추가 읽기나
+검수가 필요하면 작업을 보류하며, 같은 요청은 다시 호출하지 않습니다. 독립 작업은 계속
+처리합니다. 개념 추출·합성·감사는 도구를 사용하는 최종화 절차를 유지합니다.
+
 새 분할 작업은 요청 크기와 각 결과의 최대 크기를 기준으로 여러 관찰을 한 번에 종합하며,
 저장된 작업은 기존 구조로 재개합니다. `lore run process --json`의 `work_steps`는 단계별
 JSON 크기와 준비·에이전트 호출·검증 시간을 구분합니다. 관측하지 못한 값은 `null`이며

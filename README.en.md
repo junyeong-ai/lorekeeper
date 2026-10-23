@@ -448,6 +448,12 @@ preserved and reported as failure. See [execution configuration](skills/lore-set
 for profile-specific limits and manual selection, and [bounded work](skills/lore-process/references/bounded-work.md)
 for result contracts.
 
+Bounded summaries, event refinement and theme extraction receive completed observations
+and their applicable generation rules, then return a section body. Rust owns task identity,
+revision checks, staging and publication. A required read or review defers the task without
+calling the same unchanged request again; independent work continues. Concept extraction,
+synthesis and audits retain tool-using finalization.
+
 New bounded plans group observations using request and maximum result sizes; saved
 plans resume with their existing topology. Native `lore run process --json` reports
 per-step JSON sizes and preparation, agent invocation and validation wall times in

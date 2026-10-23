@@ -40,8 +40,8 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   and cancellation. Invocation counts and wall time are not tokens or billed cost.
   Native work telemetry retains at most 1024 evidence/screening/finalizer steps and counts
   omissions. Measure existing operations only; unknown/inapplicable fields are null.
-  Compact request/decoded-result bytes exclude prompts and host envelopes; finalizer
-  JSON sizes are unobserved. Revalidation and recording share one measured operation.
+  Compact request/decoded-result bytes exclude prompts and host envelopes; interactive
+  finalizer JSON sizes are unobserved. Revalidation and recording share one measured operation.
   Parallel invocation durations are summed and can exceed elapsed job time.
   Queue-planning metrics count local checkpoints and shared synthesis captures,
   separately from later revalidation and host work.
@@ -83,12 +83,21 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   never finishes extraction independently: canonical extraction publication journals its
   exact supporting-consumption receipt with the knowledge edits. Retention validates that
   receipt and preserves live queue/reuse references before removing expired source work.
-- Native inspection/reduction is a structured inference role (`execution/observation.rs`):
-  stdin carries only the bounded node request and instructions, stdout is bounded and
+- Native inspection/reduction and screening are structured inference roles
+  (`execution/observation.rs`); bounded single-section finalization uses
+  `execution/finalization.rs`. Rust selects applicable shared generation rules through
+  typed task/target kinds. Extraction, synthesis and audits retain interactive finalization.
+  stdin carries only the bounded request and instructions, stdout is bounded and
   decoded by the host's explicit response contract. Rust owns recording the selected
-  observation. Claude disables tools/customizations; Codex uses a read-only sandbox.
+  observation or creating the guarded section result. Claude disables tools/customizations;
+  Codex uses a read-only sandbox.
   Never fall back to parsing prose/Markdown when structured output is missing or invalid.
-  This restriction does not describe the interactive finalizer/maintenance role.
+  A section `needs-action` response records an exact request-bound action receipt;
+  unchanged requests defer before invocation, while independent work continues. Changed
+  requests can be reconsidered; valid sealed results restage before checking the receipt.
+  Corrupt receipts refuse. Retention validates stored receipt identity without requiring
+  historical generation rules to match current ones. Interactive finalizers retain their
+  explicit repair and guarded submission capabilities.
 - Native queue scheduling chooses one task per target so publication cannot invalidate
   another simultaneous task on the same page. Whole-input tasks share an evidence-bounded
   batch; oversized work reserves fair inspection/reduction/finalization turns.
