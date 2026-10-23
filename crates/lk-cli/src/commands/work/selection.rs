@@ -517,7 +517,9 @@ impl Selection {
         require_settled(root)?;
         let manifest_path = self.manifest_path();
         let manifest = read_optional(root, &manifest_path)?
-            .ok_or_else(|| fail("selection manifest is missing"))?;
+            .ok_or_else(|| {
+                fail("current selection manifest is missing; inspect `lore work context` for the required plan; earlier selections do not establish the current scope")
+            })?;
         if manifest != encoded(&self.manifest)? {
             return Err(fail(
                 "selection manifest differs from the current complete inventory or source context",
@@ -655,6 +657,11 @@ impl Selection {
         plan: &mut MutationPlan,
         binding: &lk_queue::ExtractionSelection,
     ) -> miette::Result<SelectionLedger> {
+        if binding.inventory_revision != self.manifest.binding.inventory_revision {
+            return Err(fail(
+                "staged selection inventory differs from current inputs; inspect `lore work context`, rescreen and regenerate the extraction result",
+            ));
+        }
         let captured = self.capture_ledger(root)?;
         if serde_json::to_value(captured.ledger.binding()?).into_diagnostic()?
             != serde_json::to_value(binding).into_diagnostic()?
@@ -1233,6 +1240,72 @@ mod tests {
                 std::fs::write(path, before).unwrap();
             }
         }
+    }
+
+    #[test]
+    fn publication_reports_changed_inventory_before_reading_a_new_selection_manifest() {
+        let fixture = Fixture::new(2);
+        let selection = fixture.selection(8192, 8192);
+        fixture.create(&selection);
+        let request = selection.prepare(&fixture.root).unwrap().1.unwrap();
+        fixture
+            .record(
+                &selection,
+                answer(&request, ScreeningDecision::NotSelected),
+                None,
+            )
+            .unwrap();
+        let binding = selection.ledger(&fixture.root).unwrap().binding().unwrap();
+        let retained_manifest =
+            std::fs::read(fixture.root.join(selection.manifest_path())).unwrap();
+        let retained_receipt =
+            std::fs::read(fixture.root.join(selection.receipt_path(0).unwrap())).unwrap();
+        std::fs::write(
+            fixture.root.join("wiki/concepts/new.md"),
+            "---\ntype: concept\ntitle: Candidate added\n---\nA newly available candidate.\n",
+        )
+        .unwrap();
+        let current = fixture.selection(8192, 8192);
+        assert_ne!(current.id, selection.id);
+        assert!(!current.is_planned(&fixture.root).unwrap());
+        let error = current
+            .guard(&fixture.root, &mut MutationPlan::default(), &binding)
+            .expect_err("changed inventory must refuse publication")
+            .to_string();
+        assert!(
+            error.contains("staged selection inventory differs from current inputs"),
+            "{error}"
+        );
+        assert!(!current.is_planned(&fixture.root).unwrap());
+        assert_eq!(
+            std::fs::read(fixture.root.join(selection.manifest_path())).unwrap(),
+            retained_manifest
+        );
+        assert_eq!(
+            std::fs::read(fixture.root.join(selection.receipt_path(0).unwrap())).unwrap(),
+            retained_receipt
+        );
+        assert!(selection.ledger(&fixture.root).unwrap().progress.complete);
+    }
+
+    #[test]
+    fn publication_distinguishes_a_missing_current_manifest_from_inventory_drift() {
+        let fixture = Fixture::new(0);
+        let selection = fixture.selection(8192, 8192);
+        fixture.create(&selection);
+        let binding = selection.ledger(&fixture.root).unwrap().binding().unwrap();
+        let manifest = fixture.root.join(selection.manifest_path());
+        std::fs::remove_file(&manifest).unwrap();
+        let error = selection
+            .guard(&fixture.root, &mut MutationPlan::default(), &binding)
+            .expect_err("missing current manifest must refuse publication")
+            .to_string();
+        assert!(
+            error.contains("current selection manifest is missing"),
+            "{error}"
+        );
+        assert!(!error.contains("inventory changed"), "{error}");
+        assert!(!manifest.exists());
     }
 
     #[test]
