@@ -61,6 +61,8 @@ canonical; SQLite navigation is derived.
   After a retained guard is evaluated, later owned steps must preserve it.
 - Persist plan once; progress receipts bind its revision. Remove/sync plan before
   clearing progress to avoid replaying earlier steps over later same-file state.
+  Checkpoint each file transition; pure read assertions advance only in memory and
+  are rechecked from the last durable checkpoint during recovery.
   Journal private data and durable directory creation use shared primitives.
 - Reads use `page_path`, writes `writable_page_path`. Ancestors must resolve inside
   the vault; internal directory aliases are supported, leaf symlinks refused for

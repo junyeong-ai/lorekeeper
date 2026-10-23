@@ -39,6 +39,16 @@ enum Step {
     },
 }
 
+impl Step {
+    fn is_guard(&self) -> bool {
+        match self {
+            Self::RequireAbsent { .. } => true,
+            Self::Edit { before, after, .. } => before == after,
+            _ => false,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Journal {
@@ -508,6 +518,9 @@ impl MutationSession {
                 }
             }
             completed += 1;
+            if step.is_guard() {
+                continue;
+            }
             let progress = Progress::new(plan_revision.clone(), completed);
             let bytes = serde_json::to_vec(&progress)
                 .map_err(|e| VaultError::Serialization(e.to_string()))?;
@@ -954,6 +967,180 @@ mod tests {
     }
 
     #[test]
+    fn assertions_before_a_failed_transition_do_not_create_progress() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("dependency.md"), "retained").unwrap();
+        fs::write(root.path().join("gate.md"), "expected").unwrap();
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let mut plan = MutationPlan::default();
+        plan.require_unchanged("dependency.md", "retained".into());
+        plan.require_absent("missing.md");
+        plan.require_unchanged("dependency.md", "retained".into());
+        plan.edit("gate.md", "expected".into(), "done".into());
+        session.preflight(&plan).unwrap();
+        let journal = Journal { version: 1, plan };
+        session.save(&journal).unwrap();
+        let bytes = fs::read(&session.journal).unwrap();
+        fs::write(root.path().join("gate.md"), "external").unwrap();
+        assert!(session.finish(&journal).is_err());
+        assert_eq!(fs::read(&session.journal).unwrap(), bytes);
+        assert!(!session.journal.with_file_name("progress.json").exists());
+        fs::write(root.path().join("gate.md"), "expected").unwrap();
+        fs::write(root.path().join("dependency.md"), "changed").unwrap();
+        drop(session);
+        assert!(MutationSession::acquire(root.path()).is_err());
+        assert_eq!(
+            fs::read_to_string(root.path().join("gate.md")).unwrap(),
+            "expected"
+        );
+        fs::write(root.path().join("dependency.md"), "retained").unwrap();
+        let session = MutationSession::acquire(root.path()).unwrap();
+        assert_eq!(
+            fs::read_to_string(root.path().join("gate.md")).unwrap(),
+            "done"
+        );
+        assert!(!session.journal.exists());
+    }
+
+    #[test]
+    fn guard_runs_preserve_the_last_transition_checkpoint_and_replay_the_suffix() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("dependency.md"), "retained").unwrap();
+        fs::write(root.path().join("gate.md"), "expected").unwrap();
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let mut plan = MutationPlan::default();
+        plan.require_unchanged("dependency.md", "retained".into());
+        plan.require_absent("missing.md");
+        plan.create("published.md", "published".into());
+        plan.require_unchanged("published.md", "published".into());
+        plan.require_unchanged("dependency.md", "retained".into());
+        plan.edit("gate.md", "expected".into(), "done".into());
+        let journal = Journal { version: 1, plan };
+        session.save(&journal).unwrap();
+        fs::write(root.path().join("gate.md"), "external").unwrap();
+        assert!(session.finish(&journal).is_err());
+        let path = session.journal.with_file_name("progress.json");
+        let bytes = fs::read(&path).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Progress>(&bytes)
+                .unwrap()
+                .completed,
+            3
+        );
+        fs::write(root.path().join("dependency.md"), "changed").unwrap();
+        fs::write(root.path().join("gate.md"), "expected").unwrap();
+        drop(session);
+        assert!(MutationSession::acquire(root.path()).is_err());
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        assert_eq!(
+            fs::read_to_string(root.path().join("published.md")).unwrap(),
+            "published"
+        );
+        assert_eq!(
+            fs::read_to_string(root.path().join("gate.md")).unwrap(),
+            "expected"
+        );
+        fs::write(root.path().join("dependency.md"), "retained").unwrap();
+        let session = MutationSession::acquire(root.path()).unwrap();
+        assert_eq!(
+            fs::read_to_string(root.path().join("gate.md")).unwrap(),
+            "done"
+        );
+        assert!(!session.journal.exists());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn recovery_accepts_legacy_progress_inside_guard_runs_and_rechecks_their_inputs() {
+        for (completed, missing) in [1, 2, 4, 5]
+            .into_iter()
+            .flat_map(|completed| [false, true].map(|missing| (completed, missing)))
+        {
+            let root = tempfile::tempdir().unwrap();
+            fs::write(root.path().join("dependency.md"), "retained").unwrap();
+            fs::write(root.path().join("gate.md"), "expected").unwrap();
+            let session = MutationSession::acquire(root.path()).unwrap();
+            let mut plan = MutationPlan::default();
+            plan.require_unchanged("dependency.md", "retained".into());
+            plan.require_absent("missing.md");
+            plan.create("published.md", "published".into());
+            plan.require_unchanged("published.md", "published".into());
+            plan.require_unchanged("dependency.md", "retained".into());
+            plan.edit("gate.md", "expected".into(), "done".into());
+            let revision = lk_core::concept::file_revision(&serde_json::to_string(&plan).unwrap());
+            session.save(&Journal { version: 1, plan }).unwrap();
+            let progress = session.journal.with_file_name("progress.json");
+            let bytes = serde_json::to_vec(&Progress::new(revision, completed)).unwrap();
+            lk_core::fs::write_atomic(&progress, &bytes, Some(0o600)).unwrap();
+            fs::write(root.path().join("published.md"), "published").unwrap();
+            let changed = if missing {
+                "missing.md"
+            } else {
+                "dependency.md"
+            };
+            fs::write(root.path().join(changed), "changed").unwrap();
+            drop(session);
+            assert!(MutationSession::acquire(root.path()).is_err());
+            assert_eq!(fs::read(&progress).unwrap(), bytes);
+            assert_eq!(
+                fs::read_to_string(root.path().join("gate.md")).unwrap(),
+                "expected"
+            );
+            if missing {
+                fs::remove_file(root.path().join(changed)).unwrap();
+            } else {
+                fs::write(root.path().join(changed), "retained").unwrap();
+            }
+            let session = MutationSession::acquire(root.path()).unwrap();
+            assert_eq!(
+                fs::read_to_string(root.path().join("gate.md")).unwrap(),
+                "done"
+            );
+            assert!(!session.journal.exists());
+            assert!(!progress.exists());
+        }
+    }
+
+    #[test]
+    fn recovery_replays_a_pure_guard_tail_after_a_checkpointed_transition() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("page.md"), "before").unwrap();
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let mut plan = MutationPlan::default();
+        plan.edit("page.md", "before".into(), "after".into());
+        plan.require_unchanged("page.md", "after".into());
+        plan.require_absent("missing.md");
+        let revision = lk_core::concept::file_revision(&serde_json::to_string(&plan).unwrap());
+        session.save(&Journal { version: 1, plan }).unwrap();
+        let journal = session.journal.clone();
+        let bytes = fs::read(&journal).unwrap();
+        let progress = journal.with_file_name("progress.json");
+        lk_core::fs::write_atomic(
+            &progress,
+            &serde_json::to_vec(&Progress::new(revision, 1)).unwrap(),
+            Some(0o600),
+        )
+        .unwrap();
+        fs::write(root.path().join("page.md"), "after").unwrap();
+        fs::write(root.path().join("missing.md"), "external").unwrap();
+        drop(session);
+        assert!(MutationSession::acquire(root.path()).is_err());
+        assert_eq!(fs::read(&journal).unwrap(), bytes);
+        assert_eq!(
+            fs::read_to_string(root.path().join("page.md")).unwrap(),
+            "after"
+        );
+        fs::remove_file(root.path().join("missing.md")).unwrap();
+        let _session = MutationSession::acquire(root.path()).unwrap();
+        assert_eq!(
+            fs::read_to_string(root.path().join("page.md")).unwrap(),
+            "after"
+        );
+        assert!(!journal.exists());
+        assert!(!progress.exists());
+    }
+
+    #[test]
     fn recovery_rechecks_preserved_dependencies_before_retiring_originals() {
         for damaged in [None, Some("archive.md"), Some("receipt.json")] {
             for remove in [false, true] {
@@ -975,7 +1162,7 @@ mod tests {
                 let progress_path = session.journal.with_file_name("progress.json");
                 let progress_bytes = fs::read(&progress_path).unwrap();
                 let progress: Progress = serde_json::from_slice(&progress_bytes).unwrap();
-                assert_eq!(progress.completed, 4);
+                assert_eq!(progress.completed, 3);
                 let journal_path = session.journal.clone();
                 let journal_bytes = fs::read(&journal_path).unwrap();
                 if let Some(path) = damaged {
@@ -1057,13 +1244,9 @@ mod tests {
             session.save(&journal).unwrap();
             fs::write(root.path().join(concept), "external edit").unwrap();
             assert!(session.finish(&journal).is_err());
-            let progress = fs::read(session.journal.with_file_name("progress.json")).unwrap();
-            assert!(
-                serde_json::from_slice::<Progress>(&progress)
-                    .unwrap()
-                    .completed
-                    >= 3
-            );
+            let progress_path = session.journal.with_file_name("progress.json");
+            assert!(!progress_path.exists());
+            let journal_bytes = fs::read(&session.journal).unwrap();
             if damage == Some("payload") {
                 fs::write(
                     root.path().join(format!(
@@ -1090,9 +1273,10 @@ mod tests {
                     fs::read_to_string(root.path().join(concept)).unwrap(),
                     before
                 );
+                assert!(!progress_path.exists());
                 assert_eq!(
-                    fs::read(root.path().join(".lorekeeper/mutation/progress.json")).unwrap(),
-                    progress
+                    fs::read(root.path().join(".lorekeeper/mutation/pending.json")).unwrap(),
+                    journal_bytes
                 );
             } else {
                 assert!(resumed.is_ok());
