@@ -54,10 +54,12 @@ impl InputAvailability {
         Ok(false)
     }
 
+    #[cfg(unix)]
     pub fn require_ready(&mut self, candidate: &AuditCandidate) -> miette::Result<()> {
         self.readiness.require_ready(&self.root, candidate)
     }
 
+    #[cfg(unix)]
     pub fn guard(&self, mutation: &mut lk_vault::MutationPlan) -> miette::Result<()> {
         self.readiness.guard(&self.root, mutation)
     }

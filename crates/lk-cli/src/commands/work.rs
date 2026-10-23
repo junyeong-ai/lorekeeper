@@ -953,6 +953,7 @@ pub(super) fn prepare_inspection(
     work.prepare_inspection(&root, &prepared.resources)
 }
 
+#[cfg(unix)]
 pub(super) fn prepare_inspections(
     root: &Path,
     config: &lk_core::config::Config,
