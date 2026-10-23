@@ -28,6 +28,8 @@ pub struct ClassifyRule {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
+    #[serde(skip)]
+    semantic_work_revision: Option<String>,
     pub vault: VaultConfig,
     pub identity: Identity,
     /// Optional shared credential file; relative to this configuration file.
@@ -74,6 +76,7 @@ impl Config {
         let content = std::fs::read_to_string(path)?;
         let mut config: Self = crate::yaml::from_str(&content)?;
         config.validate()?;
+        config.semantic_work_revision = Some(work_policy_revision(&content)?);
         config.graph.apply_vault_defaults(&config.vault.dirs);
         if let Some(parent) = path.parent() {
             config.vault.resolve_relative_to(parent);
@@ -86,6 +89,10 @@ impl Config {
             }
         }
         Ok((config, crate::concept::file_revision(&content)))
+    }
+
+    pub fn semantic_work_revision(&self) -> Option<&str> {
+        self.semantic_work_revision.as_deref()
     }
 
     pub fn credentials_path(&self) -> PathBuf {
@@ -525,6 +532,48 @@ impl Config {
 
         Ok(())
     }
+}
+
+fn work_policy_revision(content: &str) -> Result<String, ConfigError> {
+    fn strip_work(parent: &mut serde_json::Map<String, serde_json::Value>) {
+        if let Some(work) = parent
+            .get_mut("work")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            for key in ["max_calls", "max_parallel", "max_screening_batches"] {
+                work.remove(key);
+            }
+            if work.is_empty() {
+                parent.remove("work");
+            }
+        }
+    }
+    let mut value: serde_json::Value = crate::yaml::from_str(content)?;
+    if let Some(root) = value.as_object_mut()
+        && let Some(execution) = root
+            .get_mut("execution")
+            .and_then(serde_json::Value::as_object_mut)
+    {
+        strip_work(execution);
+        if let Some(profiles) = execution
+            .get_mut("profiles")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            for profile in profiles
+                .values_mut()
+                .filter_map(serde_json::Value::as_object_mut)
+            {
+                profile.remove("timeout_seconds");
+                strip_work(profile);
+            }
+        }
+        if execution.is_empty() {
+            root.remove("execution");
+        }
+    }
+    let bytes = crate::rss_original::canonical_bytes(&("semantic-work-config-v1", value))
+        .map_err(ConfigError::Validation)?;
+    Ok(crate::rss_original::digest(&bytes))
 }
 
 fn validate_cron(expr: &str) -> Result<(), String> {
@@ -1701,6 +1750,52 @@ mod observation_unit_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn semantic_work_configuration_preserves_policy_and_excludes_only_operational_limits() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.yaml");
+        let base = "vault: {root: vault, locale: en}\nidentity: {name: Test, email: test@example.com}\nsources:\n  notes: {type: manual, params: {inbox_dir: inbox}}\nexecution:\n  default_profile: main\n  work: {max_input_bytes: 262144, max_result_bytes: 32768, max_calls: 4, max_parallel: 1}\n  profiles:\n    main: {engine: codex, timeout_seconds: 30, work: {max_calls: 4, max_parallel: 1}}\n";
+        std::fs::write(&path, base).unwrap();
+        let (original, bytes) = Config::load_with_revision(&path).unwrap();
+        let operational = base
+            .replace("max_calls: 4", "max_calls: 9")
+            .replace("max_parallel: 1", "max_parallel: 3")
+            .replace("timeout_seconds: 30", "timeout_seconds: 60")
+            .replace(
+                "work: {max_calls:",
+                "work: {max_screening_batches: 2, max_calls:",
+            );
+        std::fs::write(&path, &operational).unwrap();
+        let (changed, changed_bytes) = Config::load_with_revision(&path).unwrap();
+        assert_ne!(bytes, changed_bytes);
+        assert_eq!(
+            original.semantic_work_revision(),
+            changed.semantic_work_revision()
+        );
+        for policy in [
+            base.replace("locale: en", "locale: ko"),
+            base.replace("engine: codex,", "engine: codex, model: selected-model,"),
+            base.replace(
+                "engine: codex,",
+                "engine: codex, model_reasoning_effort: high,",
+            ),
+            base.replace("max_input_bytes: 262144", "max_input_bytes: 131072"),
+            base.replace("max_result_bytes: 32768", "max_result_bytes: 16384"),
+            base.replace(
+                "work: {max_input_bytes:",
+                "work: {extraction_context: full-context, max_input_bytes:",
+            ),
+        ] {
+            std::fs::write(&path, policy).unwrap();
+            assert_ne!(
+                original.semantic_work_revision(),
+                Config::load(&path).unwrap().semantic_work_revision()
+            );
+        }
+        let direct: Config = crate::yaml::from_str(base).unwrap();
+        assert!(direct.semantic_work_revision().is_none());
+    }
+
     #[test]
     fn navigation_has_no_markdown_export_setting() {
         crate::yaml::from_str::<super::VaultConfig>("root: /tmp/vault\n").unwrap();

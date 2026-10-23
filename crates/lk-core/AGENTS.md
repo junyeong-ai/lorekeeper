@@ -9,6 +9,10 @@ config loading and the shared filesystem primitives intentionally perform I/O.
   directories, invalid cron/thresholds and unknown category references. Relative
   vault roots resolve against the config file. Use `yaml::from_str`: duplicate keys,
   YAML scalar policy, parser budgets and snippet-free errors are shared contracts.
+  Config loading also derives semantic Work policy from that same read, excluding
+  only execution call/parallel/screening-packet limits and profile timeouts. Preserve
+  the separate complete byte revision for live workflow pinning. Direct deserialization
+  has no loaded policy revision; it must not fabricate one from resolved paths.
 - `SourceType::descriptor()` is exhaustive with no fallback. `streaming` means a
   past day cannot be completely refetched; `unit` decides daily versus document
   materialization. Adding a type requires deciding every descriptor trait.

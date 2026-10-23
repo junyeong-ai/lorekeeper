@@ -203,6 +203,65 @@ fn source_role(context: &Value, has_candidates: bool) -> miette::Result<&str> {
 }
 
 impl Selection {
+    pub fn prefer_saved_configuration(
+        mut self,
+        root: &Path,
+        config_revision: &str,
+        source_revision: &str,
+    ) -> miette::Result<Self> {
+        if self.is_planned(root)? || self.manifest.binding.config_revision == config_revision {
+            return Ok(self);
+        }
+        let directory =
+            lk_vault::page_path(root, self.directory.parent().expect("selection owner"))
+                .into_diagnostic()?;
+        match std::fs::symlink_metadata(directory) {
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+            Ok(_) => return Err(fail("selection owner must be a direct directory")),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(self),
+            Err(error) => return Err(error).into_diagnostic(),
+        }
+        let source_before = self
+            .manifest
+            .source_context
+            .get("source_revision")
+            .cloned()
+            .ok_or_else(|| {
+                fail("saved configuration comparison requires an explicit source revision")
+            })?;
+        if encoded(&self.manifest.binding.config_revision)?.len()
+            != encoded(&config_revision)?.len()
+            || encoded(&source_before)?.len() != encoded(&source_revision)?.len()
+        {
+            return Ok(self);
+        }
+        let config_before = std::mem::replace(
+            &mut self.manifest.binding.config_revision,
+            config_revision.into(),
+        );
+        self.manifest.source_context["source_revision"] = json!(source_revision);
+        self.refresh_identity()?;
+        if self.is_planned(root)? {
+            return Ok(self);
+        }
+        self.manifest.binding.config_revision = config_before;
+        self.manifest.source_context["source_revision"] = source_before;
+        self.refresh_identity()?;
+        Ok(self)
+    }
+
+    fn refresh_identity(&mut self) -> miette::Result<()> {
+        self.manifest.source_context_revision = digest(&self.manifest.source_context)?;
+        self.id = digest(&self.manifest)?;
+        self.directory = Path::new(".lorekeeper/queue/selection")
+            .join(digest(&(
+                &self.manifest.binding.task_id,
+                &self.manifest.binding.cache_hash,
+            ))?)
+            .join(&self.id);
+        Ok(())
+    }
+
     pub fn cost(&self, root: &Path) -> miette::Result<ScreeningCost> {
         let progress = if self.is_planned(root)? {
             Some(self.ledger(root)?.progress)
@@ -430,13 +489,7 @@ impl Selection {
         {
             return Err(fail("complete source context exceeds the input bound"));
         }
-        selection.id = digest(&selection.manifest)?;
-        selection.directory = Path::new(".lorekeeper/queue/selection")
-            .join(digest(&(
-                &selection.manifest.binding.task_id,
-                &selection.manifest.binding.cache_hash,
-            ))?)
-            .join(&selection.id);
+        selection.refresh_identity()?;
         Ok(selection)
     }
 
@@ -1198,6 +1251,50 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    #[test]
+    fn legacy_configuration_adoption_requires_the_exact_saved_manifest_and_preserves_receipts() {
+        let fixture = Fixture::new(7);
+        let mut legacy = fixture.selection(4500, 4096);
+        legacy.manifest.binding.config_revision = "a".repeat(64);
+        legacy.manifest.source_context["source_revision"] = json!("b".repeat(64));
+        legacy.refresh_identity().unwrap();
+        fixture.create(&legacy);
+        let request = legacy.prepare(&fixture.root).unwrap().1.unwrap();
+        fixture
+            .record(&legacy, answer(&request, ScreeningDecision::Inspect), None)
+            .unwrap();
+        let original = std::fs::read(fixture.root.join(legacy.manifest_path())).unwrap();
+        let mut current = fixture.selection(4500, 4096);
+        current.manifest.binding.config_revision = "c".repeat(64);
+        current.manifest.source_context["source_revision"] = json!("d".repeat(64));
+        current.refresh_identity().unwrap();
+        let current_id = current.id.clone();
+        let adopted = current
+            .prefer_saved_configuration(&fixture.root, &"a".repeat(64), &"b".repeat(64))
+            .unwrap();
+        assert_eq!(adopted.id, legacy.id);
+        assert_eq!(
+            adopted
+                .ledger(&fixture.root)
+                .unwrap()
+                .progress
+                .completed_batches,
+            1
+        );
+        assert_eq!(
+            std::fs::read(fixture.root.join(legacy.manifest_path())).unwrap(),
+            original
+        );
+        let mut changed = fixture.selection(4500, 4096);
+        changed.manifest.binding.config_revision = "c".repeat(64);
+        changed.manifest.source_context["source_revision"] = json!("d".repeat(64));
+        changed.refresh_identity().unwrap();
+        let unmatched = changed
+            .prefer_saved_configuration(&fixture.root, &"e".repeat(64), &"b".repeat(64))
+            .unwrap();
+        assert_eq!(unmatched.id, current_id);
     }
 
     #[test]

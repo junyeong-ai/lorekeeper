@@ -2523,6 +2523,109 @@ fn screening_cost_is_read_only_and_capacity_defers_without_clipping_independent_
 }
 
 #[test]
+fn partial_screening_retains_exact_paid_packets_across_operational_configuration_changes() {
+    let (fixture, task) = progressive_extraction_fixture("codex", "exit 97", 32, 16384, 4096);
+    let target = fixture.root().join("vault/wiki/documents/source.md");
+    let discovery = fixture.root().join("discovery.json");
+    std::fs::write(&discovery, serde_json::to_vec(&serde_json::json!({
+        "target_revision":lk_core::concept::file_revision(&std::fs::read_to_string(target).unwrap()),
+        "queries":[{"query":"transactional outbox","phrase":true,"spacing":false}]
+    })).unwrap()).unwrap();
+    execution_json(
+        &fixture,
+        &[
+            "work",
+            "discover",
+            "--task-id",
+            &task.task_id,
+            "--file",
+            discovery.to_str().unwrap(),
+        ],
+    );
+    let first = execution_json(&fixture, &["work", "select", "--task-id", &task.task_id]);
+    let response = fixture.root().join("response.json");
+    std::fs::write(
+        &response,
+        serde_json::to_vec(&screening_decisions(&first["request"], false)).unwrap(),
+    )
+    .unwrap();
+    execution_json(
+        &fixture,
+        &[
+            "work",
+            "select-record",
+            "--task-id",
+            &task.task_id,
+            "--file",
+            response.to_str().unwrap(),
+        ],
+    );
+    let selection_root = fixture.root().join("vault/.lorekeeper/queue/selection");
+    let bytes = || {
+        walkdir::WalkDir::new(&selection_root)
+            .into_iter()
+            .map(Result::unwrap)
+            .filter(|entry| entry.file_type().is_file())
+            .map(|entry| {
+                (
+                    entry.path().to_owned(),
+                    std::fs::read(entry.path()).unwrap(),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    let recorded = bytes();
+    let original = std::fs::read_to_string(&fixture.config).unwrap();
+    let changed = original
+        .replace(
+            "max_calls: 64",
+            "max_calls: 9, max_parallel: 3, max_screening_batches: 1",
+        )
+        .replace("timeout_seconds: 30", "timeout_seconds: 60");
+    std::fs::write(&fixture.config, &changed).unwrap();
+    let blocked = execution_json(&fixture, &["work", "cost", "--task-id", &task.task_id]);
+    assert_eq!(blocked["status"], "needs-admission");
+    assert_eq!(
+        blocked["cost"]["selection_id"],
+        first["request"]["selection_id"]
+    );
+    assert_eq!(blocked["cost"]["completed_batches"], 1);
+    assert_eq!(bytes(), recorded);
+    std::fs::write(
+        &fixture.config,
+        changed.replace("max_screening_batches: 1", "max_screening_batches: 100"),
+    )
+    .unwrap();
+    let resumed = execution_json(&fixture, &["work", "select", "--task-id", &task.task_id]);
+    assert_eq!(
+        resumed["request"]["selection_id"],
+        first["request"]["selection_id"]
+    );
+    assert_eq!(resumed["progress"]["completed_batches"], 1);
+    assert_ne!(resumed["request"]["batch_id"], first["request"]["batch_id"]);
+    assert_eq!(bytes(), recorded);
+    std::fs::write(
+        &fixture.config,
+        original.replace(
+            "engine: codex",
+            "engine: codex\n      model_reasoning_effort: high",
+        ),
+    )
+    .unwrap();
+    let changed_policy = execution_json(&fixture, &["work", "cost", "--task-id", &task.task_id]);
+    assert_ne!(
+        changed_policy["cost"]["selection_id"],
+        first["request"]["selection_id"]
+    );
+    assert_eq!(changed_policy["cost"]["completed_batches"], 0);
+    assert_eq!(bytes(), recorded);
+    assert!(
+        !fixture.root().join("arguments").exists(),
+        "no host is required to inspect or resume exact records"
+    );
+}
+
+#[test]
 fn progressive_native_screening_keeps_complete_inventory_and_reads_only_admitted_bodies() {
     for engine in ["claude-code", "codex"] {
         let (fixture, _) = progressive_extraction_fixture(

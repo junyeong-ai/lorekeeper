@@ -217,6 +217,11 @@ Optional positive `max_screening_batches` limits the complete candidate-card
 selection's packet count. Omission is unlimited; exceeding it preserves the full
 scope and paid decisions, defers that task before invocation and permits independent
 work. Use `lore work cost --task-id ID` to inspect counts/JSON bytes without writes.
+For new Work and candidate selections, call/parallel/screening-packet limits and
+profile timeouts can change between workflows without discarding paid observations.
+Every configuration byte is still pinned during execution. Model/effort, input/result
+limits and semantic policies remain identity inputs. Legacy byte-bound work requires
+its exact original configuration; changing operational settings does not migrate it.
 `execution.work.extraction_context` defaults to `progressive`: examine bounded cards
 for the complete candidate inventory, then read selected bodies and their required
 reviews/evidence. Card-only exclusions do not establish whole-body findings; deferred

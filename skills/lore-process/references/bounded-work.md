@@ -190,7 +190,13 @@ unselected bodies as inspected or discard source-phase questions during finaliza
 
 ## Changed inputs
 
-Changed configuration, targets, evidence or review dependencies invalidate work.
+Changed semantic configuration, targets, evidence or review dependencies invalidate work.
+New Work and candidate selections exclude only `max_calls`, `max_parallel`,
+`max_screening_batches` and profile `timeout_seconds` from configuration identity.
+Adjust these only between workflows: every configuration byte remains pinned during
+execution. Model/effort, input/result limits, extraction policy and other settings
+still invalidate derived work. Legacy byte-bound plans and selections resume with
+the exact original configuration; operational edits cannot adopt those old receipts.
 Replan. `lore work reuse WORK NODE --from-work OLD --from-node OLD_NODE` permits
 explicitly attributed reuse of an inspection only when semantic purpose and its
 assigned exact resources/ranges match. It never claims a new read. Changed-source

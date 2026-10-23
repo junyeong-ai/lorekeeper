@@ -12,6 +12,12 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
 - Workflow configuration is loaded and revisioned from one read. Pass its selected
   path and `LORE_CONFIG_REVISION` to children; every CLI config load rejects changed
   bytes or another path. Native jobs stop after drift and retain unfinished work.
+  New semantic Work and selection identities exclude only execution call/parallel/
+  screening-packet limits and profile session timeouts. Input/result byte limits,
+  extraction policy, model/effort and all other configuration remain semantic inputs.
+  The live workflow still pins every configuration byte. Legacy byte-bound manifests
+  resume only through an exact current-configuration reconstruction; never retag them
+  after an operational change or guess historical settings.
 - `commands/workflow.rs` is a Unix foreground coordinator for long LLM consumers,
   not a vault mutation lock. It locks canonical-vault `.lorekeeper/workflow.lock`,
   clears only FD_CLOEXEC, and `exec`s literal argv. Busy defaults to nonzero with no

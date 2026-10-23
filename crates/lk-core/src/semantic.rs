@@ -475,9 +475,25 @@ impl SemanticPlan {
     }
 
     fn identity(&self) -> Result<String> {
+        self.identity_with_subject(&self.subject_revision)
+    }
+
+    /// Lookup only: callers must rebuild and compare saved work before adopting it.
+    /// Equal serialized revision lengths preserve the existing partition bounds.
+    pub fn lookup_identity(&self, subject_revision: &str) -> Result<Option<String>> {
+        self.verify_structure()?;
+        if subject_revision.trim().is_empty()
+            || json_bytes(&subject_revision)? != json_bytes(&self.subject_revision)?
+        {
+            return Ok(None);
+        }
+        self.identity_with_subject(subject_revision).map(Some)
+    }
+
+    fn identity_with_subject(&self, subject_revision: &str) -> Result<String> {
         digest(&(
             &self.policy,
-            &self.subject_revision,
+            subject_revision,
             self.max_input_bytes,
             self.max_result_bytes,
             &self.resources,
@@ -665,6 +681,25 @@ fn part_identity(resources: &[SemanticResourceGuard], ranges: &[SemanticRange]) 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn configuration_lookup_matches_rebuilt_identity_only_for_equal_envelope_lengths() {
+        let resources = [resource(
+            "source",
+            &"한글🙂 source-scoped evidence.\n\n".repeat(100),
+        )];
+        let original = SemanticPlan::build(&"a".repeat(64), &resources, 1200, 200).unwrap();
+        let rebuilt = SemanticPlan::build(&"b".repeat(64), &resources, 1200, 200).unwrap();
+        assert_eq!(
+            original.lookup_identity(&"b".repeat(64)).unwrap(),
+            Some(rebuilt.id)
+        );
+        assert_eq!(original.parts, rebuilt.parts);
+        assert!(original.lookup_identity("short").unwrap().is_none());
+        let mut invalid = original;
+        invalid.id = "not-current".into();
+        assert!(invalid.lookup_identity(&"b".repeat(64)).is_err());
+    }
+
     use super::*;
 
     fn resource(address: &str, text: &str) -> SemanticResource {

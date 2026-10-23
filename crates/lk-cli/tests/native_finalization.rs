@@ -40,6 +40,9 @@ if kind in ['finalize-section','whole-section']:
     if mode=='changed-target':
         path=root/'vault'/work['context']['subject']['target']
         path.write_text(path.read_text()+'\nExternal editor change.\n')
+    if mode=='changed-operational-config':
+        path=Path(os.environ['LORE_CONFIG'])
+        path.write_text(path.read_text().replace('max_calls: 2','max_calls: 3'))
     blocked=root/'blocked-work'
     needs=mode=='needs-action' and (not blocked.exists() or blocked.read_text()==work_id)
     if needs:
@@ -535,6 +538,77 @@ fn section_finalizers_use_typed_bodies_and_resume_saved_work_on_both_hosts() {
             let (_, report) = fixture.run();
             assert_eq!(report["semantic_calls"], 0);
         }
+    }
+}
+
+#[test]
+fn quiescent_operational_changes_resume_paid_nodes_but_active_changes_refuse_publication() {
+    for engine in ["codex", "claude-code"] {
+        let fixture = Fixture::new(engine, 32768);
+        let original = std::fs::read_to_string(&fixture.config).unwrap();
+        std::fs::write(
+            &fixture.config,
+            original.replace("max_calls: 2", "max_calls: 1"),
+        )
+        .unwrap();
+        let (_, plan) = fixture.add("source", TaskKind::Summarize);
+        let before = std::fs::read(fixture.work_path(&plan, "plan.json")).unwrap();
+        let (output, first) = fixture.run();
+        assert!(!output.status.success());
+        assert_eq!(first["semantic_calls"], 1);
+        assert_eq!(fixture.calls()[0]["kind"], "inspect");
+        std::fs::write(
+            &fixture.config,
+            original
+                .replace(
+                    "max_calls: 2",
+                    "max_calls: 3, max_parallel: 2, max_screening_batches: 1",
+                )
+                .replace("timeout_seconds: 30", "timeout_seconds: 60"),
+        )
+        .unwrap();
+        let replanned = fixture.json(&[
+            "work",
+            "plan",
+            "--task-id",
+            plan["subject"]["task_id"].as_str().unwrap(),
+        ]);
+        assert_eq!(replanned["work_id"], plan["work_id"]);
+        let (output, second) = fixture.run();
+        assert!(output.status.success(), "{second}");
+        assert_eq!(second["semantic_calls"], 1);
+        assert_eq!(
+            fixture
+                .calls()
+                .iter()
+                .filter(|call| call["kind"] == "inspect")
+                .count(),
+            1
+        );
+        assert_eq!(
+            std::fs::read(fixture.work_path(&plan, "plan.json")).unwrap(),
+            before
+        );
+        assert!(fixture.work_path(&plan, "publication.json").exists());
+
+        let fixture = Fixture::new(engine, 32768);
+        let (_, plan) = fixture.add("active", TaskKind::Summarize);
+        fixture.mode("changed-operational-config");
+        let (output, report) = fixture.run();
+        assert!(!output.status.success(), "{report}");
+        assert_eq!(report["semantic_calls"], 2);
+        assert!(!fixture.work_path(&plan, "seal.json").exists());
+        assert!(!fixture.work_path(&plan, "publication.json").exists());
+        assert!(
+            report["stages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|stage| stage["detail"]
+                    .as_str()
+                    .is_some_and(|detail| detail.contains("configuration changed"))),
+            "{report}"
+        );
     }
 }
 

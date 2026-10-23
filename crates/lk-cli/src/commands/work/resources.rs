@@ -26,6 +26,7 @@ pub(super) enum Subject {
 
 #[derive(Clone)]
 pub(super) struct Prepared {
+    semantic_config_revision: Option<String>,
     pub subject: Subject,
     pub context: Value,
     pub resources: Vec<SemanticResource>,
@@ -44,6 +45,14 @@ pub(super) struct SelectionInventory {
 
 impl Prepared {
     pub fn revision(&self, config_revision: &str) -> miette::Result<String> {
+        self.legacy_revision(
+            self.semantic_config_revision
+                .as_deref()
+                .unwrap_or(config_revision),
+        )
+    }
+
+    pub fn legacy_revision(&self, config_revision: &str) -> miette::Result<String> {
         let resources = self
             .resources
             .iter()
@@ -187,8 +196,9 @@ impl<'a> Capture<'a> {
         Ok(())
     }
 
-    fn finish(self, subject: Subject, context: Value) -> Prepared {
+    fn finish(self, subject: Subject, context: Value, config: &Config) -> Prepared {
         Prepared {
+            semantic_config_revision: config.semantic_work_revision().map(str::to_owned),
             subject,
             context,
             resources: self.resources.into_values().collect(),
@@ -250,7 +260,7 @@ pub(super) fn section_task(
             .collect(),
     };
     capture_reviews(&mut captured, &mut prepared.context, &reviews)?;
-    Ok(captured.finish(prepared.subject, prepared.context))
+    Ok(captured.finish(prepared.subject, prepared.context, config))
 }
 
 pub(super) fn task_with_audit(
@@ -396,7 +406,7 @@ pub(super) fn selection_inventory_with_capture(
         "match_revision":lk_core::concept::citation_digest(&[]),
     });
     source.context["purpose"]["extraction_scope"] = json!({"policy":"source-proposals-v1"});
-    source = source_capture.finish(source.subject, source.context);
+    source = source_capture.finish(source.subject, source.context, config);
     let mut guarded = Capture {
         root,
         pages: source.pages.clone(),
@@ -648,7 +658,7 @@ pub(super) fn with_discovery(
         "match_count":selected.len(),
         "match_revision":lk_core::concept::citation_digest(&selected),
     });
-    Ok(captured.finish(prepared.subject, prepared.context))
+    Ok(captured.finish(prepared.subject, prepared.context, config))
 }
 
 pub(super) fn task_for_publication(
@@ -778,7 +788,7 @@ fn capture_task_with_audit(
         "purpose": {"operation":"queue", "task_kind":task.kind, "target":task.target, "parameters":purpose},
         "authority": "Retained input is the task source; the current target is publication context. Source/page/RSS evidence retains its declared authority. A read or part receipt is not factual verification.",
     });
-    Ok(captured.finish(subject, context))
+    Ok(captured.finish(subject, context, config))
 }
 
 pub(super) fn audit(root: &Path, config: &Config, path: &str) -> miette::Result<Prepared> {
@@ -841,7 +851,7 @@ pub(super) fn audit_candidate(
             "review_dependencies":candidate.reviews.iter().map(|review| &review.path).collect::<Vec<_>>()},
         "authority": "The selected page is the audit subject. Concept citations are evidence; a document is its own subject without a self-citation. Related pages are context, not automatically support. Reviews and historical archives are assessments/history, not independent corroboration. Join source-declared scope, time and attribution before judging contradictions; unknown context stays unknown.",
     });
-    Ok(captured.finish(subject, context))
+    Ok(captured.finish(subject, context, config))
 }
 
 pub(super) fn refresh(

@@ -155,13 +155,69 @@ fn expected(
     config: &lk_core::config::Config,
     config_revision: &str,
 ) -> miette::Result<Work> {
-    Work::build(
+    let current = Work::build(
         &prepared.resources,
         &prepared.revision(config_revision)?,
         prepared.context.clone(),
         limits(config)?,
     )?
-    .with_saved_policy(root)
+    .with_saved_policy(root)?;
+    if current.is_planned(root)? {
+        return Ok(current);
+    }
+    let legacy_revision = prepared.legacy_revision(config_revision)?;
+    if legacy_revision == current.plan.subject_revision {
+        return Ok(current);
+    }
+    let Some(legacy_id) = current
+        .plan
+        .lookup_identity(&legacy_revision)
+        .into_diagnostic()?
+    else {
+        return Err(miette::miette!(
+            "configuration identity changed the bounded plan envelope"
+        ));
+    };
+    let path = lk_vault::page_path(
+        root,
+        &Path::new(".lorekeeper/work")
+            .join(legacy_id)
+            .join("plan.json"),
+    )
+    .into_diagnostic()?;
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(current),
+        Err(error) => return Err(error).into_diagnostic(),
+    }
+    let legacy = Work::build(
+        &prepared.resources,
+        &legacy_revision,
+        prepared.context.clone(),
+        limits(config)?,
+    )?
+    .with_saved_policy(root)?;
+    if legacy.is_planned(root)? {
+        Ok(legacy)
+    } else {
+        Ok(current)
+    }
+}
+
+fn persist_prepared(
+    session: &lk_vault::MutationSession,
+    config: &lk_core::config::Config,
+    config_revision: &str,
+    prepared: &Prepared,
+) -> miette::Result<Work> {
+    let work = expected(session.root(), prepared, config, config_revision)?;
+    Work::create(
+        session,
+        &prepared.resources,
+        &work.plan.subject_revision,
+        prepared.context.clone(),
+        limits(config)?,
+    )
 }
 
 fn guard_prepared(
@@ -350,7 +406,9 @@ pub(super) fn prepare_queue_publication(
             serde_json::from_value(result.clone()).into_diagnostic()?;
         if let Some(revision) = section.context_revision {
             prepared = resources::section_task(&root, config, task_id)?;
-            if revision != prepared.revision(config_revision)? {
+            if revision != prepared.revision(config_revision)?
+                && revision != prepared.legacy_revision(config_revision)?
+            {
                 return Err(publication_rejection(
                     RejectionKind::SemanticContextChanged,
                     "section review/read scope changed; reread and regenerate the result",
@@ -360,7 +418,10 @@ pub(super) fn prepare_queue_publication(
     }
     if scoped_synthesis || scoped_extraction {
         let revision = prepared.revision(config_revision)?;
-        if result.get("context_revision").and_then(Value::as_str) != Some(revision.as_str()) {
+        let supplied = result.get("context_revision").and_then(Value::as_str);
+        if supplied != Some(revision.as_str())
+            && supplied != Some(prepared.legacy_revision(config_revision)?.as_str())
+        {
             return Err(publication_rejection(
                 RejectionKind::SemanticContextChanged,
                 "semantic read scope changed or was not captured before drafting; reread current context and regenerate the result",
@@ -489,7 +550,7 @@ pub(super) fn task_context(
         "status":"ready",
         "requires_screening":false,
         "selection":prepared.context["purpose"]["extraction_scope"]["selection"],
-        "context_revision": prepared.revision(config_revision)?,
+        "context_revision": work.plan.subject_revision,
         "subject": prepared.subject,
         "context": prepared.context,
         "resource_count":prepared.resources.len(),
@@ -663,7 +724,10 @@ fn screening_with_inventory(
         cache_hash: cache_hash.clone(),
         target: target.clone(),
         target_revision: target_revision.clone(),
-        config_revision: config_revision.into(),
+        config_revision: config
+            .semantic_work_revision()
+            .unwrap_or(config_revision)
+            .into(),
         inventory_revision: inventory.revision.clone(),
     };
     let bounds = limits(config)?;
@@ -707,6 +771,11 @@ fn screening_with_inventory(
         &inventory.capture,
         bounds.max_input_bytes,
         bounds.max_result_bytes,
+    )?
+    .prefer_saved_configuration(
+        root,
+        config_revision,
+        &inventory.source.legacy_revision(config_revision)?,
     )?;
     Ok(ScreeningPreparation::Candidates(Box::new(Screening {
         selection,
@@ -742,13 +811,7 @@ impl ScreeningPreparation {
     ) -> miette::Result<()> {
         match self {
             Self::Source { prepared, .. } => {
-                Work::create(
-                    session,
-                    &prepared.resources,
-                    &prepared.revision(config_revision)?,
-                    prepared.context.clone(),
-                    limits(config)?,
-                )?;
+                persist_prepared(session, config, config_revision, prepared)?;
             }
             Self::Candidates(screening) => screening
                 .selection
@@ -1047,13 +1110,7 @@ fn prepare_task_in_session(
             bytes: work.whole_input_bytes(&prepared.resources)?,
         });
     }
-    Work::create(
-        session,
-        &prepared.resources,
-        &prepared.revision(config_revision)?,
-        prepared.context,
-        limits(config)?,
-    )?;
+    persist_prepared(session, config, config_revision, &prepared)?;
     Ok(TaskWork::Partitioned { id: work.plan.id })
 }
 
@@ -1066,13 +1123,7 @@ pub(super) fn prepare_audit(
     let root = root.canonicalize().into_diagnostic()?;
     let session = lk_vault::MutationSession::acquire(&root).into_diagnostic()?;
     let prepared = resources::audit_candidate(&root, config, candidate)?;
-    let work = Work::create(
-        &session,
-        &prepared.resources,
-        &prepared.revision(config_revision)?,
-        prepared.context,
-        limits(config)?,
-    )?;
+    let work = persist_prepared(&session, config, config_revision, &prepared)?;
     Ok(work.plan.id)
 }
 
@@ -1577,13 +1628,7 @@ pub async fn run(opts: &GlobalOptions, command: WorkCommand) -> miette::Result<(
         WorkCommand::SourcePlan { task_id } => {
             let session = lk_vault::MutationSession::acquire(&root).into_diagnostic()?;
             let prepared = resources::source_task(&root, &config, &task_id)?;
-            let work = Work::create(
-                &session,
-                &prepared.resources,
-                &prepared.revision(&config_revision)?,
-                prepared.context.clone(),
-                limits(&config)?,
-            )?;
+            let work = persist_prepared(&session, &config, &config_revision, &prepared)?;
             progress(&work, &root, &prepared, 20, 0)?
         }
         WorkCommand::Discover { task_id, file } => {
@@ -1621,13 +1666,7 @@ pub async fn run(opts: &GlobalOptions, command: WorkCommand) -> miette::Result<(
                 (None, Some(path)) => resources::audit(&root, &config, &path)?,
                 _ => return Err(miette::miette!("select exactly one task or audit path")),
             };
-            let work = Work::create(
-                &session,
-                &prepared.resources,
-                &prepared.revision(&config_revision)?,
-                prepared.context.clone(),
-                limits(&config)?,
-            )?;
+            let work = persist_prepared(&session, &config, &config_revision, &prepared)?;
             progress(&work, &root, &prepared, 20, 0)?
         }
         WorkCommand::Read { work_id, node_id } => {
@@ -1887,6 +1926,13 @@ mod tests {
     }
 
     fn completed_audit_work(root: &Path) -> (Work, Prepared, Value) {
+        completed_audit_work_with_configuration(root, false)
+    }
+
+    fn completed_audit_work_with_configuration(
+        root: &Path,
+        legacy: bool,
+    ) -> (Work, Prepared, Value) {
         let config_path = root.join("config.yaml");
         std::fs::write(
             &config_path,
@@ -1912,7 +1958,11 @@ mod tests {
         let work = Work::create(
             &session,
             &prepared.resources,
-            &prepared.revision(&config_revision).unwrap(),
+            &if legacy {
+                prepared.legacy_revision(&config_revision).unwrap()
+            } else {
+                prepared.revision(&config_revision).unwrap()
+            },
             prepared.context.clone(),
             limits(&config).unwrap(),
         )
@@ -1953,6 +2003,83 @@ mod tests {
             "disposition":"reviewed","reason":"Fixture completed the exact selected reads.","reviews":[],
         }]});
         (work, prepared, result)
+    }
+
+    #[test]
+    fn saved_work_preserves_exact_observations_and_legacy_configuration_boundaries() {
+        for legacy in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let root = directory.path().canonicalize().unwrap();
+            let (work, _, _) = completed_audit_work_with_configuration(&root, legacy);
+            let config_path = root.join("config.yaml");
+            let original = std::fs::read_to_string(&config_path).unwrap();
+            let (config, revision) =
+                lk_core::config::Config::load_with_revision(&config_path).unwrap();
+            let (loaded, prepared) = load(&root, &config, &revision, &work.plan.id).unwrap();
+            assert_eq!(loaded, work);
+            assert!(
+                loaded
+                    .progress(&root, &prepared.resources)
+                    .unwrap()
+                    .complete
+            );
+            let before = std::fs::read(
+                root.join(".lorekeeper/work")
+                    .join(&work.plan.id)
+                    .join("plan.json"),
+            )
+            .unwrap();
+            let changed = original.replace(
+                "max_input_bytes: 8192",
+                "max_calls: 9, max_parallel: 3, max_screening_batches: 1, max_input_bytes: 8192",
+            );
+            std::fs::write(&config_path, changed).unwrap();
+            let (config, revision) =
+                lk_core::config::Config::load_with_revision(&config_path).unwrap();
+            let resumed = load(&root, &config, &revision, &work.plan.id);
+            if legacy {
+                assert!(
+                    resumed.is_err(),
+                    "legacy work cannot guess its original configuration"
+                );
+            } else {
+                let (loaded, prepared) = resumed.unwrap();
+                assert_eq!(loaded, work);
+                assert!(
+                    loaded
+                        .progress(&root, &prepared.resources)
+                        .unwrap()
+                        .complete
+                );
+                let session = MutationSession::acquire(&root).unwrap();
+                assert_eq!(
+                    persist_prepared(&session, &config, &revision, &prepared).unwrap(),
+                    work
+                );
+            }
+            assert_eq!(
+                std::fs::read(
+                    root.join(".lorekeeper/work")
+                        .join(&work.plan.id)
+                        .join("plan.json")
+                )
+                .unwrap(),
+                before
+            );
+            std::fs::write(&config_path, original).unwrap();
+            let (config, revision) =
+                lk_core::config::Config::load_with_revision(&config_path).unwrap();
+            assert_eq!(
+                load(&root, &config, &revision, &work.plan.id).unwrap().0,
+                work
+            );
+            assert_eq!(
+                std::fs::read_dir(root.join(".lorekeeper/work"))
+                    .unwrap()
+                    .count(),
+                1
+            );
+        }
     }
 
     #[test]
