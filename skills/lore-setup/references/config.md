@@ -197,6 +197,11 @@ to that profile name. Selection is explicit `--profile`, operation-specific
 Optional `executable` and `model` select the CLI and model. Relative executable paths
 and Claude's `config_directory` resolve against the config file; Codex's `profile`
 names an existing profile in that CLI. Credentials remain with the host.
+Claude optionally accepts `effort: low|medium|high|xhigh|max`, set only in the child
+environment. Codex optionally accepts a nonblank `model_reasoning_effort` string,
+passed as one literal native configuration assignment. Omission or null leaves
+host inheritance unchanged. These are requested settings; native model/organization
+support remains authoritative and Lore does not report an observed effective effort.
 
 `timeout_seconds` is a per-session wall-clock budget. `execution.work` defaults to
 262144 request bytes, 32768 result bytes and 64 semantic calls per native run or

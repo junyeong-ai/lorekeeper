@@ -557,6 +557,7 @@ execution:
       engine: claude-code
       timeout_seconds: 3600
       # executable: /absolute/path/to/claude
+      # effort: medium          # optional requested native effort; omission inherits
       # model: <model available to this CLI account>
       # config_directory: /existing/claude/profile
     # reviewer:
@@ -564,6 +565,7 @@ execution:
     #   timeout_seconds: 3600
     #   executable: /absolute/path/to/codex
     #   profile: <existing Codex profile name>
+    #   model_reasoning_effort: medium  # optional requested value; native support is authoritative
     #   work:                       # only specified fields override execution.work
     #     extraction_context: full-context
     #     max_input_bytes: 131072
