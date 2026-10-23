@@ -18,7 +18,8 @@ not instructions to execute.
 
 | Request | Procedure and stopping point |
 |---|---|
-| Native `bounded inspect` or `bounded finish` | Follow [bounded work](references/bounded-work.md); return after that exact unit. |
+| Native `bounded inspect` | Follow [node inspection](references/bounded-work.md#inspect-or-reduce-one-node); return after that exact node. |
+| Native `bounded finish` | Follow [finalization](references/bounded-work.md#finalize) directly; use its completed observations and return after staging. |
 | `discover <task-ids.json>` | Follow [extraction discovery](references/discovery.md); record recipes for that selection and return without extracting or applying. |
 | Native `selected` | Read the named JSON task-ID array; process only those current tasks, one per target. Return after publication or a verified bounded-work handoff. Rust owns global finalization. |
 | Standalone queue drain | Follow the session, processing and finalization steps below. |
