@@ -213,6 +213,10 @@ evidence inspection/reduction requests, bounded by the remaining call budget.
 Screening, interactive sessions, finalization and publication remain serial.
 Recording reloads current inputs after the observers return; changed inputs refuse
 old observations. Parallelism does not increase `max_calls` or guarantee a speedup.
+Optional positive `max_screening_batches` limits the complete candidate-card
+selection's packet count. Omission is unlimited; exceeding it preserves the full
+scope and paid decisions, defers that task before invocation and permits independent
+work. Use `lore work cost --task-id ID` to inspect counts/JSON bytes without writes.
 `execution.work.extraction_context` defaults to `progressive`: examine bounded cards
 for the complete candidate inventory, then read selected bodies and their required
 reviews/evidence. Card-only exclusions do not establish whole-body findings; deferred

@@ -2413,6 +2413,116 @@ fn screening_decisions(request: &serde_json::Value, defer: bool) -> serde_json::
 }
 
 #[test]
+fn screening_cost_is_read_only_and_capacity_defers_without_clipping_independent_work() {
+    for engine in ["codex", "claude-code"] {
+        let (fixture, task) = progressive_extraction_fixture(
+            engine,
+            &format!("{WHOLE_SECTION}\nexit 97"),
+            32,
+            16384,
+            4096,
+        );
+        let config = std::fs::read_to_string(&fixture.config)
+            .unwrap()
+            .replace("max_calls: 64", "max_calls: 64, max_screening_batches: 1");
+        std::fs::write(&fixture.config, config).unwrap();
+        let status = execution_json(&fixture, &["queue", "status", "--json"]);
+        let discovery = fixture.root().join("cost-discovery.json");
+        std::fs::write(
+            &discovery,
+            serde_json::to_vec(&serde_json::json!({
+            "target_revision":status["data"]["tasks"][0]["target_revision"],
+            "queries":[{"query":"transactional outbox","phrase":true,"spacing":false},
+                {"query":"Candidate 000","phrase":true,"spacing":false}]}))
+            .unwrap(),
+        )
+        .unwrap();
+        execution_json(
+            &fixture,
+            &[
+                "work",
+                "discover",
+                "--task-id",
+                &task.task_id,
+                "--file",
+                discovery.to_str().unwrap(),
+            ],
+        );
+        let bytes = || {
+            walkdir::WalkDir::new(fixture.root().join("vault"))
+                .into_iter()
+                .map(Result::unwrap)
+                .filter(|entry| entry.file_type().is_file())
+                .map(|entry| {
+                    (
+                        entry.path().to_owned(),
+                        std::fs::read(entry.path()).unwrap(),
+                    )
+                })
+                .collect::<std::collections::BTreeMap<_, _>>()
+        };
+        let before = bytes();
+        let cost = execution_json(&fixture, &["work", "cost", "--task-id", &task.task_id]);
+        assert_eq!(bytes(), before);
+        assert_eq!(cost["status"], "needs-admission", "{cost}");
+        assert_eq!(cost["cost"]["candidates"], 32);
+        assert!(cost["cost"]["batches"].as_u64().unwrap() > 1);
+        let queries = cost["cost"]["queries"].as_array().unwrap();
+        let broad = queries
+            .iter()
+            .find(|cost| cost["query"]["query"] == "transactional outbox")
+            .unwrap();
+        let narrow = queries
+            .iter()
+            .find(|cost| cost["query"]["query"] == "Candidate 000")
+            .unwrap();
+        assert_eq!(broad["matched_candidates"], 32);
+        assert_eq!(broad["exclusive_candidates"], 31);
+        assert_eq!(narrow["matched_candidates"], 1);
+        let context = execution_json(&fixture, &["work", "context", "--task-id", &task.task_id]);
+        assert_eq!(context["status"], "needs-admission");
+        let root = fixture.root().join("vault");
+        let queue = root.join(".lorekeeper/queue");
+        let client = lk_queue::QueueLlmClient::new(queue.clone());
+        let summary=client.build_task("summary",lk_queue::TaskKind::Summarize,
+            serde_json::from_value::<lk_queue::SummarizeRequest>(serde_json::json!({"text":"Independent source.","max_sentences":2,"locale":"en",
+                "target":{"vault_path":"wiki/documents/independent.md","anchor":"## Summary","kind":"document-summary"}})).unwrap());
+        std::fs::write(root.join(&summary.target.vault_path),format!("---\ntype: document\ntitle: Independent\nllm_inputs:\n  summary: {}\n---\n# Independent\n\n## Summary\n",summary.cache_hash)).unwrap();
+        lk_queue::write_tasks_atomic(
+            &queue.join("independent.jsonl"),
+            std::slice::from_ref(&summary),
+        )
+        .unwrap();
+        let (output, report) = fixture.run("process");
+        assert!(!output.status.success(), "scope remains pending: {report}");
+        assert_eq!(report["semantic_calls"], 1, "{report}");
+        let status = execution_json(&fixture, &["queue", "status", "--json"]);
+        for (id, expected) in [(&task.task_id, "current"), (&summary.task_id, "done")] {
+            assert!(
+                status["data"]["tasks"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|row| row["task_id"] == id.as_str() && row["status"] == expected),
+                "{status}"
+            );
+        }
+        let repeated = execution_json(&fixture, &["work", "cost", "--task-id", &task.task_id]);
+        assert_eq!(repeated["cost"]["candidates"], 32);
+        assert_eq!(
+            repeated["cost"]["inventory_revision"],
+            cost["cost"]["inventory_revision"]
+        );
+        let (output, report) = fixture.run("process");
+        assert!(!output.status.success());
+        assert_eq!(
+            report["semantic_calls"], 0,
+            "unchanged admission must not spend calls: {report}"
+        );
+    }
+}
+
+#[test]
 fn progressive_native_screening_keeps_complete_inventory_and_reads_only_admitted_bodies() {
     for engine in ["claude-code", "codex"] {
         let (fixture, _) = progressive_extraction_fixture(

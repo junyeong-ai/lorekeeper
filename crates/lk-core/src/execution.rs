@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::num::NonZeroU64;
+use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -92,6 +92,8 @@ pub struct SemanticWorkConfig {
     pub max_result_bytes: usize,
     pub max_calls: usize,
     pub max_parallel: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_screening_batches: Option<NonZeroUsize>,
     pub extraction_context: ExtractionContext,
 }
 
@@ -102,6 +104,7 @@ pub struct SemanticWorkOverrides {
     pub max_result_bytes: Option<usize>,
     pub max_calls: Option<usize>,
     pub max_parallel: Option<usize>,
+    pub max_screening_batches: Option<NonZeroUsize>,
     pub extraction_context: Option<ExtractionContext>,
 }
 
@@ -112,6 +115,9 @@ impl SemanticWorkOverrides {
             max_result_bytes: self.max_result_bytes.unwrap_or(defaults.max_result_bytes),
             max_calls: self.max_calls.unwrap_or(defaults.max_calls),
             max_parallel: self.max_parallel.unwrap_or(defaults.max_parallel),
+            max_screening_batches: self
+                .max_screening_batches
+                .or(defaults.max_screening_batches),
             extraction_context: self
                 .extraction_context
                 .unwrap_or(defaults.extraction_context),
@@ -142,6 +148,7 @@ impl Default for SemanticWorkConfig {
             max_result_bytes: 32_768,
             max_calls: 64,
             max_parallel: 1,
+            max_screening_batches: None,
             extraction_context: ExtractionContext::Progressive,
         }
     }
@@ -491,6 +498,38 @@ mod tests {
     }
 
     #[test]
+    fn screening_capacity_is_optional_positive_and_inherits_per_profile() {
+        let config:ExecutionConfig=crate::yaml::from_str("work: {max_screening_batches: 3}\nprofiles:\n  inherited: {engine: codex, timeout_seconds: 60}\n  bounded: {engine: codex, timeout_seconds: 60, work: {max_screening_batches: 1}}\n").unwrap();
+        assert_eq!(
+            config
+                .work_for("inherited")
+                .unwrap()
+                .max_screening_batches
+                .unwrap()
+                .get(),
+            3
+        );
+        assert_eq!(
+            config
+                .work_for("bounded")
+                .unwrap()
+                .max_screening_batches
+                .unwrap()
+                .get(),
+            1
+        );
+        assert!(
+            crate::yaml::from_str::<ExecutionConfig>("work: {max_screening_batches: 0}").is_err()
+        );
+        assert!(
+            ExecutionConfig::default()
+                .work
+                .max_screening_batches
+                .is_none()
+        );
+    }
+
+    #[test]
     fn profile_work_overrides_inherit_and_validate_the_effective_budget() {
         let mut config: ExecutionConfig = crate::yaml::from_str(
             "work: {max_calls: 12}\nprofiles:\n  main: {engine: claude-code, timeout_seconds: 60}\n  small: {engine: codex, timeout_seconds: 60, work: {max_input_bytes: 16384, max_result_bytes: 4096, max_calls: 2}}\n"
@@ -501,6 +540,7 @@ mod tests {
         assert_eq!(
             config.effective_work().unwrap(),
             SemanticWorkConfig {
+                max_screening_batches: None,
                 max_input_bytes: 16384,
                 max_result_bytes: 4096,
                 max_calls: 2,

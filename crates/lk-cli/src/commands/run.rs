@@ -1794,6 +1794,12 @@ mod native {
                         continue;
                     };
                     match work {
+                        crate::commands::work::TaskWork::Admission { reason } => {
+                            flush(&mut batch, &mut jobs);
+                            batch_bytes = 0;
+                            keys.remove(target);
+                            deferred.insert(target.clone(), vec![reason]);
+                        }
                         crate::commands::work::TaskWork::WholeInput { .. }
                             if execution::finalization::supports(task.kind) =>
                         {
@@ -1900,6 +1906,7 @@ mod native {
                         crate::commands::work::TaskWork::Partitioned { .. }
                             | crate::commands::work::TaskWork::Source { .. }
                             | crate::commands::work::TaskWork::Screening
+                            | crate::commands::work::TaskWork::Admission { .. }
                     )
                 {
                     return Ok(false);
@@ -2104,7 +2111,7 @@ mod native {
                                 ""
                             };
                             let operation = format!(
-                                "selected. {context} The native controller selected one task per distinct target within the configured evidence input budget. Read the JSON array of exact task IDs from the selection manifest and process only those current tasks, then return. Do not drain the rest of the queue or run global finalization. Follow the ordinary typed staging/publication protocol for these tasks. For extraction, record exact discovery recipes and inspect lore work context before loading candidate bodies. Follow its needs-discovery, needs-source-observations, needs-screening and ready states. Complete ordinary small-source screening in this selected session when practical. If a phase requires source observations, bounded candidate screening or partitioned admitted evidence, execute its returned plan_command and stage no extraction result; finish other selected tasks and return so the controller can resume that exact source/screening/evidence phase. Draft only from ready context, carry its typed selection when present, and fully read every selected reused owner. Unknown or deferred candidates remain unfinished; not-selected is a candidate-card judgment rather than a whole-body finding. Selected queue task manifest: {selection}"
+                                "selected. {context} The native controller selected one task per distinct target within the configured evidence input budget. Read the JSON array of exact task IDs from the selection manifest and process only those current tasks, then return. Do not drain the rest of the queue or run global finalization. Follow the ordinary typed staging/publication protocol for these tasks. For extraction, record exact discovery recipes and inspect lore work context before loading candidate bodies. Follow its needs-discovery, needs-source-observations, needs-admission, needs-screening and ready states. Read the exact reported screening cost before requesting paid screening. A needs-admission scope remains pending: report it and return without changing configuration, clipping candidates or retrying unchanged scope. Explicitly revise discovery only when the expressed source question requires correction; scope size alone does not establish irrelevance. Complete ordinary small-source screening in this selected session when practical. If a phase requires source observations, bounded candidate screening or partitioned admitted evidence, execute its returned plan_command and stage no extraction result; finish other selected tasks and return so the controller can resume that exact source/screening/evidence phase. Draft only from ready context, carry its typed selection when present, and fully read every selected reused owner. Unknown or deferred candidates remain unfinished; not-selected is a candidate-card judgment rather than a whole-body finding. Selected queue task manifest: {selection}"
                             );
                             if !self
                                 .consumer("lore-process", &operation, Some(directory.path()))
@@ -2187,7 +2194,7 @@ mod native {
                         if matches!(jobs[&selected], QueueDispatch::WholeInput { .. }) {
                             match self.expanded_extraction_handoff(&unfinished) {
                                 Ok(true) => {
-                                    self.record("expanded extraction work", StageState::Completed, Some("discovery expanded unfinished extraction beyond the whole-input budget; replanning bounded inspections".into()));
+                                    self.record("expanded extraction work", StageState::Completed, Some("discovery requires retained source/screening/evidence work or explicit scope admission; replanning unfinished extraction".into()));
                                     continue 'planning;
                                 }
                                 Ok(false) => {}

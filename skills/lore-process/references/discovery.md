@@ -45,6 +45,7 @@ status rather than assuming that a context revision or resource roster is ready:
 |---|---|
 | `needs-discovery` | Record meaningful recipes against the current target. |
 | `needs-source-observations` | Run `work source-plan --task-id ID`; complete its bounded reads and reductions, then return to `work context`. |
+| `needs-admission` | Read `work cost --task-id ID`; explicitly reconsider the discovery scope or capacity. Keep the task incomplete and all candidates/paid decisions retained. |
 | `needs-screening` | Run `work select --task-id ID`; examine and record each returned packet. |
 | `ready` | Retain `context_revision`, `selection` and the exact resource roster; read that evidence before drafting. |
 
@@ -53,6 +54,18 @@ The source phase uses the normal `work status`, `work read`, `work record` and
 target dependencies. **Do not run `work finish` for this phase:** its observations
 prepare screening; they are not an extraction result. Preserve attributed source
 questions and processing blockers through later examination and finalization.
+`work cost --task-id ID` is read-only: it reports exact candidate and packet counts,
+query-specific matches, compact JSON bytes, recorded packets and deferred/unknown
+decisions. Remaining request bytes cover unrecorded packets; they exclude future
+reassessment of deferred decisions, prompts, host envelopes, tokens and billed cost.
+Packet cost remains unknown until oversized source observations are complete.
+An optional `execution.work.max_screening_batches` bounds the complete selection's
+packet count; omission adds no limit. A completed ledger remains usable. Exceeding
+the limit defers the scope without dropping candidates or rewriting recorded work.
+Refine a recipe only when its expressed source question is wrong or incomplete;
+large lexical scope alone does not prove irrelevance. An unaffordable valid scope
+remains deferred, never silently clipped. Recipe changes create a new scope and
+preserve prior decisions rather than relabeling them.
 If complete source observations reveal missing relevant subjects, revise the recipes
 and recapture the inventory before choosing evidence for those subjects.
 

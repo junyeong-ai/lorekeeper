@@ -21,6 +21,11 @@ use super::queue::application::{RejectionKind, rejection as publication_rejectio
 
 #[derive(clap::Subcommand)]
 pub enum WorkCommand {
+    /// Inspect complete candidate-screening costs without creating or changing work
+    Cost {
+        #[arg(long)]
+        task_id: String,
+    },
     /// Plan or resume one bounded candidate-screening packet without publishing knowledge
     Select {
         /// Exact retained concept-extraction task identifier
@@ -424,6 +429,12 @@ pub(super) fn task_context(
                 );
             }
             ScreeningPreparation::Candidates(screening) => {
+                if let Some(reason) = screening.selection.admission_reason(config, &root)? {
+                    return Ok(json!({"status":"needs-admission", "context_revision":null,
+                        "requires_screening":true,"resources":null,"reason":reason,
+                        "cost":screening.selection.cost(&root)?,
+                        "cost_command":["lore","work","cost","--task-id",task_id]}));
+                }
                 let planned = screening.selection.is_planned(&root)?;
                 let ledger = planned
                     .then(|| screening.selection.ledger(&root))
@@ -435,6 +446,7 @@ pub(super) fn task_context(
                         "requires_screening":true,"requires_source_work":false,"resources":null,
                         "candidate_count":screening.inventory.capture.candidates.len(),
                         "selection_id":screening.selection.id,"planned":planned,
+                        "cost":screening.selection.cost(&root)?,
                         "plan_command":["lore","work","select","--task-id",task_id],
                         "authority":"Complete retrieval is not a semantic assessment. Read and record each assigned candidate-card decision; unresolved applicability remains deferred. Selected bodies still require full evidence inspection before publication."}));
                 }
@@ -769,6 +781,9 @@ pub(super) fn prepare_screening(
             "source observations are incomplete; resume source work before candidate screening"
         ));
     };
+    if let Some(reason) = screening.selection.admission_reason(config, &root)? {
+        return Err(miette::miette!("{reason}"));
+    }
     let (progress, request) = screening.selection.prepare(&root)?;
     Ok(ScreeningTurn {
         selection_id: screening.selection.id,
@@ -894,6 +909,7 @@ pub(super) enum TaskWork {
     Partitioned { id: String },
     Source { id: String },
     Screening,
+    Admission { reason: String },
 }
 
 pub(super) fn prepare_task(
@@ -995,6 +1011,11 @@ fn prepare_task_in_session(
             Some(inventory) => screening_with_inventory(root, config, config_revision, inventory)?,
             None => current_screening(root, config, config_revision, &task.task_id)?,
         };
+        if let ScreeningPreparation::Candidates(screening) = &selected
+            && let Some(reason) = screening.selection.admission_reason(config, root)?
+        {
+            return Ok(TaskWork::Admission { reason });
+        }
         selected.persist(session, config, config_revision)?;
         match selected {
             ScreeningPreparation::Source { work, .. } => {
@@ -1454,6 +1475,22 @@ pub async fn run(opts: &GlobalOptions, command: WorkCommand) -> miette::Result<(
     let (config, config_revision) = load_config_with_revision(&find_config(opts)?)?;
     let root = config.vault.root_path().canonicalize().into_diagnostic()?;
     let output = match command {
+        WorkCommand::Cost { task_id } => {
+            match current_screening(&root, &config, &config_revision, &task_id)? {
+                ScreeningPreparation::Source { work, .. } => {
+                    json!({"status":"needs-source-observations",
+                "source_parts":work.plan.parts.len(),"cost":null,
+                "authority":"Candidate packet costs are unknown until complete source observations are available; no model call or write was made."})
+                }
+                ScreeningPreparation::Candidates(screening) => {
+                    let reason = screening.selection.admission_reason(&config, &root)?;
+                    json!({"status":if reason.is_some() {"needs-admission"} else {"admitted"},
+                    "cost":screening.selection.cost(&root)?,"reason":reason,
+                    "max_screening_batches":config.execution.effective_work().into_diagnostic()?.max_screening_batches,
+                    "authority":"Compact UTF-8 JSON bytes and exact packet counts, not tokens, billed cost, latency or semantic relevance. Deferred and unknown candidates remain incomplete."})
+                }
+            }
+        }
         WorkCommand::Select {
             task_id,
             batch_id,
@@ -1478,9 +1515,13 @@ pub async fn run(opts: &GlobalOptions, command: WorkCommand) -> miette::Result<(
                     "plan_command":["lore","work","source-plan","--task-id",task_id],
                 }),
                 ScreeningPreparation::Candidates(screening) => {
+                    let admission = screening.selection.admission_reason(&config, &root)?;
                     let (mut progress, mut request) = screening.selection.prepare(&root)?;
                     if let Some(batch_id) = &batch_id {
                         request = Some(screening.selection.packet(&root, batch_id)?);
+                    }
+                    if admission.is_some() {
+                        request = None;
                     }
                     let receipt = batch_id
                         .as_ref()
@@ -1501,14 +1542,16 @@ pub async fn run(opts: &GlobalOptions, command: WorkCommand) -> miette::Result<(
                         .take(limit)
                         .collect();
                     let next = offset.saturating_add(progress.receipts.len());
-                    let status = if progress.complete {
+                    let status = if admission.is_some() {
+                        "needs-admission"
+                    } else if progress.complete {
                         "ready"
                     } else if request.is_none() {
                         "deferred"
                     } else {
                         "screening"
                     };
-                    json!({"status":status, "progress":progress,"request":request,"receipt":receipt,
+                    json!({"status":status,"admission":admission, "progress":progress,"request":request,"receipt":receipt,
                         "receipt_total":receipt_total,"receipt_limit":limit,"receipt_offset":offset,
                         "receipt_next_offset":(next<receipt_total).then_some(next)})
                 }

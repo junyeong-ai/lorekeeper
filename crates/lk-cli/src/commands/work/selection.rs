@@ -100,6 +100,29 @@ pub(super) struct SelectionLedger {
     pub decisions_revision: String,
 }
 
+#[derive(Debug, Serialize)]
+pub(super) struct ScreeningCost {
+    pub selection_id: String,
+    pub inventory_revision: String,
+    pub candidates: usize,
+    pub batches: usize,
+    pub completed_batches: usize,
+    pub remaining_unrecorded_batches: usize,
+    pub deferred_candidates: usize,
+    pub unknown_candidates: usize,
+    pub source_context_json_bytes: usize,
+    pub candidate_inventory_json_bytes: usize,
+    pub remaining_request_json_bytes: usize,
+    pub queries: Vec<QueryCost>,
+}
+
+#[derive(Debug, Serialize)]
+pub(super) struct QueryCost {
+    pub query: lk_core::discovery::DiscoveryQuery,
+    pub matched_candidates: usize,
+    pub exclusive_candidates: usize,
+}
+
 impl SelectionLedger {
     pub fn binding(&self) -> miette::Result<lk_queue::ExtractionSelection> {
         if !self.progress.complete {
@@ -180,6 +203,89 @@ fn source_role(context: &Value, has_candidates: bool) -> miette::Result<&str> {
 }
 
 impl Selection {
+    pub fn cost(&self, root: &Path) -> miette::Result<ScreeningCost> {
+        let progress = if self.is_planned(root)? {
+            Some(self.ledger(root)?.progress)
+        } else {
+            None
+        };
+        let completed_batches = progress
+            .as_ref()
+            .map_or(0, |progress| progress.completed_batches);
+        let mut remaining_request_json_bytes = 0;
+        for (index, indexes) in self.manifest.batches.iter().enumerate() {
+            if read_optional(root, &self.receipt_path(index)?)?.is_none() {
+                remaining_request_json_bytes += encoded(&self.request_for(indexes, index)?)?.len();
+            }
+        }
+        Ok(ScreeningCost {
+            selection_id: self.id.clone(),
+            inventory_revision: self.manifest.capture_revision.clone(),
+            candidates: self.manifest.candidates.len(),
+            batches: self.manifest.batches.len(),
+            completed_batches,
+            remaining_unrecorded_batches: self
+                .manifest
+                .batches
+                .len()
+                .saturating_sub(completed_batches),
+            deferred_candidates: progress.as_ref().map_or(0, |progress| progress.deferred),
+            unknown_candidates: progress
+                .as_ref()
+                .map_or(self.manifest.candidates.len(), |progress| progress.unknown),
+            source_context_json_bytes: encoded(&self.manifest.source_context)?.len(),
+            candidate_inventory_json_bytes: encoded(&self.manifest.candidates)?.len(),
+            remaining_request_json_bytes,
+            queries: self
+                .manifest
+                .discovery
+                .iter()
+                .enumerate()
+                .map(|(index, query)| QueryCost {
+                    query: query.clone(),
+                    matched_candidates: self
+                        .manifest
+                        .candidates
+                        .iter()
+                        .filter(|candidate| candidate.query_indexes.contains(&index))
+                        .count(),
+                    exclusive_candidates: self
+                        .manifest
+                        .candidates
+                        .iter()
+                        .filter(|candidate| candidate.query_indexes.as_slice() == [index])
+                        .count(),
+                })
+                .collect(),
+        })
+    }
+
+    pub fn admission_reason(
+        &self,
+        config: &lk_core::config::Config,
+        root: &Path,
+    ) -> miette::Result<Option<String>> {
+        let Some(limit) = config
+            .execution
+            .effective_work()
+            .into_diagnostic()?
+            .max_screening_batches
+        else {
+            return Ok(None);
+        };
+        if self.manifest.batches.len() <= limit.get() {
+            return Ok(None);
+        }
+        if self.is_planned(root)? && self.ledger(root)?.progress.complete {
+            return Ok(None);
+        }
+        Ok(Some(format!(
+            "complete candidate scope needs {} screening batches, above max_screening_batches {}; review `lore work cost` and explicitly revise discovery or capacity; all candidates and paid decisions are retained",
+            self.manifest.batches.len(),
+            limit
+        )))
+    }
+
     pub fn is_planned(&self, root: &Path) -> miette::Result<bool> {
         require_settled(root)?;
         match read_optional(root, &self.manifest_path())? {
@@ -1092,6 +1198,69 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    #[test]
+    fn completed_screening_is_usable_under_a_lower_capacity_limit() {
+        let fixture = Fixture::new(7);
+        let selection = fixture.selection(4500, 4096);
+        let config:lk_core::config::Config=lk_core::yaml::from_str("vault: {root: .}\nidentity: {name: Test, email: test@example.com}\nsources: {}\nexecution: {work: {max_screening_batches: 1}}\n").unwrap();
+        assert!(
+            selection
+                .admission_reason(&config, &fixture.root)
+                .unwrap()
+                .is_some()
+        );
+        fixture.create(&selection);
+        while let Some(request) = selection.prepare(&fixture.root).unwrap().1 {
+            fixture
+                .record(
+                    &selection,
+                    answer(&request, ScreeningDecision::Inspect),
+                    None,
+                )
+                .unwrap();
+        }
+        assert!(
+            selection
+                .admission_reason(&config, &fixture.root)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn screening_cost_counts_complete_scope_and_only_unrecorded_request_bytes() {
+        let fixture = Fixture::new(7);
+        let selection = fixture.selection(4500, 4096);
+        let before = selection.cost(&fixture.root).unwrap();
+        assert_eq!(before.candidates, 7);
+        assert_eq!(before.completed_batches, 0);
+        assert_eq!(before.remaining_unrecorded_batches, before.batches);
+        assert_eq!(before.queries[0].matched_candidates, 7);
+        assert_eq!(before.queries[0].exclusive_candidates, 7);
+        assert!(!fixture.root.join(".lorekeeper").exists());
+        fixture.create(&selection);
+        let (_, request) = selection.prepare(&fixture.root).unwrap();
+        let request = request.unwrap();
+        let request_bytes = encoded(&request).unwrap().len();
+        fixture
+            .record(&selection, answer(&request, ScreeningDecision::Defer), None)
+            .unwrap();
+        let after = selection.cost(&fixture.root).unwrap();
+        assert_eq!(after.completed_batches, 1);
+        assert_eq!(after.remaining_unrecorded_batches + 1, before.batches);
+        assert_eq!(
+            after.remaining_request_json_bytes + request_bytes,
+            before.remaining_request_json_bytes
+        );
+        assert_eq!(
+            after.deferred_candidates,
+            request["candidates"].as_array().unwrap().len()
+        );
+        assert_eq!(after.candidates, before.candidates);
+        assert_eq!(after.inventory_revision, before.inventory_revision);
+        assert!(!selection.ledger(&fixture.root).unwrap().progress.complete);
     }
 
     #[test]

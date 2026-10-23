@@ -90,6 +90,11 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   never finishes extraction independently: canonical extraction publication journals its
   exact supporting-consumption receipt with the knowledge edits. Retention validates that
   receipt and preserves live queue/reuse references before removing expired source work.
+  `work cost` reports complete candidate/packet counts and compact JSON bytes without
+  persisting plans or reading candidate bodies through a host. Optional positive
+  `max_screening_batches` defers oversized incomplete ledgers before new screening calls;
+  complete ledgers remain usable. No clipping, implicit recipe rewrite, token/price claim
+  or completion from capacity admission. Unknown packet costs await source observations.
 - Native inspection/reduction and screening are structured inference roles
   (`execution/observation.rs`); bounded single-section finalization uses
   `execution/finalization.rs`. Rust selects applicable shared generation rules through
