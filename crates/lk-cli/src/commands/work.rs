@@ -1084,9 +1084,21 @@ fn prepare_task_in_session(
         && is_progressive(config)?
         && discovery::current(root, task)?.is_some()
     {
-        let selected = match inventory {
-            Some(inventory) => screening_with_inventory(root, config, config_revision, inventory)?,
-            None => current_screening(root, config, config_revision, &task.task_id)?,
+        let selected = match match inventory {
+            Some(inventory) => screening_with_inventory(root, config, config_revision, inventory),
+            None => current_screening(root, config, config_revision, &task.task_id),
+        } {
+            Ok(selected) => selected,
+            Err(error)
+                if error
+                    .downcast_ref::<selection::ScreeningCapacity>()
+                    .is_some() =>
+            {
+                return Ok(TaskWork::Admission {
+                    reason: error.to_string(),
+                });
+            }
+            Err(error) => return Err(error),
         };
         if let ScreeningPreparation::Candidates(screening) = &selected
             && let Some(reason) = screening.selection.admission_reason(config, root)?

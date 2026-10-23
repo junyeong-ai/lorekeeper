@@ -10,6 +10,40 @@ use serde_json::{Value, json};
 const POLICY: &str = "progressive-evidence-v1";
 const CARD_SCOPE: &str = "candidate-card-only";
 
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum ScreeningCapacity {
+    Input {
+        required_bytes: usize,
+        max_bytes: usize,
+    },
+    Result {
+        required_bytes: usize,
+        max_bytes: usize,
+    },
+}
+
+impl std::fmt::Display for ScreeningCapacity {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (boundary, required, maximum) = match self {
+            Self::Input {
+                required_bytes,
+                max_bytes,
+            } => ("input", required_bytes, max_bytes),
+            Self::Result {
+                required_bytes,
+                max_bytes,
+            } => ("result", required_bytes, max_bytes),
+        };
+        write!(
+            formatter,
+            "candidate screening: one complete packet requires {required} {boundary} bytes, above the configured bound {maximum}; the complete scope is retained"
+        )
+    }
+}
+
+impl std::error::Error for ScreeningCapacity {}
+impl miette::Diagnostic for ScreeningCapacity {}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct SelectionBinding {
@@ -452,31 +486,29 @@ impl Selection {
         };
         for index in 0..selection.manifest.candidates.len() {
             let size = encoded(&selection.output_shape(&[index], ""))?.len();
-            let available = max_result_bytes
-                .checked_sub(size)
-                .ok_or_else(|| fail("one candidate's result envelope exceeds the result bound"))?;
+            if size >= max_result_bytes {
+                return Err(ScreeningCapacity::Result {
+                    required_bytes: size + 1,
+                    max_bytes: max_result_bytes,
+                }
+                .into());
+            }
+            let available = max_result_bytes - size;
             selection.manifest.max_reason_json_bytes =
                 selection.manifest.max_reason_json_bytes.min(available + 2);
-        }
-        if selection.manifest.max_reason_json_bytes <= 2 {
-            return Err(fail("result bound cannot hold a candidate reason"));
         }
         let mut batch = Vec::new();
         for index in 0..selection.manifest.candidates.len() {
             let mut prospective = batch.clone();
             prospective.push(index);
-            if !selection.fits(&prospective)? {
+            if let Some(capacity) = selection.capacity(&prospective)? {
                 if batch.is_empty() {
-                    return Err(fail(
-                        "one complete candidate packet exceeds its input or result bound",
-                    ));
+                    return Err(capacity.into());
                 }
                 selection.manifest.batches.push(std::mem::take(&mut batch));
                 prospective = vec![index];
-                if !selection.fits(&prospective)? {
-                    return Err(fail(
-                        "one complete candidate packet exceeds its input or result bound",
-                    ));
+                if let Some(capacity) = selection.capacity(&prospective)? {
+                    return Err(capacity.into());
                 }
             }
             batch = prospective;
@@ -484,10 +516,15 @@ impl Selection {
         if !batch.is_empty() {
             selection.manifest.batches.push(batch);
         }
-        if selection.manifest.candidates.is_empty()
-            && encoded(&selection.request_for(&[], 0)?)?.len() > max_input_bytes
-        {
-            return Err(fail("complete source context exceeds the input bound"));
+        if selection.manifest.candidates.is_empty() {
+            let required_bytes = encoded(&selection.request_for(&[], 0)?)?.len();
+            if required_bytes > max_input_bytes {
+                return Err(ScreeningCapacity::Input {
+                    required_bytes,
+                    max_bytes: max_input_bytes,
+                }
+                .into());
+            }
         }
         selection.refresh_identity()?;
         Ok(selection)
@@ -559,12 +596,28 @@ impl Selection {
         }
     }
 
-    fn fits(&self, indexes: &[usize]) -> miette::Result<bool> {
+    fn capacity(&self, indexes: &[usize]) -> miette::Result<Option<ScreeningCapacity>> {
         let request = self.request_for(indexes, self.manifest.batches.len())?;
+        let required_bytes = encoded(&request)?.len();
+        if required_bytes > self.manifest.max_input_bytes {
+            return Ok(Some(ScreeningCapacity::Input {
+                required_bytes,
+                max_bytes: self.manifest.max_input_bytes,
+            }));
+        }
         let reason = "x".repeat(self.manifest.max_reason_json_bytes - 2);
-        Ok(encoded(&request)?.len() <= self.manifest.max_input_bytes
-            && encoded(&self.output_shape(indexes, &reason))?.len()
-                <= self.manifest.max_result_bytes)
+        let required_bytes = encoded(&self.output_shape(indexes, &reason))?.len();
+        if required_bytes > self.manifest.max_result_bytes {
+            return Ok(Some(ScreeningCapacity::Result {
+                required_bytes,
+                max_bytes: self.manifest.max_result_bytes,
+            }));
+        }
+        Ok(None)
+    }
+
+    fn fits(&self, indexes: &[usize]) -> miette::Result<bool> {
+        Ok(self.capacity(indexes)?.is_none())
     }
 
     fn guard_pages(
@@ -1196,20 +1249,24 @@ mod tests {
         fn selection(&self, input: usize, result: usize) -> Selection {
             let capture = self.capture();
             Selection::build(
-                SelectionBinding {
-                    task_id: "retained-task".into(),
-                    cache_hash: "input-hash".into(),
-                    target: "wiki/documents/source.md".into(),
-                    target_revision: lk_core::concept::file_revision(&self.source),
-                    config_revision: "selected-config-revision".into(),
-                    inventory_revision: capture.revision.clone(),
-                },
+                self.binding(&capture),
                 json!({"role":"complete-retained-input","text":"A complete retained observation."}),
                 &capture,
                 input,
                 result,
             )
             .unwrap()
+        }
+
+        fn binding(&self, capture: &lk_vault::DiscoveryCapture) -> SelectionBinding {
+            SelectionBinding {
+                task_id: "retained-task".into(),
+                cache_hash: "input-hash".into(),
+                target: "wiki/documents/source.md".into(),
+                target_revision: lk_core::concept::file_revision(&self.source),
+                config_revision: "selected-config-revision".into(),
+                inventory_revision: capture.revision.clone(),
+            }
         }
 
         fn pages(&self) -> BTreeMap<PathBuf, String> {
@@ -1251,6 +1308,141 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    #[test]
+    fn metadata_only_capacity_is_typed_without_clipping_the_complete_recipe() {
+        let fixture = Fixture::new(0);
+        let queries = (b'A'..=b'I')
+            .map(|character| lk_vault::DiscoveryQuery {
+                query: char::from(character).to_string().repeat(4096),
+                phrase: true,
+                spacing: false,
+            })
+            .collect::<Vec<_>>();
+        let capture =
+            lk_vault::capture_discovery(&fixture.root, &Default::default(), &queries).unwrap();
+        assert!(capture.candidates.is_empty());
+        let before = serde_json::to_vec(&capture).unwrap();
+        let error = Selection::source_fits(
+            &fixture.binding(&capture),
+            &json!({"role":"no-candidates","source_revision":"a".repeat(64)}),
+            &capture,
+            32768,
+            4096,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<ScreeningCapacity>(),
+            Some(ScreeningCapacity::Input {
+                required_bytes,
+                max_bytes: 32768,
+            }) if *required_bytes > 32768
+        ));
+        assert_eq!(serde_json::to_vec(&capture).unwrap(), before);
+        assert_eq!(capture.queries, queries);
+        assert!(!fixture.root.join(".lorekeeper").exists());
+    }
+
+    #[test]
+    fn oversized_retained_context_still_requests_bounded_source_observations() {
+        let fixture = Fixture::new(1);
+        let capture = fixture.capture();
+        let binding = fixture.binding(&capture);
+        let context = json!({"role":"complete-retained-input","source_revision":"a".repeat(64),
+            "text":"Complete source evidence. ".repeat(1000)});
+        assert!(!Selection::source_fits(&binding, &context, &capture, 4096, 1024).unwrap());
+        let bounded = json!({"role":"complete-bounded-source-observations",
+            "source_revision":"a".repeat(64),"observation":{"output":{"unresolved":[]}}});
+        assert!(Selection::source_fits(&binding, &bounded, &capture, 4096, 1024).unwrap());
+        assert!(Selection::build(binding, bounded, &capture, 4096, 1024).is_ok());
+        assert!(!fixture.root.join(".lorekeeper").exists());
+    }
+
+    #[test]
+    fn indivisible_candidate_envelopes_report_input_and_result_capacity() {
+        let fixture = Fixture::new(1);
+        let capture = fixture.capture();
+        let context = json!({"role":"complete-retained-input","source_revision":"a".repeat(64)});
+        let baseline = Selection::build(
+            fixture.binding(&capture),
+            context.clone(),
+            &capture,
+            8192,
+            1024,
+        )
+        .unwrap();
+        let required = encoded(&baseline.request_for(&[0], 0).unwrap())
+            .unwrap()
+            .len();
+        let error = Selection::build(
+            fixture.binding(&capture),
+            context.clone(),
+            &capture,
+            required - 1,
+            1024,
+        )
+        .err()
+        .expect("one complete card must not be clipped");
+        assert_eq!(
+            error.downcast_ref::<ScreeningCapacity>(),
+            Some(&ScreeningCapacity::Input {
+                required_bytes: required,
+                max_bytes: required - 1,
+            })
+        );
+
+        let fixture = Fixture::new(0);
+        let address = format!(
+            "wiki/concepts/{}candidate.md",
+            format!("{}/", "owner".repeat(40)).repeat(4)
+        );
+        let path = fixture.root.join(&address);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            path,
+            "---\ntype: concept\ntitle: Candidate\n---\nA scoped candidate.\n",
+        )
+        .unwrap();
+        let capture = fixture.capture();
+        assert_eq!(capture.candidates.len(), 1);
+        let error = Selection::build(fixture.binding(&capture), context, &capture, 32768, 1024)
+            .err()
+            .expect("the complete exact owner must fit in the result");
+        assert!(matches!(
+            error.downcast_ref::<ScreeningCapacity>(),
+            Some(ScreeningCapacity::Result {
+                required_bytes,
+                max_bytes: 1024,
+            }) if *required_bytes > 1024
+        ));
+    }
+
+    #[test]
+    fn invalid_identity_and_stored_manifest_remain_integrity_errors() {
+        let fixture = Fixture::new(1);
+        let capture = fixture.capture();
+        let mut binding = fixture.binding(&capture);
+        binding.task_id.clear();
+        let error = Selection::build(
+            binding,
+            json!({"role":"complete-retained-input"}),
+            &capture,
+            1,
+            1,
+        )
+        .err()
+        .expect("invalid identity must be refused");
+        assert!(error.downcast_ref::<ScreeningCapacity>().is_none());
+
+        let mut stored = fixture.selection(8192, 4096);
+        stored.manifest.max_input_bytes = 1;
+        stored.refresh_identity().unwrap();
+        fixture.create(&stored);
+        let error = retention_selection(&fixture.root, &stored.directory)
+            .err()
+            .expect("invalid saved bounds must prevent retention");
+        assert!(error.downcast_ref::<ScreeningCapacity>().is_none());
     }
 
     #[test]

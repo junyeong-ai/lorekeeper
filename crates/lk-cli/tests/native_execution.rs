@@ -2523,6 +2523,91 @@ fn screening_cost_is_read_only_and_capacity_defers_without_clipping_independent_
 }
 
 #[test]
+fn indivisible_screening_envelope_defers_only_its_task_before_invocation() {
+    for engine in ["codex", "claude-code"] {
+        let (fixture, task) = progressive_extraction_fixture(
+            engine,
+            &format!("{WHOLE_SECTION}\nexit 97"),
+            0,
+            32768,
+            4096,
+        );
+        let status = execution_json(&fixture, &["queue", "status", "--json"]);
+        let queries = (b'A'..=b'I').map(|character| serde_json::json!({
+            "query":char::from(character).to_string().repeat(4096),"phrase":true,"spacing":false,
+        })).collect::<Vec<_>>();
+        let discovery = fixture.root().join("indivisible-discovery.json");
+        std::fs::write(
+            &discovery,
+            serde_json::to_vec(&serde_json::json!({
+                "target_revision":status["data"]["tasks"][0]["target_revision"],"queries":queries,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        execution_json(
+            &fixture,
+            &[
+                "work",
+                "discover",
+                "--task-id",
+                &task.task_id,
+                "--file",
+                discovery.to_str().unwrap(),
+            ],
+        );
+        let root = fixture.root().join("vault");
+        let target_before = std::fs::read(root.join(&task.target.vault_path)).unwrap();
+        let retained_discovery = root.join(".lorekeeper/queue/discovery").join(format!(
+            "{}.json",
+            lk_core::rss_original::digest(task.task_id.as_bytes())
+        ));
+        let discovery_before = std::fs::read(&retained_discovery).unwrap();
+        let queue = root.join(".lorekeeper/queue");
+        let summary = lk_queue::QueueLlmClient::new(queue.clone()).build_task("summary", lk_queue::TaskKind::Summarize,
+            serde_json::from_value::<lk_queue::SummarizeRequest>(serde_json::json!({"text":"Independent source.","max_sentences":2,"locale":"en",
+                "target":{"vault_path":"wiki/documents/independent.md","anchor":"## Summary","kind":"document-summary"}})).unwrap());
+        std::fs::write(root.join(&summary.target.vault_path), format!("---\ntype: document\ntitle: Independent\nllm_inputs:\n  summary: {}\n---\n# Independent\n\n## Summary\n", summary.cache_hash)).unwrap();
+        lk_queue::write_tasks_atomic(
+            &queue.join("independent.jsonl"),
+            std::slice::from_ref(&summary),
+        )
+        .unwrap();
+        for calls in [1, 0] {
+            let (output, report) = fixture.run("process");
+            assert!(
+                !output.status.success(),
+                "incomplete scope remains explicit: {report}"
+            );
+            assert_eq!(report["semantic_calls"], calls, "{report}");
+            let status = execution_json(&fixture, &["queue", "status", "--json"]);
+            for (id, expected) in [(&task.task_id, "current"), (&summary.task_id, "done")] {
+                assert!(
+                    status["data"]["tasks"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|row| row["task_id"] == id.as_str() && row["status"] == expected),
+                    "{status}"
+                );
+            }
+            assert_eq!(
+                std::fs::read(root.join(&task.target.vault_path)).unwrap(),
+                target_before
+            );
+            assert_eq!(
+                std::fs::read(&retained_discovery).unwrap(),
+                discovery_before
+            );
+            assert!(
+                !queue.join("selection").exists(),
+                "no partial selection manifest may be persisted"
+            );
+        }
+    }
+}
+
+#[test]
 fn partial_screening_retains_exact_paid_packets_across_operational_configuration_changes() {
     let (fixture, task) = progressive_extraction_fixture("codex", "exit 97", 32, 16384, 4096);
     let target = fixture.root().join("vault/wiki/documents/source.md");
