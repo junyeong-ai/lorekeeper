@@ -1,3 +1,4 @@
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 use lk_core::event::Event;
@@ -48,8 +49,8 @@ impl EventLog {
         date: jiff::civil::Date,
     ) -> Result<Vec<Event>, PipelineError> {
         let path = self.path(source_id, date);
-        let content = match std::fs::read_to_string(&path) {
-            Ok(c) => c,
+        let file = match std::fs::File::open(&path) {
+            Ok(file) => file,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(e) => {
                 return Err(PipelineError::EventLog(format!(
@@ -58,21 +59,47 @@ impl EventLog {
                 )));
             }
         };
+        let mut reader = BufReader::new(file);
+        let mut line = String::new();
+        let mut line_number = 0;
         let mut events = Vec::new();
-        for (i, line) in content.lines().enumerate() {
+        let mut corruption = None;
+        loop {
+            line.clear();
+            if reader
+                .read_line(&mut line)
+                .map_err(|e| PipelineError::EventLog(format!("read {}: {e}", path.display())))?
+                == 0
+            {
+                break;
+            }
+            line_number += 1;
+            // Validate the whole file's UTF-8 and IO before reporting JSON corruption.
+            if corruption.is_some() {
+                continue;
+            }
+            let line = line
+                .strip_suffix('\n')
+                .map(|line| line.strip_suffix('\r').unwrap_or(line))
+                .unwrap_or(&line);
             if line.trim().is_empty() {
                 continue;
             }
-            let ev = serde_json::from_str::<Event>(line).map_err(|e| {
-                PipelineError::EventLog(format!(
-                    "{} is corrupt at line {}: {e} (left intact — recover or delete it)",
-                    path.display(),
-                    i + 1
-                ))
-            })?;
-            events.push(ev);
+            match serde_json::from_str::<Event>(line) {
+                Ok(event) => events.push(event),
+                Err(e) => {
+                    corruption = Some(PipelineError::EventLog(format!(
+                        "{} is corrupt at line {}: {e} (left intact — recover or delete it)",
+                        path.display(),
+                        line_number,
+                    )))
+                }
+            }
         }
-        Ok(events)
+        match corruption {
+            Some(error) => Err(error),
+            None => Ok(events),
+        }
     }
 
     /// Atomically replace the log for `(source, date)` with `events` (temp + fsync +
@@ -289,6 +316,68 @@ mod tests {
         std::fs::write(&path, "{not valid json\n").unwrap();
         assert!(log.read("ai-news", date).is_err());
         assert!(path.exists(), "the corrupt log is left intact for recovery");
+    }
+
+    #[test]
+    fn read_preserves_complete_events_across_buffer_and_line_boundaries() {
+        let dir = TempDir::new().unwrap();
+        let log = EventLog::new(dir.path());
+        let date = jiff::civil::date(2026, 5, 23);
+        let mut first = ev("a", "한글 source", 100);
+        first.body = format!("    # literal\r\n\n{}\n```\ncode\n```\n", "가".repeat(8193));
+        let events = vec![first, ev("b", "Second", 200)];
+        let first = serde_json::to_string(&events[0]).unwrap();
+        let second = serde_json::to_string(&events[1]).unwrap();
+        let path = log.path("ai-news", date);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        for raw in [
+            format!("{first}\n\n{second}\n"),
+            format!("\n \t\r\n{first}\r\n\r\n{second}"),
+            format!("{first}\r\n{second}\r\n"),
+        ] {
+            std::fs::write(&path, &raw).unwrap();
+            assert_eq!(log.read("ai-news", date).unwrap(), events);
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), raw);
+        }
+    }
+
+    #[test]
+    fn read_rejects_invalid_utf8_after_multiple_lines_without_returning_a_prefix() {
+        let dir = TempDir::new().unwrap();
+        let log = EventLog::new(dir.path());
+        let date = jiff::civil::date(2026, 5, 23);
+        let first = serde_json::to_string(&ev("a", "A", 100)).unwrap();
+        let path = log.path("ai-news", date);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        for opening in [first.as_str(), "{not valid json"] {
+            let mut raw = format!("{opening}\n\n").into_bytes();
+            raw.extend_from_slice(&[0xff, b'\n']);
+            raw.extend_from_slice(first.as_bytes());
+            std::fs::write(&path, &raw).unwrap();
+            let error = log.read("ai-news", date).unwrap_err().to_string();
+            assert!(error.contains("read "), "{error}");
+            assert!(!error.contains("corrupt at line"), "{error}");
+            assert_eq!(std::fs::read(&path).unwrap(), raw);
+        }
+    }
+
+    #[test]
+    fn read_reports_truncated_json_at_its_original_physical_line() {
+        let dir = TempDir::new().unwrap();
+        let log = EventLog::new(dir.path());
+        let date = jiff::civil::date(2026, 5, 23);
+        let first = serde_json::to_string(&ev("a", "A", 100)).unwrap();
+        let path = log.path("ai-news", date);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        for ending in ["", "\n", "\r\n"] {
+            let raw = format!("{first}\n\n \t\r\n{{\"id\":{ending}");
+            std::fs::write(&path, &raw).unwrap();
+            let error = log.read("ai-news", date).unwrap_err().to_string();
+            let expected = serde_json::from_str::<Event>("{\"id\":").unwrap_err();
+            assert!(error.contains("corrupt at line 4"), "{error}");
+            assert!(error.contains(&expected.to_string()), "{error}");
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), raw);
+        }
     }
 
     #[test]
