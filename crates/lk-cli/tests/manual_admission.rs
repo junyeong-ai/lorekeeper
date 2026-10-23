@@ -48,6 +48,138 @@ fn stderr(output: &Output) -> String {
 }
 
 #[test]
+fn capability_unprocessed_files_are_reported_without_admission_and_examples_are_bounded() {
+    let root = tempfile::tempdir().unwrap();
+    let config = setup(root.path(), 2, false);
+    let original = include_bytes!("../../lk-source/src/content/fixtures/policy.pdf");
+    for number in 0..10 {
+        std::fs::write(
+            root.path().join(format!("vault/inbox/source-{number}.pdf")),
+            original,
+        )
+        .unwrap();
+    }
+    for preview in [true, false] {
+        let output = run(&config, preview);
+        assert!(output.status.success(), "{}", stderr(&output));
+        let diagnostic = stderr(&output);
+        assert!(diagnostic.contains("0 eligible entries"), "{diagnostic}");
+        assert!(
+            diagnostic.contains("10 capability-unprocessed"),
+            "{diagnostic}"
+        );
+        assert!(diagnostic.contains("0 pending"), "{diagnostic}");
+        assert!(
+            diagnostic.contains("ingest.documents is not configured"),
+            "{diagnostic}"
+        );
+        assert_eq!(diagnostic.matches("  ! unprocessed ").count(), 8);
+        assert!(diagnostic.contains("2 additional capability-unprocessed files"));
+        assert!(!root.path().join("vault/wiki/documents").exists());
+        assert!(!root.path().join("vault/.lorekeeper/queue").exists());
+        if preview {
+            assert!(!root.path().join("vault/.lorekeeper").exists());
+        } else {
+            assert!(state(root.path())["pending"].as_array().unwrap().is_empty());
+            assert!(
+                state(root.path())["published"]
+                    .as_object()
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+        assert_eq!(
+            std::fs::read(root.path().join("vault/inbox/source-0.pdf")).unwrap(),
+            original
+        );
+    }
+}
+
+#[test]
+fn capability_unprocessed_attachment_is_preserved_with_its_eligible_note() {
+    let root = tempfile::tempdir().unwrap();
+    let config = setup(root.path(), 2, true);
+    let original = include_bytes!("../../lk-source/src/content/fixtures/policy.pdf");
+    std::fs::write(root.path().join("vault/inbox/source.pdf"), original).unwrap();
+    note(
+        root.path(),
+        "note.md",
+        "# Eligible note\n\n[Original attachment](source.pdf)\n",
+    );
+    let output = run(&config, false);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(stderr(&output).contains("1 capability-unprocessed"));
+    assert_eq!(
+        state(root.path())["published"].as_object().unwrap().len(),
+        1
+    );
+    let page =
+        std::fs::read_to_string(root.path().join("vault/wiki/documents/eligible-note.md")).unwrap();
+    let parsed = lk_core::frontmatter::parse_page(&page).unwrap();
+    let reference: lk_core::manual_original::ManualOriginalReference = serde_json::from_value(
+        parsed.frontmatter.get("source_record").unwrap()["manual_original"].clone(),
+    )
+    .unwrap();
+    let manifest =
+        lk_vault::load_manual_original_manifest(&root.path().join("vault"), &reference).unwrap();
+    assert!(
+        manifest
+            .members
+            .iter()
+            .any(|member| member.path == "source.pdf")
+    );
+    assert_eq!(
+        std::fs::read(root.path().join("vault/inbox/source.pdf")).unwrap(),
+        original
+    );
+    assert!(!root.path().join("vault/inbox/note.md").exists());
+}
+
+#[test]
+fn explicit_extensions_preserve_user_exclusion_and_missing_decoder_refusal() {
+    for extension in ["md", "pdf"] {
+        let root = tempfile::tempdir().unwrap();
+        let config = setup(root.path(), 2, false);
+        let raw = std::fs::read_to_string(&config).unwrap();
+        std::fs::write(
+            &config,
+            raw.replace(
+                "inbox_dir: inbox,",
+                &format!("inbox_dir: inbox, extensions: [{extension}],"),
+            ),
+        )
+        .unwrap();
+        let original = include_bytes!("../../lk-source/src/content/fixtures/policy.pdf");
+        std::fs::write(root.path().join("vault/inbox/source.pdf"), original).unwrap();
+        note(
+            root.path(),
+            "note.md",
+            "# Eligible note\n\nOriginal source.\n",
+        );
+        let output = run(&config, false);
+        assert_eq!(
+            output.status.success(),
+            extension == "md",
+            "{}",
+            stderr(&output)
+        );
+        assert!(stderr(&output).contains("0 capability-unprocessed"));
+        assert!(stderr(&output).contains("1 excluded by extension"));
+        assert_eq!(
+            state(root.path())["pending"].as_array().unwrap().len(),
+            usize::from(extension == "pdf")
+        );
+        if extension == "pdf" {
+            assert!(stderr(&output).contains("binary document processing is not configured"));
+        }
+        assert_eq!(
+            std::fs::read(root.path().join("vault/inbox/source.pdf")).unwrap(),
+            original
+        );
+    }
+}
+
+#[test]
 fn retained_entries_drain_bounded_turns_and_unchanged_receipts_do_not_republish() {
     let root = tempfile::tempdir().unwrap();
     let config = setup(root.path(), 2, false);

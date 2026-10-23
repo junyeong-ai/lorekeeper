@@ -80,19 +80,47 @@ impl ManualParams {
         Ok(effective)
     }
 
-    fn selects(&self, extension: &str, ctx: &ExtractContext) -> bool {
+    fn selection(&self, extension: Option<&str>, ctx: &ExtractContext) -> ManualEntrySelection {
         if let Some(extensions) = &self.extensions {
-            return extensions
-                .iter()
-                .any(|value| value.eq_ignore_ascii_case(extension));
+            return if extension.is_some_and(|extension| {
+                extensions
+                    .iter()
+                    .any(|value| value.eq_ignore_ascii_case(extension))
+            }) {
+                ManualEntrySelection::Eligible
+            } else {
+                ManualEntrySelection::Excluded
+            };
         }
-        lk_core::content::InputFormat::from_extension(extension).is_some_and(|format| {
-            !format.requires_processor()
-                || ctx.documents.as_ref().is_some_and(|config| {
-                    !format.is_image() || config.ocr.is_some() || config.vision.is_some()
-                })
-        })
+        let Some(format) = extension.and_then(lk_core::content::InputFormat::from_extension) else {
+            return ManualEntrySelection::Unsupported;
+        };
+        if format.requires_processor() {
+            let reason = match &ctx.documents {
+                None => Some(UnprocessedReason::DocumentProcessorNotConfigured),
+                Some(config)
+                    if format.is_image() && config.ocr.is_none() && config.vision.is_none() =>
+                {
+                    Some(UnprocessedReason::ImageRecognitionNotConfigured)
+                }
+                Some(_) => None,
+            };
+            if let Some(reason) = reason {
+                return ManualEntrySelection::Unprocessed { format, reason };
+            }
+        }
+        ManualEntrySelection::Eligible
     }
+}
+
+enum ManualEntrySelection {
+    Eligible,
+    Unprocessed {
+        format: lk_core::content::InputFormat,
+        reason: UnprocessedReason,
+    },
+    Excluded,
+    Unsupported,
 }
 
 fn default_archive() -> bool {
@@ -107,24 +135,39 @@ pub fn entry_limit(params: &serde_json::Value) -> Result<usize, SourceError> {
     Ok(crate::parse_validated::<ManualParams>(params)?.max_entries_per_run)
 }
 
+#[derive(Debug, Default)]
+pub struct ManualEntryInventory {
+    pub eligible: BTreeSet<String>,
+    pub unprocessed: Vec<UnprocessedInput>,
+    pub excluded: BTreeSet<PathBuf>,
+}
+
+/// Classify direct files without capturing bytes or clipping the inventory.
+pub fn entry_inventory(
+    params: &serde_json::Value,
+    ctx: &ExtractContext,
+) -> Result<ManualEntryInventory, SourceError> {
+    let params: ManualParams = crate::parse_validated(params)?;
+    let mut effective = ctx.clone();
+    effective.documents = params.build_processing_config(ctx.documents.as_ref())?;
+    let inbox = resolve_inbox_dir(&params.inbox_dir, &ctx.vault_root, &ctx.vault_dirs)?;
+    inventory_entries(&params, &effective, &inbox)
+}
+
 /// Enumerate eligible direct entries without capturing their bytes or clipping the inventory.
 pub fn entry_names(
     params: &serde_json::Value,
     ctx: &ExtractContext,
 ) -> Result<BTreeSet<String>, SourceError> {
-    let params: ManualParams = crate::parse_validated(params)?;
-    let mut effective = ctx.clone();
-    effective.documents = params.build_processing_config(ctx.documents.as_ref())?;
-    let inbox = resolve_inbox_dir(&params.inbox_dir, &ctx.vault_root, &ctx.vault_dirs)?;
-    selected_entry_names(&params, &effective, &inbox)
+    Ok(entry_inventory(params, ctx)?.eligible)
 }
 
-fn selected_entry_names(
+fn inventory_entries(
     params: &ManualParams,
     ctx: &ExtractContext,
     inbox: &Path,
-) -> Result<BTreeSet<String>, SourceError> {
-    let mut names = BTreeSet::new();
+) -> Result<ManualEntryInventory, SourceError> {
+    let mut inventory = ManualEntryInventory::default();
     for entry in std::fs::read_dir(inbox).map_err(|error| SourceError::Parse(error.to_string()))? {
         let entry = entry.map_err(|error| SourceError::Parse(error.to_string()))?;
         if !entry
@@ -134,19 +177,32 @@ fn selected_entry_names(
         {
             continue;
         }
-        if entry
-            .path()
-            .extension()
-            .and_then(|value| value.to_str())
-            .is_some_and(|extension| params.selects(extension, ctx))
-        {
-            let name = entry.file_name().into_string().map_err(|_| {
-                SourceError::Parse("manual admission requires UTF-8 entry names".into())
-            })?;
-            names.insert(name);
+        let path = entry.path();
+        let extension = path.extension().and_then(|value| value.to_str());
+        match params.selection(extension, ctx) {
+            ManualEntrySelection::Eligible => {
+                let name = entry.file_name().into_string().map_err(|_| {
+                    SourceError::Parse("manual admission requires UTF-8 entry names".into())
+                })?;
+                inventory.eligible.insert(name);
+            }
+            ManualEntrySelection::Unprocessed { format, reason } => {
+                inventory.unprocessed.push(UnprocessedInput {
+                    path,
+                    format,
+                    reason,
+                });
+            }
+            ManualEntrySelection::Excluded => {
+                inventory.excluded.insert(path);
+            }
+            ManualEntrySelection::Unsupported => {}
         }
     }
-    Ok(names)
+    inventory
+        .unprocessed
+        .sort_by(|left, right| left.path.cmp(&right.path));
+    Ok(inventory)
 }
 
 pub async fn processing_revision(
@@ -827,9 +883,28 @@ pub struct ManualExtraction {
     max_input_bytes: usize,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UnprocessedInput {
     pub path: PathBuf,
     pub format: lk_core::content::InputFormat,
+    pub reason: UnprocessedReason,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnprocessedReason {
+    DocumentProcessorNotConfigured,
+    ImageRecognitionNotConfigured,
+}
+
+impl std::fmt::Display for UnprocessedReason {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::DocumentProcessorNotConfigured => "ingest.documents is not configured",
+            Self::ImageRecognitionNotConfigured => {
+                "image recognition requires ingest.documents.ocr or ingest.documents.vision"
+            }
+        })
+    }
 }
 impl ManualExtraction {
     fn new(ctx: &ExtractContext) -> Self {
@@ -992,7 +1067,7 @@ pub async fn capture_manual_batch(
     let root = inbox
         .canonicalize()
         .map_err(|error| SourceError::Parse(error.to_string()))?;
-    let available = selected_entry_names(&params, ctx, &inbox)?;
+    let available = inventory_entries(&params, ctx, &inbox)?.eligible;
     if entries.iter().any(|name| !available.contains(name)) {
         return Err(SourceError::InvalidParams(
             "manual admission names an entry outside the current selected inbox inventory".into(),
@@ -1186,17 +1261,18 @@ pub async fn capture_manual(
         if !kind.is_file() {
             continue;
         }
-        let Some(ext) = path.extension().and_then(|s| s.to_str()) else {
-            continue;
-        };
-        if !p.selects(ext, ctx) {
-            if p.extensions.is_none()
-                && let Some(format) = lk_core::content::InputFormat::from_extension(ext)
-                    .filter(|format| format.requires_processor())
-            {
-                result.unprocessed.push(UnprocessedInput { path, format });
+        let ext = path.extension().and_then(|s| s.to_str());
+        match p.selection(ext, ctx) {
+            ManualEntrySelection::Eligible => {}
+            ManualEntrySelection::Unprocessed { format, reason } => {
+                result.unprocessed.push(UnprocessedInput {
+                    path,
+                    format,
+                    reason,
+                });
+                continue;
             }
-            continue;
+            ManualEntrySelection::Excluded | ManualEntrySelection::Unsupported => continue,
         }
         attempted += 1;
         if attempted > lk_core::manual_original::MAX_ORIGINAL_MEMBERS {
@@ -1313,6 +1389,91 @@ mod tests {
                 .max_source_bytes
                 .get(),
         }
+    }
+
+    #[tokio::test]
+    async fn entry_inventory_distinguishes_capability_gaps_and_explicit_exclusions_without_decoding()
+     {
+        let root = TempDir::new().unwrap();
+        let inbox = root.path().join("inbox");
+        std::fs::create_dir(&inbox).unwrap();
+        for (name, bytes) in [
+            ("note.md", b"# Note\n\nRetained source.\n".as_slice()),
+            ("source.PDF", b"not decoded".as_slice()),
+            ("image.PnG", b"not decoded".as_slice()),
+            ("unknown.bin", b"untouched".as_slice()),
+            ("README", b"untouched".as_slice()),
+        ] {
+            std::fs::write(inbox.join(name), bytes).unwrap();
+        }
+        let params = serde_json::json!({"inbox_dir":"inbox"});
+        let mut context = new_capture_context(root.path().to_owned());
+        let first = entry_inventory(&params, &context).unwrap();
+        assert_eq!(first.eligible, BTreeSet::from(["note.md".into()]));
+        assert_eq!(first.unprocessed.len(), 2);
+        assert!(
+            first
+                .unprocessed
+                .iter()
+                .all(|input| input.reason == UnprocessedReason::DocumentProcessorNotConfigured)
+        );
+        assert!(first.excluded.is_empty());
+        let captured = capture_manual(&params, &context).await.unwrap();
+        assert_eq!(captured.unprocessed, first.unprocessed);
+        assert_eq!(captured.items.len(), 1);
+
+        context.documents =
+            Some(serde_json::from_value(serde_json::json!({"python":"/not-invoked"})).unwrap());
+        let native = entry_inventory(&params, &context).unwrap();
+        assert_eq!(
+            native.eligible,
+            BTreeSet::from(["note.md".into(), "source.PDF".into()])
+        );
+        assert_eq!(native.unprocessed.len(), 1);
+        assert_eq!(
+            native.unprocessed[0].reason,
+            UnprocessedReason::ImageRecognitionNotConfigured
+        );
+        context.documents.as_mut().unwrap().ocr = Some(
+            serde_json::from_value(
+                serde_json::json!({"tessdata_dir":"/not-read","languages":["eng"]}),
+            )
+            .unwrap(),
+        );
+        let recognized = entry_inventory(&params, &context).unwrap();
+        assert_eq!(recognized.eligible.len(), 3);
+        assert!(recognized.unprocessed.is_empty());
+
+        let documents = context.documents.as_mut().unwrap();
+        documents.ocr = None;
+        documents.vision = Some(serde_json::from_value(serde_json::json!({"engine":"paddle-ocr-vl","python":"/not-invoked","vlm_python":"/not-invoked","models_dir":"/not-read"})).unwrap());
+        let visual = entry_inventory(&params, &context).unwrap();
+        assert_eq!(visual.eligible, recognized.eligible);
+        assert!(visual.unprocessed.is_empty());
+
+        context.documents = None;
+        for extension in ["md", "PDF"] {
+            let filtered = entry_inventory(
+                &serde_json::json!({"inbox_dir":"inbox","extensions":[extension]}),
+                &context,
+            )
+            .unwrap();
+            assert_eq!(
+                filtered.eligible,
+                BTreeSet::from([if extension == "md" {
+                    "note.md"
+                } else {
+                    "source.PDF"
+                }
+                .into()])
+            );
+            assert!(filtered.unprocessed.is_empty());
+            assert_eq!(filtered.excluded.len(), 4);
+        }
+        assert_eq!(
+            std::fs::read(inbox.join("source.PDF")).unwrap(),
+            b"not decoded"
+        );
     }
 
     mod bounded_admission {

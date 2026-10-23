@@ -94,6 +94,8 @@ pub(super) struct Acquisition {
     pub manifests: Vec<ManualBundleManifest>,
     decoders: BTreeMap<String, String>,
     total: usize,
+    unprocessed: Vec<lk_source::UnprocessedInput>,
+    excluded: usize,
     verified: usize,
     attempted: usize,
     admitted: usize,
@@ -177,7 +179,7 @@ impl Acquisition {
     pub fn report(&self, dry_run: bool) {
         let pending = self.state.pending_count();
         eprintln!(
-            "  {}manual inventory: {} current entries; {} verified_published; {} attempted; {} admitted; {} published; {} refused; {} deferred; {} pending (publication receipts, not semantic review)",
+            "  {}manual inventory: {} eligible entries; {} verified_published; {} attempted; {} admitted; {} published; {} refused; {} deferred; {} pending; {} capability-unprocessed; {} excluded by extension (publication receipts, not semantic review)",
             if dry_run { "[dry-run] " } else { "" },
             self.total,
             self.verified,
@@ -190,8 +192,23 @@ impl Acquisition {
                 .iter()
                 .filter(|entry| !self.refused.contains(*entry))
                 .count(),
-            pending
+            pending,
+            self.unprocessed.len(),
+            self.excluded,
         );
+        const UNPROCESSED_EXAMPLES: usize = 8;
+        for input in self.unprocessed.iter().take(UNPROCESSED_EXAMPLES) {
+            eprintln!(
+                "  ! unprocessed {:?} ({:?}): {}",
+                input.path, input.format, input.reason
+            );
+        }
+        if self.unprocessed.len() > UNPROCESSED_EXAMPLES {
+            eprintln!(
+                "  ! {} additional capability-unprocessed files",
+                self.unprocessed.len() - UNPROCESSED_EXAMPLES
+            );
+        }
         let referenced = self
             .manifests
             .iter()
@@ -484,7 +501,8 @@ pub(super) async fn acquire(
         Ok(metadata) if !metadata.is_dir() => return Err(error("inbox must be a directory")),
         Ok(_) => {}
     }
-    let entries = lk_source::manual_entry_names(&source.params, context)?;
+    let entry_inventory = lk_source::manual_entry_inventory(&source.params, context)?;
+    let entries = entry_inventory.eligible;
     let mut state = match (&before, &known) {
         (None, None) => ManualAdmission::new(inbox.clone()),
         (Some(raw), Some(existing)) if existing == &marker => ManualAdmission::decode(raw, &inbox)?,
@@ -634,6 +652,8 @@ pub(super) async fn acquire(
         manifests,
         decoders: entry_decoders,
         total: entries.len(),
+        unprocessed: entry_inventory.unprocessed,
+        excluded: entry_inventory.excluded.len(),
         verified: verified.len(),
         attempted: turn.len(),
         admitted,

@@ -21,9 +21,10 @@ mod tasks;
 /// this only once a source's vault writes and the queue flush have succeeded, so a
 /// write/flush failure leaves the inbox intact for retry.
 pub use manual::{
-    ManualAdmission, ManualDependencyInventory, ManualExtraction, ManualPublishedInput,
-    UnprocessedInput, archive_consumed_files, archive_manual_originals,
-    archive_verified_manual_originals, capture_manual, capture_manual_batch,
+    ManualAdmission, ManualDependencyInventory, ManualEntryInventory, ManualExtraction,
+    ManualPublishedInput, UnprocessedInput, UnprocessedReason, archive_consumed_files,
+    archive_manual_originals, archive_verified_manual_originals, capture_manual,
+    capture_manual_batch, entry_inventory as manual_entry_inventory,
     entry_limit as manual_entry_limit, entry_names as manual_entry_names,
     inbox_dir as manual_inbox_dir, original_current as manual_original_current,
     processing_revision as manual_processing_revision,
