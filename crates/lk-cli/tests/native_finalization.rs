@@ -75,6 +75,19 @@ else:
     output={'work_id':work['work_id'],'node_id':work['node_id'],'input_revision':work['input_revision'],
             'summary':'Read the assigned evidence. Deployment is not verified.',
             'findings':[],'source_questions':questions,'unresolved':unresolved,'resolutions':[]}
+if kind in ['inspect','reduce']:
+    output={'status':'complete','observation':output,'action':None}
+    mode=(root/'mode').read_text()
+    if mode in ['inspection-action','inspection-action-wrong-id','inspection-action-drift']:
+        action={key:request[key] for key in ['work_id','node_id','input_revision']}
+        action['reason']='Cannot complete this assigned evidence inspection without further action.'
+        if mode=='inspection-action-wrong-id': action['node_id']='not-selected'
+        if mode=='inspection-action-drift':
+            path=root/'vault'/request['context']['subject']['target']
+            path.write_text(path.read_text()+'\nExternal edit during inspection.\n')
+        output={'status':'needs-action','observation':None,'action':action}
+    if mode=='empty-inspection-evidence':
+        output['observation']['unresolved']=[{'id':work['node_id']+':mapping','question':'Cannot establish mapping.','evidence':[]}]
 if engine=='claude-code':
     output={'type':'result','subtype':'success','is_error':False,'structured_output':output}
 print(json.dumps(output))
@@ -1085,4 +1098,77 @@ fn near_limit_saved_work_is_retained_without_spending_a_finalizer_call() {
     );
     assert!(fixture.work_path(&plan, "plan.json").exists());
     assert!(!fixture.work_path(&plan, "seal.json").exists());
+}
+
+#[test]
+fn inspection_actions_retain_unfinished_work_skip_unchanged_calls_and_publish_independent_sections()
+{
+    for engine in ["codex", "claude-code"] {
+        let fixture = Fixture::new(engine, 32768);
+        let (task, plan) = fixture.add("a", TaskKind::Summarize);
+        let before = std::fs::read(fixture.work_path(&plan, "plan.json")).unwrap();
+        fixture.mode("inspection-action");
+        let (output, report) = fixture.run();
+        assert!(!output.status.success());
+        assert_eq!(report["halted"], false, "{report}");
+        assert_eq!(report["semantic_calls"], 1, "{report}");
+        assert!(fixture.work_path(&plan, "inspection-actions.json").exists());
+        let status = fixture.json(&["work", "status", plan["work_id"].as_str().unwrap()]);
+        assert_eq!(status["completed"], 0);
+        assert_eq!(status["complete"], false);
+        assert_eq!(
+            std::fs::read(fixture.work_path(&plan, "plan.json")).unwrap(),
+            before
+        );
+        let (_, repeated) = fixture.run();
+        assert_eq!(repeated["semantic_calls"], 0, "{repeated}");
+        assert_eq!(repeated["halted"], false);
+        fixture.mode("complete");
+        let (other, _) = fixture.add_with_plan("b", TaskKind::Summarize, false);
+        let (_, independent) = fixture.run();
+        assert_eq!(independent["semantic_calls"], 1, "{independent}");
+        assert_eq!(independent["halted"], false);
+        let status = fixture.json(&["queue", "status", "--json"]);
+        for (id, expected) in [(task.task_id, "current"), (other.task_id, "done")] {
+            assert!(
+                status["data"]["tasks"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|row| row["task_id"] == id && row["status"] == expected),
+                "{status}"
+            );
+        }
+        let raw = fixture.command().args(["queue", "check"]).output().unwrap();
+        let receipts: Value = serde_json::from_slice(&raw.stdout).unwrap();
+        assert_eq!(receipts["data"]["pending_mutation"], false);
+    }
+}
+
+#[test]
+fn inspection_actions_and_evidence_reject_forged_stale_empty_and_corrupt_states() {
+    for engine in ["codex", "claude-code"] {
+        for mode in [
+            "inspection-action-wrong-id",
+            "inspection-action-drift",
+            "empty-inspection-evidence",
+        ] {
+            let fixture = Fixture::new(engine, 32768);
+            let (_, plan) = fixture.add("source", TaskKind::Summarize);
+            fixture.mode(mode);
+            let (_, report) = fixture.run();
+            assert_eq!(report["halted"], true, "{engine}/{mode}: {report}");
+            assert!(!fixture.work_path(&plan, "inspection-actions.json").exists());
+            if mode != "inspection-action-drift" {
+                let status = fixture.json(&["work", "status", plan["work_id"].as_str().unwrap()]);
+                assert_eq!(status["completed"], 0);
+            }
+        }
+        let fixture = Fixture::new(engine, 32768);
+        let (_, plan) = fixture.add("source", TaskKind::Summarize);
+        std::fs::write(fixture.work_path(&plan, "inspection-actions.json"), "[]").unwrap();
+        let (_, report) = fixture.run();
+        assert_eq!(report["halted"], true, "{report}");
+        assert_eq!(report["semantic_calls"], 0);
+    }
 }

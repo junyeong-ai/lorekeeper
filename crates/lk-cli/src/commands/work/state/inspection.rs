@@ -1,0 +1,289 @@
+use super::*;
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct InspectionActions {
+    schema: String,
+    work_id: String,
+    actions: BTreeMap<String, InspectionAction>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InspectionAction {
+    input_revision: String,
+    request_revision: String,
+    reason: String,
+}
+
+impl InspectionActions {
+    pub(super) fn decode(raw: &str, work: &Work) -> miette::Result<Self> {
+        let value: Value = serde_json::from_str(raw).map_err(fail)?;
+        if !value.is_object() {
+            return Err(fail("inspection action receipt must be a JSON object"));
+        }
+        let actions: Self = serde_json::from_value(value).map_err(fail)?;
+        if actions.schema != "inspection-actions-v1"
+            || actions.work_id != work.plan.id
+            || actions.actions.is_empty()
+        {
+            return Err(fail("invalid inspection action receipt identity or schema"));
+        }
+        let nodes = work.nodes()?;
+        for (node, action) in &actions.actions {
+            if !nodes.iter().any(|candidate| &candidate.id == node) {
+                return Err(fail("inspection action names an unknown work node"));
+            }
+            require_id(&action.input_revision)?;
+            require_id(&action.request_revision)?;
+            nonblank(&action.reason)?;
+        }
+        Ok(actions)
+    }
+}
+
+fn request_revision(request: &Value, contract: &str) -> miette::Result<String> {
+    revision(&json!({"request":request,"contract":contract}))
+}
+
+impl Work {
+    pub fn load_inspection_action(
+        &self,
+        root: &Path,
+        request: &Value,
+        contract: &str,
+    ) -> miette::Result<Option<String>> {
+        let Some(raw) = read_optional(root, &work_path(&self.plan.id, "inspection-actions.json")?)?
+        else {
+            return Ok(None);
+        };
+        let actions = InspectionActions::decode(&raw, self)?;
+        let Some(node) = request["node_id"].as_str() else {
+            return Err(fail("inspection request has no node identity"));
+        };
+        let Some(action) = actions.actions.get(node) else {
+            return Ok(None);
+        };
+        if action.request_revision != request_revision(request, contract)? {
+            return Ok(None);
+        }
+        if request["work_id"] != self.plan.id
+            || request["input_revision"].as_str() != Some(action.input_revision.as_str())
+        {
+            return Err(fail("inspection action identity differs from its request"));
+        }
+        Ok(Some(action.reason.clone()))
+    }
+
+    pub fn plan_inspection_action(
+        &self,
+        root: &Path,
+        resources: &[SemanticResource],
+        request: &Value,
+        contract: &str,
+        reason: String,
+    ) -> miette::Result<MutationPlan> {
+        nonblank(&reason)?;
+        let evaluated = self.evaluate(root, resources)?;
+        let node = evaluated
+            .nodes
+            .iter()
+            .find(|node| request["node_id"].as_str() == Some(node.id.as_str()))
+            .ok_or_else(|| fail("inspection action names an unknown node"))?;
+        if !evaluated.ready.contains(&node.id) {
+            return Err(fail("inspection action requires an unfinished ready node"));
+        }
+        let current = self
+            .node_input(node, &evaluated.inputs, &evaluated.current)
+            .map_err(NodeInputError::report)?;
+        if &current != request {
+            return Err(fail("inspection action request changed before recording"));
+        }
+        let path = work_path(&self.plan.id, "inspection-actions.json")?;
+        let before = read_optional(root, &path)?;
+        let mut actions = match &before {
+            Some(raw) => InspectionActions::decode(raw, self)?,
+            None => InspectionActions {
+                schema: "inspection-actions-v1".into(),
+                work_id: self.plan.id.clone(),
+                actions: BTreeMap::new(),
+            },
+        };
+        actions.actions.insert(
+            node.id.clone(),
+            InspectionAction {
+                input_revision: current["input_revision"]
+                    .as_str()
+                    .expect("native input revision")
+                    .into(),
+                request_revision: request_revision(request, contract)?,
+                reason,
+            },
+        );
+        let mut plan = MutationPlan::default();
+        let output = output_path(&self.plan.id, &node.id)?;
+        if !evaluated.raw.contains_key(&output) {
+            plan.require_absent(output);
+        }
+        for (path, raw) in evaluated.raw {
+            plan.require_unchanged(path, raw);
+        }
+        plan.publish_expected(root, path, before, encoded(&actions)?)
+            .map_err(fail)?;
+        Ok(plan)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::tests::{context, limits, resources};
+    use super::*;
+
+    #[test]
+    fn actions_bind_each_exact_ready_request_and_preserve_other_nodes() {
+        let root = tempfile::tempdir().unwrap();
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let source = resources();
+        let work =
+            Work::create(&session, &source, "subject", context("subject"), limits()).unwrap();
+        let manifest = std::fs::read(
+            root.path()
+                .join(work_path(&work.plan.id, "plan.json").unwrap()),
+        )
+        .unwrap();
+        let (progress, requests) = work.prepare_inspections(root.path(), &source, 2).unwrap();
+        assert_eq!(requests.len(), 2);
+        for request in &requests {
+            let plan = work
+                .plan_inspection_action(
+                    root.path(),
+                    &source,
+                    request,
+                    "contract-1",
+                    "Explicit processing action.".into(),
+                )
+                .unwrap();
+            session.apply(plan).unwrap();
+        }
+        for request in &requests {
+            assert!(
+                work.load_inspection_action(root.path(), request, "contract-1")
+                    .unwrap()
+                    .is_some()
+            );
+            assert!(
+                work.load_inspection_action(root.path(), request, "contract-2")
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        let mut changed = requests[0].clone();
+        changed["context"]["purpose"]["locale"] = json!("en");
+        assert!(
+            work.load_inspection_action(root.path(), &changed, "contract-1")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            work.plan_inspection_action(
+                root.path(),
+                &source,
+                &changed,
+                "contract-1",
+                "Must refuse.".into()
+            )
+            .is_err()
+        );
+        let after = work.progress(root.path(), &source).unwrap();
+        assert_eq!(after.completed, progress.completed);
+        assert!(!after.complete);
+        assert_eq!(
+            std::fs::read(
+                root.path()
+                    .join(work_path(&work.plan.id, "plan.json").unwrap())
+            )
+            .unwrap(),
+            manifest
+        );
+        let path = root
+            .path()
+            .join(work_path(&work.plan.id, "inspection-actions.json").unwrap());
+        let original = std::fs::read_to_string(&path).unwrap();
+        for corrupt in [json!([]), json!({}), {
+            let mut value: Value = serde_json::from_str(&original).unwrap();
+            value["actions"] = json!({});
+            value
+        }] {
+            std::fs::write(&path, encoded(&corrupt).unwrap()).unwrap();
+            assert!(
+                work.load_inspection_action(root.path(), &requests[0], "contract-2")
+                    .is_err()
+            );
+            assert!(
+                work.plan_inspection_action(
+                    root.path(),
+                    &source,
+                    &requests[0],
+                    "contract-2",
+                    "Action.".into()
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn interrupted_actions_recheck_absent_nodes_and_preserved_dependencies() {
+        for edit_receipted in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let session = MutationSession::acquire(root.path()).unwrap();
+            let source = resources();
+            let work =
+                Work::create(&session, &source, "subject", context("subject"), limits()).unwrap();
+            let (_, request) = work.prepare_inspection(root.path(), &source).unwrap();
+            let request = request.unwrap();
+            let plan = work
+                .plan_inspection_action(
+                    root.path(),
+                    &source,
+                    &request,
+                    "contract",
+                    "Action required.".into(),
+                )
+                .unwrap();
+            let plan_revision = lk_core::concept::file_revision(&encoded(&plan).unwrap());
+            let plan = serde_json::to_value(plan).unwrap();
+            let steps = plan["steps"].as_array().unwrap();
+            let edit = steps.last().unwrap();
+            let path = root.path().join(edit["path"].as_str().unwrap());
+            let completed = steps.len() - usize::from(!edit_receipted);
+            drop(session);
+            let directory = root.path().join(".lorekeeper/mutation");
+            std::fs::write(
+                directory.join("pending.json"),
+                encoded(&json!({"version":1,"plan":plan})).unwrap(),
+            )
+            .unwrap();
+            std::fs::write(&path, edit["after"].as_str().unwrap()).unwrap();
+            std::fs::write(directory.join("progress.json"), encoded(&json!({
+                "plan_revision":plan_revision,"completed":completed,
+                "checksum":lk_core::concept::file_revision(&format!("{plan_revision}:{completed}")),
+            })).unwrap()).unwrap();
+            let node = root
+                .path()
+                .join(output_path(&work.plan.id, request["node_id"].as_str().unwrap()).unwrap());
+            std::fs::create_dir_all(node.parent().unwrap()).unwrap();
+            std::fs::write(&node, "Unexpected concurrent observation.").unwrap();
+            assert!(MutationSession::acquire(root.path()).is_err());
+            std::fs::remove_file(&node).unwrap();
+            let _recovered = MutationSession::acquire(root.path()).unwrap();
+            assert!(!directory.join("pending.json").exists());
+            assert!(
+                work.load_inspection_action(root.path(), &request, "contract")
+                    .unwrap()
+                    .is_some()
+            );
+            assert_eq!(work.progress(root.path(), &source).unwrap().completed, 0);
+        }
+    }
+}

@@ -144,6 +144,7 @@ fn capture_retention(root: &Path, id: &str, cutoff: i64) -> miette::Result<Reten
         "publication.json",
         "consumption.json",
         "finalization-action.json",
+        "inspection-actions.json",
     ]
     .into_iter()
     .map(|name| work_path(id, name))
@@ -179,6 +180,12 @@ fn capture_retention(root: &Path, id: &str, cutoff: i64) -> miette::Result<Reten
             .is_some_and(|name| name == "finalization-action.json")
         {
             FinalizationAction::decode(&raw, &work)?;
+        }
+        if path
+            .file_name()
+            .is_some_and(|name| name == "inspection-actions.json")
+        {
+            super::inspection::InspectionActions::decode(&raw, &work)?;
         }
         if path.parent() == Some(directory.join("nodes").as_path()) {
             let stored: StoredOutput = serde_json::from_str(&raw).map_err(fail)?;
@@ -522,6 +529,57 @@ mod tests {
             )
             .unwrap();
         session.apply(plan).unwrap();
+    }
+
+    #[test]
+    fn inspection_actions_are_validated_and_expired_only_with_completed_work() {
+        for corrupt in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let session = MutationSession::acquire(root.path()).unwrap();
+            let source = resources();
+            let work =
+                Work::create(&session, &source, "subject", context("subject"), limits()).unwrap();
+            let (_, request) = work.prepare_inspection(root.path(), &source).unwrap();
+            let plan = work
+                .plan_inspection_action(
+                    root.path(),
+                    &source,
+                    &request.unwrap(),
+                    "historical contract",
+                    "Read required.".into(),
+                )
+                .unwrap();
+            session.apply(plan).unwrap();
+            let directory = root.path().join(work_path(&work.plan.id, "").unwrap());
+            let cutoff = jiff::Timestamp::now().as_second() + 1;
+            assert_eq!(
+                prune_published(root.path(), Some(&session), cutoff)
+                    .unwrap()
+                    .removed,
+                0
+            );
+            assert!(directory.exists());
+            publish(&work, &session, &source);
+            let cutoff = jiff::Timestamp::now().as_second() + 1;
+            if corrupt {
+                std::fs::write(directory.join("inspection-actions.json"), "[]").unwrap();
+                assert!(prune_published(root.path(), Some(&session), cutoff).is_err());
+                assert!(directory.exists());
+            } else {
+                assert_eq!(
+                    prune_published(root.path(), None, cutoff).unwrap().removed,
+                    1
+                );
+                assert!(directory.exists());
+                assert_eq!(
+                    prune_published(root.path(), Some(&session), cutoff)
+                        .unwrap()
+                        .removed,
+                    1
+                );
+                assert!(!directory.exists());
+            }
+        }
     }
 
     #[test]

@@ -10,13 +10,30 @@ agent session. The native controller starts a fresh configured agent for each
 inspection, reduction and finalization.
 
 Native inspection/reduction receives the exact JSON request through stdin and returns
-one schema-constrained JSON observation. Rust verifies and records it; the worker does
+one schema-constrained completion or processing-action response. Rust verifies and records it; the worker does
 not invoke this skill's commands or write draft/cache/page files. Claude runs without
 built-in tools/customizations; Codex uses a read-only sandbox with command, app, plugin,
 hook and subagent features disabled. Both run in a private temporary workspace without
 copying the vault. Bounded native section finalization uses the same read-only host
 contract described below. Other finalizers and standalone interactive processing use
 the command protocol. These are distinct execution roles, not interchangeable write permissions.
+
+A native completion is `{status: "complete", observation: OBSERVATION, action: null}`.
+An inability to complete assigned reading or establish its evidence mapping is
+`{status: "needs-action", observation: null, action: {work_id, node_id, input_revision, reason}}`,
+using exact request identities and a concrete nonblank reason. This records no observation
+or assessment and never supplies invented evidence. Native Rust validates the supplied
+range/text mapping: copy the assigned `range` for the corresponding inspected text;
+finer contained offsets are optional when established. `total_characters` describes the
+full resource; `continued` marks a split Markdown block, not omitted assigned text.
+All findings, questions and resolutions require at least one evidence reference.
+
+Native actions bind the complete request and instruction/response contract. The same
+unchanged action defers before another host call; independent queue and audit work can
+continue, while the overall job remains incomplete. Changed requests can be reconsidered.
+An explicit guarded `work record` can supply a corrected observation; never edit action,
+node or plan files to bypass guards. Malformed responses and corrupt receipts refuse.
+Saved plans, node observations and the standalone `work record` format stay unchanged.
 
 ## Plan and resume
 
@@ -224,7 +241,7 @@ is not a complete invocation ledger.
 | Fields | Meaning |
 | --- | --- |
 | `role`, `work_id`, `node_id`, `node_kind`, `selection_id`, `batch_id` | Exact selected work or screening identities; unavailable identities are `null` |
-| `request_json_bytes`, `result_json_bytes` | Compact UTF-8 JSON of the prepared request and decoded result, excluding prompts and host envelopes; interactive finalizer sizes are unobserved and `null` |
+| `request_json_bytes`, `result_json_bytes` | Compact UTF-8 JSON of the prepared request and decoded response (including a native observation/action envelope), excluding prompts and host envelopes; interactive finalizer sizes are unobserved and `null` |
 | `preparation_duration_ms` | Local preparation of the selected request or completed root |
 | `agent_duration_ms` | Supervised invocation attempt wall time, including a failed or cancelled attempt; never server inference time |
 | `revalidation_record_duration_ms` | Fresh input validation and recording together; these operations are not measured separately |

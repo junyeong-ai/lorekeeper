@@ -120,6 +120,14 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   observation or creating the guarded section result. Claude disables tools/customizations;
   Codex uses a read-only sandbox.
   Never fall back to parsing prose/Markdown when structured output is missing or invalid.
+  Evidence observers return either a typed observation or an exact work/node/input-bound
+  processing action. Native range/text mapping is already verified; workers can copy
+  assigned ranges without inventing finer offsets. Every observation concern still needs
+  evidence. Actions record no observation, discharge no concerns and defer only their
+  Work. Bind the receipt to the complete request and response/instruction contract; skip
+  unchanged calls, revalidate before recording and preserve independent parallel results.
+  Deferred audit subjects remain unassessed; verify receipts only for the other selected
+  subjects and retain an incomplete overall result. Corrupt or unknown-scope state stops.
   A section `needs-action` response records an exact request-bound action receipt;
   unchanged requests defer before invocation, while independent work continues. Changed
   requests can be reconsidered; valid sealed results restage before checking the receipt.

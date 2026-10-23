@@ -1273,6 +1273,42 @@ pub(super) fn record_inspection(
 }
 
 #[cfg(unix)]
+pub(super) fn inspection_action(
+    root: &Path,
+    id: &str,
+    request: &Value,
+) -> miette::Result<Option<String>> {
+    state::Work::load(root, id)?.load_inspection_action(
+        root,
+        request,
+        &super::execution::observation::contract_revision(),
+    )
+}
+
+#[cfg(unix)]
+pub(super) fn record_inspection_action(
+    root: &Path,
+    config: &lk_core::config::Config,
+    config_revision: &str,
+    id: &str,
+    request: &Value,
+    reason: String,
+) -> miette::Result<()> {
+    let session = lk_vault::MutationSession::acquire(root).into_diagnostic()?;
+    let (work, prepared) = load(session.root(), config, config_revision, id)?;
+    let mut plan = work.plan_inspection_action(
+        session.root(),
+        &prepared.resources,
+        request,
+        &super::execution::observation::contract_revision(),
+        reason,
+    )?;
+    prepared.guard_pages(&mut plan);
+    session.apply(plan).into_diagnostic()?;
+    Ok(())
+}
+
+#[cfg(unix)]
 pub(super) struct SectionFinalization {
     pub request: Value,
     pub max_response_bytes: usize,

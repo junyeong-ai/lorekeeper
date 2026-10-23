@@ -463,7 +463,11 @@ calling the same unchanged request again; independent work continues. Concept ex
 synthesis and audits retain tool-using finalization.
 
 New bounded plans group observations using request and maximum result sizes; saved
-plans resume with their existing topology. Native `lore run process --json` reports
+plans resume with their existing topology. An observer unable to complete assigned
+reading returns an identity-bound processing action instead of an observation.
+Unchanged requests defer without another call; independent work continues, while the
+node and assessment remain incomplete. Workers can cite native-verified assigned ranges
+without guessing finer offsets. Native `lore run process --json` reports
 per-step JSON sizes and preparation, agent invocation and validation wall times in
 `work_steps`. Unobserved values are `null`; these are not token counts or billed cost.
 See [native run measurements](skills/lore-process/references/bounded-work.md#native-run-measurements)

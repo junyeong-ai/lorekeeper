@@ -1258,6 +1258,8 @@ if action=='inspect':
     output={'work_id':work_id, 'node_id':node_id, 'input_revision':request['input_revision'],
             'summary':'Fixture observation of this exact request; structural coverage is not factual verification.',
             'findings':[], 'unresolved':unresolved, 'resolutions':[]}
+    if native:
+        output={'status':'complete','observation':output,'action':None}
     row['output_bytes']=len(json.dumps(output, ensure_ascii=False, separators=(',', ':')).encode())
     if native:
         if '--safe-mode' in sys.argv:
@@ -4304,6 +4306,11 @@ if leader and mode=='malformed':
     raise SystemExit(0)
 output={key:request[key] for key in ['work_id','node_id','input_revision']}
 output.update(summary='Read this exact fixture request without a factual correctness claim.',findings=[],source_questions=[],unresolved=[],resolutions=[])
+output={'status':'complete','observation':output,'action':None}
+if mode=='needs-action':
+    action={key:request[key] for key in ['work_id','node_id','input_revision']}
+    action['reason']='Cannot complete this selected evidence node.'
+    output={'status':'needs-action','observation':None,'action':action}
 if '--safe-mode' in sys.argv:
     print(json.dumps({'type':'result','subtype':'success','is_error':False,'structured_output':output}))
 else:
@@ -4964,5 +4971,76 @@ fn knowledge_campaign_retains_partial_bounded_batch_completion_at_the_call_limit
         assert!(plan.status.success());
         let plan: serde_json::Value = serde_json::from_slice(&plan.stdout).unwrap();
         assert_eq!(plan["reviewed_current"], 2);
+    }
+}
+
+#[test]
+fn parallel_processing_actions_remain_incomplete_and_do_not_repeat_paid_nodes() {
+    for engine in ["codex", "claude-code"] {
+        for targets in [1, 2] {
+            let fixture = parallel_observation_fixture(engine, 2, 2, targets, "needs-action");
+            let (_, report) = fixture.run("knowledge");
+            assert_eq!(report["semantic_calls"], 2, "{report}");
+            assert_eq!(report["halted"], false, "{report}");
+            assert_eq!(parallel_receipts(&fixture), 0);
+            let starts = parallel_starts(&fixture);
+            assert_eq!(starts.len(), 2);
+            let mut actions = std::collections::BTreeMap::<String, usize>::new();
+            for start in &starts {
+                *actions
+                    .entry(start["work_id"].as_str().unwrap().into())
+                    .or_default() += 1;
+            }
+            for (work, total) in actions {
+                let raw = std::fs::read(
+                    fixture
+                        .root()
+                        .join("vault/.lorekeeper/work")
+                        .join(work)
+                        .join("inspection-actions.json"),
+                )
+                .unwrap();
+                let receipt: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+                assert_eq!(receipt["actions"].as_object().unwrap().len(), total);
+            }
+            let (_, repeated) = fixture.run("knowledge");
+            assert_eq!(repeated["semantic_calls"], 0, "{repeated}");
+            assert_eq!(repeated["halted"], false, "{repeated}");
+            assert_eq!(parallel_starts(&fixture).len(), 2);
+            assert_parallel_no_publication(&fixture);
+        }
+    }
+}
+
+#[test]
+fn explicit_inspection_actions_allow_an_independent_audit_assessment() {
+    let behavior = RECORD_BOUNDED_AUDIT.replace(
+        "output={'status':'complete','observation':output,'action':None}",
+        r#"output={'status':'complete','observation':output,'action':None}
+        if request['context']['subject'].get('path')=='wiki/concepts/large.md':
+            blocked={key:request[key] for key in ['work_id','node_id','input_revision']}
+            blocked['reason']='Cannot complete the selected assigned read.'
+            output={'status':'needs-action','observation':None,'action':blocked}"#,
+    );
+    for engine in ["codex", "claude-code"] {
+        let fixture = bounded_audit_fixture(engine, 8, &behavior);
+        let config = std::fs::read_to_string(&fixture.config)
+            .unwrap()
+            .replace("batch_size: 1", "batch_size: 2");
+        std::fs::write(&fixture.config, config).unwrap();
+        write_audit_concept(&fixture, "second");
+        record_discovery(&fixture, "wiki/concepts/second.md");
+        let (output, report) = fixture.run("knowledge");
+        assert!(!output.status.success());
+        assert_eq!(report["halted"], false, "{engine}: {report}");
+        assert_eq!(report["audit"].as_array().unwrap().len(), 1, "{report}");
+        assert_eq!(
+            report["audit"][0]["assessed_path"],
+            "wiki/concepts/second.md"
+        );
+        assert_eq!(report["audit_progress"]["after"]["reviewed_current"], 1);
+        let (_, repeated) = fixture.run("knowledge");
+        assert_eq!(repeated["semantic_calls"], 0, "{repeated}");
+        assert_eq!(repeated["halted"], false, "{repeated}");
     }
 }

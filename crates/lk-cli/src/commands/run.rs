@@ -150,6 +150,7 @@ mod native {
 
     enum ObservationStep {
         Recorded,
+        Deferred(String),
         Complete {
             root_node: String,
             preparation_duration_ms: u64,
@@ -310,6 +311,7 @@ mod native {
         selected: Option<ExecutionProfile>,
         project_protection: Option<crate::commands::installation::Protection>,
         drain_blocked: bool,
+        inspection_deferred: std::collections::BTreeMap<String, String>,
         audit_batch: Option<Vec<lk_graph::audit::AuditCandidate>>,
         queue_turn: Option<QueueTurn>,
         started_at: Instant,
@@ -834,44 +836,73 @@ mod native {
             id: &str,
             node: &str,
             request: serde_json::Value,
+            completed: usize,
             metrics: &mut WorkStepMetrics,
-        ) -> Option<crate::commands::work::state::WorkProgress> {
-            let reply = self.request_observation(request, metrics).await?;
-            let output =
-                match execution::observation::decode(reply.engine, &reply.bytes, reply.limit) {
-                    Ok(output) => output,
-                    Err(error) => {
-                        self.failure("bounded work receipt", error);
-                        return None;
-                    }
-                };
-            metrics.result_json_bytes = Some(
-                serde_json::to_vec(&output)
-                    .expect("decoded observation serializes")
-                    .len(),
-            );
+        ) -> ObservationStep {
+            let Some(reply) = self.request_observation(request.clone(), metrics).await else {
+                return ObservationStep::Failed;
+            };
+            self.record_observation(id, node, &request, completed, reply, metrics)
+        }
+
+        fn record_observation(
+            &mut self,
+            id: &str,
+            node: &str,
+            request: &serde_json::Value,
+            completed: usize,
+            reply: ObservationReply,
+            metrics: &mut WorkStepMetrics,
+        ) -> ObservationStep {
+            let (response, bytes) = match execution::observation::decode(
+                reply.engine,
+                &reply.bytes,
+                reply.limit,
+                request,
+            ) {
+                Ok(response) => response,
+                Err(error) => {
+                    self.failure("bounded work receipt", error);
+                    return ObservationStep::Failed;
+                }
+            };
+            metrics.result_json_bytes = Some(bytes);
             let started_at = Instant::now();
-            let recorded = crate::commands::work::record_inspection(
-                &self.root,
-                &self.config,
-                &self.config_revision,
-                id,
-                node,
-                output,
-            );
+            let recorded = match response {
+                execution::observation::ObservationResponse::Complete(output) => {
+                    crate::commands::work::record_inspection(&self.root, &self.config, &self.config_revision, id, node, output)
+                        .and_then(|progress| {
+                            if progress.completed > completed && !progress.ready.iter().any(|ready| ready == node) {
+                                Ok(None)
+                            } else {
+                                Err(miette::miette!("worker exited without completing its selected node; unfinished work retained"))
+                            }
+                        })
+                }
+                execution::observation::ObservationResponse::NeedsAction(reason) => {
+                    crate::commands::work::record_inspection_action(&self.root, &self.config, &self.config_revision,
+                        id, request, reason.clone()).map(|()| Some(reason))
+                }
+            };
             metrics.revalidation_record_duration_ms = Some(started_at.elapsed().as_millis() as u64);
             match recorded {
-                Ok(progress) => {
+                Ok(None) => {
+                    metrics.outcome = WorkOutcome::Recorded;
                     self.record(
                         "bounded work receipt",
                         StageState::Completed,
                         Some(node.into()),
                     );
-                    Some(progress)
+                    ObservationStep::Recorded
+                }
+                Ok(Some(reason)) => {
+                    self.inspection_deferred.insert(id.into(), reason.clone());
+                    self.deferred("bounded work action", &reason);
+                    ObservationStep::Deferred(reason)
                 }
                 Err(error) => {
                     self.failure("bounded work receipt", error);
-                    None
+                    ObservationStep::Failed
                 }
             }
         }
@@ -974,6 +1005,15 @@ mod native {
                 let Some(request) = work.requests.pop_front() else {
                     break;
                 };
+                match crate::commands::work::inspection_action(&self.root, id, &request) {
+                    Ok(Some(reason)) => {
+                        self.inspection_deferred.insert(id.clone(), reason.clone());
+                        self.deferred("bounded work action", reason);
+                        break;
+                    }
+                    Ok(None) => {}
+                    Err(error) => return Some(self.failure("bounded work action", error)),
+                }
                 reserved_targets.push(target.clone());
                 let node_id = request["node_id"]
                     .as_str()
@@ -1011,7 +1051,11 @@ mod native {
                     .clone();
             }
             if turns.is_empty() {
-                return None;
+                return if self.inspection_deferred.contains_key(&jobs[selected]) {
+                    Some(true)
+                } else {
+                    None
+                };
             }
             if self.result.halted || self.result.cancelled || !self.configuration_is_current() {
                 return Some(false);
@@ -1111,60 +1155,25 @@ mod native {
                         continue;
                     }
                 };
-                let output = match execution::observation::decode(
-                    engine,
-                    &child.stdout,
-                    budget.max_result_bytes,
-                ) {
-                    Ok(output) => output,
-                    Err(error) => {
-                        accepted = false;
-                        self.failure("bounded work receipt", error);
-                        self.result.work_telemetry.record(turn.metrics);
-                        continue;
-                    }
-                };
-                turn.metrics.result_json_bytes = Some(
-                    serde_json::to_vec(&output)
-                        .expect("observation serializes")
-                        .len(),
-                );
                 if !self.configuration_is_current() {
                     accepted = false;
                     self.result.work_telemetry.record(turn.metrics);
                     continue;
                 }
-                let started_at = Instant::now();
-                let recorded = crate::commands::work::record_inspection(
-                    &self.root,
-                    &self.config,
-                    &self.config_revision,
+                let step = self.record_observation(
                     &turn.work_id,
                     &turn.node_id,
-                    output,
+                    &turn.request,
+                    turn.completed,
+                    ObservationReply {
+                        engine,
+                        bytes: child.stdout,
+                        limit: budget.max_result_bytes,
+                    },
+                    &mut turn.metrics,
                 );
-                turn.metrics.revalidation_record_duration_ms =
-                    Some(started_at.elapsed().as_millis() as u64);
-                match recorded {
-                    Ok(progress)
-                        if progress.completed > turn.completed
-                            && !progress.ready.contains(&turn.node_id) =>
-                    {
-                        turn.metrics.outcome = WorkOutcome::Recorded;
-                        self.record(
-                            "bounded work receipt",
-                            StageState::Completed,
-                            Some(turn.node_id),
-                        );
-                    }
-                    Ok(_) => {
-                        accepted = false;
-                        self.failure("bounded work receipt", "worker exited without completing its selected node; unfinished work retained");
-                    }
-                    Err(error) => {
-                        accepted = false;
-                        self.failure("bounded work receipt", error);
-                    }
+                if matches!(step, ObservationStep::Failed) {
+                    accepted = false;
                 }
                 self.result.work_telemetry.record(turn.metrics);
             }
@@ -1211,19 +1220,22 @@ mod native {
                     Some("reduce") => Some(NodeKind::Reduce),
                     _ => None,
                 };
-                let result = match self.observe(id, node, request, &mut metrics).await {
-                    Some(after)
-                        if after.completed > before.completed && !after.ready.contains(node) =>
-                    {
-                        metrics.outcome = WorkOutcome::Recorded;
-                        ObservationStep::Recorded
-                    }
-                    Some(_) => {
-                        self.failure("bounded work receipt", "worker exited without completing its selected node; unfinished work retained");
-                        ObservationStep::Failed
-                    }
-                    None => ObservationStep::Failed,
-                };
+                let result =
+                    match crate::commands::work::inspection_action(&self.root, id, &request) {
+                        Ok(Some(reason)) => {
+                            self.inspection_deferred.insert(id.into(), reason.clone());
+                            self.deferred("bounded work action", &reason);
+                            ObservationStep::Deferred(reason)
+                        }
+                        Ok(None) => {
+                            self.observe(id, node, request, before.completed, &mut metrics)
+                                .await
+                        }
+                        Err(error) => {
+                            self.failure("bounded work action", error);
+                            ObservationStep::Failed
+                        }
+                    };
                 self.result.work_telemetry.record(metrics);
                 return result;
             }
@@ -1408,6 +1420,7 @@ mod native {
             metrics.work_id = Some(id.into());
             match self.bounded_observation_step(id).await {
                 ObservationStep::Recorded => return WorkStep::Pending,
+                ObservationStep::Deferred(reason) => return WorkStep::Deferred(reason),
                 ObservationStep::Failed => return WorkStep::Failed,
                 ObservationStep::Complete {
                     root_node,
@@ -1855,7 +1868,10 @@ mod native {
                         crate::commands::work::TaskWork::Partitioned { id } => {
                             flush(&mut batch, &mut jobs);
                             batch_bytes = 0;
-                            if let Some(reason) = blocked.get(&id) {
+                            if let Some(reason) = blocked
+                                .get(&id)
+                                .or_else(|| self.inspection_deferred.get(&id))
+                            {
                                 keys.remove(target);
                                 deferred.insert(target.clone(), vec![reason.clone()]);
                             } else {
@@ -1868,7 +1884,12 @@ mod native {
                         crate::commands::work::TaskWork::Source { id } => {
                             flush(&mut batch, &mut jobs);
                             batch_bytes = 0;
-                            jobs.insert(target.clone(), QueueDispatch::Source { id });
+                            if let Some(reason) = self.inspection_deferred.get(&id) {
+                                keys.remove(target);
+                                deferred.insert(target.clone(), vec![reason.clone()]);
+                            } else {
+                                jobs.insert(target.clone(), QueueDispatch::Source { id });
+                            }
                         }
                         crate::commands::work::TaskWork::Screening => {
                             flush(&mut batch, &mut jobs);
@@ -2002,6 +2023,12 @@ mod native {
                         if !completed {
                             return false;
                         }
+                        if bounded_jobs
+                            .values()
+                            .any(|id| self.inspection_deferred.contains_key(id))
+                        {
+                            continue 'planning;
+                        }
                         continue;
                     }
                     self.queue_turn = Some(QueueTurn {
@@ -2088,6 +2115,10 @@ mod native {
                                     metrics.preparation_duration_ms = Some(preparation_duration_ms);
                                     metrics.outcome = WorkOutcome::AlreadyComplete;
                                     self.result.work_telemetry.record(metrics);
+                                    continue 'planning;
+                                }
+                                ObservationStep::Deferred(reason) => {
+                                    blocked.insert(id.clone(), reason);
                                     continue 'planning;
                                 }
                                 ObservationStep::Failed => return false,
@@ -2719,6 +2750,7 @@ mod native {
                     }
                 }
             }
+            let mut deferred_subjects = std::collections::BTreeSet::new();
             if bounded {
                 let mut jobs = std::collections::BTreeMap::new();
                 for candidate in &plan.candidates {
@@ -2738,6 +2770,17 @@ mod native {
                     jobs.insert(path.clone(), work);
                 }
                 while !jobs.is_empty() {
+                    jobs.retain(|path, work| {
+                        if self.inspection_deferred.contains_key(work) {
+                            deferred_subjects.insert(path.clone());
+                            false
+                        } else {
+                            true
+                        }
+                    });
+                    if jobs.is_empty() {
+                        break;
+                    }
                     if !self.call_budget_available() {
                         return;
                     }
@@ -2764,8 +2807,10 @@ mod native {
                     match self.bounded_step(work, "lore-wiki").await {
                         WorkStep::Pending => continue,
                         WorkStep::Deferred(reason) => {
-                            self.failure("bounded audit action", reason);
-                            return;
+                            self.deferred("bounded audit action", reason);
+                            deferred_subjects.insert(selected.clone());
+                            jobs.remove(&selected);
+                            continue;
                         }
                         WorkStep::Failed => return,
                         WorkStep::Staged => {}
@@ -2806,7 +2851,19 @@ mod native {
             } else {
                 self.consumer("lore-wiki", &format!("maintain. The controller selected this exact batch: {selection}. Start with audit-plan --path for these addresses; do not select another batch. Use bounded work for any subject whose work envelope requires partitioning."), None).await;
             }
-            self.audit_batch = Some(plan.candidates);
+            let assessed = plan
+                .candidates
+                .into_iter()
+                .filter(|candidate| !deferred_subjects.contains(&candidate.path))
+                .collect::<Vec<_>>();
+            if !deferred_subjects.is_empty() {
+                self.deferred("audit inspection dependencies", format!("{} selected audit subjects require explicit processing action; no assessment was recorded for them", deferred_subjects.len()));
+            }
+            if assessed.is_empty() {
+                self.result.audit = Some(Vec::new());
+            } else {
+                self.audit_batch = Some(assessed);
+            }
         }
     }
 
@@ -2958,6 +3015,7 @@ mod native {
             selected: None,
             project_protection: None,
             drain_blocked: false,
+            inspection_deferred: std::collections::BTreeMap::new(),
             audit_batch: None,
             queue_turn: None,
             started_at: Instant::now(),

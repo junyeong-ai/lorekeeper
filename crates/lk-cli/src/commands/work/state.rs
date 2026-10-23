@@ -9,6 +9,7 @@ use lk_vault::{MutationPlan, MutationSession};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+mod inspection;
 mod retention;
 pub(crate) use retention::prune_published;
 
