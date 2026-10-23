@@ -250,6 +250,30 @@ impl Fixture {
         self.vault().join(sealed["staged_result"].as_str().unwrap())
     }
 
+    fn complete_observations(&self, plan: &Value) -> Value {
+        let id = plan["work_id"].as_str().unwrap();
+        loop {
+            let status = self.json(&["work", "status", id]);
+            if status["complete"] == true {
+                return self.json(&["work", "result", id]);
+            }
+            let request = self.json(&["work", "read", id, status["ready"][0].as_str().unwrap()]);
+            let path = self.root().join("observation.json");
+            std::fs::write(
+                &path,
+                serde_json::to_vec(&json!({
+                    "work_id":request["work_id"],"node_id":request["node_id"],
+                    "input_revision":request["input_revision"],
+                    "summary":"Recorded assigned fixture evidence without a factual truth claim.",
+                    "findings":[],"source_questions":[],"unresolved":[],"resolutions":[],
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            self.success(&["work", "record", "--file", path.to_str().unwrap()]);
+        }
+    }
+
     fn is_completed(&self, task: &QueueTask) -> bool {
         let raw = std::fs::read_to_string(self.vault().join(&task.target.vault_path)).unwrap();
         let page = lk_vault::parse_page(&raw).unwrap();
@@ -329,6 +353,187 @@ impl Fixture {
             })
             .collect()
     }
+}
+
+#[test]
+fn corrected_source_blocker_is_local_to_staged_extraction_and_keeps_independent_publication() {
+    let fixture = Fixture::new("codex");
+    let config = std::fs::read_to_string(&fixture.config)
+        .unwrap()
+        .replace(
+            "max_input_bytes: 262144, max_result_bytes: 65536",
+            "max_input_bytes: 32768, max_result_bytes: 4096",
+        )
+        .replace(
+            "extraction_context: full-context",
+            "extraction_context: progressive",
+        )
+        .replace("concept_policy: disabled", "concept_policy: supported-new");
+    std::fs::write(&fixture.config, config).unwrap();
+    let independent = fixture.add_summary("b-independent");
+    let client = QueueLlmClient::new(fixture.vault().join(".lorekeeper/queue"));
+    let rejected = client.build_task(
+        "a-rejected",
+        TaskKind::ExtractConcepts,
+        lk_queue::ExtractConceptsRequest {
+            text: "Candidate retained source observation.\n\n".repeat(2000),
+            source_id: "notes".into(),
+            source_type: lk_core::config::SourceType::Manual,
+            date: jiff::civil::date(2026, 10, 23),
+            focus: None,
+            locale: lk_core::i18n::Locale::En,
+            categories: vec![],
+            rss_original: None,
+            concept_policy: lk_core::config::ConceptPolicy::SupportedNew,
+            target: lk_queue::TaskTarget {
+                vault_path: "wiki/documents/a-rejected.md".into(),
+                kind: lk_queue::TargetKind::DocumentConcepts,
+                anchor: "## Related Concepts".into(),
+            },
+        },
+    );
+    fixture.write(&rejected.target.vault_path, &format!("---\ntype: document\ntitle: Retained source\nllm_inputs:\n  concepts: {}\n---\n# Retained source\n\n## Summary\nA retained source observation.\n\n## Content\nCandidate retained source observation.\n\n## Related Concepts\n", rejected.cache_hash));
+    fixture.write(
+        ".lorekeeper/queue/a-rejected.jsonl",
+        &(serde_json::to_string(&rejected).unwrap() + "\n"),
+    );
+    fixture.write(
+        "wiki/documents/candidate.md",
+        "---\ntype: document\ntitle: Candidate\n---\nA separate Candidate observation.\n",
+    );
+    let queries = vec![lk_core::discovery::DiscoveryQuery {
+        query: "Candidate".into(),
+        phrase: true,
+        spacing: false,
+    }];
+    let path = fixture.root().join("discovery.json");
+    std::fs::write(
+        &path,
+        serde_json::to_vec(
+            &json!({"target_revision":fixture.target_revision(&rejected),"queries":queries}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    fixture.success(&[
+        "work",
+        "discover",
+        "--task-id",
+        &rejected.task_id,
+        "--file",
+        path.to_str().unwrap(),
+    ]);
+    let source = fixture.json(&["work", "source-plan", "--task-id", &rejected.task_id]);
+    assert!(source["parts"].as_u64().unwrap() > 1);
+    let input = fixture.json(&[
+        "work",
+        "read",
+        source["work_id"].as_str().unwrap(),
+        source["ready"][0].as_str().unwrap(),
+    ]);
+    let range = input["input"]["ranges"][0]["range"].clone();
+    let source_result = fixture.complete_observations(&source);
+    let selection = fixture.json(&["work", "select", "--task-id", &rejected.task_id]);
+    let request = &selection["request"];
+    let path = fixture.root().join("screening.json");
+    std::fs::write(&path, serde_json::to_vec(&json!({
+        "selection_id":request["selection_id"],"batch_id":request["batch_id"],"input_revision":request["input_revision"],
+        "decisions":request["candidates"].as_array().unwrap().iter().map(|candidate| json!({
+            "candidate_key":candidate["candidate_key"],"decision":"not-selected",
+            "reason":"Card-only fixture scope; no full-body negative finding.",
+        })).collect::<Vec<_>>(),
+    })).unwrap()).unwrap();
+    fixture.success(&[
+        "work",
+        "select-record",
+        "--task-id",
+        &rejected.task_id,
+        "--file",
+        path.to_str().unwrap(),
+    ]);
+    let context = fixture.json(&["work", "context", "--task-id", &rejected.task_id]);
+    let plan = fixture.json(&["work", "plan", "--task-id", &rejected.task_id]);
+    fixture.complete_observations(&plan);
+    let answer = lk_queue::TaskResult {
+        task_id: rejected.task_id.clone(),
+        cache_hash: rejected.cache_hash.clone(),
+        target_revision: fixture.target_revision(&rejected),
+        context_revision: context["context_revision"].as_str().unwrap().into(),
+        selection: Some(serde_json::from_value(context["selection"].clone()).unwrap()),
+        discovery: queries,
+        concept_policy: lk_core::config::ConceptPolicy::SupportedNew,
+        target: rejected.target.clone(),
+        date: jiff::civil::date(2026, 10, 23),
+        concepts: vec![],
+    };
+    let answer_path = fixture.root().join("answer.json");
+    std::fs::write(&answer_path, serde_json::to_vec(&answer).unwrap()).unwrap();
+    let sealed = fixture.json(&[
+        "work",
+        "finish",
+        plan["work_id"].as_str().unwrap(),
+        "--file",
+        answer_path.to_str().unwrap(),
+    ]);
+    let result = fixture
+        .vault()
+        .join(sealed["staged_result"].as_str().unwrap());
+    let original = std::fs::read(&result).unwrap();
+    let before = fixture.snapshot();
+    let valid = fixture.json(&["queue", "apply", "--json", "--dry-run"]);
+    assert_eq!(valid["applied"], 1, "{valid}");
+    assert_eq!(fixture.snapshot(), before);
+
+    let path = fixture.root().join("corrected-source.json");
+    let mut corrected = source_result["output"].clone();
+    corrected["unresolved"] = json!([{"id":"source:required-read","question":"A required supporting read remains unavailable.","evidence":[range]}]);
+    std::fs::write(&path, serde_json::to_vec(&corrected).unwrap()).unwrap();
+    fixture.success(&["work", "record", "--file", path.to_str().unwrap()]);
+    assert_eq!(
+        fixture.json(&["work", "status", source["work_id"].as_str().unwrap()])["complete"],
+        true
+    );
+    fixture.stage(
+        &independent,
+        &fixture.target_revision(&independent),
+        "Independent retained source interpretation.",
+    );
+    let before = fixture.snapshot();
+    let preview = fixture
+        .command()
+        .args(["queue", "apply", "--json", "--dry-run"])
+        .output()
+        .unwrap();
+    assert!(!preview.status.success());
+    let preview: Value = serde_json::from_slice(&preview.stdout).unwrap();
+    assert!(preview["fatal"].is_null(), "{preview}");
+    assert_eq!(preview["applied"], 1, "{preview}");
+    assert_eq!(preview["rejected"], 1, "{preview}");
+    assert_eq!(fixture.snapshot(), before);
+    let applied = fixture
+        .command()
+        .args(["queue", "apply", "--json"])
+        .output()
+        .unwrap();
+    assert!(!applied.status.success());
+    let applied: Value = serde_json::from_slice(&applied.stdout).unwrap();
+    assert!(applied["fatal"].is_null(), "{applied}");
+    assert_eq!(applied["applied"], 1, "{applied}");
+    assert_eq!(applied["rejected"], 1, "{applied}");
+    assert!(fixture.is_completed(&independent));
+    assert!(!fixture.is_completed(&rejected));
+    assert_eq!(std::fs::read(&result).unwrap(), original);
+    let (output, report) = fixture.run("process");
+    assert!(!output.status.success(), "{report}");
+    assert_eq!(report["semantic_calls"], 0, "{report}");
+    assert!(fixture.calls().is_empty());
+    std::fs::write(&path, serde_json::to_vec(&source_result["output"]).unwrap()).unwrap();
+    fixture.success(&["work", "record", "--file", path.to_str().unwrap()]);
+    let accepted = fixture.json(&["queue", "apply", "--json"]);
+    assert_eq!(accepted["applied"], 1, "{accepted}");
+    assert!(fixture.is_completed(&rejected));
+    assert!(!result.exists());
+    assert!(fixture.calls().is_empty());
 }
 
 #[test]

@@ -64,6 +64,16 @@ pub(in crate::commands) fn publication_scope(
             None
         };
         match screening_with_inventory(&root, config, config_revision, inventory)? {
+            ScreeningPreparation::SourceBlocked { inventory, work_id } => {
+                merge_pages(&mut pages, inventory.pages.clone())?;
+                let phase = json!({
+                    "inventory_revision":inventory_revision,
+                    "supplied_inventory_revision":supplied_revision,
+                    "source_work":work_id,
+                    "source_blocked":true,
+                });
+                (inventory.source, owners, pages, phase)
+            }
             ScreeningPreparation::Capacity {
                 inventory,
                 capacity,
@@ -355,7 +365,7 @@ mod tests {
     }
 
     #[test]
-    fn capacity_scope_keeps_completed_source_observation_guards() {
+    fn source_observation_scope_preserves_guards_when_capacity_or_blockers_prevent_screening() {
         let mut fixture = Fixture::build_with_text(
             "progressive",
             &"Candidate attributed source observation.\n\n".repeat(2000),
@@ -445,9 +455,39 @@ mod tests {
             serde_json::from_value(result["output"].clone()).unwrap();
         output.summary = "T".repeat(2500);
         let session = lk_vault::MutationSession::acquire(&fixture.root).unwrap();
-        work.record(&session, output, &prepared.resources).unwrap();
+        work.record(&session, output.clone(), &prepared.resources)
+            .unwrap();
         drop(session);
         assert_ne!(before.revision, fixture.scope().revision);
+
+        output.unresolved.push(super::super::state::WorkQuestion {
+            id: "source:missing-required-read".into(),
+            question: "A required supporting read remains unavailable.".into(),
+            evidence: vec![work.plan.parts[0].ranges[0].clone()],
+        });
+        let session = lk_vault::MutationSession::acquire(&fixture.root).unwrap();
+        work.record(&session, output, &prepared.resources).unwrap();
+        drop(session);
+        assert!(
+            work.progress(&fixture.root, &prepared.resources)
+                .unwrap()
+                .complete
+        );
+        let (blocked_result, guards) = work
+            .result_with_guards(&fixture.root, &prepared.resources)
+            .unwrap();
+        assert_eq!(
+            blocked_result["output"]["unresolved"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        let blocked = fixture.scope();
+        for (path, raw) in guards {
+            assert_eq!(blocked.pages.get(&path), Some(&raw));
+            assert!(!blocked.owners.contains(&path));
+        }
     }
 
     #[test]

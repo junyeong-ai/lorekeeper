@@ -106,8 +106,8 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   or completion from capacity admission. Unknown packet costs await source observations.
   An indivisible packet's typed byte-capacity failure defers only its target; malformed
   inputs and corrupt saved manifests remain integrity failures.
-  Capture capacity with its complete inventory and source-observation guards for staged
-  proposal rejection too; unchanged rejected scope never becomes global application failure.
+  Capture capacity and typed source-observation blockers with their complete inventory and
+  source guards for staged proposal rejection too; known incomplete scope defers only its work.
 - Native inspection/reduction and screening are structured inference roles
   (`execution/observation.rs`); bounded single-section finalization uses
   `execution/finalization.rs`. Rust selects applicable shared generation rules through

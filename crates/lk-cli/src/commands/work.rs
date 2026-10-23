@@ -496,6 +496,9 @@ pub(super) fn task_context(
         };
         match screening(&root, config, config_revision, task_id, queries)? {
             ScreeningPreparation::Capacity { capacity, .. } => return Err(capacity.into()),
+            ScreeningPreparation::SourceBlocked { work_id, .. } => {
+                return Err(miette::miette!("{}", source_blocked_reason(&work_id)));
+            }
             ScreeningPreparation::Source { work, .. } => {
                 return Ok(
                     json!({"status":"needs-source-observations","context_revision":null,
@@ -677,13 +680,8 @@ fn task_for_plan(
             "progressive extraction requires recorded discovery before planning; run lore work discover and inspect lore work context"
         )
     })?;
-    let ScreeningPreparation::Candidates(screening) =
-        screening(root, config, config_revision, task_id, &queries)?
-    else {
-        return Err(miette::miette!(
-            "source observations are incomplete; use lore work source-plan before planning selected evidence"
-        ));
-    };
+    let screening =
+        screening(root, config, config_revision, task_id, &queries)?.into_candidates()?;
     if !screening.selection.is_planned(root)? {
         return Err(miette::miette!(
             "candidate screening is incomplete; use lore work select before planning selected evidence"
@@ -708,6 +706,16 @@ enum ScreeningPreparation {
         inventory: Box<resources::SelectionInventory>,
         capacity: selection::ScreeningCapacity,
     },
+    SourceBlocked {
+        inventory: Box<resources::SelectionInventory>,
+        work_id: String,
+    },
+}
+
+fn source_blocked_reason(work_id: &str) -> String {
+    format!(
+        "source observation Work {work_id} retains processing blockers; resolve or replan before candidate screening"
+    )
 }
 
 fn screening(
@@ -718,10 +726,7 @@ fn screening(
     queries: &[lk_core::discovery::DiscoveryQuery],
 ) -> miette::Result<ScreeningPreparation> {
     let inventory = resources::selection_inventory(root, config, task_id, queries)?;
-    match screening_with_inventory(root, config, config_revision, inventory)? {
-        ScreeningPreparation::Capacity { capacity, .. } => Err(capacity.into()),
-        prepared => Ok(prepared),
-    }
+    screening_with_inventory(root, config, config_revision, inventory)
 }
 
 fn screening_with_inventory(
@@ -790,15 +795,16 @@ fn screening_with_inventory(
             });
         }
         let (result, guards) = work.result_with_guards(root, &inventory.source.resources)?;
+        inventory.pages.extend(guards);
         if result["output"]["unresolved"]
             .as_array()
             .is_some_and(|values| !values.is_empty())
         {
-            return Err(miette::miette!(
-                "source observations retain processing blockers; resolve or replan before candidate screening"
-            ));
+            return Ok(ScreeningPreparation::SourceBlocked {
+                inventory: Box::new(inventory),
+                work_id: work.plan.id,
+            });
         }
-        inventory.pages.extend(guards);
         context = json!({"role":"complete-bounded-source-observations", "source_revision":source_revision,
             "observation":result});
     }
@@ -854,6 +860,19 @@ fn current_screening(
 }
 
 impl ScreeningPreparation {
+    fn into_candidates(self) -> miette::Result<Box<Screening>> {
+        match self {
+            Self::Candidates(screening) => Ok(screening),
+            Self::Capacity { capacity, .. } => Err(capacity.into()),
+            Self::SourceBlocked { work_id, .. } => {
+                Err(miette::miette!("{}", source_blocked_reason(&work_id)))
+            }
+            Self::Source { .. } => Err(miette::miette!(
+                "source observations are incomplete; resume lore work source-plan before candidate screening"
+            )),
+        }
+    }
+
     fn persist(
         &self,
         session: &lk_vault::MutationSession,
@@ -862,6 +881,9 @@ impl ScreeningPreparation {
     ) -> miette::Result<()> {
         match self {
             Self::Capacity { capacity, .. } => return Err((*capacity).into()),
+            Self::SourceBlocked { work_id, .. } => {
+                return Err(miette::miette!("{}", source_blocked_reason(work_id)));
+            }
             Self::Source { prepared, .. } => {
                 persist_prepared(session, config, config_revision, prepared)?;
             }
@@ -890,12 +912,8 @@ pub(super) fn prepare_screening(
     task_id: &str,
 ) -> miette::Result<ScreeningTurn> {
     let root = root.canonicalize().into_diagnostic()?;
-    let prepared = current_screening(&root, config, config_revision, task_id)?;
-    let ScreeningPreparation::Candidates(screening) = prepared else {
-        return Err(miette::miette!(
-            "source observations are incomplete; resume source work before candidate screening"
-        ));
-    };
+    let screening =
+        current_screening(&root, config, config_revision, task_id)?.into_candidates()?;
     if let Some(reason) = screening.selection.admission_reason(config, &root)? {
         return Err(miette::miette!("{reason}"));
     }
@@ -920,12 +938,8 @@ pub(super) fn record_screening(
     previous_revision: Option<&str>,
 ) -> miette::Result<usize> {
     let session = lk_vault::MutationSession::acquire(root).into_diagnostic()?;
-    let prepared = current_screening(session.root(), config, config_revision, task_id)?;
-    let ScreeningPreparation::Candidates(screening) = prepared else {
-        return Err(miette::miette!(
-            "candidate screening source scope changed; replan"
-        ));
-    };
+    let screening =
+        current_screening(session.root(), config, config_revision, task_id)?.into_candidates()?;
     Ok(screening
         .selection
         .record(
@@ -946,17 +960,26 @@ fn selected_task(
     binding: &lk_queue::ExtractionSelection,
     mutation: &mut lk_vault::MutationPlan,
 ) -> miette::Result<(Prepared, std::collections::BTreeSet<String>)> {
-    let current = screening(root, config, config_revision, task_id, queries).map_err(|error| {
-        if error.downcast_ref::<selection::ScreeningCapacity>().is_some() {
-            publication_rejection(RejectionKind::EvidenceScopeChanged,
-                "current candidate screening exceeds its complete packet bound; retain the proposal and regenerate only after explicit scope or capacity reconsideration")
-        } else { error }
-    })?;
-    let ScreeningPreparation::Candidates(screening) = current else {
-        return Err(publication_rejection(
-            RejectionKind::EvidenceScopeChanged,
-            "source observations are incomplete; retained extraction cannot publish",
-        ));
+    let screening = match screening(root, config, config_revision, task_id, queries)? {
+        ScreeningPreparation::Candidates(screening) => screening,
+        ScreeningPreparation::Capacity { .. } => {
+            return Err(publication_rejection(
+                RejectionKind::EvidenceScopeChanged,
+                "current candidate screening exceeds its complete packet bound; retained proposal needs explicit scope or capacity reconsideration",
+            ));
+        }
+        ScreeningPreparation::SourceBlocked { work_id, .. } => {
+            return Err(publication_rejection(
+                RejectionKind::EvidenceScopeChanged,
+                source_blocked_reason(&work_id),
+            ));
+        }
+        ScreeningPreparation::Source { .. } => {
+            return Err(publication_rejection(
+                RejectionKind::EvidenceScopeChanged,
+                "source observations are incomplete; retained extraction cannot publish",
+            ));
+        }
     };
     let ledger = screening.selection.guard(root, mutation, binding)?;
     Ok((
@@ -1126,23 +1149,16 @@ fn prepare_task_in_session(
         && is_progressive(config)?
         && discovery::current(root, task)?.is_some()
     {
-        let selected = match match inventory {
-            Some(inventory) => screening_with_inventory(root, config, config_revision, inventory),
-            None => current_screening(root, config, config_revision, &task.task_id),
-        } {
-            Ok(selected) => selected,
-            Err(error)
-                if error
-                    .downcast_ref::<selection::ScreeningCapacity>()
-                    .is_some() =>
-            {
-                return Ok(TaskWork::Admission {
-                    reason: error.to_string(),
-                });
-            }
-            Err(error) => return Err(error),
+        let selected = match inventory {
+            Some(inventory) => screening_with_inventory(root, config, config_revision, inventory)?,
+            None => current_screening(root, config, config_revision, &task.task_id)?,
         };
         match selected {
+            ScreeningPreparation::SourceBlocked { work_id, .. } => {
+                return Ok(TaskWork::Admission {
+                    reason: source_blocked_reason(&work_id),
+                });
+            }
             ScreeningPreparation::Capacity { capacity, .. } => {
                 return Ok(TaskWork::Admission {
                     reason: capacity.to_string(),
@@ -1663,6 +1679,9 @@ pub async fn run(opts: &GlobalOptions, command: WorkCommand) -> miette::Result<(
         WorkCommand::Cost { task_id } => {
             match current_screening(&root, &config, &config_revision, &task_id)? {
                 ScreeningPreparation::Capacity { capacity, .. } => return Err(capacity.into()),
+                ScreeningPreparation::SourceBlocked { work_id, .. } => {
+                    return Err(miette::miette!("{}", source_blocked_reason(&work_id)));
+                }
                 ScreeningPreparation::Source { work, .. } => {
                     json!({"status":"needs-source-observations",
                 "source_parts":work.plan.parts.len(),"cost":null,
@@ -1696,6 +1715,9 @@ pub async fn run(opts: &GlobalOptions, command: WorkCommand) -> miette::Result<(
             }
             match prepared {
                 ScreeningPreparation::Capacity { capacity, .. } => return Err(capacity.into()),
+                ScreeningPreparation::SourceBlocked { work_id, .. } => {
+                    return Err(miette::miette!("{}", source_blocked_reason(&work_id)));
+                }
                 ScreeningPreparation::Source { work, prepared } => json!({
                     "status":"needs-source-observations",
                     "source_work":progress(&work, &root, &prepared, 20, 0)?,
