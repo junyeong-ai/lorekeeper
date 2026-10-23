@@ -489,14 +489,12 @@ impl Work {
             limits.max_result_bytes,
         )
         .map_err(fail)?;
-        let work = Self {
+        Ok(Self {
             plan,
             context,
             max_input_bytes: limits.max_input_bytes,
             reduction: ReductionPolicy::ByteBudgetedV1,
-        };
-        work.plan.verify_resources(resources).map_err(fail)?;
-        Ok(work)
+        })
     }
 
     pub fn create(
@@ -930,24 +928,38 @@ impl Work {
         root: &Path,
         resources: &[SemanticResource],
     ) -> miette::Result<(WorkProgress, Option<Value>)> {
+        let (progress, mut inputs) = self.prepare_inspections(root, resources, 1)?;
+        Ok((progress, inputs.pop()))
+    }
+
+    pub fn prepare_inspections(
+        &self,
+        root: &Path,
+        resources: &[SemanticResource],
+        limit: usize,
+    ) -> miette::Result<(WorkProgress, Vec<Value>)> {
+        debug_assert!(limit > 0);
         let evaluated = self.evaluate(root, resources)?;
         let progress = evaluated.progress();
-        let input = if progress.complete {
-            None
-        } else if let Some(id) = progress.ready.first() {
-            let node = evaluated
-                .nodes
-                .iter()
-                .find(|node| &node.id == id)
-                .expect("ready node belongs to the evaluated tree");
-            Some(
-                self.node_input(node, &evaluated.inputs, &evaluated.current)
-                    .map_err(NodeInputError::report)?,
-            )
+        let inputs = if progress.complete {
+            Vec::new()
         } else {
-            None
+            progress
+                .ready
+                .iter()
+                .take(limit)
+                .map(|id| {
+                    let node = evaluated
+                        .nodes
+                        .iter()
+                        .find(|node| &node.id == id)
+                        .expect("ready node belongs to the evaluated tree");
+                    self.node_input(node, &evaluated.inputs, &evaluated.current)
+                        .map_err(NodeInputError::report)
+                })
+                .collect::<miette::Result<Vec<_>>>()?
         };
-        Ok((progress, input))
+        Ok((progress, inputs))
     }
 
     pub fn input(
@@ -1045,19 +1057,7 @@ impl Work {
         output: WorkOutput,
         resources: &[SemanticResource],
     ) -> miette::Result<WorkProgress> {
-        self.record_with_reuse(session, output, resources, None, Vec::new())
-    }
-
-    fn record_with_reuse(
-        &self,
-        session: &MutationSession,
-        output: WorkOutput,
-        resources: &[SemanticResource],
-        reused_from: Option<Reuse>,
-        additional_guards: Vec<(PathBuf, String)>,
-    ) -> miette::Result<WorkProgress> {
-        let mutation =
-            self.plan_record(session, output, resources, reused_from, additional_guards)?;
+        let mutation = self.plan_record(session, output, resources, None, Vec::new())?;
         session.apply(mutation).map_err(fail)?;
         self.progress(session.root(), resources)
     }
@@ -1070,11 +1070,28 @@ impl Work {
         reused_from: Option<Reuse>,
         additional_guards: Vec<(PathBuf, String)>,
     ) -> miette::Result<MutationPlan> {
+        let evaluated = self.evaluate(session.root(), resources)?;
+        self.plan_evaluated_record(
+            session.root(),
+            output,
+            evaluated,
+            reused_from,
+            additional_guards,
+        )
+    }
+
+    fn plan_evaluated_record(
+        &self,
+        root: &Path,
+        output: WorkOutput,
+        evaluated: Evaluation<'_>,
+        reused_from: Option<Reuse>,
+        additional_guards: Vec<(PathBuf, String)>,
+    ) -> miette::Result<MutationPlan> {
         if output.work_id != self.plan.id {
             return Err(fail("output belongs to another work"));
         }
         require_id(&output.node_id)?;
-        let evaluated = self.evaluate(session.root(), resources)?;
         let node = evaluated
             .nodes
             .iter()
@@ -1103,7 +1120,7 @@ impl Work {
             reused_from,
         };
         let path = output_path(&self.plan.id, &node.id)?;
-        let before = read_optional(session.root(), &path)?;
+        let before = evaluated.raw.get(&path).cloned();
         let mut mutation = MutationPlan::default();
         // The node edit owns its before/after guard. A separate unchanged guard
         // would reject our own replacement when an interrupted journal resumes.
@@ -1118,7 +1135,7 @@ impl Work {
             }
         }
         mutation
-            .publish_expected(session.root(), path, before, encoded(&stored)?)
+            .publish_expected(root, path, before, encoded(&stored)?)
             .map_err(fail)?;
         Ok(mutation)
     }
@@ -1150,7 +1167,7 @@ impl Work {
             ));
         }
         let purpose_key = encoded(&purpose_value)?;
-        self.plan.verify_resources(resources).map_err(fail)?;
+        let evaluated = self.evaluate(session.root(), resources)?;
         let content_revision = self
             .plan
             .part_content_revision(new_node_id, &purpose_key)
@@ -1198,7 +1215,14 @@ impl Work {
         let mut output = old.output.clone();
         output.work_id = self.plan.id.clone();
         output.node_id = new_node_id.into();
-        let new_input = self.input(session.root(), new_node_id, resources)?;
+        let new_node = evaluated
+            .nodes
+            .iter()
+            .find(|node| node.id == new_node_id)
+            .ok_or_else(|| fail("unknown work node"))?;
+        let new_input = self
+            .node_input(new_node, &evaluated.inputs, &evaluated.current)
+            .map_err(NodeInputError::report)?;
         output.input_revision = new_input["input_revision"]
             .as_str()
             .ok_or_else(|| fail("missing input revision"))?
@@ -1230,10 +1254,10 @@ impl Work {
             remap(&mut question.evidence)?;
         }
         let (manifest_path, manifest_raw) = prior.manifest(session.root())?;
-        self.record_with_reuse(
-            session,
+        let mutation = self.plan_evaluated_record(
+            session.root(),
             output,
-            resources,
+            evaluated,
             Some(Reuse {
                 work_id: prior.plan.id.clone(),
                 node_id: old_node_id.into(),
@@ -1241,7 +1265,9 @@ impl Work {
                 content_revision,
             }),
             vec![(manifest_path, manifest_raw), (old_path, old_raw)],
-        )
+        )?;
+        session.apply(mutation).map_err(fail)?;
+        self.progress(session.root(), resources)
     }
 
     #[cfg(test)]
@@ -1488,6 +1514,54 @@ mod tests {
                 text: "evidence ".repeat(repetitions),
             })
             .collect()
+    }
+
+    #[test]
+    fn built_work_reconstructs_exact_unicode_and_empty_resources() {
+        let root = tempfile::tempdir().unwrap();
+        let source = vec![
+            SemanticResource {
+                address: "wiki/documents/원본.md".into(),
+                revision: "source-revision".into(),
+                authority: SemanticAuthority::Page,
+                text: "## 범위\r\n\r\n한글🙂 \"quoted\" \\\t\n\n".repeat(130),
+            },
+            SemanticResource {
+                address: "wiki/documents/empty.md".into(),
+                revision: "empty-revision".into(),
+                authority: SemanticAuthority::Review,
+                text: String::new(),
+            },
+        ];
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let work = Work::create(&session, &source, "subject", context("one"), limits()).unwrap();
+        let loaded = Work::load(root.path(), &work.plan.id).unwrap();
+        assert_eq!(encoded(&work).unwrap(), encoded(&loaded).unwrap());
+        let mut reconstructed = vec![String::new(); source.len()];
+        let mut empty_ranges = 0;
+        for part in &work.plan.parts {
+            let fresh = work.input(root.path(), &part.id, &source).unwrap();
+            let restored = loaded.input(root.path(), &part.id, &source).unwrap();
+            assert_eq!(fresh, restored);
+            assert!(encoded(&fresh).unwrap().len() <= work.max_input_bytes);
+            for range in fresh["input"]["ranges"].as_array().unwrap() {
+                let resource = range["range"]["resource"].as_u64().unwrap() as usize;
+                let text = range["text"].as_str().unwrap();
+                reconstructed[resource].push_str(text);
+                empty_ranges += usize::from(text.is_empty());
+            }
+        }
+        assert_eq!(
+            reconstructed,
+            source
+                .iter()
+                .map(|resource| resource.text.clone())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(empty_ranges, 1);
+        let mut changed = source.clone();
+        changed[0].text.push('!');
+        assert!(loaded.progress(root.path(), &changed).is_err());
     }
 
     #[test]
@@ -1759,6 +1833,52 @@ mod tests {
             );
         }
         assert_eq!(kinds, BTreeSet::from(["inspect".into(), "reduce".into()]));
+    }
+
+    #[test]
+    fn prepared_inspections_preserve_ready_order_and_exclude_dependent_nodes() {
+        let root = tempfile::tempdir().unwrap();
+        let source = resources();
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let work = Work::create(&session, &source, "subject", context("one"), limits()).unwrap();
+        let (before, requests) = work.prepare_inspections(root.path(), &source, 3).unwrap();
+        assert!(before.ready.len() > 1);
+        assert_eq!(requests.len(), before.ready.len().min(3));
+        assert_eq!(
+            serde_json::to_value(&before).unwrap(),
+            serde_json::to_value(work.progress(root.path(), &source).unwrap()).unwrap()
+        );
+        let (_, single) = work.prepare_inspection(root.path(), &source).unwrap();
+        assert_eq!(single.as_ref(), requests.first());
+        let ready = before
+            .ready
+            .iter()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        for (request, id) in requests.iter().zip(&before.ready) {
+            assert_eq!(request["node_id"].as_str(), Some(id.as_str()));
+            assert_eq!(request, &work.input(root.path(), id, &source).unwrap());
+            for child in request["children"].as_array().into_iter().flatten() {
+                assert!(!ready.contains(child["node_id"].as_str().unwrap()));
+            }
+        }
+        let first = &before.ready[0];
+        work.record(&session, draft(&work, root.path(), first, &source), &source)
+            .unwrap();
+        let (after, _) = work.prepare_inspections(root.path(), &source, 3).unwrap();
+        assert_eq!(after.completed, 1);
+        assert!(!after.ready.contains(first));
+        let parent = work
+            .nodes()
+            .unwrap()
+            .into_iter()
+            .find(|node| matches!(&node.kind, NodeKind::Reduce { children } if children.contains(first)))
+            .unwrap();
+        assert!(!after.ready.contains(&parent.id));
+        finish(&work, &session, &source);
+        let (complete, requests) = work.prepare_inspections(root.path(), &source, 3).unwrap();
+        assert!(complete.complete);
+        assert!(requests.is_empty());
     }
 
     #[test]
@@ -2148,6 +2268,65 @@ mod tests {
     }
 
     #[test]
+    fn captured_record_matches_fresh_planning_and_refuses_changed_artifacts() {
+        for artifact in [
+            "observation",
+            "absent-observation",
+            "other-observation",
+            "manifest",
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let source = resources();
+            let session = MutationSession::acquire(root.path()).unwrap();
+            let work =
+                Work::create(&session, &source, "subject", context("one"), limits()).unwrap();
+            let id = &work.plan.parts[0].id;
+            let other = &work.plan.parts[1].id;
+            for node in [id, other] {
+                if artifact != "absent-observation" || node != id {
+                    work.record(&session, draft(&work, root.path(), node, &source), &source)
+                        .unwrap();
+                }
+            }
+            let mut output = draft(&work, root.path(), id, &source);
+            output.summary = "A corrected observation from the exact assigned source.".into();
+            let fresh = work
+                .plan_record(&session, output.clone(), &source, None, Vec::new())
+                .unwrap();
+            let captured = work.evaluate(root.path(), &source).unwrap();
+            let equivalent = work
+                .plan_evaluated_record(root.path(), output.clone(), captured, None, Vec::new())
+                .unwrap();
+            assert_eq!(encoded(&fresh).unwrap(), encoded(&equivalent).unwrap());
+
+            let captured = work.evaluate(root.path(), &source).unwrap();
+            let changed = match artifact {
+                "manifest" => work_path(&work.plan.id, "plan.json").unwrap(),
+                "other-observation" => output_path(&work.plan.id, other).unwrap(),
+                _ => output_path(&work.plan.id, id).unwrap(),
+            };
+            let before = read_optional(root.path(), &changed).unwrap();
+            let after = format!("{}\n", before.as_deref().unwrap_or("external observation"));
+            std::fs::write(root.path().join(&changed), &after).unwrap();
+            if let Ok(mutation) =
+                work.plan_evaluated_record(root.path(), output, captured, None, Vec::new())
+            {
+                assert!(session.apply(mutation).is_err());
+            }
+            assert_eq!(
+                read_optional(root.path(), &changed).unwrap().as_deref(),
+                Some(after.as_str())
+            );
+            assert!(
+                !root
+                    .path()
+                    .join(".lorekeeper/mutation/pending.json")
+                    .exists()
+            );
+        }
+    }
+
+    #[test]
     fn reuse_rebinds_only_exact_local_evidence_and_records_provenance() {
         let root = tempfile::tempdir().unwrap();
         let session = MutationSession::acquire(root.path()).unwrap();
@@ -2201,8 +2380,13 @@ mod tests {
             .iter()
             .find(|candidate| candidate.id == part.id)
             .unwrap();
-        new.reuse_from(&session, &old, &part.id, &new_part.id, &changed)
+        let reused = new
+            .reuse_from(&session, &old, &part.id, &new_part.id, &changed)
             .unwrap();
+        assert_eq!(
+            serde_json::to_value(reused).unwrap(),
+            serde_json::to_value(new.progress(root.path(), &changed).unwrap()).unwrap(),
+        );
         let raw = read_optional(
             root.path(),
             &output_path(&new.plan.id, &new_part.id).unwrap(),
@@ -2225,6 +2409,43 @@ mod tests {
             different
                 .reuse_from(&session, &old, &part.id, &new_part.id, &changed)
                 .is_err()
+        );
+
+        let other = &new
+            .plan
+            .parts
+            .iter()
+            .find(|candidate| candidate.id != new_part.id)
+            .unwrap()
+            .id;
+        new.record(
+            &session,
+            draft(&new, root.path(), other, &changed),
+            &changed,
+        )
+        .unwrap();
+        let other_path = output_path(&new.plan.id, other).unwrap();
+        let mut corrupt: Value =
+            serde_json::from_str(&read_optional(root.path(), &other_path).unwrap().unwrap())
+                .unwrap();
+        corrupt["output"]["summary"] = "An unverified external replacement.".into();
+        std::fs::write(root.path().join(other_path), encoded(&corrupt).unwrap()).unwrap();
+        let before = read_optional(
+            root.path(),
+            &output_path(&new.plan.id, &new_part.id).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            new.reuse_from(&session, &old, &part.id, &new_part.id, &changed)
+                .is_err()
+        );
+        assert_eq!(
+            read_optional(
+                root.path(),
+                &output_path(&new.plan.id, &new_part.id).unwrap()
+            )
+            .unwrap(),
+            before
         );
     }
     #[test]
