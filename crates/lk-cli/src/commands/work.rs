@@ -980,6 +980,7 @@ pub(super) fn record_inspection(
         ));
     }
     let session = lk_vault::MutationSession::acquire(root).into_diagnostic()?;
+    let root = session.root();
     let (work, prepared) = load(root, config, config_revision, id)?;
     work.record(&session, output, &prepared.resources)
 }
@@ -1239,6 +1240,7 @@ pub(super) fn restage_finished(
     id: &str,
 ) -> miette::Result<()> {
     let session = lk_vault::MutationSession::acquire(root).into_diagnostic()?;
+    let root = session.root();
     let (work, prepared) = load(root, config, config_revision, id)?;
     let final_path = PathBuf::from(".lorekeeper/work")
         .join(id)

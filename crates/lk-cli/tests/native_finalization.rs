@@ -303,6 +303,44 @@ fn section_finalizers_use_typed_bodies_and_resume_saved_work_on_both_hosts() {
 }
 
 #[test]
+fn native_section_records_use_the_verified_vault_owner_through_a_root_alias() {
+    let fixture = Fixture::new("codex", 32768);
+    std::os::unix::fs::symlink(
+        fixture.root().join("vault"),
+        fixture.root().join("vault-alias"),
+    )
+    .unwrap();
+    let config = std::fs::read_to_string(&fixture.config).unwrap();
+    std::fs::write(
+        &fixture.config,
+        config.replace("root: vault", "root: vault-alias"),
+    )
+    .unwrap();
+    let (task, plan) = fixture.add("source", TaskKind::Summarize);
+    let before = std::fs::read(fixture.work_path(&plan, "plan.json")).unwrap();
+    let (output, report) = fixture.run();
+    assert!(
+        output.status.success(),
+        "{report}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(report["semantic_calls"], 2);
+    assert_eq!(
+        std::fs::read(fixture.work_path(&plan, "plan.json")).unwrap(),
+        before
+    );
+    assert!(fixture.work_path(&plan, "publication.json").exists());
+    let status = fixture.json(&["queue", "status", "--json"]);
+    assert!(
+        status["data"]["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["task_id"] == task.task_id && entry["status"] == "done")
+    );
+}
+
+#[test]
 fn needs_action_retries_spend_no_calls_and_do_not_starve_independent_work() {
     for engine in ["codex", "claude-code"] {
         let fixture = Fixture::new(engine, 32768);
