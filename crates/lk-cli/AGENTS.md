@@ -80,6 +80,9 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   batch. Exhaustion retains unfinished work and fails explicitly, without clipping evidence.
   Resume current explicit Work plans even when the remaining batch fits whole input;
   validate their exact manifest before using recorded observations.
+  Saved section finalizers capture fresh scoped reviews separately from source-only Work;
+  guard the complete final request after the host and its context again at apply. Do not
+  incorporate reviews into old Work identities or rewrite paid nodes to acquire that scope.
   New work fixes reduction topology from the exact envelope plus each child's full result
   allowance; every child and its evidence mapping participates. Persist the policy and
   preserve missing-policy binary plans, node IDs and seals without rewriting them on resume.
@@ -101,6 +104,8 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   `max_screening_batches` defers oversized incomplete ledgers before new screening calls;
   complete ledgers remain usable. No clipping, implicit recipe rewrite, token/price claim
   or completion from capacity admission. Unknown packet costs await source observations.
+  An indivisible packet's typed byte-capacity failure defers only its target; malformed
+  inputs and corrupt saved manifests remain integrity failures.
 - Native inspection/reduction and screening are structured inference roles
   (`execution/observation.rs`); bounded single-section finalization uses
   `execution/finalization.rs`. Rust selects applicable shared generation rules through

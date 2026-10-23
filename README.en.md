@@ -455,7 +455,7 @@ for result contracts.
 
 Small summaries, event refinement and theme extraction use one structured request with
 source text, scoped reviews and applicable generation rules. Saved bounded work resumes
-its observations before using those same section rules. A complete request exceeding
+its observations and binds fresh reviews and evidence separately before using those same section rules. A complete request exceeding
 the input bound defers only that target; independent work continues. The model returns
 a section body. Rust owns task identity,
 revision checks, staging and publication. A required read or review defers the task without

@@ -1470,6 +1470,21 @@ mod native {
                 .expect("measured preparation") += started_at.elapsed().as_millis() as u64;
             match section {
                 Ok(crate::commands::work::SectionPreparation::Interactive) => {}
+                Ok(crate::commands::work::SectionPreparation::Capacity {
+                    request_bytes,
+                    max_input_bytes,
+                }) => {
+                    let reason = format!(
+                        "complete section finalizer request requires {request_bytes} bytes, above max_input_bytes {max_input_bytes}; existing work is retained"
+                    );
+                    self.record(
+                        "bounded section capacity",
+                        StageState::Skipped,
+                        Some(reason.clone()),
+                    );
+                    self.result.work_telemetry.record(metrics);
+                    return WorkStep::Deferred(reason);
+                }
                 Ok(crate::commands::work::SectionPreparation::NeedsAction(reason)) => {
                     self.record(
                         "bounded section action",
@@ -1480,7 +1495,7 @@ mod native {
                     return WorkStep::Deferred(reason);
                 }
                 Ok(crate::commands::work::SectionPreparation::Ready(section)) => {
-                    let result = self.finalize_section(id, section, &mut metrics).await;
+                    let result = self.finalize_section(id, *section, &mut metrics).await;
                     self.result.work_telemetry.record(metrics);
                     return result;
                 }

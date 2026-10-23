@@ -145,8 +145,17 @@ pub(in crate::commands) fn request(
     work: &Value,
     events: Option<Value>,
     max_response_bytes: usize,
+    review_context: Value,
 ) -> miette::Result<Value> {
-    section_request(work, events, max_response_bytes, false)
+    let mut request = section_request(work, events, max_response_bytes, false)?;
+    request["review_context"] = review_context;
+    let instructions = request["instructions"]
+        .as_str()
+        .expect("section instructions");
+    request["instructions"] = json!(format!(
+        "{instructions}\nRead every resource in review_context in full. These are fresh scoped reviews and their exact evidence, captured separately from the saved source observations. Apply their current uncertainty and constraints; the saved observations do not certify that these reviews were inspected. Return needs-action if a required review or repair cannot be satisfied."
+    ));
+    Ok(request)
 }
 
 pub(in crate::commands) fn whole_request(

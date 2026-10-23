@@ -136,6 +136,10 @@ coverage. Return after the selected node is recorded; do not drain other tasks.
 
 For bounded summaries, event refinement and theme extraction, Rust supplies the completed
 observations, applicable shared generation rules and exact event roster where needed.
+Fresh scoped reviews and their evidence enter the final request separately; saved source
+observations remain unchanged and do not certify that those reviews were inspected.
+Review changes during generation or before publication reject the draft. An oversized
+complete final request defers that Work without clipping reviews or blocking independent tasks.
 The worker returns only `{ "status": "complete", "body": "...", "reason": null }`, or
 `{ "status": "needs-action", "body": null, "reason": "Required action" }`. Rust supplies
 task identity and revision guards, checks the full result limit, and seals and stages

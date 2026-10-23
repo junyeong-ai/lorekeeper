@@ -406,14 +406,27 @@ pub(super) fn prepare_queue_publication(
         let section: lk_queue::SectionResult =
             serde_json::from_value(result.clone()).into_diagnostic()?;
         if let Some(revision) = section.context_revision {
-            prepared = resources::section_task(&root, config, task_id)?;
-            if revision != prepared.revision(config_revision)?
-                && revision != prepared.legacy_revision(config_revision)?
+            let scope = resources::section_task(&root, config, task_id)?;
+            if revision != scope.revision(config_revision)?
+                && revision != scope.legacy_revision(config_revision)?
             {
                 return Err(publication_rejection(
                     RejectionKind::SemanticContextChanged,
                     "section review/read scope changed; reread and regenerate the result",
                 ));
+            }
+            for (path, content) in scope.pages {
+                if prepared
+                    .pages
+                    .get(&path)
+                    .is_some_and(|before| before != &content)
+                {
+                    return Err(publication_rejection(
+                        RejectionKind::SemanticContextChanged,
+                        "section input changed during review scope capture",
+                    ));
+                }
+                prepared.pages.insert(path, content);
             }
         }
     }
@@ -1189,13 +1202,18 @@ pub(super) struct SectionFinalization {
     pub max_response_bytes: usize,
     completed: Value,
     result: lk_queue::SectionResult,
+    scope: Prepared,
 }
 
 #[cfg(unix)]
 pub(super) enum SectionPreparation {
     Interactive,
-    Ready(SectionFinalization),
+    Ready(Box<SectionFinalization>),
     NeedsAction(String),
+    Capacity {
+        request_bytes: usize,
+        max_input_bytes: usize,
+    },
 }
 
 #[cfg(unix)]
@@ -1274,8 +1292,9 @@ pub(super) fn prepare_section_finalization(
         return Ok(SectionPreparation::Interactive);
     }
     let completed = work.result(&root, &prepared.resources)?;
+    let scope = resources::section_task(&root, config, task_id)?;
     let result = lk_queue::SectionResult {
-        context_revision: None,
+        context_revision: Some(scope.revision(config_revision)?),
         task_id: task_id.clone(),
         cache_hash: cache_hash.clone(),
         target_revision: target_revision.clone(),
@@ -1292,17 +1311,38 @@ pub(super) fn prepare_section_finalization(
     let events = (task.kind == lk_queue::TaskKind::RefineEvents)
         .then(|| refinement_events(&root, &prepared, &task))
         .transpose()?;
-    let request = super::execution::finalization::request(&completed, events, max_response_bytes)?;
-    if serde_json::to_vec(&request).into_diagnostic()?.len()
-        > config
-            .execution
-            .effective_work()
-            .map_err(|error| miette::miette!("{error}"))?
-            .max_input_bytes
-    {
-        return Err(miette::miette!(
-            "complete section finalizer request including generation rules exceeds max_input_bytes; existing work is retained"
-        ));
+    let review_resources = scope
+        .resources
+        .iter()
+        .filter(|resource| {
+            !prepared
+                .resources
+                .iter()
+                .any(|original| original == *resource)
+        })
+        .collect::<Vec<_>>();
+    let review_context = json!({
+        "context_revision":result.context_revision,
+        "dependencies":scope.context["purpose"]["review_dependencies"],
+        "resources":review_resources,
+    });
+    let request = super::execution::finalization::request(
+        &completed,
+        events,
+        max_response_bytes,
+        review_context,
+    )?;
+    let request_bytes = serde_json::to_vec(&request).into_diagnostic()?.len();
+    let max_input_bytes = config
+        .execution
+        .effective_work()
+        .map_err(|error| miette::miette!("{error}"))?
+        .max_input_bytes;
+    if request_bytes > max_input_bytes {
+        return Ok(SectionPreparation::Capacity {
+            request_bytes,
+            max_input_bytes,
+        });
     }
     if let Some(reason) = work.load_finalization_action(&root, &request)? {
         return Ok(SectionPreparation::NeedsAction(reason));
@@ -1315,12 +1355,13 @@ pub(super) fn prepare_section_finalization(
             "unresolved work concerns prevent section finalization".into(),
         ));
     }
-    Ok(SectionPreparation::Ready(SectionFinalization {
+    Ok(SectionPreparation::Ready(Box::new(SectionFinalization {
         request,
         completed,
         result,
+        scope,
         max_response_bytes,
-    }))
+    })))
 }
 
 #[cfg(unix)]
@@ -1333,6 +1374,7 @@ pub(super) fn record_finalization_action(
     reason: String,
 ) -> miette::Result<()> {
     let session = lk_vault::MutationSession::acquire(root).into_diagnostic()?;
+    revalidate_section_finalization(session.root(), config, config_revision, id, &section)?;
     let (work, prepared) = load(session.root(), config, config_revision, id)?;
     let mut plan = work.plan_finalization_action(
         session.root(),
@@ -1342,6 +1384,7 @@ pub(super) fn record_finalization_action(
         reason,
     )?;
     prepared.guard_pages(&mut plan);
+    section.scope.guard_pages(&mut plan);
     session.apply(plan).into_diagnostic()?;
     Ok(())
 }
@@ -1357,20 +1400,50 @@ pub(super) fn finish_section(
 ) -> miette::Result<()> {
     validate_section_response(&prepared_section.request, &body)?;
     let session = lk_vault::MutationSession::acquire(root).into_diagnostic()?;
+    revalidate_section_finalization(
+        session.root(),
+        config,
+        config_revision,
+        id,
+        &prepared_section,
+    )?;
     let (work, prepared) = load(session.root(), config, config_revision, id)?;
     let result = lk_queue::SectionResult {
-        context_revision: None,
         body,
         ..prepared_section.result
     };
-    let (_, mutation) = plan_finish_expected(
+    let (_, mut mutation) = plan_finish_expected(
         &session,
         &work,
         &prepared,
         serde_json::to_value(result).into_diagnostic()?,
         Some(&prepared_section.completed),
     )?;
+    prepared_section.scope.guard_pages(&mut mutation);
     session.apply(mutation).into_diagnostic()?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn revalidate_section_finalization(
+    root: &Path,
+    config: &lk_core::config::Config,
+    config_revision: &str,
+    id: &str,
+    section: &SectionFinalization,
+) -> miette::Result<()> {
+    let SectionPreparation::Ready(current) =
+        prepare_section_finalization(root, config, config_revision, id)?
+    else {
+        return Err(miette::miette!(
+            "section finalization scope changed; retained work requires a fresh request"
+        ));
+    };
+    if current.request != section.request || current.completed != section.completed {
+        return Err(miette::miette!(
+            "section finalization scope changed during generation; retained work requires a fresh request"
+        ));
+    }
     Ok(())
 }
 

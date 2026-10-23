@@ -294,8 +294,16 @@ pub(in crate::commands) fn finish(
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     #[test]
-    fn staged_whole_sections_reject_new_scoped_reviews_without_retagging() {
+    fn staged_sections_reject_new_scoped_reviews_without_retagging() {
+        for bounded in [false, true] {
+            assert_staged_review_scope(bounded);
+        }
+    }
+
+    #[cfg(unix)]
+    fn assert_staged_review_scope(bounded: bool) {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().canonicalize().unwrap();
         let config_path = root.join("config.yaml");
@@ -315,25 +323,69 @@ mod tests {
         std::fs::write(root.join(target), format!("---\ntype: document\ntitle: Source\nllm_inputs:\n  summary: {}\n---\n# Source\n\n## Summary\n\n## Content\nA proposed decision.\n",task.cache_hash)).unwrap();
         lk_queue::write_tasks_atomic(&queue.join("tasks.jsonl"), std::slice::from_ref(&task))
             .unwrap();
-        let Preparation::Ready(section) =
-            prepare(&root, &config, &revision, &task.task_id).unwrap()
-        else {
-            panic!("ready section");
+        let body = "A proposal, not a verified deployment.".to_string();
+        let result = if bounded {
+            let prepared = super::super::resources::task(&root, &config, &task.task_id).unwrap();
+            let id = {
+                let session = lk_vault::MutationSession::acquire(&root).unwrap();
+                let work = super::super::persist_prepared(&session, &config, &revision, &prepared)
+                    .unwrap();
+                loop {
+                    let (progress, request) =
+                        work.prepare_inspection(&root, &prepared.resources).unwrap();
+                    if progress.complete {
+                        break;
+                    }
+                    let request = request.unwrap();
+                    work.record(
+                        &session,
+                        super::super::WorkOutput {
+                            work_id: work.plan.id.clone(),
+                            node_id: request["node_id"].as_str().unwrap().into(),
+                            input_revision: request["input_revision"].as_str().unwrap().into(),
+                            summary: "Exact saved source read.".into(),
+                            findings: vec![],
+                            source_questions: vec![],
+                            unresolved: vec![],
+                            resolutions: vec![],
+                        },
+                        &prepared.resources,
+                    )
+                    .unwrap();
+                }
+                work.plan.id
+            };
+            let super::super::SectionPreparation::Ready(section) =
+                super::super::prepare_section_finalization(&root, &config, &revision, &id).unwrap()
+            else {
+                panic!("ready bounded section");
+            };
+            let result = lk_queue::SectionResult {
+                body: body.clone(),
+                ..section.result.clone()
+            };
+            super::super::finish_section(&root, &config, &revision, &id, *section, body).unwrap();
+            result
+        } else {
+            let Preparation::Ready(section) =
+                prepare(&root, &config, &revision, &task.task_id).unwrap()
+            else {
+                panic!("ready section");
+            };
+            let result = lk_queue::SectionResult {
+                body: body.clone(),
+                ..section.result.clone()
+            };
+            finish(
+                &root,
+                &config,
+                &revision,
+                *section,
+                crate::commands::execution::finalization::SectionResponse::Complete(body),
+            )
+            .unwrap();
+            result
         };
-        let result = lk_queue::SectionResult {
-            body: "A proposal, not a verified deployment.".into(),
-            ..section.result.clone()
-        };
-        finish(
-            &root,
-            &config,
-            &revision,
-            *section,
-            crate::commands::execution::finalization::SectionResponse::Complete(
-                result.body.clone(),
-            ),
-        )
-        .unwrap();
         let value = serde_json::to_value(&result).unwrap();
         super::super::prepare_queue_publication(
             &root,

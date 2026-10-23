@@ -1,5 +1,6 @@
 #![cfg(unix)]
 
+use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -43,6 +44,9 @@ if kind in ['finalize-section','whole-section']:
     if mode=='changed-operational-config':
         path=Path(os.environ['LORE_CONFIG'])
         path.write_text(path.read_text().replace('max_calls: 2','max_calls: 3'))
+    if mode=='changed-review':
+        path=root/'vault'/(root/'review-target').read_text()
+        path.write_text(path.read_text()+'\nThe scoped assessment changed during finalization.\n')
     blocked=root/'blocked-work'
     needs=mode=='needs-action' and (not blocked.exists() or blocked.read_text()==work_id)
     if needs:
@@ -245,6 +249,233 @@ impl Fixture {
 
     fn mode(&self, mode: &str) {
         std::fs::write(self.root().join("mode"), mode).unwrap();
+    }
+
+    fn complete_source(&self, plan: &Value) -> Value {
+        let original = std::fs::read_to_string(&self.config).unwrap();
+        std::fs::write(
+            &self.config,
+            original.replace("max_calls: 2", "max_calls: 1"),
+        )
+        .unwrap();
+        let (output, report) = self.run();
+        assert!(
+            !output.status.success(),
+            "finalization remains pending: {report}"
+        );
+        assert_eq!(report["semantic_calls"], 1, "{report}");
+        assert_eq!(self.calls().len(), 1);
+        assert_eq!(self.calls()[0]["kind"], "inspect");
+        let completed = self.json(&["work", "result", plan["work_id"].as_str().unwrap()]);
+        assert!(completed["output"].is_object());
+        assert!(!self.work_path(plan, "seal.json").exists());
+        std::fs::write(&self.config, original).unwrap();
+        completed
+    }
+
+    fn source_snapshot(&self, plan: &Value) -> BTreeMap<PathBuf, Vec<u8>> {
+        let mut files = BTreeMap::from([(
+            PathBuf::from("plan.json"),
+            std::fs::read(self.work_path(plan, "plan.json")).unwrap(),
+        )]);
+        for entry in std::fs::read_dir(self.work_path(plan, "nodes")).unwrap() {
+            let entry = entry.unwrap();
+            assert!(entry.file_type().unwrap().is_file());
+            files.insert(
+                PathBuf::from("nodes").join(entry.file_name()),
+                std::fs::read(entry.path()).unwrap(),
+            );
+        }
+        assert!(files.len() > 1, "completed source observation is retained");
+        files
+    }
+
+    fn add_review(&self, task: &QueueTask, body: &str) -> (String, String) {
+        let evidence = "wiki/documents/review-evidence.md";
+        let evidence_raw = "---\ntype: document\ntitle: Authoritative policy\n---\n# Authoritative policy\nDeployment requires a separately recorded approval.\n";
+        std::fs::write(self.root().join("vault").join(evidence), evidence_raw).unwrap();
+        let evidence_revision =
+            lk_core::concept::source_revision(&lk_vault::parse_page(evidence_raw).unwrap());
+        let review = "wiki/explorations/section-review.md";
+        let absolute = self.root().join("vault").join(review);
+        std::fs::create_dir_all(absolute.parent().unwrap()).unwrap();
+        std::fs::write(&absolute, format!(
+            "---\ntype: exploration\ntitle: Scoped section review\nreview:\n  status: open\n  subjects: [{}]\n  evidence:\n    - path: {evidence}\n      revision: {evidence_revision}\n---\n# Scoped section review\n{body}\n",
+            task.target.vault_path
+        )).unwrap();
+        std::fs::write(self.root().join("review-target"), review).unwrap();
+        let reports = self.json(&["wiki", "reviews"]);
+        assert_eq!(reports[0]["effective_state"], "open", "{reports}");
+        assert_eq!(reports[0]["errors"], json!([]));
+        (review.into(), evidence.into())
+    }
+}
+
+#[test]
+fn planned_section_finalizers_read_current_reviews_without_repeating_saved_source_work() {
+    for engine in ["codex", "claude-code"] {
+        for review_preexists in [false, true] {
+            let fixture = Fixture::new(engine, 32768);
+            let (task, plan) = fixture.add("source", TaskKind::Summarize);
+            let mut paths = review_preexists.then(|| {
+                fixture.add_review(
+                    &task,
+                    "The proposal is not evidence of approved deployment.",
+                )
+            });
+            let completed = fixture.complete_source(&plan);
+            let source_before = fixture.source_snapshot(&plan);
+            let (review, evidence) = paths.take().unwrap_or_else(|| {
+                fixture.add_review(
+                    &task,
+                    "A newly scoped assessment requires explicit approval.",
+                )
+            });
+            let (output, report) = fixture.run();
+            assert!(
+                output.status.success(),
+                "{engine}/{review_preexists}: {report}"
+            );
+            assert_eq!(report["semantic_calls"], 1, "{report}");
+            assert_eq!(fixture.source_snapshot(&plan), source_before);
+            assert_eq!(fixture.calls().len(), 2);
+            assert_eq!(fixture.calls()[1]["kind"], "finalize-section");
+            let request: Value = serde_json::from_slice(
+                &std::fs::read(fixture.root().join("last-finalization.json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(request["work"], completed);
+            let context = &request["review_context"];
+            assert!(!context["context_revision"].as_str().unwrap().is_empty());
+            assert!(!context["dependencies"].is_null());
+            let resources = context["resources"].as_array().unwrap();
+            for (path, authority) in [(&review, "review"), (&evidence, "page")] {
+                let resource = resources
+                    .iter()
+                    .find(|r| r["address"] == path.as_str())
+                    .unwrap_or_else(|| panic!("missing {path}: {context}"));
+                assert_eq!(resource["authority"], authority);
+                assert_eq!(
+                    resource["text"],
+                    std::fs::read_to_string(fixture.root().join("vault").join(path)).unwrap()
+                );
+            }
+            assert_eq!(resources.len(), 2, "source evidence must not be duplicated");
+            let result: Value = serde_json::from_slice(
+                &std::fs::read(fixture.work_path(&plan, "final.json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(result["context_revision"], context["context_revision"]);
+            assert!(fixture.work_path(&plan, "publication.json").exists());
+        }
+    }
+}
+
+#[test]
+fn planned_section_review_changes_during_finalization_refuse_then_reuse_paid_nodes() {
+    for engine in ["codex", "claude-code"] {
+        let fixture = Fixture::new(engine, 32768);
+        let (task, plan) = fixture.add("source", TaskKind::Summarize);
+        fixture.complete_source(&plan);
+        fixture.add_review(
+            &task,
+            "The approval requirement remains an open assessment.",
+        );
+        let source_before = fixture.source_snapshot(&plan);
+        let target = fixture.root().join("vault").join(&task.target.vault_path);
+        let target_before = std::fs::read(&target).unwrap();
+        fixture.mode("changed-review");
+        let (output, report) = fixture.run();
+        assert!(!output.status.success(), "{engine}: {report}");
+        assert_eq!(report["semantic_calls"], 1);
+        assert_eq!(fixture.source_snapshot(&plan), source_before);
+        assert_eq!(std::fs::read(&target).unwrap(), target_before);
+        assert!(!fixture.work_path(&plan, "seal.json").exists());
+        assert!(!fixture.work_path(&plan, "final.json").exists());
+        let staged = fixture.root().join("vault/.lorekeeper/queue/results");
+        assert!(!staged.exists() || std::fs::read_dir(staged).unwrap().next().is_none());
+        let old_request: Value = serde_json::from_slice(
+            &std::fs::read(fixture.root().join("last-finalization.json")).unwrap(),
+        )
+        .unwrap();
+        fixture.mode("complete");
+        let (output, report) = fixture.run();
+        assert!(output.status.success(), "{engine}: {report}");
+        assert_eq!(report["semantic_calls"], 1);
+        assert_eq!(fixture.source_snapshot(&plan), source_before);
+        let new_request: Value = serde_json::from_slice(
+            &std::fs::read(fixture.root().join("last-finalization.json")).unwrap(),
+        )
+        .unwrap();
+        assert_ne!(old_request["review_context"], new_request["review_context"]);
+        assert_eq!(
+            fixture
+                .calls()
+                .iter()
+                .filter(|c| c["kind"] == "inspect")
+                .count(),
+            1
+        );
+        assert!(fixture.work_path(&plan, "publication.json").exists());
+    }
+}
+
+#[test]
+fn planned_section_review_capacity_defers_without_blocking_independent_publication() {
+    for engine in ["codex", "claude-code"] {
+        let fixture = Fixture::new(engine, 32768);
+        let (blocked, plan) = fixture.add("a-blocked", TaskKind::Summarize);
+        fixture.complete_source(&plan);
+        fixture.add_review(
+            &blocked,
+            &"A material scoped assessment remains open. ".repeat(2000),
+        );
+        let source_before = fixture.source_snapshot(&plan);
+        let (independent, _) = fixture.add_with_plan("z-independent", TaskKind::Summarize, false);
+        let target = fixture
+            .root()
+            .join("vault")
+            .join(&blocked.target.vault_path);
+        let target_before = std::fs::read(&target).unwrap();
+        let (output, report) = fixture.run();
+        assert!(
+            !output.status.success(),
+            "blocked Work remains incomplete: {report}"
+        );
+        assert_eq!(report["semantic_calls"], 1, "{engine}: {report}");
+        assert_eq!(fixture.source_snapshot(&plan), source_before);
+        assert_eq!(std::fs::read(&target).unwrap(), target_before);
+        assert!(!fixture.work_path(&plan, "seal.json").exists());
+        assert!(
+            !fixture
+                .work_path(&plan, "finalization-action.json")
+                .exists()
+        );
+        assert_eq!(fixture.calls().len(), 2);
+        assert_eq!(fixture.calls()[1]["kind"], "whole-section");
+        let status = fixture.json(&["queue", "status", "--json"]);
+        for (id, expected) in [(blocked.task_id, "current"), (independent.task_id, "done")] {
+            assert!(
+                status["data"]["tasks"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|entry| entry["task_id"] == id && entry["status"] == expected),
+                "{status}"
+            );
+        }
+        assert!(
+            report["stages"].as_array().unwrap().iter().any(|stage| {
+                stage["detail"]
+                    .as_str()
+                    .is_some_and(|detail| detail.contains("max_input_bytes"))
+            }),
+            "{report}"
+        );
+        let (output, repeated) = fixture.run();
+        assert!(!output.status.success());
+        assert_eq!(repeated["semantic_calls"], 0, "{repeated}");
+        assert_eq!(fixture.source_snapshot(&plan), source_before);
     }
 }
 
@@ -839,12 +1070,16 @@ fn near_limit_saved_work_is_retained_without_spending_a_finalizer_call() {
     assert!(!output.status.success(), "{report}");
     assert_eq!(report["semantic_calls"], 1);
     assert_eq!(fixture.calls().len(), 1);
-    assert!(report["stages"].as_array().unwrap().iter().any(|stage| {
-        stage["name"] == "bounded section finalization"
-            && stage["detail"]
-                .as_str()
-                .is_some_and(|detail| detail.contains("exceeds max_input_bytes"))
-    }));
+    assert!(
+        report["stages"].as_array().unwrap().iter().any(|stage| {
+            stage["name"] == "bounded section capacity"
+                && stage["state"] == "skipped"
+                && stage["detail"]
+                    .as_str()
+                    .is_some_and(|detail| detail.contains("above max_input_bytes"))
+        }),
+        "{report}"
+    );
     assert!(
         fixture.json(&["work", "result", plan["work_id"].as_str().unwrap()])["output"].is_object()
     );
