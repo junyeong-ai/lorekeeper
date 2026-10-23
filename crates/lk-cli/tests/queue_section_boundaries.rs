@@ -84,6 +84,7 @@ impl Workspace {
         self.write(
             RESULT,
             &serde_json::to_string(&lk_queue::SectionResult {
+                context_revision: None,
                 task_id: task.task_id.clone(),
                 cache_hash: task.cache_hash.clone(),
                 target_revision: lk_core::concept::file_revision(&page),
@@ -206,6 +207,7 @@ fn completed_source_reingest_preserves_literal_content_and_published_page_bytes(
     let before = workspace.read(&task.target.vault_path);
     assert!(before.contains("first\n\n\nsecond"));
     let result = lk_queue::SectionResult {
+        context_revision: None,
         task_id: task.task_id,
         cache_hash: task.cache_hash,
         target_revision: lk_core::concept::file_revision(&before),

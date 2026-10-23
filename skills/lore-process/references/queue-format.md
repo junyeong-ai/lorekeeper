@@ -252,6 +252,10 @@ The pending task supplies the destination, target kind, anchor and completion ke
 never add these fields to this strict result contract. `queue status --json` reports
 `target_revision` for every readable target. Only `queue apply` publishes the body
 and marker together after exact revision validation. No worker writes target pages.
+Native whole-input section generation also supplies an optional `context_revision`
+binding the source and scoped reviews. Keep that binding unchanged; apply revalidates
+it. Existing results without it retain the legacy contract. Do not invent a revision
+or remove one to bypass changed evidence.
 Refinement may change bodies but must preserve the original sequence of `###` event
 headings. Section bodies must remain beneath their H2: no root H1/H2 headings
 (including Setext) or HTML/code blocks consuming the next section. Valid HTML and

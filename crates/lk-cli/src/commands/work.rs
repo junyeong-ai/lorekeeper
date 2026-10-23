@@ -8,6 +8,8 @@ use super::{GlobalOptions, find_config, load_config_with_revision};
 mod discovery;
 mod publication;
 mod resources;
+#[cfg(unix)]
+pub(super) mod section;
 mod selection;
 pub(crate) mod state;
 
@@ -338,6 +340,19 @@ pub(super) fn prepare_queue_publication(
     }
     let scoped_synthesis = prepared.context["purpose"]["task_kind"]
         == serde_json::to_value(lk_queue::TaskKind::SynthesizeConcept).into_diagnostic()?;
+    if !scoped_synthesis && !scoped_extraction {
+        let section: lk_queue::SectionResult =
+            serde_json::from_value(result.clone()).into_diagnostic()?;
+        if let Some(revision) = section.context_revision {
+            prepared = resources::section_task(&root, config, task_id)?;
+            if revision != prepared.revision(config_revision)? {
+                return Err(publication_rejection(
+                    RejectionKind::SemanticContextChanged,
+                    "section review/read scope changed; reread and regenerate the result",
+                ));
+            }
+        }
+    }
     if scoped_synthesis || scoped_extraction {
         let revision = prepared.revision(config_revision)?;
         if result.get("context_revision").and_then(Value::as_str) != Some(revision.as_str()) {
@@ -1187,6 +1202,7 @@ pub(super) fn prepare_section_finalization(
     }
     let completed = work.result(&root, &prepared.resources)?;
     let result = lk_queue::SectionResult {
+        context_revision: None,
         task_id: task_id.clone(),
         cache_hash: cache_hash.clone(),
         target_revision: target_revision.clone(),
@@ -1266,26 +1282,11 @@ pub(super) fn finish_section(
     prepared_section: SectionFinalization,
     body: String,
 ) -> miette::Result<()> {
-    lk_core::markdown::validate_section_body(&body).into_diagnostic()?;
-    if let Some(events) = prepared_section.request["events"].as_array() {
-        let expected = events
-            .iter()
-            .map(|event| {
-                event["heading"]
-                    .as_str()
-                    .expect("native event heading")
-                    .to_owned()
-            })
-            .collect::<Vec<_>>();
-        if expected != event_headings(&body) {
-            return Err(miette::miette!(
-                "refinement must preserve the event heading sequence"
-            ));
-        }
-    }
+    validate_section_response(&prepared_section.request, &body)?;
     let session = lk_vault::MutationSession::acquire(root).into_diagnostic()?;
     let (work, prepared) = load(session.root(), config, config_revision, id)?;
     let result = lk_queue::SectionResult {
+        context_revision: None,
         body,
         ..prepared_section.result
     };
@@ -1297,6 +1298,28 @@ pub(super) fn finish_section(
         Some(&prepared_section.completed),
     )?;
     session.apply(mutation).into_diagnostic()?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn validate_section_response(request: &Value, body: &str) -> miette::Result<()> {
+    lk_core::markdown::validate_section_body(body).into_diagnostic()?;
+    if let Some(events) = request["events"].as_array() {
+        let expected = events
+            .iter()
+            .map(|event| {
+                event["heading"]
+                    .as_str()
+                    .expect("native event heading")
+                    .to_owned()
+            })
+            .collect::<Vec<_>>();
+        if expected != event_headings(body) {
+            return Err(miette::miette!(
+                "refinement must preserve the event heading sequence"
+            ));
+        }
+    }
     Ok(())
 }
 

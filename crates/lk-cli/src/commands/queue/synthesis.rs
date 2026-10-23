@@ -75,7 +75,7 @@ pub(super) fn apply(
                 task_id: result.task_id,
                 cache_hash: result.cache_hash,
                 target_revision: result.target_revision,
-                context_revision: String::new(),
+                context_revision: result.context_revision.unwrap_or_default(),
                 synthesis: result.body,
                 related: None,
             })
@@ -130,6 +130,8 @@ pub(super) fn apply(
                     (
                         path.clone(),
                         SectionResult {
+                            context_revision: (!result.context_revision.is_empty())
+                                .then(|| result.context_revision.clone()),
                             task_id: result.task_id.clone(),
                             cache_hash: result.cache_hash.clone(),
                             target_revision: result.target_revision.clone(),
@@ -232,6 +234,8 @@ pub(super) fn apply(
             let mut plan = lk_vault::MutationPlan::default();
             let value = if section {
                 serde_json::to_value(SectionResult {
+                    context_revision: (!result.context_revision.is_empty())
+                        .then(|| result.context_revision.clone()),
                     task_id: result.task_id.clone(),
                     cache_hash: result.cache_hash.clone(),
                     target_revision: result.target_revision.clone(),

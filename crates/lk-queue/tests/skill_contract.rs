@@ -183,6 +183,7 @@ fn skill_documents_staged_section_results_instead_of_direct_page_writes() {
     let format = read_skill_file("references/queue-format.md");
     assert!(format.contains(lk_queue::SECTION_RESULT_SUFFIX));
     let sample = lk_queue::SectionResult {
+        context_revision: None,
         task_id: "t".into(),
         cache_hash: "h".into(),
         target_revision: "r".into(),

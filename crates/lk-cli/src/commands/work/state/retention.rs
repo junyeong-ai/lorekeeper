@@ -694,6 +694,7 @@ mod tests {
                         "{}".into()
                     } else {
                         encoded(&lk_queue::SectionResult {
+                            context_revision: None,
                             task_id: "unknown-task".into(),
                             cache_hash: task.cache_hash,
                             target_revision: "captured".into(),

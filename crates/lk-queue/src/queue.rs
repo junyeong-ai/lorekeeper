@@ -268,7 +268,28 @@ pub struct SectionResult {
     pub task_id: String,
     pub cache_hash: String,
     pub target_revision: String,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "section_context_revision"
+    )]
+    pub context_revision: Option<String>,
     pub body: String,
+}
+
+fn section_context_revision<'de, D: serde::Deserializer<'de>>(
+    decoder: D,
+) -> Result<Option<String>, D::Error> {
+    let revision = Option::<String>::deserialize(decoder)?;
+    if revision.as_ref().is_some_and(|value| {
+        value.len() != 64
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    }) {
+        return Err(serde::de::Error::custom("invalid section context revision"));
+    }
+    Ok(revision)
 }
 
 /// Exact existing owner selected from the worker's revision-pinned discovery context.

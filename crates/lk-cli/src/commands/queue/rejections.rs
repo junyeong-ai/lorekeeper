@@ -22,6 +22,7 @@ fn validation_policy() -> String {
         include_str!("../work/selection.rs"),
         include_str!("../work/publication.rs"),
         include_str!("../work/resources.rs"),
+        include_str!("../work/section.rs"),
         include_str!("../../../../lk-pipeline/src/lib.rs"),
         include_str!("../../../../lk-pipeline/src/concept_draft.rs"),
     ] {
@@ -620,6 +621,7 @@ mod tests {
         .unwrap();
         let result_path = root.join(".lorekeeper/queue/results/summary.section.json");
         let result = lk_queue::SectionResult {
+            context_revision: None,
             task_id: task.task_id.clone(),
             cache_hash: task.cache_hash.clone(),
             target_revision: lk_core::concept::file_revision(&target),
@@ -662,6 +664,7 @@ mod tests {
         let snapshots = {
             std::os::unix::fs::symlink(&root, root.join("wiki/documents/root-alias.md")).unwrap();
             let result = lk_queue::SectionResult {
+                context_revision: None,
                 task_id: task.task_id.clone(),
                 cache_hash: task.cache_hash.clone(),
                 target_revision: lk_core::concept::file_revision(&target),
@@ -747,6 +750,7 @@ mod tests {
             &root,
             result_path,
             &serde_json::to_string(&lk_queue::SectionResult {
+                context_revision: None,
                 task_id: task.task_id.clone(),
                 cache_hash: task.cache_hash.clone(),
                 target_revision: "captured".into(),

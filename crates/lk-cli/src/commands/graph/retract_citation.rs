@@ -509,6 +509,7 @@ mod tests {
         std::fs::write(
             queue.join("results/orphan.section.json"),
             serde_json::to_vec(&lk_queue::SectionResult {
+                context_revision: None,
                 task_id: "orphan".into(),
                 cache_hash: "abc".into(),
                 target_revision: lk_core::concept::file_revision(RAW),
@@ -589,6 +590,7 @@ mod tests {
         std::fs::write(
             &staged,
             serde_json::to_vec(&lk_queue::SectionResult {
+                context_revision: None,
                 task_id: task.task_id.clone(),
                 cache_hash: task.cache_hash.clone(),
                 target_revision: lk_core::concept::file_revision(&done),

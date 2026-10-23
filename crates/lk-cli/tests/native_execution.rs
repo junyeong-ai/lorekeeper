@@ -11,6 +11,10 @@ struct Fixture {
 }
 
 impl Fixture {
+    fn with_whole_sections(engine: &str, timeout: u64, behavior: &str) -> Self {
+        Self::new(engine, timeout, &format!("{WHOLE_SECTION}\n{behavior}"))
+    }
+
     fn new(engine: &str, timeout: u64, behavior: &str) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path();
@@ -64,6 +68,48 @@ impl Fixture {
         );
     }
 
+    fn settle_sections_for_interactive_contract(&self) {
+        let vault = self.root().join("vault");
+        let queue = vault.join(".lorekeeper/queue");
+        let results = queue.join("results");
+        std::fs::create_dir_all(&results).unwrap();
+        for entry in std::fs::read_dir(&queue).unwrap() {
+            let path = entry.unwrap().path();
+            if path
+                .extension()
+                .is_none_or(|extension| extension != "jsonl")
+            {
+                continue;
+            }
+            let tasks = lk_queue::read_tasks_snapshot(&path).unwrap().1;
+            for task in tasks.tasks {
+                if task.kind != lk_queue::TaskKind::Summarize {
+                    continue;
+                }
+                let raw = std::fs::read_to_string(vault.join(&task.target.vault_path)).unwrap();
+                let result = lk_queue::SectionResult {
+                    task_id: task.task_id.clone(),
+                    cache_hash: task.cache_hash,
+                    target_revision: lk_core::concept::file_revision(&raw),
+                    context_revision: None,
+                    body: "Fixture source summary prepared before the interactive contract test."
+                        .into(),
+                };
+                std::fs::write(
+                    results.join(format!("{}.section.json", task.task_id)),
+                    serde_json::to_vec(&result).unwrap(),
+                )
+                .unwrap();
+            }
+        }
+        let output = self.command().args(["queue", "apply"]).output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     fn run(&self, operation: &str) -> (std::process::Output, serde_json::Value) {
         let result = self
             .command()
@@ -94,6 +140,41 @@ impl Fixture {
         (result, json)
     }
 }
+
+const WHOLE_SECTION: &str = r#"
+case "$*" in
+  *--output-schema*|*--safe-mode*)
+    /bin/cat > "$TEST_EXECUTION_ROOT/whole-section-request.txt"
+    python3 - "$@" <<'SECTION'
+import json, os, sys
+from pathlib import Path
+root=Path(os.environ['TEST_EXECUTION_ROOT'])
+request=json.loads((root/'whole-section-request.txt').read_text().split('\nNative request:\n',1)[1])
+if request['kind']!='whole-section': raise SystemExit(100)
+if (root/'forbid-prepared-work').exists():
+    assert not (root/'vault/.lorekeeper/work').exists(), 'dependent work must not be prepared before source publication'
+work=request['work']
+kind=work['context']['purpose']['task_kind']
+if kind=='refine-events':
+    body='\n\n'.join(event['heading']+'\n\nRetained source evidence.\n'+'\n'.join(event['inline_links']) for event in request['events'])
+elif kind=='identify-themes':
+    body=('### Evidence review\nThe evidence review task was completed.' if (root/'resume-period').exists()
+          else '### Evidence review\nCompleted the evidence review task.')
+else:
+    body='Completed the evidence review task and checked retained source evidence.'
+with (root/'whole-section-calls.jsonl').open('a') as stream:
+    stream.write(json.dumps({'target':work['context']['subject']['target']})+'\n')
+response={'status':'complete','body':body,'reason':None}
+if '--safe-mode' in sys.argv:
+    response={'type':'result','subtype':'success','is_error':False,'structured_output':response}
+print(json.dumps(response))
+SECTION
+    section_status=$?
+    if [ "$section_status" -ne 100 ]; then exit "$section_status"; fi
+    exec < "$TEST_EXECUTION_ROOT/whole-section-request.txt"
+    ;;
+esac
+"#;
 
 const RECORD_FIRST_AUDIT: &str = r#"
 "$LORE_BIN" wiki audit-plan > "$TEST_EXECUTION_ROOT/plan.json" || exit 31
@@ -423,6 +504,7 @@ CHECK
 "#,
         );
         fixture.ingest();
+        fixture.settle_sections_for_interactive_contract();
         let (output, result) = fixture.run("process");
         assert!(!output.status.success());
         assert_eq!(result["ok"], false);
@@ -459,6 +541,7 @@ CHECK
 fn knowledge_queue_consumer_receives_bounded_maintenance_context() {
     let fixture = Fixture::new("codex", 30, "exit 0");
     fixture.ingest();
+    fixture.settle_sections_for_interactive_contract();
     let (output, result) = fixture.run("knowledge");
     assert!(
         !output.status.success(),
@@ -684,6 +767,7 @@ fn daily_preserves_collection_when_the_selected_agent_is_unavailable() {
 fn missing_packaged_dependency_refuses_before_launch() {
     let fixture = Fixture::new("claude-code", 30, "exit 0");
     fixture.ingest();
+    fixture.settle_sections_for_interactive_contract();
     std::fs::remove_file(
         fixture
             .root()
@@ -1572,36 +1656,7 @@ fn resumed_knowledge_batches_share_budget_across_oversized_subjects() {
 
 #[test]
 fn short_documents_finish_between_resumed_parts_of_a_large_document() {
-    let ordinary = r#"
-exec python3 - "$@" <<'SELECTED'
-import json, os, subprocess, sys
-from pathlib import Path
-root=Path(os.environ['TEST_EXECUTION_ROOT'])
-prompt='\n'.join(sys.argv[1:])
-path,_=json.JSONDecoder().raw_decode(prompt.split('Selected queue task manifest: ',1)[1])
-ids=json.loads(Path(path).read_text())
-lore=os.environ['LORE_BIN']
-status=json.loads(subprocess.check_output([lore,'queue','status','--json']))
-rows={row['task_id']:row for row in status['data']['tasks']}
-tasks=[json.loads(line) for path in (root/'vault/.lorekeeper/queue').glob('*.jsonl') for line in path.read_text().splitlines()]
-selected=[task for task in tasks if task['task_id'] in ids]
-assert len(selected)==len(ids)
-assert len({task['target']['vault_path'] for task in selected})==len(selected)
-results=root/'vault/.lorekeeper/queue/results'
-results.mkdir(exist_ok=True)
-for task in selected:
-    assert task['kind']=='summarize'
-    assert 'short' in task['target']['vault_path']
-    result={key:task[key] for key in ['task_id','cache_hash']}
-    result.update(target_revision=rows[task['task_id']]['target_revision'],body='Short source evidence was inspected.')
-    (results/(task['task_id']+'.section.json')).write_text(json.dumps(result))
-(root/'selected-manifest-path').write_text(path)
-SELECTED
-"#;
-    let behavior = format!(
-        "case \"$*\" in\n*--output-schema*|*--safe-mode*)\n{RECORD_BOUNDED_AUDIT}\n;;\n*)\n{ordinary}\n;;\nesac"
-    );
-    let fixture = Fixture::new("codex", 30, &behavior);
+    let fixture = Fixture::with_whole_sections("codex", 30, RECORD_BOUNDED_AUDIT);
     let config = std::fs::read_to_string(&fixture.config).unwrap().replace("concept_policy: supported-new", "concept_policy: disabled")
         .replace("  default_profile: primary\n", "  default_profile: primary\n  work: {max_input_bytes: 8192, max_result_bytes: 1024, max_calls: 1}\n");
     std::fs::write(&fixture.config, config).unwrap();
@@ -1642,11 +1697,8 @@ SELECTED
             && row["status"] == "done"),
         "{status}"
     );
-    let manifest = std::fs::read_to_string(fixture.root().join("selected-manifest-path")).unwrap();
-    assert!(
-        !Path::new(&manifest).exists(),
-        "selection metadata is removed after the worker"
-    );
+    let calls = std::fs::read_to_string(fixture.root().join("whole-section-calls.jsonl")).unwrap();
+    assert!(calls.contains("z-short.md"), "{calls}");
 }
 
 #[test]
@@ -1731,35 +1783,14 @@ fn planned_queue_subjects(fixture: &Fixture) -> Vec<serde_json::Value> {
 
 #[test]
 fn synthesis_waits_for_source_publication_before_preparing_bounded_work() {
-    let behavior = r#"
-exec python3 - "$@" <<'SELECTED'
-import json, os, subprocess, sys
-from pathlib import Path
-root=Path(os.environ['TEST_EXECUTION_ROOT'])
-prompt='\n'.join(sys.argv[1:])
-path,_=json.JSONDecoder().raw_decode(prompt.split('Selected queue task manifest: ',1)[1])
-ids=json.loads(Path(path).read_text())
-lore=os.environ['LORE_BIN']
-rows={row['task_id']:row for row in json.loads(subprocess.check_output([lore,'queue','status','--json']))['data']['tasks']}
-tasks=[json.loads(line) for file in (root/'vault/.lorekeeper/queue').glob('*.jsonl') for line in file.read_text().splitlines()]
-selected=[task for task in tasks if task['task_id'] in ids]
-assert len(selected)==1 and selected[0]['kind']=='summarize', selected
-assert not (root/'vault/.lorekeeper/work').exists(), 'dependent synthesis must not be prepared before source publication'
-task=selected[0]
-result={key:task[key] for key in ['task_id','cache_hash']}
-result.update(target_revision=rows[task['task_id']]['target_revision'],body='Completed the source interpretation before dependent synthesis.')
-results=root/'vault/.lorekeeper/queue/results'
-results.mkdir(exist_ok=True)
-(results/(task['task_id']+'.section.json')).write_text(json.dumps(result))
-SELECTED
-"#;
     for (engine, repetitions) in [
         ("claude-code", 1),
         ("codex", 1),
         ("claude-code", 400),
         ("codex", 400),
     ] {
-        let fixture = Fixture::new(engine, 30, behavior);
+        let fixture = Fixture::with_whole_sections(engine, 30, "exit 71");
+        std::fs::write(fixture.root().join("forbid-prepared-work"), "source-first").unwrap();
         let config = std::fs::read_to_string(&fixture.config).unwrap().replace(
             "  default_profile: primary\n",
             "  default_profile: primary\n  work: {max_input_bytes: 8192, max_result_bytes: 1024, max_calls: 1}\n",
@@ -2022,7 +2053,7 @@ fn small_extraction_hands_expanded_discovery_to_bounded_work_on_both_hosts() {
         rows={row['task_id']:row for row in json.loads(subprocess.check_output([lore,'queue','status','--json']))['data']['tasks']}
         tasks=[json.loads(line) for file in (root/'vault/.lorekeeper/queue').glob('*.jsonl') for line in file.read_text().splitlines()]
         selected=[task for task in tasks if task['task_id'] in ids]
-        assert len(selected)==2
+        assert len(selected)==1 and selected[0]['kind']=='extract-concepts'
         results=root/'vault/.lorekeeper/queue/results'
         results.mkdir(exist_ok=True)
         for task in selected:
@@ -2048,7 +2079,7 @@ fn small_extraction_hands_expanded_discovery_to_bounded_work_on_both_hosts() {
     );
     for engine in ["claude-code", "codex"] {
         for expands in [true, false] {
-            let fixture = Fixture::new(engine, 30, &behavior);
+            let fixture = Fixture::with_whole_sections(engine, 30, &behavior);
             let config = std::fs::read_to_string(&fixture.config).unwrap().replace(
                 "  default_profile: primary\n",
                 "  default_profile: primary\n  work: {max_input_bytes: 8192, max_result_bytes: 1024, max_calls: 64}\n",
@@ -2130,10 +2161,12 @@ fn small_extraction_hands_expanded_discovery_to_bounded_work_on_both_hosts() {
                 "{engine}, expands={expands}: {result}"
             );
             assert!(fixture.root().join("selected-handoff.json").exists());
-            assert!(
+            assert_eq!(
                 std::fs::read_to_string(root.join("wiki/documents/summary.md"))
                     .unwrap()
-                    .contains("summary_done:")
+                    .contains("summary_done:"),
+                expands,
+                "an unexpanded interactive attempt without a result stops before independent publication"
             );
             assert_eq!(
                 std::fs::read_to_string(root.join("wiki/documents/source.md"))
@@ -3240,7 +3273,7 @@ ASSESS
 }
 
 fn assert_daily_period_finalization(with_review: bool) {
-    let fixture = Fixture::new(
+    let fixture = Fixture::with_whole_sections(
         "codex",
         30,
         r#"python3 - <<'PROCESS'
@@ -3413,6 +3446,7 @@ fn a_failed_host_stops_period_planning_and_preserves_final_read_checks() {
         "printf 'attempt\\n' >> \"$TEST_EXECUTION_ROOT/attempts\"\nexit 23",
     );
     fixture.ingest();
+    fixture.settle_sections_for_interactive_contract();
     let (output, result) = fixture.run("daily");
     assert!(!output.status.success());
     let names = result["stages"]
@@ -3468,7 +3502,7 @@ fn deadline_preserves_pending_work_and_releases_the_workflow() {
     assert_eq!(result["cancelled"], false);
     assert!(
         result["stages"].as_array().unwrap().iter().any(|stage| {
-            stage["name"] == "lore-process"
+            stage["name"] == "bounded work receipt"
                 && stage["state"] == "failed"
                 && stage["detail"].as_str().is_some_and(|detail| {
                     detail.starts_with("session deadline exceeded")
@@ -3709,7 +3743,11 @@ fn cancellation_stops_further_stages_when_zombie_group_cleanup_returns_eperm() {
     let stages = result["stages"].as_array().unwrap();
     assert_eq!(result["ok"], false, "{result}");
     assert_eq!(result["cancelled"], true, "{result}");
-    assert_eq!(stages.last().unwrap()["name"], "lore-process", "{result}");
+    assert_eq!(
+        stages.last().unwrap()["name"],
+        "bounded work receipt",
+        "{result}"
+    );
     assert_eq!(stages.last().unwrap()["state"], "cancelled", "{result}");
     assert!(
         stages.last().unwrap()["detail"]
@@ -4226,7 +4264,7 @@ fn queue_window_fixture(entries: usize, large: bool) -> Fixture {
 }
 
 #[test]
-fn native_queue_limits_preparation_and_reserves_whole_input_members_in_fair_order() {
+fn native_queue_limits_preparation_and_reserves_whole_sections_in_fair_order() {
     let fixture = queue_window_fixture(65, false);
     let (output, report) = fixture.run("process");
     assert!(!output.status.success(), "mock publishes nothing: {report}");
@@ -4237,7 +4275,7 @@ fn native_queue_limits_preparation_and_reserves_whole_input_members_in_fair_orde
         .join("vault/.lorekeeper/execution-cursor.json");
     let cursor: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&cursor_path).unwrap()).unwrap();
-    assert_eq!(cursor["queue"], "wiki/documents/source-064.md");
+    assert_eq!(cursor["queue"], "wiki/documents/source-001.md");
     assert_eq!(
         execution_json(&fixture, &["queue", "status", "--json"])["data"]["tasks"]
             .as_array()
@@ -4251,7 +4289,7 @@ fn native_queue_limits_preparation_and_reserves_whole_input_members_in_fair_orde
     assert_eq!(report["queue_planning"]["prepared_targets"], 64);
     let cursor: serde_json::Value =
         serde_json::from_slice(&std::fs::read(cursor_path).unwrap()).unwrap();
-    assert_eq!(cursor["queue"], "wiki/documents/source-063.md");
+    assert_eq!(cursor["queue"], "wiki/documents/source-002.md");
 }
 
 #[test]

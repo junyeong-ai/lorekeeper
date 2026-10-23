@@ -65,6 +65,10 @@ lives in `lk-vault`/`lk-pipeline`.
   `TaskResult`. Never edit page sections or markers directly. Use the task's exact
   identity and the target revision captured before reading; do not relabel a stale
   answer. Synthesis carries both core and related bodies.
+- Native whole-input sections additionally bind `context_revision` to the exact source
+  and scoped reviews. Missing revision preserves legacy result bytes; a present revision
+  must be valid and current. Never erase it when projecting a section through shared
+  synthesis application. Scope changes require regeneration, not guard replacement.
 - Equivalent typed proposals for one task/input publish once. Competing current
   section, synthesis or extraction values remain unpublished and retain every
   result file for review; filename order never selects an answer.

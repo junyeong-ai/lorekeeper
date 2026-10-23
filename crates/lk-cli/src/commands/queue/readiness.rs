@@ -597,6 +597,7 @@ mod tests {
             .require_ready(root.path(), &candidate(root.path()))
             .unwrap();
         let result = lk_queue::SectionResult {
+            context_revision: None,
             task_id: task.task_id,
             cache_hash: task.cache_hash,
             target_revision: "captured".into(),

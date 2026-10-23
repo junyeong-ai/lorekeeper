@@ -2469,6 +2469,7 @@ fn staged_sections_retain_work_when_the_target_declares_an_incompatible_format()
         let pending = serde_json::to_string(&task).unwrap();
         ws.write(".lorekeeper/queue/run.jsonl", &pending);
         let result = lk_queue::SectionResult {
+            context_revision: None,
             task_id: task.task_id.clone(),
             cache_hash: task.cache_hash.clone(),
             target_revision: lk_core::concept::file_revision(&page),
@@ -2879,6 +2880,7 @@ fn staged_section_links_must_resolve_inside_the_vault() {
             ws.write(pending_path, &pending);
             let body = format!("A [linked document]({destination}).");
             let result = lk_queue::SectionResult {
+                context_revision: None,
                 task_id: task.task_id.clone(),
                 cache_hash: task.cache_hash.clone(),
                 target_revision: lk_core::concept::file_revision(&page),

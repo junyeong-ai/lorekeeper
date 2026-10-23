@@ -220,6 +220,39 @@ pub(super) fn task(root: &Path, config: &Config, task_id: &str) -> miette::Resul
     task_with_audit(root, config, task_id, None)
 }
 
+pub(super) fn section_task(
+    root: &Path,
+    config: &Config,
+    task_id: &str,
+) -> miette::Result<Prepared> {
+    let mut prepared = task(root, config, task_id)?;
+    let Subject::Queue { target, .. } = &prepared.subject else {
+        return Err(miette::miette!("section requires a queue subject"));
+    };
+    let owner = lk_vault::resolve_page_owner(root, Path::new(target)).into_diagnostic()?;
+    let raw = prepared
+        .pages
+        .get(&owner)
+        .ok_or_else(|| miette::miette!("section owner is absent from its scope"))?;
+    let subjects = BTreeMap::from([(
+        target.clone(),
+        lk_vault::parse_page(raw).map_err(|error| miette::miette!("{target}: {error}"))?,
+    )]);
+    let reports = lk_vault::list_reviews(root, &config.vault.dirs).into_diagnostic()?;
+    let reviews = lk_graph::audit::review_dependencies_with_reports(root, &subjects, reports)
+        .into_diagnostic()?;
+    let mut captured = Capture {
+        root,
+        pages: std::mem::take(&mut prepared.pages),
+        resources: std::mem::take(&mut prepared.resources)
+            .into_iter()
+            .map(|resource| (resource.address.clone(), resource))
+            .collect(),
+    };
+    capture_reviews(&mut captured, &mut prepared.context, &reviews)?;
+    Ok(captured.finish(prepared.subject, prepared.context))
+}
+
 pub(super) fn task_with_audit(
     root: &Path,
     config: &Config,

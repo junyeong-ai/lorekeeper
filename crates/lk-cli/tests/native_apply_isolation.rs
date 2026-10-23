@@ -185,6 +185,7 @@ impl Fixture {
 
     fn stage(&self, task: &QueueTask, revision: &str, body: &str) -> PathBuf {
         let result = SectionResult {
+            context_revision: None,
             task_id: task.task_id.clone(),
             cache_hash: task.cache_hash.clone(),
             target_revision: revision.into(),
@@ -224,6 +225,7 @@ impl Fixture {
         std::fs::write(
             &result,
             serde_json::to_vec(&SectionResult {
+                context_revision: None,
                 task_id: task.task_id.clone(),
                 cache_hash: task.cache_hash.clone(),
                 target_revision: self.target_revision(task),

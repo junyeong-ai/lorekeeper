@@ -192,6 +192,9 @@ mod native {
         Screening {
             task: lk_queue::QueueTask,
         },
+        Section {
+            task: lk_queue::QueueTask,
+        },
         WholeInput {
             tasks: Vec<lk_queue::QueueTask>,
         },
@@ -1230,6 +1233,99 @@ mod native {
             }
         }
 
+        async fn whole_section_step(&mut self, task: &lk_queue::QueueTask) -> WorkStep {
+            let mut metrics = WorkStepMetrics::new(WorkRole::Finalizer);
+            let started = Instant::now();
+            let prepared = crate::commands::work::section::prepare(
+                &self.root,
+                &self.config,
+                &self.config_revision,
+                &task.task_id,
+            );
+            metrics.preparation_duration_ms = Some(started.elapsed().as_millis() as u64);
+            let section = match prepared {
+                Ok(crate::commands::work::section::Preparation::Ready(section)) => section,
+                Ok(crate::commands::work::section::Preparation::NeedsAction(reason)) => {
+                    self.result.work_telemetry.record(metrics);
+                    return WorkStep::Deferred(reason);
+                }
+                Ok(crate::commands::work::section::Preparation::Capacity {
+                    request_bytes,
+                    max_input_bytes,
+                }) => {
+                    self.result.work_telemetry.record(metrics);
+                    return WorkStep::Deferred(format!(
+                        "complete section request needs {request_bytes} bytes, above max_input_bytes {max_input_bytes}; retained for explicit capacity adjustment"
+                    ));
+                }
+                Err(error) => {
+                    self.result.work_telemetry.record(metrics);
+                    self.failure("whole-section preparation", error);
+                    return WorkStep::Failed;
+                }
+            };
+            let result = self.invoke_whole_section(*section, &mut metrics).await;
+            self.result.work_telemetry.record(metrics);
+            result
+        }
+
+        async fn invoke_whole_section(
+            &mut self,
+            section: crate::commands::work::section::Section,
+            metrics: &mut WorkStepMetrics,
+        ) -> WorkStep {
+            let Some(reply) = self
+                .request_observation(section.request.clone(), metrics)
+                .await
+            else {
+                return WorkStep::Failed;
+            };
+            let (response, bytes) = match execution::finalization::decode(
+                reply.engine,
+                &reply.bytes,
+                section.max_response_bytes,
+            ) {
+                Ok(response) => response,
+                Err(error) => {
+                    self.failure("whole-section response", error);
+                    return WorkStep::Failed;
+                }
+            };
+            metrics.result_json_bytes = Some(bytes);
+            let started = Instant::now();
+            let result = crate::commands::work::section::finish(
+                &self.root,
+                &self.config,
+                &self.config_revision,
+                section,
+                response,
+            );
+            metrics.revalidation_record_duration_ms = Some(started.elapsed().as_millis() as u64);
+            match result {
+                Ok(Some(reason)) => {
+                    self.record(
+                        "whole-section action",
+                        StageState::Skipped,
+                        Some(reason.clone()),
+                    );
+                    WorkStep::Deferred(reason)
+                }
+                Ok(None) => {
+                    metrics.outcome = WorkOutcome::Staged;
+                    self.record(
+                        "whole-section result",
+                        StageState::Completed,
+                        Some("guarded result staged".into()),
+                    );
+                    WorkStep::Staged
+                }
+                Err(error) => {
+                    self.failure("whole-section publication", error);
+                    WorkStep::Failed
+                }
+            }
+        }
+
         async fn finalize_section(
             &mut self,
             id: &str,
@@ -1698,6 +1794,35 @@ mod native {
                         continue;
                     };
                     match work {
+                        crate::commands::work::TaskWork::WholeInput { .. }
+                            if execution::finalization::supports(task.kind) =>
+                        {
+                            flush(&mut batch, &mut jobs);
+                            batch_bytes = 0;
+                            match crate::commands::work::section::prepare(
+                                session.root(),
+                                &self.config,
+                                &self.config_revision,
+                                &task.task_id,
+                            )? {
+                                crate::commands::work::section::Preparation::Ready(_) => {
+                                    jobs.insert(target.clone(), QueueDispatch::Section { task });
+                                }
+                                crate::commands::work::section::Preparation::NeedsAction(
+                                    reason,
+                                ) => {
+                                    keys.remove(target);
+                                    deferred.insert(target.clone(), vec![reason]);
+                                }
+                                crate::commands::work::section::Preparation::Capacity {
+                                    request_bytes,
+                                    max_input_bytes,
+                                } => {
+                                    keys.remove(target);
+                                    deferred.insert(target.clone(), vec![format!("complete section request needs {request_bytes} bytes, above max_input_bytes {max_input_bytes}; retained for explicit capacity adjustment")]);
+                                }
+                            }
+                        }
                         crate::commands::work::TaskWork::WholeInput { bytes } => {
                             if bytes > budget.max_input_bytes.saturating_sub(batch_bytes) {
                                 flush(&mut batch, &mut jobs);
@@ -1868,6 +1993,16 @@ mod native {
                         },
                     });
                     match &jobs[&selected] {
+                        QueueDispatch::Section { task } => {
+                            match self.whole_section_step(task).await {
+                                WorkStep::Staged => {}
+                                WorkStep::Deferred(_) => continue 'planning,
+                                WorkStep::Failed => return false,
+                                WorkStep::Pending => {
+                                    unreachable!("single section has no evidence nodes")
+                                }
+                            }
+                        }
                         QueueDispatch::Discovery { task } => {
                             let directory = match tempfile::Builder::new()
                                 .prefix("lorekeeper-discovery-")
@@ -1988,7 +2123,8 @@ mod native {
                     }
                     let tasks = match &jobs[&selected] {
                         QueueDispatch::WholeInput { tasks } => tasks.as_slice(),
-                        QueueDispatch::Partitioned { task, .. } => std::slice::from_ref(task),
+                        QueueDispatch::Partitioned { task, .. }
+                        | QueueDispatch::Section { task } => std::slice::from_ref(task),
                         QueueDispatch::Discovery { .. } => {
                             unreachable!("discovery restarts planning")
                         }

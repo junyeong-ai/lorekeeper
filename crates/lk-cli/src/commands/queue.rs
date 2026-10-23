@@ -1614,6 +1614,13 @@ fn prune_queue_with_session(
             );
         }
         if complete {
+            #[cfg(unix)]
+            {
+                let removed = super::work::section::prune(session, &identities)?;
+                if removed != 0 {
+                    eprintln!("pruned {removed} unreferenced whole-section action receipt(s)");
+                }
+            }
             let removed = super::work::prune_discovery(session, &identities)?;
             if removed != 0 {
                 eprintln!("pruned {removed} unreferenced extraction discovery recipe(s)");

@@ -146,6 +146,23 @@ pub(in crate::commands) fn request(
     events: Option<Value>,
     max_response_bytes: usize,
 ) -> miette::Result<Value> {
+    section_request(work, events, max_response_bytes, false)
+}
+
+pub(in crate::commands) fn whole_request(
+    work: &Value,
+    events: Option<Value>,
+    max_response_bytes: usize,
+) -> miette::Result<Value> {
+    section_request(work, events, max_response_bytes, true)
+}
+
+fn section_request(
+    work: &Value,
+    events: Option<Value>,
+    max_response_bytes: usize,
+    whole_input: bool,
+) -> miette::Result<Value> {
     let purpose = &work["context"]["purpose"];
     let kind: TaskKind = serde_json::from_value(purpose["task_kind"].clone()).into_diagnostic()?;
     let target: TaskTarget = serde_json::from_value(purpose["target"].clone()).into_diagnostic()?;
@@ -157,13 +174,18 @@ pub(in crate::commands) fn request(
             "section finalization requires the task locale"
         ));
     }
-    let rules = instructions(
+    let mut rules = instructions(
         kind,
         target.kind,
         purpose["parameters"]["source_type"].as_str(),
     )?;
+    if whole_input {
+        rules = format!(
+            "This is a whole-input section request. Read every supplied resource in full. The resources contain the exact retained source and required scoped dependencies, rather than completed observations. Generate directly from those resources, preserving their authority and uncertainty. The work object has no completed observation, source_questions or unresolved list. Return needs-action if these supplied inputs cannot support the required section; do not assume a missing read or review was completed.\n\n{rules}"
+        );
+    }
     Ok(json!({
-        "kind":"finalize-section", "work":work, "instructions":rules,
+        "kind":if whole_input {"whole-section"} else {"finalize-section"}, "work":work, "instructions":rules,
         "events":events, "max_response_bytes":max_response_bytes,
     }))
 }
@@ -179,7 +201,7 @@ pub(in crate::commands) fn build_invocation(
             "properties":{"status":{"type":"string","enum":["complete","needs-action"]},
                 "body":{"type":["string","null"]},"reason":{"type":["string","null"]}},
             "required":["status","body","reason"]}),
-        "Complete only the supplied finalize-section request. Its instructions and completed observations are the entire authorized generation scope. Return the schema-constrained response; native Rust owns all guards and writes.",
+        "Complete only the supplied single-section request. Its instructions and guarded inputs are the entire authorized generation scope. Return the schema-constrained response; native Rust owns all guards and writes.",
     )
 }
 

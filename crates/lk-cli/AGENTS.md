@@ -66,7 +66,10 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   keep it alive through the foreground consumer and remove it afterward.
   `commands/work.rs` binds retained input and audit dependencies to resumable derived
   work. Oversized requests use a fresh configured agent per inspection/reduction and
-  a bounded finalizer; small requests retain ordinary batching. `execution.work` limits
+  a bounded finalizer. Unplanned whole-input summarize/refine/themes use one tool-free
+  section request, including scoped reviews and generation rules; other small requests
+  retain ordinary batching. Complete-envelope capacity defers only that target without
+  clipping or rewriting paid Work. `execution.work` limits
   serialized request/result bytes and agent calls per native run, resetting per knowledge
   batch. Exhaustion retains unfinished work and fails explicitly, without clipping evidence.
   Resume current explicit Work plans even when the remaining batch fits whole input;
@@ -102,6 +105,10 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   Corrupt receipts refuse. Retention validates stored receipt identity without requiring
   historical generation rules to match current ones. Interactive finalizers retain their
   explicit repair and guarded submission capabilities.
+  Whole-section action receipts bind exact task/input, captured scope and complete request;
+  unchanged actions defer before invocation. Scoped SectionResult values retain an optional
+  context revision, revalidated against current reviews at apply. Omission preserves the
+  legacy section wire contract. Pending identities protect actions during queue pruning.
 - Native queue scheduling chooses one task per target so publication cannot invalidate
   another simultaneous task on the same page. Whole-input tasks share an evidence-bounded
   batch; oversized work reserves fair inspection/reduction/finalization turns.

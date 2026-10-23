@@ -114,6 +114,7 @@ fn automatic_readiness_skips_blocked_inputs_without_reserving_or_changing_defaul
     fixture.write(
         ".lorekeeper/queue/results/pending.section.json",
         &serde_json::to_string(&lk_queue::SectionResult {
+            context_revision: None,
             task_id: task.task_id.clone(),
             cache_hash: task.cache_hash.clone(),
             target_revision: file_revision(&blocked),
@@ -252,6 +253,7 @@ fn unknown_queue_or_staged_targets_refuse_readiness_without_changing_default_pla
     fixture.write(
         ".lorekeeper/queue/results/orphan.section.json",
         &serde_json::to_string(&lk_queue::SectionResult {
+            context_revision: None,
             task_id: "orphan".into(),
             cache_hash: "hash".into(),
             target_revision: "revision".into(),

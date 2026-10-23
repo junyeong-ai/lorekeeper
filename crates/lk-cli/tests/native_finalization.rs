@@ -19,14 +19,16 @@ assert '--output-schema' in sys.argv or '--safe-mode' in sys.argv, 'interactive 
 raw=sys.stdin.read()
 request=json.loads(raw.split('\nNative request:\n',1)[1])
 kind=request['kind']
-work=request['work'] if kind=='finalize-section' else request
+work=request['work'] if kind in ['finalize-section','whole-section'] else request
+work_id=work.get('work_id') or work.get('context_revision')
 with (root/'calls.jsonl').open('a') as f:
-    f.write(json.dumps({'kind':kind,'work_id':work['work_id'],'node_id':work['node_id']})+'\n')
-if kind=='finalize-section':
+    f.write(json.dumps({'kind':kind,'work_id':work_id,'node_id':work.get('node_id')})+'\n')
+if kind in ['finalize-section','whole-section']:
     assert all(key in request for key in ['instructions','max_response_bytes','events'])
     assert 'No tools' in request['instructions']
     assert work['context']['purpose']['parameters']['locale']=='ko'
-    assert not work['output']['unresolved']
+    if kind=='finalize-section': assert not work['output']['unresolved']
+    else: assert work['resources'] and 'output' not in work
     (root/'last-finalization.json').write_text(json.dumps(request))
     mode=(root/'mode').read_text()
     if mode=='exit': raise SystemExit(23)
@@ -39,7 +41,7 @@ if kind=='finalize-section':
         path=root/'vault'/work['context']['subject']['target']
         path.write_text(path.read_text()+'\nExternal editor change.\n')
     blocked=root/'blocked-work'
-    needs=mode=='needs-action' and (not blocked.exists() or blocked.read_text()==work['work_id'])
+    needs=mode=='needs-action' and (not blocked.exists() or blocked.read_text()==work_id)
     if needs:
         output={'status':'needs-action','body':None,'reason':'A scoped open review must be recorded before completing this section.'}
     else:
@@ -153,6 +155,10 @@ impl Fixture {
     }
 
     fn add(&self, name: &str, kind: TaskKind) -> (QueueTask, Value) {
+        self.add_with_plan(name, kind, true)
+    }
+
+    fn add_with_plan(&self, name: &str, kind: TaskKind, planned: bool) -> (QueueTask, Value) {
         let target_kind = match kind {
             TaskKind::RefineEvents => "daily-refine-events",
             TaskKind::IdentifyThemes => "weekly-synthesis-themes",
@@ -205,8 +211,13 @@ impl Fixture {
             std::slice::from_ref(&task),
         )
         .unwrap();
-        let plan = self.json(&["work", "plan", "--task-id", &task.task_id]);
-        assert_eq!(plan["parts"], 1);
+        let plan = if planned {
+            let plan = self.json(&["work", "plan", "--task-id", &task.task_id]);
+            assert_eq!(plan["parts"], 1);
+            plan
+        } else {
+            Value::Null
+        };
         (task, plan)
     }
 
@@ -232,6 +243,231 @@ impl Fixture {
     fn mode(&self, mode: &str) {
         std::fs::write(self.root().join("mode"), mode).unwrap();
     }
+}
+
+#[test]
+fn whole_sections_use_one_tool_free_call_without_fabricated_work_on_both_hosts() {
+    for engine in ["codex", "claude-code"] {
+        for kind in [
+            TaskKind::Summarize,
+            TaskKind::RefineEvents,
+            TaskKind::IdentifyThemes,
+        ] {
+            let fixture = Fixture::new(engine, 32768);
+            let (task, _) = fixture.add_with_plan("source", kind, false);
+            let (output, report) = fixture.run();
+            assert!(
+                output.status.success(),
+                "{report}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(report["semantic_calls"], 1);
+            assert_eq!(fixture.calls().len(), 1);
+            assert_eq!(fixture.calls()[0]["kind"], "whole-section");
+            assert!(!fixture.root().join("vault/.lorekeeper/work").exists());
+            let status = fixture.json(&["queue", "status", "--json"]);
+            assert!(
+                status["data"]["tasks"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|entry| entry["task_id"] == task.task_id && entry["status"] == "done")
+            );
+            let (_, repeated) = fixture.run();
+            assert_eq!(repeated["semantic_calls"], 0);
+        }
+    }
+}
+
+#[test]
+fn whole_section_actions_defer_unchanged_requests_and_allow_independent_publication() {
+    for engine in ["codex", "claude-code"] {
+        let fixture = Fixture::new(engine, 32768);
+        fixture.mode("needs-action");
+        let (task, _) = fixture.add_with_plan("a", TaskKind::Summarize, false);
+        let (output, report) = fixture.run();
+        assert!(!output.status.success());
+        assert_eq!(report["semantic_calls"], 1);
+        let (_, repeated) = fixture.run();
+        assert_eq!(repeated["semantic_calls"], 0);
+        fixture.mode("complete");
+        let (other, _) = fixture.add_with_plan("b", TaskKind::Summarize, false);
+        let (output, report) = fixture.run();
+        assert!(!output.status.success(), "blocked a must remain incomplete");
+        assert_eq!(report["semantic_calls"], 1);
+        let status = fixture.json(&["queue", "status", "--json"]);
+        for (id, expected) in [(task.task_id, "current"), (other.task_id, "done")] {
+            assert!(
+                status["data"]["tasks"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|entry| entry["task_id"] == id && entry["status"] == expected)
+            );
+        }
+    }
+}
+
+#[test]
+fn whole_sections_reject_malformed_forged_changed_and_oversized_results_on_both_hosts() {
+    for engine in ["codex", "claude-code"] {
+        for mode in [
+            "malformed",
+            "forged-guards",
+            "changed-target",
+            "oversized",
+            "section-boundary",
+            "exit",
+        ] {
+            let fixture = Fixture::new(engine, 32768);
+            let (task, _) = fixture.add_with_plan("source", TaskKind::Summarize, false);
+            fixture.mode(mode);
+            let (output, report) = fixture.run();
+            assert!(!output.status.success(), "{engine}/{mode}: {report}");
+            assert_eq!(report["semantic_calls"], 1);
+            let status = fixture.json(&["queue", "status", "--json"]);
+            assert!(
+                !status["data"]["tasks"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|entry| entry["task_id"] == task.task_id && entry["status"] == "done")
+            );
+            assert!(
+                !fixture
+                    .root()
+                    .join("vault/.lorekeeper/queue/section-actions")
+                    .exists()
+            );
+        }
+    }
+}
+
+#[test]
+fn whole_section_actions_reconsider_changed_inputs_and_refuse_corruption() {
+    let fixture = Fixture::new("codex", 32768);
+    let (task, _) = fixture.add_with_plan("source", TaskKind::Summarize, false);
+    fixture.mode("needs-action");
+    let (_, report) = fixture.run();
+    assert_eq!(report["semantic_calls"], 1);
+    let store = fixture
+        .root()
+        .join("vault/.lorekeeper/queue/section-actions");
+    let action = std::fs::read_dir(&store)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    std::fs::write(&action, "{}").unwrap();
+    let (output, report) = fixture.run();
+    assert!(!output.status.success());
+    assert_eq!(report["semantic_calls"], 0);
+    assert_eq!(std::fs::read_to_string(&action).unwrap(), "{}");
+    std::fs::remove_file(&action).unwrap();
+    let (_, report) = fixture.run();
+    assert_eq!(report["semantic_calls"], 1);
+    let page = fixture.root().join("vault").join(&task.target.vault_path);
+    let raw = std::fs::read_to_string(&page).unwrap();
+    std::fs::write(&page, format!("{raw}\nA changed source observation.\n")).unwrap();
+    fixture.mode("complete");
+    let (output, report) = fixture.run();
+    assert!(output.status.success(), "{report}");
+    assert_eq!(report["semantic_calls"], 1);
+    assert_eq!(std::fs::read_dir(store).unwrap().count(), 0);
+}
+
+#[test]
+fn whole_section_action_retention_preserves_pending_and_removes_unreferenced_receipts() {
+    let fixture = Fixture::new("codex", 32768);
+    fixture.add_with_plan("source", TaskKind::Summarize, false);
+    fixture.mode("needs-action");
+    fixture.run();
+    let store = fixture
+        .root()
+        .join("vault/.lorekeeper/queue/section-actions");
+    let before = std::fs::read_dir(&store)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let raw = std::fs::read(&before).unwrap();
+    let output = fixture
+        .command()
+        .args(["queue", "prune", "--dry-run"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(std::fs::read(&before).unwrap(), raw);
+    let output = fixture.command().args(["queue", "prune"]).output().unwrap();
+    assert!(output.status.success());
+    assert_eq!(std::fs::read(&before).unwrap(), raw);
+    std::fs::remove_file(fixture.root().join("vault/.lorekeeper/queue/source.jsonl")).unwrap();
+    let output = fixture.command().args(["queue", "prune"]).output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!before.exists());
+}
+
+#[test]
+fn whole_section_capacity_defers_complete_review_scope_without_blocking_independent_work() {
+    let fixture = Fixture::new("codex", 32768);
+    let (blocked, _) = fixture.add_with_plan("a", TaskKind::Summarize, false);
+    let (independent, _) = fixture.add_with_plan("b", TaskKind::Summarize, false);
+    let reviews = fixture.root().join("vault/wiki/explorations");
+    std::fs::create_dir_all(&reviews).unwrap();
+    std::fs::write(reviews.join("large-review.md"), format!(
+        "---\ntype: exploration\ntitle: Large review\nreview:\n  status: unresolved\n  subjects: [{}]\n---\n# Large review\n{}\n", blocked.target.vault_path, "Scoped review evidence. ".repeat(2000)
+    )).unwrap();
+    let target_before = std::fs::read(
+        fixture
+            .root()
+            .join("vault")
+            .join(&blocked.target.vault_path),
+    )
+    .unwrap();
+    let (output, report) = fixture.run();
+    assert!(
+        !output.status.success(),
+        "capacity remains incomplete: {report}"
+    );
+    assert_eq!(report["semantic_calls"], 1, "{report}");
+    assert!(!fixture.root().join("vault/.lorekeeper/work").exists());
+    assert_eq!(
+        std::fs::read(
+            fixture
+                .root()
+                .join("vault")
+                .join(&blocked.target.vault_path)
+        )
+        .unwrap(),
+        target_before
+    );
+    let status = fixture.json(&["queue", "status", "--json"]);
+    for (id, expected) in [(blocked.task_id, "current"), (independent.task_id, "done")] {
+        assert!(
+            status["data"]["tasks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["task_id"] == id && entry["status"] == expected),
+            "{status}"
+        );
+    }
+    assert!(
+        report["stages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|stage| stage["detail"]
+                .as_str()
+                .is_some_and(|detail| detail.contains("above max_input_bytes"))),
+        "{report}"
+    );
 }
 
 #[test]
@@ -468,6 +704,7 @@ fn explicitly_finished_work_restages_before_considering_old_action_receipts() {
     let id = plan["work_id"].as_str().unwrap();
     let completed = fixture.json(&["work", "result", id]);
     let result = lk_queue::SectionResult {
+        context_revision: None,
         task_id: task.task_id,
         cache_hash: task.cache_hash,
         target_revision: completed["context"]["subject"]["target_revision"]
