@@ -125,7 +125,7 @@ jobs:
       # checkout rather than restored from a store some other run wrote.
       - name: Install cross
         if: matrix.cross
-        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+        uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
           tool: cross@0.2.5
 
@@ -181,7 +181,9 @@ jobs:
           echo "archive=$archive" >> "$GITHUB_OUTPUT"
 
       - name: Attest build provenance
-        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        env:
+          NODE_OPTIONS: --max-http-header-size=32768
         with:
           subject-path: ${{ steps.package.outputs.archive }}
 
