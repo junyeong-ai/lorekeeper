@@ -495,6 +495,7 @@ pub(super) fn task_context(
                 "authority":"Record explicit discovery queries against the exact target before selecting candidate evidence. No semantic read or completion is certified."}));
         };
         match screening(&root, config, config_revision, task_id, queries)? {
+            ScreeningPreparation::Capacity { capacity, .. } => return Err(capacity.into()),
             ScreeningPreparation::Source { work, .. } => {
                 return Ok(
                     json!({"status":"needs-source-observations","context_revision":null,
@@ -703,6 +704,10 @@ enum ScreeningPreparation {
         prepared: Box<Prepared>,
     },
     Candidates(Box<Screening>),
+    Capacity {
+        inventory: Box<resources::SelectionInventory>,
+        capacity: selection::ScreeningCapacity,
+    },
 }
 
 fn screening(
@@ -713,7 +718,10 @@ fn screening(
     queries: &[lk_core::discovery::DiscoveryQuery],
 ) -> miette::Result<ScreeningPreparation> {
     let inventory = resources::selection_inventory(root, config, task_id, queries)?;
-    screening_with_inventory(root, config, config_revision, inventory)
+    match screening_with_inventory(root, config, config_revision, inventory)? {
+        ScreeningPreparation::Capacity { capacity, .. } => Err(capacity.into()),
+        prepared => Ok(prepared),
+    }
 }
 
 fn screening_with_inventory(
@@ -752,13 +760,28 @@ fn screening_with_inventory(
         json!({"role":"complete-retained-input", "source_revision":source_revision,
             "context":inventory.source.context, "resources":inventory.source.resources})
     };
-    if !selection::Selection::source_fits(
+    let source_fits = match selection::Selection::source_fits(
         &binding,
         &context,
         &inventory.capture,
         bounds.max_input_bytes,
         bounds.max_result_bytes,
-    )? {
+    ) {
+        Ok(fits) => fits,
+        Err(error) => {
+            let Some(capacity) = error
+                .downcast_ref::<selection::ScreeningCapacity>()
+                .copied()
+            else {
+                return Err(error);
+            };
+            return Ok(ScreeningPreparation::Capacity {
+                inventory: Box::new(inventory),
+                capacity,
+            });
+        }
+    };
+    if !source_fits {
         let work = expected(root, &inventory.source, config, config_revision)?;
         if !work.is_planned(root)? || !work.progress(root, &inventory.source.resources)?.complete {
             return Ok(ScreeningPreparation::Source {
@@ -779,13 +802,27 @@ fn screening_with_inventory(
         context = json!({"role":"complete-bounded-source-observations", "source_revision":source_revision,
             "observation":result});
     }
-    let selection = selection::Selection::build(
+    let selection = match selection::Selection::build(
         binding,
         context,
         &inventory.capture,
         bounds.max_input_bytes,
         bounds.max_result_bytes,
-    )?
+    ) {
+        Ok(selection) => selection,
+        Err(error) => {
+            let Some(capacity) = error
+                .downcast_ref::<selection::ScreeningCapacity>()
+                .copied()
+            else {
+                return Err(error);
+            };
+            return Ok(ScreeningPreparation::Capacity {
+                inventory: Box::new(inventory),
+                capacity,
+            });
+        }
+    }
     .prefer_saved_configuration(
         root,
         config_revision,
@@ -824,6 +861,7 @@ impl ScreeningPreparation {
         config_revision: &str,
     ) -> miette::Result<()> {
         match self {
+            Self::Capacity { capacity, .. } => return Err((*capacity).into()),
             Self::Source { prepared, .. } => {
                 persist_prepared(session, config, config_revision, prepared)?;
             }
@@ -908,9 +946,13 @@ fn selected_task(
     binding: &lk_queue::ExtractionSelection,
     mutation: &mut lk_vault::MutationPlan,
 ) -> miette::Result<(Prepared, std::collections::BTreeSet<String>)> {
-    let ScreeningPreparation::Candidates(screening) =
-        screening(root, config, config_revision, task_id, queries)?
-    else {
+    let current = screening(root, config, config_revision, task_id, queries).map_err(|error| {
+        if error.downcast_ref::<selection::ScreeningCapacity>().is_some() {
+            publication_rejection(RejectionKind::EvidenceScopeChanged,
+                "current candidate screening exceeds its complete packet bound; retain the proposal and regenerate only after explicit scope or capacity reconsideration")
+        } else { error }
+    })?;
+    let ScreeningPreparation::Candidates(screening) = current else {
         return Err(publication_rejection(
             RejectionKind::EvidenceScopeChanged,
             "source observations are incomplete; retained extraction cannot publish",
@@ -1100,17 +1142,23 @@ fn prepare_task_in_session(
             }
             Err(error) => return Err(error),
         };
-        if let ScreeningPreparation::Candidates(screening) = &selected
-            && let Some(reason) = screening.selection.admission_reason(config, root)?
-        {
-            return Ok(TaskWork::Admission { reason });
-        }
-        selected.persist(session, config, config_revision)?;
         match selected {
-            ScreeningPreparation::Source { work, .. } => {
+            ScreeningPreparation::Capacity { capacity, .. } => {
+                return Ok(TaskWork::Admission {
+                    reason: capacity.to_string(),
+                });
+            }
+            ScreeningPreparation::Source { work, prepared } => {
+                persist_prepared(session, config, config_revision, &prepared)?;
                 return Ok(TaskWork::Source { id: work.plan.id });
             }
             ScreeningPreparation::Candidates(screening) => {
+                if let Some(reason) = screening.selection.admission_reason(config, root)? {
+                    return Ok(TaskWork::Admission { reason });
+                }
+                screening
+                    .selection
+                    .create(session, &screening.inventory.pages)?;
                 let ledger = screening.selection.ledger(root)?;
                 if !ledger.progress.complete {
                     return Ok(TaskWork::Screening);
@@ -1614,6 +1662,7 @@ pub async fn run(opts: &GlobalOptions, command: WorkCommand) -> miette::Result<(
     let output = match command {
         WorkCommand::Cost { task_id } => {
             match current_screening(&root, &config, &config_revision, &task_id)? {
+                ScreeningPreparation::Capacity { capacity, .. } => return Err(capacity.into()),
                 ScreeningPreparation::Source { work, .. } => {
                     json!({"status":"needs-source-observations",
                 "source_parts":work.plan.parts.len(),"cost":null,
@@ -1646,6 +1695,7 @@ pub async fn run(opts: &GlobalOptions, command: WorkCommand) -> miette::Result<(
                 prepared.persist(session, &config, &config_revision)?;
             }
             match prepared {
+                ScreeningPreparation::Capacity { capacity, .. } => return Err(capacity.into()),
                 ScreeningPreparation::Source { work, prepared } => json!({
                     "status":"needs-source-observations",
                     "source_work":progress(&work, &root, &prepared, 20, 0)?,

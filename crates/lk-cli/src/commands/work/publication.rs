@@ -64,6 +64,32 @@ pub(in crate::commands) fn publication_scope(
             None
         };
         match screening_with_inventory(&root, config, config_revision, inventory)? {
+            ScreeningPreparation::Capacity {
+                inventory,
+                capacity,
+            } => {
+                merge_pages(&mut pages, inventory.pages.clone())?;
+                let capacity = match capacity {
+                    super::selection::ScreeningCapacity::Input {
+                        required_bytes,
+                        max_bytes,
+                    } => {
+                        json!({"kind":"input","required_bytes":required_bytes,"max_bytes":max_bytes})
+                    }
+                    super::selection::ScreeningCapacity::Result {
+                        required_bytes,
+                        max_bytes,
+                    } => {
+                        json!({"kind":"result","required_bytes":required_bytes,"max_bytes":max_bytes})
+                    }
+                };
+                let phase = json!({
+                    "inventory_revision":inventory_revision,
+                    "supplied_inventory_revision":supplied_revision,
+                    "capacity":capacity,
+                });
+                (inventory.source, owners, pages, phase)
+            }
             ScreeningPreparation::Source { work, prepared } => {
                 let planned = work.is_planned(&root)?;
                 let progress = if planned {
@@ -278,6 +304,150 @@ mod tests {
             )
             .unwrap();
         }
+    }
+
+    #[test]
+    fn publication_scope_retains_readable_capacity_inputs_and_refuses_unreadable_pages() {
+        let mut fixture = Fixture::build("progressive");
+        let config_path = fixture.root.join("config.yaml");
+        let config = std::fs::read_to_string(&config_path)
+            .unwrap()
+            .replace("max_result_bytes: 4096", "max_result_bytes: 1024");
+        std::fs::write(&config_path, config).unwrap();
+        (fixture.config, fixture.config_revision) =
+            Config::load_with_revision(&config_path).unwrap();
+        fixture.record_queries(&fixture.queries);
+        let before = fixture.scope();
+        let address = format!(
+            "wiki/concepts/{}candidate.md",
+            format!("{}/", "owner".repeat(40)).repeat(4)
+        );
+        let original =
+            "---\ntype: concept\ntitle: Candidate\n---\nA scoped Candidate observation.\n";
+        write(&fixture.root, &address, original);
+        let capacity = fixture.scope();
+        assert_ne!(capacity.revision, before.revision);
+        assert!(capacity.owners.contains(Path::new(&address)));
+        assert_eq!(capacity.pages[Path::new(&address)], original);
+        assert_eq!(capacity.revision, fixture.scope().revision);
+
+        let changed = format!("{original}\nChanged scoped evidence.\n");
+        write(&fixture.root, &address, &changed);
+        assert_ne!(capacity.revision, fixture.scope().revision);
+        std::fs::write(fixture.root.join(&address), [0xff]).unwrap();
+        let error = publication_scope(
+            &fixture.root,
+            &fixture.config,
+            &fixture.config_revision,
+            &fixture.task.task_id,
+            &fixture.queries,
+        )
+        .err()
+        .expect("unreadable current evidence must remain fatal");
+        assert!(error.downcast_ref::<PublicationRejection>().is_none());
+        assert!(
+            error
+                .downcast_ref::<super::super::selection::ScreeningCapacity>()
+                .is_none()
+        );
+        std::fs::remove_file(fixture.root.join(&address)).unwrap();
+        assert_eq!(before.revision, fixture.scope().revision);
+    }
+
+    #[test]
+    fn capacity_scope_keeps_completed_source_observation_guards() {
+        let mut fixture = Fixture::build_with_text(
+            "progressive",
+            &"Candidate attributed source observation.\n\n".repeat(2000),
+        );
+        fixture
+            .queries
+            .extend((b'A'..=b'C').map(|character| DiscoveryQuery {
+                query: char::from(character).to_string().repeat(4096),
+                phrase: true,
+                spacing: false,
+            }));
+        fixture.record_queries(&fixture.queries);
+        let ScreeningPreparation::Source { work, prepared } = super::super::screening(
+            &fixture.root,
+            &fixture.config,
+            &fixture.config_revision,
+            &fixture.task.task_id,
+            &fixture.queries,
+        )
+        .unwrap() else {
+            panic!("large retained source requires bounded observations");
+        };
+        {
+            let session = lk_vault::MutationSession::acquire(&fixture.root).unwrap();
+            super::super::persist_prepared(
+                &session,
+                &fixture.config,
+                &fixture.config_revision,
+                &prepared,
+            )
+            .unwrap();
+            loop {
+                let (progress, request) = work
+                    .prepare_inspection(&fixture.root, &prepared.resources)
+                    .unwrap();
+                if progress.complete {
+                    break;
+                }
+                let request = request.unwrap();
+                work.record(
+                    &session,
+                    super::super::WorkOutput {
+                        work_id: work.plan.id.clone(),
+                        node_id: request["node_id"].as_str().unwrap().into(),
+                        input_revision: request["input_revision"].as_str().unwrap().into(),
+                        summary: "S".repeat(2500),
+                        findings: vec![],
+                        source_questions: vec![],
+                        unresolved: vec![],
+                        resolutions: vec![],
+                    },
+                    &prepared.resources,
+                )
+                .unwrap();
+            }
+        }
+        let inventory = resources::selection_inventory(
+            &fixture.root,
+            &fixture.config,
+            &fixture.task.task_id,
+            &fixture.queries,
+        )
+        .unwrap();
+        assert!(matches!(
+            screening_with_inventory(
+                &fixture.root,
+                &fixture.config,
+                &fixture.config_revision,
+                inventory,
+            )
+            .unwrap(),
+            ScreeningPreparation::Capacity {
+                capacity: super::super::selection::ScreeningCapacity::Input { .. },
+                ..
+            }
+        ));
+        let (result, guards) = work
+            .result_with_guards(&fixture.root, &prepared.resources)
+            .unwrap();
+        assert!(guards.len() > 1);
+        let before = fixture.scope();
+        for (path, raw) in &guards {
+            assert_eq!(before.pages.get(path), Some(raw));
+            assert!(!before.owners.contains(path));
+        }
+        let mut output: super::super::WorkOutput =
+            serde_json::from_value(result["output"].clone()).unwrap();
+        output.summary = "T".repeat(2500);
+        let session = lk_vault::MutationSession::acquire(&fixture.root).unwrap();
+        work.record(&session, output, &prepared.resources).unwrap();
+        drop(session);
+        assert_ne!(before.revision, fixture.scope().revision);
     }
 
     #[test]

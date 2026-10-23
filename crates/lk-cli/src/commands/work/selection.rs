@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 const POLICY: &str = "progressive-evidence-v1";
 const CARD_SCOPE: &str = "candidate-card-only";
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ScreeningCapacity {
     Input {
         required_bytes: usize,
