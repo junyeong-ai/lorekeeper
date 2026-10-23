@@ -187,6 +187,14 @@ mod native {
         deferred: std::collections::BTreeMap<String, Vec<String>>,
     }
 
+    #[derive(Default, Serialize)]
+    struct QueuePlanningMetrics {
+        attempts: usize,
+        duration_ms: u64,
+        synthesis_subjects: usize,
+        audit_captures: usize,
+    }
+
     #[derive(Serialize)]
     #[serde(rename_all = "kebab-case")]
     enum StageState {
@@ -238,6 +246,7 @@ mod native {
         semantic_calls: usize,
         #[serde(flatten)]
         work_telemetry: WorkTelemetry,
+        queue_planning: QueuePlanningMetrics,
         audit: Option<Vec<lk_graph::audit::AuditCompletion>>,
         audit_progress: Option<AuditProgress>,
         audit_blocked: Vec<lk_graph::audit::AuditBlockedInput>,
@@ -965,7 +974,7 @@ mod native {
             Some(completed == before.batches)
         }
 
-        fn queue_dispatches(&self) -> miette::Result<QueuePlan> {
+        fn queue_dispatches(&mut self) -> miette::Result<QueuePlan> {
             fn flush(
                 batch: &mut Vec<lk_queue::QueueTask>,
                 jobs: &mut std::collections::BTreeMap<String, QueueDispatch>,
@@ -1003,8 +1012,7 @@ mod native {
                 .max_input_bytes;
             let mut jobs = std::collections::BTreeMap::new();
             let mut deferred = std::collections::BTreeMap::new();
-            let mut batch = Vec::new();
-            let mut batch_bytes = 0usize;
+            let mut eligible = Vec::new();
             for task in targets.into_values() {
                 let target = task.target.vault_path.clone();
                 if task.kind == lk_queue::TaskKind::SynthesizeConcept {
@@ -1017,6 +1025,36 @@ mod native {
                         continue;
                     }
                 }
+                eligible.push(task);
+            }
+            let synthesis_paths = eligible
+                .iter()
+                .filter(|task| task.kind == lk_queue::TaskKind::SynthesizeConcept)
+                .map(|task| task.target.vault_path.clone())
+                .collect::<Vec<_>>();
+            let synthesis_inputs = if synthesis_paths.is_empty() {
+                std::collections::BTreeMap::new()
+            } else {
+                self.result.queue_planning.synthesis_subjects += synthesis_paths.len();
+                self.result.queue_planning.audit_captures += 1;
+                let pages =
+                    lk_graph::scan::scan_vault(&self.root, self.config.graph.scope.follow_links)
+                        .map_err(|error| miette::miette!("{error}"))?;
+                lk_graph::audit::load_selected_inputs(
+                    &self.root,
+                    &self.config.vault.dirs,
+                    &pages,
+                    &synthesis_paths,
+                )
+                .map_err(|error| miette::miette!("{error}"))?
+                .into_iter()
+                .map(|candidate| (candidate.path.clone(), candidate))
+                .collect()
+            };
+            let mut batch = Vec::new();
+            let mut batch_bytes = 0usize;
+            for task in eligible {
+                let target = task.target.vault_path.clone();
                 if crate::commands::work::needs_discovery(
                     &self.root,
                     &self.config,
@@ -1028,11 +1066,12 @@ mod native {
                     jobs.insert(target, QueueDispatch::Discovery { task });
                     continue;
                 }
-                match crate::commands::work::prepare_task(
+                match crate::commands::work::prepare_task_with_audit(
                     &self.root,
                     &self.config,
                     &self.config_revision,
                     &task.task_id,
+                    synthesis_inputs.get(&target),
                 )? {
                     crate::commands::work::TaskWork::WholeInput { bytes } => {
                         if bytes > limit.saturating_sub(batch_bytes) {
@@ -1104,7 +1143,11 @@ mod native {
 
         async fn dispatch_queue(&mut self) -> bool {
             'planning: loop {
-                let plan = match self.queue_dispatches() {
+                let started_at = Instant::now();
+                self.result.queue_planning.attempts += 1;
+                let planned = self.queue_dispatches();
+                self.result.queue_planning.duration_ms += started_at.elapsed().as_millis() as u64;
+                let plan = match planned {
                     Ok(plan) => plan,
                     Err(error) => return self.failure("queue planning", error),
                 };
@@ -1957,6 +2000,7 @@ mod native {
                 workflow_id: None,
                 semantic_calls: 0,
                 work_telemetry: WorkTelemetry::default(),
+                queue_planning: QueuePlanningMetrics::default(),
                 audit: None,
                 audit_progress: None,
                 audit_blocked: Vec::new(),

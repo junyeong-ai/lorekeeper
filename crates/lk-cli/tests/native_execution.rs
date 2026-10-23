@@ -3689,3 +3689,57 @@ fn cancellation_stops_further_stages_when_zombie_group_cleanup_returns_eperm() {
             .success()
     );
 }
+
+#[test]
+fn native_synthesis_queue_planning_captures_two_ready_subjects_once_per_checkpoint() {
+    let fixture = Fixture::new("codex", 30, RECORD_BOUNDED_AUDIT);
+    let config = std::fs::read_to_string(&fixture.config).unwrap().replace(
+        "  default_profile: primary\n",
+        "  default_profile: primary\n  work: {max_input_bytes: 8192, max_result_bytes: 1024, max_calls: 1}\n",
+    );
+    std::fs::write(&fixture.config, config).unwrap();
+    write_synthesis_pair(&fixture, "a-ready", None, 400);
+    write_synthesis_pair(&fixture, "b-ready", None, 400);
+    let (output, report) = fixture.run("process");
+    assert!(
+        !output.status.success(),
+        "one call retains both syntheses: {report}"
+    );
+    assert_eq!(report["semantic_calls"], 1);
+    assert_eq!(report["queue_planning"]["attempts"], 1);
+    assert_eq!(report["queue_planning"]["audit_captures"], 1);
+    assert_eq!(report["queue_planning"]["synthesis_subjects"], 2);
+    assert!(
+        report["stages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|stage| { stage["name"] == "semantic call budget" && stage["state"] == "failed" })
+    );
+    let subjects = planned_queue_subjects(&fixture);
+    assert_eq!(subjects.len(), 2);
+    assert_eq!(
+        subjects
+            .iter()
+            .map(|subject| subject["target"].as_str().unwrap())
+            .collect::<std::collections::BTreeSet<_>>(),
+        std::collections::BTreeSet::from(["wiki/concepts/a-ready.md", "wiki/concepts/b-ready.md"])
+    );
+    let status = execution_json(&fixture, &["queue", "status", "--json"]);
+    assert_eq!(
+        status["data"]["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|task| task["kind"] == "synthesize-concept" && task["status"] == "current")
+            .count(),
+        2
+    );
+    assert_eq!(bounded_calls(&fixture).len(), 1);
+    assert!(
+        !fixture
+            .root()
+            .join("vault/.lorekeeper/mutation/pending.json")
+            .exists()
+    );
+}

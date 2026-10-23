@@ -849,6 +849,16 @@ pub(super) fn prepare_task(
     config_revision: &str,
     task_id: &str,
 ) -> miette::Result<TaskWork> {
+    prepare_task_with_audit(root, config, config_revision, task_id, None)
+}
+
+pub(super) fn prepare_task_with_audit(
+    root: &Path,
+    config: &lk_core::config::Config,
+    config_revision: &str,
+    task_id: &str,
+    audit: Option<&lk_graph::audit::AuditCandidate>,
+) -> miette::Result<TaskWork> {
     let root = root.canonicalize().into_diagnostic()?;
     let session = lk_vault::MutationSession::acquire(&root).into_diagnostic()?;
     let task = super::queue::current_task(&root, task_id)?;
@@ -871,7 +881,7 @@ pub(super) fn prepare_task(
             }
         }
     } else {
-        resources::task(&root, config, task_id)?
+        resources::task_with_audit(&root, config, task_id, audit)?
     };
     let work = expected(&root, &prepared, config, config_revision)?;
     let stored = root

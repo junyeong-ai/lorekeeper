@@ -217,6 +217,15 @@ fn capture_reviews(
 }
 
 pub(super) fn task(root: &Path, config: &Config, task_id: &str) -> miette::Result<Prepared> {
+    task_with_audit(root, config, task_id, None)
+}
+
+pub(super) fn task_with_audit(
+    root: &Path,
+    config: &Config,
+    task_id: &str,
+    audit: Option<&lk_graph::audit::AuditCandidate>,
+) -> miette::Result<Prepared> {
     let task = super::super::queue::select_task(
         root,
         task_id,
@@ -228,7 +237,7 @@ pub(super) fn task(root: &Path, config: &Config, task_id: &str) -> miette::Resul
     } else {
         Vec::new()
     };
-    let prepared = capture_task(root, config, task)?;
+    let prepared = capture_task_with_audit(root, config, task, audit)?;
     if extraction {
         with_discovery(root, config, prepared, &queries)
     } else {
@@ -610,6 +619,24 @@ fn capture_task(
     config: &Config,
     task: lk_queue::QueueTask,
 ) -> miette::Result<Prepared> {
+    capture_task_with_audit(root, config, task, None)
+}
+
+fn capture_task_with_audit(
+    root: &Path,
+    config: &Config,
+    task: lk_queue::QueueTask,
+    audit_input: Option<&lk_graph::audit::AuditCandidate>,
+) -> miette::Result<Prepared> {
+    if audit_input.is_some_and(|candidate| {
+        task.kind != lk_queue::TaskKind::SynthesizeConcept
+            || candidate.kind != lk_graph::audit::AuditSubjectKind::Concept
+            || candidate.path != task.target.vault_path
+    }) {
+        return Err(miette::miette!(
+            "synthesis audit input belongs to another target"
+        ));
+    }
     let mut captured = Capture::new(root);
     let target = captured.page(
         &task.target.vault_path,
@@ -675,7 +702,10 @@ fn capture_task(
         purpose.insert("rss_evidence".into(), json!({"manifest_revision": manifest.reference().map_err(|e| miette::miette!("{e}"))?, "events": normalized.len()}));
     }
     if task.kind == lk_queue::TaskKind::SynthesizeConcept {
-        let scoped = audit(root, config, &task.target.vault_path)?;
+        let scoped = match audit_input {
+            Some(candidate) => audit_candidate(root, config, candidate)?,
+            None => audit(root, config, &task.target.vault_path)?,
+        };
         for resource in scoped.resources {
             captured
                 .resources
@@ -1160,5 +1190,169 @@ mod tests {
         )
         .unwrap();
         assert!(audit_candidate(&root, &config, candidate).is_err());
+    }
+
+    fn synthesis_batch_fixture() -> (
+        tempfile::TempDir,
+        Config,
+        Vec<lk_queue::QueueTask>,
+        Vec<lk_graph::audit::AuditCandidate>,
+    ) {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let config_path = root.join("config.yaml");
+        std::fs::write(&config_path, "vault:\n  root: .\n  locale: en\nidentity: {name: Test, email: test@example.com}\nsources:\n  notes:\n    type: manual\n    enabled: false\n    params: {inbox_dir: inbox}\n").unwrap();
+        let config = Config::load(&config_path).unwrap();
+        let source = "daily/source.md";
+        let raw = "---\ntype: daily\ntitle: Source\n---\n## Summary\nOne scoped source statement.\n\n## Related Concepts\n[A](../wiki/concepts/a.md) and [B](../wiki/concepts/b.md).\n";
+        write(&root, source, raw);
+        write(
+            &root,
+            "wiki/concepts/context.md",
+            "---\ntype: concept\ntitle: Context\n---\n## Synthesis\nContext with a distinct authority.\n",
+        );
+        let citation =
+            lk_core::concept::Citation::new(Path::new(source), &lk_vault::parse_page(raw).unwrap());
+        let digest = lk_core::concept::citation_digest(std::slice::from_ref(&citation));
+        let client = lk_queue::QueueLlmClient::new(root.join(".lorekeeper/queue"));
+        let mut tasks = Vec::new();
+        for name in ["a", "b"] {
+            let path = format!("wiki/concepts/{name}.md");
+            write(
+                &root,
+                &path,
+                &format!(
+                    "---\ntype: concept\ntitle: {name}\nsource_count: 1\nllm_inputs: {{synthesis: {digest}}}\n---\n## Synthesis\nAn earlier scoped statement.\n\n## Sources\n\n## Related Concepts\n[Context](context.md)\n"
+                ),
+            );
+            tasks.push(client.build_task(
+                &digest,
+                lk_queue::TaskKind::SynthesizeConcept,
+                lk_queue::ConceptSynthesisRequest {
+                    citations: vec![citation.clone()],
+                    locale: lk_core::i18n::Locale::En,
+                    related_anchor: Some("## Related Concepts".into()),
+                    target: lk_queue::TaskTarget {
+                        vault_path: path,
+                        kind: lk_queue::TargetKind::ConceptSynthesis,
+                        anchor: "## Synthesis".into(),
+                    },
+                },
+            ));
+        }
+        write(
+            &root,
+            ".lorekeeper/queue/tasks.jsonl",
+            &tasks
+                .iter()
+                .map(|task| serde_json::to_string(task).unwrap() + "\n")
+                .collect::<String>(),
+        );
+        write(
+            &root,
+            "wiki/explorations/review.md",
+            &format!(
+                "---\ntype: exploration\ntitle: Shared assessment\nreview:\n  status: open\n  subjects: [wiki/concepts/a.md, wiki/concepts/b.md]\n  evidence: [{{path: {source}, revision: {}}}]\n---\n## Question\nDoes the source support these conditions?\n",
+                citation.revision
+            ),
+        );
+        let pages = lk_graph::scan::scan_vault(&root, false).unwrap();
+        let candidates = lk_graph::audit::load_selected_inputs(
+            &root,
+            &config.vault.dirs,
+            &pages,
+            &tasks
+                .iter()
+                .map(|task| task.target.vault_path.clone())
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        (directory, config, tasks, candidates)
+    }
+
+    #[test]
+    fn batched_synthesis_capture_matches_standalone_scope_and_rejects_wrong_audit_subjects() {
+        let (directory, config, tasks, candidates) = synthesis_batch_fixture();
+        let root = directory.path().canonicalize().unwrap();
+        assert_eq!(candidates.len(), 2);
+        for (task, candidate) in tasks.iter().zip(&candidates) {
+            assert_eq!(candidate.path, task.target.vault_path);
+            assert_eq!(candidate.evidence.len(), 1);
+            assert_eq!(candidate.evidence[0].path, "daily/source.md");
+            assert_eq!(candidate.reviews.len(), 1);
+            let standalone = task_with_audit(&root, &config, &task.task_id, None).unwrap();
+            let batched = task_with_audit(&root, &config, &task.task_id, Some(candidate)).unwrap();
+            assert_same_prepared(&standalone, &batched);
+            assert_eq!(
+                standalone.revision("config-revision").unwrap(),
+                batched.revision("config-revision").unwrap()
+            );
+            assert!(batched.resources.iter().any(|resource| {
+                resource.address == "wiki/concepts/context.md"
+                    && resource.authority == SemanticAuthority::Context
+            }));
+        }
+        assert!(task_with_audit(&root, &config, &tasks[0].task_id, Some(&candidates[1])).is_err());
+        let mut wrong_kind = candidates[0].clone();
+        wrong_kind.kind = lk_graph::audit::AuditSubjectKind::Document;
+        assert!(task_with_audit(&root, &config, &tasks[0].task_id, Some(&wrong_kind)).is_err());
+    }
+
+    #[test]
+    fn batched_synthesis_capture_refuses_drift_and_posthost_refresh_rederives_membership() {
+        let (directory, config, tasks, candidates) = synthesis_batch_fixture();
+        let root = directory.path().canonicalize().unwrap();
+        let task = &tasks[0];
+        let candidate = &candidates[0];
+        let prepared = task_with_audit(&root, &config, &task.task_id, Some(candidate)).unwrap();
+        assert_same_prepared(
+            &prepared,
+            &refresh(&root, &config, "config-revision", &prepared.context).unwrap(),
+        );
+        let assert_invalidated = || {
+            if let Ok(current) = refresh(&root, &config, "config-revision", &prepared.context) {
+                assert_ne!(
+                    current.revision("config-revision").unwrap(),
+                    prepared.revision("config-revision").unwrap(),
+                    "fresh capture must invalidate the stored work input"
+                );
+            }
+        };
+        for path in [
+            task.target.vault_path.as_str(),
+            "daily/source.md",
+            "wiki/concepts/context.md",
+            "wiki/explorations/review.md",
+        ] {
+            let before = std::fs::read_to_string(root.join(path)).unwrap();
+            write(&root, path, &format!("{before}\nChanged interpretation.\n"));
+            assert!(
+                task_with_audit(&root, &config, &task.task_id, Some(candidate)).is_err(),
+                "old batch must refuse changed {path}"
+            );
+            assert_invalidated();
+            write(&root, path, &before);
+        }
+        write(
+            &root,
+            "daily/added.md",
+            "---\ntype: daily\ntitle: Added evidence\n---\nAnother scoped source. [A](../wiki/concepts/a.md)\n",
+        );
+        assert_invalidated();
+        std::fs::remove_file(root.join("daily/added.md")).unwrap();
+        write(
+            &root,
+            "wiki/explorations/added.md",
+            &format!(
+                "---\ntype: exploration\ntitle: Newly scoped review\nreview:\n  status: open\n  subjects: [wiki/concepts/a.md]\n  evidence: [{{path: daily/source.md, revision: {}}}]\n---\n## Question\nA separate assessment.\n",
+                candidate.evidence[0].revision
+            ),
+        );
+        assert_invalidated();
+        std::fs::remove_file(root.join("wiki/explorations/added.md")).unwrap();
+        assert_same_prepared(
+            &prepared,
+            &refresh(&root, &config, "config-revision", &prepared.context).unwrap(),
+        );
     }
 }
