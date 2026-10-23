@@ -536,6 +536,9 @@ impl Config {
 
 fn work_policy_revision(content: &str) -> Result<String, ConfigError> {
     fn strip_work(parent: &mut serde_json::Map<String, serde_json::Value>) {
+        if parent.get("work").is_some_and(serde_json::Value::is_null) {
+            parent.remove("work");
+        }
         if let Some(work) = parent
             .get_mut("work")
             .and_then(serde_json::Value::as_object_mut)
@@ -549,6 +552,13 @@ fn work_policy_revision(content: &str) -> Result<String, ConfigError> {
         }
     }
     let mut value: serde_json::Value = crate::yaml::from_str(content)?;
+    if let Some(root) = value.as_object_mut()
+        && root
+            .get("execution")
+            .is_some_and(serde_json::Value::is_null)
+    {
+        root.remove("execution");
+    }
     if let Some(root) = value.as_object_mut()
         && let Some(execution) = root
             .get_mut("execution")
@@ -1794,6 +1804,57 @@ mod tests {
         }
         let direct: Config = crate::yaml::from_str(base).unwrap();
         assert!(direct.semantic_work_revision().is_none());
+    }
+
+    #[test]
+    fn null_default_work_containers_preserve_operational_only_identity_in_both_directions() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.yaml");
+        let base = "vault: {root: vault}\nidentity: {name: Test, email: test@example.com}\nsources:\n  notes: {type: manual, params: {inbox_dir: inbox}}\n";
+        std::fs::write(&path, base).unwrap();
+        let default_revision = Config::load(&path)
+            .unwrap()
+            .semantic_work_revision()
+            .unwrap()
+            .to_owned();
+        for execution in ["null", "{}", "{work: null}", "{work: {max_calls: 9}}"] {
+            std::fs::write(&path, format!("{base}execution: {execution}\n")).unwrap();
+            assert_eq!(
+                Config::load(&path).unwrap().semantic_work_revision(),
+                Some(default_revision.as_str())
+            );
+        }
+        for profile in [false, true] {
+            let config = |work: &str| {
+                if profile {
+                    format!(
+                        "{base}execution:\n  profiles:\n    main: {{engine: codex, timeout_seconds: 30, work: {work}}}\n"
+                    )
+                } else {
+                    format!("{base}execution: {{work: {work}}}\n")
+                }
+            };
+            let default = if profile { "{}" } else { "null" };
+            for (before, after) in [
+                (
+                    default,
+                    "{max_calls: 9, max_parallel: 2, max_screening_batches: 1}",
+                ),
+                ("{max_calls: 9}", default),
+            ] {
+                std::fs::write(&path, config(before)).unwrap();
+                let old = Config::load(&path)
+                    .unwrap()
+                    .semantic_work_revision()
+                    .unwrap()
+                    .to_owned();
+                std::fs::write(&path, config(after)).unwrap();
+                assert_eq!(
+                    Config::load(&path).unwrap().semantic_work_revision(),
+                    Some(old.as_str())
+                );
+            }
+        }
     }
 
     #[test]
