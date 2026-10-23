@@ -65,6 +65,9 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   Recheck readiness under those claims before recording,
   and verify selected receipts after final reconciliation even when unrelated backlog
   leaves the overall job incomplete. Authored pages require no invented done markers.
+  Recheck discovered dependencies within the originally selected batch. Known blockers
+  defer only their subjects; recompute the ready input union and final host selection.
+  Preserve pending order and report the latest checked scope without claiming completion.
   `wiki audit-plan --ready` uses the same readiness owner without reserving work;
   automatic plans skip blockers, while exact selections retain them with bounded
   diagnostics and a complete count for that checked scope.

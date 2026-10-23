@@ -2396,32 +2396,18 @@ mod native {
                 lk_graph::scan::scan_vault(&self.root, self.config.graph.scope.follow_links)
                     .map_err(|e| miette::miette!("{e}"))?;
             let mut readiness = InputAvailability::load(&self.root)?;
-            if paths.is_empty() {
-                let plan = lk_graph::audit::plan_available_partitioned(
-                    &self.root,
-                    &self.config.vault.dirs,
-                    &pages,
-                    self.config.graph.audit.batch_size,
-                    self.config.graph.audit.max_input_bytes,
-                    &mut |candidate| readiness.check(candidate),
-                )
-                .map_err(|error| miette::miette!("{error}"))?;
-                self.result.audit_deferred = readiness.deferred().to_vec();
-                self.result.audit_deferred_count = readiness.deferred_count();
-                return Ok(plan);
-            }
-            let plan = lk_graph::audit::plan_selected_partitioned(
+            let plan = lk_graph::audit::plan_selected_available_partitioned(
                 &self.root,
                 &self.config.vault.dirs,
                 &pages,
                 self.config.graph.audit.batch_size,
                 paths,
                 self.config.graph.audit.max_input_bytes,
+                &mut |candidate| readiness.check(candidate),
             )
             .map_err(|e| miette::miette!("{e}"))?;
-            for candidate in &plan.candidates {
-                readiness.require_ready(candidate)?;
-            }
+            self.result.audit_deferred = readiness.deferred().to_vec();
+            self.result.audit_deferred_count = readiness.deferred_count();
             Ok(plan)
         }
 
@@ -2668,7 +2654,6 @@ mod native {
                 .iter()
                 .map(|candidate| candidate.path.clone())
                 .collect::<Vec<_>>();
-            let selection = serde_json::to_string(&paths).expect("string paths serialize");
             let missing = plan
                 .candidates
                 .iter()
@@ -2687,6 +2672,18 @@ mod native {
                         return;
                     }
                 };
+                if self.result.audit_deferred_count > 0 {
+                    self.deferred(
+                        "audit discovery dependencies",
+                        format!(
+                            "{} selected audit subjects have unfinished discovered inputs; retained for later assessment",
+                            self.result.audit_deferred_count,
+                        ),
+                    );
+                    if plan.candidates.is_empty() {
+                        return;
+                    }
+                }
                 if plan
                     .candidates
                     .iter()
@@ -2699,6 +2696,14 @@ mod native {
                     return;
                 }
             }
+            let selection = serde_json::to_string(
+                &plan
+                    .candidates
+                    .iter()
+                    .map(|candidate| &candidate.path)
+                    .collect::<Vec<_>>(),
+            )
+            .expect("string paths serialize");
             let mut bounded = plan.input.ensure_ready().is_err();
             for candidate in &plan.candidates {
                 match crate::commands::work::audit_needs_work(

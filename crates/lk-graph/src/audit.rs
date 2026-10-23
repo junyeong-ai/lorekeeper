@@ -1463,12 +1463,26 @@ pub fn plan_available_partitioned(
     max_input_bytes: u64,
     available: &mut dyn FnMut(&AuditCandidate) -> Result<bool, GraphError>,
 ) -> Result<AuditPlan, GraphError> {
+    plan_selected_available_partitioned(root, dirs, pages, limit, &[], max_input_bytes, available)
+}
+
+/// Recheck readiness within an exact batch without expanding its scope. Counts
+/// retain the requested selection; candidates and input contain only ready members.
+pub fn plan_selected_available_partitioned(
+    root: &Path,
+    dirs: &VaultDirs,
+    pages: &[ScannedPage],
+    limit: usize,
+    selection: &[String],
+    max_input_bytes: u64,
+    available: &mut dyn FnMut(&AuditCandidate) -> Result<bool, GraphError>,
+) -> Result<AuditPlan, GraphError> {
     plan_selected_inner(
         root,
         dirs,
         pages,
         limit,
-        &[],
+        selection,
         max_input_bytes,
         Planning::Available(available),
     )
@@ -1588,7 +1602,10 @@ fn plan_selected_inner(
         .partition(|candidate| candidate.reason == "changed");
     let changed_count = changed.len();
     let unreviewed_count = unreviewed.len();
-    let mut candidates = selected;
+    let mut candidates = selected
+        .into_iter()
+        .filter(|candidate| !unavailable.contains(&candidate.path))
+        .collect::<Vec<_>>();
     let mut resources = InputResources::default();
     let mut input = if selection.is_empty() {
         resources.bound(max_input_bytes)?
@@ -1890,6 +1907,96 @@ mod tests {
     fn scan(root: &Path) -> Vec<ScannedPage> {
         crate::scan::scan_vault(root, false).unwrap()
     }
+
+    #[test]
+    fn exact_available_planning_preserves_coverage_pending_and_ready_input_union() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let selection = [
+            "wiki/documents/a.md".to_owned(),
+            "wiki/documents/b.md".to_owned(),
+        ];
+        for path in &selection {
+            write(
+                root.path(),
+                path,
+                &format!("---\ntype: document\ntitle: {path}\n---\nAuthored observation.\n"),
+            );
+        }
+        let pages = scan(root.path());
+        let session = MutationSession::acquire(root.path()).unwrap();
+        admit_available_partitioned(
+            &session,
+            &dirs,
+            &pages,
+            2,
+            u64::MAX,
+            &mut |_| Ok(true),
+            |_, _| Ok(()),
+        )
+        .unwrap();
+        let state = std::fs::read(root.path().join(STATE)).unwrap();
+        let mut checked = Vec::new();
+        let selected = plan_selected_available_partitioned(
+            root.path(),
+            &dirs,
+            &pages,
+            2,
+            &selection,
+            u64::MAX,
+            &mut |candidate| {
+                checked.push(candidate.path.clone());
+                Ok(candidate.path == selection[1])
+            },
+        )
+        .unwrap();
+        assert_eq!(checked, selection);
+        assert_eq!(selected.total, 2);
+        assert_eq!(selected.unreviewed, 2);
+        assert_eq!(
+            selected.counts_by_kind[&AuditSubjectKind::Document].total,
+            2
+        );
+        assert_eq!(
+            serde_json::to_value(&selected).unwrap()["coverage_scope"],
+            "selection"
+        );
+        assert_eq!(selected.candidates.len(), 1);
+        assert_eq!(selected.candidates[0].path, selection[1]);
+        let expected =
+            plan_selected_partitioned(root.path(), &dirs, &pages, 1, &selection[1..], u64::MAX)
+                .unwrap();
+        assert_eq!(selected.input.bytes, expected.input.bytes);
+        assert_eq!(selected.input.pages, 1);
+        let unavailable = plan_selected_available_partitioned(
+            root.path(),
+            &dirs,
+            &pages,
+            2,
+            &selection,
+            u64::MAX,
+            &mut |_| Ok(false),
+        )
+        .unwrap();
+        assert!(unavailable.candidates.is_empty());
+        assert_eq!(unavailable.total, 2);
+        assert_eq!(unavailable.input.bytes, 0);
+        assert_eq!(unavailable.input.pages, 0);
+        assert!(
+            plan_selected_available_partitioned(
+                root.path(),
+                &dirs,
+                &pages,
+                2,
+                &selection,
+                u64::MAX,
+                &mut |_| Err(error("unreadable input"))
+            )
+            .is_err()
+        );
+        assert_eq!(std::fs::read(root.path().join(STATE)).unwrap(), state);
+    }
+
     fn assessment(candidate: &AuditCandidate) -> AuditAssessment {
         AuditAssessment {path:candidate.path.clone(),file_revision:candidate.file_revision.clone(),input_revision:candidate.input_revision.clone(),disposition:AuditDisposition::Reviewed,reason:"Read the complete source and concept; the scoped claim and relationship are supported.".into(),reviews:vec![]}
     }

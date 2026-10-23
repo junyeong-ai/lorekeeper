@@ -637,6 +637,162 @@ fn knowledge_audit_progresses_before_unrelated_queue_backlog_and_reports_it_unfi
 }
 
 #[test]
+fn knowledge_defers_discovery_expansion_without_halting_independent_work() {
+    let discovery = r#"
+case "$*" in
+  *"discover."*)
+    python3 - <<'DISCOVER'
+import json, os, subprocess
+from pathlib import Path
+root=Path(os.environ['TEST_EXECUTION_ROOT'])
+paths=['wiki/documents/a.md']
+if (root/'select-b').exists(): paths.append('wiki/documents/b.md')
+for subject in paths:
+    candidate=json.loads(subprocess.check_output([os.environ['LORE_BIN'],'wiki','audit-plan','--path',subject]))['candidates'][0]
+    request={key:candidate[key] for key in ['path','file_revision']}
+    request['queries']=[{'query':'transactional outbox' if subject.endswith('/a.md') else 'Independent subject b','phrase':True,'spacing':False}]
+    path=root/'discovery.json'
+    path.write_text(json.dumps(request))
+    subprocess.run([os.environ['LORE_BIN'],'wiki','audit-discover','--file',str(path)],check=True)
+if (root/'corrupt-after-discovery').exists():
+    (root/'vault/.lorekeeper/queue/unknown.jsonl').write_text('unparseable task\n')
+DISCOVER
+    exit $?
+    ;;
+  *"maintain."*)
+    printf '%s\n' "$*" > "$TEST_EXECUTION_ROOT/maintain-command"
+    ;;
+  *) exit 72 ;;
+esac
+"#;
+    let assessment = RECORD_FIRST_AUDIT.replace(
+        "wiki audit-plan >",
+        "wiki audit-plan --path wiki/documents/b.md >",
+    );
+    for engine in ["claude-code", "codex"] {
+        for (batch_size, corrupt_queue) in [(1, false), (2, false), (1, true)] {
+            let fixture =
+                Fixture::with_whole_sections(engine, 30, &format!("{discovery}\n{assessment}"));
+            let config = std::fs::read_to_string(&fixture.config)
+                .unwrap()
+                .replace("concept_policy: supported-new", "concept_policy: disabled")
+                + &format!("graph:\n  audit:\n    batch_size: {batch_size}\n");
+            std::fs::write(&fixture.config, config).unwrap();
+            fixture.ingest();
+            let documents = fixture.root().join("vault/wiki/documents");
+            for (name, title) in [("a", "Subject a"), ("b", "Independent subject b")] {
+                std::fs::write(
+                    documents.join(format!("{name}.md")),
+                    format!("---\ntype: document\ntitle: {title}\n---\nA complete authored observation for {name}.\n"),
+                )
+                .unwrap();
+            }
+            if batch_size == 2 {
+                std::fs::write(fixture.root().join("select-b"), "").unwrap();
+            }
+            if corrupt_queue {
+                std::fs::write(fixture.root().join("corrupt-after-discovery"), "").unwrap();
+            }
+            let (output, result) = fixture.run("knowledge");
+            assert!(
+                !output.status.success(),
+                "the deferred audit remains incomplete: {result}"
+            );
+            if corrupt_queue {
+                assert_eq!(result["halted"], true, "{result}");
+                assert_eq!(result["semantic_calls"], 1, "{result}");
+                assert!(result["audit"].is_null());
+                assert!(!fixture.root().join("whole-section-calls.jsonl").exists());
+                assert!(!fixture.root().join("maintain-command").exists());
+                assert_eq!(
+                    std::fs::read_to_string(
+                        fixture.root().join("vault/.lorekeeper/queue/unknown.jsonl")
+                    )
+                    .unwrap(),
+                    "unparseable task\n",
+                );
+                assert!(
+                    result["stages"].as_array().unwrap().iter().any(|stage| {
+                        stage["name"] == "discovery planning" && stage["state"] == "failed"
+                    }),
+                    "{result}"
+                );
+                let state: serde_json::Value = serde_json::from_slice(
+                    &std::fs::read(
+                        fixture
+                            .root()
+                            .join("vault/.lorekeeper/knowledge-audit.json"),
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+                assert!(state["discovery"]["wiki/documents/a.md"].is_object());
+                assert!(state["entries"].as_object().unwrap().is_empty());
+                continue;
+            }
+            assert_eq!(result["halted"], false, "{result}");
+            assert_eq!(result["semantic_calls"], batch_size + 1, "{result}");
+            assert!(
+                result["audit_deferred"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|item| {
+                        item["path"] == "wiki/documents/a.md"
+                            && item["reasons"].as_array().unwrap().iter().any(|reason| {
+                                reason.as_str().unwrap().contains("unfinished summary")
+                            })
+                    }),
+                "{result}"
+            );
+            assert!(
+                result["stages"].as_array().unwrap().iter().any(|stage| {
+                    stage["name"] == "audit discovery dependencies" && stage["state"] == "failed"
+                }),
+                "{result}"
+            );
+            let queue = fixture.command().args(["queue", "check"]).output().unwrap();
+            assert!(
+                queue.status.success(),
+                "{}",
+                String::from_utf8_lossy(&queue.stderr)
+            );
+            let state: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(
+                    fixture
+                        .root()
+                        .join("vault/.lorekeeper/knowledge-audit.json"),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            assert!(state["discovery"]["wiki/documents/a.md"].is_object());
+            assert!(state["entries"].get("wiki/documents/a.md").is_none());
+            assert!(
+                state["pending"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|path| path == "wiki/documents/a.md")
+            );
+            if batch_size == 2 {
+                assert_eq!(result["audit"][0]["assessed_path"], "wiki/documents/b.md");
+                assert_eq!(result["audit"].as_array().unwrap().len(), 1);
+                let command =
+                    std::fs::read_to_string(fixture.root().join("maintain-command")).unwrap();
+                assert!(command.contains("[\"wiki/documents/b.md\"]"));
+                assert!(!command.contains("[\"wiki/documents/a.md\","));
+                assert!(state["entries"]["wiki/documents/b.md"].is_object());
+            } else {
+                assert!(result["audit"].is_null());
+                assert!(!fixture.root().join("maintain-command").exists());
+                assert!(state["entries"].as_object().unwrap().is_empty());
+            }
+        }
+    }
+}
+
+#[test]
 fn knowledge_defers_selected_evidence_with_unfinished_semantics_and_record_rechecks_it() {
     let fixture = Fixture::new("codex", 30, "exit 0");
     write_audit_concept(&fixture, "stable");

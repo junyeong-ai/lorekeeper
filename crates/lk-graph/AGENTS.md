@@ -80,6 +80,8 @@ and CLI discovery, not a second graph authority.
   requires exact completed-work proof for each exempted subject in the same guarded
   publication plan; ordinary subjects retain their combined whole-input bound.
   Exact selections retain their complete requested scope.
+  Selected readiness planning preserves that coverage accounting while measuring only
+  ready candidates; it never persists a subset-local pending order or expands the batch.
 - Scope reviews by their declared subjects, the subject's `knowledge_review` pointer,
   and prior receipt review paths. Omitting result review paths cannot bypass a missing,
   invalid or stale scoped review. Valid open findings remain durable follow-up.

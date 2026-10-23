@@ -674,6 +674,9 @@ graph:
 
 Review changed and first-time concepts/documents independently of collection and
 period synthesis. Ready subjects get a turn; `audit_deferred` exposes blockers.
+Dependencies added by discovery defer the affected subjects; ready batch members
+and queue processing continue. Deferred diagnostics describe the latest checked
+scope, not a corpus-wide blocked count.
 Progress can coexist with unrelated queue backlog while the overall job remains
 incomplete. Judgments and evidence revisions stay in Markdown reviews; one source
 or a high citation count alone never authorizes merging or deletion.
