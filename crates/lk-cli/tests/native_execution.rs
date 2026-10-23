@@ -2849,29 +2849,20 @@ fn progressive_large_source_observations_feed_guarded_admitted_work_before_publi
 
 #[test]
 fn sealed_queue_work_restages_a_missing_result_without_calling_the_model_again() {
-    let start = RECORD_BOUNDED_AUDIT
-        .find("    assert subject['kind']=='audit'")
-        .unwrap();
-    let end = RECORD_BOUNDED_AUDIT[start..]
-        .find("    row={'action':action")
-        .unwrap()
-        + start;
-    let mut behavior = RECORD_BOUNDED_AUDIT.to_string();
-    behavior.replace_range(
-        start..end,
-        r#"    assert subject['kind']=='queue'
-    result={key:subject[key] for key in ['task_id','cache_hash','target_revision']}
-    result['body']='Verified cached section result.'
-    path=root/'section.json'
-    path.write_text(json.dumps(result))
-    staged=cli('work','finish',work_id,'--file',str(path))
-    (root/'vault'/staged['staged_result']).unlink()
-"#,
-    );
-    let fixture = Fixture::new("codex", 30, &behavior);
+    let fixture = Fixture::new("codex", 30, RECORD_BOUNDED_AUDIT);
+    std::os::unix::fs::symlink(
+        fixture.root().join("vault"),
+        fixture.root().join("vault-alias"),
+    )
+    .unwrap();
     let config = std::fs::read_to_string(&fixture.config)
         .unwrap()
-        .replace("concept_policy: supported-new", "concept_policy: disabled");
+        .replace("concept_policy: supported-new", "concept_policy: disabled")
+        .replace("root: vault", "root: vault-alias")
+        .replace(
+            "  default_profile: primary\n",
+            "  default_profile: primary\n  work: {max_calls: 1}\n",
+        );
     std::fs::write(&fixture.config, config).unwrap();
     fixture.ingest();
     let status = fixture
@@ -2881,22 +2872,64 @@ fn sealed_queue_work_restages_a_missing_result_without_calling_the_model_again()
         .unwrap();
     let status: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
     let task = status["data"]["tasks"][0]["task_id"].as_str().unwrap();
+    let plan = fixture
+        .command()
+        .args(["work", "plan", "--task-id", task])
+        .output()
+        .unwrap();
     assert!(
-        fixture
-            .command()
-            .args(["work", "plan", "--task-id", task])
-            .output()
-            .unwrap()
-            .status
-            .success()
+        plan.status.success(),
+        "{}",
+        String::from_utf8_lossy(&plan.stderr)
     );
+    let plan: serde_json::Value = serde_json::from_slice(&plan.stdout).unwrap();
+    let id = plan["work_id"].as_str().unwrap();
     let (first, result) = fixture.run("process");
     assert!(
         !first.status.success(),
-        "missing staging cannot count as completed publication: {result}"
+        "a call-limited observation cannot count as completed publication: {result}"
     );
     let calls = bounded_calls(&fixture);
-    assert_eq!(calls.len(), 2);
+    assert_eq!(calls.len(), 1);
+    let completed = fixture
+        .command()
+        .args(["work", "result", id])
+        .output()
+        .unwrap();
+    assert!(
+        completed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&completed.stderr)
+    );
+    let completed: serde_json::Value = serde_json::from_slice(&completed.stdout).unwrap();
+    let subject = &completed["context"]["subject"];
+    let result = serde_json::json!({
+        "task_id": subject["task_id"],
+        "cache_hash": subject["cache_hash"],
+        "target_revision": subject["target_revision"],
+        "body": "Verified cached section result.",
+    });
+    let file = fixture.root().join("section.json");
+    std::fs::write(&file, serde_json::to_vec(&result).unwrap()).unwrap();
+    let sealed = fixture
+        .command()
+        .args(["work", "finish", id, "--file"])
+        .arg(&file)
+        .output()
+        .unwrap();
+    assert!(
+        sealed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&sealed.stderr)
+    );
+    let sealed: serde_json::Value = serde_json::from_slice(&sealed.stdout).unwrap();
+    std::fs::remove_file(
+        fixture
+            .root()
+            .join("vault")
+            .join(sealed["staged_result"].as_str().unwrap()),
+    )
+    .unwrap();
     std::fs::remove_file(fixture.root().join("agent executable")).unwrap();
     let (second, result) = fixture.run("process");
     assert!(
@@ -2908,7 +2941,7 @@ fn sealed_queue_work_restages_a_missing_result_without_calling_the_model_again()
         result["execution"].is_null(),
         "verified cache restoration needs no agent preflight"
     );
-    assert_eq!(bounded_calls(&fixture).len(), 2);
+    assert_eq!(bounded_calls(&fixture).len(), 1);
     assert!(
         fixture
             .command()
