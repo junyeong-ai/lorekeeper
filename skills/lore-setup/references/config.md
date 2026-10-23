@@ -385,7 +385,7 @@ Legacy pages without verified document identity require explicit migration; a ma
 path alone cannot authorize overwriting a curated synthesis. Missing inventory entries
 do not imply deletion, archival or false claims.
 
-The adapter supports nodex `>=0.60, <0.61`. Lore's installer and
+The adapter supports nodex `>=0.61, <0.62`. Lore's installer and
 `lore self update --version` select Lore versions, not nodex versions.
 Set a source's optional `params.executable` to a compatible binary's absolute path.
 Omitted, it uses
@@ -404,7 +404,10 @@ certifies the currently selected nodex executable.
 
 Collection uses nodex's verified metadata, canonical body and outgoing relations.
 `source_record.observation_revision` identifies that public response with an explicit
-scheme; it is not the raw Markdown file's SHA. Formatting that nodex canonicalizes
+`nodex-query-node-v2:sha256` scheme; body reference locations count lines from the
+start of the source file, including frontmatter. Retained v1 observations keep their
+body-relative locations and original revision; they are not relabeled. The digest
+is not the raw Markdown file's SHA. Formatting that nodex canonicalizes
 can yield the same observation after rebuilding. Earlier `revision` and
 `content_revision` evidence keeps its original meaning. Refreshing a source creates
 new semantic inputs and may require reassessing reviews that cite its old revision.

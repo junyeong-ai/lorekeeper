@@ -92,7 +92,7 @@ const INITIAL_REACH: usize = 500;
 /// `lookback_hours` the operator meant differently — not something the adapter can settle
 /// by asking again.
 const MAX_REACH: usize = 64_000;
-const NODEX_COMPATIBILITY: &str = ">=0.60, <0.61";
+const NODEX_COMPATIBILITY: &str = ">=0.61, <0.62";
 const INVENTORY_FIELDS: &str = "id,title,kind,status,path,created,updated,reviewed,supersedes,superseded_by,implements,related,covers,tags";
 
 /// One document, as `nodex query recent` reports it.
@@ -905,7 +905,7 @@ fn build_document_observation(
     })
 }
 
-const OBSERVATION_SCHEME: &str = "nodex-query-node-v1:sha256";
+const OBSERVATION_SCHEME: &str = "nodex-query-node-v2:sha256";
 
 #[derive(Debug, PartialEq, Eq, serde::Serialize)]
 struct ObservationRevision {
@@ -1112,10 +1112,13 @@ template = "{kind}-{path_slug}"
             .unwrap();
         let references = body["references"].as_array().unwrap();
         assert_eq!(references.len(), 2);
-        for reference in references {
+        for (index, reference) in references.iter().enumerate() {
             assert_eq!(reference["source"], "a");
             assert_eq!(reference["syntax"], "markdown");
-            assert_eq!(reference["location"]["type"], "body");
+            assert_eq!(
+                reference["location"],
+                serde_json::json!({"type":"body","start_line":11 + index,"end_line":11 + index})
+            );
         }
         let related = relations
             .iter()
@@ -1125,6 +1128,19 @@ template = "{kind}-{path_slug}"
         assert_eq!(
             related["references"][0]["location"],
             serde_json::json!({"type":"frontmatter","field":"related"})
+        );
+        let dated = NodexSource
+            .extract(
+                &serde_json::json!({"repo":root.path(), "executable":supported, "repository_id":"fixture/repo", "document_ids":["a"]}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(dated.len(), 1);
+        assert_eq!(dated[0].body, raw[0].body);
+        assert_eq!(
+            dated[0].metadata["source_record"],
+            raw[0].metadata["source_record"]
         );
         let mut rejected = selected.clone();
         rejected["executable"] = serde_json::json!(unsupported);
@@ -1362,7 +1378,7 @@ exit "$rc"
         assert_eq!(raw.metadata["source_record"]["timestamp_basis"], "observed");
         assert_eq!(
             raw.metadata["source_record"]["observation_revision"]["scheme"],
-            OBSERVATION_SCHEME
+            "nodex-query-node-v2:sha256"
         );
         assert!(raw.metadata["source_record"].get("revision").is_none());
         assert!(

@@ -335,7 +335,7 @@ Collection connects sources and concepts; period synthesis uses ready daily reco
 | `google-calendar` | Schedule + meeting notes (auto-extracted from Drive links) | Google OAuth |
 | `google-drive` | Curated docs in a Drive folder | Google OAuth |
 | `rss` | Vendor blogs / news → concepts (no auth, multi-feed) | none |
-| `nodex` | A project repository's own decision and learning records → concepts (needs `nodex.toml` and nodex `>=0.60,<0.61`; see [binary selection and evidence versions](skills/lore-setup/references/config.md#nodex-binary-selection)) | none |
+| `nodex` | A project repository's own decision and learning records → concepts (needs `nodex.toml` and nodex `>=0.61,<0.62`; see [binary selection and evidence versions](skills/lore-setup/references/config.md#nodex-binary-selection)) | none |
 | `manual` | Inbox Markdown, text and HTML; optional DOCX, XLSX, PDF and image recognition | No source credentials; binary decoding needs an optional runtime |
 | `tasks` | Your own finished tasks — what `lore task` closed becomes the day's page | none |
 
