@@ -77,10 +77,14 @@ pending work, but a resumed large document does not always take the first turn.
   Never silently discard concerns to fit the output limit. If a faithful bounded
   result cannot fit, report the limit and retain pending work.
 
-Keep drafts inside the vault's `.lorekeeper/work/WORK_ID/drafts/`, using unique
-filenames; never write source-derived drafts to a shared temporary directory or
-replace the native plan, node or seal files. Write one JSON observation and submit
-with `lore work record --file FILE`:
+For interactive inspection and finalization, create a private, unique draft
+directory directly under the vault's `.lorekeeper/`, outside `.lorekeeper/work/`. Restrict
+access to the current user; never write source-derived drafts to a shared temporary
+directory or replace native plan, node or seal files. After Rust accepts
+`work record` or `work finish`, remove only that invocation's accepted draft and
+its empty directory. On failure, preserve the draft and report its exact path for
+resumption. Write one JSON observation and submit with
+`lore work record --file FILE`:
 
 ```json
 {
