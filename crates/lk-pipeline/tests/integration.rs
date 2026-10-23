@@ -3,55 +3,19 @@ use std::sync::Arc;
 use tempfile::TempDir;
 
 use lk_core::concept::ExtractedConcept;
-use lk_core::config::{
-    Config, Identity, PersonalConfig, SourceConfig, SourceType, SynthesisConfig, VaultConfig,
-    VaultDirs,
-};
+use lk_core::config::{Config, SourceConfig, SourceType};
 use lk_core::event::RawItem;
 use lk_pipeline::{IngestOptions, Pipeline, PipelineContext, Synthesizer};
 use lk_queue::{LlmClient, MockLlmClient, NoopLlmClient};
 
 fn base_config(vault_root: &std::path::Path) -> Config {
-    let mut sources = std::collections::BTreeMap::new();
-    sources.insert(
-        "test-source".to_string(),
-        SourceConfig {
-            source_type: SourceType::Gmail,
-            instance: None,
-            enabled: true,
-            params: serde_json::Value::Object(Default::default()),
-            classify: Default::default(),
-            labels: vec!["test".into()],
-            concept_policy: lk_core::config::ConceptPolicy::SupportedNew,
-            collection_timeout_seconds: None,
-            focus: None,
-            highlights: vec![],
-        },
-    );
-
-    Config {
-        credentials: Default::default(),
-        ingest: Default::default(),
-        vault: VaultConfig {
-            root: vault_root.to_string_lossy().into(),
-            dirs: VaultDirs::default(),
-            timezone: Some("UTC".into()),
-            locale: None,
-        },
-        identity: Identity {
-            name: "Test User".into(),
-            email: "test@example.com".into(),
-            slack_id: None,
-        },
-        sources,
-        personal: Some(PersonalConfig::default()),
-        synthesis: SynthesisConfig::default(),
-        llm: Default::default(),
-        execution: Default::default(),
-        concepts: Default::default(),
-        graph: Default::default(),
-        maintenance: Default::default(),
-    }
+    serde_json::from_value(serde_json::json!({
+        "vault": {"root":vault_root,"timezone":"UTC"},
+        "identity": {"name":"Test User","email":"test@example.com"},
+        "sources": {"test-source": {"type":"gmail","params":{},"labels":["test"],"concept_policy":"supported-new"}},
+        "personal": {}
+    }))
+    .unwrap()
 }
 
 fn reuse_concept(vault: &std::path::Path, slug: &str) -> lk_queue::ConceptAdmission {
