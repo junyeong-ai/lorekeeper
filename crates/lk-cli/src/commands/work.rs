@@ -23,6 +23,7 @@ use super::queue::application::{RejectionKind, rejection as publication_rejectio
 pub enum WorkCommand {
     /// Inspect complete candidate-screening costs without creating or changing work
     Cost {
+        /// Exact retained concept-extraction task identifier
         #[arg(long)]
         task_id: String,
     },
