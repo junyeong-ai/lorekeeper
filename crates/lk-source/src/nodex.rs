@@ -92,7 +92,7 @@ const INITIAL_REACH: usize = 500;
 /// `lookback_hours` the operator meant differently — not something the adapter can settle
 /// by asking again.
 const MAX_REACH: usize = 64_000;
-const NODEX_COMPATIBILITY: &str = ">=0.61, <0.62";
+const NODEX_COMPATIBILITY: &str = ">=0.63, <0.64";
 const INVENTORY_FIELDS: &str = "id,title,kind,status,path,created,updated,reviewed,supersedes,superseded_by,implements,related,covers,tags";
 
 /// One document, as `nodex query recent` reports it.
@@ -1044,9 +1044,8 @@ printf '%s' '{"ok":true,"data":{"items":[]},"snapshot":{"verification":"content"
         assert!(supported.is_absolute() && unsupported.is_absolute());
         let root = tempfile::tempdir().unwrap();
         std::fs::create_dir(root.path().join("docs")).unwrap();
-        std::fs::write(
-            root.path().join("nodex.toml"),
-            r#"[scope]
+        let config_path = root.path().join("nodex.toml");
+        let original_config = r#"[scope]
 include = ["docs/**/*.md"]
 [kinds]
 allowed = ["generic"]
@@ -1060,9 +1059,8 @@ kind = "generic"
 [[identity.id_rules]]
 kind = "*"
 template = "{kind}-{path_slug}"
-"#,
-        )
-        .unwrap();
+"#;
+        std::fs::write(&config_path, original_config).unwrap();
         let path = root.path().join("docs/a.md");
         let original = "---\r\nid: a\r\ntitle: Alpha\r\nkind: generic\r\nstatus: active\r\ncreated: 2026-10-17\r\nrelated: [b]\r\n---\r\n# Alpha\r\nBody.\r\n[Beta](b.md)\r\n[Beta again](b.md)\r\n";
         std::fs::write(&path, original).unwrap();
@@ -1142,6 +1140,64 @@ template = "{kind}-{path_slug}"
             dated[0].metadata["source_record"],
             raw[0].metadata["source_record"]
         );
+        let scope = original_config.strip_prefix("[scope]\n").unwrap();
+        let idle_exclude = format!("[scope]\nexclude = [\"docs/optional/**\"]\n{scope}");
+        std::fs::write(&config_path, &idle_exclude).unwrap();
+        let error = NodexSource
+            .extract(&selected, &ctx)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("scope_coverage"), "{error}");
+        assert!(error.contains("excluded nothing"), "{error}");
+        assert_eq!(std::fs::read_to_string(&config_path).unwrap(), idle_exclude);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+
+        let optional_exclude = format!(
+            "[scope]\nexclude = [{{ glob = \"docs/optional/**\", may_be_empty = true }}]\n{scope}"
+        );
+        std::fs::write(&config_path, &optional_exclude).unwrap();
+        let rebuilt = std::process::Command::new(&supported)
+            .arg("-C")
+            .arg(root.path())
+            .arg("build")
+            .output()
+            .unwrap();
+        assert!(
+            rebuilt.status.success(),
+            "{}",
+            String::from_utf8_lossy(&rebuilt.stdout)
+        );
+        let optional = NodexSource.extract(&selected, &ctx).await.unwrap();
+        assert_eq!(optional.len(), 1);
+        assert_eq!(optional[0].body, raw[0].body);
+        assert_eq!(
+            optional[0].metadata["source_record"],
+            raw[0].metadata["source_record"]
+        );
+        assert_eq!(
+            std::fs::read_to_string(&config_path).unwrap(),
+            optional_exclude
+        );
+
+        let shadowed_identity = format!(
+            "{original_config}\n[[identity.kind_rules]]\nglob = \"docs/a.md\"\nkind = \"generic\"\n"
+        );
+        std::fs::write(&config_path, &shadowed_identity).unwrap();
+        let error = NodexSource
+            .extract(&selected, &ctx)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("CONFIG_ERROR"), "{error}");
+        assert!(error.contains("identity.kind_rules[1]"), "{error}");
+        assert!(error.contains("can never apply"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(&config_path).unwrap(),
+            shadowed_identity
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+        std::fs::write(&config_path, original_config).unwrap();
         let mut rejected = selected.clone();
         rejected["executable"] = serde_json::json!(unsupported);
         let error = NodexSource

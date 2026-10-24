@@ -391,7 +391,7 @@ Legacy pages without verified document identity require explicit migration; a ma
 path alone cannot authorize overwriting a curated synthesis. Missing inventory entries
 do not imply deletion, archival or false claims.
 
-The adapter supports nodex `>=0.61, <0.62`. Lore's installer and
+The adapter supports nodex `>=0.63, <0.64`. Lore's installer and
 `lore self update --version` select Lore versions, not nodex versions.
 Set a source's optional `params.executable` to a compatible binary's absolute path.
 Omitted, it uses
@@ -400,8 +400,12 @@ variable expansion; an explicit failure never retries another binary.
 
 The repository must permit the selected version and already hold an index current for
 it. Binary selection does not override a project version pin or rebuild its index.
-The repository owner prepares it with the selected binary's `nodex build --full`. Relations
-retain every authored `references` location; earlier captured evidence keeps its
+The repository owner prepares it with the selected binary's `nodex build --full`;
+upgrading the binary requires rebuilding even when the graph schema is unchanged.
+`scope_coverage` warnings and invalid first-match rules refuse collection. Optional
+excludes that legitimately match nothing need the repository owner's explicit
+`may_be_empty = true`; Lore does not suppress warnings or rewrite source configuration.
+Relations retain every authored `references` location; earlier captured evidence keeps its
 original shape and revision rather than being relabeled as a new observation.
 `lore validate` checks the parameter shape; `lore ingest --dry-run <source-id>` checks
 actual source compatibility without vault or queue writes. `doctor` audits page contracts,

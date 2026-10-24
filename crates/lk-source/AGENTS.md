@@ -150,7 +150,7 @@ Use parser/token-state behavior, not regex replacement of arbitrary markup.
 
 - Read the declared public graph, NEVER substitute filesystem discovery. Require
   nodex.toml and a current compatible public index. Current subprocess compatibility
-  is `>=0.61, <0.62`, checked publicly; an explicit executable applies to every call,
+  is `>=0.63, <0.64`, checked publicly; an explicit executable applies to every call,
   without fallback or changing the repository's own version pin.
 - Query created and updated separately, then fold selected documents by identity.
   Grow query reach past the window's first day; one below-bound observation proves
