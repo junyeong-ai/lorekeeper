@@ -246,11 +246,17 @@ pub(super) fn instruction() -> &'static str {
     "Return one results entry for each supplied task, in exact supplied order (one entry for a completed Work). Each entry is {status: complete, value: semantic_object, reason: null}, or {status: needs-action, value: null, reason: nonblank}. Extraction semantic_object contains only concepts in the shared ReportedConcept format; synthesis contains only synthesis and related. Rust supplies all TaskResult/SynthesisResult task/cache/target/context/date/discovery/selection metadata and owns result-file serialization, finish, seals, staging and publication. Never return metadata, source_questions fields or extra keys. Preserve source_questions as attributed uncertainty in the semantic prose, never invent answers. Read the supplied scope/contracts completely. Exact owner/name/alias checks, targeted missing reads and review/repair capabilities remain available when necessary. Do not repeat setup/queue enumeration or reconstruct guards. If scope changes, return needs-action for fresh discovery/readiness; never attach new hashes to an old answer. Unknown semantic support is not approval. Processing blockers, missing required reads or actions require needs-action. Honor max_response_bytes, which reserves the native result envelope inside max_result_bytes. Do not drop evidence, unresolved issues or source questions to fit; return needs-action instead. Native guards revalidate the complete current scope after the host and again at publication."
 }
 
-pub(super) fn action_reason(
+pub(super) enum Admission {
+    Batch,
+    Single,
+    Deferred(String),
+}
+
+pub(super) fn admission(
     root: &Path,
     config: &lk_core::config::Config,
     input: &Value,
-) -> miette::Result<Option<String>> {
+) -> miette::Result<Admission> {
     let task: QueueTask = crate::commands::queue::current_task(
         root,
         input["task"]["task_id"]
@@ -258,18 +264,18 @@ pub(super) fn action_reason(
             .ok_or_else(|| miette::miette!("missing selected task"))?,
     )?;
     let Some((_, action)) = GENERATION.read(root, &task.task_id, &task.cache_hash)? else {
-        return Ok(None);
+        return Ok(Admission::Batch);
     };
     let request = super::native::selected_request(config, std::slice::from_ref(input))?;
     if action.request_revision != digest(&request)? {
-        return Ok(None);
+        return Ok(Admission::Single);
     }
     if Some(action.context_revision.as_str()) != input["context_revision"].as_str() {
         return Err(miette::miette!(
             "native action context differs from its request"
         ));
     }
-    Ok(Some(action.reason))
+    Ok(Admission::Deferred(action.reason))
 }
 
 pub(in crate::commands) fn prune(
@@ -283,6 +289,7 @@ pub(in crate::commands) fn finish_selected(
     session: &lk_vault::MutationSession,
     config: &lk_core::config::Config,
     config_revision: &str,
+    request: &Value,
     input: &Value,
     reply: Value,
 ) -> miette::Result<SelectedFinish> {
@@ -309,7 +316,6 @@ pub(in crate::commands) fn finish_selected(
             "selected generation scope changed; reread and regenerate"
         ));
     }
-    let request = super::native::selected_request(config, std::slice::from_ref(input))?;
     let before = GENERATION
         .read(root, &task.task_id, &task.cache_hash)?
         .map(|(raw, _)| raw);
@@ -333,7 +339,7 @@ pub(in crate::commands) fn finish_selected(
                     task_id: task.task_id.clone(),
                     cache_hash: task.cache_hash.clone(),
                     context_revision: work.plan.subject_revision.clone(),
-                    request_revision: digest(&request)?,
+                    request_revision: digest(request)?,
                     reason: reason.clone(),
                 })
                 .into_diagnostic()?,

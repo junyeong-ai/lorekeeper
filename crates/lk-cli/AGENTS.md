@@ -130,6 +130,9 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   metadata from the exact prepared scope, reserves envelope bytes and owns finish/staging.
   Models return semantic values or needs-action only. Do not couple output schema to
   tool prohibition, scrape events/prose or mutate saved Work to adopt a reply.
+  Selected action receipts bind the actual batch request. Reconsider action-bearing
+  tasks individually after request changes, then suppress unchanged singleton actions;
+  never substitute a reconstructed singleton for the original batch's identity.
   Tool-free observation, screening and section roles carry the bounded request through
   stdin and decode bounded stdout. Rust records the selected observation or creates
   the guarded section result. In those roles Claude disables tools/customizations;

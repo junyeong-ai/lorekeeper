@@ -181,7 +181,7 @@ pub(in crate::commands) fn selected_request(
         .min()
         .expect("nonempty selection");
     Ok(json!({
-        "schema":"native-selected-results-v1", "tasks":selected, "contracts":contracts,
+        "schema":"native-selected-results-v2", "tasks":selected, "contracts":contracts,
         "max_input_bytes":limits.max_input_bytes,
         "max_result_bytes":limits.max_result_bytes,
         "max_response_bytes":max_response_bytes,

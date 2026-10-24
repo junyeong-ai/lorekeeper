@@ -1191,6 +1191,8 @@ pub(super) enum TaskWork {
     WholeInput {
         #[cfg(unix)]
         native: Option<Box<Value>>,
+        #[cfg(unix)]
+        individual: bool,
     },
     Partitioned {
         id: String,
@@ -1426,7 +1428,10 @@ fn prepare_task_in_session(
         {
             if super::execution::finalization::supports(task.kind) {
                 work.whole_input_bytes(&prepared.resources)?;
-                return Ok(TaskWork::WholeInput { native: None });
+                return Ok(TaskWork::WholeInput {
+                    native: None,
+                    individual: false,
+                });
             }
             let owner = lk_vault::resolve_page_owner(root, Path::new(&task.target.vault_path))
                 .into_diagnostic()?;
@@ -1439,14 +1444,19 @@ fn prepare_task_in_session(
                 }
                 Err(error) => return Err(error),
             };
-            if let Some(reason) = generation::action_reason(root, config, &input)? {
-                return Ok(TaskWork::Admission { reason });
-            }
+            let individual = match generation::admission(root, config, &input)? {
+                generation::Admission::Batch => false,
+                generation::Admission::Single => true,
+                generation::Admission::Deferred(reason) => {
+                    return Ok(TaskWork::Admission { reason });
+                }
+            };
             let request = native::selected_request(config, std::slice::from_ref(&input))?;
             let bytes = serde_json::to_vec(&request).into_diagnostic()?.len();
             if bytes <= work.max_input_bytes {
                 return Ok(TaskWork::WholeInput {
                     native: Some(Box::new(input)),
+                    individual,
                 });
             }
         }

@@ -1795,6 +1795,7 @@ mod native {
                     &session,
                     &self.config,
                     &self.config_revision,
+                    &request,
                     input,
                     reply,
                 ) {
@@ -2787,9 +2788,12 @@ mod native {
                                 }
                             }
                         }
-                        crate::commands::work::TaskWork::WholeInput { native, .. } => {
+                        crate::commands::work::TaskWork::WholeInput { native, individual } => {
                             let input =
                                 *native.expect("interactive task has a prepared native input");
+                            if individual {
+                                flush(&mut batch, &mut jobs);
+                            }
                             let mut inputs = batch
                                 .iter()
                                 .map(|(_, input)| input.clone())
@@ -2807,6 +2811,9 @@ mod native {
                                 flush(&mut batch, &mut jobs);
                             }
                             batch.push((task, input));
+                            if individual {
+                                flush(&mut batch, &mut jobs);
+                            }
                         }
                         crate::commands::work::TaskWork::Partitioned { id } => {
                             flush(&mut batch, &mut jobs);

@@ -1,6 +1,6 @@
 # Prepared native results
 
-Use only when the native controller supplies `native-selected-results-v1` or
+Use only when the native controller supplies `native-selected-results-v2` or
 `native-finalize-results-v1`. The complete request arrives through supervised stdin.
 It is neither semantic completion nor permission to process unrelated work.
 
@@ -45,6 +45,9 @@ remain available. Do not repeat setup or drain other tasks. New discovery, chang
 scope or review publication requires fresh preparation and regeneration, never new
 guards on old prose. Return `needs-action` when a required step cannot be completed.
 An unchanged exact request/action defers before another call; independent work continues.
+Actions bind the actual supplied request, including its selected tasks and shared response
+allowance. A changed action request is reconsidered individually; a new unchanged action
+then defers without another call.
 Never edit native receipts or retag earlier replies.
 
 The complete request remains subject to `max_input_bytes`. `max_response_bytes`

@@ -16,7 +16,7 @@ raw=sys.stdin.read()
 request=json.loads(raw.split('\nNative request:\n',1)[1])
 with (root/'calls.jsonl').open('a') as f: f.write(json.dumps(request)+'\n')
 mode=(root/'mode').read_text()
-if request.get('schema') in ['native-selected-results-v1','native-finalize-results-v1']:
+if request.get('schema') in ['native-selected-results-v2','native-finalize-results-v1']:
     assert '--safe-mode' not in sys.argv
     assert '--output-schema' in sys.argv or '--json-schema' in sys.argv
     assert 'Do not write result files' in raw or 'do not write result files' in raw
@@ -30,7 +30,7 @@ if request.get('schema') in ['native-selected-results-v1','native-finalize-resul
     results=[]
     for item in tasks:
         task=item['task']; target=task['target']['vault_path']
-        if mode=='action' and 'blocked' in target:
+        if (mode=='action' and 'blocked' in target) or (mode=='batch-capacity' and 'blocked' in target and request['max_response_bytes'] < item['max_response_bytes']):
             results.append({'status':'needs-action','value':None,'reason':'A scoped review action is required.'}); continue
         if mode=='changed-target':
             path=root/'vault'/target; path.write_text(path.read_text()+'\nExternal change.\n')
@@ -386,7 +386,7 @@ fn result_identity_capacity_defers_without_calls_and_preserves_independent_work(
         let mut observed_capacity = false;
         for line in calls.lines() {
             let call: Value = serde_json::from_str(line).unwrap();
-            if call["schema"] == "native-selected-results-v1" {
+            if call["schema"] == "native-selected-results-v2" {
                 assert!(
                     call["tasks"]
                         .as_array()
@@ -405,4 +405,134 @@ fn result_identity_capacity_defers_without_calls_and_preserves_independent_work(
         }
         assert!(observed_capacity, "{report}");
     }
+}
+
+#[test]
+fn changed_batch_response_allowance_reconsiders_capacity_action() {
+    let fixture = Fixture::new("codex");
+    let (blocked, _) = fixture.add("blocked", lk_queue::TaskKind::ExtractConcepts, false);
+    let (other, _) = fixture.add("other", lk_queue::TaskKind::ExtractConcepts, false);
+    for (task, query) in [
+        (&blocked, "unmatched-alone".to_string()),
+        (&other, "z".repeat(2000)),
+    ] {
+        let status = fixture.json(&["queue", "status", "--json"]);
+        let row = status["data"]["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["task_id"] == task.task_id)
+            .unwrap();
+        let file = fixture.root().join("recipe.json");
+        std::fs::write(&file,serde_json::to_vec(&json!({"target_revision":row["target_revision"],"queries":[{"query":query,"phrase":true,"spacing":false}]})).unwrap()).unwrap();
+        fixture.json(&[
+            "work",
+            "discover",
+            "--task-id",
+            &task.task_id,
+            "--file",
+            file.to_str().unwrap(),
+        ]);
+    }
+    std::fs::write(fixture.root().join("mode"), "batch-capacity").unwrap();
+    let report = fixture.run();
+    assert!(fixture.done(&other), "{report}");
+    assert!(
+        fixture.done(&blocked),
+        "a larger standalone response allowance is a changed request: {report}"
+    );
+    let calls: Vec<Value> = std::fs::read_to_string(fixture.root().join("calls.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(calls.len(), 2, "{calls:?}");
+    assert_eq!(calls[0]["tasks"].as_array().unwrap().len(), 2);
+    assert_eq!(calls[1]["tasks"].as_array().unwrap().len(), 1);
+    assert_eq!(calls[1]["tasks"][0]["task"]["task_id"], blocked.task_id);
+    assert!(
+        calls[1]["max_response_bytes"].as_u64().unwrap()
+            > calls[0]["max_response_bytes"].as_u64().unwrap()
+    );
+}
+
+#[test]
+fn batch_actions_reconsider_once_individually_then_defer_without_calls() {
+    for engine in ["codex", "claude-code"] {
+        let fixture = Fixture::new(engine);
+        let (first, _) = fixture.add("blocked-first", lk_queue::TaskKind::ExtractConcepts, false);
+        let (second, _) = fixture.add("blocked-second", lk_queue::TaskKind::ExtractConcepts, false);
+        std::fs::write(fixture.root().join("mode"), "action").unwrap();
+        let report = fixture.run();
+        assert_eq!(report["halted"], false, "{report}");
+        assert!(!fixture.done(&first));
+        assert!(!fixture.done(&second));
+        let calls: Vec<Value> = std::fs::read_to_string(fixture.root().join("calls.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(calls.len(), 3, "{calls:?}");
+        assert_eq!(calls[0]["tasks"].as_array().unwrap().len(), 2);
+        assert_eq!(calls[1]["tasks"].as_array().unwrap().len(), 1);
+        assert_eq!(calls[2]["tasks"].as_array().unwrap().len(), 1);
+        assert_ne!(
+            calls[1]["tasks"][0]["task"]["task_id"],
+            calls[2]["tasks"][0]["task"]["task_id"]
+        );
+        let directory = fixture
+            .root()
+            .join("vault/.lorekeeper/queue/result-actions");
+        let before: Vec<_> = std::fs::read_dir(&directory)
+            .unwrap()
+            .map(|entry| {
+                let path = entry.unwrap().path();
+                let raw = std::fs::read(&path).unwrap();
+                (path, raw)
+            })
+            .collect();
+        let report = fixture.run();
+        assert_eq!(fixture.calls(), 3, "{report}");
+        assert_eq!(report["halted"], false, "{report}");
+        for (path, raw) in before {
+            assert_eq!(std::fs::read(path).unwrap(), raw);
+        }
+    }
+}
+
+#[test]
+fn legacy_request_action_does_not_suppress_current_singleton_contract() {
+    let fixture = Fixture::new("codex");
+    let (task, _) = fixture.add("blocked", lk_queue::TaskKind::ExtractConcepts, false);
+    std::fs::write(fixture.root().join("mode"), "action").unwrap();
+    let report = fixture.run();
+    assert_eq!(fixture.calls(), 1, "{report}");
+    let raw = std::fs::read_to_string(fixture.root().join("calls.jsonl")).unwrap();
+    let mut old_request: Value = serde_json::from_str(raw.lines().next().unwrap()).unwrap();
+    old_request["schema"] = json!("native-selected-results-v1");
+    let old_revision =
+        lk_core::concept::file_revision(&serde_json::to_string(&old_request).unwrap());
+    let directory = fixture
+        .root()
+        .join("vault/.lorekeeper/queue/result-actions");
+    let path = std::fs::read_dir(directory)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let mut action: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    action["request_revision"] = json!(old_revision);
+    std::fs::write(&path, serde_json::to_vec(&action).unwrap()).unwrap();
+    let report = fixture.run();
+    assert_eq!(
+        fixture.calls(),
+        2,
+        "the changed native contract requires one fresh singleton: {report}"
+    );
+    let current: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_ne!(current["request_revision"], old_revision);
+    let report = fixture.run();
+    assert_eq!(fixture.calls(), 2, "{report}");
+    assert!(!fixture.done(&task));
 }
