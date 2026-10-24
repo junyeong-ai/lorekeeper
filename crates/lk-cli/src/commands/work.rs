@@ -788,13 +788,17 @@ fn screening_with_inventory(
     };
     if !source_fits {
         let work = expected(root, &inventory.source, config, config_revision)?;
-        if !work.is_planned(root)? || !work.progress(root, &inventory.source.resources)?.complete {
+        let observed = if work.is_planned(root)? {
+            work.result_if_complete_with_guards(root, &inventory.source.resources)?
+        } else {
+            None
+        };
+        let Some((result, guards)) = observed else {
             return Ok(ScreeningPreparation::Source {
                 work: Box::new(work),
                 prepared: Box::new(inventory.source),
             });
-        }
-        let (result, guards) = work.result_with_guards(root, &inventory.source.resources)?;
+        };
         inventory.pages.extend(guards);
         if result["output"]["unresolved"]
             .as_array()
@@ -1586,12 +1590,20 @@ pub(super) fn verify_finished(
 ) -> miette::Result<()> {
     let root = root.canonicalize().into_diagnostic()?;
     let (work, prepared) = load(&root, config, config_revision, id)?;
-    let result = std::fs::read(root.join(".lorekeeper/work").join(id).join("final.json"))
-        .into_diagnostic()?;
+    verify_finished_prepared(&root, &work, &prepared)
+}
+
+fn verify_finished_prepared(root: &Path, work: &Work, prepared: &Prepared) -> miette::Result<()> {
+    let result = std::fs::read(
+        root.join(".lorekeeper/work")
+            .join(&work.plan.id)
+            .join("final.json"),
+    )
+    .into_diagnostic()?;
     let result: Value = serde_json::from_slice(&result).into_diagnostic()?;
     work.guard_completion(
         &mut lk_vault::MutationPlan::default(),
-        &root,
+        root,
         &prepared.resources,
         &result,
     )
@@ -1604,7 +1616,7 @@ pub(super) fn is_finished(
     id: &str,
 ) -> miette::Result<bool> {
     let root = root.canonicalize().into_diagnostic()?;
-    let (work, _) = load(&root, config, config_revision, id)?;
+    let (work, prepared) = load(&root, config, config_revision, id)?;
     let path = root
         .join(".lorekeeper/work")
         .join(&work.plan.id)
@@ -1612,7 +1624,7 @@ pub(super) fn is_finished(
     match std::fs::symlink_metadata(path) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(miette::miette!("inspect final result: {error}")),
-        Ok(_) => verify_finished(&root, config, config_revision, id).map(|()| true),
+        Ok(_) => verify_finished_prepared(&root, &work, &prepared).map(|()| true),
     }
 }
 
@@ -1687,6 +1699,16 @@ fn progress(
     offset: usize,
 ) -> miette::Result<Value> {
     let status = work.progress(root, &prepared.resources)?;
+    Ok(progress_value(work, prepared, status, limit, offset))
+}
+
+fn progress_value(
+    work: &Work,
+    prepared: &Prepared,
+    status: state::WorkProgress,
+    limit: usize,
+    offset: usize,
+) -> Value {
     let total_ready = status.ready.len();
     let ready = status
         .ready
@@ -1696,12 +1718,12 @@ fn progress(
         .collect::<Vec<_>>();
     let next_offset = (offset.saturating_add(ready.len()) < total_ready)
         .then_some(offset.saturating_add(ready.len()));
-    Ok(json!({"work_id":work.plan.id,"subject":prepared.subject,
+    json!({"work_id":work.plan.id,"subject":prepared.subject,
         "context_revision":work.plan.subject_revision,
         "resources":work.plan.resources.len(),"parts":work.plan.parts.len(),
         "completed":status.completed,"total":status.total,"complete":status.complete,
         "root_node":status.root_node,"ready_total":total_ready,"ready":ready,
-        "limit":limit,"offset":offset,"next_offset":next_offset}))
+        "limit":limit,"offset":offset,"next_offset":next_offset})
 }
 
 pub async fn run(opts: &GlobalOptions, command: WorkCommand) -> miette::Result<()> {
@@ -1882,8 +1904,8 @@ pub async fn run(opts: &GlobalOptions, command: WorkCommand) -> miette::Result<(
                     .into_diagnostic()?;
             let session = lk_vault::MutationSession::acquire(&root).into_diagnostic()?;
             let (work, prepared) = load(&root, &config, &config_revision, &output.work_id)?;
-            work.record(&session, output, &prepared.resources)?;
-            progress(&work, &root, &prepared, 20, 0)?
+            let status = work.record(&session, output, &prepared.resources)?;
+            progress_value(&work, &prepared, status, 20, 0)
         }
         WorkCommand::Reuse {
             work_id,
@@ -1894,8 +1916,9 @@ pub async fn run(opts: &GlobalOptions, command: WorkCommand) -> miette::Result<(
             let session = lk_vault::MutationSession::acquire(&root).into_diagnostic()?;
             let (work, prepared) = load(&root, &config, &config_revision, &work_id)?;
             let prior = Work::load(&root, &from_work)?;
-            work.reuse_from(&session, &prior, &from_node, &node_id, &prepared.resources)?;
-            progress(&work, &root, &prepared, 20, 0)?
+            let status =
+                work.reuse_from(&session, &prior, &from_node, &node_id, &prepared.resources)?;
+            progress_value(&work, &prepared, status, 20, 0)
         }
         WorkCommand::Finish { work_id, file } => {
             let result: Value = serde_json::from_slice(&std::fs::read(file).into_diagnostic()?)
@@ -2271,6 +2294,84 @@ mod tests {
                 1
             );
         }
+    }
+
+    #[test]
+    fn finished_status_keeps_fresh_scope_and_exact_sealed_result_checks() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let (work, prepared, result) = completed_audit_work(&root);
+        let (config, config_revision) =
+            lk_core::config::Config::load_with_revision(&root.join("config.yaml")).unwrap();
+        assert!(!is_finished(&root, &config, &config_revision, &work.plan.id).unwrap());
+        assert!(verify_finished(&root, &config, &config_revision, &work.plan.id).is_err());
+        {
+            let session = MutationSession::acquire(&root).unwrap();
+            finish(&session, &work, &prepared, result).unwrap();
+        }
+        assert!(is_finished(&root, &config, &config_revision, &work.plan.id).unwrap());
+        verify_finished(&root, &config, &config_revision, &work.plan.id).unwrap();
+
+        let final_path = root
+            .join(".lorekeeper/work")
+            .join(&work.plan.id)
+            .join("final.json");
+        let original = std::fs::read_to_string(&final_path).unwrap();
+        let mut changed: Value = serde_json::from_str(&original).unwrap();
+        changed["assessments"][0]["reason"] = json!("A different unsealed assessment.");
+        std::fs::write(&final_path, serde_json::to_vec(&changed).unwrap()).unwrap();
+        assert!(is_finished(&root, &config, &config_revision, &work.plan.id).is_err());
+        assert!(verify_finished(&root, &config, &config_revision, &work.plan.id).is_err());
+        std::fs::write(&final_path, &original).unwrap();
+
+        let Subject::Audit { path, .. } = &prepared.subject else {
+            unreachable!()
+        };
+        let subject_path = root.join(path);
+        let subject = std::fs::read_to_string(&subject_path).unwrap();
+        std::fs::write(
+            &subject_path,
+            format!("{subject}\nChanged authored evidence.\n"),
+        )
+        .unwrap();
+        assert!(is_finished(&root, &config, &config_revision, &work.plan.id).is_err());
+        assert!(verify_finished(&root, &config, &config_revision, &work.plan.id).is_err());
+        std::fs::write(subject_path, subject).unwrap();
+        assert!(is_finished(&root, &config, &config_revision, &work.plan.id).unwrap());
+        assert_eq!(std::fs::read_to_string(final_path).unwrap(), original);
+    }
+
+    #[test]
+    fn recorded_progress_json_matches_fresh_status_after_reduction_invalidation() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let (work, prepared, _) = completed_audit_work(&root);
+        let node = &work.plan.parts[0].id;
+        let input = work.input(&root, node, &prepared.resources).unwrap();
+        let session = MutationSession::acquire(&root).unwrap();
+        let status = work
+            .record(
+                &session,
+                WorkOutput {
+                    work_id: work.plan.id.clone(),
+                    node_id: node.clone(),
+                    input_revision: input["input_revision"].as_str().unwrap().into(),
+                    summary: "A corrected observation from the exact assigned source.".into(),
+                    findings: vec![],
+                    source_questions: vec![],
+                    unresolved: vec![],
+                    resolutions: vec![],
+                },
+                &prepared.resources,
+            )
+            .unwrap();
+        assert!(!status.complete);
+        assert!(status.completed < status.total);
+        assert!(!status.ready.is_empty());
+        assert_eq!(
+            progress_value(&work, &prepared, status, 1, 0),
+            progress(&work, &root, &prepared, 1, 0).unwrap(),
+        );
     }
 
     #[test]

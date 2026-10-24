@@ -1136,6 +1136,19 @@ impl Work {
         Ok((completed.result, completed.guards))
     }
 
+    pub(super) fn result_if_complete_with_guards(
+        &self,
+        root: &Path,
+        resources: &[SemanticResource],
+    ) -> miette::Result<Option<(Value, BTreeMap<PathBuf, String>)>> {
+        let evaluated = self.evaluate(root, resources)?;
+        if !evaluated.progress().complete {
+            return Ok(None);
+        }
+        let result = self.build_finalizer_result(&evaluated)?;
+        Ok(Some((result, evaluated.raw)))
+    }
+
     pub(super) fn capture_completion(
         &self,
         root: &Path,
@@ -2175,8 +2188,26 @@ mod tests {
         let session = MutationSession::acquire(root.path()).unwrap();
         let work = Work::create(&session, &source, "subject", context("one"), limits()).unwrap();
         assert!(work.result_with_guards(root.path(), &source).is_err());
+        assert!(
+            work.result_if_complete_with_guards(root.path(), &source)
+                .unwrap()
+                .is_none()
+        );
+        let first = &work.plan.parts[0].id;
+        work.record(&session, draft(&work, root.path(), first, &source), &source)
+            .unwrap();
+        assert!(
+            work.result_if_complete_with_guards(root.path(), &source)
+                .unwrap()
+                .is_none()
+        );
         finish(&work, &session, &source);
         let (result, guards) = work.result_with_guards(root.path(), &source).unwrap();
+        assert_eq!(
+            work.result_if_complete_with_guards(root.path(), &source)
+                .unwrap(),
+            Some((result.clone(), guards.clone()))
+        );
         assert_eq!(result, work.result(root.path(), &source).unwrap());
         assert_eq!(
             guards.len(),
@@ -2542,13 +2573,25 @@ mod tests {
         corrupt["output"]["summary"] = "unverified edit".into();
         std::fs::write(&path, encoded(&corrupt).unwrap()).unwrap();
         assert!(work.progress(root.path(), &source).is_err());
+        assert!(
+            work.result_if_complete_with_guards(root.path(), &source)
+                .is_err()
+        );
         std::fs::write(&path, original).unwrap();
         let mut changed = source.clone();
         changed[0].text.push('!');
         assert!(work.progress(root.path(), &changed).is_err());
+        assert!(
+            work.result_if_complete_with_guards(root.path(), &changed)
+                .is_err()
+        );
         let journal = root.path().join(".lorekeeper/mutation/pending.json");
         std::fs::write(&journal, "{}").unwrap();
         assert!(work.progress(root.path(), &source).is_err());
+        assert!(
+            work.result_if_complete_with_guards(root.path(), &source)
+                .is_err()
+        );
         assert_eq!(std::fs::read_to_string(&journal).unwrap(), "{}");
         std::fs::remove_file(journal).unwrap();
         assert_eq!(work.progress(root.path(), &source).unwrap().completed, 1);
