@@ -515,7 +515,13 @@ else:
 prompt='\n'.join(sys.argv[1:])
 selection,_=json.JSONDecoder().raw_decode(prompt.split('Selected queue task manifest: ',1)[1])
 path=Path(selection)
-assert isinstance(json.loads(path.read_text()),list)
+request=json.loads(path.read_text())
+assert request['schema']=='native-selected-v1'
+assert request['tasks'] and request['contracts']
+for selected in request['tasks']:
+    assert selected['task']['task_id']
+    assert selected['resources']
+    assert all(0<=index<len(request['contracts']) for index in selected['contract_indices'])
 granted=[Path(sys.argv[index+1]).resolve() for index,arg in enumerate(sys.argv[:-1]) if arg=='--add-dir']
 assert path.parent.resolve() in granted, 'selection must be readable inside an explicitly granted directory'
 (Path(os.environ['TEST_EXECUTION_ROOT'])/'selection-path').write_text(str(path))
@@ -1293,7 +1299,14 @@ if action=='inspect':
         path.write_text(json.dumps(output))
         cli('work', 'record', '--file', str(path))
 else:
-    request=cli('work', 'result', work_id)
+    prepared_match=re.search(r'Read this native-finalize-v1 prepared request once: ("[^"\n]+")', '\n'.join(sys.argv[1:]))
+    prepared_path=Path(json.loads(prepared_match.group(1))) if prepared_match else None
+    prepared=json.loads(prepared_path.read_text()) if prepared_path else None
+    if prepared:
+        assert prepared['schema']=='native-finalize-v1' and prepared['contracts']
+        request=prepared['completed']
+    else:
+        request=cli('work', 'result', work_id)
     subject=request['context']['subject']
     assert subject['kind']=='audit'
     assessment={key:subject[key] for key in ['path','file_revision','input_revision']}
@@ -1359,7 +1372,7 @@ fn selected_profile_budget_reaches_controller_and_worker_commands() {
         );
         assert_eq!(
             result["execution"]["work"],
-            serde_json::json!({"max_input_bytes":16384,"max_result_bytes":2048,"max_calls":1,"max_parallel":1,"extraction_context":"full-context"})
+            serde_json::json!({"max_input_bytes":16384,"max_result_bytes":2048,"max_calls":1,"max_parallel":1,"max_consecutive_calls":4,"extraction_context":"full-context"})
         );
         assert!(
             result["stages"]
@@ -1828,6 +1841,7 @@ fn bounded_queue_shares_each_runs_budget_across_independent_documents() {
             !output.status.success(),
             "a one-call budget retains unfinished documents: {result}"
         );
+        assert_eq!(result["semantic_calls"], 1, "{result}");
     }
     let calls = bounded_calls(&fixture);
     assert_eq!(calls.len(), 2);
@@ -1835,6 +1849,209 @@ fn bounded_queue_shares_each_runs_budget_across_independent_documents() {
         calls[0]["work_id"], calls[1]["work_id"],
         "one unfinished document must not consume every resumed run before another independent document gets a turn"
     );
+}
+
+fn queue_quantum_fixture(
+    behavior: &str,
+    max_calls: usize,
+    max_parallel: usize,
+    quantum: Option<usize>,
+    entries: usize,
+    repetitions: usize,
+) -> Fixture {
+    let fixture = Fixture::new("codex", 30, behavior);
+    let quantum = quantum.map_or(String::new(), |value| {
+        format!(", max_consecutive_calls: {value}")
+    });
+    let config = std::fs::read_to_string(&fixture.config)
+        .unwrap()
+        .replace("concept_policy: supported-new", "concept_policy: disabled")
+        .replace(
+            "  default_profile: primary\n",
+            &format!("  default_profile: primary\n  work: {{max_input_bytes: 65536, max_result_bytes: 4096, max_calls: {max_calls}, max_parallel: {max_parallel}{quantum}}}\n"),
+        );
+    std::fs::write(&fixture.config, config).unwrap();
+    for index in 0..entries {
+        std::fs::write(
+            fixture
+                .root()
+                .join(format!("vault/inbox/source-{index}.md")),
+            format!(
+                "# Source {index}\n\n{}\n{}",
+                "Independent source evidence.\n".repeat(repetitions / 2),
+                "Independent source evidence.\n".repeat(repetitions - repetitions / 2)
+            ),
+        )
+        .unwrap();
+    }
+    let collected = fixture.command().arg("ingest").output().unwrap();
+    assert!(
+        collected.status.success(),
+        "{}",
+        String::from_utf8_lossy(&collected.stderr)
+    );
+    fixture
+}
+
+#[test]
+fn native_queue_quantum_completes_one_bounded_summary_before_rotating_without_extra_calls() {
+    let section = WHOLE_SECTION.replace(
+        "if request['kind']!='whole-section': raise SystemExit(100)",
+        "if request['kind'] not in ['whole-section','finalize-section']: raise SystemExit(100)",
+    );
+    let behavior = format!("{section}\n{RECORD_BOUNDED_AUDIT}");
+    for quantum in [Some(1), None] {
+        let fixture = queue_quantum_fixture(&behavior, 4, 1, quantum, 2, 3000);
+        let second = fixture.root().join("vault/wiki/documents/source-1.md");
+        let second_before = std::fs::read(&second).unwrap();
+        let (output, report) = fixture.run("process");
+        assert!(
+            !output.status.success(),
+            "four calls retain another source: {report}"
+        );
+        assert_eq!(report["semantic_calls"], 4, "{report}");
+        assert_eq!(
+            report["execution"]["work"]["max_consecutive_calls"],
+            quantum.unwrap_or(4)
+        );
+        let calls = bounded_calls(&fixture);
+        let first_id = calls[0]["work_id"].as_str().unwrap();
+        let manifest: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(
+                fixture
+                    .root()
+                    .join("vault/.lorekeeper/work")
+                    .join(first_id)
+                    .join("plan.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(manifest["plan"]["parts"].as_array().unwrap().len(), 2);
+        let steps = report["work_steps"].as_array().unwrap();
+        assert_eq!(steps.len(), 4);
+        let events = String::from_utf8_lossy(&output.stderr)
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .collect::<Vec<_>>();
+        let emitted_steps = events
+            .iter()
+            .filter(|event| event["type"] == "lore.work-step")
+            .map(|event| event["step"].clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            &emitted_steps, steps,
+            "progress retains exact nullable metrics"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(
+                    |event| event["type"] == "lore.queue-planning" && event["state"] == "completed"
+                )
+                .count() as u64,
+            report["queue_planning"]["attempts"].as_u64().unwrap(),
+        );
+        if quantum == Some(1) {
+            assert_eq!(calls.len(), 4, "one host attempt per fair target turn");
+            assert_ne!(calls[0]["work_id"], calls[1]["work_id"]);
+            assert_eq!(calls[0]["work_id"], calls[2]["work_id"]);
+            assert_eq!(calls[1]["work_id"], calls[3]["work_id"]);
+            assert!(steps.iter().all(|step| step["role"] == "evidence"));
+            assert!(!fixture.root().join("whole-section-calls.jsonl").exists());
+        } else {
+            assert_eq!(calls.len(), 3, "two inspections and their reduction");
+            assert!(calls.iter().all(|call| call["work_id"] == first_id));
+            assert_eq!(calls[0]["kind"], "inspect");
+            assert_eq!(calls[1]["kind"], "inspect");
+            assert_eq!(calls[2]["kind"], "reduce");
+            assert_eq!(steps[3]["role"], "finalizer");
+            assert_eq!(steps[3]["work_id"], first_id);
+            assert_eq!(report["queue_application"]["applied"], 1, "{report}");
+            assert!(
+                std::fs::read_to_string(fixture.root().join("vault/wiki/documents/source-0.md"))
+                    .unwrap()
+                    .contains("summary_done:")
+            );
+            let cursor: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(
+                    fixture
+                        .root()
+                        .join("vault/.lorekeeper/execution-cursor.json"),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(cursor["queue"], "wiki/documents/source-1.md");
+            assert_eq!(std::fs::read(&second).unwrap(), second_before);
+            let (output, resumed) = fixture.run("process");
+            assert!(output.status.success(), "{resumed}");
+            assert_eq!(resumed["semantic_calls"], 4);
+            assert_eq!(resumed["queue_application"]["applied"], 1);
+        }
+    }
+}
+
+#[test]
+fn native_queue_parallel_quantum_fills_a_wave_after_one_admitted_allowance_runs_out() {
+    let behavior = RECORD_BOUNDED_AUDIT
+        .replace(
+            "/bin/cat > \"$TEST_EXECUTION_ROOT/native-request.txt\"",
+            "export TEST_BOUNDED_REQUEST=\"$TEST_EXECUTION_ROOT/native-request-$$.txt\"; /bin/cat > \"$TEST_BOUNDED_REQUEST\"",
+        )
+        .replace(
+            "(root/'native-request.txt').read_text()",
+            "Path(os.environ['TEST_BOUNDED_REQUEST']).read_text()",
+        )
+        .replace("import json, os, re, subprocess, sys", "import json, os, re, subprocess, sys, time")
+        .replace(
+            "    row={'action':action,",
+            r#"    (root/('quantum-start-'+node_id+'.json')).write_text(json.dumps({'work_id':work_id}))
+    wave_end=((len(list(root.glob('quantum-start-*.json')))-1)//4+1)*4
+    deadline=time.monotonic()+15
+    while len(list(root.glob('quantum-start-*.json')))<wave_end:
+        if time.monotonic()>=deadline:
+            raise SystemExit('admitted work did not fill the four-host wave')
+        time.sleep(.01)
+    row={'action':action,"#,
+        );
+    let fixture = queue_quantum_fixture(&behavior, 12, 4, Some(5), 3, 24000);
+    let originals = (0..3)
+        .map(|index| {
+            let path = fixture
+                .root()
+                .join(format!("vault/wiki/documents/source-{index}.md"));
+            let raw = std::fs::read(&path).unwrap();
+            (path, raw)
+        })
+        .collect::<Vec<_>>();
+    let (output, report) = fixture.run("process");
+    assert!(
+        !output.status.success(),
+        "unfinished evidence remains: {report}"
+    );
+    assert_eq!(report["halted"], false, "{report}");
+    assert_eq!(report["semantic_calls"], 12, "{report}");
+    let steps = report["work_steps"].as_array().unwrap();
+    assert_eq!(steps.len(), 12);
+    assert!(steps.iter().all(|step| step["outcome"] == "recorded"));
+    let a = &steps[0]["work_id"];
+    let b = &steps[1]["work_id"];
+    let c = &steps[2]["work_id"];
+    assert_ne!(a, b);
+    assert_ne!(b, c);
+    assert_ne!(a, c);
+    assert_eq!(
+        steps
+            .iter()
+            .map(|step| &step["work_id"])
+            .collect::<Vec<_>>(),
+        [a, b, c, a, a, b, c, a, a, b, c, b]
+    );
+    assert_eq!(bounded_calls(&fixture).len(), 12);
+    for (path, raw) in originals {
+        assert_eq!(std::fs::read(path).unwrap(), raw);
+    }
 }
 
 #[test]
@@ -2171,7 +2388,9 @@ fn build_extraction_behavior(discovery_handler: &str) -> String {
                   target=context['target'],date=context['parameters']['date'],concepts=[])
     path=root/'extraction-result.json'
     path.write_text(json.dumps(result))
-    cli('work','finish',work_id,'--file',str(path))
+    finish=['work','finish',work_id,'--file',str(path)]
+    if prepared_path: finish.extend(['--prepared',str(prepared_path)])
+    cli(*finish)
 "#);
     behavior
 }
@@ -2202,11 +2421,12 @@ fn oversized_extraction_records_discovery_before_planning_on_both_hosts() {
         let fixture = Fixture::new(engine, 30, &behavior);
         let config = std::fs::read_to_string(&fixture.config).unwrap().replace(
             "  default_profile: primary\n",
-            "  default_profile: primary\n  work: {max_input_bytes: 8192, max_result_bytes: 1024, max_calls: 64}\n",
+            "  default_profile: primary\n  work: {max_input_bytes: 65536, max_result_bytes: 1024, max_calls: 64}\n",
         );
         std::fs::write(&fixture.config, config).unwrap();
         let root = fixture.root().join("vault");
-        let source = "Transactional outbox commits an event with its state change.\n\n".repeat(400);
+        let source =
+            "Transactional outbox commits an event with its state change.\n\n".repeat(2000);
         let request = lk_queue::ExtractConceptsRequest {
             concept_policy: lk_core::config::ConceptPolicy::SupportedNew,
             rss_original: None,
@@ -2261,7 +2481,10 @@ fn small_extraction_hands_expanded_discovery_to_bounded_work_on_both_hosts() {
         r#"    if match is None:
         prompt='\n'.join(sys.argv[1:])
         path,_=json.JSONDecoder().raw_decode(prompt.split('Selected queue task manifest: ',1)[1])
-        ids=json.loads(Path(path).read_text())
+        prepared=json.loads(Path(path).read_text())
+        assert prepared['schema']=='native-selected-v1'
+        assert prepared['contracts']
+        ids=[selected['task']['task_id'] for selected in prepared['tasks']]
         lore=os.environ['LORE_BIN']
         assert not (root/'vault/.lorekeeper/work').exists(), 'small retained inputs must start in the ordinary selected batch'
         rows={row['task_id']:row for row in json.loads(subprocess.check_output([lore,'queue','status','--json']))['data']['tasks']}
@@ -2296,7 +2519,7 @@ fn small_extraction_hands_expanded_discovery_to_bounded_work_on_both_hosts() {
             let fixture = Fixture::with_whole_sections(engine, 30, &behavior);
             let config = std::fs::read_to_string(&fixture.config).unwrap().replace(
                 "  default_profile: primary\n",
-                "  default_profile: primary\n  work: {max_input_bytes: 8192, max_result_bytes: 1024, max_calls: 64}\n",
+                "  default_profile: primary\n  work: {max_input_bytes: 65536, max_result_bytes: 1024, max_calls: 64}\n",
             );
             std::fs::write(&fixture.config, config).unwrap();
             let root = fixture.root().join("vault");
@@ -2353,7 +2576,7 @@ fn small_extraction_hands_expanded_discovery_to_bounded_work_on_both_hosts() {
                 format!(
                     "---\ntype: document\n---\n{}",
                     "A transactional outbox has source-scoped delivery assumptions.\n\n"
-                        .repeat(if expands { 400 } else { 1 })
+                        .repeat(if expands { 2000 } else { 1 })
                 ),
             )
             .unwrap();
@@ -2463,7 +2686,10 @@ if match:
     ids=json.loads(Path(json.loads(match.group(1))).read_text())
 else:
     path,_=json.JSONDecoder().raw_decode(prompt.split('Selected queue task manifest: ',1)[1])
-    ids=json.loads(Path(path).read_text())
+    prepared=json.loads(Path(path).read_text())
+    assert prepared['schema']=='native-selected-v1'
+    assert prepared['contracts']
+    ids=[selected['task']['task_id'] for selected in prepared['tasks']]
 tasks={task['task_id']:task for file in (root/'vault/.lorekeeper/queue').glob('*.jsonl')
        for line in file.read_text().splitlines() if line for task in [json.loads(line)]}
 for task_id in ids:
@@ -2983,7 +3209,7 @@ fn native_screening_refuses_model_owned_identity_without_rebinding_or_losing_met
                 "    output={}",
                 &format!("    output={{'selection_id':{supplied}}}"),
             );
-            let (fixture, task) = progressive_extraction_fixture(engine, &behavior, 6, 16384, 4096);
+            let (fixture, task) = progressive_extraction_fixture(engine, &behavior, 6, 65536, 4096);
             let target = fixture.root().join("vault/wiki/documents/source.md");
             let original = std::fs::read(&target).unwrap();
             let (output, report) = fixture.run("process");
@@ -3237,7 +3463,7 @@ fn progressive_large_source_observations_feed_guarded_admitted_work_before_publi
         "    result.update(context_revision=cli('work','status',work_id)['context_revision'],",
         "    result.update(selection=context['extraction_scope']['selection'],context_revision=cli('work','status',work_id)['context_revision'],",
     );
-    let (fixture, original) = progressive_extraction_fixture("codex", &behavior, 2, 8192, 1024);
+    let (fixture, original) = progressive_extraction_fixture("codex", &behavior, 2, 65536, 1024);
     let config = std::fs::read_to_string(&fixture.config)
         .unwrap()
         .replace("max_calls: 64", "max_calls: 1");
@@ -3254,7 +3480,7 @@ fn progressive_large_source_observations_feed_guarded_admitted_work_before_publi
         serde_json::from_value(serde_json::Value::Object(input)).unwrap();
     request.text =
         "A transactional outbox observation preserves its exact source conditions and attribution.\n"
-            .repeat(105);
+            .repeat(1000);
     let text = request.text.clone();
     let task = client.build_task("ext", lk_queue::TaskKind::ExtractConcepts, request);
     std::fs::write(
@@ -4977,15 +5203,19 @@ BATCH"#;
             }
         );
         if !start_at_summary {
-            let selected: Vec<String> = serde_json::from_slice(
+            let selected: serde_json::Value = serde_json::from_slice(
                 &std::fs::read(fixture.root().join("selected-batch.json")).unwrap(),
             )
             .unwrap();
+            assert_eq!(selected["schema"], "native-selected-v1");
+            assert!(!selected["contracts"].as_array().unwrap().is_empty());
+            let tasks = selected["tasks"].as_array().unwrap();
             assert_eq!(
-                selected.len(),
+                tasks.len(),
                 2,
                 "one interactive invocation retains both exact task IDs"
             );
+            assert_ne!(tasks[0]["task"]["task_id"], tasks[1]["task"]["task_id"]);
         }
     }
 }

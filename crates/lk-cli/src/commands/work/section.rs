@@ -354,8 +354,8 @@ mod tests {
                 }
                 work.plan.id
             };
-            let super::super::SectionPreparation::Ready(section) =
-                super::super::prepare_section_finalization(&root, &config, &revision, &id).unwrap()
+            let super::super::FinalizationPreparation::Ready(section) =
+                super::super::prepare_finalization(&root, &config, &revision, &id).unwrap()
             else {
                 panic!("ready bounded section");
             };

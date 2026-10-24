@@ -35,6 +35,86 @@ fn instruction_section<'a>(document: &'a str, anchor: &str) -> miette::Result<&'
     Ok(&document[heading.range.end..end])
 }
 
+pub(in crate::commands) fn interactive_contracts(
+    config: &lk_core::config::Config,
+    kind: TaskKind,
+    target: TargetKind,
+) -> miette::Result<Vec<Value>> {
+    if !kind.supports_target(target) {
+        return Err(miette::miette!("task kind does not support its target"));
+    }
+    let (kind_heading, result_headings): (&str, &[&str]) = match kind {
+        TaskKind::ExtractConcepts => (
+            "## `kind: extract-concepts`",
+            &["## Extraction read scope", "## Single-section result"],
+        ),
+        TaskKind::SynthesizeConcept => (
+            "## `kind: synthesize-concept`",
+            &["## Synthesis result", "## Single-section result"],
+        ),
+        TaskKind::Summarize | TaskKind::RefineEvents | TaskKind::IdentifyThemes => {
+            return Err(miette::miette!(
+                "this task uses the structured section generation contract"
+            ));
+        }
+    };
+    let mut contracts = Vec::new();
+    let mut append = |source: &str, document: &str, heading: &str| -> miette::Result<()> {
+        contracts.push(json!({
+            "source":source, "heading":heading,
+            "body":instruction_section(document, heading)?,
+        }));
+        Ok(())
+    };
+    let rules = reference("references/processing-kinds.md")?;
+    for heading in [
+        "## Relevance focus (all kinds)",
+        "## Output language (all kinds)",
+        kind_heading,
+    ] {
+        append(
+            "lore-process/references/processing-kinds.md",
+            rules,
+            heading,
+        )?;
+    }
+    if kind == TaskKind::ExtractConcepts {
+        append(
+            "lore-process/references/processing-kinds.md",
+            rules,
+            "### Concept-link targets",
+        )?;
+        append(
+            "lore-process/references/source-types.md",
+            reference("references/source-types.md")?,
+            "## Extract-concepts (`kind: extract-concepts`) — per-type scoping",
+        )?;
+    }
+    let queue = reference("references/queue-format.md")?;
+    for heading in result_headings {
+        append("lore-process/references/queue-format.md", queue, heading)?;
+    }
+    let schema = crate::commands::schema::render_agents_md(
+        config.vault.locale(),
+        &config.vault.dirs,
+        config.personal.is_some(),
+        config
+            .personal
+            .as_ref()
+            .and_then(|personal| personal.tasks.as_ref())
+            .map(|tasks| tasks.board.as_str()),
+    );
+    for heading in [
+        "## Links",
+        "## Knowledge reviews",
+        "## Knowledge lifecycle and retrieval",
+        "## Concept convergence",
+    ] {
+        append("generated wiki/AGENTS.md", &schema, heading)?;
+    }
+    Ok(contracts)
+}
+
 pub(in crate::commands) fn supports(kind: TaskKind) -> bool {
     match kind {
         TaskKind::Summarize | TaskKind::IdentifyThemes | TaskKind::RefineEvents => true,
@@ -252,6 +332,65 @@ pub(in crate::commands) fn decode(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn interactive_contracts_include_complete_shared_rules_and_refuse_section_roles() {
+        let config =
+            lk_core::yaml::from_str(include_str!("../../../../../config.starter.yaml")).unwrap();
+        for (kind, target, expected) in [
+            (
+                TaskKind::ExtractConcepts,
+                TargetKind::DocumentConcepts,
+                "## `kind: extract-concepts`",
+            ),
+            (
+                TaskKind::SynthesizeConcept,
+                TargetKind::ConceptSynthesis,
+                "## `kind: synthesize-concept`",
+            ),
+        ] {
+            let contracts = interactive_contracts(&config, kind, target).unwrap();
+            for heading in [
+                expected,
+                "## Relevance focus (all kinds)",
+                "## Output language (all kinds)",
+                "## Links",
+                "## Knowledge reviews",
+                "## Concept convergence",
+            ] {
+                assert!(contracts.iter().any(|rule| rule["heading"] == heading));
+            }
+            let kind_rule = contracts
+                .iter()
+                .find(|rule| rule["heading"] == expected)
+                .unwrap();
+            assert_eq!(
+                kind_rule["body"],
+                instruction_section(
+                    reference("references/processing-kinds.md").unwrap(),
+                    expected
+                )
+                .unwrap()
+            );
+            assert!(
+                contracts
+                    .iter()
+                    .all(|rule| { rule["body"].as_str().is_some_and(|body| !body.is_empty()) })
+            );
+        }
+        assert!(
+            interactive_contracts(&config, TaskKind::Summarize, TargetKind::DocumentSummary)
+                .is_err()
+        );
+        assert!(
+            interactive_contracts(
+                &config,
+                TaskKind::ExtractConcepts,
+                TargetKind::ConceptSynthesis
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn content_rules_are_selected_from_the_shared_packaged_instructions() {

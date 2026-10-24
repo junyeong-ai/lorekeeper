@@ -6,6 +6,8 @@ use serde_json::{Value, json};
 use super::{GlobalOptions, find_config, load_config_with_revision};
 
 mod discovery;
+#[cfg(unix)]
+pub(super) mod native;
 mod publication;
 mod resources;
 #[cfg(unix)]
@@ -14,6 +16,10 @@ mod selection;
 pub(crate) mod state;
 
 pub(super) use publication::publication_scope;
+#[cfg(unix)]
+pub(super) const FINALIZATION_REQUEST_ENV: &str = "LORE_WORK_FINALIZATION_REQUEST";
+#[cfg(unix)]
+pub(super) const FINALIZATION_REVISION_ENV: &str = "LORE_WORK_FINALIZATION_REVISION";
 use resources::{Prepared, Subject};
 use state::{Work, WorkLimits, WorkOutput};
 
@@ -139,6 +145,9 @@ pub enum WorkCommand {
         /// Normal typed queue result or single-subject audit assessment JSON
         #[arg(long)]
         file: PathBuf,
+        /// Exact native finalizer handoff captured before drafting
+        #[arg(long)]
+        prepared: Option<PathBuf>,
     },
 }
 
@@ -1050,11 +1059,108 @@ fn load(
 }
 
 pub(super) enum TaskWork {
-    WholeInput { bytes: usize },
-    Partitioned { id: String },
-    Source { id: String },
-    Screening,
-    Admission { reason: String },
+    WholeInput {
+        #[cfg(unix)]
+        native: Option<Box<Value>>,
+    },
+    Partitioned {
+        id: String,
+    },
+    Source {
+        id: String,
+    },
+    Screening {
+        selection_id: String,
+    },
+    Admission {
+        reason: String,
+    },
+}
+
+#[cfg(unix)]
+fn validate_native_finalization(
+    root: &Path,
+    config: &lk_core::config::Config,
+    work: &Work,
+    prepared: &Prepared,
+    request: &Value,
+) -> miette::Result<Value> {
+    let completed = work.result(root, &prepared.resources)?;
+    let current =
+        native::finalization_request(config, work, &work.plan.subject_revision, &completed)?;
+    if &current != request {
+        return Err(miette::miette!(
+            "native finalization scope or completed observations changed; reread and regenerate"
+        ));
+    }
+    if serde_json::to_vec(&current).into_diagnostic()?.len() > work.max_input_bytes {
+        return Err(miette::miette!(
+            "complete native finalizer exceeds max_input_bytes"
+        ));
+    }
+    Ok(completed)
+}
+
+#[cfg(unix)]
+fn load_native_finalization_input(
+    explicit: Option<&Path>,
+    inherited: Option<(&Path, &str)>,
+) -> miette::Result<Option<Value>> {
+    let path = inherited.map(|(path, _)| path).or(explicit);
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    let bytes = std::fs::read(path).into_diagnostic()?;
+    if let Some((_, revision)) = inherited {
+        if lk_core::rss_original::digest(&bytes) != revision {
+            return Err(miette::miette!(
+                "native finalizer handoff bytes changed; retained work requires a fresh invocation"
+            ));
+        }
+        if let Some(explicit) = explicit
+            && std::fs::read(explicit).into_diagnostic()? != bytes
+        {
+            return Err(miette::miette!(
+                "prepared input differs from the native finalizer handoff"
+            ));
+        }
+    }
+    serde_json::from_slice(&bytes).map(Some).into_diagnostic()
+}
+
+#[cfg(unix)]
+fn finish_with_preparation(
+    session: &lk_vault::MutationSession,
+    config: &lk_core::config::Config,
+    work: &Work,
+    prepared: &Prepared,
+    result: Value,
+    request: Option<&Value>,
+) -> miette::Result<Value> {
+    if let Some(request) = request {
+        let completed =
+            validate_native_finalization(session.root(), config, work, prepared, request)?;
+        let (path, mutation) =
+            plan_finish_expected(session, work, prepared, result, Some(&completed))?;
+        session.apply(mutation).into_diagnostic()?;
+        Ok(json!({"work_id":work.plan.id,"staged_result":path,"canonical_published":false}))
+    } else {
+        finish(session, work, prepared, result)
+    }
+}
+
+#[cfg(unix)]
+pub(super) fn verify_native_finalization(
+    root: &Path,
+    config: &lk_core::config::Config,
+    config_revision: &str,
+    id: &str,
+    request: &Value,
+) -> miette::Result<()> {
+    let root = root.canonicalize().into_diagnostic()?;
+    let (work, prepared) = load(&root, config, config_revision, id)?;
+    validate_native_finalization(&root, config, &work, &prepared, request)?;
+    verify_finished_prepared(&root, &work, &prepared)
 }
 
 pub(super) fn prepare_task(
@@ -1168,7 +1274,9 @@ fn prepare_task_in_session(
                     .create(session, &screening.inventory.pages)?;
                 let ledger = screening.selection.ledger(root)?;
                 if !ledger.progress.complete {
-                    return Ok(TaskWork::Screening);
+                    return Ok(TaskWork::Screening {
+                        selection_id: screening.selection.id.clone(),
+                    });
                 }
                 admitted_task(&screening, &ledger.binding()?, &ledger.selected_owners)?
             }
@@ -1187,9 +1295,28 @@ fn prepare_task_in_session(
         Err(error) => return Err(miette::miette!("inspect work plan: {error}")),
     };
     if work.plan.parts.len() == 1 && !planned {
-        return Ok(TaskWork::WholeInput {
-            bytes: work.whole_input_bytes(&prepared.resources)?,
-        });
+        #[cfg(not(unix))]
+        {
+            work.whole_input_bytes(&prepared.resources)?;
+            return Ok(TaskWork::WholeInput {});
+        }
+        #[cfg(unix)]
+        {
+            if super::execution::finalization::supports(task.kind) {
+                work.whole_input_bytes(&prepared.resources)?;
+                return Ok(TaskWork::WholeInput { native: None });
+            }
+            let owner = lk_vault::resolve_page_owner(root, Path::new(&task.target.vault_path))
+                .into_diagnostic()?;
+            let input = native::selected_task(config, task, &prepared, &work, &owner)?;
+            let request = native::selected_request(config, std::slice::from_ref(&input))?;
+            let bytes = serde_json::to_vec(&request).into_diagnostic()?.len();
+            if bytes <= work.max_input_bytes {
+                return Ok(TaskWork::WholeInput {
+                    native: Some(Box::new(input)),
+                });
+            }
+        }
     }
     persist_prepared(session, config, config_revision, &prepared)?;
     Ok(TaskWork::Partitioned { id: work.plan.id })
@@ -1325,8 +1452,9 @@ pub(super) struct SectionFinalization {
 }
 
 #[cfg(unix)]
-pub(super) enum SectionPreparation {
+pub(super) enum FinalizationPreparation {
     Interactive,
+    PreparedInteractive(Box<Value>),
     Ready(Box<SectionFinalization>),
     NeedsAction(String),
     Capacity {
@@ -1389,12 +1517,12 @@ fn refinement_events(
 }
 
 #[cfg(unix)]
-pub(super) fn prepare_section_finalization(
+pub(super) fn prepare_finalization(
     root: &Path,
     config: &lk_core::config::Config,
     config_revision: &str,
     id: &str,
-) -> miette::Result<SectionPreparation> {
+) -> miette::Result<FinalizationPreparation> {
     let root = root.canonicalize().into_diagnostic()?;
     let (work, prepared) = load(&root, config, config_revision, id)?;
     let Subject::Queue {
@@ -1404,13 +1532,24 @@ pub(super) fn prepare_section_finalization(
         ..
     } = &prepared.subject
     else {
-        return Ok(SectionPreparation::Interactive);
+        return Ok(FinalizationPreparation::Interactive);
     };
     let task = super::queue::current_task(&root, task_id)?;
-    if !super::execution::finalization::supports(task.kind) {
-        return Ok(SectionPreparation::Interactive);
-    }
     let completed = work.result(&root, &prepared.resources)?;
+    if !super::execution::finalization::supports(task.kind) {
+        let request =
+            native::finalization_request(config, &work, &work.plan.subject_revision, &completed)?;
+        let request_bytes = serde_json::to_vec(&request).into_diagnostic()?.len();
+        if request_bytes > work.max_input_bytes {
+            return Ok(FinalizationPreparation::Capacity {
+                request_bytes,
+                max_input_bytes: work.max_input_bytes,
+            });
+        }
+        return Ok(FinalizationPreparation::PreparedInteractive(Box::new(
+            request,
+        )));
+    }
     let scope = resources::section_task(&root, config, task_id)?;
     let result = lk_queue::SectionResult {
         context_revision: Some(scope.revision(config_revision)?),
@@ -1458,29 +1597,31 @@ pub(super) fn prepare_section_finalization(
         .map_err(|error| miette::miette!("{error}"))?
         .max_input_bytes;
     if request_bytes > max_input_bytes {
-        return Ok(SectionPreparation::Capacity {
+        return Ok(FinalizationPreparation::Capacity {
             request_bytes,
             max_input_bytes,
         });
     }
     if let Some(reason) = work.load_finalization_action(&root, &request)? {
-        return Ok(SectionPreparation::NeedsAction(reason));
+        return Ok(FinalizationPreparation::NeedsAction(reason));
     }
     if completed["output"]["unresolved"]
         .as_array()
         .is_some_and(|items| !items.is_empty())
     {
-        return Ok(SectionPreparation::NeedsAction(
+        return Ok(FinalizationPreparation::NeedsAction(
             "unresolved work concerns prevent section finalization".into(),
         ));
     }
-    Ok(SectionPreparation::Ready(Box::new(SectionFinalization {
-        request,
-        completed,
-        result,
-        scope,
-        max_response_bytes,
-    })))
+    Ok(FinalizationPreparation::Ready(Box::new(
+        SectionFinalization {
+            request,
+            completed,
+            result,
+            scope,
+            max_response_bytes,
+        },
+    )))
 }
 
 #[cfg(unix)]
@@ -1545,8 +1686,8 @@ fn revalidate_section_finalization(
     id: &str,
     section: &SectionFinalization,
 ) -> miette::Result<()> {
-    let SectionPreparation::Ready(current) =
-        prepare_section_finalization(root, config, config_revision, id)?
+    let FinalizationPreparation::Ready(current) =
+        prepare_finalization(root, config, config_revision, id)?
     else {
         return Err(miette::miette!(
             "section finalization scope changed; retained work requires a fresh request"
@@ -1920,12 +2061,58 @@ pub async fn run(opts: &GlobalOptions, command: WorkCommand) -> miette::Result<(
                 work.reuse_from(&session, &prior, &from_node, &node_id, &prepared.resources)?;
             progress_value(&work, &prepared, status, 20, 0)
         }
-        WorkCommand::Finish { work_id, file } => {
+        WorkCommand::Finish {
+            work_id,
+            file,
+            prepared: request,
+        } => {
             let result: Value = serde_json::from_slice(&std::fs::read(file).into_diagnostic()?)
                 .into_diagnostic()?;
             let session = lk_vault::MutationSession::acquire(&root).into_diagnostic()?;
             let (work, prepared) = load(&root, &config, &config_revision, &work_id)?;
-            finish(&session, &work, &prepared, result)?
+            #[cfg(unix)]
+            {
+                let inherited = match (
+                    std::env::var_os(FINALIZATION_REQUEST_ENV),
+                    std::env::var_os(FINALIZATION_REVISION_ENV),
+                ) {
+                    (None, None) => None,
+                    (Some(path), Some(revision)) => Some((
+                        PathBuf::from(path),
+                        revision.into_string().map_err(|_| {
+                            miette::miette!("invalid native finalizer request revision")
+                        })?,
+                    )),
+                    _ => {
+                        return Err(miette::miette!(
+                            "incomplete native finalizer request binding"
+                        ));
+                    }
+                };
+                let expected = load_native_finalization_input(
+                    request.as_deref(),
+                    inherited
+                        .as_ref()
+                        .map(|(path, revision)| (path.as_path(), revision.as_str())),
+                )?;
+                finish_with_preparation(
+                    &session,
+                    &config,
+                    &work,
+                    &prepared,
+                    result,
+                    expected.as_ref(),
+                )?
+            }
+            #[cfg(not(unix))]
+            {
+                if request.is_some() {
+                    return Err(miette::miette!(
+                        "native prepared finalization is supported only on Unix"
+                    ));
+                }
+                finish(&session, &work, &prepared, result)?
+            }
         }
     };
     println!("{}", serde_json::to_string(&output).into_diagnostic()?);
@@ -2371,6 +2558,162 @@ mod tests {
         assert_eq!(
             progress_value(&work, &prepared, status, 1, 0),
             progress(&work, &root, &prepared, 1, 0).unwrap(),
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inherited_native_finalization_rejects_corrected_roots_even_without_prepared_flag() {
+        let directory = tempfile::tempdir().unwrap();
+        let config_path = directory.path().join("config.yaml");
+        std::fs::write(&config_path, "vault:\n  root: vault\n  locale: en\nidentity: {name: Tester, email: tester@example.com}\nsources:\n  notes:\n    type: manual\n    params: {inbox_dir: inbox}\n    concept_policy: supported-new\nexecution:\n  work: {extraction_context: full-context}\n").unwrap();
+        let (config, config_revision) =
+            lk_core::config::Config::load_with_revision(&config_path).unwrap();
+        std::fs::create_dir(directory.path().join("vault")).unwrap();
+        let root = directory.path().join("vault").canonicalize().unwrap();
+        let target = "wiki/documents/subject.md";
+        let task = lk_queue::QueueLlmClient::new(root.join(".lorekeeper/queue")).build_task(
+            "ext",
+            lk_queue::TaskKind::ExtractConcepts,
+            lk_queue::ExtractConceptsRequest {
+                concept_policy: lk_core::config::ConceptPolicy::SupportedNew,
+                rss_original: None,
+                text: "A complete source-scoped observation.".into(),
+                source_id: "notes".into(),
+                source_type: lk_core::config::SourceType::Manual,
+                date: jiff::civil::date(2026, 10, 24),
+                focus: None,
+                locale: lk_core::i18n::Locale::En,
+                categories: vec![],
+                target: lk_queue::TaskTarget {
+                    vault_path: target.into(),
+                    kind: lk_queue::TargetKind::DocumentConcepts,
+                    anchor: "## Related Concepts".into(),
+                },
+            },
+        );
+        let target_raw = format!(
+            "---\ntype: document\nllm_inputs:\n  concepts: {}\n---\n## Content\nA complete source-scoped observation.\n\n## Related Concepts\n",
+            serde_json::to_string(&task.cache_hash).unwrap()
+        );
+        write(&root, target, &target_raw);
+        write(
+            &root,
+            ".lorekeeper/queue/fixture.jsonl",
+            &serde_json::to_string(&task).unwrap(),
+        );
+        let session = MutationSession::acquire(&root).unwrap();
+        let prepared = resources::task(&root, &config, &task.task_id).unwrap();
+        let work = persist_prepared(&session, &config, &config_revision, &prepared).unwrap();
+        assert_eq!(work.plan.parts.len(), 1);
+        let (progress, input) = work.prepare_inspection(&root, &prepared.resources).unwrap();
+        let input = input.unwrap();
+        let mut observation = WorkOutput {
+            work_id: work.plan.id.clone(),
+            node_id: progress.root_node,
+            input_revision: input["input_revision"].as_str().unwrap().into(),
+            summary: "The original source observation.".into(),
+            findings: vec![],
+            source_questions: vec![],
+            unresolved: vec![],
+            resolutions: vec![],
+        };
+        assert!(
+            work.record(&session, observation.clone(), &prepared.resources)
+                .unwrap()
+                .complete
+        );
+        let completed = work.result(&root, &prepared.resources).unwrap();
+        let request =
+            native::finalization_request(&config, &work, &work.plan.subject_revision, &completed)
+                .unwrap();
+        validate_native_finalization(&root, &config, &work, &prepared, &request).unwrap();
+        let bytes = serde_json::to_vec(&request).unwrap();
+        let revision = lk_core::rss_original::digest(&bytes);
+        let request_path = directory.path().join("prepared.json");
+        std::fs::write(&request_path, &bytes).unwrap();
+        let inherited = Some((request_path.as_path(), revision.as_str()));
+        let captured = load_native_finalization_input(None, inherited)
+            .unwrap()
+            .unwrap();
+        assert_eq!(captured, request);
+        assert_eq!(
+            load_native_finalization_input(Some(&request_path), inherited).unwrap(),
+            Some(request.clone())
+        );
+        let other_path = directory.path().join("different.json");
+        std::fs::write(&other_path, b"{}").unwrap();
+        assert!(load_native_finalization_input(Some(&other_path), inherited).is_err());
+        std::fs::write(&request_path, b"{}").unwrap();
+        assert!(load_native_finalization_input(None, inherited).is_err());
+        std::fs::write(&request_path, bytes).unwrap();
+
+        observation.summary = "A corrected observation of the same assigned source.".into();
+        assert!(
+            work.record(&session, observation, &prepared.resources)
+                .unwrap()
+                .complete
+        );
+        let (current, prepared) = load(&root, &config, &config_revision, &work.plan.id).unwrap();
+        assert_eq!(current, work);
+        assert_ne!(
+            current.result(&root, &prepared.resources).unwrap(),
+            completed
+        );
+        let Subject::Queue {
+            target_revision, ..
+        } = &prepared.subject
+        else {
+            unreachable!()
+        };
+        let result = json!({
+            "task_id":task.task_id, "cache_hash":task.cache_hash,
+            "target":task.target, "target_revision":target_revision,
+            "context_revision":work.plan.subject_revision,
+            "concept_policy":"supported-new", "date":"2026-10-24",
+            "discovery":[], "concepts":[],
+        });
+        let request = load_native_finalization_input(None, inherited)
+            .unwrap()
+            .unwrap();
+        assert!(
+            finish_with_preparation(
+                &session,
+                &config,
+                &current,
+                &prepared,
+                result.clone(),
+                Some(&request),
+            )
+            .is_err()
+        );
+        let work_dir = PathBuf::from(".lorekeeper/work").join(&work.plan.id);
+        for path in [
+            work_dir.join("seal.json"),
+            work_dir.join("final.json"),
+            queue_result_path(task.kind, &result).unwrap(),
+        ] {
+            assert!(!root.join(path).exists());
+        }
+        assert_eq!(
+            std::fs::read_to_string(root.join(target)).unwrap(),
+            target_raw
+        );
+        let request = load_native_finalization_input(None, None).unwrap();
+        assert!(request.is_none());
+        finish_with_preparation(
+            &session,
+            &config,
+            &current,
+            &prepared,
+            result,
+            request.as_ref(),
+        )
+        .unwrap();
+        verify_finished(&root, &config, &config_revision, &work.plan.id).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join(target)).unwrap(),
+            target_raw
         );
     }
 

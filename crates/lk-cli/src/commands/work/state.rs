@@ -1124,7 +1124,8 @@ impl Work {
     }
 
     pub fn result(&self, root: &Path, resources: &[SemanticResource]) -> miette::Result<Value> {
-        Ok(self.capture_completion(root, resources)?.result)
+        self.result_with_guards(root, resources)
+            .map(|(result, _)| result)
     }
 
     pub fn result_with_guards(

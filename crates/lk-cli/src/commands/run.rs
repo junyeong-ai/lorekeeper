@@ -135,6 +135,10 @@ mod native {
 
         fn record(&mut self, step: WorkStepMetrics) {
             if self.work_steps.len() < Self::MAX_STEPS {
+                eprintln!(
+                    "{}",
+                    serde_json::json!({"type":"lore.work-step", "step":step})
+                );
                 self.work_steps.push(step);
             } else {
                 self.work_steps_omitted += 1;
@@ -192,13 +196,31 @@ mod native {
         },
         Screening {
             task: lk_queue::QueueTask,
+            selection_id: String,
         },
         Section {
             task: lk_queue::QueueTask,
         },
         WholeInput {
             tasks: Vec<lk_queue::QueueTask>,
+            inputs: Vec<serde_json::Value>,
         },
+    }
+
+    impl QueueDispatch {
+        fn binding(&self, target: &str) -> Option<scheduler::TurnBinding> {
+            let identity = match self {
+                Self::Partitioned { id, .. } | Self::Source { id } => format!("work:{id}"),
+                Self::Screening { selection_id, .. } => format!("screening:{selection_id}"),
+                Self::Discovery { .. } | Self::Section { .. } | Self::WholeInput { .. } => {
+                    return None;
+                }
+            };
+            Some(scheduler::TurnBinding {
+                target: target.into(),
+                identity,
+            })
+        }
     }
 
     struct QueuePlan {
@@ -209,6 +231,20 @@ mod native {
     }
 
     const MAX_PREPARED_QUEUE_TARGETS: usize = 64;
+
+    fn native_request_file(
+        directory: &Path,
+        request: &serde_json::Value,
+    ) -> miette::Result<tempfile::NamedTempFile> {
+        let mut file = tempfile::Builder::new()
+            .prefix("request-")
+            .suffix(".json")
+            .tempfile_in(directory)
+            .map_err(|error| miette::miette!("native request: {error}"))?;
+        serde_json::to_writer(&mut file, request)
+            .map_err(|error| miette::miette!("native request: {error}"))?;
+        Ok(file)
+    }
 
     fn is_interactive_batch_candidate(
         kind: lk_queue::TaskKind,
@@ -228,9 +264,10 @@ mod native {
     struct QueueTurn {
         keys: std::collections::BTreeSet<String>,
         targets: Vec<String>,
+        binding: Option<scheduler::TurnBinding>,
     }
 
-    #[derive(Default, Serialize)]
+    #[derive(Clone, Copy, Default, Serialize)]
     struct QueuePlanningMetrics {
         attempts: usize,
         duration_ms: u64,
@@ -336,6 +373,7 @@ mod native {
         inspection_deferred: std::collections::BTreeMap<String, String>,
         audit_batch: Option<Vec<lk_graph::audit::AuditCandidate>>,
         queue_turn: Option<QueueTurn>,
+        queue_admitted: scheduler::AdmittedTurns,
         queue_replan: bool,
         writer_access_failed: bool,
         started_at: Instant,
@@ -714,6 +752,17 @@ mod native {
             operation: &str,
             input_directory: Option<&Path>,
         ) -> bool {
+            self.consumer_with_preparation(skill, operation, input_directory, None)
+                .await
+        }
+
+        async fn consumer_with_preparation(
+            &mut self,
+            skill: &str,
+            operation: &str,
+            input_directory: Option<&Path>,
+            finalizer: Option<(&tempfile::NamedTempFile, &serde_json::Value)>,
+        ) -> bool {
             if self.result.halted || self.result.cancelled || !self.configuration_is_current() {
                 return false;
             }
@@ -746,6 +795,15 @@ mod native {
             );
             match command {
                 Ok(mut command) => {
+                    if let Some((file, request)) = finalizer {
+                        let bytes = serde_json::to_vec(request).expect("native request serializes");
+                        command
+                            .env(crate::commands::work::FINALIZATION_REQUEST_ENV, file.path())
+                            .env(
+                                crate::commands::work::FINALIZATION_REVISION_ENV,
+                                lk_core::rss_original::digest(&bytes),
+                            );
+                    }
                     if !self.reserve_queue_turn().await {
                         return false;
                     }
@@ -861,6 +919,43 @@ mod native {
                     }
                 };
             let timeout = self.selected.as_ref().expect("prepared agent").timeout();
+            if let Some(binding) = self
+                .queue_turn
+                .as_ref()
+                .and_then(|turn| turn.binding.as_ref())
+            {
+                let actual = match metrics.role {
+                    WorkRole::Evidence => format!(
+                        "work:{}",
+                        request["work_id"].as_str().expect("prepared work identity")
+                    ),
+                    WorkRole::Screening => format!(
+                        "screening:{}",
+                        request["selection_id"]
+                            .as_str()
+                            .expect("prepared selection identity")
+                    ),
+                    WorkRole::Finalizer => format!(
+                        "work:{}",
+                        request["work"]["work_id"]
+                            .as_str()
+                            .expect("prepared finalizer identity")
+                    ),
+                };
+                if binding.identity != actual {
+                    self.queue_admitted.clear();
+                    self.queue_replan = true;
+                    self.record(
+                        "queue phase refresh",
+                        StageState::Skipped,
+                        Some(
+                            "selected phase changed; preparing current work before invocation"
+                                .into(),
+                        ),
+                    );
+                    return None;
+                }
+            }
             if !self.reserve_queue_turn().await {
                 if self.result.cancelled {
                     metrics.outcome = WorkOutcome::Cancelled;
@@ -1028,19 +1123,37 @@ mod native {
                 return false;
             };
             if waited {
+                self.queue_admitted.clear();
                 self.queue_replan = true;
                 self.record("queue input refresh", StageState::Skipped, Some("writer access became available; preparing current inputs before invocation".into()));
                 return false;
             }
-            match scheduler::reserve_in_session(
-                &session,
-                scheduler::Stage::Queue,
-                &turn.keys,
-                &turn.targets,
-            ) {
-                Ok(()) => true,
-                Err(error) => self.failure("queue scheduling", error),
+            let continuation = turn.binding.as_ref().is_some_and(|binding| {
+                self.queue_admitted
+                    .can_continue(std::slice::from_ref(binding))
+            });
+            if !continuation {
+                if let Err(error) = scheduler::reserve_in_session(
+                    &session,
+                    scheduler::Stage::Queue,
+                    &turn.keys,
+                    &turn.targets,
+                ) {
+                    return self.failure("queue scheduling", error);
+                }
+                self.queue_admitted.clear();
+                if let Some(binding) = &turn.binding
+                    && let Err(error) = self.queue_admitted.admit(std::slice::from_ref(binding))
+                {
+                    return self.failure("queue scheduling", error);
+                }
             }
+            if let Some(binding) = &turn.binding
+                && let Err(error) = self.queue_admitted.charge(std::slice::from_ref(binding))
+            {
+                return self.failure("queue scheduling", error);
+            }
+            true
         }
 
         async fn bounded_observation_wave(
@@ -1060,28 +1173,63 @@ mod native {
             if limit <= 1 || !jobs.contains_key(selected) {
                 return None;
             }
+            let continued = stage == scheduler::Stage::Queue
+                && self.queue_admitted.remaining_bindings().any(|binding| {
+                    binding.target == selected
+                        && binding.identity == format!("work:{}", jobs[selected])
+                });
+            let mut order = if continued {
+                self.queue_admitted
+                    .remaining_bindings()
+                    .filter(|binding| {
+                        jobs.get(&binding.target)
+                            .is_some_and(|id| binding.identity == format!("work:{id}"))
+                    })
+                    .map(|binding| binding.target.clone())
+                    .collect::<Vec<_>>()
+            } else {
+                keys.iter().cloned().collect::<Vec<_>>()
+            };
+            let first = order
+                .iter()
+                .position(|target| target == selected)
+                .expect("selected queue target");
+            order.rotate_left(first);
             let mut prepared = std::collections::BTreeMap::<String, PreparedObservations>::new();
             let mut request_counts = std::collections::BTreeMap::<String, usize>::new();
-            let mut planned_target = selected.to_owned();
-            for _ in 0..limit {
-                let Some(id) = jobs.get(&planned_target) else {
+            let mut planned_targets = Vec::new();
+            let mut index = 0;
+            let mut skipped = 0;
+            while planned_targets.len() < limit {
+                let target = &order[index % order.len()];
+                index += 1;
+                let Some(id) = jobs.get(target) else {
                     break;
                 };
+                let allowance = if stage != scheduler::Stage::Queue {
+                    usize::MAX
+                } else if continued {
+                    self.queue_admitted.remaining(&scheduler::TurnBinding {
+                        target: target.clone(),
+                        identity: format!("work:{id}"),
+                    })
+                } else {
+                    budget.max_consecutive_calls
+                };
+                if request_counts.get(id).copied().unwrap_or(0) >= allowance {
+                    skipped += 1;
+                    if skipped == order.len() {
+                        break;
+                    }
+                    continue;
+                }
+                skipped = 0;
                 *request_counts.entry(id.clone()).or_default() += 1;
-                planned_target = keys
-                    .range((
-                        std::ops::Bound::Excluded(planned_target),
-                        std::ops::Bound::Unbounded,
-                    ))
-                    .next()
-                    .or_else(|| keys.first())
-                    .expect("selected keys")
-                    .clone();
+                planned_targets.push(target.clone());
             }
             let mut turns = Vec::new();
             let mut reserved_targets = Vec::new();
-            let mut target = selected.to_owned();
-            while turns.len() < limit {
+            for target in planned_targets {
                 let Some(id) = jobs.get(&target) else { break };
                 if let std::collections::btree_map::Entry::Vacant(entry) =
                     prepared.entry(id.clone())
@@ -1153,15 +1301,6 @@ mod native {
                     request,
                     metrics,
                 });
-                target = keys
-                    .range((
-                        std::ops::Bound::Excluded(target),
-                        std::ops::Bound::Unbounded,
-                    ))
-                    .next()
-                    .or_else(|| keys.first())
-                    .expect("selected keys")
-                    .clone();
             }
             if turns.is_empty() {
                 return if self.inspection_deferred.contains_key(&jobs[selected]) {
@@ -1226,6 +1365,7 @@ mod native {
                     return Some(false);
                 };
                 if waited && stage == scheduler::Stage::Queue {
+                    self.queue_admitted.clear();
                     self.queue_replan = true;
                     self.record("queue input refresh", StageState::Skipped, Some("writer access became available; preparing current inputs before invocation".into()));
                     self.record_uninvoked_observations(turns);
@@ -1245,7 +1385,40 @@ mod native {
                         }
                     }
                 }
-                if let Err(error) =
+                if stage == scheduler::Stage::Queue {
+                    let bindings = reserved_targets
+                        .iter()
+                        .zip(&turns)
+                        .map(|(target, turn)| scheduler::TurnBinding {
+                            target: target.clone(),
+                            identity: format!("work:{}", turn.work_id),
+                        })
+                        .collect::<Vec<_>>();
+                    if !self.queue_admitted.can_continue(&bindings) {
+                        let mut seen = std::collections::BTreeSet::new();
+                        let admitted = bindings
+                            .iter()
+                            .filter(|binding| seen.insert(binding.target.clone()))
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        let targets = admitted
+                            .iter()
+                            .map(|binding| binding.target.clone())
+                            .collect::<Vec<_>>();
+                        if let Err(error) =
+                            scheduler::reserve_in_session(&session, stage, keys, &targets)
+                        {
+                            return Some(self.failure("bounded work scheduling", error));
+                        }
+                        self.queue_admitted.clear();
+                        if let Err(error) = self.queue_admitted.admit(&admitted) {
+                            return Some(self.failure("bounded work scheduling", error));
+                        }
+                    }
+                    if let Err(error) = self.queue_admitted.charge(&bindings) {
+                        return Some(self.failure("bounded work scheduling", error));
+                    }
+                } else if let Err(error) =
                     scheduler::reserve_in_session(&session, stage, keys, reservations)
                 {
                     return Some(self.failure("bounded work scheduling", error));
@@ -1647,7 +1820,7 @@ mod native {
                 }
             }
             let started_at = Instant::now();
-            let section = crate::commands::work::prepare_section_finalization(
+            let section = crate::commands::work::prepare_finalization(
                 &self.root,
                 &self.config,
                 &self.config_revision,
@@ -1657,9 +1830,12 @@ mod native {
                 .preparation_duration_ms
                 .as_mut()
                 .expect("measured preparation") += started_at.elapsed().as_millis() as u64;
-            match section {
-                Ok(crate::commands::work::SectionPreparation::Interactive) => {}
-                Ok(crate::commands::work::SectionPreparation::Capacity {
+            let prepared_request = match section {
+                Ok(crate::commands::work::FinalizationPreparation::Interactive) => None,
+                Ok(crate::commands::work::FinalizationPreparation::PreparedInteractive(
+                    request,
+                )) => Some(*request),
+                Ok(crate::commands::work::FinalizationPreparation::Capacity {
                     request_bytes,
                     max_input_bytes,
                 }) => {
@@ -1674,7 +1850,7 @@ mod native {
                     self.result.work_telemetry.record(metrics);
                     return WorkStep::Deferred(reason);
                 }
-                Ok(crate::commands::work::SectionPreparation::NeedsAction(reason)) => {
+                Ok(crate::commands::work::FinalizationPreparation::NeedsAction(reason)) => {
                     self.record(
                         "bounded section action",
                         StageState::Skipped,
@@ -1683,7 +1859,7 @@ mod native {
                     self.result.work_telemetry.record(metrics);
                     return WorkStep::Deferred(reason);
                 }
-                Ok(crate::commands::work::SectionPreparation::Ready(section)) => {
+                Ok(crate::commands::work::FinalizationPreparation::Ready(section)) => {
                     let result = self.finalize_section(id, *section, &mut metrics).await;
                     self.result.work_telemetry.record(metrics);
                     return result;
@@ -1693,13 +1869,56 @@ mod native {
                     self.failure("bounded section finalization", error);
                     return WorkStep::Failed;
                 }
-            }
-            let operation = format!(
-                "bounded finish {id}. Start at the bounded-work reference's Finalize section. Read lore work result once for this exact work and retain its response; use lore work status for the distinct context_revision publication guard. Read only the matching generation rules and result-envelope sections named there. Produce the typed final result from the completed guarded observations; do not restart ordinary intake, discovery, screening or full-evidence reading. Exact name/alias ownership checks and targeted revision-pinned reads remain necessary when decision-relevant information is missing; expanded discovery or changed inputs require replanning. Submit with lore work finish. Do not read the whole corpus or drain other tasks. Leave the staged queue result or audit assessment for native controller publication. The controller owns global checks. Preserve source_questions as attributed uncertainty in the final prose; do not invent answers. Material conflicts need a scoped open review and follow-up audit disposition. Processing blockers in unresolved cannot be silently removed or marked reviewed."
-            );
+            };
+            let transport = if let Some(request) = &prepared_request {
+                let prepared = (|| -> miette::Result<_> {
+                    let directory = tempfile::Builder::new()
+                        .prefix("lorekeeper-finalizer-")
+                        .tempdir()
+                        .map_err(|error| miette::miette!("{error}"))?;
+                    let file = native_request_file(directory.path(), request)?;
+                    Ok((directory, file))
+                })();
+                match prepared {
+                    Ok(transport) => Some(transport),
+                    Err(error) => {
+                        self.result.work_telemetry.record(metrics);
+                        self.failure("bounded finalizer preparation", error);
+                        return WorkStep::Failed;
+                    }
+                }
+            } else {
+                None
+            };
+            let operation = if let Some((_, file)) = &transport {
+                metrics.request_json_bytes = prepared_request.as_ref().map(|request| {
+                    serde_json::to_vec(request)
+                        .expect("native request serializes")
+                        .len()
+                });
+                let path =
+                    serde_json::to_string(file.path()).expect("native request path serializes");
+                format!(
+                    "bounded finish {id}. Read this native-finalize-v1 prepared request once: {path}. It contains the exact complete root, evidence mapping, distinct publication context_revision and applicable shared rules. Do not repeat work result/status, config/schema setup, ordinary discovery/intake or full-source reading. Perform only decision-relevant targeted name/alias checks, missing required reads or review/repair actions. Expanded scope requires replanning, never retagging. Preserve all attributed source questions and blockers. Submit with lore work finish {id} --file RESULT --prepared {path}; Rust checks this exact handoff before sealing/staging. Leave publication/global checks to the native controller."
+                )
+            } else {
+                format!(
+                    "bounded finish {id}. Start at the bounded-work reference's Finalize section. Read lore work result once for this exact work and retain its response; use lore work status for the distinct context_revision publication guard. Read only the matching generation rules and result-envelope sections named there. Produce the typed final result from the completed guarded observations; do not restart ordinary intake, discovery, screening or full-evidence reading. Exact name/alias ownership checks and targeted revision-pinned reads remain necessary when decision-relevant information is missing; expanded discovery or changed inputs require replanning. Submit with lore work finish. Do not read the whole corpus or drain other tasks. Leave the staged queue result or audit assessment for native controller publication. The controller owns global checks. Preserve source_questions as attributed uncertainty in the final prose; do not invent answers. Material conflicts need a scoped open review and follow-up audit disposition. Processing blockers in unresolved cannot be silently removed or marked reviewed."
+                )
+            };
             let calls_before = self.result.semantic_calls;
             let duration_before = self.result.semantic_duration_ms;
-            let completed = self.consumer(skill, &operation, None).await;
+            let completed = self
+                .consumer_with_preparation(
+                    skill,
+                    &operation,
+                    transport.as_ref().map(|(directory, _)| directory.path()),
+                    transport
+                        .as_ref()
+                        .zip(prepared_request.as_ref())
+                        .map(|((_, file), request)| (file, request)),
+                )
+                .await;
             if self.result.semantic_calls > calls_before {
                 metrics.agent_duration_ms =
                     Some(self.result.semantic_duration_ms - duration_before);
@@ -1716,12 +1935,22 @@ mod native {
                 return WorkStep::Failed;
             }
             let started_at = Instant::now();
-            let verified = crate::commands::work::verify_finished(
-                &self.root,
-                &self.config,
-                &self.config_revision,
-                id,
-            );
+            let verified = if let Some(request) = &prepared_request {
+                crate::commands::work::verify_native_finalization(
+                    &self.root,
+                    &self.config,
+                    &self.config_revision,
+                    id,
+                    request,
+                )
+            } else {
+                crate::commands::work::verify_finished(
+                    &self.root,
+                    &self.config,
+                    &self.config_revision,
+                    id,
+                )
+            };
             *metrics
                 .verification_duration_ms
                 .as_mut()
@@ -1854,16 +2083,13 @@ mod native {
             blocked: &std::collections::BTreeMap<String, String>,
         ) -> miette::Result<QueuePlan> {
             fn flush(
-                batch: &mut Vec<lk_queue::QueueTask>,
+                batch: &mut Vec<(lk_queue::QueueTask, serde_json::Value)>,
                 jobs: &mut std::collections::BTreeMap<String, QueueDispatch>,
             ) {
-                if let Some(first) = batch.first() {
-                    jobs.insert(
-                        first.target.vault_path.clone(),
-                        QueueDispatch::WholeInput {
-                            tasks: std::mem::take(batch),
-                        },
-                    );
+                if let Some((first, _)) = batch.first() {
+                    let target = first.target.vault_path.clone();
+                    let (tasks, inputs) = std::mem::take(batch).into_iter().unzip();
+                    jobs.insert(target, QueueDispatch::WholeInput { tasks, inputs });
                 }
             }
             let (session, _) = self
@@ -2023,17 +2249,14 @@ mod native {
                     .map(|(task, work)| (task.target.vault_path.clone(), (task, work)))
                     .collect::<std::collections::BTreeMap<_, _>>();
                 let mut batch = Vec::new();
-                let mut batch_bytes = 0usize;
                 for target in window {
                     let Some((task, work)) = prepared.remove(target) else {
                         flush(&mut batch, &mut jobs);
-                        batch_bytes = 0;
                         continue;
                     };
                     match work {
                         crate::commands::work::TaskWork::Admission { reason } => {
                             flush(&mut batch, &mut jobs);
-                            batch_bytes = 0;
                             keys.remove(target);
                             deferred.insert(target.clone(), vec![reason]);
                         }
@@ -2041,7 +2264,6 @@ mod native {
                             if execution::finalization::supports(task.kind) =>
                         {
                             flush(&mut batch, &mut jobs);
-                            batch_bytes = 0;
                             match crate::commands::work::section::prepare(
                                 session.root(),
                                 &self.config,
@@ -2066,17 +2288,29 @@ mod native {
                                 }
                             }
                         }
-                        crate::commands::work::TaskWork::WholeInput { bytes } => {
-                            if bytes > budget.max_input_bytes.saturating_sub(batch_bytes) {
+                        crate::commands::work::TaskWork::WholeInput { native, .. } => {
+                            let input =
+                                *native.expect("interactive task has a prepared native input");
+                            let mut inputs = batch
+                                .iter()
+                                .map(|(_, input)| input.clone())
+                                .collect::<Vec<_>>();
+                            inputs.push(input.clone());
+                            let request = crate::commands::work::native::selected_request(
+                                &self.config,
+                                &inputs,
+                            )?;
+                            if serde_json::to_vec(&request)
+                                .map_err(|error| miette::miette!("{error}"))?
+                                .len()
+                                > budget.max_input_bytes
+                            {
                                 flush(&mut batch, &mut jobs);
-                                batch_bytes = 0;
                             }
-                            batch_bytes += bytes;
-                            batch.push(task);
+                            batch.push((task, input));
                         }
                         crate::commands::work::TaskWork::Partitioned { id } => {
                             flush(&mut batch, &mut jobs);
-                            batch_bytes = 0;
                             if let Some(reason) = blocked
                                 .get(&id)
                                 .or_else(|| self.inspection_deferred.get(&id))
@@ -2092,7 +2326,6 @@ mod native {
                         }
                         crate::commands::work::TaskWork::Source { id } => {
                             flush(&mut batch, &mut jobs);
-                            batch_bytes = 0;
                             if let Some(reason) = self.inspection_deferred.get(&id) {
                                 keys.remove(target);
                                 deferred.insert(target.clone(), vec![reason.clone()]);
@@ -2100,10 +2333,12 @@ mod native {
                                 jobs.insert(target.clone(), QueueDispatch::Source { id });
                             }
                         }
-                        crate::commands::work::TaskWork::Screening => {
+                        crate::commands::work::TaskWork::Screening { selection_id } => {
                             flush(&mut batch, &mut jobs);
-                            batch_bytes = 0;
-                            jobs.insert(target.clone(), QueueDispatch::Screening { task });
+                            jobs.insert(
+                                target.clone(),
+                                QueueDispatch::Screening { task, selection_id },
+                            );
                         }
                     }
                 }
@@ -2156,7 +2391,7 @@ mod native {
                         )?,
                         crate::commands::work::TaskWork::Partitioned { .. }
                             | crate::commands::work::TaskWork::Source { .. }
-                            | crate::commands::work::TaskWork::Screening
+                            | crate::commands::work::TaskWork::Screening { .. }
                             | crate::commands::work::TaskWork::Admission { .. }
                     )
                 {
@@ -2174,13 +2409,23 @@ mod native {
                     return false;
                 }
                 self.queue_turn = None;
+                self.queue_admitted.clear();
                 let started_at = Instant::now();
                 let acquisition_before = self.result.mutation_access.duration_ms;
+                let before = self.result.queue_planning;
                 self.result.queue_planning.attempts += 1;
+                eprintln!(
+                    "{}",
+                    serde_json::json!({"type":"lore.queue-planning","state":"started","attempt":self.result.queue_planning.attempts,"elapsed_job_ms":self.started_at.elapsed().as_millis()})
+                );
                 let planned = self.queue_dispatches(&blocked).await;
                 let acquisition_ms = self.result.mutation_access.duration_ms - acquisition_before;
                 self.result.queue_planning.duration_ms +=
                     (started_at.elapsed().as_millis() as u64).saturating_sub(acquisition_ms);
+                eprintln!(
+                    "{}",
+                    serde_json::json!({"type":"lore.queue-planning","state":if planned.is_ok() { "completed" } else { "failed" },"attempt":self.result.queue_planning.attempts,"duration_ms":self.result.queue_planning.duration_ms-before.duration_ms,"prepared_targets":self.result.queue_planning.prepared_targets-before.prepared_targets,"discovery_captures":self.result.queue_planning.discovery_captures-before.discovery_captures,"audit_captures":self.result.queue_planning.audit_captures-before.audit_captures,"elapsed_job_ms":self.started_at.elapsed().as_millis()})
+                );
                 let plan = match planned {
                     Ok(plan) => plan,
                     Err(_) if self.result.halted || self.result.cancelled => return false,
@@ -2222,11 +2467,26 @@ mod native {
                         return false;
                     }
                     let keys = &plan.keys;
-                    let selected = match scheduler::order(&self.root, scheduler::Stage::Queue, keys)
-                    {
-                        Ok(order) if !order.is_empty() => order[0].clone(),
-                        Ok(_) => return true,
-                        Err(error) => return self.failure("queue scheduling", error),
+                    let admitted = self
+                        .queue_admitted
+                        .remaining_bindings()
+                        .find(|binding| {
+                            jobs.get(&binding.target)
+                                .and_then(|job| job.binding(&binding.target))
+                                .as_ref()
+                                == Some(*binding)
+                        })
+                        .map(|binding| binding.target.clone());
+                    let selected = match admitted {
+                        Some(selected) => selected,
+                        None => {
+                            self.queue_admitted.clear();
+                            match scheduler::order(&self.root, scheduler::Stage::Queue, keys) {
+                                Ok(order) if !order.is_empty() => order[0].clone(),
+                                Ok(_) => return true,
+                                Err(error) => return self.failure("queue scheduling", error),
+                            }
+                        }
                     };
                     if !jobs.contains_key(&selected) {
                         continue 'planning;
@@ -2256,8 +2516,9 @@ mod native {
                     }
                     self.queue_turn = Some(QueueTurn {
                         keys: keys.clone(),
+                        binding: jobs[&selected].binding(&selected),
                         targets: match &jobs[&selected] {
-                            QueueDispatch::WholeInput { tasks } => tasks
+                            QueueDispatch::WholeInput { tasks, .. } => tasks
                                 .iter()
                                 .map(|task| task.target.vault_path.clone())
                                 .collect(),
@@ -2353,7 +2614,7 @@ mod native {
                                 ObservationStep::Failed => return false,
                             }
                         }
-                        QueueDispatch::Screening { task } => {
+                        QueueDispatch::Screening { task, .. } => {
                             match self.screening_step(task).await {
                                 Some(true) => continue 'planning,
                                 Some(false) => continue,
@@ -2361,8 +2622,14 @@ mod native {
                                 None => return false,
                             }
                         }
-                        QueueDispatch::WholeInput { tasks } => {
-                            let ids: Vec<_> = tasks.iter().map(|task| &task.task_id).collect();
+                        QueueDispatch::WholeInput { tasks: _, inputs } => {
+                            let request = match crate::commands::work::native::selected_request(
+                                &self.config,
+                                inputs,
+                            ) {
+                                Ok(request) => request,
+                                Err(error) => return self.failure("queue selection", error),
+                            };
                             let directory = match tempfile::Builder::new()
                                 .prefix("lorekeeper-selection-")
                                 .tempdir()
@@ -2370,14 +2637,11 @@ mod native {
                                 Ok(directory) => directory,
                                 Err(error) => return self.failure("queue selection", error),
                             };
-                            let path = directory.path().join("tasks.json");
-                            if let Err(error) = std::fs::write(
-                                &path,
-                                serde_json::to_vec(&ids).expect("task ids serialize"),
-                            ) {
-                                return self.failure("queue selection", error);
-                            }
-                            let selection = match serde_json::to_string(&path) {
+                            let input = match native_request_file(directory.path(), &request) {
+                                Ok(input) => input,
+                                Err(error) => return self.failure("queue selection", error),
+                            };
+                            let selection = match serde_json::to_string(input.path()) {
                                 Ok(selection) => selection,
                                 Err(error) => return self.failure("queue selection", error),
                             };
@@ -2387,7 +2651,7 @@ mod native {
                                 ""
                             };
                             let operation = format!(
-                                "selected. {context} The native controller selected one task per distinct target within the configured evidence input budget. Read the JSON array of exact task IDs from the selection manifest and process only those current tasks, then return. Do not drain the rest of the queue or run global finalization. Follow the ordinary typed staging/publication protocol for these tasks. For extraction, record exact discovery recipes and inspect lore work context before loading candidate bodies. Follow its needs-discovery, needs-source-observations, needs-admission, needs-screening and ready states. Read the exact reported screening cost before requesting paid screening. A needs-admission scope remains pending: report it and return without changing configuration, clipping candidates or retrying unchanged scope. Explicitly revise discovery only when the expressed source question requires correction; scope size alone does not establish irrelevance. Complete ordinary small-source screening in this selected session when practical. If a phase requires source observations, bounded candidate screening or partitioned admitted evidence, execute its returned plan_command and stage no extraction result; finish other selected tasks and return so the controller can resume that exact source/screening/evidence phase. Draft only from ready context, carry its typed selection when present, and fully read every selected reused owner. Unknown or deferred candidates remain unfinished; not-selected is a candidate-card judgment rather than a whole-body finding. Selected queue task manifest: {selection}"
+                                "selected. {context} Read the native-selected-v1 request exactly once from the named manifest. It supplies exact selected tasks, source/target revisions, current read scope, complete evidence and applicable shared contracts. Use that prepared metadata instead of queue status, queue JSONL enumeration, config/schema setup, repeated work context or reference-file intake. Read all supplied evidence and applicable contracts. Keep targeted name/alias resolution, missing required reads, discovery correction and review/repair capabilities when genuinely needed; changed scope requires fresh context and regeneration. Do not infer semantic identity from lexical matches. Only these selected tasks may be processed; native Rust owns global reconciliation and checks. Follow the existing typed result staging/publication protocol. Do not clip candidates or rewrite paid Work. Selected queue task manifest: {selection}"
                             );
                             if !self
                                 .consumer("lore-process", &operation, Some(directory.path()))
@@ -2401,6 +2665,9 @@ mod native {
                         }
                     }
                     self.queue_turn = None;
+                    if let Some(binding) = jobs[&selected].binding(&selected) {
+                        self.queue_admitted.clear_binding(&binding);
+                    }
                     if !self
                         .native("selected queue apply", &["queue", "apply"])
                         .await
@@ -2408,7 +2675,7 @@ mod native {
                         return false;
                     }
                     let tasks = match &jobs[&selected] {
-                        QueueDispatch::WholeInput { tasks } => tasks.as_slice(),
+                        QueueDispatch::WholeInput { tasks, .. } => tasks.as_slice(),
                         QueueDispatch::Partitioned { task, .. }
                         | QueueDispatch::Section { task } => std::slice::from_ref(task),
                         QueueDispatch::Discovery { .. } => {
@@ -3256,6 +3523,13 @@ mod native {
         let mut runner = Runner {
             installation,
             root: config.vault.root_path(),
+            queue_admitted: scheduler::AdmittedTurns::new(
+                config
+                    .execution
+                    .effective_work()
+                    .expect("validated execution limits")
+                    .max_consecutive_calls,
+            ),
             config,
             config_revision,
             configuration_failed: false,
