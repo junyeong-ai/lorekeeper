@@ -421,6 +421,7 @@ execution:
     max_input_bytes: 262144
     max_result_bytes: 32768
     max_calls: 64
+    max_consecutive_calls: 4
   profiles:
     primary:
       engine: claude-code
@@ -460,7 +461,18 @@ the input bound defers only that target; independent work continues. The model r
 a section body. Rust owns task identity,
 revision checks, staging and publication. A required read or review defers the task without
 calling the same unchanged request again; independent work continues. Concept extraction,
-synthesis and audits retain tool-using finalization.
+synthesis and audits retain tool-using finalization. Native queue selections and
+completed extraction/synthesis finalizers receive [prepared native input](skills/lore-process/references/native-input.md)
+with exact captured metadata, evidence and applicable shared rules. This replaces
+routine setup reads; targeted identity checks and explicit repair remain available.
+Changed scope or completed observations refuse before sealing and publication.
+
+`max_consecutive_calls` defaults to 4 fresh attempts for an admitted exact Work or
+screening phase, within the same total call and parallel limits. Durable fair order
+survives restart; publication, deferral, phase changes and writer-wait replanning end
+admission. Setting 1 uses one-attempt turns. Like call/parallel limits, this operational
+setting can change between workflows without rewriting new semantic Work identities;
+the live workflow still pins every configuration byte.
 
 New bounded plans group observations using request and maximum result sizes; saved
 plans resume with their existing topology. An observer unable to complete assigned
@@ -474,7 +486,8 @@ without guessing finer offsets. Native `lore run process --json` reports
 per-step JSON sizes and preparation, agent invocation and validation wall times in
 `work_steps`. Unobserved values are `null`; these are not token counts or billed cost.
 `mutation_access` reports native in-process writer acquisition, waiting and recovery;
-queue-planning time excludes those acquisitions.
+queue-planning time excludes those acquisitions. Bounded step and planning progress
+also appears on stderr as JSON events; stdout remains the single final native result.
 See [native run measurements](skills/lore-process/references/bounded-work.md#native-run-measurements)
 for coverage and limits.
 
