@@ -544,6 +544,26 @@ CHECK
         } else {
             assert!(arguments.starts_with("-p\n/lore-process:lore-process selected."));
             assert!(arguments.contains("--permission-prompts\nnone\n"));
+            let binary = Path::new(env!("CARGO_BIN_EXE_lore"))
+                .canonicalize()
+                .unwrap();
+            let binary = binary.to_str().unwrap();
+            let quoted = binary.replace('\'', "'\\''");
+            assert!(
+                arguments
+                    .lines()
+                    .any(|argument| argument == format!("Bash('{quoted}' *)"))
+            );
+            if binary
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"/._-".contains(&byte))
+            {
+                assert!(
+                    arguments
+                        .lines()
+                        .any(|argument| argument == format!("Bash({binary} *)"))
+                );
+            }
         }
         let pending = fixture.command().args(["queue", "count"]).output().unwrap();
         assert!(

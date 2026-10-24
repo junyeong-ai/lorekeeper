@@ -550,7 +550,7 @@ pub(super) fn agent_command(
             command
                 .arg("--allowedTools")
                 .args(claude_tools(skill, dependencies)?)
-                .arg(claude_binary_permission(binary)?);
+                .args(claude_binary_permissions(binary)?);
         }
         ExecutionProfile::Codex { profile, .. } => {
             command.args([
@@ -603,14 +603,22 @@ fn apply_profile_options(command: &mut tokio::process::Command, profile: &Execut
     }
 }
 
-fn claude_binary_permission(binary: &str) -> miette::Result<String> {
+fn claude_binary_permissions(binary: &str) -> miette::Result<Vec<String>> {
     if binary.contains('*') || binary.chars().any(char::is_control) {
         return Err(miette::miette!(
             "Claude permissions cannot represent this executable path literally; install lore at a path without wildcards or control characters"
         ));
     }
     let quoted = format!("'{}'", binary.replace('\'', "'\\''"));
-    Ok(format!("Bash({quoted} *)"))
+    let mut rules = vec![format!("Bash({quoted} *)")];
+    if !binary.is_empty()
+        && binary
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"/._-".contains(&byte))
+    {
+        rules.push(format!("Bash({binary} *)"));
+    }
+    Ok(rules)
 }
 
 pub(super) fn claude_tools(skill: &str, dependencies: &[&str]) -> miette::Result<Vec<String>> {
@@ -1005,14 +1013,39 @@ mod tests {
     #[test]
     fn binary_permissions_preserve_literal_paths() {
         assert_eq!(
-            claude_binary_permission("/opt/tools/my lore").unwrap(),
-            "Bash('/opt/tools/my lore' *)"
+            claude_binary_permissions("/opt/tools/my lore").unwrap(),
+            ["Bash('/opt/tools/my lore' *)"]
         );
         assert_eq!(
-            claude_binary_permission("/opt/it's/lore").unwrap(),
-            "Bash('/opt/it'\\''s/lore' *)"
+            claude_binary_permissions("/opt/it's/lore").unwrap(),
+            ["Bash('/opt/it'\\''s/lore' *)"]
         );
-        assert!(claude_binary_permission("/opt/*/lore").is_err());
-        assert!(claude_binary_permission("/opt/tools\nlore").is_err());
+        assert_eq!(
+            claude_binary_permissions("/opt/tools/lore-v1_0").unwrap(),
+            [
+                "Bash('/opt/tools/lore-v1_0' *)",
+                "Bash(/opt/tools/lore-v1_0 *)"
+            ]
+        );
+        for binary in [
+            "/opt/a;b/lore",
+            "/opt/$HOME/lore",
+            "/opt/$(id)/lore",
+            "/opt/`id`/lore",
+            "/opt/a&b/lore",
+            "/opt/a|b/lore",
+            "/opt/한글/lore",
+            "/opt/a\\b/lore",
+            "/opt/a?b/lore",
+            "",
+        ] {
+            assert_eq!(
+                claude_binary_permissions(binary).unwrap().len(),
+                1,
+                "{binary}"
+            );
+        }
+        assert!(claude_binary_permissions("/opt/*/lore").is_err());
+        assert!(claude_binary_permissions("/opt/tools\nlore").is_err());
     }
 }

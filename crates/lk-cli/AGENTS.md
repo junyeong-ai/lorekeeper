@@ -31,6 +31,9 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
 - Child PATH starts with the selected executable's directory and LORE_BIN names
   that executable. Its canonical `lore` sibling must identify the same file; a
   renamed binary cannot silently delegate skill commands to another installation.
+  Claude grants exact quoted executable spellings and, only for plain ASCII shell
+  path characters, the same unquoted path. Never use a wildcard executable prefix,
+  wrapper permission or unrestricted Bash to accommodate another spelling.
 - `commands/run.rs` owns daily/process/knowledge sequencing; `execution.rs` owns
   host-specific invocation and supervised Unix process groups. The shared
   WorkflowLease covers semantic reads through final publication. Native daily
