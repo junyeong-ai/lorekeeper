@@ -470,14 +470,20 @@ fn signal_group(pid: rustix::process::Pid, signal: rustix::process::Signal) -> m
     }
 }
 
-pub(super) fn agent_command(
+pub(super) struct AgentInvocation {
+    pub command: tokio::process::Command,
+    pub input: Option<Vec<u8>>,
+}
+
+pub(super) fn agent_invocation(
     profile: &ExecutionProfile,
     skill: &str,
     operation: &str,
     installation: &lk_dist::Installation,
     config: &Path,
     input_directory: Option<&Path>,
-) -> miette::Result<tokio::process::Command> {
+    prepared_request: Option<&serde_json::Value>,
+) -> miette::Result<AgentInvocation> {
     let engine = profile.engine();
     let root = installation.for_engine(engine).runtime_skills_dir();
     let dependencies: &[&str] = match skill {
@@ -508,6 +514,7 @@ pub(super) fn agent_command(
     let instruction = format!(
         "{UNATTENDED}\n\nThe selected configuration is {config}. In every skill command, replace the leading `lore` with this exact literal command prefix: {prefix}. LORE_CONFIG is already set to the selected configuration. Run that prefix directly: do not assign shell variables, use $LORE_BIN, aliases, functions or shell wrappers, inspect environment variables, or substitute another installation. The unattended permission rule authorizes the literal executable command, not variable expansion."
     );
+    let prompt;
     match profile {
         ExecutionProfile::ClaudeCode {
             config_directory, ..
@@ -523,12 +530,14 @@ pub(super) fn agent_command(
                 }
                 command.env("CLAUDE_CONFIG_DIR", path);
             }
-            let prompt = format!("/{skill}:{skill} {operation}")
+            prompt = format!("/{skill}:{skill} {operation}")
                 .trim_end()
                 .to_string();
+            command.arg("-p");
+            if prepared_request.is_none() {
+                command.arg(&prompt);
+            }
             command.args([
-                "-p",
-                &prompt,
                 "--append-system-prompt",
                 &instruction,
                 "--permission-mode",
@@ -571,14 +580,24 @@ pub(super) fn agent_command(
                 .map(|name| serde_json::to_string(&root.join(name).join("SKILL.md")))
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|e| miette::miette!("{e}"))?;
-            command.arg(format!("{instruction}\n\nUse the exact packaged skill at {entry}. Read that SKILL.md and follow its requested operation: {operation}. Its dependency skills are at: {}. Resolve dependency names to these exact files. Read only the references needed for this operation.", dependencies.join(", ")));
+            prompt = format!(
+                "{instruction}\n\nUse the exact packaged skill at {entry}. Read that SKILL.md and follow its requested operation: {operation}. Its dependency skills are at: {}. Resolve dependency names to these exact files. Read only the references needed for this operation.",
+                dependencies.join(", ")
+            );
+            command.arg(if prepared_request.is_some() {
+                "-"
+            } else {
+                &prompt
+            });
         }
     }
     if let Some(directory) = input_directory {
         command.arg("--add-dir").arg(directory);
     }
     apply_profile_options(&mut command, profile);
-    Ok(command)
+    let input = prepared_request
+        .map(|request| format!("{prompt}\n\nNative request:\n{request}").into_bytes());
+    Ok(AgentInvocation { command, input })
 }
 
 fn apply_profile_options(command: &mut tokio::process::Command, profile: &ExecutionProfile) {
@@ -724,6 +743,103 @@ pub(super) fn executable_path(path: &Path) -> miette::Result<PathBuf> {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn prepared_interactive_hosts_receive_complete_stdin_without_argument_expansion() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let installation = lk_dist::Installation::at(
+            root.join("bin/lore"),
+            root.join("data"),
+            root.join("config"),
+            None,
+            None,
+        );
+        let executable = root.join("host");
+        std::fs::write(
+            &executable,
+            r#"#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+sys.stdout.write('x' * 131072)
+sys.stdout.flush()
+prompt=sys.stdin.read()
+request=json.loads(prompt.split('\nNative request:\n',1)[1])
+assert request['text'].endswith('끝🚀')
+assert all('끝🚀' not in arg for arg in sys.argv)
+assert len('\n'.join(sys.argv).encode()) < 16384
+Path(os.environ['TEST_ROOT'],'received.json').write_text(json.dumps(request,ensure_ascii=False))
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let request = serde_json::json!({"text":format!("{}끝🚀", "가x".repeat(62500))});
+        assert!(serde_json::to_vec(&request).unwrap().len() > 242699);
+        for engine in ["claude-code", "codex"] {
+            let profile: ExecutionProfile = lk_core::yaml::from_str(&format!(
+                "engine: {engine}\nexecutable: {}\ntimeout_seconds: 10",
+                serde_json::to_string(&executable).unwrap()
+            ))
+            .unwrap();
+            installation
+                .for_engine(profile.engine())
+                .deploy_runtime_skills()
+                .unwrap();
+            for (skill, operation) in [
+                ("lore-process", "selected."),
+                ("lore-wiki", "bounded finish"),
+            ] {
+                let ordinary = agent_invocation(
+                    &profile,
+                    skill,
+                    operation,
+                    &installation,
+                    &root.join("config.yaml"),
+                    None,
+                    None,
+                )
+                .unwrap();
+                assert!(ordinary.input.is_none());
+                assert!(
+                    ordinary
+                        .command
+                        .as_std()
+                        .get_args()
+                        .any(|arg| { arg.to_str().is_some_and(|arg| arg.contains(operation)) })
+                );
+                let AgentInvocation { mut command, input } = agent_invocation(
+                    &profile,
+                    skill,
+                    operation,
+                    &installation,
+                    &root.join("config.yaml"),
+                    Some(root),
+                    Some(&request),
+                )
+                .unwrap();
+                command.env("TEST_ROOT", root);
+                let mut supervisor = Supervisor::new().unwrap();
+                let completed = supervisor
+                    .run_request(
+                        command,
+                        Some(Duration::from_secs(10)),
+                        Some(131072),
+                        input.as_deref(),
+                    )
+                    .await
+                    .unwrap();
+                assert!(completed.success, "{:?}", completed.detail);
+                assert_eq!(completed.stdout, vec![b'x'; 131072]);
+                let received: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(root.join("received.json")).unwrap())
+                        .unwrap();
+                assert_eq!(received, request);
+            }
+        }
+    }
+
     #[test]
     fn omitted_profile_options_preserve_child_inheritance() {
         for engine in ["claude-code", "codex"] {
@@ -837,6 +953,18 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn incomplete_stdin_delivery_cannot_report_success() {
+        let mut request = shell_request("exec 0<&-; printf ready; exit 0");
+        request.input = Some(vec![b'x'; 262144]);
+        let results = Supervisor::new().unwrap().run_requests(vec![request]).await;
+        let completed = results.into_iter().next().unwrap().result.unwrap();
+        assert!(!completed.success);
+        assert!(!completed.cancelled);
+        assert!(completed.detail.unwrap().starts_with("child IO:"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn parallel_children_overlap_and_return_in_request_order() {
         let directory = tempfile::tempdir().unwrap();
         let mut first = shell_request(
@@ -927,6 +1055,7 @@ mod tests {
                     "trap 'exit 0' TERM\n/bin/sh -c 'trap \"\" TERM; printf \"%s\" \"$$\" > \"$TEST_ROOT/$TEST_NAME-descendant\"; while :; do sleep 1; done' &\nprintf '%s' \"$$\" > \"$TEST_ROOT/$TEST_NAME-parent\"\nwait",
                 );
                 request.timeout = None;
+                request.input = Some(vec![b'x'; 262144]);
                 request.command.env("TEST_ROOT", directory.path()).env("TEST_NAME", name);
                 request
             });

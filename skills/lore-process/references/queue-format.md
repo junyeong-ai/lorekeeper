@@ -13,7 +13,7 @@
 - [Policy and regeneration](#generation-policy-provenance-and-explicit-regeneration)
 - [Evidence packets](#read-only-evidence-packets)
 
-Read-once reference for `/lore-process`. The skill body carries the processing
+Result contract reference for `/lore-process`. The skill body carries the processing
 protocol; this file carries the format details you consult only when needed.
 
 ## Queue file lifecycle

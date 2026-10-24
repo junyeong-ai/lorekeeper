@@ -463,8 +463,9 @@ revision checks, staging and publication. A required read or review defers the t
 calling the same unchanged request again; independent work continues. Concept extraction,
 synthesis and audits retain tool-using finalization. Native queue selections and
 completed extraction/synthesis finalizers receive [prepared native input](skills/lore-process/references/native-input.md)
-with exact captured metadata, evidence and applicable shared rules. This replaces
-routine setup reads; targeted identity checks and explicit repair remain available.
+through supervised stdin, with exact captured metadata, evidence and applicable shared rules.
+Private request files allow bounded continuation reads when a tool display is incomplete.
+This replaces routine setup reads; targeted identity checks and explicit repair remain available.
 Changed scope or completed observations refuse before sealing and publication.
 
 `max_consecutive_calls` defaults to 4 fresh attempts for an admitted exact Work or

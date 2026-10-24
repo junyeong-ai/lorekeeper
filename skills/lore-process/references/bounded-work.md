@@ -192,7 +192,8 @@ the complete root, distinct context guard and applicable rules; do not repeat st
 below. Its inherited pin and `--prepared` bind the exact handoff before sealing.
 The command procedure below remains for standalone work and native audit finalizers.
 
-1. Read `lore work result WORK` once and retain that exact response in the private
+1. Read the complete `lore work result WORK`, continuing with bounded reads if a
+   tool display is incomplete, and retain that exact response in the private
    [draft directory](#private-drafts). It supplies the completed root observation, subject, purpose and
    bounded evidence mapping. Read `lore work status WORK` for `context_revision`;
    the result's `input_revision` is a different guard and cannot replace it.

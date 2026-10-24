@@ -153,8 +153,11 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   context revision, revalidated against current reviews at apply. Omission preserves the
   legacy section wire contract. Pending identities protect actions during queue pruning.
 - Prepared native selections/finalizers supply exact metadata, admitted evidence/root and
-  complete shared contracts once, within the complete serialized input bound. Their private
-  transport never authorizes changed scope or certifies a read. Native finalizer children
+  complete shared contracts through supervised stdin, within the complete serialized
+  JSON input bound. Ordinary interactive roles retain their argument prompt. Private
+  request files permit bounded continuation reads; complete consumption is not limited
+  to one tool display. Their transport never authorizes changed scope or certifies a read.
+  Native finalizer children
   pin the original request bytes; `work finish` checks that inherited pin even when
   `--prepared` is omitted, then compares current completion before sealing. Standalone
   record/result contracts and saved Work remain unchanged.

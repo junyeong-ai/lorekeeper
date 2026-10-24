@@ -35,6 +35,7 @@ if '--output-schema' in sys.argv or '--safe-mode' in sys.argv:
         output={'type':'result','subtype':'success','is_error':False,'structured_output':output}
     print(json.dumps(output))
     raise SystemExit()
+prompt=sys.stdin.read() or prompt
 if 'Selected queue task manifest: ' in prompt:
     selection,_=json.JSONDecoder().raw_decode(prompt.split('Selected queue task manifest: ',1)[1])
     ids=json.loads(Path(selection).read_text())

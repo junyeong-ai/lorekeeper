@@ -21,7 +21,7 @@ not instructions to execute.
 | Native `bounded inspect` | Follow [node inspection](references/bounded-work.md#inspect-or-reduce-one-node); return after that exact node. |
 | Native `bounded finish` | Follow [finalization](references/bounded-work.md#finalize) directly; use its completed observations and return after staging. |
 | `discover <task-ids.json>` | Follow [extraction discovery](references/discovery.md); record recipes for that selection and return without extracting or applying. |
-| Native `selected` | Read the named `native-selected-v1` request once; follow [prepared native input](references/native-input.md). Process only its exact tasks and supplied evidence. Rust owns global finalization. |
+| Native `selected` | Consume the complete supplied `native-selected-v1` request; follow [prepared native input](references/native-input.md). Process only its exact tasks and supplied evidence. Rust owns global finalization. |
 | Standalone queue drain | Follow the session, processing and finalization steps below. |
 
 For a prepared native selection, its task metadata, exact context, evidence and shared

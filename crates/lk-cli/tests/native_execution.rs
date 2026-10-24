@@ -25,7 +25,7 @@ impl Fixture {
         } else {
             "2.1.303 (Claude Code)"
         };
-        std::fs::write(&agent, format!("#!/bin/sh\nif [ \"$1\" = --version ]; then printf '%s\\n' '{version}'; exit; fi\nprintf '%s\\n' \"$@\" > \"$TEST_EXECUTION_ROOT/arguments\"\n{behavior}\n")).unwrap();
+        std::fs::write(&agent, format!("#!/bin/sh\nif [ \"$1\" = --version ]; then printf '%s\\n' '{version}'; exit; fi\nprintf '%s\\n' \"$@\" > \"$TEST_EXECUTION_ROOT/arguments\"\ncase \"$*\" in *--output-schema*|*--safe-mode*) ;; *) /bin/cat > \"$TEST_EXECUTION_ROOT/interactive-request.txt\" ;; esac\n{behavior}\n")).unwrap();
         std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o755)).unwrap();
         let config = root.join("config.yaml");
         std::fs::write(&config, format!("vault:\n  root: vault\nidentity:\n  name: Test\n  email: test@example.com\nsources:\n  notes:\n    type: manual\n    params: {{inbox_dir: inbox}}\n    labels: [knowledge]\n    concept_policy: supported-new\nexecution:\n  default_profile: primary\n  profiles:\n    primary:\n      engine: {engine}\n      executable: {}\n      timeout_seconds: {timeout}\n      work: {{extraction_context: full-context}}\n", serde_json::to_string(&agent).unwrap())).unwrap();
@@ -512,10 +512,14 @@ if sys.argv[1]=='exec':
 else:
     assert '--model=claude-sonnet-5-5' in sys.argv
     assert os.environ['CLAUDE_CODE_EFFORT_LEVEL']=='medium'
-prompt='\n'.join(sys.argv[1:])
+prompt=(Path(os.environ['TEST_EXECUTION_ROOT'])/'interactive-request.txt').read_text() or '\n'.join(sys.argv[1:])
 selection,_=json.JSONDecoder().raw_decode(prompt.split('Selected queue task manifest: ',1)[1])
 path=Path(selection)
-request=json.loads(path.read_text())
+raw=prompt.split('\nNative request:\n',1)[1]
+assert raw.encode()==path.read_bytes()
+request=json.loads(raw)
+assert request==json.loads(path.read_text())
+assert not any('native-selected-v1' in arg for arg in sys.argv[1:])
 assert request['schema']=='native-selected-v1'
 assert request['tasks'] and request['contracts']
 for selected in request['tasks']:
@@ -546,9 +550,10 @@ CHECK
             assert!(arguments.starts_with("exec\n"));
             assert!(arguments.contains("--sandbox\nworkspace-write\n"));
             assert!(arguments.contains("--ephemeral\n"));
+            assert!(arguments.lines().any(|argument| argument == "-"));
             assert!(!arguments.contains("--allowedTools"));
         } else {
-            assert!(arguments.starts_with("-p\n/lore-process:lore-process selected."));
+            assert!(arguments.starts_with("-p\n--append-system-prompt\n"));
             assert!(arguments.contains("--permission-prompts\nnone\n"));
             let binary = Path::new(env!("CARGO_BIN_EXE_lore"))
                 .canonicalize()
@@ -594,10 +599,10 @@ fn knowledge_queue_consumer_receives_bounded_maintenance_context() {
         "the mock leaves current queue work unfinished"
     );
     assert_eq!(result["ok"], false);
-    let arguments = std::fs::read_to_string(fixture.root().join("arguments")).unwrap();
-    assert!(arguments.contains("bounded knowledge maintenance job"));
-    assert!(arguments.contains("Read the selected work's review dependencies"));
-    assert!(arguments.contains("native controller owns final reconciliation"));
+    let prompt = std::fs::read_to_string(fixture.root().join("interactive-request.txt")).unwrap();
+    assert!(prompt.contains("bounded knowledge maintenance job"));
+    assert!(prompt.contains("Read the selected work's review dependencies"));
+    assert!(prompt.contains("native controller owns final reconciliation"));
     assert!(
         result["stages"]
             .as_array()
@@ -1255,11 +1260,13 @@ import json, os, re, subprocess, sys
 from pathlib import Path
 root=Path(os.environ['TEST_EXECUTION_ROOT'])
 native='--output-schema' in sys.argv or '--safe-mode' in sys.argv
+prompt=(root/'interactive-request.txt').read_text() if (root/'interactive-request.txt').exists() else ''
+prompt=prompt or '\n'.join(sys.argv[1:])
 if native:
     request=json.loads((root/'native-request.txt').read_text().split('\nNative request:\n',1)[1])
     action,work_id,node_id='inspect',request['work_id'],request['node_id']
 else:
-    match=re.search(r'bounded (inspect|finish) ([0-9a-f]{64})(?: ([0-9a-f]{64}))?', '\n'.join(sys.argv[1:]))
+    match=re.search(r'bounded (inspect|finish) ([0-9a-f]{64})(?: ([0-9a-f]{64}))?', prompt)
     if match is None:
         raise SystemExit('expected an exact bounded native request')
     action, work_id, node_id=match.groups()
@@ -1299,9 +1306,10 @@ if action=='inspect':
         path.write_text(json.dumps(output))
         cli('work', 'record', '--file', str(path))
 else:
-    prepared_match=re.search(r'Read this native-finalize-v1 prepared request once: ("[^"\n]+")', '\n'.join(sys.argv[1:]))
+    prepared_match=re.search(r'pinned request file is ("[^"\n]+")', prompt)
     prepared_path=Path(json.loads(prepared_match.group(1))) if prepared_match else None
-    prepared=json.loads(prepared_path.read_text()) if prepared_path else None
+    prepared=json.loads(prompt.split('\nNative request:\n',1)[1]) if prepared_path else None
+    if prepared_path: assert prompt.split('\nNative request:\n',1)[1].encode()==prepared_path.read_bytes()
     if prepared:
         assert prepared['schema']=='native-finalize-v1' and prepared['contracts']
         request=prepared['completed']
@@ -2479,7 +2487,7 @@ fn oversized_extraction_records_discovery_before_planning_on_both_hosts() {
 fn small_extraction_hands_expanded_discovery_to_bounded_work_on_both_hosts() {
     let behavior = build_extraction_behavior(
         r#"    if match is None:
-        prompt='\n'.join(sys.argv[1:])
+        prompt=(Path(os.environ['TEST_EXECUTION_ROOT'])/'interactive-request.txt').read_text() or '\n'.join(sys.argv[1:])
         path,_=json.JSONDecoder().raw_decode(prompt.split('Selected queue task manifest: ',1)[1])
         prepared=json.loads(Path(path).read_text())
         assert prepared['schema']=='native-selected-v1'
@@ -2680,7 +2688,7 @@ if native:
     else:
         print(json.dumps(output))
     raise SystemExit(0)
-prompt='\n'.join(sys.argv[1:])
+prompt=(Path(os.environ['TEST_EXECUTION_ROOT'])/'interactive-request.txt').read_text() or '\n'.join(sys.argv[1:])
 match=re.search(r'discover ("[^"\n]+")',prompt)
 if match:
     ids=json.loads(Path(json.loads(match.group(1))).read_text())
@@ -5166,7 +5174,7 @@ fn native_queue_preserves_interactive_batching_and_stops_at_capability_boundarie
             let capture = r#"exec python3 - "$@" <<'BATCH'
 import json, os, sys
 from pathlib import Path
-prompt='\n'.join(sys.argv[1:])
+prompt=(Path(os.environ['TEST_EXECUTION_ROOT'])/'interactive-request.txt').read_text() or '\n'.join(sys.argv[1:])
 path,_=json.JSONDecoder().raw_decode(prompt.split('Selected queue task manifest: ',1)[1])
 Path(os.environ['TEST_EXECUTION_ROOT'],'selected-batch.json').write_bytes(Path(path).read_bytes())
 BATCH"#;

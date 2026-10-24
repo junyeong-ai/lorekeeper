@@ -1,12 +1,15 @@
 # Prepared native input
 
-Use only when the native controller supplies a named `native-selected-v1` or
-`native-finalize-v1` request. The private file is disposable transport, not another
+Use only when the native controller supplies a complete `native-selected-v1` or
+`native-finalize-v1` request in the invocation prompt. Its private file permits bounded continuation
+reads when a tool display is incomplete; it is not another
 knowledge authority, completion receipt or permission to change unrelated work.
 
 ## Selected tasks
 
-Read the request once. `tasks` contains the exact queue metadata, captured subject
+Consume the complete request. Do not treat one tool command as proof that its
+entire output was visible; continue or reread bounded portions as needed, preserving
+the exact request bytes. `tasks` contains the exact queue metadata, captured subject
 and `context_revision`, complete admitted `resources`, target owner and retained-input
 reference. The retained source appears as evidence once; its `task.input.text` is
 replaced by that explicit resource reference. `contract_indices` select the complete

@@ -358,6 +358,22 @@ mod native {
         stages: Vec<StageResult>,
     }
 
+    enum PreparedAgentInput<'a> {
+        Selected(&'a serde_json::Value),
+        Finalizer {
+            file: &'a tempfile::NamedTempFile,
+            request: &'a serde_json::Value,
+        },
+    }
+
+    impl PreparedAgentInput<'_> {
+        fn request(&self) -> &serde_json::Value {
+            match self {
+                Self::Selected(request) | Self::Finalizer { request, .. } => request,
+            }
+        }
+    }
+
     struct Runner<'a> {
         opts: &'a GlobalOptions,
         installation: &'a lk_dist::Installation,
@@ -439,14 +455,28 @@ mod native {
         async fn child(
             &mut self,
             name: &str,
+            command: tokio::process::Command,
+            timeout: Option<Duration>,
+        ) -> bool {
+            self.child_with_input(name, command, timeout, None).await
+        }
+
+        async fn child_with_input(
+            &mut self,
+            name: &str,
             mut command: tokio::process::Command,
             timeout: Option<Duration>,
+            input: Option<&[u8]>,
         ) -> bool {
             if self.result.halted || self.result.cancelled || !self.configuration_is_current() {
                 return false;
             }
             self.configure_child(&mut command);
-            let completed = match self.supervisor.run(command, timeout, false).await {
+            let completed = match self
+                .supervisor
+                .run_request(command, timeout, None, input)
+                .await
+            {
                 Ok(result) => {
                     if !result.success && self.lease.is_some() {
                         self.result.halted = true;
@@ -761,7 +791,7 @@ mod native {
             skill: &str,
             operation: &str,
             input_directory: Option<&Path>,
-            finalizer: Option<(&tempfile::NamedTempFile, &serde_json::Value)>,
+            prepared: Option<PreparedAgentInput<'_>>,
         ) -> bool {
             if self.result.halted || self.result.cancelled || !self.configuration_is_current() {
                 return false;
@@ -785,17 +815,18 @@ mod native {
             }
             let profile = self.selected.as_ref().expect("prepared agent");
             let timeout = profile.timeout();
-            let command = execution::agent_command(
+            let invocation = execution::agent_invocation(
                 profile,
                 skill,
                 operation,
                 self.installation,
                 self.opts.config.as_ref().expect("resolved config"),
                 input_directory,
+                prepared.as_ref().map(PreparedAgentInput::request),
             );
-            match command {
-                Ok(mut command) => {
-                    if let Some((file, request)) = finalizer {
+            match invocation {
+                Ok(execution::AgentInvocation { mut command, input }) => {
+                    if let Some(PreparedAgentInput::Finalizer { file, request }) = prepared {
                         let bytes = serde_json::to_vec(request).expect("native request serializes");
                         command
                             .env(crate::commands::work::FINALIZATION_REQUEST_ENV, file.path())
@@ -810,7 +841,9 @@ mod native {
                     self.result.semantic_calls += 1;
                     command.current_dir(&self.root);
                     let started_at = Instant::now();
-                    let completed = self.child(skill, command, Some(timeout)).await;
+                    let completed = self
+                        .child_with_input(skill, command, Some(timeout), input.as_deref())
+                        .await;
                     self.result.semantic_duration_ms += started_at.elapsed().as_millis() as u64;
                     completed
                 }
@@ -1899,11 +1932,11 @@ mod native {
                 let path =
                     serde_json::to_string(file.path()).expect("native request path serializes");
                 format!(
-                    "bounded finish {id}. Read this native-finalize-v1 prepared request once: {path}. It contains the exact complete root, evidence mapping, distinct publication context_revision and applicable shared rules. Do not repeat work result/status, config/schema setup, ordinary discovery/intake or full-source reading. Perform only decision-relevant targeted name/alias checks, missing required reads or review/repair actions. Expanded scope requires replanning, never retagging. Preserve all attributed source questions and blockers. Submit with lore work finish {id} --file RESULT --prepared {path}; Rust checks this exact handoff before sealing/staging. Leave publication/global checks to the native controller."
+                    "bounded finish {id}. Consume the complete native-finalize-v1 request supplied in this prompt. Its pinned request file is {path}. If a tool display is incomplete, continue with bounded reads of that same file. It contains the exact complete root, evidence mapping, distinct publication context_revision and applicable shared rules. Do not repeat work result/status, config/schema setup, ordinary discovery/intake or full-source reading. Perform only decision-relevant targeted name/alias checks, missing required reads or review/repair actions. Expanded scope requires replanning, never retagging. Preserve all attributed source questions and blockers. Submit with lore work finish {id} --file RESULT --prepared {path}; Rust checks this exact handoff before sealing/staging. Leave publication/global checks to the native controller."
                 )
             } else {
                 format!(
-                    "bounded finish {id}. Start at the bounded-work reference's Finalize section. Read lore work result once for this exact work and retain its response; use lore work status for the distinct context_revision publication guard. Read only the matching generation rules and result-envelope sections named there. Produce the typed final result from the completed guarded observations; do not restart ordinary intake, discovery, screening or full-evidence reading. Exact name/alias ownership checks and targeted revision-pinned reads remain necessary when decision-relevant information is missing; expanded discovery or changed inputs require replanning. Submit with lore work finish. Do not read the whole corpus or drain other tasks. Leave the staged queue result or audit assessment for native controller publication. The controller owns global checks. Preserve source_questions as attributed uncertainty in the final prose; do not invent answers. Material conflicts need a scoped open review and follow-up audit disposition. Processing blockers in unresolved cannot be silently removed or marked reviewed."
+                    "bounded finish {id}. Start at the bounded-work reference's Finalize section. Read the complete lore work result for this exact work, using bounded continuation reads if a tool display is incomplete, and retain its response; use lore work status for the distinct context_revision publication guard. Read only the matching generation rules and result-envelope sections named there. Produce the typed final result from the completed guarded observations; do not restart ordinary intake, discovery, screening or full-evidence reading. Exact name/alias ownership checks and targeted revision-pinned reads remain necessary when decision-relevant information is missing; expanded discovery or changed inputs require replanning. Submit with lore work finish. Do not read the whole corpus or drain other tasks. Leave the staged queue result or audit assessment for native controller publication. The controller owns global checks. Preserve source_questions as attributed uncertainty in the final prose; do not invent answers. Material conflicts need a scoped open review and follow-up audit disposition. Processing blockers in unresolved cannot be silently removed or marked reviewed."
                 )
             };
             let calls_before = self.result.semantic_calls;
@@ -1913,10 +1946,9 @@ mod native {
                     skill,
                     &operation,
                     transport.as_ref().map(|(directory, _)| directory.path()),
-                    transport
-                        .as_ref()
-                        .zip(prepared_request.as_ref())
-                        .map(|((_, file), request)| (file, request)),
+                    transport.as_ref().zip(prepared_request.as_ref()).map(
+                        |((_, file), request)| PreparedAgentInput::Finalizer { file, request },
+                    ),
                 )
                 .await;
             if self.result.semantic_calls > calls_before {
@@ -2651,10 +2683,15 @@ mod native {
                                 ""
                             };
                             let operation = format!(
-                                "selected. {context} Read the native-selected-v1 request exactly once from the named manifest. It supplies exact selected tasks, source/target revisions, current read scope, complete evidence and applicable shared contracts. Use that prepared metadata instead of queue status, queue JSONL enumeration, config/schema setup, repeated work context or reference-file intake. Read all supplied evidence and applicable contracts. Keep targeted name/alias resolution, missing required reads, discovery correction and review/repair capabilities when genuinely needed; changed scope requires fresh context and regeneration. Do not infer semantic identity from lexical matches. Only these selected tasks may be processed; native Rust owns global reconciliation and checks. Follow the existing typed result staging/publication protocol. Do not clip candidates or rewrite paid Work. Selected queue task manifest: {selection}"
+                                "selected. {context} Consume the complete native-selected-v1 request supplied in this prompt. The named manifest retains the same complete request for bounded continuation reads if a tool display is incomplete. It supplies exact selected tasks, source/target revisions, current read scope, complete evidence and applicable shared contracts. Use that prepared metadata instead of queue status, queue JSONL enumeration, config/schema setup, repeated work context or reference-file intake. Read all supplied evidence and applicable contracts. Keep targeted name/alias resolution, missing required reads, discovery correction and review/repair capabilities when genuinely needed; changed scope requires fresh context and regeneration. Do not infer semantic identity from lexical matches. Only these selected tasks may be processed; native Rust owns global reconciliation and checks. Follow the existing typed result staging/publication protocol. Do not clip candidates or rewrite paid Work. Selected queue task manifest: {selection}"
                             );
                             if !self
-                                .consumer("lore-process", &operation, Some(directory.path()))
+                                .consumer_with_preparation(
+                                    "lore-process",
+                                    &operation,
+                                    Some(directory.path()),
+                                    Some(PreparedAgentInput::Selected(&request)),
+                                )
                                 .await
                             {
                                 if self.queue_replan {
