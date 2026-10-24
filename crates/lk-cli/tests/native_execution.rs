@@ -5731,11 +5731,19 @@ fn owned_publication_commands_keep_default_refusal_and_explicit_guarded_waiting(
                 .stderr(std::fs::File::create(fixture.root().join("wait-error")).unwrap())
                 .spawn()
                 .unwrap();
-            std::thread::sleep(Duration::from_millis(200));
-            assert!(
-                child.try_wait().unwrap().is_none(),
-                "{command} did not wait"
-            );
+            let deadline = Instant::now() + Duration::from_secs(15);
+            loop {
+                let error = std::fs::read_to_string(fixture.root().join("wait-error")).unwrap();
+                assert!(child.try_wait().unwrap().is_none(), "{command}: {error}");
+                if error.contains("Waiting for exclusive vault access...") {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "{command} did not start writer wait"
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            }
             assert_eq!(std::fs::read(&target).unwrap(), before);
             match outcome {
                 "cancel" => {
