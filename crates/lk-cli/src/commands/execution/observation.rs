@@ -2,7 +2,9 @@ use lk_core::execution::{AgentEngine, ExecutionProfile};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::commands::work::state::{WorkFinding, WorkOutput, WorkQuestion, WorkResolution};
+use crate::commands::work::state::{
+    OutputCapacity, WorkFinding, WorkOutput, WorkQuestion, WorkResolution,
+};
 
 pub(in crate::commands) struct Invocation {
     pub command: tokio::process::Command,
@@ -186,14 +188,15 @@ fn reject_returned_identities(value: &Value, fields: &[&str]) -> miette::Result<
 }
 
 fn check_response_size(value: &Value, limit: usize) -> miette::Result<()> {
-    if serde_json::to_vec(value)
+    let actual_bytes = serde_json::to_vec(value)
         .expect("response serializes")
-        .len()
-        > limit
-    {
-        return Err(miette::miette!(
-            "worker reply exceeds the response allowance reserved within max_result_bytes; no receipt was recorded"
-        ));
+        .len();
+    if actual_bytes > limit {
+        return Err(OutputCapacity {
+            actual_bytes,
+            max_bytes: limit,
+        }
+        .into());
     }
     Ok(())
 }
@@ -403,9 +406,11 @@ pub(in crate::commands) fn decode_observation(
                 .len()
                 + 1;
             if size > result_limit(request, limit)? {
-                return Err(miette::miette!(
-                    "complete observation exceeds max_result_bytes; no observation was recorded"
-                ));
+                return Err(OutputCapacity {
+                    actual_bytes: size,
+                    max_bytes: result_limit(request, limit)?,
+                }
+                .into());
             }
             Ok(ObservationResponse::Complete(output))
         }
@@ -474,9 +479,11 @@ pub(in crate::commands) fn decode_response(
     let encoded =
         serde_json::to_vec(&output).map_err(|_| miette::miette!("invalid observation"))?;
     if encoded.len() > limit {
-        return Err(miette::miette!(
-            "worker observation exceeds max_result_bytes; no observation was recorded"
-        ));
+        return Err(OutputCapacity {
+            actual_bytes: encoded.len(),
+            max_bytes: limit,
+        }
+        .into());
     }
     Ok(output)
 }

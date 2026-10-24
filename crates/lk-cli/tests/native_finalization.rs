@@ -84,6 +84,11 @@ if kind in ['inspect','reduce']:
             path=root/'vault'/request['context']['subject']['target']
             path.write_text(path.read_text()+'\nExternal edit during inspection.\n')
         output={'status':'needs-action','observation':None,'action':action}
+    if mode in ['oversized-inspection','oversized-inspection-drift'] and 'a-blocked' in request['context']['subject']['target']:
+        output['observation']['summary']='x'*2048
+        if mode=='oversized-inspection-drift':
+            path=root/'vault'/request['context']['subject']['target']
+            path.write_text(path.read_text()+'\nExternal edit during oversized inspection.\n')
     if mode=='empty-inspection-evidence':
         output['observation']['unresolved']=[{'id':work['node_id']+':mapping','question':'Cannot establish mapping.','evidence':[]}]
 if engine=='claude-code':
@@ -1169,4 +1174,85 @@ fn inspection_actions_and_evidence_reject_forged_stale_empty_and_corrupt_states(
         assert_eq!(report["halted"], true, "{report}");
         assert_eq!(report["semantic_calls"], 0);
     }
+}
+
+#[test]
+fn oversized_observation_defers_its_exact_work_without_retry_or_blocking_independent_work() {
+    for engine in ["codex", "claude-code"] {
+        let fixture = Fixture::new(engine, 32768);
+        let config = std::fs::read_to_string(&fixture.config).unwrap();
+        std::fs::write(
+            &fixture.config,
+            config.replace("max_calls: 2", "max_calls: 6"),
+        )
+        .unwrap();
+        let (_, blocked) = fixture.add("a-blocked", TaskKind::Summarize);
+        let plan = std::fs::read(fixture.work_path(&blocked, "plan.json")).unwrap();
+        let (_, ready) = fixture.add("z-independent", TaskKind::Summarize);
+        fixture.mode("oversized-inspection");
+        let (_, report) = fixture.run();
+        assert_eq!(report["halted"], false, "{engine}: {report}");
+        assert!(
+            fixture.work_path(&ready, "publication.json").exists(),
+            "{report}"
+        );
+        assert!(!fixture.work_path(&blocked, "seal.json").exists());
+        assert!(!fixture.work_path(&blocked, "final.json").exists());
+        assert_eq!(
+            std::fs::read(fixture.work_path(&blocked, "plan.json")).unwrap(),
+            plan
+        );
+        let receipt = fixture.work_path(&blocked, "inspection-actions.json");
+        let raw = std::fs::read(&receipt).unwrap();
+        let action: Value = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(action["schema"], "inspection-actions-v2");
+        let capacity = action["actions"]
+            .as_object()
+            .unwrap()
+            .values()
+            .next()
+            .unwrap()["capacity"]
+            .clone();
+        assert!(
+            capacity["actual_bytes"].as_u64().unwrap() > capacity["max_bytes"].as_u64().unwrap()
+        );
+        assert_eq!(
+            std::fs::read_dir(fixture.work_path(&blocked, "nodes"))
+                .map(|dir| dir.count())
+                .unwrap_or(0),
+            0
+        );
+        let calls = fixture.calls().len();
+        let (_, report) = fixture.run();
+        assert_eq!(report["halted"], false, "{report}");
+        assert_eq!(report["semantic_calls"], 0, "{report}");
+        assert_eq!(fixture.calls().len(), calls);
+        assert_eq!(std::fs::read(&receipt).unwrap(), raw);
+        let mut corrupted = action;
+        corrupted["actions"]
+            .as_object_mut()
+            .unwrap()
+            .values_mut()
+            .next()
+            .unwrap()["capacity"]["actual_bytes"] = json!(1);
+        std::fs::write(&receipt, serde_json::to_vec(&corrupted).unwrap()).unwrap();
+        let (_, report) = fixture.run();
+        assert_eq!(report["halted"], true, "{report}");
+        assert_eq!(fixture.calls().len(), calls);
+    }
+}
+
+#[test]
+fn oversized_observation_refuses_to_bind_a_changed_request() {
+    let fixture = Fixture::new("codex", 32768);
+    let (_, blocked) = fixture.add("a-blocked", TaskKind::Summarize);
+    fixture.mode("oversized-inspection-drift");
+    let (_, report) = fixture.run();
+    assert_eq!(report["halted"], true, "{report}");
+    assert!(
+        !fixture
+            .work_path(&blocked, "inspection-actions.json")
+            .exists()
+    );
+    assert!(!fixture.work_path(&blocked, "seal.json").exists());
 }

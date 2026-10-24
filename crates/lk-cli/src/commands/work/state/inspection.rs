@@ -1,5 +1,25 @@
 use super::*;
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct OutputCapacity {
+    pub actual_bytes: usize,
+    pub max_bytes: usize,
+}
+
+impl std::fmt::Display for OutputCapacity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "worker output requires {} bytes, above its {} byte allowance; no observation was recorded",
+            self.actual_bytes, self.max_bytes
+        )
+    }
+}
+
+impl std::error::Error for OutputCapacity {}
+impl miette::Diagnostic for OutputCapacity {}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct InspectionActions {
@@ -14,6 +34,8 @@ struct InspectionAction {
     input_revision: String,
     request_revision: String,
     reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    capacity: Option<OutputCapacity>,
 }
 
 impl InspectionActions {
@@ -23,8 +45,10 @@ impl InspectionActions {
             return Err(fail("inspection action receipt must be a JSON object"));
         }
         let actions: Self = serde_json::from_value(value).map_err(fail)?;
-        if actions.schema != "inspection-actions-v1"
-            || actions.work_id != work.plan.id
+        if !matches!(
+            actions.schema.as_str(),
+            "inspection-actions-v1" | "inspection-actions-v2"
+        ) || actions.work_id != work.plan.id
             || actions.actions.is_empty()
         {
             return Err(fail("invalid inspection action receipt identity or schema"));
@@ -37,6 +61,14 @@ impl InspectionActions {
             require_id(&action.input_revision)?;
             require_id(&action.request_revision)?;
             nonblank(&action.reason)?;
+            if let Some(capacity) = &action.capacity
+                && (actions.schema != "inspection-actions-v2"
+                    || capacity.max_bytes == 0
+                    || capacity.max_bytes > work.plan.max_result_bytes
+                    || capacity.actual_bytes <= capacity.max_bytes)
+            {
+                return Err(fail("invalid inspection capacity rejection"));
+            }
         }
         Ok(actions)
     }
@@ -83,6 +115,42 @@ impl Work {
         contract: &str,
         reason: String,
     ) -> miette::Result<MutationPlan> {
+        self.plan_inspection_block(root, resources, request, contract, reason, None)
+    }
+
+    pub fn plan_inspection_capacity(
+        &self,
+        root: &Path,
+        resources: &[SemanticResource],
+        request: &Value,
+        contract: &str,
+        capacity: OutputCapacity,
+    ) -> miette::Result<MutationPlan> {
+        if capacity.max_bytes == 0
+            || capacity.max_bytes > self.plan.max_result_bytes
+            || capacity.actual_bytes <= capacity.max_bytes
+        {
+            return Err(fail("invalid inspection capacity rejection"));
+        }
+        self.plan_inspection_block(
+            root,
+            resources,
+            request,
+            contract,
+            capacity.to_string(),
+            Some(capacity),
+        )
+    }
+
+    fn plan_inspection_block(
+        &self,
+        root: &Path,
+        resources: &[SemanticResource],
+        request: &Value,
+        contract: &str,
+        reason: String,
+        capacity: Option<OutputCapacity>,
+    ) -> miette::Result<MutationPlan> {
         nonblank(&reason)?;
         let evaluated = self.evaluate(root, resources)?;
         let node = evaluated
@@ -109,6 +177,9 @@ impl Work {
                 actions: BTreeMap::new(),
             },
         };
+        if capacity.is_some() {
+            actions.schema = "inspection-actions-v2".into();
+        }
         actions.actions.insert(
             node.id.clone(),
             InspectionAction {
@@ -118,6 +189,7 @@ impl Work {
                     .into(),
                 request_revision: request_revision(request, contract)?,
                 reason,
+                capacity,
             },
         );
         let mut plan = MutationPlan::default();

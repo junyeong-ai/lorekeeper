@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 
 mod inspection;
 mod retention;
+pub(crate) use inspection::OutputCapacity;
 pub(crate) use retention::prune_published;
 
 #[derive(Debug)]

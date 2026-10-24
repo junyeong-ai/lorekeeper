@@ -1052,6 +1052,14 @@ mod native {
             ) {
                 Ok(response) => response,
                 Err(error) => {
+                    if let Some(capacity) =
+                        error.downcast_ref::<crate::commands::work::state::OutputCapacity>()
+                    {
+                        metrics.result_json_bytes = Some(capacity.actual_bytes);
+                        return self
+                            .reject_inspection_capacity(id, request, capacity.clone(), metrics)
+                            .await;
+                    }
                     self.failure("bounded work receipt", error);
                     return ObservationStep::Failed;
                 }
@@ -1065,6 +1073,13 @@ mod native {
                 match execution::observation::decode_observation(output, request, reply.limit) {
                     Ok(response) => response,
                     Err(error) => {
+                        if let Some(capacity) =
+                            error.downcast_ref::<crate::commands::work::state::OutputCapacity>()
+                        {
+                            return self
+                                .reject_inspection_capacity(id, request, capacity.clone(), metrics)
+                                .await;
+                        }
                         self.failure("bounded work receipt", error);
                         return ObservationStep::Failed;
                     }
@@ -1110,6 +1125,41 @@ mod native {
                 }
                 Err(error) => {
                     self.failure("bounded work receipt", error);
+                    ObservationStep::Failed
+                }
+            }
+        }
+
+        async fn reject_inspection_capacity(
+            &mut self,
+            id: &str,
+            request: &serde_json::Value,
+            capacity: crate::commands::work::state::OutputCapacity,
+            metrics: &mut WorkStepMetrics,
+        ) -> ObservationStep {
+            let reason = capacity.to_string();
+            let started = Instant::now();
+            let Some((session, _)) = self.recording_session("bounded output capacity").await else {
+                return ObservationStep::Failed;
+            };
+            let recorded = crate::commands::work::record_inspection_capacity(
+                &session,
+                &self.config,
+                &self.config_revision,
+                id,
+                request,
+                capacity,
+            );
+            metrics.revalidation_record_duration_ms = Some(started.elapsed().as_millis() as u64);
+            match recorded {
+                Ok(()) => {
+                    metrics.outcome = WorkOutcome::Rejected;
+                    self.inspection_deferred.insert(id.into(), reason.clone());
+                    self.deferred("bounded output capacity", &reason);
+                    ObservationStep::Deferred(reason)
+                }
+                Err(error) => {
+                    self.failure("bounded output capacity", error);
                     ObservationStep::Failed
                 }
             }

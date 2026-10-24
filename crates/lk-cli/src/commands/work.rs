@@ -1586,6 +1586,29 @@ pub(super) fn record_inspection_action(
 }
 
 #[cfg(unix)]
+pub(super) fn record_inspection_capacity(
+    session: &lk_vault::MutationSession,
+    config: &lk_core::config::Config,
+    config_revision: &str,
+    id: &str,
+    request: &Value,
+    capacity: state::OutputCapacity,
+) -> miette::Result<()> {
+    let root = session.root();
+    let (work, prepared) = load(root, config, config_revision, id)?;
+    let mut plan = work.plan_inspection_capacity(
+        root,
+        &prepared.resources,
+        request,
+        &super::execution::observation::contract_revision(),
+        capacity,
+    )?;
+    prepared.guard_pages(&mut plan);
+    session.apply(plan).into_diagnostic()?;
+    Ok(())
+}
+
+#[cfg(unix)]
 pub(super) struct SectionFinalization {
     pub request: Value,
     pub max_response_bytes: usize,
