@@ -82,6 +82,7 @@ impl Pipeline {
             include_str!("document_identity.rs"),
             include_str!("../../lk-vault/src/template.rs"),
             include_str!("../../lk-vault/src/fragment.rs"),
+            include_str!("../../lk-core/src/markdown/fragment.rs"),
             include_str!("../../lk-core/src/i18n.rs"),
             include_str!("../../lk-core/src/document.rs"),
             include_str!("../../lk-core/src/event.rs"),

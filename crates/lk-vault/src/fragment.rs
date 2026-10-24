@@ -1,8 +1,8 @@
 //! Embed standalone source Markdown without letting its syntax own the surrounding page.
 
-use lk_core::markdown::{MarkdownInput, OPTIONS, has_sibling_boundary};
+use lk_core::markdown::{MarkdownInput, OPTIONS};
 use minijinja::{Error, ErrorKind};
-use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, LinkType, Tag, TagEnd};
+use pulldown_cmark::{Event, HeadingLevel, LinkType, Tag, TagEnd};
 use std::path::Path;
 
 /// Scalar fields are literal inline text; their original values remain in metadata.
@@ -75,125 +75,10 @@ pub fn relocate_markdown_links(
     }
 }
 
-fn shift_heading_level(level: HeadingLevel, shift: usize) -> HeadingLevel {
-    match (level as usize + shift).min(6) {
-        1 => HeadingLevel::H1,
-        2 => HeadingLevel::H2,
-        3 => HeadingLevel::H3,
-        4 => HeadingLevel::H4,
-        5 => HeadingLevel::H5,
-        _ => HeadingLevel::H6,
-    }
-}
-
-/// Render standalone source Markdown inside a page's owned sections. Source text
-/// remains separate from this presentation; headings, references and EOF syntax
-/// cannot claim the surrounding document.
+/// Render standalone source Markdown inside a page's owned sections.
 pub fn render_markdown_fragment(value: &str) -> Result<String, Error> {
-    let markdown = MarkdownInput::from_text(value);
-    let parsed: Vec<_> = markdown.events(OPTIONS).collect();
-    let shallowest = parsed
-        .iter()
-        .filter_map(|event| match event {
-            Event::Start(Tag::Heading { level, .. }) => Some(*level as usize),
-            _ => None,
-        })
-        .min()
-        .unwrap_or(4);
-    let shift = 4usize.saturating_sub(shallowest);
-    let namespace = blake3::hash(value.as_bytes()).to_hex();
-    let footnote = |name: &str| format!("lk-{namespace}-{name}");
-    let mut events = Vec::with_capacity(parsed.len());
-    let mut input = parsed.into_iter();
-    while let Some(event) = input.next() {
-        match event {
-            Event::Start(Tag::Heading {
-                level: old,
-                id,
-                classes,
-                attrs,
-            }) => {
-                events.push(Event::Start(Tag::Heading {
-                    level: shift_heading_level(old, shift),
-                    id,
-                    classes,
-                    attrs,
-                }));
-            }
-            Event::End(TagEnd::Heading(old)) => {
-                events.push(Event::End(TagEnd::Heading(shift_heading_level(old, shift))))
-            }
-            Event::Start(Tag::Link {
-                dest_url, title, ..
-            }) => events.push(Event::Start(Tag::Link {
-                link_type: LinkType::Inline,
-                dest_url,
-                title,
-                id: "".into(),
-            })),
-            Event::Start(Tag::Image {
-                dest_url, title, ..
-            }) => events.push(Event::Start(Tag::Image {
-                link_type: LinkType::Inline,
-                dest_url,
-                title,
-                id: "".into(),
-            })),
-            Event::Start(Tag::FootnoteDefinition(name)) => events.push(Event::Start(
-                Tag::FootnoteDefinition(footnote(&name).into()),
-            )),
-            Event::FootnoteReference(name) => {
-                events.push(Event::FootnoteReference(footnote(&name).into()))
-            }
-            Event::End(TagEnd::CodeBlock) => {
-                if !matches!(events.last(), Some(Event::Text(text)) if text.ends_with('\n')) {
-                    events.push(Event::Text("\n".into()));
-                }
-                events.push(Event::End(TagEnd::CodeBlock));
-            }
-            Event::Start(Tag::HtmlBlock) => {
-                let mut block = String::new();
-                for event in input.by_ref() {
-                    match event {
-                        Event::End(TagEnd::HtmlBlock) => break,
-                        Event::Html(text) | Event::Text(text) => block.push_str(&text),
-                        _ => {
-                            return Err(Error::new(
-                                ErrorKind::InvalidOperation,
-                                "invalid HTML block events",
-                            ));
-                        }
-                    }
-                }
-                if has_sibling_boundary(&block) {
-                    events.extend([
-                        Event::Start(Tag::HtmlBlock),
-                        Event::Html(block.into()),
-                        Event::End(TagEnd::HtmlBlock),
-                    ]);
-                } else {
-                    // EOF-terminated HTML is shown literally; inventing closing tags could change its meaning.
-                    if !block.ends_with('\n') {
-                        block.push('\n');
-                    }
-                    events.extend([
-                        Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced("html".into()))),
-                        Event::Text(block.into()),
-                        Event::End(TagEnd::CodeBlock),
-                    ]);
-                }
-            }
-            other => events.push(other),
-        }
-    }
-    let output = serialize(&events)?;
-    if !has_sibling_boundary(&output) {
-        return Err(Error::new(
-            ErrorKind::InvalidOperation,
-            "source Markdown does not preserve the surrounding page boundary",
-        ));
-    }
-    Ok(output)
+    lk_core::markdown::render_fragment(value, HeadingLevel::H4, value)
+        .map_err(|error| Error::new(ErrorKind::InvalidOperation, error.to_string()))
 }
 
 /// Serialize the complete link so provider URL punctuation cannot become page syntax.
@@ -216,6 +101,7 @@ pub(crate) fn link(url: &str, label: &str) -> Result<String, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lk_core::markdown::has_sibling_boundary;
     use pulldown_cmark::Parser;
 
     #[test]

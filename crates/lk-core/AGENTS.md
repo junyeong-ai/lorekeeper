@@ -60,6 +60,9 @@ config loading and the shared filesystem primitives intentionally perform I/O.
 
 - `markdown::serialize` preserves structured link/image destinations and titles,
   including whitespace, without allowing metadata to introduce Markdown structure.
+- `markdown::render_fragment` resolves each independent source before composition,
+  contains EOF syntax and namespaces footnotes by its caller-supplied source identity.
+  Page embedding supplies its minimum heading level; source assembly retains H1.
 - `markdown::root_headings` owns CommonMark root structure. Semantic section bodies
   use `validate_section_body`: reject parent/sibling headings and syntax consuming
   the next section; preserve valid HTML and literal code without rewriting prose.

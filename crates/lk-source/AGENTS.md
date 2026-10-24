@@ -95,6 +95,9 @@ uses validated params and context; do not add per-adapter output pipelines.
   require a supported textual Content-Type and share Drive's 16 MiB strict-decoding
   reader on export and media paths. Unsupported attachments remain unexpanded;
   their warnings do not change complete Calendar listing coverage.
+  Resolve each note's Markdown before joining it to the event; shared fragment
+  rendering uses its exact Drive file ID for footnote scope. Reference definitions
+  and EOF code/HTML from one attachment must not change another attachment.
 - `drive.rs`: select direct children by explicit `folder_id`, never a folder name.
   Query the actual modified-time day window: `lookback_days` defaults to1 prior civil
   day plus the target day; explicit0 selects only the target day. Query and reported

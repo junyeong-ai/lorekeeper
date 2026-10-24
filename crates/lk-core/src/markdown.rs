@@ -5,6 +5,9 @@ use std::ops::Range;
 
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag};
 
+mod fragment;
+pub use fragment::{FragmentError, render_fragment};
+
 /// The Markdown dialect used to determine page and embedded-section boundaries.
 pub const OPTIONS: Options = Options::ENABLE_TABLES
     .union(Options::ENABLE_TASKLISTS)

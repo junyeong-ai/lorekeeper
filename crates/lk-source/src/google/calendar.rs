@@ -359,12 +359,17 @@ impl Source for GoogleCalendarSource {
                     .into_iter()
                     .take(MAX_DRIVE_FETCHES_PER_EVENT)
                 {
-                    match fetch_drive_content(&self.http, &token, &file_id).await {
-                        Ok(content) if !content.trim().is_empty() => {
+                    let enriched = fetch_drive_content(&self.http, &token, &file_id)
+                        .await
+                        .and_then(|content| {
+                            if content.trim().is_empty() {
+                                return Ok(());
+                            }
                             let header = att_title.as_deref().unwrap_or(s.meeting_notes);
-                            append_meeting_notes(&mut mapped.item.body, header, &content);
-                        }
-                        Ok(_) => {}
+                            append_meeting_notes(&mut mapped.item.body, &file_id, header, &content)
+                        });
+                    match enriched {
+                        Ok(()) => {}
                         Err(e) => {
                             tracing::warn!(
                                 event_id = ?mapped.item.external_id,
@@ -403,7 +408,15 @@ struct MappedEvent {
     drive_files: Vec<(String, Option<String>)>,
 }
 
-fn append_meeting_notes(body: &mut String, header: &str, content: &str) {
+fn append_meeting_notes(
+    body: &mut String,
+    file_id: &str,
+    header: &str,
+    content: &str,
+) -> Result<(), SourceError> {
+    let content =
+        lk_core::markdown::render_fragment(content, pulldown_cmark::HeadingLevel::H1, file_id)
+            .map_err(|error| SourceError::Parse(error.to_string()))?;
     let header = lk_core::markdown::inline_text(header);
     let note = format!("**{header}:**\n\n{content}");
     if body.is_empty() {
@@ -412,6 +425,7 @@ fn append_meeting_notes(body: &mut String, header: &str, content: &str) {
         body.push_str("\n\n");
         body.push_str(&note);
     }
+    Ok(())
 }
 
 /// Map one Calendar event to a `RawItem` (and its Drive-file candidates), or `None`
@@ -621,20 +635,64 @@ mod tests {
     }
 
     #[test]
-    fn meeting_note_fragments_preserve_leading_code_and_remaining_bytes() {
+    fn meeting_notes_resolve_references_in_each_original_document() {
+        let mut body = String::new();
+        for (header, content) in [
+            ("First", "[A][ref]\n\n[ref]: https://one.example/"),
+            ("Second", "[B][ref]\n\n[ref]: https://two.example/"),
+        ] {
+            append_meeting_notes(&mut body, header, header, content).unwrap();
+        }
+        let input = lk_core::markdown::MarkdownInput::from_text(&body);
+        let destinations = input
+            .events(lk_core::markdown::OPTIONS)
+            .filter_map(|event| match event {
+                pulldown_cmark::Event::Start(pulldown_cmark::Tag::Link { dest_url, .. }) => {
+                    Some(dest_url.into_string())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            destinations,
+            ["https://one.example/", "https://two.example/"]
+        );
+    }
+
+    #[test]
+    fn meeting_note_fragments_preserve_leading_code_and_html_content() {
         for content in [
             "    [literal](ghost.md)\n    next line\n\n<pre>\nkept\n</pre>\n\n",
             "    [literal](ghost.md)\r\n    next line\r\n\r\n<pre>\r\nkept\r\n</pre>\r\n\r\n",
         ] {
             for prefix in ["", "Existing description.\n"] {
                 let mut body = prefix.to_owned();
-                append_meeting_notes(&mut body, "Notes", content);
+                append_meeting_notes(&mut body, "file", "Notes", content).unwrap();
                 assert!(
                     lk_core::link::extract_page_links(&body).is_empty(),
                     "{body:?}"
                 );
-                let separator = if prefix.is_empty() { "" } else { "\n\n" };
-                assert_eq!(body, format!("{prefix}{separator}**Notes:**\n\n{content}"));
+                let input = lk_core::markdown::MarkdownInput::from_text(&body);
+                let mut in_code = false;
+                let mut code = String::new();
+                for event in input.events(lk_core::markdown::OPTIONS) {
+                    match event {
+                        pulldown_cmark::Event::Start(pulldown_cmark::Tag::CodeBlock(_)) => {
+                            in_code = true
+                        }
+                        pulldown_cmark::Event::End(pulldown_cmark::TagEnd::CodeBlock) => {
+                            in_code = false
+                        }
+                        pulldown_cmark::Event::Text(text) if in_code => code.push_str(&text),
+                        _ => {}
+                    }
+                }
+                assert_eq!(code, "[literal](ghost.md)\nnext line\n", "{body:?}");
+                assert!(
+                    body.replace("\r\n", "\n").contains("<pre>\nkept\n</pre>"),
+                    "{body:?}"
+                );
+                assert!(body.starts_with(prefix), "{body:?}");
             }
         }
     }
@@ -687,9 +745,11 @@ mod tests {
         let header = mapped.drive_files[0].1.as_deref().unwrap();
         append_meeting_notes(
             &mut mapped.item.body,
+            "deck",
             header,
             "[Note](https://example.com/notes)\n",
-        );
+        )
+        .unwrap();
         let input = lk_core::markdown::MarkdownInput::from_text(&mapped.item.body);
         let links: Vec<_> = input
             .events(lk_core::markdown::OPTIONS)
@@ -713,7 +773,8 @@ mod tests {
             mapped
                 .item
                 .body
-                .ends_with("[Note](https://example.com/notes)\n")
+                .trim_end()
+                .ends_with("[Note](https://example.com/notes)")
         );
     }
 
@@ -846,6 +907,30 @@ mod tests {
         assert_eq!(
             lk_core::link::first_external_dest(&html).as_deref(),
             Some("https://example.com")
+        );
+
+        let mut body = String::new();
+        for (file_id, expected) in [("first", "one"), ("second", "two")] {
+            let source = format!("[Note][r]\n\n[r]: https://{expected}.example/");
+            let note =
+                meeting_notes_response(true, text_response("text/markdown", source.as_bytes()))
+                    .await
+                    .unwrap();
+            append_meeting_notes(&mut body, file_id, "Note", &note).unwrap();
+        }
+        let input = lk_core::markdown::MarkdownInput::from_text(&body);
+        let destinations = input
+            .events(lk_core::markdown::OPTIONS)
+            .filter_map(|event| match event {
+                pulldown_cmark::Event::Start(pulldown_cmark::Tag::Link { dest_url, .. }) => {
+                    Some(dest_url.into_string())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            destinations,
+            ["https://one.example/", "https://two.example/"]
         );
     }
 
