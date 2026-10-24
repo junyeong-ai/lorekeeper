@@ -768,10 +768,16 @@ mod native {
         ) -> miette::Result<(execution::observation::Invocation, usize)> {
             let profile = self.selected.as_ref().expect("prepared agent");
             let mut invocation = match role {
-                WorkRole::Evidence => execution::observation::build_invocation(profile, request),
-                WorkRole::Screening => {
-                    execution::observation::build_screening_invocation(profile, request)
-                }
+                WorkRole::Evidence => execution::observation::build_invocation(
+                    profile,
+                    request,
+                    budget.max_result_bytes,
+                ),
+                WorkRole::Screening => execution::observation::build_screening_invocation(
+                    profile,
+                    request,
+                    budget.max_result_bytes,
+                ),
                 WorkRole::Finalizer => execution::finalization::build_invocation(profile, request),
             }?;
             invocation
@@ -936,11 +942,10 @@ mod native {
             reply: ObservationReply,
             metrics: &mut WorkStepMetrics,
         ) -> ObservationStep {
-            let (response, bytes) = match execution::observation::decode(
+            let output = match execution::observation::decode_response(
                 reply.engine,
                 &reply.bytes,
                 reply.limit,
-                request,
             ) {
                 Ok(response) => response,
                 Err(error) => {
@@ -948,7 +953,19 @@ mod native {
                     return ObservationStep::Failed;
                 }
             };
-            metrics.result_json_bytes = Some(bytes);
+            metrics.result_json_bytes = Some(
+                serde_json::to_vec(&output)
+                    .expect("decoded observation serializes")
+                    .len(),
+            );
+            let response =
+                match execution::observation::decode_observation(output, request, reply.limit) {
+                    Ok(response) => response,
+                    Err(error) => {
+                        self.failure("bounded work receipt", error);
+                        return ObservationStep::Failed;
+                    }
+                };
             let started_at = Instant::now();
             let Some((session, _)) = self.recording_session("bounded work receipt").await else {
                 if self.result.cancelled {
@@ -1770,10 +1787,8 @@ mod native {
                 );
                 return None;
             };
-            let selected_input = request["input_revision"].clone();
-            let selected_batch = request["batch_id"].clone();
-            metrics.batch_id = selected_batch.as_str().map(str::to_owned);
-            let reply = self.request_observation(request, metrics).await?;
+            metrics.batch_id = request["batch_id"].as_str().map(str::to_owned);
+            let reply = self.request_observation(request.clone(), metrics).await?;
             let output = match execution::observation::decode_response(
                 reply.engine,
                 &reply.bytes,
@@ -1790,13 +1805,14 @@ mod native {
                     .expect("decoded screening serializes")
                     .len(),
             );
-            if output["selection_id"] != before.selection_id
-                || output["batch_id"] != selected_batch
-                || output["input_revision"] != selected_input
-            {
-                self.failure("candidate screening", "worker did not answer the exact selected screening packet; unfinished work retained");
-                return None;
-            }
+            let output =
+                match execution::observation::decode_screening(output, &request, reply.limit) {
+                    Ok(output) => output,
+                    Err(error) => {
+                        self.failure("candidate screening", error);
+                        return None;
+                    }
+                };
             let started_at = Instant::now();
             let Some((session, _)) = self.mutation_session("candidate screening").await else {
                 if self.result.cancelled {

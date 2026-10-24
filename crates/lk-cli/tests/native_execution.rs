@@ -1277,8 +1277,10 @@ if action=='inspect':
     unresolved=[concern for child in request.get('children', []) for concern in child['output']['unresolved']]
     output={'work_id':work_id, 'node_id':node_id, 'input_revision':request['input_revision'],
             'summary':'Fixture observation of this exact request; structural coverage is not factual verification.',
-            'findings':[], 'unresolved':unresolved, 'resolutions':[]}
+            'findings':[], 'source_questions':[], 'unresolved':unresolved, 'resolutions':[]}
     if native:
+        for key in ['work_id','node_id','input_revision']:
+            del output[key]
         output={'status':'complete','observation':output,'action':None}
     row['output_bytes']=len(json.dumps(output, ensure_ascii=False, separators=(',', ':')).encode())
     if native:
@@ -1639,8 +1641,8 @@ fn oversized_audit_completes_through_fresh_bounded_workers_on_both_hosts() {
 #[test]
 fn native_observation_cannot_record_another_selected_node() {
     let behavior = RECORD_BOUNDED_AUDIT.replace(
-        "output={'work_id':work_id, 'node_id':node_id,",
-        "output={'work_id':work_id, 'node_id':'not-selected',",
+        "output={'status':'complete','observation':output,'action':None}",
+        "output['node_id']='not-selected'\n        output={'status':'complete','observation':output,'action':None}",
     );
     let fixture = bounded_audit_fixture("codex", 1, &behavior);
     let (output, result) = fixture.run("knowledge");
@@ -1650,7 +1652,7 @@ fn native_observation_cannot_record_another_selected_node() {
             && stage["state"] == "failed"
             && stage["detail"]
                 .as_str()
-                .is_some_and(|detail| detail.contains("selected work node"))
+                .is_some_and(|detail| detail.contains("Rust-owned identity fields: node_id"))
     }));
     let calls = bounded_calls(&fixture);
     let step = &result["work_steps"][0];
@@ -1658,7 +1660,7 @@ fn native_observation_cannot_record_another_selected_node() {
     assert_eq!(step["outcome"], "rejected");
     assert_ne!(step["node_id"], "not-selected");
     assert_eq!(step["result_json_bytes"], calls[0]["output_bytes"]);
-    assert!(step["revalidation_record_duration_ms"].as_u64().is_some());
+    assert!(step["revalidation_record_duration_ms"].is_null());
     assert!(step["agent_duration_ms"].as_u64().is_some());
     let id = calls[0]["work_id"].as_str().unwrap();
     let status = fixture
@@ -2441,7 +2443,7 @@ if native:
     assert request['source_context']['role']=='complete-retained-input'
     assert request['discovery']==[{'query':'transactional outbox','phrase':True,'spacing':False}]
     assert len(request['candidates'])<120
-    output={key:request[key] for key in ['selection_id','batch_id','input_revision']}
+    output={}
     output['decisions']=[{'candidate_key':candidate['candidate_key'],
         'decision':'inspect' if candidate['candidate_key'].endswith('/candidate-000.md') else 'not-selected',
         'reason':'This assigned card has a fixture-defined scope; not-selected is not a full-body judgment.'}
@@ -2965,6 +2967,75 @@ fn progressive_native_screening_keeps_complete_inventory_and_reads_only_admitted
                 .status
                 .success()
         );
+    }
+}
+
+#[test]
+fn native_screening_refuses_model_owned_identity_without_rebinding_or_losing_metrics() {
+    for engine in ["claude-code", "codex"] {
+        for deleted in [false, true] {
+            let supplied = if deleted {
+                "request['selection_id'][:40]+request['selection_id'][42:]"
+            } else {
+                "request['selection_id']"
+            };
+            let behavior = RECORD_PROGRESSIVE_EXTRACTION.replace(
+                "    output={}",
+                &format!("    output={{'selection_id':{supplied}}}"),
+            );
+            let (fixture, task) = progressive_extraction_fixture(engine, &behavior, 6, 16384, 4096);
+            let target = fixture.root().join("vault/wiki/documents/source.md");
+            let original = std::fs::read(&target).unwrap();
+            let (output, report) = fixture.run("process");
+            assert!(!output.status.success(), "{report}");
+            assert_eq!(report["halted"], true);
+            let steps = report["work_steps"].as_array().unwrap();
+            let step = steps
+                .iter()
+                .find(|step| step["role"] == "screening")
+                .unwrap();
+            assert_eq!(step["outcome"], "rejected");
+            assert!(
+                step["result_json_bytes"]
+                    .as_u64()
+                    .is_some_and(|size| size > 0)
+            );
+            assert!(step["revalidation_record_duration_ms"].is_null());
+            let selection = step["selection_id"].as_str().unwrap();
+            let detail = report["stages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|stage| stage["name"] == "candidate screening" && stage["state"] == "failed")
+                .unwrap()["detail"]
+                .as_str()
+                .unwrap();
+            assert!(
+                detail.contains(&format!(
+                    "selection_id (string, {} Unicode scalars",
+                    if deleted { 62 } else { 64 }
+                )),
+                "{detail}"
+            );
+            assert!(!detail.contains(selection));
+            let progress =
+                execution_json(&fixture, &["work", "select", "--task-id", &task.task_id]);
+            assert_eq!(progress["progress"]["completed_batches"], 0, "{progress}");
+            assert_eq!(std::fs::read(target).unwrap(), original);
+            let checked = fixture.command().args(["queue", "check"]).output().unwrap();
+            assert!(
+                !checked.status.success(),
+                "the refused task remains pending"
+            );
+            let settlement: serde_json::Value = serde_json::from_slice(&checked.stdout).unwrap();
+            assert_eq!(settlement["data"]["pending_mutation"], false);
+            assert!(
+                settlement["data"]["staged_results"]
+                    .as_array()
+                    .unwrap()
+                    .is_empty()
+            );
+        }
     }
 }
 
@@ -4324,12 +4395,12 @@ if leader and mode=='failed':
 if leader and mode=='malformed':
     print('not a structured observation')
     raise SystemExit(0)
-output={key:request[key] for key in ['work_id','node_id','input_revision']}
-output.update(summary='Read this exact fixture request without a factual correctness claim.',findings=[],source_questions=[],unresolved=[],resolutions=[])
+if not leader:
+    time.sleep(.2)
+output=dict(summary='Read native node '+node,findings=[],source_questions=[],unresolved=[],resolutions=[])
 output={'status':'complete','observation':output,'action':None}
 if mode=='needs-action':
-    action={key:request[key] for key in ['work_id','node_id','input_revision']}
-    action['reason']='Cannot complete this selected evidence node.'
+    action={'reason':'Cannot complete this selected evidence node.'}
     output={'status':'needs-action','observation':None,'action':action}
 if '--safe-mode' in sys.argv:
     print(json.dumps({'type':'result','subtype':'success','is_error':False,'structured_output':output}))
@@ -4467,6 +4538,20 @@ fn parallel_native_observers_overlap_on_both_hosts_with_same_and_distinct_work()
                     2,
                     "both observation processes reached the barrier"
                 );
+            }
+            for row in &starts {
+                let node = row["node_id"].as_str().unwrap();
+                let receipt = fixture
+                    .root()
+                    .join("vault/.lorekeeper/work")
+                    .join(row["work_id"].as_str().unwrap())
+                    .join("nodes")
+                    .join(format!("{node}.json"));
+                let output: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(receipt).unwrap()).unwrap();
+                assert_eq!(output["summary"], format!("Read native node {node}"));
+                assert_eq!(output["node_id"], row["node_id"]);
+                assert_eq!(output["work_id"], row["work_id"]);
             }
             assert_eq!(parallel_receipts(&fixture), 2);
             assert_eq!(
@@ -5121,8 +5206,7 @@ fn explicit_inspection_actions_allow_an_independent_audit_assessment() {
         "output={'status':'complete','observation':output,'action':None}",
         r#"output={'status':'complete','observation':output,'action':None}
         if request['context']['subject'].get('path')=='wiki/concepts/large.md':
-            blocked={key:request[key] for key in ['work_id','node_id','input_revision']}
-            blocked['reason']='Cannot complete the selected assigned read.'
+            blocked={'reason':'Cannot complete the selected assigned read.'}
             output={'status':'needs-action','observation':None,'action':blocked}"#,
     );
     for engine in ["codex", "claude-code"] {

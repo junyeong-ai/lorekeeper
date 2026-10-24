@@ -20,9 +20,16 @@ the command protocol. These are distinct execution roles, not interchangeable wr
 
 A native completion is `{status: "complete", observation: OBSERVATION, action: null}`.
 An inability to complete assigned reading or establish its evidence mapping is
-`{status: "needs-action", observation: null, action: {work_id, node_id, input_revision, reason}}`,
-using exact request identities and a concrete nonblank reason. This records no observation
-or assessment and never supplies invented evidence. Native Rust validates the supplied
+`{status: "needs-action", observation: null, action: {reason}}`,
+using a concrete nonblank reason. An action records no observation or assessment
+and never supplies invented evidence. The native observation contains only `summary`,
+`findings`, `source_questions`, `unresolved` and `resolutions`. Rust binds work, node
+and input identity from the supervised invocation; never return those fields. Native
+screening similarly returns only `{decisions: [...]}`; Rust binds selection, batch
+and input identity. Standalone `work record` and `work select-record` still require
+their complete identity-bearing formats. Native replies use the supplied fixed schema
+and reply allowance, which reserves identity and newline bytes within the stored result
+limit. Native Rust validates the supplied
 range/text mapping: copy the assigned `range` for the corresponding inspected text;
 finer contained offsets are optional when established. `total_characters` describes the
 full resource; `continued` marks a split Markdown block, not omitted assigned text.
@@ -33,7 +40,9 @@ unchanged action defers before another host call; independent queue and audit wo
 continue, while the overall job remains incomplete. Changed requests can be reconsidered.
 An explicit guarded `work record` can supply a corrected observation; never edit action,
 node or plan files to bypass guards. Malformed responses and corrupt receipts refuse.
-Saved plans, node observations and the standalone `work record` format stay unchanged.
+Saved plans, node observations and standalone record formats stay unchanged. A changed
+native response/instruction contract can reconsider a prior processing action; it never
+retags or adopts an invalid historical response.
 
 ## Plan and resume
 
@@ -241,7 +250,7 @@ is not a complete invocation ledger.
 | Fields | Meaning |
 | --- | --- |
 | `role`, `work_id`, `node_id`, `node_kind`, `selection_id`, `batch_id` | Exact selected work or screening identities; unavailable identities are `null` |
-| `request_json_bytes`, `result_json_bytes` | Compact UTF-8 JSON of the prepared request and decoded response (including a native observation/action envelope), excluding prompts and host envelopes; interactive finalizer sizes are unobserved and `null` |
+| `request_json_bytes`, `result_json_bytes` | Compact UTF-8 JSON of the prepared request and decoded response (including a native observation/action envelope but excluding Rust-supplied identity), excluding prompts and host envelopes; interactive finalizer sizes are unobserved and `null` |
 | `preparation_duration_ms` | Local preparation of the selected request or completed root |
 | `agent_duration_ms` | Supervised invocation attempt wall time, including a failed or cancelled attempt; never server inference time |
 | `revalidation_record_duration_ms` | Fresh input validation and recording together; these operations are not measured separately |

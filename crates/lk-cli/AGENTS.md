@@ -131,8 +131,11 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   observation or creating the guarded section result. Claude disables tools/customizations;
   Codex uses a read-only sandbox.
   Never fall back to parsing prose/Markdown when structured output is missing or invalid.
-  Evidence observers return either a typed observation or an exact work/node/input-bound
-  processing action. Native range/text mapping is already verified; workers can copy
+  Evidence observers return only a typed observation body or processing-action reason.
+  Rust binds native work/node/input and screening selection/batch/input identities from
+  the supervised invocation; reject model-supplied identity fields without adopting or
+  repairing them. Fixed schemas and exact reply allowances reserve stored identity bytes.
+  Standalone record formats and fresh owner/currentness validation remain authoritative. Native range/text mapping is already verified; workers can copy
   assigned ranges without inventing finer offsets. Every observation concern still needs
   evidence. Actions record no observation, discharge no concerns and defer only their
   Work. Bind the receipt to the complete request and response/instruction contract; skip

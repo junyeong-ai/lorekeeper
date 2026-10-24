@@ -465,6 +465,9 @@ synthesis and audits retain tool-using finalization.
 New bounded plans group observations using request and maximum result sizes; saved
 plans resume with their existing topology. An observer unable to complete assigned
 reading returns an identity-bound processing action instead of an observation.
+Native evidence reading and candidate screening return judgment fields only; Rust binds
+identities from the supervised invocation. Models do not transcribe native identities;
+freshness, scope and complete stored-result bounds remain enforced.
 Unchanged requests defer without another call; independent work continues, while the
 node and assessment remain incomplete. Workers can cite native-verified assigned ranges
 without guessing finer offsets. Native `lore run process --json` reports
