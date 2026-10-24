@@ -4,6 +4,39 @@ use std::sync::Arc;
 
 use miette::IntoDiagnostic;
 
+pub(super) async fn acquire_mutation(
+    root: &Path,
+    wait: bool,
+    pin: &super::ConfigurationPin,
+) -> miette::Result<lk_vault::MutationSession> {
+    acquire_mutation_checked(root, wait, || pin.validate()).await
+}
+
+pub(super) async fn acquire_mutation_checked(
+    root: &Path,
+    wait: bool,
+    mut validate: impl FnMut() -> miette::Result<()>,
+) -> miette::Result<lk_vault::MutationSession> {
+    let mut waiting = false;
+    loop {
+        validate()?;
+        match lk_vault::MutationClaim::acquire(root) {
+            Ok(claim) => {
+                validate()?;
+                return claim.into_session().into_diagnostic();
+            }
+            Err(lk_vault::VaultError::MutationBusy) if wait => {
+                if !waiting {
+                    eprintln!("Waiting for exclusive vault access...");
+                    waiting = true;
+                }
+            }
+            Err(error) => return Err(error).into_diagnostic(),
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
 pub(super) struct Publication<'a> {
     session: &'a lk_vault::MutationSession,
     client: Arc<dyn lk_queue::LlmClient>,

@@ -292,7 +292,7 @@ async fn run_inner(
             | GraphCommand::RetractCitation { dry_run: false, .. }
     ) {
         Some(
-            super::execution::acquire_mutation(&rc.root, wait_for_vault, &rc.pin)
+            super::publication::acquire_mutation(&rc.root, wait_for_vault, &rc.pin)
                 .await
                 .map_err(|error| error.to_string())?,
         )

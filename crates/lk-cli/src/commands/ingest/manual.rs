@@ -482,7 +482,7 @@ pub(super) async fn acquire(
     if !dry_run {
         std::fs::create_dir_all(root).map_err(error)?;
         let _session =
-            super::super::execution::acquire_mutation_checked(root, wait, &validate_config)
+            super::super::publication::acquire_mutation_checked(root, wait, &validate_config)
                 .await
                 .map_err(error)?;
     }
@@ -552,7 +552,7 @@ pub(super) async fn acquire(
     let reserved = serde_json::to_string(&state).map_err(error)?;
     if !dry_run {
         let session =
-            super::super::execution::acquire_mutation_checked(root, wait, &validate_config)
+            super::super::publication::acquire_mutation_checked(root, wait, &validate_config)
                 .await
                 .map_err(error)?;
         if lk_source::manual_inbox_dir(&source.params, root, &context.vault_dirs)? != inbox {

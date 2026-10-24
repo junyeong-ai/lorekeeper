@@ -650,7 +650,7 @@ pub async fn run(opts: &super::GlobalOptions, cmd: WikiCommand) -> miette::Resul
             )
             .map_err(|error| miette::miette!("{error}"))?;
             let root = config.vault.root_path();
-            let session = super::execution::acquire_mutation(&root, wait_for_vault, &pin).await?;
+            let session = super::publication::acquire_mutation(&root, wait_for_vault, &pin).await?;
             let pages = lk_graph::scan::scan_vault(&root, config.graph.scope.follow_links)
                 .map_err(|error| miette::miette!("{error}"))?;
             let selection = results
@@ -1252,7 +1252,7 @@ pub async fn run_refresh_with_wait(
         .map(|config| config.vault.dirs.clone())
         .unwrap_or_default();
     std::fs::create_dir_all(&root).map_err(|error| miette::miette!("create vault: {error}"))?;
-    let session = super::execution::acquire_mutation(&root, wait_for_vault, &pin).await?;
+    let session = super::publication::acquire_mutation(&root, wait_for_vault, &pin).await?;
     let plan = lk_vault::plan_navigation_entry(session.root(), locale, &dirs)
         .map_err(|error| miette::miette!("validate navigation entry: {error}"))?;
     let snapshot = prepare_discovery_snapshot(

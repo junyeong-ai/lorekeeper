@@ -591,7 +591,7 @@ async fn apply_into(
     let mutation = if dry_run {
         None
     } else {
-        Some(super::execution::acquire_mutation(&vault_root, wait_for_vault, &pin).await?)
+        Some(super::publication::acquire_mutation(&vault_root, wait_for_vault, &pin).await?)
     };
     let _claim = claim_writer(&queue_dir, dry_run)?;
     rejections::validate_store(&vault_root)?;

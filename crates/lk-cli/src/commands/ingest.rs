@@ -479,7 +479,7 @@ async fn run_with_identity(
     } else {
         std::fs::create_dir_all(&vault_root).map_err(|e| miette::miette!("create vault: {e}"))?;
         Some(
-            super::execution::acquire_mutation(
+            super::publication::acquire_mutation(
                 &vault_root,
                 access.wait_for_vault,
                 &super::ConfigurationPin::from_loaded(config_path.clone(), config_revision.clone()),

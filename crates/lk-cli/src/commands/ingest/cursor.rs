@@ -51,7 +51,7 @@ pub(super) async fn reserve_start(
     } else {
         std::fs::create_dir_all(root).into_diagnostic()?;
         Some(
-            super::super::execution::acquire_mutation_checked(root, wait, &mut validate_config)
+            super::super::publication::acquire_mutation_checked(root, wait, &mut validate_config)
                 .await?,
         )
     };
