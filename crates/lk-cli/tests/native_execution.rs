@@ -4549,9 +4549,12 @@ fn parallel_native_observers_overlap_on_both_hosts_with_same_and_distinct_work()
                     .join(format!("{node}.json"));
                 let output: serde_json::Value =
                     serde_json::from_slice(&std::fs::read(receipt).unwrap()).unwrap();
-                assert_eq!(output["summary"], format!("Read native node {node}"));
-                assert_eq!(output["node_id"], row["node_id"]);
-                assert_eq!(output["work_id"], row["work_id"]);
+                assert_eq!(
+                    output["output"]["summary"],
+                    format!("Read native node {node}")
+                );
+                assert_eq!(output["output"]["node_id"], row["node_id"]);
+                assert_eq!(output["output"]["work_id"], row["work_id"]);
             }
             assert_eq!(parallel_receipts(&fixture), 2);
             assert_eq!(
