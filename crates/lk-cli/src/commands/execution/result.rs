@@ -32,7 +32,7 @@ impl Output {
                 let mut bytes = Vec::new();
                 std::fs::File::open(&self.result_path)
                     .into_diagnostic()?
-                    .take(self.transport_limit as u64 + 1)
+                    .take(self.transport_limit.saturating_add(1) as u64)
                     .read_to_end(&mut bytes)
                     .into_diagnostic()?;
                 if bytes.len() > self.transport_limit {
@@ -118,6 +118,12 @@ mod tests {
             invocation.response(b"unbounded tool events", 64).unwrap(),
             json!({"value":"exact"})
         );
+        invocation.transport_limit = usize::MAX;
+        assert_eq!(
+            invocation.response(b"", 64).unwrap(),
+            json!({"value":"exact"})
+        );
+        invocation.transport_limit = 128;
         std::fs::write(&path, "x".repeat(129)).unwrap();
         assert!(invocation.response(b"", 64).is_err());
         invocation.engine = AgentEngine::ClaudeCode;
