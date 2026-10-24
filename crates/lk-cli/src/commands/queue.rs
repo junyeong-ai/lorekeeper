@@ -1629,6 +1629,10 @@ fn prune_queue_with_session(
                 if removed != 0 {
                     eprintln!("pruned {removed} unreferenced whole-section action receipt(s)");
                 }
+                let removed = super::work::generation::prune(session, &identities)?;
+                if removed != 0 {
+                    eprintln!("pruned {removed} unreferenced native result action receipt(s)");
+                }
             }
             let removed = super::work::prune_discovery(session, &identities)?;
             if removed != 0 {

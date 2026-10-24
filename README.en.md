@@ -460,11 +460,14 @@ its observations and binds fresh reviews and evidence separately before using th
 the input bound defers only that target; independent work continues. The model returns
 a section body. Rust owns task identity,
 revision checks, staging and publication. A required read or review defers the task without
-calling the same unchanged request again; independent work continues. Concept extraction,
-synthesis and audits retain tool-using finalization. Native queue selections and
+calling the same unchanged request again; independent work continues. Concept extraction and
+synthesis retain tools with a schema-constrained semantic response; Rust assembles the
+original task/result metadata and owns finish, staging and publication. Audits retain
+their interactive finalization protocol. Native queue selections and
 completed extraction/synthesis finalizers receive [prepared native input](skills/lore-process/references/native-input.md)
 through supervised stdin, with exact captured metadata, evidence and applicable shared rules.
-Private request files allow bounded continuation reads when a tool display is incomplete.
+Native result workers do not recreate result metadata/files or call finish/apply.
+An explicit needs-action response retains work and suppresses unchanged calls.
 This replaces routine setup reads; targeted identity checks and explicit repair remain available.
 Changed scope or completed observations refuse before sealing and publication.
 

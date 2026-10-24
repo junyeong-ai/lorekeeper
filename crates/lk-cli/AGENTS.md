@@ -54,8 +54,8 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   and cancellation. Invocation counts and wall time are not tokens or billed cost.
   Native work telemetry retains at most 1024 evidence/screening/finalizer steps and counts
   omissions. Measure existing operations only; unknown/inapplicable fields are null.
-  Compact request/decoded-result bytes exclude prompts and host envelopes; prepared interactive
-  finalizer request bytes are measured; interactive response bytes remain unobserved. Revalidation and recording share one measured operation.
+  Compact request/decoded-result bytes exclude prompts and host envelopes; tool-enabled native
+  result request/response bytes are measured; ordinary interactive audit responses remain unobserved. Revalidation and recording share one measured operation.
   Parallel invocation durations are summed and can exceed elapsed job time.
   Queue-planning metrics count local checkpoints and shared synthesis captures,
   separately from later revalidation and host work. `mutation_access` measures
@@ -125,10 +125,14 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
 - Native inspection/reduction and screening are structured inference roles
   (`execution/observation.rs`); bounded single-section finalization uses
   `execution/finalization.rs`. Rust selects applicable shared generation rules through
-  typed task/target kinds. Extraction, synthesis and audits retain interactive finalization.
-  stdin carries only the bounded request and instructions, stdout is bounded and
-  decoded by the host's explicit response contract. Rust owns recording the selected
-  observation or creating the guarded section result. Claude disables tools/customizations;
+  typed task/target kinds. Extraction/synthesis use tool-enabled final-schema responses;
+  audits retain interactive finalization. Native Rust assembles TaskResult/SynthesisResult
+  metadata from the exact prepared scope, reserves envelope bytes and owns finish/staging.
+  Models return semantic values or needs-action only. Do not couple output schema to
+  tool prohibition, scrape events/prose or mutate saved Work to adopt a reply.
+  Tool-free observation, screening and section roles carry the bounded request through
+  stdin and decode bounded stdout. Rust records the selected observation or creates
+  the guarded section result. In those roles Claude disables tools/customizations;
   Codex uses a read-only sandbox.
   Never fall back to parsing prose/Markdown when structured output is missing or invalid.
   Evidence observers return only a typed observation body or processing-action reason.
@@ -154,13 +158,17 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   legacy section wire contract. Pending identities protect actions during queue pruning.
 - Prepared native selections/finalizers supply exact metadata, admitted evidence/root and
   complete shared contracts through supervised stdin, within the complete serialized
-  JSON input bound. Ordinary interactive roles retain their argument prompt. Private
-  request files permit bounded continuation reads; complete consumption is not limited
-  to one tool display. Their transport never authorizes changed scope or certifies a read.
-  Native finalizer children
-  pin the original request bytes; `work finish` checks that inherited pin even when
-  `--prepared` is omitted, then compares current completion before sealing. Standalone
-  record/result contracts and saved Work remain unchanged.
+  JSON input bound. Ordinary interactive roles retain their argument prompt. Legacy
+  prepared requests and standalone consumers may use private files with bounded
+  continuation reads; one tool display is not a complete-read requirement. No transport
+  authorizes changed scope or certifies a read.
+  Tool-enabled native results are decoded only from Claude terminal structured_output
+  or Codex explicit final-message output; complete semantic and assembled-result bounds
+  stay separate. Fresh request/root comparison precedes sealing/staging. Native workers
+  do not run work finish/apply. Standalone record/result contracts, inherited prepared
+  finish pins and saved Work remain unchanged. Exact request-bound action receipts
+  suppress unchanged native calls; unknown/corrupt state refuses and pending identities
+  protect receipts from pruning.
 - Native queue scheduling chooses one task per target so publication cannot invalidate
   another simultaneous task on the same page. Whole-input tasks share an evidence-bounded
   batch; oversized work reserves fair inspection/reduction/finalization turns.

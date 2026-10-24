@@ -25,7 +25,7 @@ impl Fixture {
         } else {
             "2.1.303 (Claude Code)"
         };
-        std::fs::write(&agent, format!("#!/bin/sh\nif [ \"$1\" = --version ]; then printf '%s\\n' '{version}'; exit; fi\nprintf '%s\\n' \"$@\" > \"$TEST_EXECUTION_ROOT/arguments\"\ncase \"$*\" in *--output-schema*|*--safe-mode*) ;; *) /bin/cat > \"$TEST_EXECUTION_ROOT/interactive-request.txt\" ;; esac\n{behavior}\n")).unwrap();
+        std::fs::write(&agent, format!("#!/bin/sh\nif [ \"$1\" = --version ]; then printf '%s\\n' '{version}'; exit; fi\nprintf '%s\\n' \"$@\" > \"$TEST_EXECUTION_ROOT/arguments\"\ncase \"$*\" in *--output-last-message*) /bin/cat > \"$TEST_EXECUTION_ROOT/interactive-request.txt\" ;; *--output-schema*|*--safe-mode*) ;; *) /bin/cat > \"$TEST_EXECUTION_ROOT/interactive-request.txt\" ;; esac\n{behavior}\n")).unwrap();
         std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o755)).unwrap();
         let config = root.join("config.yaml");
         std::fs::write(&config, format!("vault:\n  root: vault\nidentity:\n  name: Test\n  email: test@example.com\nsources:\n  notes:\n    type: manual\n    params: {{inbox_dir: inbox}}\n    labels: [knowledge]\n    concept_policy: supported-new\nexecution:\n  default_profile: primary\n  profiles:\n    primary:\n      engine: {engine}\n      executable: {}\n      timeout_seconds: {timeout}\n      work: {{extraction_context: full-context}}\n", serde_json::to_string(&agent).unwrap())).unwrap();
@@ -143,6 +143,7 @@ impl Fixture {
 
 const WHOLE_SECTION: &str = r#"
 case "$*" in
+  *--output-last-message*) ;;
   *--output-schema*|*--safe-mode*)
     /bin/cat > "$TEST_EXECUTION_ROOT/whole-section-request.txt"
     python3 - "$@" <<'SECTION'
@@ -513,21 +514,20 @@ else:
     assert '--model=claude-sonnet-5-5' in sys.argv
     assert os.environ['CLAUDE_CODE_EFFORT_LEVEL']=='medium'
 prompt=(Path(os.environ['TEST_EXECUTION_ROOT'])/'interactive-request.txt').read_text() or '\n'.join(sys.argv[1:])
-selection,_=json.JSONDecoder().raw_decode(prompt.split('Selected queue task manifest: ',1)[1])
-path=Path(selection)
 raw=prompt.split('\nNative request:\n',1)[1]
-assert raw.encode()==path.read_bytes()
 request=json.loads(raw)
-assert request==json.loads(path.read_text())
-assert not any('native-selected-v1' in arg for arg in sys.argv[1:])
-assert request['schema']=='native-selected-v1'
-assert request['tasks'] and request['contracts']
+assert request['schema']=='native-selected-results-v1'
+assert request['tasks'] and request['contracts'] and request['response_schema']
 for selected in request['tasks']:
-    assert selected['task']['task_id']
-    assert selected['resources']
+    assert selected['task']['task_id'] and selected['resources']
     assert all(0<=index<len(request['contracts']) for index in selected['contract_indices'])
 granted=[Path(sys.argv[index+1]).resolve() for index,arg in enumerate(sys.argv[:-1]) if arg=='--add-dir']
-assert path.parent.resolve() in granted, 'selection must be readable inside an explicitly granted directory'
+if '--output-last-message' in sys.argv:
+    path=Path(sys.argv[sys.argv.index('--output-last-message')+1])
+else:
+    assert '--json-schema' in sys.argv and '--allowedTools' in sys.argv
+    path=granted[-1]/'result.json'
+assert path.parent.resolve() in granted
 (Path(os.environ['TEST_EXECUTION_ROOT'])/'selection-path').write_text(str(path))
 CHECK
 "#,
@@ -600,8 +600,8 @@ fn knowledge_queue_consumer_receives_bounded_maintenance_context() {
     );
     assert_eq!(result["ok"], false);
     let prompt = std::fs::read_to_string(fixture.root().join("interactive-request.txt")).unwrap();
-    assert!(prompt.contains("bounded knowledge maintenance job"));
-    assert!(prompt.contains("Read the selected work's review dependencies"));
+    assert!(prompt.contains("native-selected-results-v1"));
+    assert!(prompt.contains("scoped"));
     assert!(prompt.contains("native controller owns final reconciliation"));
     assert!(
         result["stages"]
@@ -1253,13 +1253,14 @@ fn selected_review_drift_blocks_audit_completion_without_becoming_a_global_healt
 
 const RECORD_BOUNDED_AUDIT: &str = r#"
 case "$*" in
+  *--output-last-message*) ;;
   *--output-schema*|*--safe-mode*) pwd > "$TEST_EXECUTION_ROOT/observation-cwd"; /bin/cat > "$TEST_EXECUTION_ROOT/native-request.txt" ;;
 esac
 exec python3 - "$@" <<'BOUNDED'
 import json, os, re, subprocess, sys
 from pathlib import Path
 root=Path(os.environ['TEST_EXECUTION_ROOT'])
-native='--output-schema' in sys.argv or '--safe-mode' in sys.argv
+native=('--output-schema' in sys.argv and '--output-last-message' not in sys.argv) or '--safe-mode' in sys.argv
 prompt=(root/'interactive-request.txt').read_text() if (root/'interactive-request.txt').exists() else ''
 prompt=prompt or '\n'.join(sys.argv[1:])
 if native:
@@ -2380,6 +2381,18 @@ fn build_extraction_behavior(discovery_handler: &str) -> String {
         "    if match is None:\n        raise SystemExit('expected an exact bounded native request')",
         discovery_handler,
     );
+    behavior = behavior.replace("native=('--output-schema'", r#"result_role='--output-last-message' in sys.argv or ('--json-schema' in sys.argv and '--safe-mode' not in sys.argv)
+if result_role:
+    prepared=json.loads((root/'interactive-request.txt').read_text().split('\nNative request:\n',1)[1])
+    if prepared['schema']=='native-finalize-results-v1':
+        output={'results':[{'status':'complete','value':{'concepts':[]},'reason':None}]}
+        with (root/'bounded-calls.jsonl').open('a') as stream:
+            stream.write(json.dumps({'action':'finish','work_id':prepared['completed']['work_id']})+'\n')
+        if '--output-last-message' in sys.argv:
+            Path(sys.argv[sys.argv.index('--output-last-message')+1]).write_text(json.dumps(output))
+        else: print(json.dumps({'type':'result','subtype':'success','is_error':False,'structured_output':output}))
+        raise SystemExit()
+native=('--output-schema'"#);
     behavior = behavior.replace(
         "        assert all('text' in item for item in request['input']['ranges'])",
         "        assert all('text' in item for item in request['input']['ranges'])\n        row['addresses']=[item['address'] for item in request['input']['ranges']]",
@@ -2488,9 +2501,8 @@ fn small_extraction_hands_expanded_discovery_to_bounded_work_on_both_hosts() {
     let behavior = build_extraction_behavior(
         r#"    if match is None:
         prompt=(Path(os.environ['TEST_EXECUTION_ROOT'])/'interactive-request.txt').read_text() or '\n'.join(sys.argv[1:])
-        path,_=json.JSONDecoder().raw_decode(prompt.split('Selected queue task manifest: ',1)[1])
-        prepared=json.loads(Path(path).read_text())
-        assert prepared['schema']=='native-selected-v1'
+        prepared=json.loads(prompt.split('\nNative request:\n',1)[1])
+        assert prepared['schema']=='native-selected-results-v1'
         assert prepared['contracts']
         ids=[selected['task']['task_id'] for selected in prepared['tasks']]
         lore=os.environ['LORE_BIN']
@@ -2507,7 +2519,7 @@ fn small_extraction_hands_expanded_discovery_to_bounded_work_on_both_hosts() {
                 request={'target_revision':row['target_revision'],'queries':[{'query':'transactional outbox','phrase':True,'spacing':False}]}
                 file=root/'extraction-discovery.json'
                 file.write_text(json.dumps(request))
-                subprocess.run([lore,'work','discover','--task-id',task['task_id'],'--file',str(file)],check=True)
+                subprocess.run([lore,'work','discover','--task-id',task['task_id'],'--file',str(file)],check=True,capture_output=True,text=True)
                 context=json.loads(subprocess.check_output([lore,'work','context','--task-id',task['task_id']]))
                 if context['requires_bounded_work']:
                     assert context['resources'] is None
@@ -2520,6 +2532,10 @@ fn small_extraction_hands_expanded_discovery_to_bounded_work_on_both_hosts() {
                 result.update(target_revision=row['target_revision'],body='Completed the other selected source.')
                 (results/(task['task_id']+'.section.json')).write_text(json.dumps(result))
         (root/'selected-handoff.json').write_text(json.dumps(ids))
+        output={'results':[{'status':'needs-action','value':None,'reason':'Fresh discovery scope requires replanning.'} for _ in ids]}
+        if '--output-last-message' in sys.argv:
+            Path(sys.argv[sys.argv.index('--output-last-message')+1]).write_text(json.dumps(output))
+        else: print(json.dumps({'type':'result','subtype':'success','is_error':False,'structured_output':output}))
         raise SystemExit(0)"#,
     );
     for engine in ["claude-code", "codex"] {
@@ -2606,12 +2622,11 @@ fn small_extraction_hands_expanded_discovery_to_bounded_work_on_both_hosts() {
                 "{engine}, expands={expands}: {result}"
             );
             assert!(fixture.root().join("selected-handoff.json").exists());
-            assert_eq!(
+            assert!(
                 std::fs::read_to_string(root.join("wiki/documents/summary.md"))
                     .unwrap()
                     .contains("summary_done:"),
-                expands,
-                "an unexpanded interactive attempt without a result stops before independent publication"
+                "an explicit blocked extraction preserves independent section publication"
             );
             assert_eq!(
                 std::fs::read_to_string(root.join("wiki/documents/source.md"))
@@ -2639,8 +2654,8 @@ fn small_extraction_hands_expanded_discovery_to_bounded_work_on_both_hosts() {
                         .as_array()
                         .unwrap()
                         .iter()
-                        .any(|stage| stage["name"] == "selected queue receipt"
-                            && stage["state"] == "failed")
+                        .any(|stage| stage["name"] == "native selected action"
+                            && stage["state"] == "skipped")
                 );
             }
         }
@@ -2649,6 +2664,7 @@ fn small_extraction_hands_expanded_discovery_to_bounded_work_on_both_hosts() {
 
 const RECORD_PROGRESSIVE_EXTRACTION: &str = r#"
 case "$*" in
+  *--output-last-message*) ;;
   *--output-schema*|*--safe-mode*) /bin/cat > "$TEST_EXECUTION_ROOT/native-request.txt" ;;
 esac
 exec python3 - "$@" <<'PROGRESSIVE'
@@ -2666,7 +2682,35 @@ def cli(*args):
 def log(row):
     with (root/'progressive-calls.jsonl').open('a') as stream:
         stream.write(json.dumps(row)+'\n')
-native='--output-schema' in sys.argv or '--safe-mode' in sys.argv
+result_role='--output-last-message' in sys.argv or ('--json-schema' in sys.argv and '--safe-mode' not in sys.argv)
+if result_role:
+    prepared=json.loads((root/'interactive-request.txt').read_text().split('\nNative request:\n',1)[1])
+    assert prepared['schema']=='native-selected-results-v1'
+    output={'results':[]}
+    for selected in prepared['tasks']:
+        task=selected['task']
+        if not selected['context']['purpose']['discovery']['queries']:
+            rows=cli('queue','status','--json')['data']['tasks']
+            row=next(row for row in rows if row['task_id']==task['task_id'])
+            file=root/'progressive-discovery.json'
+            file.write_text(json.dumps({'target_revision':row['target_revision'],
+                'queries':[{'query':'transactional outbox','phrase':True,'spacing':False}]}))
+            cli('work','discover','--task-id',task['task_id'],'--file',str(file))
+            cli('work','select','--task-id',task['task_id'])
+            log({'action':'discovery','task_id':task['task_id']})
+            output['results'].append({'status':'needs-action','value':None,'reason':'Explicit discovery requires fresh candidate screening.'})
+            continue
+        addresses=[resource['address'] for resource in selected['resources'] if resource['address']!=selected['target_resource']]
+        assert 'wiki/documents/candidate-000.md' in addresses
+        assert all('candidate-' not in address or address.endswith('/candidate-000.md') for address in addresses)
+        output['results'].append({'status':'complete','value':{'concepts':[]},'reason':None})
+        log({'action':'final','task_id':task['task_id'],'resources':addresses,
+             'selection':selected['context']['purpose']['extraction_scope']['selection']})
+    if '--output-last-message' in sys.argv:
+        Path(sys.argv[sys.argv.index('--output-last-message')+1]).write_text(json.dumps(output))
+    else: print(json.dumps({'type':'result','subtype':'success','is_error':False,'structured_output':output}))
+    raise SystemExit()
+native=('--output-schema' in sys.argv and '--output-last-message' not in sys.argv) or '--safe-mode' in sys.argv
 if native:
     request=json.loads((root/'native-request.txt').read_text().split('\nNative request:\n',1)[1])
     assert request['policy']=='progressive-evidence-v1'
@@ -3150,8 +3194,17 @@ fn progressive_native_screening_keeps_complete_inventory_and_reads_only_admitted
             .filter(|call| call["action"] == "screen")
             .collect::<Vec<_>>();
         assert!(batches.len() > 1);
-        let steps = report["work_steps"].as_array().unwrap();
+        let all_steps = report["work_steps"].as_array().unwrap();
+        let steps = all_steps
+            .iter()
+            .filter(|step| step["role"] == "screening")
+            .collect::<Vec<_>>();
         assert_eq!(steps.len(), batches.len());
+        assert!(
+            all_steps
+                .iter()
+                .any(|step| step["role"] == "finalizer" && step["outcome"] == "staged")
+        );
         for (step, batch) in steps.iter().zip(&batches) {
             assert_eq!(step["role"], "screening");
             assert_eq!(step["selection_id"], batch["selection_id"]);
@@ -4277,7 +4330,7 @@ fn a_failed_host_stops_period_planning_and_preserves_final_read_checks() {
     assert!(!names.iter().any(|name| name.starts_with("period resume")));
     let failed_host = names
         .iter()
-        .position(|name| *name == "lore-process")
+        .position(|name| *name == "native result host")
         .unwrap();
     let final_stages = &result["stages"].as_array().unwrap()[failed_host + 1..];
     assert!(
@@ -4588,6 +4641,7 @@ fn cancellation_stops_further_stages_when_zombie_group_cleanup_returns_eperm() {
 
 const PARALLEL_OBSERVATIONS: &str = r#"
 case "$*" in
+  *--output-last-message*) ;;
   *--output-schema*|*--safe-mode*)
     export TEST_PARALLEL_REQUEST="$TEST_EXECUTION_ROOT/parallel-request-$$.txt"
     /bin/cat > "$TEST_PARALLEL_REQUEST"
@@ -5178,8 +5232,8 @@ fn native_queue_preserves_interactive_batching_and_stops_at_capability_boundarie
 import json, os, sys
 from pathlib import Path
 prompt=(Path(os.environ['TEST_EXECUTION_ROOT'])/'interactive-request.txt').read_text() or '\n'.join(sys.argv[1:])
-path,_=json.JSONDecoder().raw_decode(prompt.split('Selected queue task manifest: ',1)[1])
-Path(os.environ['TEST_EXECUTION_ROOT'],'selected-batch.json').write_bytes(Path(path).read_bytes())
+request=json.loads(prompt.split('\nNative request:\n',1)[1])
+Path(os.environ['TEST_EXECUTION_ROOT'],'selected-batch.json').write_text(json.dumps(request))
 BATCH"#;
             std::fs::write(agent, script.replacen("exit 0", capture, 1)).unwrap();
         }
@@ -5218,7 +5272,7 @@ BATCH"#;
                 &std::fs::read(fixture.root().join("selected-batch.json")).unwrap(),
             )
             .unwrap();
-            assert_eq!(selected["schema"], "native-selected-v1");
+            assert_eq!(selected["schema"], "native-selected-results-v1");
             assert!(!selected["contracts"].as_array().unwrap().is_empty());
             let tasks = selected["tasks"].as_array().unwrap();
             assert_eq!(
@@ -5918,6 +5972,7 @@ fn native_daily_without_wait_refuses_busy_publication_before_semantic_execution(
 
 const PARALLEL_SCREENING: &str = r#"
 case "$*" in
+  *--output-last-message*) ;;
   *--output-schema*|*--safe-mode*)
     export TEST_SCREENING_REQUEST="$TEST_EXECUTION_ROOT/screening-request-$$.txt"
     /bin/cat > "$TEST_SCREENING_REQUEST" ;;

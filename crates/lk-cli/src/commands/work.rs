@@ -5,7 +5,11 @@ use serde_json::{Value, json};
 
 use super::{GlobalOptions, find_config, load_config_with_revision};
 
+#[cfg(unix)]
+mod action;
 mod discovery;
+#[cfg(unix)]
+pub(super) mod generation;
 #[cfg(unix)]
 pub(super) mod native;
 mod publication;
@@ -1211,8 +1215,12 @@ fn validate_native_finalization(
     request: &Value,
 ) -> miette::Result<Value> {
     let completed = work.result(root, &prepared.resources)?;
+    let Subject::Queue { task_id, .. } = &prepared.subject else {
+        return Err(miette::miette!("native result requires a queue task"));
+    };
+    let task = super::queue::current_task(root, task_id)?;
     let current =
-        native::finalization_request(config, work, &work.plan.subject_revision, &completed)?;
+        native::finalization_request(config, &task, work, &work.plan.subject_revision, &completed)?;
     if &current != request {
         return Err(miette::miette!(
             "native finalization scope or completed observations changed; reread and regenerate"
@@ -1272,20 +1280,6 @@ fn finish_with_preparation(
     } else {
         finish(session, work, prepared, result)
     }
-}
-
-#[cfg(unix)]
-pub(super) fn verify_native_finalization(
-    root: &Path,
-    config: &lk_core::config::Config,
-    config_revision: &str,
-    id: &str,
-    request: &Value,
-) -> miette::Result<()> {
-    let root = root.canonicalize().into_diagnostic()?;
-    let (work, prepared) = load(&root, config, config_revision, id)?;
-    validate_native_finalization(&root, config, &work, &prepared, request)?;
-    verify_finished_prepared(&root, &work, &prepared)
 }
 
 pub(super) fn prepare_task(
@@ -1436,7 +1430,18 @@ fn prepare_task_in_session(
             }
             let owner = lk_vault::resolve_page_owner(root, Path::new(&task.target.vault_path))
                 .into_diagnostic()?;
-            let input = native::selected_task(config, task, &prepared, &work, &owner)?;
+            let input = match native::selected_task(config, task, &prepared, &work, &owner) {
+                Ok(input) => input,
+                Err(error) if error.downcast_ref::<generation::ResultCapacity>().is_some() => {
+                    return Ok(TaskWork::Admission {
+                        reason: error.to_string(),
+                    });
+                }
+                Err(error) => return Err(error),
+            };
+            if let Some(reason) = generation::action_reason(root, config, &input)? {
+                return Ok(TaskWork::Admission { reason });
+            }
             let request = native::selected_request(config, std::slice::from_ref(&input))?;
             let bytes = serde_json::to_vec(&request).into_diagnostic()?.len();
             if bytes <= work.max_input_bytes {
@@ -1580,10 +1585,16 @@ pub(super) struct SectionFinalization {
 }
 
 #[cfg(unix)]
+pub(super) struct ResultFinalization {
+    pub request: Value,
+    completed: Value,
+}
+
+#[cfg(unix)]
 pub(super) enum FinalizationPreparation {
     Interactive,
-    PreparedInteractive(Box<Value>),
     Ready(Box<SectionFinalization>),
+    Result(Box<ResultFinalization>),
     NeedsAction(String),
     Capacity {
         request_bytes: usize,
@@ -1665,8 +1676,19 @@ pub(super) fn prepare_finalization(
     let task = super::queue::current_task(&root, task_id)?;
     let completed = work.result(&root, &prepared.resources)?;
     if !super::execution::finalization::supports(task.kind) {
-        let request =
-            native::finalization_request(config, &work, &work.plan.subject_revision, &completed)?;
+        let request = match native::finalization_request(
+            config,
+            &task,
+            &work,
+            &work.plan.subject_revision,
+            &completed,
+        ) {
+            Ok(request) => request,
+            Err(error) if error.downcast_ref::<generation::ResultCapacity>().is_some() => {
+                return Ok(FinalizationPreparation::NeedsAction(error.to_string()));
+            }
+            Err(error) => return Err(error),
+        };
         let request_bytes = serde_json::to_vec(&request).into_diagnostic()?.len();
         if request_bytes > work.max_input_bytes {
             return Ok(FinalizationPreparation::Capacity {
@@ -1674,8 +1696,21 @@ pub(super) fn prepare_finalization(
                 max_input_bytes: work.max_input_bytes,
             });
         }
-        return Ok(FinalizationPreparation::PreparedInteractive(Box::new(
-            request,
+        if let Some(reason) =
+            work.load_finalization_action_for(&root, &request, &completed["result_revision"])?
+        {
+            return Ok(FinalizationPreparation::NeedsAction(reason));
+        }
+        if completed["output"]["unresolved"]
+            .as_array()
+            .is_some_and(|items| !items.is_empty())
+        {
+            return Ok(FinalizationPreparation::NeedsAction(
+                "unresolved work concerns prevent native finalization".into(),
+            ));
+        }
+        return Ok(FinalizationPreparation::Result(Box::new(
+            ResultFinalization { request, completed },
         )));
     }
     let scope = resources::section_task(&root, config, task_id)?;
@@ -1750,6 +1785,55 @@ pub(super) fn prepare_finalization(
             max_response_bytes,
         },
     )))
+}
+
+#[cfg(unix)]
+pub(super) fn finish_result(
+    session: &lk_vault::MutationSession,
+    config: &lk_core::config::Config,
+    config_revision: &str,
+    id: &str,
+    result: ResultFinalization,
+    reply: Value,
+) -> miette::Result<Option<String>> {
+    let root = session.root();
+    let (work, prepared) = load(root, config, config_revision, id)?;
+    let completed = validate_native_finalization(root, config, &work, &prepared, &result.request)?;
+    if completed != result.completed {
+        return Err(miette::miette!(
+            "completed Work changed before native finalization"
+        ));
+    }
+    let Subject::Queue { task_id, .. } = &prepared.subject else {
+        return Err(miette::miette!("native result requires a queue subject"));
+    };
+    let task = super::queue::current_task(root, task_id)?;
+    match generation::assemble_prepared(
+        &task,
+        &prepared,
+        &work.plan.subject_revision,
+        reply,
+        work.plan.max_result_bytes,
+    )? {
+        generation::Outcome::NeedsAction(reason) => {
+            let mut plan = work.plan_finalization_action(
+                root,
+                &prepared.resources,
+                &completed,
+                &result.request,
+                reason.clone(),
+            )?;
+            prepared.guard_pages(&mut plan);
+            session.apply(plan).into_diagnostic()?;
+            Ok(Some(reason))
+        }
+        generation::Outcome::Complete(value) => {
+            let (_, plan) =
+                plan_finish_expected(session, &work, &prepared, value, Some(&completed))?;
+            session.apply(plan).into_diagnostic()?;
+            Ok(None)
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -2752,9 +2836,14 @@ mod tests {
                 .complete
         );
         let completed = work.result(&root, &prepared.resources).unwrap();
-        let request =
-            native::finalization_request(&config, &work, &work.plan.subject_revision, &completed)
-                .unwrap();
+        let request = native::finalization_request(
+            &config,
+            &task,
+            &work,
+            &work.plan.subject_revision,
+            &completed,
+        )
+        .unwrap();
         validate_native_finalization(&root, &config, &work, &prepared, &request).unwrap();
         let bytes = serde_json::to_vec(&request).unwrap();
         let revision = lk_core::rss_original::digest(&bytes);

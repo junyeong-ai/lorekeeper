@@ -1,48 +1,56 @@
-# Prepared native input
+# Prepared native results
 
-Use only when the native controller supplies a complete `native-selected-v1` or
-`native-finalize-v1` request in the invocation prompt. Its private file permits bounded continuation
-reads when a tool display is incomplete; it is not another
-knowledge authority, completion receipt or permission to change unrelated work.
+Use only when the native controller supplies `native-selected-results-v1` or
+`native-finalize-results-v1`. The complete request arrives through supervised stdin.
+It is neither semantic completion nor permission to process unrelated work.
 
 ## Selected tasks
 
-Consume the complete request. Do not treat one tool command as proof that its
-entire output was visible; continue or reread bounded portions as needed, preserving
-the exact request bytes. `tasks` contains the exact queue metadata, captured subject
-and `context_revision`, complete admitted `resources`, target owner and retained-input
-reference. The retained source appears as evidence once; its `task.input.text` is
-replaced by that explicit resource reference. `contract_indices` select the complete
-applicable entries in shared `contracts`.
-
-Read every supplied resource and applicable contract. Use these prepared values
-instead of ordinary config/schema discovery, full queue status/JSONL enumeration,
-repeated `work context` and reference-file intake. Other tasks are outside this call.
-Keep source, target, context and reviews distinct; a candidate is not automatically
-the same concept or independent corroboration.
-
-Targeted name/alias resolution, missing required reads, discovery correction and
-review/repair remain interactive capabilities. Changed evidence, review publication
-or expanded discovery requires current scope and a new draft. Never copy new guards
-onto old prose. An incomplete or blocked scope remains pending. Stage and apply the
-existing typed result; native Rust owns global reconciliation and checks.
+Read every supplied resource and applicable contract. `tasks` contains exact queue
+metadata, captured subject/context revisions, admitted resources and target owner.
+The retained source appears once as evidence; `task.input.text` is replaced by its
+explicit resource reference. `contract_indices` select shared `contracts`.
+These values replace ordinary configuration, queue enumeration, repeated `work context`
+and reference-file intake. A candidate is not automatically the same concept or
+independent corroboration.
 
 ## Completed Work
 
-For `native-finalize-v1`, `completed` contains the exact complete root, evidence map,
-source questions and processing concerns. `context_revision` is its publication
-scope; `completed.input_revision` is the distinct root request guard. Follow the
-included shared contracts without restarting ordinary intake or full-source reads.
-Resolve names and request only missing decision-relevant evidence or repairs.
+`completed` supplies the exact complete root, evidence mapping, source questions and
+processing concerns. Its `input_revision` is distinct from the publication
+`context_revision`. Generate from those observations without restarting preceding
+intake, discovery or full-source reading. Preserve source questions as attributed
+uncertainty; processing blockers do not become source questions or approval.
 
-Submit `lore work finish WORK --file RESULT --prepared REQUEST` using the supplied
-request file. The native invocation also pins its exact request bytes for child
-commands, so omitting the flag cannot remove the guard. A changed file, root or scope
-refuses before sealing; retain the draft and replan. Standalone `work finish` keeps
-its existing contract when no native request is inherited.
+## Semantic response
 
-Native Rust checks the complete serialized transport against the configured input
-bound. A batch may split between tasks; evidence/rules are never clipped. An unplanned
-singleton needing a larger envelope enters its ordinary exact Work protocol.
-Saved plans and observations are not rewritten. An oversized finalizer remains
-explicitly deferred. Currentness is rechecked after the host and at publication.
+Return one `results` entry for each selected task in supplied order, or one entry for
+a completed Work. Each entry has exactly `status`, `value` and `reason`:
+
+- Complete: `status: complete`, a semantic `value` object and `reason: null`.
+- Required action: `status: needs-action`, `value: null` and a concrete nonblank reason.
+
+An extraction value is `{concepts: [...]}` using the supplied concept schema: names,
+aliases, categories, explicit new/reuse admission, grounding and RSS article selections
+remain semantic judgments. A synthesis value is `{synthesis: "...", related: "..." | null}`.
+Use null or empty arrays for absent values required by the response schema. An empty
+concept list is valid. Do not add task IDs, hashes, dates, target, context, discovery,
+selection or source-question fields. Rust assembles the existing full result envelope
+from the original prepared scope, seals/stages it and publishes through guarded apply.
+Do not write result files or invoke `work finish`/`queue apply` in this native role.
+Standalone processing and `work finish` retain their existing full-result contracts.
+
+Targeted name/alias resolution, missing decision-relevant reads and review/repair tools
+remain available. Do not repeat setup or drain other tasks. New discovery, changed
+scope or review publication requires fresh preparation and regeneration, never new
+guards on old prose. Return `needs-action` when a required step cannot be completed.
+An unchanged exact request/action defers before another call; independent work continues.
+Never edit native receipts or retag earlier replies.
+
+The complete request remains subject to `max_input_bytes`. `max_response_bytes`
+reserves native result metadata within `max_result_bytes`; complete assembled results
+are checked again. An oversized request defers or enters the existing exact Work
+protocol without clipping evidence/rules or rewriting paid plans. After the host,
+Rust reconstructs the current full request/root before recording, then apply validates
+publication scope again. Codex's explicit final-response file and Claude's terminal
+`structured_output` are the response authorities; tool logs and prose are not results.

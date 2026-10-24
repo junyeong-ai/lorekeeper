@@ -35,7 +35,7 @@ fn instruction_section<'a>(document: &'a str, anchor: &str) -> miette::Result<&'
     Ok(&document[heading.range.end..end])
 }
 
-pub(in crate::commands) fn interactive_contracts(
+pub(in crate::commands) fn generation_contracts(
     config: &lk_core::config::Config,
     kind: TaskKind,
     target: TargetKind,
@@ -43,15 +43,9 @@ pub(in crate::commands) fn interactive_contracts(
     if !kind.supports_target(target) {
         return Err(miette::miette!("task kind does not support its target"));
     }
-    let (kind_heading, result_headings): (&str, &[&str]) = match kind {
-        TaskKind::ExtractConcepts => (
-            "## `kind: extract-concepts`",
-            &["## Extraction read scope", "## Single-section result"],
-        ),
-        TaskKind::SynthesizeConcept => (
-            "## `kind: synthesize-concept`",
-            &["## Synthesis result", "## Single-section result"],
-        ),
+    let kind_heading = match kind {
+        TaskKind::ExtractConcepts => "## `kind: extract-concepts`",
+        TaskKind::SynthesizeConcept => "## `kind: synthesize-concept`",
         TaskKind::Summarize | TaskKind::RefineEvents | TaskKind::IdentifyThemes => {
             return Err(miette::miette!(
                 "this task uses the structured section generation contract"
@@ -90,9 +84,12 @@ pub(in crate::commands) fn interactive_contracts(
             "## Extract-concepts (`kind: extract-concepts`) — per-type scoping",
         )?;
     }
-    let queue = reference("references/queue-format.md")?;
-    for heading in result_headings {
-        append("lore-process/references/queue-format.md", queue, heading)?;
+    if kind == TaskKind::ExtractConcepts {
+        append(
+            "lore-process/references/queue-format.md",
+            reference("references/queue-format.md")?,
+            "## Extraction read scope",
+        )?;
     }
     let schema = crate::commands::schema::render_agents_md(
         config.vault.locale(),
@@ -334,7 +331,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn interactive_contracts_include_complete_shared_rules_and_refuse_section_roles() {
+    fn generation_contracts_include_complete_shared_rules_and_refuse_section_roles() {
         let config =
             lk_core::yaml::from_str(include_str!("../../../../../config.starter.yaml")).unwrap();
         for (kind, target, expected) in [
@@ -349,7 +346,7 @@ mod tests {
                 "## `kind: synthesize-concept`",
             ),
         ] {
-            let contracts = interactive_contracts(&config, kind, target).unwrap();
+            let contracts = generation_contracts(&config, kind, target).unwrap();
             for heading in [
                 expected,
                 "## Relevance focus (all kinds)",
@@ -379,11 +376,11 @@ mod tests {
             );
         }
         assert!(
-            interactive_contracts(&config, TaskKind::Summarize, TargetKind::DocumentSummary)
+            generation_contracts(&config, TaskKind::Summarize, TargetKind::DocumentSummary)
                 .is_err()
         );
         assert!(
-            interactive_contracts(
+            generation_contracts(
                 &config,
                 TaskKind::ExtractConcepts,
                 TargetKind::ConceptSynthesis

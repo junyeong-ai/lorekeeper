@@ -15,7 +15,7 @@ not invoke this skill's commands or write draft/cache/page files. Claude runs wi
 built-in tools/customizations; Codex uses a read-only sandbox with command, app, plugin,
 hook and subagent features disabled. Both run in a private temporary workspace without
 copying the vault. Bounded native section finalization uses the same read-only host
-contract described below. Other finalizers and standalone interactive processing use
+contract described below. Audits and standalone interactive processing use
 the command protocol. These are distinct execution roles, not interchangeable write permissions.
 
 A native completion is `{status: "complete", observation: OBSERVATION, action: null}`.
@@ -183,15 +183,16 @@ blockers remain incomplete. A native action receipt prevents another invocation 
 the exact unchanged request. Independent tasks can continue. Changed requests may be
 reconsidered; explicit guarded `work finish` can resolve the task, and a verified sealed
 result can restage normally. Never edit native receipts, observations or guard fields
-to bypass pending work. Extraction, concept synthesis and audits use the interactive
-procedure below because their finalization can require identity checks, reviews or repairs.
+to bypass pending work. Native extraction and synthesis use the tool-enabled semantic
+response contract in [prepared native results](native-input.md). Native audits and
+standalone processing use the command procedure below.
 
 ## Finalize
 
-When the controller supplies `native-finalize-v1`, follow
+When the controller supplies `native-finalize-results-v1`, follow
 [prepared native input](native-input.md#completed-work) directly. It already contains
 the complete root, distinct context guard and applicable rules; do not repeat steps 1–2
-below. Its inherited pin and `--prepared` bind the exact handoff before sealing.
+below. Rust reconstructs the exact current request/root before sealing the assembled result.
 The command procedure below remains for standalone work and native audit finalizers.
 
 1. Read the complete `lore work result WORK`, continuing with bounded reads if a
@@ -256,7 +257,7 @@ or malformed staging remains an error; it is not silently overwritten.
 
 `lore run process --json` and other native jobs include `work_steps` for evidence,
 screening and finalization. The first 1024 steps are retained per run;
-`work_steps_omitted` counts later steps. Ordinary interactive processing and discovery
+`work_steps_omitted` counts later steps. Ordinary interactive discovery/audit calls
 remain in the aggregate `semantic_calls` and `semantic_duration_ms`, so this array
 is not a complete invocation ledger.
 
@@ -268,7 +269,7 @@ result; progress events do not establish publication, inference time or cost.
 | Fields | Meaning |
 | --- | --- |
 | `role`, `work_id`, `node_id`, `node_kind`, `selection_id`, `batch_id` | Exact selected work or screening identities; unavailable identities are `null` |
-| `request_json_bytes`, `result_json_bytes` | Compact UTF-8 JSON of the prepared request and decoded response (including a native observation/action envelope but excluding Rust-supplied identity), excluding prompts and host envelopes; prepared interactive finalizer request bytes are measured, its response bytes remain unobserved and `null` |
+| `request_json_bytes`, `result_json_bytes` | Compact UTF-8 JSON of the prepared request and decoded response (including a native observation/action envelope but excluding Rust-supplied identity), excluding prompts and host envelopes; tool-enabled native extraction/synthesis response bytes are measured, while ordinary interactive audit response bytes remain unobserved and `null` |
 | `preparation_duration_ms`, `preparation_from_queue_plan` | Additional local preparation of the selected request or completed root; a screening request carried from the same queue checkpoint has `null` duration and `true` reuse |
 | `agent_duration_ms` | Supervised invocation attempt wall time, including a failed or cancelled attempt; never server inference time |
 | `revalidation_record_duration_ms` | Fresh input validation and recording together; these operations are not measured separately |

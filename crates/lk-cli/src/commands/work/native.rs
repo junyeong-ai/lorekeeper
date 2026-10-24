@@ -69,7 +69,7 @@ fn selected_task_value(
         ));
     }
     work.whole_input_bytes(captured.resources)?;
-    let contracts = crate::commands::execution::finalization::interactive_contracts(
+    let contracts = crate::commands::execution::finalization::generation_contracts(
         config,
         task.kind,
         task.target.kind,
@@ -128,6 +128,7 @@ fn selected_task_value(
         "retained_input":retained, "target_resource":owner,
         "resources":resources, "contracts":contracts,
         "max_result_bytes":work.plan.max_result_bytes,
+        "max_response_bytes":super::generation::response_limit(task, captured.subject, captured.context, &work.plan.subject_revision, work.plan.max_result_bytes)?,
     }))
 }
 
@@ -167,15 +168,31 @@ pub(in crate::commands) fn selected_request(
         selected.push(task);
     }
     let limits = super::limits(config)?;
+    let max_response_bytes = tasks
+        .iter()
+        .map(|task| {
+            task["max_response_bytes"]
+                .as_u64()
+                .and_then(|value| usize::try_from(value).ok())
+                .ok_or_else(|| miette::miette!("missing native semantic response allowance"))
+        })
+        .collect::<miette::Result<Vec<_>>>()?
+        .into_iter()
+        .min()
+        .expect("nonempty selection");
     Ok(json!({
-        "schema":"native-selected-v1", "tasks":selected, "contracts":contracts,
+        "schema":"native-selected-results-v1", "tasks":selected, "contracts":contracts,
         "max_input_bytes":limits.max_input_bytes,
-        "instructions":"Process only these exact selected tasks. The supplied task metadata, context guards, resources and contracts replace ordinary queue enumeration and setup reads; read all supplied evidence in full. Contract indices select complete shared rules for each task. This transport is not a semantic read receipt or completion. Preserve explicit targeted name/alias resolution, revision-pinned reads and review/repair capabilities when necessary. Added discovery, changed evidence or review publication requires fresh scope and regeneration, never replacement guards on an old draft. Retain bounded handoffs and incomplete needs-action work; never clip evidence or drain unrelated tasks. Use the ordinary typed staging/publication protocol. The native controller owns global checks.",
+        "max_result_bytes":limits.max_result_bytes,
+        "max_response_bytes":max_response_bytes,
+        "response_schema":super::generation::schema(),
+        "instructions":super::generation::instruction(),
     }))
 }
 
 pub(in crate::commands) fn finalization_request(
     config: &Config,
+    task: &QueueTask,
     work: &Work,
     context_revision: &str,
     completed: &Value,
@@ -202,12 +219,16 @@ pub(in crate::commands) fn finalization_request(
     let kind: TaskKind = serde_json::from_value(purpose["task_kind"].clone()).into_diagnostic()?;
     let target: TaskTarget = serde_json::from_value(purpose["target"].clone()).into_diagnostic()?;
     let contracts =
-        crate::commands::execution::finalization::interactive_contracts(config, kind, target.kind)?;
+        crate::commands::execution::finalization::generation_contracts(config, kind, target.kind)?;
+    let subject: Subject =
+        serde_json::from_value(work.context["subject"].clone()).into_diagnostic()?;
     Ok(json!({
-        "schema":"native-finalize-v1", "context_revision":context_revision,
+        "schema":"native-finalize-results-v1", "context_revision":context_revision,
         "completed":completed, "contracts":contracts,
         "max_input_bytes":work.max_input_bytes, "max_result_bytes":work.plan.max_result_bytes,
-        "instructions":"Finalize only this exact Work from the complete guarded root observation and evidence mapping. context_revision is the publication guard; completed.input_revision is a distinct root request guard. The supplied completed object replaces work result and work status setup reads. Follow all included shared contracts; ordinary intake/discovery/full-evidence reading describes the preceding work and must not restart here. Preserve source_questions with attribution and all processing blockers. Targeted name/alias checks, missing required reads and review/repair proposals remain explicit interactive capabilities; changed or expanded scope requires replanning rather than retagging. Submit the ordinary typed result through work finish for this Work. The native controller publishes and performs global checks. This transport is not semantic completion.",
+        "max_response_bytes":super::generation::response_limit(task, &subject, &work.context, context_revision, work.plan.max_result_bytes)?,
+        "response_schema":super::generation::schema(),
+        "instructions":format!("Finalize only this exact Work from its complete guarded root observation and evidence mapping. The supplied completed object replaces work result/status setup reads; preceding discovery and full evidence observations must not restart. {}", super::generation::instruction()),
     }))
 }
 
@@ -232,7 +253,7 @@ mod tests {
         let target = "---\ntype: document\n---\n## Related Concepts\n".to_owned();
         let task: QueueTask = serde_json::from_value(json!({
             "task_id":"task", "kind":"extract-concepts", "created_at":"2026-10-24T00:00:00Z",
-            "cache_hash":"hash", "input":{"text":text,"locale":"ko","source_type":"manual"},
+            "cache_hash":"hash", "input":{"text":text,"locale":"ko","source_type":"manual","concept_policy":"supported-new","date":"2026-10-24"},
             "target":{"vault_path":"wiki/documents/alias.md","anchor":"## Related Concepts","kind":"document-concepts"},
         })).unwrap();
         let subject = Subject::Queue {
@@ -241,7 +262,7 @@ mod tests {
             target: task.target.vault_path.clone(),
             target_revision: lk_core::concept::file_revision(&target),
         };
-        let context = json!({"subject":subject,"purpose":{"operation":"queue","task_kind":task.kind,"target":task.target,"parameters":{"locale":"ko","source_type":"manual"}}});
+        let context = json!({"subject":subject,"purpose":{"operation":"queue","task_kind":task.kind,"target":task.target,"discovery":{"queries":[]},"parameters":{"locale":"ko","source_type":"manual"}}});
         let resources = vec![SemanticResource {
             address: "retained-input://wiki/documents/alias.md/concepts".into(),
             revision: lk_core::concept::file_revision(text),
@@ -333,9 +354,9 @@ mod tests {
 
     #[test]
     fn finalizer_keeps_root_and_publication_guards_distinct_without_source_bodies() {
-        let (_, _, context, resources, work, _) = fixture();
+        let (task, _, context, resources, work, _) = fixture();
         let completed = json!({"kind":"finalize","work_id":work.plan.id,"context":context,"input_revision":"root-input","output":{"summary":"Pinned finding","source_questions":[{"id":"question"}]},"evidence":work.plan.resources});
-        let request = finalization_request(&config(), &work, "scope", &completed).unwrap();
+        let request = finalization_request(&config(), &task, &work, "scope", &completed).unwrap();
         assert_eq!(request["completed"], completed);
         assert_eq!(request["context_revision"], "scope");
         assert_eq!(request["completed"]["input_revision"], "root-input");
@@ -344,6 +365,8 @@ mod tests {
                 .unwrap()
                 .contains(&resources[0].text)
         );
-        assert!(finalization_request(&config(), &work, "another-scope", &completed).is_err());
+        assert!(
+            finalization_request(&config(), &task, &work, "another-scope", &completed).is_err()
+        );
     }
 }

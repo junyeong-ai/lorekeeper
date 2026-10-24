@@ -1,12 +1,9 @@
 use std::path::{Path, PathBuf};
 
 use miette::IntoDiagnostic;
-use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::{Prepared, Subject};
-
-const SCHEMA: &str = "whole-section-action-v1";
 
 pub(in crate::commands) struct Section {
     pub request: Value,
@@ -24,114 +21,23 @@ pub(in crate::commands) enum Preparation {
     },
 }
 
-#[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct Action {
-    schema: String,
-    task_id: String,
-    cache_hash: String,
-    context_revision: String,
-    request_revision: String,
-    reason: String,
-}
+use super::action::{Action, SECTION, digest};
 
 fn action_path(task_id: &str, cache_hash: &str) -> PathBuf {
-    let identity = serde_json::to_vec(&(task_id, cache_hash)).expect("identity serializes");
-    PathBuf::from(".lorekeeper/queue/section-actions")
-        .join(format!("{}.json", blake3::hash(&identity).to_hex()))
+    SECTION.path(task_id, cache_hash)
 }
-
-fn digest(value: &Value) -> miette::Result<String> {
-    Ok(lk_core::concept::file_revision(
-        &serde_json::to_string(value).into_diagnostic()?,
-    ))
-}
-
 fn read_action(
     root: &Path,
     task_id: &str,
     cache_hash: &str,
 ) -> miette::Result<Option<(String, Action)>> {
-    let path = action_path(task_id, cache_hash);
-    let absolute = lk_vault::page_path(root, &path).into_diagnostic()?;
-    match std::fs::symlink_metadata(&absolute) {
-        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {}
-        Ok(_) => {
-            return Err(miette::miette!(
-                "section action must be a direct regular file"
-            ));
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error).into_diagnostic(),
-    }
-    let raw = std::fs::read_to_string(absolute).into_diagnostic()?;
-    let action = decode(&path, &raw)?;
-    if action.task_id != task_id || action.cache_hash != cache_hash {
-        return Err(miette::miette!("section action belongs to another task"));
-    }
-    Ok(Some((raw, action)))
+    SECTION.read(root, task_id, cache_hash)
 }
-
-fn decode(path: &Path, raw: &str) -> miette::Result<Action> {
-    let value: Value = serde_json::from_str(raw).into_diagnostic()?;
-    if !value.is_object() {
-        return Err(miette::miette!("section action must be an object"));
-    }
-    let action: Action = serde_json::from_value(value).into_diagnostic()?;
-    let revision = |value: &str, length: usize| {
-        value.len() == length
-            && value
-                .bytes()
-                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-    };
-    if action.schema != SCHEMA
-        || action.task_id.trim().is_empty()
-        || !revision(&action.cache_hash, 32)
-        || path != action_path(&action.task_id, &action.cache_hash)
-        || !revision(&action.context_revision, 64)
-        || !revision(&action.request_revision, 64)
-        || action.reason.trim().is_empty()
-    {
-        return Err(miette::miette!("invalid section action identity or scope"));
-    }
-    Ok(action)
-}
-
 pub(in crate::commands) fn prune(
     session: &lk_vault::MutationSession,
     pending: &std::collections::BTreeSet<(String, String)>,
 ) -> miette::Result<usize> {
-    let directory = Path::new(".lorekeeper/queue/section-actions");
-    let absolute = lk_vault::page_path(session.root(), directory).into_diagnostic()?;
-    match std::fs::symlink_metadata(&absolute) {
-        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
-        Ok(_) => {
-            return Err(miette::miette!(
-                "section action store must be a direct directory"
-            ));
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
-        Err(error) => return Err(error).into_diagnostic(),
-    }
-    let mut plan = lk_vault::MutationPlan::default();
-    let mut removed = 0;
-    for entry in std::fs::read_dir(absolute).into_diagnostic()? {
-        let entry = entry.into_diagnostic()?;
-        if !entry.file_type().into_diagnostic()?.is_file() {
-            return Err(miette::miette!("unknown section action artifact"));
-        }
-        let path = directory.join(entry.file_name());
-        let raw = std::fs::read_to_string(entry.path()).into_diagnostic()?;
-        let action = decode(&path, &raw)?;
-        if !pending.contains(&(action.task_id, action.cache_hash)) {
-            plan.remove(path, raw);
-            removed += 1;
-        }
-    }
-    if removed != 0 {
-        session.apply(plan).into_diagnostic()?;
-    }
-    Ok(removed)
+    SECTION.prune(session, pending)
 }
 
 pub(in crate::commands) fn prepare(
@@ -236,7 +142,7 @@ pub(in crate::commands) fn finish(
     match response {
         crate::commands::execution::finalization::SectionResponse::NeedsAction(reason) => {
             let action = Action {
-                schema: SCHEMA.into(),
+                schema: SECTION.schema.into(),
                 task_id: section.result.task_id,
                 cache_hash: section.result.cache_hash,
                 context_revision: current.prepared.revision(config_revision)?,

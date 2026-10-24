@@ -256,20 +256,6 @@ mod native {
 
     const MAX_PREPARED_QUEUE_TARGETS: usize = 64;
 
-    fn native_request_file(
-        directory: &Path,
-        request: &serde_json::Value,
-    ) -> miette::Result<tempfile::NamedTempFile> {
-        let mut file = tempfile::Builder::new()
-            .prefix("request-")
-            .suffix(".json")
-            .tempfile_in(directory)
-            .map_err(|error| miette::miette!("native request: {error}"))?;
-        serde_json::to_writer(&mut file, request)
-            .map_err(|error| miette::miette!("native request: {error}"))?;
-        Ok(file)
-    }
-
     fn is_interactive_batch_candidate(
         kind: lk_queue::TaskKind,
         context: lk_core::execution::ExtractionContext,
@@ -381,22 +367,6 @@ mod native {
         audit_deferred_count: usize,
         review_health: Option<ReviewHealth>,
         stages: Vec<StageResult>,
-    }
-
-    enum PreparedAgentInput<'a> {
-        Selected(&'a serde_json::Value),
-        Finalizer {
-            file: &'a tempfile::NamedTempFile,
-            request: &'a serde_json::Value,
-        },
-    }
-
-    impl PreparedAgentInput<'_> {
-        fn request(&self) -> &serde_json::Value {
-            match self {
-                Self::Selected(request) | Self::Finalizer { request, .. } => request,
-            }
-        }
     }
 
     struct Runner<'a> {
@@ -807,17 +777,6 @@ mod native {
             operation: &str,
             input_directory: Option<&Path>,
         ) -> bool {
-            self.consumer_with_preparation(skill, operation, input_directory, None)
-                .await
-        }
-
-        async fn consumer_with_preparation(
-            &mut self,
-            skill: &str,
-            operation: &str,
-            input_directory: Option<&Path>,
-            prepared: Option<PreparedAgentInput<'_>>,
-        ) -> bool {
             if self.result.halted || self.result.cancelled || !self.configuration_is_current() {
                 return false;
             }
@@ -847,19 +806,10 @@ mod native {
                 self.installation,
                 self.opts.config.as_ref().expect("resolved config"),
                 input_directory,
-                prepared.as_ref().map(PreparedAgentInput::request),
+                None,
             );
             match invocation {
                 Ok(execution::AgentInvocation { mut command, input }) => {
-                    if let Some(PreparedAgentInput::Finalizer { file, request }) = prepared {
-                        let bytes = serde_json::to_vec(request).expect("native request serializes");
-                        command
-                            .env(crate::commands::work::FINALIZATION_REQUEST_ENV, file.path())
-                            .env(
-                                crate::commands::work::FINALIZATION_REVISION_ENV,
-                                lk_core::rss_original::digest(&bytes),
-                            );
-                    }
                     if !self.reserve_queue_turn().await {
                         return false;
                     }
@@ -1630,6 +1580,265 @@ mod native {
             }
         }
 
+        async fn request_result(
+            &mut self,
+            request: &serde_json::Value,
+            metrics: &mut WorkStepMetrics,
+        ) -> Option<serde_json::Value> {
+            metrics.request_json_bytes = Some(
+                serde_json::to_vec(request)
+                    .expect("request serializes")
+                    .len(),
+            );
+            if self.result.halted
+                || self.result.cancelled
+                || !self.configuration_is_current()
+                || !self.call_budget_available()
+            {
+                return None;
+            }
+            let budget = match self.config.execution.effective_work() {
+                Ok(budget) => budget,
+                Err(error) => {
+                    self.failure("native result budget", error);
+                    return None;
+                }
+            };
+            if metrics.request_json_bytes.expect("measured request") > budget.max_input_bytes {
+                self.failure(
+                    "native result request",
+                    "complete request exceeds max_input_bytes",
+                );
+                return None;
+            }
+            if self.config.llm.provider == lk_core::config::LlmProvider::Noop {
+                self.failure(
+                    "native result",
+                    "semantic execution is disabled by llm.provider",
+                );
+                return None;
+            }
+            if let Err(error) = self.prepare_agent().await {
+                self.failure("native result host", error);
+                return None;
+            }
+            let profile = self.selected.as_ref().expect("prepared host");
+            let timeout = profile.timeout();
+            let invocation = execution::result::build(
+                profile,
+                self.installation,
+                self.opts.config.as_ref().expect("resolved config"),
+                request,
+                &crate::commands::work::generation::schema(),
+                budget.max_result_bytes,
+            );
+            let execution::result::Invocation { mut agent, output } = match invocation {
+                Ok(invocation) => invocation,
+                Err(error) => {
+                    self.failure("native result host", error);
+                    return None;
+                }
+            };
+            self.configure_child(&mut agent.command);
+            agent.command.current_dir(&self.root);
+            if !self.reserve_queue_turn().await {
+                return None;
+            }
+            self.result.semantic_calls += 1;
+            let started = Instant::now();
+            let child = self
+                .supervisor
+                .run_request(
+                    agent.command,
+                    Some(timeout),
+                    output.capture_limit,
+                    agent.input.as_deref(),
+                )
+                .await;
+            let duration = started.elapsed().as_millis() as u64;
+            metrics.agent_duration_ms = Some(duration);
+            self.result.semantic_duration_ms += duration;
+            let child = match child {
+                Ok(child) => child,
+                Err(error) => {
+                    metrics.outcome = WorkOutcome::Failed;
+                    self.failure("native result host", error);
+                    return None;
+                }
+            };
+            if child.cancelled {
+                metrics.outcome = WorkOutcome::Cancelled;
+                self.record("native result host", StageState::Cancelled, child.detail);
+                return None;
+            }
+            if !self.configuration_is_current() {
+                return None;
+            }
+            if !child.success {
+                metrics.outcome = WorkOutcome::Failed;
+                self.failure(
+                    "native result host",
+                    child.detail.unwrap_or_else(|| "host failed".into()),
+                );
+                return None;
+            }
+            match output.response(
+                &child.stdout,
+                request["max_response_bytes"]
+                    .as_u64()
+                    .and_then(|limit| usize::try_from(limit).ok())
+                    .expect("native response allowance"),
+            ) {
+                Ok(value) => {
+                    metrics.result_json_bytes = Some(
+                        serde_json::to_vec(&value)
+                            .expect("response serializes")
+                            .len(),
+                    );
+                    Some(value)
+                }
+                Err(error) => {
+                    self.failure("native result response", error);
+                    None
+                }
+            }
+        }
+
+        async fn finalize_result(
+            &mut self,
+            id: &str,
+            result: crate::commands::work::ResultFinalization,
+            metrics: &mut WorkStepMetrics,
+        ) -> WorkStep {
+            let Some(response) = self.request_result(&result.request, metrics).await else {
+                return WorkStep::Failed;
+            };
+            let reply = match crate::commands::work::generation::replies(response, 1) {
+                Ok(mut replies) => replies.remove(0),
+                Err(error) => {
+                    self.failure("native finalization response", error);
+                    return WorkStep::Failed;
+                }
+            };
+            let started = Instant::now();
+            let Some((session, _)) = self.mutation_session("native finalization").await else {
+                return WorkStep::Failed;
+            };
+            let finished = crate::commands::work::finish_result(
+                &session,
+                &self.config,
+                &self.config_revision,
+                id,
+                result,
+                reply,
+            );
+            metrics.revalidation_record_duration_ms = Some(started.elapsed().as_millis() as u64);
+            match finished {
+                Ok(Some(reason)) => {
+                    self.record(
+                        "native finalization action",
+                        StageState::Skipped,
+                        Some(reason.clone()),
+                    );
+                    WorkStep::Deferred(reason)
+                }
+                Ok(None) => {
+                    metrics.outcome = WorkOutcome::Staged;
+                    self.record(
+                        "bounded work completion",
+                        StageState::Completed,
+                        Some(id.into()),
+                    );
+                    WorkStep::Staged
+                }
+                Err(error) => {
+                    self.failure("native finalization", error);
+                    WorkStep::Failed
+                }
+            }
+        }
+
+        async fn selected_result_step(&mut self, inputs: &[serde_json::Value]) -> WorkStep {
+            let mut metrics = WorkStepMetrics::new(WorkRole::Finalizer);
+            let started = Instant::now();
+            let request =
+                match crate::commands::work::native::selected_request(&self.config, inputs) {
+                    Ok(request) => request,
+                    Err(error) => {
+                        self.failure("native selected request", error);
+                        return WorkStep::Failed;
+                    }
+                };
+            metrics.preparation_duration_ms = Some(started.elapsed().as_millis() as u64);
+            let Some(value) = self.request_result(&request, &mut metrics).await else {
+                self.result.work_telemetry.record(metrics);
+                return WorkStep::Failed;
+            };
+            let replies = match crate::commands::work::generation::replies(value, inputs.len()) {
+                Ok(replies) => replies,
+                Err(error) => {
+                    self.result.work_telemetry.record(metrics);
+                    self.failure("native selected response", error);
+                    return WorkStep::Failed;
+                }
+            };
+            let started = Instant::now();
+            let Some((session, _)) = self.mutation_session("native selected result").await else {
+                self.result.work_telemetry.record(metrics);
+                return WorkStep::Failed;
+            };
+            let mut deferred = false;
+            let mut failed = false;
+            let mut staged = false;
+            for (input, reply) in inputs.iter().zip(replies) {
+                match crate::commands::work::generation::finish_selected(
+                    &session,
+                    &self.config,
+                    &self.config_revision,
+                    input,
+                    reply,
+                ) {
+                    Ok(crate::commands::work::generation::SelectedFinish::NeedsAction(reason)) => {
+                        deferred = true;
+                        self.record("native selected action", StageState::Skipped, Some(reason));
+                    }
+                    Ok(crate::commands::work::generation::SelectedFinish::Staged) => {
+                        staged = true;
+                        self.record(
+                            "native selected result",
+                            StageState::Completed,
+                            Some(
+                                input["task"]["task_id"]
+                                    .as_str()
+                                    .expect("selected task")
+                                    .into(),
+                            ),
+                        );
+                    }
+                    Ok(crate::commands::work::generation::SelectedFinish::ScopeChanged) => {
+                        deferred = true;
+                        self.record("expanded extraction work", StageState::Skipped, Some("selected scope changed; old semantic reply was not adopted; preparing fresh work".into()));
+                    }
+                    Err(error) => {
+                        failed = true;
+                        self.failure("native selected result", error);
+                    }
+                }
+            }
+            metrics.revalidation_record_duration_ms = Some(started.elapsed().as_millis() as u64);
+            if staged {
+                metrics.outcome = WorkOutcome::Staged;
+            }
+            self.result.work_telemetry.record(metrics);
+            if failed {
+                WorkStep::Failed
+            } else if deferred {
+                WorkStep::Deferred("selected tasks require explicit actions".into())
+            } else {
+                WorkStep::Staged
+            }
+        }
+
         async fn whole_section_step(&mut self, task: &lk_queue::QueueTask) -> WorkStep {
             let mut metrics = WorkStepMetrics::new(WorkRole::Finalizer);
             let started = Instant::now();
@@ -1888,11 +2097,13 @@ mod native {
                 .preparation_duration_ms
                 .as_mut()
                 .expect("measured preparation") += started_at.elapsed().as_millis() as u64;
-            let prepared_request = match section {
-                Ok(crate::commands::work::FinalizationPreparation::Interactive) => None,
-                Ok(crate::commands::work::FinalizationPreparation::PreparedInteractive(
-                    request,
-                )) => Some(*request),
+            match section {
+                Ok(crate::commands::work::FinalizationPreparation::Interactive) => {}
+                Ok(crate::commands::work::FinalizationPreparation::Result(result)) => {
+                    let result = self.finalize_result(id, *result, &mut metrics).await;
+                    self.result.work_telemetry.record(metrics);
+                    return result;
+                }
                 Ok(crate::commands::work::FinalizationPreparation::Capacity {
                     request_bytes,
                     max_input_bytes,
@@ -1928,54 +2139,12 @@ mod native {
                     return WorkStep::Failed;
                 }
             };
-            let transport = if let Some(request) = &prepared_request {
-                let prepared = (|| -> miette::Result<_> {
-                    let directory = tempfile::Builder::new()
-                        .prefix("lorekeeper-finalizer-")
-                        .tempdir()
-                        .map_err(|error| miette::miette!("{error}"))?;
-                    let file = native_request_file(directory.path(), request)?;
-                    Ok((directory, file))
-                })();
-                match prepared {
-                    Ok(transport) => Some(transport),
-                    Err(error) => {
-                        self.result.work_telemetry.record(metrics);
-                        self.failure("bounded finalizer preparation", error);
-                        return WorkStep::Failed;
-                    }
-                }
-            } else {
-                None
-            };
-            let operation = if let Some((_, file)) = &transport {
-                metrics.request_json_bytes = prepared_request.as_ref().map(|request| {
-                    serde_json::to_vec(request)
-                        .expect("native request serializes")
-                        .len()
-                });
-                let path =
-                    serde_json::to_string(file.path()).expect("native request path serializes");
-                format!(
-                    "bounded finish {id}. Consume the complete native-finalize-v1 request supplied in this prompt. Its pinned request file is {path}. If a tool display is incomplete, continue with bounded reads of that same file. It contains the exact complete root, evidence mapping, distinct publication context_revision and applicable shared rules. Do not repeat work result/status, config/schema setup, ordinary discovery/intake or full-source reading. Perform only decision-relevant targeted name/alias checks, missing required reads or review/repair actions. Expanded scope requires replanning, never retagging. Preserve all attributed source questions and blockers. Submit with lore work finish {id} --file RESULT --prepared {path}; Rust checks this exact handoff before sealing/staging. Leave publication/global checks to the native controller."
-                )
-            } else {
-                format!(
-                    "bounded finish {id}. Start at the bounded-work reference's Finalize section. Read the complete lore work result for this exact work, using bounded continuation reads if a tool display is incomplete, and retain its response; use lore work status for the distinct context_revision publication guard. Read only the matching generation rules and result-envelope sections named there. Produce the typed final result from the completed guarded observations; do not restart ordinary intake, discovery, screening or full-evidence reading. Exact name/alias ownership checks and targeted revision-pinned reads remain necessary when decision-relevant information is missing; expanded discovery or changed inputs require replanning. Submit with lore work finish. Do not read the whole corpus or drain other tasks. Leave the staged queue result or audit assessment for native controller publication. The controller owns global checks. Preserve source_questions as attributed uncertainty in the final prose; do not invent answers. Material conflicts need a scoped open review and follow-up audit disposition. Processing blockers in unresolved cannot be silently removed or marked reviewed."
-                )
-            };
+            let operation = format!(
+                "bounded finish {id}. Start at the bounded-work reference's Finalize section. Read the complete lore work result for this exact audit work using bounded continuation reads when necessary. Preserve all attributed questions and blockers. Perform only decision-relevant targeted reads or review/repair actions; changed scope requires replanning. Submit with lore work finish. Leave publication/global checks to the native controller."
+            );
             let calls_before = self.result.semantic_calls;
             let duration_before = self.result.semantic_duration_ms;
-            let completed = self
-                .consumer_with_preparation(
-                    skill,
-                    &operation,
-                    transport.as_ref().map(|(directory, _)| directory.path()),
-                    transport.as_ref().zip(prepared_request.as_ref()).map(
-                        |((_, file), request)| PreparedAgentInput::Finalizer { file, request },
-                    ),
-                )
-                .await;
+            let completed = self.consumer(skill, &operation, None).await;
             if self.result.semantic_calls > calls_before {
                 metrics.agent_duration_ms =
                     Some(self.result.semantic_duration_ms - duration_before);
@@ -1992,22 +2161,12 @@ mod native {
                 return WorkStep::Failed;
             }
             let started_at = Instant::now();
-            let verified = if let Some(request) = &prepared_request {
-                crate::commands::work::verify_native_finalization(
-                    &self.root,
-                    &self.config,
-                    &self.config_revision,
-                    id,
-                    request,
-                )
-            } else {
-                crate::commands::work::verify_finished(
-                    &self.root,
-                    &self.config,
-                    &self.config_revision,
-                    id,
-                )
-            };
+            let verified = crate::commands::work::verify_finished(
+                &self.root,
+                &self.config,
+                &self.config_revision,
+                id,
+            );
             *metrics
                 .verification_duration_ms
                 .as_mut()
@@ -2879,6 +3038,7 @@ mod native {
                             _ => vec![selected.clone()],
                         },
                     });
+                    let mut generation_deferred = false;
                     match &jobs[&selected] {
                         QueueDispatch::Section { task } => {
                             match self.whole_section_step(task).await {
@@ -2970,49 +3130,14 @@ mod native {
                         }
                         QueueDispatch::Screening { .. } => unreachable!("screening wave"),
                         QueueDispatch::WholeInput { tasks: _, inputs } => {
-                            let request = match crate::commands::work::native::selected_request(
-                                &self.config,
-                                inputs,
-                            ) {
-                                Ok(request) => request,
-                                Err(error) => return self.failure("queue selection", error),
-                            };
-                            let directory = match tempfile::Builder::new()
-                                .prefix("lorekeeper-selection-")
-                                .tempdir()
-                            {
-                                Ok(directory) => directory,
-                                Err(error) => return self.failure("queue selection", error),
-                            };
-                            let input = match native_request_file(directory.path(), &request) {
-                                Ok(input) => input,
-                                Err(error) => return self.failure("queue selection", error),
-                            };
-                            let selection = match serde_json::to_string(input.path()) {
-                                Ok(selection) => selection,
-                                Err(error) => return self.failure("queue selection", error),
-                            };
-                            let context = if matches!(self.result.operation, Operation::Knowledge) {
-                                "Process these tasks as part of this bounded knowledge maintenance job. Read the selected work's review dependencies. Do not enumerate unrelated reviews or expand this batch."
-                            } else {
-                                ""
-                            };
-                            let operation = format!(
-                                "selected. {context} Consume the complete native-selected-v1 request supplied in this prompt. The named manifest retains the same complete request for bounded continuation reads if a tool display is incomplete. It supplies exact selected tasks, source/target revisions, current read scope, complete evidence and applicable shared contracts. Use that prepared metadata instead of queue status, queue JSONL enumeration, config/schema setup, repeated work context or reference-file intake. Read all supplied evidence and applicable contracts. Keep targeted name/alias resolution, missing required reads, discovery correction and review/repair capabilities when genuinely needed; changed scope requires fresh context and regeneration. Do not infer semantic identity from lexical matches. Only these selected tasks may be processed; native Rust owns global reconciliation and checks. Follow the existing typed result staging/publication protocol. Do not clip candidates or rewrite paid Work. Selected queue task manifest: {selection}"
-                            );
-                            if !self
-                                .consumer_with_preparation(
-                                    "lore-process",
-                                    &operation,
-                                    Some(directory.path()),
-                                    Some(PreparedAgentInput::Selected(&request)),
-                                )
-                                .await
-                            {
-                                if self.queue_replan {
-                                    continue 'planning;
+                            match self.selected_result_step(inputs).await {
+                                WorkStep::Staged => {}
+                                WorkStep::Deferred(_) => generation_deferred = true,
+                                WorkStep::Failed if self.queue_replan => continue 'planning,
+                                WorkStep::Failed => return false,
+                                WorkStep::Pending => {
+                                    unreachable!("whole input has no pending nodes")
                                 }
-                                return false;
                             }
                         }
                     }
@@ -3025,6 +3150,18 @@ mod native {
                         .await
                     {
                         return false;
+                    }
+                    if generation_deferred {
+                        if !self
+                            .native(
+                                "queue publication reconciliation",
+                                &["graph", "backlinks-sync"],
+                            )
+                            .await
+                        {
+                            return false;
+                        }
+                        continue 'planning;
                     }
                     let tasks = match &jobs[&selected] {
                         QueueDispatch::WholeInput { tasks, .. } => tasks.as_slice(),

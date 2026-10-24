@@ -218,8 +218,10 @@ impl FinalizationAction {
         }
         let action: Self = serde_json::from_value(value).map_err(fail)?;
         let root = work.nodes()?.last().expect("nonempty work tree").id.clone();
-        if action.schema != "section-finalization-action-v1"
-            || action.work_id != work.plan.id
+        if !matches!(
+            action.schema.as_str(),
+            "section-finalization-action-v1" | "bounded-finalization-action-v1"
+        ) || action.work_id != work.plan.id
             || action.root_node != root
             || action.reason.trim().is_empty()
         {
@@ -1063,6 +1065,15 @@ impl Work {
         root: &Path,
         request: &Value,
     ) -> miette::Result<Option<String>> {
+        self.load_finalization_action_for(root, request, &request["work"]["result_revision"])
+    }
+
+    pub fn load_finalization_action_for(
+        &self,
+        root: &Path,
+        request: &Value,
+        completion_revision: &Value,
+    ) -> miette::Result<Option<String>> {
         let Some(raw) =
             read_optional(root, &work_path(&self.plan.id, "finalization-action.json")?)?
         else {
@@ -1074,8 +1085,7 @@ impl Work {
         if action.request_revision != request_revision {
             return Ok(None);
         }
-        if request["work"]["result_revision"].as_str() != Some(action.completion_revision.as_str())
-        {
+        if completion_revision.as_str() != Some(action.completion_revision.as_str()) {
             return Err(fail(
                 "finalization action completion differs from its request",
             ));
@@ -1098,7 +1108,7 @@ impl Work {
             ));
         }
         let action = FinalizationAction {
-            schema: "section-finalization-action-v1".into(),
+            schema: "bounded-finalization-action-v1".into(),
             work_id: self.plan.id.clone(),
             root_node: completed.root_node,
             completion_revision: completed.root_output_revision,
