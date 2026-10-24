@@ -209,8 +209,10 @@ knowledge batch. These bound serialized JSON and invocation attempts, not total
 context, tokens or billing. Large requests are inspected/reduced in fresh sessions;
 exhaustion preserves verified work and reports incompletion.
 `execution.work.max_parallel` defaults to 1. Raising it permits concurrent ready
-evidence inspection/reduction requests, bounded by the remaining call budget.
-Screening, interactive sessions, finalization and publication remain serial.
+evidence inspection/reduction and distinct-target screening requests, bounded by
+the remaining call budget. Interactive sessions, finalization and publication remain
+serial. Screening shares one fresh complete candidate capture after the hosts return;
+each receipt still checks its exact task scope, page bytes and ledger.
 Recording reloads current inputs after the observers return; changed inputs refuse
 old observations. Parallelism does not increase `max_calls` or guarantee a speedup.
 Positive `max_consecutive_calls` defaults to 4. An admitted exact queue Work or

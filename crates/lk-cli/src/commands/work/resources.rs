@@ -109,12 +109,24 @@ impl<'a> Capture<'a> {
                 return Err(miette::miette!("semantic authored source changed: {path}"));
             }
         }
+        self.insert_page(relative, raw.clone(), authority)?;
+        Ok(raw)
+    }
+
+    fn insert_page(
+        &mut self,
+        relative: PathBuf,
+        raw: String,
+        authority: SemanticAuthority,
+    ) -> miette::Result<()> {
         if self.pages.get(&relative).is_some_and(|prior| prior != &raw) {
             return Err(miette::miette!(
-                "semantic source changed during capture: {path}"
+                "semantic source changed during capture: {}",
+                relative.display()
             ));
         }
         let address = relative.to_string_lossy().into_owned();
+        let exact = file_revision(&raw);
         self.pages.insert(relative, raw.clone());
         self.resources
             .entry(address.clone())
@@ -124,7 +136,7 @@ impl<'a> Capture<'a> {
                 authority,
                 text: raw.clone(),
             });
-        Ok(raw)
+        Ok(())
     }
 
     fn citation(&mut self, subject: &str, citation: &Citation) -> miette::Result<()> {
@@ -418,13 +430,11 @@ pub(super) fn selection_inventory_with_capture(
             .collect(),
     };
     for (path, raw) in capture.guarded_pages() {
-        guarded.page(
-            path.to_str()
-                .ok_or_else(|| miette::miette!("candidate owner is not UTF-8"))?,
-            Some(&file_revision(raw)),
-            None,
-            SemanticAuthority::Context,
-        )?;
+        let owner = lk_vault::resolve_page_owner(root, path).into_diagnostic()?;
+        if owner != *path {
+            return Err(miette::miette!("candidate owner changed during capture"));
+        }
+        guarded.insert_page(owner, raw.as_str().to_owned(), SemanticAuthority::Context)?;
     }
     let mut review_resources = BTreeMap::new();
     let mut seen_reviews = BTreeSet::new();

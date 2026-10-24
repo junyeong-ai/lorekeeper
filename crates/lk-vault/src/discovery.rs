@@ -15,6 +15,58 @@ pub const DISCOVERY_CAPTURE_POLICY: &str = "discovery-candidates-v1";
 /// The bound covers the serialized card, excluding exact candidate identities.
 pub const DISCOVERY_CARD_MAX_BYTES: usize = 2048;
 
+#[derive(Clone, Copy, Debug, Default, Serialize)]
+pub struct DiscoveryReadMetrics {
+    pub files: usize,
+    pub bytes: usize,
+    pub enumeration_duration_us: u64,
+    pub address_duration_us: u64,
+    pub read_duration_us: u64,
+    pub max_read_duration_us: u64,
+    pub parse_duration_us: u64,
+}
+
+impl DiscoveryReadMetrics {
+    pub(crate) fn record_read(&mut self, bytes: usize, elapsed: std::time::Duration) {
+        self.files += 1;
+        self.bytes += bytes;
+        let duration = elapsed.as_micros() as u64;
+        self.read_duration_us += duration;
+        self.max_read_duration_us = self.max_read_duration_us.max(duration);
+    }
+
+    fn accumulate(&mut self, other: Self) {
+        self.files += other.files;
+        self.bytes += other.bytes;
+        self.enumeration_duration_us += other.enumeration_duration_us;
+        self.address_duration_us += other.address_duration_us;
+        self.read_duration_us += other.read_duration_us;
+        self.max_read_duration_us = self.max_read_duration_us.max(other.max_read_duration_us);
+        self.parse_duration_us += other.parse_duration_us;
+    }
+}
+
+/// Existing reads from successful fresh captures. Durations are summed microseconds,
+/// not filesystem latency attribution or a frozen-corpus guarantee.
+#[derive(Clone, Copy, Debug, Default, Serialize)]
+pub struct DiscoveryCaptureMetrics {
+    pub captures: usize,
+    pub vocabulary: DiscoveryReadMetrics,
+    pub knowledge: DiscoveryReadMetrics,
+    pub matched_rereads: DiscoveryReadMetrics,
+    pub projection_match_duration_us: u64,
+}
+
+impl DiscoveryCaptureMetrics {
+    pub fn accumulate(&mut self, other: Self) {
+        self.captures += other.captures;
+        self.vocabulary.accumulate(other.vocabulary);
+        self.knowledge.accumulate(other.knowledge);
+        self.matched_rereads.accumulate(other.matched_rereads);
+        self.projection_match_duration_us += other.projection_match_duration_us;
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DiscoveryText {
@@ -169,7 +221,7 @@ fn capture_discovery_inner(
     queries: &[DiscoveryQuery],
     reports: Option<&[crate::ReviewReport]>,
 ) -> Result<DiscoveryCapture, VaultError> {
-    Ok(capture_discovery_batch_inner(root, dirs, &[queries], reports)?.remove(0))
+    Ok(capture_discovery_batch_inner(root, dirs, &[queries], reports, None)?.remove(0))
 }
 
 /// Capture task-local recipe sets in one fresh traversal. Output order matches the
@@ -184,7 +236,21 @@ pub fn capture_discovery_batch(
     reviews: Option<&[crate::ReviewReport]>,
 ) -> Result<Vec<DiscoveryCapture>, VaultError> {
     let query_sets = query_sets.iter().map(Vec::as_slice).collect::<Vec<_>>();
-    capture_discovery_batch_inner(root, dirs, &query_sets, reviews)
+    capture_discovery_batch_inner(root, dirs, &query_sets, reviews, None)
+}
+
+pub fn capture_discovery_batch_measured(
+    root: &Path,
+    dirs: &VaultDirs,
+    query_sets: &[Vec<DiscoveryQuery>],
+    reviews: Option<&[crate::ReviewReport]>,
+) -> Result<(Vec<DiscoveryCapture>, DiscoveryCaptureMetrics), VaultError> {
+    let mut metrics = DiscoveryCaptureMetrics::default();
+    let query_sets = query_sets.iter().map(Vec::as_slice).collect::<Vec<_>>();
+    let captures =
+        capture_discovery_batch_inner(root, dirs, &query_sets, reviews, Some(&mut metrics))?;
+    metrics.captures = usize::from(query_sets.iter().any(|queries| !queries.is_empty()));
+    Ok((captures, metrics))
 }
 
 fn capture_discovery_batch_inner(
@@ -192,6 +258,7 @@ fn capture_discovery_batch_inner(
     dirs: &VaultDirs,
     query_sets: &[&[DiscoveryQuery]],
     reports: Option<&[crate::ReviewReport]>,
+    mut metrics: Option<&mut DiscoveryCaptureMetrics>,
 ) -> Result<Vec<DiscoveryCapture>, VaultError> {
     let root = root.canonicalize()?;
     for query in query_sets.iter().flat_map(|queries| queries.iter()) {
@@ -211,10 +278,11 @@ fn capture_discovery_batch_inner(
     let has_queries = query_sets.iter().any(|queries| !queries.is_empty());
     let mut vocabulary = Vec::new();
     if has_queries {
-        search::visit_collections(
+        search::visit_collections_measured(
             &root,
             dirs,
             vec![lk_core::vault_path::concepts_dir(dirs)],
+            metrics.as_mut().map(|metrics| &mut metrics.vocabulary),
             |mut page, _| {
                 page.page.body.clear();
                 vocabulary.push(page);
@@ -253,129 +321,151 @@ fn capture_discovery_batch_inner(
         crate::review::review_previews(&root, dirs)?
     };
     let mut guarded_pages = BTreeMap::<PathBuf, Arc<String>>::new();
+    let mut matched_rereads = DiscoveryReadMetrics::default();
+    let mut projection_match_duration_us = 0;
     if has_queries {
-        search::visit_pages(&root, dirs, false, |mut page, _| {
-            let document = search::VisibleDocument::from_body(&page.page.body);
-            page.projection = Some(search::MatchProjection::from_document(&document));
-            let matches = captures
-                .iter()
-                .enumerate()
-                .filter_map(|(capture_index, capture)| {
-                    let query_indexes = capture
-                        .queries
-                        .iter()
-                        .zip(&capture.plans)
-                        .enumerate()
-                        .filter_map(|(index, (query, plan))| {
-                            let options = SearchOptions {
-                                query: Some(&query.query),
-                                phrase: query.phrase,
-                                spacing: query.spacing,
-                                knowledge_status: None,
-                                ..Default::default()
-                            };
-                            search::match_query(
-                                &page,
-                                &options,
-                                &plan.spellings,
-                                &plan.terms,
-                                plan.identity.as_deref(),
-                            )
-                            .is_some()
-                            .then_some(index)
-                        })
-                        .collect::<BTreeSet<_>>();
-                    (!query_indexes.is_empty()).then_some((capture_index, query_indexes))
-                })
-                .collect::<Vec<_>>();
-            page.projection = None;
-            if matches.is_empty() {
-                return Ok(());
-            }
-            let full = crate::page_path(&root, &page.rel_path)?;
-            let owner = full
-                .canonicalize()?
-                .strip_prefix(&root)
-                .map_err(std::io::Error::other)?
-                .to_path_buf();
-            let raw = std::fs::read_to_string(&full)?;
-            if file_revision(&raw) != page.file_revision {
-                return Err(invalid("discovery candidate changed during capture"));
-            }
-            let raw = match guarded_pages.entry(owner.clone()) {
-                std::collections::btree_map::Entry::Occupied(entry) => {
-                    if entry.get().as_str() != raw {
-                        return Err(invalid("discovery aliases changed during capture"));
-                    }
-                    Arc::clone(entry.get())
+        let measured = metrics.is_some();
+        search::visit_pages_measured(
+            &root,
+            dirs,
+            false,
+            metrics.as_mut().map(|metrics| &mut metrics.knowledge),
+            |mut page, _| {
+                let started_at = measured.then(std::time::Instant::now);
+                let document = search::VisibleDocument::from_body(&page.page.body);
+                page.projection = Some(search::MatchProjection::from_document(&document));
+                let matches = captures
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(capture_index, capture)| {
+                        let query_indexes = capture
+                            .queries
+                            .iter()
+                            .zip(&capture.plans)
+                            .enumerate()
+                            .filter_map(|(index, (query, plan))| {
+                                let options = SearchOptions {
+                                    query: Some(&query.query),
+                                    phrase: query.phrase,
+                                    spacing: query.spacing,
+                                    knowledge_status: None,
+                                    ..Default::default()
+                                };
+                                search::match_query(
+                                    &page,
+                                    &options,
+                                    &plan.spellings,
+                                    &plan.terms,
+                                    plan.identity.as_deref(),
+                                )
+                                .is_some()
+                                .then_some(index)
+                            })
+                            .collect::<BTreeSet<_>>();
+                        (!query_indexes.is_empty()).then_some((capture_index, query_indexes))
+                    })
+                    .collect::<Vec<_>>();
+                if let Some(started_at) = started_at {
+                    projection_match_duration_us += started_at.elapsed().as_micros() as u64;
                 }
-                std::collections::btree_map::Entry::Vacant(entry) => {
-                    Arc::clone(entry.insert(Arc::new(raw)))
+                page.projection = None;
+                if matches.is_empty() {
+                    return Ok(());
                 }
-            };
-            let owner_path = owner;
-            let owner = owner_path
-                .to_str()
-                .ok_or_else(|| invalid("discovery owner address is not UTF-8"))?
-                .to_owned();
-            let path = page
-                .rel_path
-                .to_str()
-                .ok_or_else(|| invalid("discovery candidate address is not UTF-8"))?
-                .to_owned();
-            let authored = source_revision(&page.page);
-            let mut counts = crate::ReviewCounts::default();
-            if let Some(previews) = reviews.get(&owner) {
-                for review in previews {
-                    counts.record(review.effective_state, 1);
+                let full = crate::page_path(&root, &page.rel_path)?;
+                let owner = full
+                    .canonicalize()?
+                    .strip_prefix(&root)
+                    .map_err(std::io::Error::other)?
+                    .to_path_buf();
+                let started_at = measured.then(std::time::Instant::now);
+                let raw = std::fs::read_to_string(&full)?;
+                if let Some(started_at) = started_at {
+                    matched_rereads.record_read(raw.len(), started_at.elapsed());
                 }
-            }
-            let outline = crate::document::outline(&page.page.body);
-            for (capture_index, mut query_indexes) in matches {
-                let capture = &mut captures[capture_index];
-                capture
-                    .guarded_pages
-                    .insert(owner_path.clone(), Arc::clone(&raw));
-                let mut path = path.clone();
-                if let Some(previous) = capture.roster.get(&owner) {
-                    if previous.file_revision != page.file_revision
-                        || previous.source_revision != authored
-                    {
-                        return Err(invalid("discovery owner changed during capture"));
+                if file_revision(&raw) != page.file_revision {
+                    return Err(invalid("discovery candidate changed during capture"));
+                }
+                let raw = match guarded_pages.entry(owner.clone()) {
+                    std::collections::btree_map::Entry::Occupied(entry) => {
+                        if entry.get().as_str() != raw {
+                            return Err(invalid("discovery aliases changed during capture"));
+                        }
+                        Arc::clone(entry.get())
                     }
-                    if path != owner && (previous.path == owner || previous.path < path) {
-                        path.clone_from(&previous.path);
+                    std::collections::btree_map::Entry::Vacant(entry) => {
+                        Arc::clone(entry.insert(Arc::new(raw)))
                     }
-                    query_indexes.extend(previous.query_indexes.iter().copied());
-                    if path == previous.path && query_indexes.len() == previous.query_indexes.len()
-                    {
-                        continue;
+                };
+                let owner_path = owner;
+                let owner = owner_path
+                    .to_str()
+                    .ok_or_else(|| invalid("discovery owner address is not UTF-8"))?
+                    .to_owned();
+                let path = page
+                    .rel_path
+                    .to_str()
+                    .ok_or_else(|| invalid("discovery candidate address is not UTF-8"))?
+                    .to_owned();
+                let authored = source_revision(&page.page);
+                let mut counts = crate::ReviewCounts::default();
+                if let Some(previews) = reviews.get(&owner) {
+                    for review in previews {
+                        counts.record(review.effective_state, 1);
                     }
                 }
-                let query_indexes = query_indexes.into_iter().collect::<Vec<_>>();
-                let card = build_card(
-                    &page.page,
-                    &document,
-                    &outline,
-                    &path,
-                    &query_indexes,
-                    capture,
-                    counts.clone(),
-                )?;
-                capture.roster.insert(
-                    owner.clone(),
-                    DiscoveryCandidate {
-                        path,
-                        owner: owner.clone(),
-                        file_revision: page.file_revision.clone(),
-                        source_revision: authored.clone(),
-                        query_indexes,
-                        card,
-                    },
-                );
-            }
-            Ok(())
-        })?;
+                let outline = crate::document::outline(&page.page.body);
+                for (capture_index, mut query_indexes) in matches {
+                    let capture = &mut captures[capture_index];
+                    capture
+                        .guarded_pages
+                        .insert(owner_path.clone(), Arc::clone(&raw));
+                    let mut path = path.clone();
+                    if let Some(previous) = capture.roster.get(&owner) {
+                        if previous.file_revision != page.file_revision
+                            || previous.source_revision != authored
+                        {
+                            return Err(invalid("discovery owner changed during capture"));
+                        }
+                        if path != owner && (previous.path == owner || previous.path < path) {
+                            path.clone_from(&previous.path);
+                        }
+                        query_indexes.extend(previous.query_indexes.iter().copied());
+                        if path == previous.path
+                            && query_indexes.len() == previous.query_indexes.len()
+                        {
+                            continue;
+                        }
+                    }
+                    let query_indexes = query_indexes.into_iter().collect::<Vec<_>>();
+                    let card = build_card(
+                        &page.page,
+                        &document,
+                        &outline,
+                        &path,
+                        &query_indexes,
+                        capture,
+                        counts.clone(),
+                    )?;
+                    capture.roster.insert(
+                        owner.clone(),
+                        DiscoveryCandidate {
+                            path,
+                            owner: owner.clone(),
+                            file_revision: page.file_revision.clone(),
+                            source_revision: authored.clone(),
+                            query_indexes,
+                            card,
+                        },
+                    );
+                }
+                Ok(())
+            },
+        )?;
+    }
+    if let Some(metrics) = metrics {
+        metrics.matched_rereads = matched_rereads;
+        metrics.projection_match_duration_us = projection_match_duration_us;
     }
     captures
         .into_iter()
@@ -722,6 +812,46 @@ mod tests {
             assert_eq!(capture.guarded_pages(), shared.guarded_pages());
         }
         batch
+    }
+
+    #[test]
+    fn measured_batch_preserves_capture_bytes_and_counts_shared_reads_once() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let concept = "---\ntype: concept\ntitle: Helios\naliases: [Sun]\n---\n## Summary\nHelios observation.\n";
+        let document = "---\ntype: document\n---\n## Content\nHelios observation.🙂\n";
+        write(root.path(), "wiki/concepts/helios.md", concept);
+        write(root.path(), "wiki/documents/observation.md", document);
+        let queries = vec![
+            vec![DiscoveryQuery {
+                query: "Helios".into(),
+                phrase: true,
+                spacing: false
+            }];
+            2
+        ];
+        let expected = capture_discovery_batch(root.path(), &dirs, &queries, None).unwrap();
+        let (measured, metrics) =
+            capture_discovery_batch_measured(root.path(), &dirs, &queries, None).unwrap();
+        assert_eq!(
+            serialized(&expected).unwrap(),
+            serialized(&measured).unwrap()
+        );
+        assert_eq!(metrics.captures, 1);
+        assert_eq!(metrics.vocabulary.files, 1);
+        assert_eq!(metrics.vocabulary.bytes, concept.len());
+        assert_eq!(metrics.knowledge.files, 2);
+        assert_eq!(metrics.knowledge.bytes, concept.len() + document.len());
+        assert_eq!(metrics.matched_rereads.files, 2);
+        assert_eq!(
+            metrics.matched_rereads.bytes,
+            concept.len() + document.len()
+        );
+        let (_, empty) =
+            capture_discovery_batch_measured(root.path(), &dirs, &[vec![], vec![]], None).unwrap();
+        assert_eq!(empty.captures, 0);
+        assert_eq!(empty.knowledge.files, 0);
+        assert_eq!(empty.vocabulary.files, 0);
     }
 
     #[test]

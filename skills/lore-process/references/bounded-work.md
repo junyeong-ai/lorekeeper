@@ -88,10 +88,12 @@ fresh calls for an admitted exact Work or screening phase before another fair tu
 It does not increase the total call budget. Restart/cancellation retains the already
 reserved next target; phase changes, publication and writer-wait replanning end the
 in-process admission. With `execution.work.max_parallel` above its default 1, ready
-evidence requests can run concurrently within the remaining call budget. Requests
-in a wave never depend on another request in that wave. Recording reloads current
-inputs and runs serially; changed evidence refuses an old response. Screening,
-interactive sessions and finalizers remain serial, as does canonical publication.
+evidence requests and distinct-target screening can run concurrently within the
+remaining call budget. Requests in a wave never depend on another request in that
+wave. Screening shares a fresh complete recipe/review capture after hosts return;
+recording checks each exact scope and publishes receipts serially. Changed evidence
+refuses an old response. Interactive sessions and finalizers remain serial, as does
+canonical publication.
 Whole-input queue tasks are batched
 within the evidence input budget with at most one task per target; publication
 refreshes selection before another task on that page. The call budget can leave
@@ -267,7 +269,7 @@ result; progress events do not establish publication, inference time or cost.
 | --- | --- |
 | `role`, `work_id`, `node_id`, `node_kind`, `selection_id`, `batch_id` | Exact selected work or screening identities; unavailable identities are `null` |
 | `request_json_bytes`, `result_json_bytes` | Compact UTF-8 JSON of the prepared request and decoded response (including a native observation/action envelope but excluding Rust-supplied identity), excluding prompts and host envelopes; prepared interactive finalizer request bytes are measured, its response bytes remain unobserved and `null` |
-| `preparation_duration_ms` | Local preparation of the selected request or completed root |
+| `preparation_duration_ms`, `preparation_from_queue_plan` | Additional local preparation of the selected request or completed root; a screening request carried from the same queue checkpoint has `null` duration and `true` reuse |
 | `agent_duration_ms` | Supervised invocation attempt wall time, including a failed or cancelled attempt; never server inference time |
 | `revalidation_record_duration_ms` | Fresh input validation and recording together; these operations are not measured separately |
 | `verification_duration_ms` | Finalizer completion and sealed-result verification |
@@ -280,6 +282,9 @@ the job's stages, publication result and final checks.
 
 When one evaluation prepares several ready requests, its preparation time belongs
 to the first selected node; later nodes from that evaluation leave that field null.
+For screening waves, shared post-host capture and acquisition time belongs to the
+first recorded step; peers report only their own recording time. Failed capture time
+is retained on the first valid reply. No pre-host capture is reused after a host call.
 `semantic_duration_ms` sums invocation attempt wall times, so parallel attempts can
 exceed the job's elapsed `duration_ms`. `queue_planning` reports local planning
 `attempts`, cumulative `duration_ms`, `prepared_targets`, `synthesis_subjects`,
@@ -319,3 +324,17 @@ batch members. Discovery shares a fresh traversal and exact immutable bytes with
 the selected window, preserving each task's complete candidates and revision identity.
 Shared captures are discarded before host execution; recording recaptures current
 inputs, including added candidates, aliases and scoped reviews.
+
+`queue_planning.discovery_io`, `screening_preparation_io` and
+`screening_revalidation_io` count existing reads in successful complete discovery
+captures. They separate concept `vocabulary`, full `knowledge` traversal and
+`matched_rereads`: `files`, UTF-8 `bytes`, enumeration/address/read/parse durations
+and maximum individual read duration, all in microseconds. Read time includes
+`read_to_string` and opening/decoding; it does not identify an OS latency cause.
+`projection_match_duration_us` includes visible projection and lexical matching.
+These counters exclude review/source/Work reads, publication guards and journals;
+failed captures do not contribute partial counters. They never authorize cache reuse.
+`screening_revalidation_duration_ms` sums successful fresh input reconstruction;
+`screening_record_duration_ms` sums attempted receipt validation/publication, including
+page guards, ledger checks and journal I/O. Writer acquisition remains in
+`mutation_access`; work-step combined durations overlap these measurements.

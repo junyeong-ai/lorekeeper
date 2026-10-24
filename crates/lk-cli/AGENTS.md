@@ -171,9 +171,14 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   Publication, phase changes, deferral and writer-wait replanning discard admission;
   restart/cancellation retain the already reserved next target.
   `execution.work.max_parallel` defaults to 1 and bounds simultaneous dependency-ready
-  evidence observers within remaining calls. Screening, interactive roles, finalizers
-  and publication remain serial. Supervise every child through exit and cleanup;
-  record returned observations serially against freshly loaded inputs.
+  evidence observers and distinct-target candidate screening within remaining calls.
+  Interactive roles, finalizers and publication remain serial. Supervise every child
+  through exit and cleanup. Carry prepared screening requests only within their local
+  pre-host queue checkpoint; any host call or writer wait invalidates their reuse.
+  Capture the complete current recipe/review universe once after screening hosts return,
+  then validate each task and publish receipts serially with exact page/ledger guards.
+  Preserve an independent valid response when a peer fails. Never reuse pre-host captures
+  for recording. Shared capture timings belong to the first recorded step, not every peer.
   Verify target owners before batching. Defer concept synthesis while its cited origin
   pages have unfinished inputs or publishable pending work; unrelated context is not
   a dependency barrier. Reconcile backlinks after a source publication wave and replan

@@ -98,6 +98,7 @@ mod native {
         request_json_bytes: Option<usize>,
         result_json_bytes: Option<usize>,
         preparation_duration_ms: Option<u64>,
+        preparation_from_queue_plan: bool,
         agent_duration_ms: Option<u64>,
         revalidation_record_duration_ms: Option<u64>,
         verification_duration_ms: Option<u64>,
@@ -116,6 +117,7 @@ mod native {
                 request_json_bytes: None,
                 result_json_bytes: None,
                 preparation_duration_ms: None,
+                preparation_from_queue_plan: false,
                 agent_duration_ms: None,
                 revalidation_record_duration_ms: None,
                 verification_duration_ms: None,
@@ -128,6 +130,10 @@ mod native {
     struct WorkTelemetry {
         work_steps: Vec<WorkStepMetrics>,
         work_steps_omitted: usize,
+        screening_preparation_io: lk_vault::DiscoveryCaptureMetrics,
+        screening_revalidation_io: lk_vault::DiscoveryCaptureMetrics,
+        screening_revalidation_duration_ms: u64,
+        screening_record_duration_ms: u64,
     }
 
     impl WorkTelemetry {
@@ -176,6 +182,22 @@ mod native {
         metrics: WorkStepMetrics,
     }
 
+    struct ScreeningAttempt {
+        task_id: String,
+        completed_batches: usize,
+        batches: usize,
+        request: serde_json::Value,
+        metrics: WorkStepMetrics,
+    }
+
+    struct ScreeningReply {
+        task_id: String,
+        output: serde_json::Value,
+        completed_batches: usize,
+        batches: usize,
+        metric_index: usize,
+    }
+
     enum WorkStep {
         Pending,
         Staged,
@@ -197,6 +219,8 @@ mod native {
         Screening {
             task: lk_queue::QueueTask,
             selection_id: String,
+            prepared: Option<Box<crate::commands::work::ScreeningTurn>>,
+            prepared_at_call: usize,
         },
         Section {
             task: lk_queue::QueueTask,
@@ -275,6 +299,7 @@ mod native {
         audit_captures: usize,
         prepared_targets: usize,
         discovery_captures: usize,
+        discovery_io: lk_vault::DiscoveryCaptureMetrics,
     }
 
     #[derive(Default, Serialize)]
@@ -2006,108 +2031,390 @@ mod native {
             result
         }
 
-        async fn screening_step(&mut self, task: &lk_queue::QueueTask) -> Option<bool> {
-            let mut metrics = WorkStepMetrics::new(WorkRole::Screening);
-            let result = self.screen_candidates(task, &mut metrics).await;
-            self.result.work_telemetry.record(metrics);
-            result
-        }
-
-        async fn screen_candidates(
+        async fn screening_wave(
             &mut self,
-            task: &lk_queue::QueueTask,
-            metrics: &mut WorkStepMetrics,
-        ) -> Option<bool> {
+            selected: &str,
+            jobs: &mut std::collections::BTreeMap<String, QueueDispatch>,
+            keys: &std::collections::BTreeSet<String>,
+        ) -> bool {
+            let budget = match self.config.execution.effective_work() {
+                Ok(budget) => budget,
+                Err(error) => return self.failure("semantic work budget", error),
+            };
+            let limit = budget
+                .max_parallel
+                .min(budget.max_calls.saturating_sub(self.result.semantic_calls));
+            let continued = jobs[selected].binding(selected).is_some_and(|binding| {
+                self.queue_admitted
+                    .can_continue(std::slice::from_ref(&binding))
+            });
+            let mut order = if continued {
+                self.queue_admitted
+                    .remaining_bindings()
+                    .map(|binding| binding.target.clone())
+                    .collect::<Vec<_>>()
+            } else {
+                match scheduler::order(&self.root, scheduler::Stage::Queue, keys) {
+                    Ok(order) => order,
+                    Err(error) => return self.failure("candidate screening scheduling", error),
+                }
+            };
+            let first = order
+                .iter()
+                .position(|target| target == selected)
+                .expect("selected screening target");
+            order.rotate_left(first);
+            let targets = order
+                .into_iter()
+                .take(limit)
+                .take_while(|target| {
+                    matches!(jobs.get(target), Some(QueueDispatch::Screening { .. }))
+                })
+                .collect::<Vec<_>>();
+            let task_ids = targets
+                .iter()
+                .map(|target| match &jobs[target] {
+                    QueueDispatch::Screening { task, .. } => task.task_id.as_str(),
+                    _ => unreachable!("screening target"),
+                })
+                .collect::<Vec<_>>();
+            let reuse = targets.iter().all(|target| {
+                matches!(&jobs[target],
+                QueueDispatch::Screening { prepared: Some(_), prepared_at_call, .. }
+                    if *prepared_at_call == self.result.semantic_calls)
+            });
             let started_at = Instant::now();
-            let prepared = crate::commands::work::prepare_screening(
-                &self.root,
-                &self.config,
-                &self.config_revision,
-                &task.task_id,
-            );
-            metrics.preparation_duration_ms = Some(started_at.elapsed().as_millis() as u64);
-            let before = match prepared {
-                Ok(before) => before,
-                Err(error) => {
-                    self.failure("candidate screening", error);
-                    return None;
-                }
+            let prepared = if reuse {
+                Ok(targets
+                    .iter()
+                    .map(
+                        |target| match jobs.get_mut(target).expect("screening target") {
+                            QueueDispatch::Screening { prepared, .. } => {
+                                *prepared.take().expect("prepared screening")
+                            }
+                            _ => unreachable!("screening target"),
+                        },
+                    )
+                    .collect::<Vec<_>>())
+            } else {
+                crate::commands::work::prepare_screenings(
+                    &self.root,
+                    &self.config,
+                    &self.config_revision,
+                    &task_ids,
+                )
+                .map(|prepared| {
+                    self.result
+                        .work_telemetry
+                        .screening_preparation_io
+                        .accumulate(prepared.discovery_io);
+                    prepared.turns
+                })
             };
-            metrics.selection_id = Some(before.selection_id.clone());
-            if before.complete {
-                metrics.outcome = WorkOutcome::AlreadyComplete;
-                return Some(true);
-            }
-            let Some(request) = before.request else {
-                self.failure(
-                    "candidate screening",
-                    format!(
-                        "{} deferred and {} unknown candidate decisions remain; work retained",
-                        before.deferred, before.unknown
-                    ),
+            let preparation_duration_ms = started_at.elapsed().as_millis() as u64;
+            let prepared = match prepared {
+                Ok(prepared) => prepared,
+                Err(error) => return self.failure("candidate screening", error),
+            };
+            let mut turns = Vec::new();
+            for (index, (target, before)) in targets.iter().zip(prepared).enumerate() {
+                let expected = jobs[target].binding(target).expect("screening binding");
+                if expected.identity != format!("screening:{}", before.selection_id)
+                    || before.complete
+                {
+                    self.queue_admitted.clear();
+                    self.queue_replan = true;
+                    return true;
+                }
+                let Some(request) = before.request else {
+                    return self.failure(
+                        "candidate screening",
+                        format!(
+                            "{} deferred and {} unknown candidate decisions remain; work retained",
+                            before.deferred, before.unknown
+                        ),
+                    );
+                };
+                let task_id = match &jobs[target] {
+                    QueueDispatch::Screening { task, .. } => task.task_id.clone(),
+                    _ => unreachable!("screening target"),
+                };
+                let mut metrics = WorkStepMetrics::new(WorkRole::Screening);
+                metrics.selection_id = Some(before.selection_id.clone());
+                metrics.batch_id = request["batch_id"].as_str().map(str::to_owned);
+                metrics.preparation_from_queue_plan = reuse;
+                metrics.preparation_duration_ms =
+                    (index == 0 && !reuse).then_some(preparation_duration_ms);
+                metrics.request_json_bytes = Some(
+                    serde_json::to_vec(&request)
+                        .expect("JSON request serializes")
+                        .len(),
                 );
-                return None;
-            };
-            metrics.batch_id = request["batch_id"].as_str().map(str::to_owned);
-            let reply = self.request_observation(request.clone(), metrics).await?;
-            let output = match execution::observation::decode_response(
-                reply.engine,
-                &reply.bytes,
-                reply.limit,
-            ) {
-                Ok(output) => output,
-                Err(error) => {
-                    self.failure("candidate screening", error);
-                    return None;
+                turns.push(ScreeningAttempt {
+                    task_id,
+                    completed_batches: before.completed_batches,
+                    batches: before.batches,
+                    request,
+                    metrics,
+                });
+            }
+            if self.result.halted || self.result.cancelled || !self.configuration_is_current() {
+                self.record_uninvoked_screenings(turns, false);
+                return false;
+            }
+            if self.config.llm.provider == lk_core::config::LlmProvider::Noop {
+                self.record_uninvoked_screenings(turns, true);
+                return self.failure(
+                    "candidate screening",
+                    "semantic execution is disabled by llm.provider",
+                );
+            }
+            if let Err(error) = self.prepare_agent().await {
+                self.record_uninvoked_screenings(turns, true);
+                return if self.result.cancelled {
+                    self.record(
+                        "candidate screening",
+                        StageState::Cancelled,
+                        Some(error.to_string()),
+                    )
+                } else {
+                    self.failure("candidate screening", error)
+                };
+            }
+            let timeout = self.selected.as_ref().expect("prepared agent").timeout();
+            let mut requests = Vec::new();
+            let mut directories = Vec::new();
+            let mut engines = Vec::new();
+            for turn in &turns {
+                let (invocation, limit) =
+                    match self.observation_invocation(&turn.request, WorkRole::Screening, budget) {
+                        Ok(invocation) => invocation,
+                        Err(error) => {
+                            self.record_uninvoked_screenings(turns, true);
+                            return self.failure("candidate screening", error);
+                        }
+                    };
+                engines.push(invocation.engine);
+                let (request, directory) = invocation.into_request(timeout, limit);
+                requests.push(request);
+                directories.push(directory);
+            }
+            {
+                let Some((session, waited)) = self
+                    .mutation_session("candidate screening scheduling")
+                    .await
+                else {
+                    return false;
+                };
+                if waited {
+                    self.queue_admitted.clear();
+                    self.queue_replan = true;
+                    self.record("queue input refresh", StageState::Skipped, Some("writer access became available; preparing current inputs before invocation".into()));
+                    self.record_uninvoked_screenings(turns, false);
+                    return true;
                 }
-            };
-            metrics.result_json_bytes = Some(
-                serde_json::to_vec(&output)
-                    .expect("decoded screening serializes")
-                    .len(),
-            );
-            let output =
-                match execution::observation::decode_screening(output, &request, reply.limit) {
-                    Ok(output) => output,
-                    Err(error) => {
-                        self.failure("candidate screening", error);
-                        return None;
+                let bindings = targets
+                    .iter()
+                    .map(|target| jobs[target].binding(target).expect("screening binding"))
+                    .collect::<Vec<_>>();
+                if !self.queue_admitted.can_continue(&bindings) {
+                    if let Err(error) = scheduler::reserve_in_session(
+                        &session,
+                        scheduler::Stage::Queue,
+                        keys,
+                        &targets,
+                    ) {
+                        return self.failure("candidate screening scheduling", error);
+                    }
+                    self.queue_admitted.clear();
+                    if let Err(error) = self.queue_admitted.admit(&bindings) {
+                        return self.failure("candidate screening scheduling", error);
+                    }
+                }
+                if let Err(error) = self.queue_admitted.charge(&bindings) {
+                    return self.failure("candidate screening scheduling", error);
+                }
+            }
+            self.result.semantic_calls += requests.len();
+            let attempts = self.supervisor.run_requests(requests).await;
+            drop(directories);
+            let cancelled = attempts
+                .iter()
+                .any(|attempt| attempt.result.as_ref().is_ok_and(|child| child.cancelled));
+            let current = self.configuration_is_current();
+            if cancelled {
+                self.record(
+                    "candidate screening",
+                    StageState::Cancelled,
+                    Some("parallel screening interrupted; unfinished work retained".into()),
+                );
+            }
+            let mut accepted = current && !cancelled;
+            let mut replies = Vec::new();
+            let mut metrics = Vec::new();
+            for ((turn, attempt), engine) in turns.into_iter().zip(attempts).zip(engines) {
+                let ScreeningAttempt {
+                    task_id,
+                    completed_batches,
+                    batches,
+                    request,
+                    metrics: mut step,
+                } = turn;
+                step.agent_duration_ms = Some(attempt.duration_ms);
+                self.result.semantic_duration_ms += attempt.duration_ms;
+                let decoded = if cancelled || !current {
+                    step.outcome = if cancelled {
+                        WorkOutcome::Cancelled
+                    } else {
+                        WorkOutcome::Rejected
+                    };
+                    None
+                } else {
+                    match attempt.result {
+                        Ok(child) if child.success => {
+                            match execution::observation::decode_response(
+                                engine,
+                                &child.stdout,
+                                budget.max_result_bytes,
+                            ) {
+                                Ok(output) => {
+                                    step.result_json_bytes = Some(
+                                        serde_json::to_vec(&output)
+                                            .expect("decoded screening serializes")
+                                            .len(),
+                                    );
+                                    match execution::observation::decode_screening(
+                                        output,
+                                        &request,
+                                        budget.max_result_bytes,
+                                    ) {
+                                        Ok(output) => Some(output),
+                                        Err(error) => {
+                                            self.failure("candidate screening", error);
+                                            None
+                                        }
+                                    }
+                                }
+                                Err(error) => {
+                                    self.failure("candidate screening", error);
+                                    None
+                                }
+                            }
+                        }
+                        Ok(child) => {
+                            step.outcome = WorkOutcome::Failed;
+                            self.result.halted = true;
+                            self.record("candidate screening", StageState::Failed, child.detail);
+                            None
+                        }
+                        Err(error) => {
+                            step.outcome = WorkOutcome::Failed;
+                            self.failure("candidate screening", error);
+                            None
+                        }
                     }
                 };
-            let started_at = Instant::now();
-            let Some((session, _)) = self.mutation_session("candidate screening").await else {
+                if let Some(output) = decoded {
+                    replies.push(ScreeningReply {
+                        task_id,
+                        output,
+                        completed_batches,
+                        batches,
+                        metric_index: metrics.len(),
+                    });
+                } else {
+                    accepted = false;
+                }
+                metrics.push(step);
+            }
+            if !replies.is_empty() {
+                let started_at = Instant::now();
+                let recorded = if let Some((session, _)) =
+                    self.recording_session("candidate screening").await
+                {
+                    crate::commands::work::record_screenings(
+                        &session,
+                        &self.config,
+                        &self.config_revision,
+                        replies
+                            .iter()
+                            .map(|reply| (reply.task_id.as_str(), reply.output.clone()))
+                            .collect(),
+                    )
+                } else {
+                    Err(miette::miette!(
+                        "candidate screening could not acquire writer access"
+                    ))
+                };
+                let total_duration_ms = started_at.elapsed().as_millis() as u64;
+                match recorded {
+                    Ok(recorded) => {
+                        self.result
+                            .work_telemetry
+                            .screening_revalidation_duration_ms +=
+                            recorded.revalidation_duration_ms;
+                        self.result
+                            .work_telemetry
+                            .screening_revalidation_io
+                            .accumulate(recorded.discovery_io);
+                        let recorded = recorded.records;
+                        self.result.work_telemetry.screening_record_duration_ms += recorded
+                            .iter()
+                            .map(|record| record.duration_ms)
+                            .sum::<u64>();
+                        let shared_duration_ms = total_duration_ms
+                            .saturating_sub(recorded.iter().map(|record| record.duration_ms).sum());
+                        for (index, (record, reply)) in
+                            recorded.into_iter().zip(&replies).enumerate()
+                        {
+                            let step = &mut metrics[reply.metric_index];
+                            step.revalidation_record_duration_ms = Some(
+                                record.duration_ms
+                                    + if index == 0 { shared_duration_ms } else { 0 },
+                            );
+                            match record.result {
+                                Ok(completed) if completed > reply.completed_batches => {
+                                    step.outcome = WorkOutcome::Recorded;
+                                    self.record("candidate screening", StageState::Completed, Some(format!("{completed}/{} screening batches recorded; card decisions are not full-body assessments", reply.batches)));
+                                    self.queue_replan |= completed == reply.batches;
+                                }
+                                Ok(_) => {
+                                    accepted = false;
+                                    self.failure("candidate screening", "worker did not advance the selected screening batch; work retained");
+                                }
+                                Err(error) => {
+                                    accepted = false;
+                                    self.failure("candidate screening", error);
+                                }
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        accepted = false;
+                        metrics[replies[0].metric_index].revalidation_record_duration_ms =
+                            Some(total_duration_ms);
+                        self.failure("candidate screening", error);
+                    }
+                }
+            }
+            for mut step in metrics {
+                if self.result.cancelled && !matches!(step.outcome, WorkOutcome::Recorded) {
+                    step.outcome = WorkOutcome::Cancelled;
+                }
+                self.result.work_telemetry.record(step);
+            }
+            accepted
+        }
+
+        fn record_uninvoked_screenings(&mut self, turns: Vec<ScreeningAttempt>, failed: bool) {
+            for mut turn in turns {
                 if self.result.cancelled {
-                    metrics.outcome = WorkOutcome::Cancelled;
+                    turn.metrics.outcome = WorkOutcome::Cancelled;
+                } else if failed {
+                    turn.metrics.outcome = WorkOutcome::Failed;
                 }
-                return None;
-            };
-            let recorded = crate::commands::work::record_screening(
-                &session,
-                &self.config,
-                &self.config_revision,
-                &task.task_id,
-                output,
-                None,
-            );
-            metrics.revalidation_record_duration_ms = Some(started_at.elapsed().as_millis() as u64);
-            let completed = match recorded {
-                Ok(completed) if completed > before.completed_batches => completed,
-                Ok(_) => {
-                    self.failure(
-                        "candidate screening",
-                        "worker did not advance the selected screening batch; work retained",
-                    );
-                    return None;
-                }
-                Err(error) => {
-                    self.failure("candidate screening", error);
-                    return None;
-                }
-            };
-            metrics.outcome = WorkOutcome::Recorded;
-            self.record("candidate screening", StageState::Completed,
-                Some(format!("{}/{} screening batches recorded; card decisions are not full-body assessments", completed, before.batches)));
-            Some(completed == before.batches)
+                self.result.work_telemetry.record(turn.metrics);
+            }
         }
 
         async fn queue_dispatches(
@@ -2274,7 +2581,8 @@ mod native {
                     &materialize,
                     &synthesis_inputs,
                 )?;
-                self.result.queue_planning.discovery_captures += captures;
+                self.result.queue_planning.discovery_captures += captures.captures;
+                self.result.queue_planning.discovery_io.accumulate(captures);
                 let mut prepared = materialize
                     .into_iter()
                     .zip(prepared)
@@ -2365,11 +2673,16 @@ mod native {
                                 jobs.insert(target.clone(), QueueDispatch::Source { id });
                             }
                         }
-                        crate::commands::work::TaskWork::Screening { selection_id } => {
+                        crate::commands::work::TaskWork::Screening { turn } => {
                             flush(&mut batch, &mut jobs);
                             jobs.insert(
                                 target.clone(),
-                                QueueDispatch::Screening { task, selection_id },
+                                QueueDispatch::Screening {
+                                    task,
+                                    selection_id: turn.selection_id.clone(),
+                                    prepared: Some(turn),
+                                    prepared_at_call: self.result.semantic_calls,
+                                },
                             );
                         }
                     }
@@ -2469,7 +2782,7 @@ mod native {
                     }
                     continue;
                 }
-                let jobs = plan.jobs;
+                let mut jobs = plan.jobs;
                 if jobs.is_empty() {
                     if !plan.keys.is_empty() && !self.call_budget_available() {
                         return false;
@@ -2522,6 +2835,15 @@ mod native {
                     };
                     if !jobs.contains_key(&selected) {
                         continue 'planning;
+                    }
+                    if matches!(jobs[&selected], QueueDispatch::Screening { .. }) {
+                        if !self.screening_wave(&selected, &mut jobs, keys).await {
+                            return false;
+                        }
+                        if self.queue_replan {
+                            continue 'planning;
+                        }
+                        continue;
                     }
                     if let Some(completed) = self
                         .bounded_observation_wave(
@@ -2646,14 +2968,7 @@ mod native {
                                 ObservationStep::Failed => return false,
                             }
                         }
-                        QueueDispatch::Screening { task, .. } => {
-                            match self.screening_step(task).await {
-                                Some(true) => continue 'planning,
-                                Some(false) => continue,
-                                None if self.queue_replan => continue 'planning,
-                                None => return false,
-                            }
-                        }
+                        QueueDispatch::Screening { .. } => unreachable!("screening wave"),
                         QueueDispatch::WholeInput { tasks: _, inputs } => {
                             let request = match crate::commands::work::native::selected_request(
                                 &self.config,

@@ -540,6 +540,16 @@ pub(super) fn visit_pages(
     include_sources: bool,
     visit: impl FnMut(Page, usize) -> Result<(), VaultError>,
 ) -> Result<(), VaultError> {
+    visit_pages_measured(vault_root, dirs, include_sources, None, visit)
+}
+
+pub(super) fn visit_pages_measured(
+    vault_root: &Path,
+    dirs: &VaultDirs,
+    include_sources: bool,
+    metrics: Option<&mut crate::discovery::DiscoveryReadMetrics>,
+    visit: impl FnMut(Page, usize) -> Result<(), VaultError>,
+) -> Result<(), VaultError> {
     let mut directories = vec![
         concepts_dir(dirs),
         documents_dir(dirs),
@@ -552,32 +562,65 @@ pub(super) fn visit_pages(
             PathBuf::from(&dirs.synthesis),
         ]);
     }
-    visit_collections(vault_root, dirs, directories, visit)
+    visit_collections_measured(vault_root, dirs, directories, metrics, visit)
 }
 
 pub(super) fn visit_collections(
     vault_root: &Path,
     dirs: &VaultDirs,
     directories: Vec<PathBuf>,
+    visit: impl FnMut(Page, usize) -> Result<(), VaultError>,
+) -> Result<(), VaultError> {
+    visit_collections_measured(vault_root, dirs, directories, None, visit)
+}
+
+pub(super) fn visit_collections_measured(
+    vault_root: &Path,
+    dirs: &VaultDirs,
+    directories: Vec<PathBuf>,
+    mut metrics: Option<&mut crate::discovery::DiscoveryReadMetrics>,
     mut visit: impl FnMut(Page, usize) -> Result<(), VaultError>,
 ) -> Result<(), VaultError> {
     let reserved = crate::navigation::ReservedNavigationPaths::load(vault_root, dirs)?;
     let mut visited = std::collections::BTreeSet::new();
     for rel_dir in directories {
         let concept_collection = rel_dir == concepts_dir(dirs);
-        for path in markdown_files(vault_root, &vault_root.join(&rel_dir))? {
+        let started_at = metrics.as_ref().map(|_| std::time::Instant::now());
+        let files = markdown_files(vault_root, &vault_root.join(&rel_dir))?;
+        if let Some(metrics) = metrics.as_mut() {
+            metrics.enumeration_duration_us += started_at
+                .expect("measured enumeration")
+                .elapsed()
+                .as_micros() as u64;
+        }
+        for path in files {
             if !visited.insert(path.clone()) {
                 continue;
             }
             if reserved.contains(&path)? {
                 continue;
             }
-            let raw = std::fs::read_to_string(crate::page_path(
+            let started_at = metrics.as_ref().map(|_| std::time::Instant::now());
+            let full = crate::page_path(
                 vault_root,
                 path.strip_prefix(vault_root)
                     .map_err(std::io::Error::other)?,
-            )?)?;
+            )?;
+            if let Some(metrics) = metrics.as_mut() {
+                metrics.address_duration_us +=
+                    started_at.expect("measured address").elapsed().as_micros() as u64;
+            }
+            let started_at = metrics.as_ref().map(|_| std::time::Instant::now());
+            let raw = std::fs::read_to_string(full)?;
+            if let Some(metrics) = metrics.as_mut() {
+                metrics.record_read(raw.len(), started_at.expect("measured read").elapsed());
+            }
+            let started_at = metrics.as_ref().map(|_| std::time::Instant::now());
             let mut page = crate::parse_page(&raw).map_err(VaultError::Frontmatter)?;
+            if let Some(metrics) = metrics.as_mut() {
+                metrics.parse_duration_us +=
+                    started_at.expect("measured parse").elapsed().as_micros() as u64;
+            }
             page.original = None;
             let knowledge_status = page
                 .frontmatter

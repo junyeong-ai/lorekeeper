@@ -3160,7 +3160,10 @@ fn progressive_native_screening_keeps_complete_inventory_and_reads_only_admitted
             assert!(step["node_id"].is_null());
             assert_eq!(step["request_json_bytes"], batch["input_bytes"]);
             assert_eq!(step["result_json_bytes"], batch["output_bytes"]);
-            assert!(step["preparation_duration_ms"].as_u64().is_some());
+            assert_eq!(
+                step["preparation_duration_ms"].is_null(),
+                step["preparation_from_queue_plan"] == true
+            );
             assert!(step["agent_duration_ms"].as_u64().is_some());
             assert!(step["revalidation_record_duration_ms"].as_u64().is_some());
             assert_eq!(step["outcome"], "recorded");
@@ -5332,7 +5335,7 @@ fn native_queue_shares_discovery_without_changing_existing_task_selection_ids() 
             !output.status.success(),
             "one screening call cannot settle both tasks: {report}"
         );
-        assert_eq!(report["semantic_calls"], 1);
+        assert_eq!(report["semantic_calls"], parallel);
         assert_eq!(report["queue_planning"]["discovery_captures"], 1);
         assert_eq!(report["queue_planning"]["prepared_targets"], prepared);
         assert!(
@@ -5911,4 +5914,394 @@ fn native_daily_without_wait_refuses_busy_publication_before_semantic_execution(
     );
     assert!(!fixture.root().join("vault/.lorekeeper/queue").exists());
     assert!(!fixture.root().join("arguments").exists());
+}
+
+const PARALLEL_SCREENING: &str = r#"
+case "$*" in
+  *--output-schema*|*--safe-mode*)
+    export TEST_SCREENING_REQUEST="$TEST_EXECUTION_ROOT/screening-request-$$.txt"
+    /bin/cat > "$TEST_SCREENING_REQUEST" ;;
+  *) exit 49 ;;
+esac
+exec python3 - "$@" <<'SCREENING'
+import json, os, sys, time
+from pathlib import Path
+root=Path(os.environ['TEST_EXECUTION_ROOT'])
+request=json.loads(Path(os.environ['TEST_SCREENING_REQUEST']).read_text().split('\nNative request:\n',1)[1])
+identity=request['selection_id']
+mode=(root/'screening-mode').read_text()
+expected=int((root/'screening-expected').read_text())
+marker=root/('screening-start-'+identity+'.json')
+marker.write_text(json.dumps({"request":request,"pid":os.getpid()}))
+deadline=time.monotonic()+15
+while len(list(root.glob('screening-start-*.json')))<expected:
+    if time.monotonic()>deadline: raise SystemExit('screening peers did not overlap')
+    time.sleep(.01)
+peers=sorted(path.name for path in root.glob('screening-start-*.json'))
+(root/('screening-overlap-'+identity+'.json')).write_text(json.dumps(peers))
+leader=marker.name==peers[0]
+if mode=='wait':
+    while True: time.sleep(1)
+if leader and mode=='failed': raise SystemExit(51)
+if leader and mode=='malformed':
+    print('invalid screening response')
+    raise SystemExit(0)
+if leader and mode=='added':
+    (root/'vault/wiki/documents/new.md').write_text('---\ntype: document\n---\nNew transactional outbox observation.\n')
+if leader and mode=='unrelated':
+    (root/'vault/wiki/documents/new.md').write_text('---\ntype: document\n---\nIndependent unrelated observation.\n')
+if leader and mode=='deleted': (root/'vault/wiki/documents/candidate-000.md').unlink()
+if leader and mode=='changed':
+    with (root/'vault/wiki/documents/candidate-000.md').open('a') as stream: stream.write('\nChanged observation.\n')
+if leader and mode=='alias':
+    (root/'vault/wiki/concepts').mkdir(exist_ok=True)
+    (root/'vault/wiki/concepts/new.md').write_text('---\ntype: concept\ntitle: New owner\naliases: [transactional outbox]\n---\nAn explicit alias.\n')
+if leader and mode=='review':
+    (root/'vault/wiki/explorations').mkdir(exist_ok=True)
+    (root/'vault/wiki/explorations/review.md').write_text('---\ntype: exploration\ntitle: Review\nreview:\n  status: open\n  subjects: [wiki/documents/candidate-000.md]\n---\nReview scope.\n')
+if leader and mode=='unreadable':
+    with (root/'vault/wiki/documents/candidate-000.md').open('ab') as stream: stream.write(b'\xff')
+if leader and mode=='config':
+    with (root/'config.yaml').open('a') as stream: stream.write('\n# changed\n')
+if not leader: time.sleep(.1)
+output={'decisions':[{'candidate_key':candidate['candidate_key'],'decision':'not-selected',
+    'reason':'Card-only fixture decision; no full-body assessment.'} for candidate in request['candidates']]}
+if '--safe-mode' in sys.argv:
+    print(json.dumps({'type':'result','subtype':'success','is_error':False,'structured_output':output}))
+else: print(json.dumps(output))
+SCREENING
+"#;
+
+fn parallel_screening_fixture(engine: &str, mode: &str, calls: usize) -> Fixture {
+    let (fixture, first) =
+        progressive_extraction_fixture(engine, PARALLEL_SCREENING, 12, 65536, 16384);
+    let mut input = first.input.clone();
+    input.insert(
+        "target".into(),
+        serde_json::to_value(&first.target).unwrap(),
+    );
+    let mut input: lk_queue::ExtractConceptsRequest =
+        serde_json::from_value(serde_json::Value::Object(input)).unwrap();
+    input.target.vault_path = "wiki/documents/source-two.md".into();
+    let queue = fixture.root().join("vault/.lorekeeper/queue");
+    let second = lk_queue::QueueLlmClient::new(queue.clone()).build_task(
+        "ext",
+        lk_queue::TaskKind::ExtractConcepts,
+        input,
+    );
+    let raw =
+        std::fs::read_to_string(fixture.root().join("vault/wiki/documents/source.md")).unwrap();
+    std::fs::write(
+        fixture.root().join("vault/wiki/documents/source-two.md"),
+        raw.replace(&first.cache_hash, &second.cache_hash),
+    )
+    .unwrap();
+    std::fs::write(
+        queue.join("fixture.jsonl"),
+        format!(
+            "{}\n{}\n",
+            serde_json::to_string(&first).unwrap(),
+            serde_json::to_string(&second).unwrap()
+        ),
+    )
+    .unwrap();
+    let config = std::fs::read_to_string(&fixture.config).unwrap().replace(
+        "max_calls: 64",
+        &format!("max_calls: {calls}, max_parallel: 2"),
+    );
+    std::fs::write(&fixture.config, config).unwrap();
+    for task in [&first, &second] {
+        let status = execution_json(&fixture, &["queue", "status", "--json"]);
+        let row = status["data"]["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["task_id"] == task.task_id)
+            .unwrap();
+        let file = fixture.root().join("recipe.json");
+        std::fs::write(&file, serde_json::to_vec(&serde_json::json!({"target_revision":row["target_revision"],"queries":[{"query":"transactional outbox","phrase":true,"spacing":false}]})).unwrap()).unwrap();
+        execution_json(
+            &fixture,
+            &[
+                "work",
+                "discover",
+                "--task-id",
+                &task.task_id,
+                "--file",
+                file.to_str().unwrap(),
+            ],
+        );
+    }
+    std::fs::write(fixture.root().join("screening-mode"), mode).unwrap();
+    std::fs::write(
+        fixture.root().join("screening-expected"),
+        calls.min(2).to_string(),
+    )
+    .unwrap();
+    fixture
+}
+
+fn screening_settlement(fixture: &Fixture) -> serde_json::Value {
+    let output = fixture.command().args(["queue", "check"]).output().unwrap();
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(output.status.success(), report["ok"].as_bool().unwrap());
+    report
+}
+
+fn screening_receipts(fixture: &Fixture) -> usize {
+    let directory = fixture.root().join("vault/.lorekeeper/queue/selection");
+    std::fs::read_dir(directory)
+        .unwrap()
+        .flat_map(|task| std::fs::read_dir(task.unwrap().path()).unwrap())
+        .map(|selection| {
+            let directory = selection.unwrap().path().join("batches");
+            if directory.exists() {
+                std::fs::read_dir(directory).unwrap().count()
+            } else {
+                0
+            }
+        })
+        .sum()
+}
+
+#[test]
+fn native_screening_wave_overlaps_distinct_tasks_and_shares_fresh_capture_on_both_hosts() {
+    for engine in ["codex", "claude-code"] {
+        let fixture = parallel_screening_fixture(engine, "good", 2);
+        let (_, report) = fixture.run("process");
+        assert_eq!(report["semantic_calls"], 2, "{report}");
+        assert_eq!(screening_receipts(&fixture), 2, "{report}");
+        assert_eq!(report["queue_planning"]["discovery_captures"], 1);
+        assert_eq!(
+            report["queue_planning"]["discovery_io"]["knowledge"]["files"],
+            14
+        );
+        assert_eq!(report["screening_preparation_io"]["captures"], 0);
+        assert_eq!(report["screening_revalidation_io"]["captures"], 1);
+        assert_eq!(
+            report["screening_revalidation_io"]["knowledge"]["files"],
+            14
+        );
+        for step in report["work_steps"].as_array().unwrap() {
+            assert_eq!(step["outcome"], "recorded");
+            assert_eq!(step["preparation_from_queue_plan"], true);
+            assert!(step["preparation_duration_ms"].is_null());
+            let peers: Vec<String> = serde_json::from_slice(
+                &std::fs::read(fixture.root().join(format!(
+                    "screening-overlap-{}.json",
+                    step["selection_id"].as_str().unwrap()
+                )))
+                .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(peers.len(), 2);
+        }
+        let settlement = screening_settlement(&fixture);
+        assert_eq!(settlement["data"]["pending_mutation"], false);
+        assert!(
+            settlement["data"]["staged_results"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        for path in ["source.md", "source-two.md"] {
+            assert!(
+                !std::fs::read_to_string(fixture.root().join("vault/wiki/documents").join(path))
+                    .unwrap()
+                    .contains("concepts_done:")
+            );
+        }
+    }
+}
+
+#[test]
+fn native_screening_wave_preserves_independent_response_when_a_peer_fails() {
+    for mode in ["failed", "malformed"] {
+        let fixture = parallel_screening_fixture("codex", mode, 2);
+        let (_, report) = fixture.run("process");
+        assert_eq!(report["semantic_calls"], 2);
+        assert_eq!(screening_receipts(&fixture), 1, "{mode}: {report}");
+        assert!(report["halted"].as_bool().unwrap());
+        assert_eq!(
+            report["work_steps"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|step| step["outcome"] == "recorded")
+                .count(),
+            1
+        );
+    }
+}
+
+#[test]
+fn native_screening_wave_recaptures_membership_contents_and_configuration_after_hosts() {
+    for (mode, accepted) in [
+        ("added", 0),
+        ("deleted", 0),
+        ("changed", 0),
+        ("alias", 0),
+        ("review", 0),
+        ("unreadable", 0),
+        ("config", 0),
+        ("unrelated", 2),
+    ] {
+        let fixture = parallel_screening_fixture("codex", mode, 2);
+        let (_, report) = fixture.run("process");
+        assert_eq!(report["semantic_calls"], 2);
+        assert_eq!(screening_receipts(&fixture), accepted, "{mode}: {report}");
+    }
+}
+
+#[test]
+fn native_screening_wave_obeys_remaining_call_budget() {
+    let fixture = parallel_screening_fixture("codex", "good", 1);
+    let (_, report) = fixture.run("process");
+    assert_eq!(report["semantic_calls"], 1);
+    assert_eq!(screening_receipts(&fixture), 1, "{report}");
+}
+
+#[test]
+fn cancelled_screening_wave_retains_plans_and_reaps_all_hosts_without_recording() {
+    let fixture = parallel_screening_fixture("codex", "wait", 2);
+    let output = fixture.root().join("cancelled-screening.json");
+    let mut child = fixture
+        .command()
+        .args(["run", "process", "--json"])
+        .stdout(std::fs::File::create(&output).unwrap())
+        .stderr(std::fs::File::create(fixture.root().join("cancelled-screening.log")).unwrap())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let peers = std::fs::read_dir(fixture.root())
+            .unwrap()
+            .filter(|entry| {
+                entry
+                    .as_ref()
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("screening-overlap-")
+            })
+            .count();
+        if peers == 2 {
+            break;
+        }
+        assert!(Instant::now() < deadline, "screening peers never started");
+        assert!(child.try_wait().unwrap().is_none());
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    rustix::process::kill_process(
+        rustix::process::Pid::from_raw(i32::try_from(child.id()).unwrap()).unwrap(),
+        rustix::process::Signal::INT,
+    )
+    .unwrap();
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            assert!(!status.success());
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "cancelled screening did not stop"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let report: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(output).unwrap()).unwrap();
+    assert_eq!(report["cancelled"], true, "{report}");
+    assert_eq!(report["semantic_calls"], 2);
+    for entry in std::fs::read_dir(fixture.root()).unwrap() {
+        let entry = entry.unwrap();
+        if entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with("screening-start-")
+        {
+            let marker: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(entry.path()).unwrap()).unwrap();
+            assert!(
+                !Command::new("kill")
+                    .args(["-0", &marker["pid"].as_i64().unwrap().to_string()])
+                    .output()
+                    .unwrap()
+                    .status
+                    .success()
+            );
+        }
+    }
+    assert_eq!(screening_receipts(&fixture), 0);
+    for step in report["work_steps"].as_array().unwrap() {
+        assert_eq!(step["outcome"], "cancelled");
+    }
+    assert_eq!(
+        screening_settlement(&fixture)["data"]["pending_mutation"],
+        false
+    );
+}
+
+#[test]
+fn screening_writer_wait_discards_prepared_requests_and_recaptures_before_invocation() {
+    let fixture = parallel_screening_fixture("codex", "good", 2);
+    let agent = fixture.root().join("agent executable");
+    let script = std::fs::read_to_string(&agent).unwrap();
+    let pause = "printf ready > \"$TEST_EXECUTION_ROOT/writer-ready\"; while [ ! -f \"$TEST_EXECUTION_ROOT/writer-release\" ]; do sleep 0.02; done; ";
+    std::fs::write(
+        &agent,
+        script.replacen("then printf", &format!("then {pause}printf"), 1),
+    )
+    .unwrap();
+    let mut child = start_contention_run(&fixture);
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(fixture.root().join("vault/.lorekeeper/mutation/lock"))
+        .unwrap();
+    lock.lock().unwrap();
+    std::fs::write(fixture.root().join("writer-release"), "release").unwrap();
+    std::thread::sleep(Duration::from_millis(250));
+    assert!(child.try_wait().unwrap().is_none());
+    assert!(!fixture.root().read_dir().unwrap().any(|entry| {
+        entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with("screening-start-")
+    }));
+    std::fs::write(
+        fixture.root().join("vault/wiki/documents/added.md"),
+        "---\ntype: document\n---\nA new transactional outbox candidate.\n",
+    )
+    .unwrap();
+    drop(lock);
+    let report = finish_contention_run(&fixture, child);
+    assert_eq!(report["semantic_calls"], 2, "{report}");
+    assert_eq!(screening_receipts(&fixture), 2, "{report}");
+    assert!(report["queue_planning"]["attempts"].as_u64().unwrap() >= 2);
+    assert!(
+        report["work_steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|step| step["outcome"] == "rejected" && step["agent_duration_ms"].is_null())
+    );
+    for entry in std::fs::read_dir(fixture.root()).unwrap() {
+        let entry = entry.unwrap();
+        if entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with("screening-start-")
+        {
+            let marker: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(entry.path()).unwrap()).unwrap();
+            assert!(
+                marker["request"]["candidates"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|candidate| candidate["candidate_key"] == "wiki/documents/added.md")
+            );
+        }
+    }
 }

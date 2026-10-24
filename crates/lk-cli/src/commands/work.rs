@@ -918,27 +918,145 @@ pub(super) struct ScreeningTurn {
     pub batches: usize,
 }
 
-pub(super) fn prepare_screening(
+impl Screening {
+    fn turn(&self, root: &Path) -> miette::Result<ScreeningTurn> {
+        let (progress, request) = self.selection.prepare(root)?;
+        Ok(ScreeningTurn {
+            selection_id: self.selection.id.clone(),
+            request,
+            complete: progress.complete,
+            unknown: progress.unknown,
+            deferred: progress.deferred,
+            completed_batches: progress.completed_batches,
+            batches: progress.batches,
+        })
+    }
+}
+
+fn current_screenings(
     root: &Path,
     config: &lk_core::config::Config,
     config_revision: &str,
-    task_id: &str,
-) -> miette::Result<ScreeningTurn> {
-    let root = root.canonicalize().into_diagnostic()?;
-    let screening =
-        current_screening(&root, config, config_revision, task_id)?.into_candidates()?;
-    if let Some(reason) = screening.selection.admission_reason(config, &root)? {
-        return Err(miette::miette!("{reason}"));
-    }
-    let (progress, request) = screening.selection.prepare(&root)?;
-    Ok(ScreeningTurn {
-        selection_id: screening.selection.id,
-        request,
-        complete: progress.complete,
-        unknown: progress.unknown,
-        deferred: progress.deferred,
-        completed_batches: progress.completed_batches,
-        batches: progress.batches,
+    task_ids: &[&str],
+) -> miette::Result<(Vec<Screening>, lk_vault::DiscoveryCaptureMetrics)> {
+    let queries = task_ids
+        .iter()
+        .map(|task_id| {
+            let task = super::queue::select_task(
+                root,
+                task_id,
+                super::queue::TaskSelection::CurrentOrDoneExtraction,
+            )?;
+            discovery::current(root, &task)?.ok_or_else(|| {
+                miette::miette!("candidate screening requires current explicit discovery")
+            })
+        })
+        .collect::<miette::Result<Vec<_>>>()?;
+    let reports = lk_vault::list_reviews(root, &config.vault.dirs).into_diagnostic()?;
+    let (captures, metrics) = lk_vault::capture_discovery_batch_measured(
+        root,
+        &config.vault.dirs,
+        &queries,
+        Some(&reports),
+    )
+    .into_diagnostic()?;
+    let screenings = task_ids
+        .iter()
+        .zip(captures)
+        .map(|(task_id, capture)| {
+            let inventory = resources::selection_inventory_with_capture(
+                root,
+                config,
+                task_id,
+                capture,
+                reports.clone(),
+            )?;
+            screening_with_inventory(root, config, config_revision, inventory)?
+                .into_candidates()
+                .map(|screening| *screening)
+        })
+        .collect::<miette::Result<Vec<_>>>()?;
+    Ok((screenings, metrics))
+}
+
+pub(super) struct ScreeningTurns {
+    pub turns: Vec<ScreeningTurn>,
+    pub discovery_io: lk_vault::DiscoveryCaptureMetrics,
+}
+
+pub(super) fn prepare_screenings(
+    root: &Path,
+    config: &lk_core::config::Config,
+    config_revision: &str,
+    task_ids: &[&str],
+) -> miette::Result<ScreeningTurns> {
+    let (screenings, discovery_io) = current_screenings(root, config, config_revision, task_ids)?;
+    let turns = screenings
+        .iter()
+        .map(|screening| {
+            if let Some(reason) = screening.selection.admission_reason(config, root)? {
+                return Err(miette::miette!("{reason}"));
+            }
+            screening.turn(root)
+        })
+        .collect::<miette::Result<Vec<_>>>()?;
+    Ok(ScreeningTurns {
+        turns,
+        discovery_io,
+    })
+}
+
+pub(super) struct ScreeningRecord {
+    pub result: miette::Result<usize>,
+    pub duration_ms: u64,
+}
+
+pub(super) struct RecordedScreenings {
+    pub records: Vec<ScreeningRecord>,
+    pub discovery_io: lk_vault::DiscoveryCaptureMetrics,
+    pub revalidation_duration_ms: u64,
+}
+
+pub(super) fn record_screenings(
+    session: &lk_vault::MutationSession,
+    config: &lk_core::config::Config,
+    config_revision: &str,
+    replies: Vec<(&str, Value)>,
+) -> miette::Result<RecordedScreenings> {
+    let task_ids = replies
+        .iter()
+        .map(|(task_id, _)| *task_id)
+        .collect::<Vec<_>>();
+    let started_at = std::time::Instant::now();
+    let (screenings, discovery_io) =
+        current_screenings(session.root(), config, config_revision, &task_ids)?;
+    let revalidation_duration_ms = started_at.elapsed().as_millis() as u64;
+    let records = screenings
+        .into_iter()
+        .zip(replies)
+        .map(|(screening, (_, output))| {
+            let started_at = std::time::Instant::now();
+            let recorded = (|| {
+                Ok(screening
+                    .selection
+                    .record(
+                        session,
+                        &screening.inventory.pages,
+                        serde_json::from_value(output).into_diagnostic()?,
+                        None,
+                    )?
+                    .completed_batches)
+            })();
+            ScreeningRecord {
+                result: recorded,
+                duration_ms: started_at.elapsed().as_millis() as u64,
+            }
+        })
+        .collect();
+    Ok(RecordedScreenings {
+        records,
+        discovery_io,
+        revalidation_duration_ms,
     })
 }
 
@@ -1070,7 +1188,7 @@ pub(super) enum TaskWork {
         id: String,
     },
     Screening {
-        selection_id: String,
+        turn: Box<ScreeningTurn>,
     },
     Admission {
         reason: String,
@@ -1179,7 +1297,7 @@ pub(super) fn prepare_tasks_with_audit(
     config_revision: &str,
     tasks: &[lk_queue::QueueTask],
     audits: &std::collections::BTreeMap<String, lk_graph::audit::AuditCandidate>,
-) -> miette::Result<(Vec<TaskWork>, usize)> {
+) -> miette::Result<(Vec<TaskWork>, lk_vault::DiscoveryCaptureMetrics)> {
     let root = session.root();
     let mut recipes = Vec::new();
     let mut positions = Vec::new();
@@ -1193,15 +1311,18 @@ pub(super) fn prepare_tasks_with_audit(
             }
         }
     }
-    let discovery_captures = usize::from(recipes.iter().any(|queries| !queries.is_empty()));
     let reports = if recipes.is_empty() {
         Vec::new()
     } else {
         lk_vault::list_reviews(root, &config.vault.dirs).into_diagnostic()?
     };
-    let captures =
-        lk_vault::capture_discovery_batch(root, &config.vault.dirs, &recipes, Some(&reports))
-            .into_diagnostic()?;
+    let (captures, metrics) = lk_vault::capture_discovery_batch_measured(
+        root,
+        &config.vault.dirs,
+        &recipes,
+        Some(&reports),
+    )
+    .into_diagnostic()?;
     let mut captures = positions.into_iter().zip(captures).peekable();
     let work = tasks
         .iter()
@@ -1230,7 +1351,7 @@ pub(super) fn prepare_tasks_with_audit(
             )
         })
         .collect::<miette::Result<Vec<_>>>()?;
-    Ok((work, discovery_captures))
+    Ok((work, metrics))
 }
 
 fn prepare_task_in_session(
@@ -1275,7 +1396,7 @@ fn prepare_task_in_session(
                 let ledger = screening.selection.ledger(root)?;
                 if !ledger.progress.complete {
                     return Ok(TaskWork::Screening {
-                        selection_id: screening.selection.id.clone(),
+                        turn: Box::new(screening.turn(root)?),
                     });
                 }
                 admitted_task(&screening, &ledger.binding()?, &ledger.selected_owners)?
@@ -2956,7 +3077,10 @@ mod tests {
                 .persist(&session, &config, &config_revision)
                 .unwrap();
         }
-        let turn = prepare_screening(&root, &config, &config_revision, &task.task_id).unwrap();
+        let turn = prepare_screenings(&root, &config, &config_revision, &[&task.task_id])
+            .unwrap()
+            .turns
+            .remove(0);
         let request = turn.request.unwrap();
         let decisions = request["candidates"].as_array().unwrap().iter().map(|candidate| {
             json!({"candidate_key":candidate["candidate_key"],
