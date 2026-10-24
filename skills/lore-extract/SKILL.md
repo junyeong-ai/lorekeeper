@@ -4,7 +4,7 @@ description: Extracts repository decisions and reusable knowledge into a Lorekee
   vault using a persistent scan/run/audit manifest. Uses source documents, code boundaries
   and optional Git history; use lore-wiki capture for an insight from current work.
 metadata:
-  version: 0.93.0
+  version: 0.94.0
 ---
 
 # Repository knowledge extraction
