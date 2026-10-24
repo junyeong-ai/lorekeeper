@@ -114,6 +114,7 @@ mod tests {
         std::fs::write(dir.path().join("wiki/concepts/retry.md"), "---\ntype: concept\ntitle: Retry\nsource_count: 1\nllm_inputs:\n  synthesis: old\n  synthesis_done: old\n---\n# Retry\n\n## Synthesis\n\nPreserved authored answer.\n\n## Sources\n\n## Related\n").unwrap();
         std::fs::write(dir.path().join("wiki/documents/evidence.md"), "---\ntype: document\ntitle: Evidence\n---\n# Evidence\n\nA bounded retry stops after three failed attempts.\n\n[Retry](../concepts/retry.md)\n").unwrap();
         let config = ResolvedConfig {
+            pin: crate::commands::ConfigurationPin::Absent,
             root: dir.path().into(),
             graph: Default::default(),
             locale: lk_core::i18n::Locale::En,

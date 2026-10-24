@@ -9,6 +9,7 @@
 | `lore ingest` | Collect ALL enabled sources, write pages; render the cross-source work-log when a `personal:` module is configured |
 | `lore ingest <source>` | Refresh one source's pages only — never rewrites the work-log (it sees a subset) |
 | `lore ingest --dry-run` | Preview without vault writes |
+| `lore ingest --publication-workflow refuse\|wait` | Collect first, then require exclusive workflow access for publication. Use outside an existing workflow; ordinary ingest omits this option. Dry run ignores it |
 | `lore ingest --recover [--dry-run]` | Requery bounded missing closed dates from the explicit recovery start; see ingestion scope and replay limits |
 | `lore ingest --date YYYY-MM-DD` | Re-materialize a specific day — RE-FETCHES it; see Safety notes before using it on a past date |
 | `lore fetch <URL> [--source ID]` | Save an HTML article, Markdown or text document into a configured manual inbox. Then ingest that source and run lore-process; fetching alone does not complete knowledge integration |
@@ -45,3 +46,8 @@
 | `lore self deploy` | Rewrite those copies from what the binary carries. This is the repair `lore self status` reports, and what an install and an update both run |
 | `lore self update [--version V]` | Replace the binary with a published release, then redeploy. Refuses active installation users and pending queue work; `--force` never overrides active claims. Older releases require explicit `--version` |
 | `lore self uninstall` | Remove the binary and everything it deployed. The vault is never touched |
+
+`schema`, `queue apply`, `graph backlinks-sync`, `wiki refresh` and `wiki audit-record`
+default to refusing busy writer access. Add `--wait-for-vault` to wait explicitly;
+changed configuration or cancellation stops before publication. Supported dry runs
+remain read-only and do not wait or recover journals.

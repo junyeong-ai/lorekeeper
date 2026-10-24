@@ -11,6 +11,7 @@ use super::GlobalOptions;
 
 struct ResolvedConfig {
     root: PathBuf,
+    pin: super::ConfigurationPin,
     graph: GraphConfig,
     locale: Locale,
     vault_dirs: VaultDirs,
@@ -108,6 +109,9 @@ pub enum GraphCommand {
         /// Report what would change without writing
         #[arg(long)]
         dry_run: bool,
+        /// Wait cancellably for vault writer access (ignored for dry-run)
+        #[arg(long)]
+        wait_for_vault: bool,
     },
     /// Request a fresh synthesis for one exact concept from its current citations.
     Resynthesize {
@@ -271,16 +275,27 @@ async fn run_inner(
     {
         return Err("suggest-links requires a limit between 1 and 100".into());
     }
+    let wait_for_vault = matches!(
+        &cmd,
+        GraphCommand::BacklinksSync {
+            wait_for_vault: true,
+            ..
+        }
+    );
     let mut rc = resolve_config_full(opts, root_override)?;
     let mutation = if matches!(
         &cmd,
         GraphCommand::Normalize { fix: true }
             | GraphCommand::Merge { dry_run: false, .. }
-            | GraphCommand::BacklinksSync { dry_run: false }
+            | GraphCommand::BacklinksSync { dry_run: false, .. }
             | GraphCommand::Resynthesize { dry_run: false, .. }
             | GraphCommand::RetractCitation { dry_run: false, .. }
     ) {
-        Some(lk_vault::MutationSession::acquire(&rc.root).map_err(|e| e.to_string())?)
+        Some(
+            super::execution::acquire_mutation(&rc.root, wait_for_vault, &rc.pin)
+                .await
+                .map_err(|error| error.to_string())?,
+        )
     } else {
         None
     };
@@ -563,7 +578,7 @@ async fn run_inner(
             }
             violated
         }
-        GraphCommand::BacklinksSync { dry_run } => {
+        GraphCommand::BacklinksSync { dry_run, .. } => {
             let report = synchronize_backlinks(&rc, &views.scanned, dry_run, mutation.as_ref())?;
             // Skipped pages need metadata/section repair before derived state can publish.
             let violated = !report.sync.skipped.is_empty();
@@ -762,11 +777,12 @@ fn resolve_config_full(
     // dirs/locale/graph/categories even under `--root` (only the root is overridden) — falling
     // back to defaults wholesale would scan the WRONG dirs, skip category lint, and resolve
     // headings in the wrong locale. Defaults apply ONLY when no config file exists.
-    let super::RootConfig { root, config } =
+    let super::RootConfig { root, config, pin } =
         super::resolve_root_config(opts, root_override).map_err(|e| format!("{e}"))?;
     match config {
         Some(config) => Ok(ResolvedConfig {
             root,
+            pin,
             locale: config.vault.locale(),
             vault_dirs: config.vault.dirs.clone(),
             graph: config.graph,
@@ -779,6 +795,7 @@ fn resolve_config_full(
             graph.apply_vault_defaults(&vault_dirs);
             Ok(ResolvedConfig {
                 root,
+                pin,
                 graph,
                 locale: Locale::default(),
                 vault_dirs,
@@ -806,6 +823,7 @@ mod tests {
         )
         .unwrap();
         let config = ResolvedConfig {
+            pin: super::super::ConfigurationPin::Absent,
             root: root.path().into(),
             graph: Default::default(),
             locale: Locale::En,

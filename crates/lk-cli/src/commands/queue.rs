@@ -51,6 +51,9 @@ pub enum QueueCommand {
         /// Emit typed task outcomes and retained rejection scopes as JSON.
         #[arg(long)]
         json: bool,
+        /// Wait cancellably for vault writer access (ignored for dry-run)
+        #[arg(long)]
+        wait_for_vault: bool,
     },
     /// Regenerate one retained task from its original input, without remote fetching.
     Regenerate {
@@ -218,7 +221,8 @@ pub async fn run(opts: &super::GlobalOptions, cmd: QueueCommand) -> miette::Resu
             root,
             dry_run,
             json,
-        } => apply(opts, root, dry_run, json).await,
+            wait_for_vault,
+        } => apply(opts, root, dry_run, json, wait_for_vault).await,
         QueueCommand::Prune {
             root,
             json,
@@ -536,9 +540,10 @@ async fn apply(
     root: Option<PathBuf>,
     dry_run: bool,
     json: bool,
+    wait_for_vault: bool,
 ) -> miette::Result<()> {
     let mut report = application::Report::new(dry_run);
-    if let Err(error) = apply_into(opts, root, dry_run, &mut report).await {
+    if let Err(error) = apply_into(opts, root, dry_run, wait_for_vault, &mut report).await {
         report.fail(error);
     }
     if json {
@@ -572,18 +577,22 @@ async fn apply_into(
     opts: &super::GlobalOptions,
     root: Option<PathBuf>,
     dry_run: bool,
+    wait_for_vault: bool,
     report: &mut application::Report,
 ) -> miette::Result<()> {
-    let (config, config_revision) = load_config_with_revision(&find_config(opts)?)?;
+    let config_path = find_config(opts)?;
+    let (config, config_revision) = load_config_with_revision(&config_path)?;
+    let pin = super::ConfigurationPin::from_loaded(config_path, config_revision.clone());
     let vault_root = root.unwrap_or_else(|| config.vault.root_path());
     let queue_dir = vault_root.join(".lorekeeper").join("queue");
 
     // Global vault claim precedes narrower queue claims everywhere. Recovery runs
-    // before deriving any write from current pages; both claims fail fast if busy.
-    let mutation = (!dry_run)
-        .then(|| lk_vault::MutationSession::acquire(&vault_root))
-        .transpose()
-        .map_err(|error| miette::miette!("claim vault mutation: {error}"))?;
+    // before deriving writes. Vault waiting is explicit; the narrow queue claim refuses contention.
+    let mutation = if dry_run {
+        None
+    } else {
+        Some(super::execution::acquire_mutation(&vault_root, wait_for_vault, &pin).await?)
+    };
     let _claim = claim_writer(&queue_dir, dry_run)?;
     rejections::validate_store(&vault_root)?;
 

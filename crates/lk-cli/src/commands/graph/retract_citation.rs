@@ -316,6 +316,7 @@ mod tests {
         std::fs::write(dir.path().join(ORIGIN), raw).unwrap();
         std::fs::write(dir.path().join(CONCEPT), "---\ntype: concept\nsource_count: 1\n---\n# Retry\n\n## Synthesis\n\nKeep the concept.\n\n## Sources\n\nKeep machine sources.\n").unwrap();
         let config = ResolvedConfig {
+            pin: crate::commands::ConfigurationPin::Absent,
             root: dir.path().into(),
             graph: Default::default(),
             locale: lk_core::i18n::Locale::En,

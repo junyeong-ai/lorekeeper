@@ -263,6 +263,14 @@ the same target can be prepared again. `prepared_targets` counts detailed prepar
 attempts; capture counts cover successful shared discovery batches and attempted
 synthesis captures, not later resource revalidation or model work.
 
+`mutation_access` reports in-process writer-acquisition `attempts` and cumulative
+`duration_ms`, including contention waiting, configuration checks and journal
+recovery. Queue-planning duration excludes these acquisitions. Child CLI waiting
+is outside this metric; work-step phase durations can overlap it, so the reported
+durations are not independent values to sum. Native waits are cancellable and retry
+only typed contention. A pre-host cursor wait triggers fresh preparation; post-host
+recording validates current resources without repeating the host call.
+
 `queue_application` accumulates deterministic application `attempts`, `duration_ms`,
 `applied`, `dropped` and `rejected` counts and retains the `latest` typed report.
 Repeated rejection counts are attempts, not distinct tasks. Native report capture

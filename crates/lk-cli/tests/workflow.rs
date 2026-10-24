@@ -287,3 +287,56 @@ fn explicit_wait_runs_after_the_foreground_holder_releases() {
     assert!(holder.0.wait().unwrap().success());
     assert!(waiting.0.wait().unwrap().success());
 }
+
+#[test]
+fn a_waiting_workflow_refuses_changed_configuration_before_starting_its_child() {
+    let (directory, config) = fixture();
+    let (mut holder, _) = held(&config, "printf 'ready\\n'; read -r release");
+    let marker = directory.path().join("must-not-start");
+    let error = directory.path().join("wait-error");
+    let mut waiter = Command::new(env!("CARGO_BIN_EXE_lore"))
+        .arg("--config")
+        .arg(&config)
+        .env("LORE_INSTALL_DATA_DIR", directory.path().join("data"))
+        .args(["workflow", "--wait", "--", "/usr/bin/touch"])
+        .arg(&marker)
+        .stdout(Stdio::null())
+        .stderr(std::fs::File::create(&error).unwrap())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !std::fs::read_to_string(&error)
+        .unwrap()
+        .contains("Waiting for the vault workflow lease")
+    {
+        assert!(std::time::Instant::now() < deadline);
+        assert!(waiter.try_wait().unwrap().is_none());
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let raw = std::fs::read_to_string(&config)
+        .unwrap()
+        .replace("name: Test", "name: Changed");
+    std::fs::write(&config, raw).unwrap();
+    let status = loop {
+        if let Some(status) = waiter.try_wait().unwrap() {
+            break status;
+        }
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    assert!(!status.success());
+    assert!(
+        std::fs::read_to_string(error)
+            .unwrap()
+            .contains("configuration changed")
+    );
+    assert!(!marker.exists());
+    holder
+        .0
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"release\n")
+        .unwrap();
+    assert!(holder.0.wait().unwrap().success());
+}

@@ -36,12 +36,12 @@ fn load(root: &Path) -> miette::Result<(Option<String>, Option<Cursor>)> {
 /// Reserve the next run's first admission turn before acquisition. Concurrent
 /// collectors read and advance this state under the same short mutation session;
 /// completion never writes a stale cursor back over another collector's turn.
-pub(super) fn reserve_start(
+pub(super) async fn reserve_start(
     root: &Path,
     candidates: &BTreeSet<String>,
     dry_run: bool,
     wait: bool,
-    validate_config: impl FnOnce() -> miette::Result<()>,
+    mut validate_config: impl FnMut() -> miette::Result<()>,
 ) -> miette::Result<Option<String>> {
     if candidates.is_empty() {
         return Ok(None);
@@ -51,13 +51,8 @@ pub(super) fn reserve_start(
     } else {
         std::fs::create_dir_all(root).into_diagnostic()?;
         Some(
-            if wait {
-                eprintln!("Waiting for exclusive vault access to reserve ingest order...");
-                lk_vault::MutationSession::acquire_waiting(root)
-            } else {
-                lk_vault::MutationSession::acquire(root)
-            }
-            .into_diagnostic()?,
+            super::super::execution::acquire_mutation_checked(root, wait, &mut validate_config)
+                .await?,
         )
     };
     validate_config()?;
@@ -97,8 +92,24 @@ pub(super) fn reserve_start(
 mod tests {
     use super::*;
 
+    fn reserve(
+        root: &Path,
+        candidates: &BTreeSet<String>,
+        dry_run: bool,
+        wait: bool,
+        validate: impl FnMut() -> miette::Result<()>,
+    ) -> miette::Result<Option<String>> {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap()
+            .block_on(super::reserve_start(
+                root, candidates, dry_run, wait, validate,
+            ))
+    }
+
     fn select(root: &Path, candidates: &[&str], dry_run: bool) -> miette::Result<Option<String>> {
-        reserve_start(
+        reserve(
             root,
             &candidates.iter().map(|id| (*id).to_owned()).collect(),
             dry_run,
@@ -173,7 +184,7 @@ mod tests {
         }
         std::fs::write(&path, "{\"next_source\":\"b\"}").unwrap();
         assert!(
-            reserve_start(
+            reserve(
                 root.path(),
                 &["a".into(), "b".into()].into(),
                 false,
@@ -231,7 +242,7 @@ mod tests {
                 let barrier = barrier.clone();
                 std::thread::spawn(move || {
                     barrier.wait();
-                    reserve_start(&root, &["a".into(), "b".into()].into(), false, true, || {
+                    reserve(&root, &["a".into(), "b".into()].into(), false, true, || {
                         Ok(())
                     })
                     .unwrap()

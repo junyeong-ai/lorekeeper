@@ -930,20 +930,19 @@ pub(super) fn prepare_screening(
 }
 
 pub(super) fn record_screening(
-    root: &Path,
+    session: &lk_vault::MutationSession,
     config: &lk_core::config::Config,
     config_revision: &str,
     task_id: &str,
     output: Value,
     previous_revision: Option<&str>,
 ) -> miette::Result<usize> {
-    let session = lk_vault::MutationSession::acquire(root).into_diagnostic()?;
-    let screening =
-        current_screening(session.root(), config, config_revision, task_id)?.into_candidates()?;
+    let root = session.root();
+    let screening = current_screening(root, config, config_revision, task_id)?.into_candidates()?;
     Ok(screening
         .selection
         .record(
-            &session,
+            session,
             &screening.inventory.pages,
             serde_json::from_value(output).into_diagnostic()?,
             previous_revision,
@@ -1055,25 +1054,13 @@ pub(super) enum TaskWork {
 }
 
 pub(super) fn prepare_task(
-    root: &Path,
+    session: &lk_vault::MutationSession,
     config: &lk_core::config::Config,
     config_revision: &str,
     task_id: &str,
 ) -> miette::Result<TaskWork> {
-    prepare_task_with_audit(root, config, config_revision, task_id, None)
-}
-
-pub(super) fn prepare_task_with_audit(
-    root: &Path,
-    config: &lk_core::config::Config,
-    config_revision: &str,
-    task_id: &str,
-    audit: Option<&lk_graph::audit::AuditCandidate>,
-) -> miette::Result<TaskWork> {
-    let root = root.canonicalize().into_diagnostic()?;
-    let session = lk_vault::MutationSession::acquire(&root).into_diagnostic()?;
-    let task = super::queue::current_task(&root, task_id)?;
-    prepare_task_in_session(&session, config, config_revision, &task, audit, None)
+    let task = super::queue::current_task(session.root(), task_id)?;
+    prepare_task_in_session(session, config, config_revision, &task, None, None)
 }
 
 pub(super) fn prepare_tasks_with_audit(
@@ -1205,15 +1192,14 @@ fn prepare_task_in_session(
 }
 
 pub(super) fn prepare_audit(
-    root: &Path,
+    session: &lk_vault::MutationSession,
     config: &lk_core::config::Config,
     config_revision: &str,
     candidate: &lk_graph::audit::AuditCandidate,
 ) -> miette::Result<String> {
-    let root = root.canonicalize().into_diagnostic()?;
-    let session = lk_vault::MutationSession::acquire(&root).into_diagnostic()?;
-    let prepared = resources::audit_candidate(&root, config, candidate)?;
-    let work = persist_prepared(&session, config, config_revision, &prepared)?;
+    let root = session.root();
+    let prepared = resources::audit_candidate(root, config, candidate)?;
+    let work = persist_prepared(session, config, config_revision, &prepared)?;
     Ok(work.plan.id)
 }
 
@@ -1241,6 +1227,24 @@ pub(super) fn prepare_inspection(
 }
 
 #[cfg(unix)]
+pub(super) fn validate_inspection_request(
+    root: &Path,
+    config: &lk_core::config::Config,
+    config_revision: &str,
+    id: &str,
+    node: &str,
+    request: &Value,
+) -> miette::Result<()> {
+    let (work, prepared) = load(root, config, config_revision, id)?;
+    if work.input(root, node, &prepared.resources)? != *request {
+        return Err(miette::miette!(
+            "inspection inputs changed while waiting for writer access; unfinished work retained"
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
 pub(super) fn prepare_inspections(
     root: &Path,
     config: &lk_core::config::Config,
@@ -1254,7 +1258,7 @@ pub(super) fn prepare_inspections(
 }
 
 pub(super) fn record_inspection(
-    root: &Path,
+    session: &lk_vault::MutationSession,
     config: &lk_core::config::Config,
     config_revision: &str,
     id: &str,
@@ -1266,10 +1270,9 @@ pub(super) fn record_inspection(
             "observation does not answer the selected work node"
         ));
     }
-    let session = lk_vault::MutationSession::acquire(root).into_diagnostic()?;
     let root = session.root();
     let (work, prepared) = load(root, config, config_revision, id)?;
-    work.record(&session, output, &prepared.resources)
+    work.record(session, output, &prepared.resources)
 }
 
 #[cfg(unix)]
@@ -1287,17 +1290,17 @@ pub(super) fn inspection_action(
 
 #[cfg(unix)]
 pub(super) fn record_inspection_action(
-    root: &Path,
+    session: &lk_vault::MutationSession,
     config: &lk_core::config::Config,
     config_revision: &str,
     id: &str,
     request: &Value,
     reason: String,
 ) -> miette::Result<()> {
-    let session = lk_vault::MutationSession::acquire(root).into_diagnostic()?;
-    let (work, prepared) = load(session.root(), config, config_revision, id)?;
+    let root = session.root();
+    let (work, prepared) = load(root, config, config_revision, id)?;
     let mut plan = work.plan_inspection_action(
-        session.root(),
+        root,
         &prepared.resources,
         request,
         &super::execution::observation::contract_revision(),
@@ -1478,18 +1481,18 @@ pub(super) fn prepare_section_finalization(
 
 #[cfg(unix)]
 pub(super) fn record_finalization_action(
-    root: &Path,
+    session: &lk_vault::MutationSession,
     config: &lk_core::config::Config,
     config_revision: &str,
     id: &str,
     section: SectionFinalization,
     reason: String,
 ) -> miette::Result<()> {
-    let session = lk_vault::MutationSession::acquire(root).into_diagnostic()?;
-    revalidate_section_finalization(session.root(), config, config_revision, id, &section)?;
-    let (work, prepared) = load(session.root(), config, config_revision, id)?;
+    let root = session.root();
+    revalidate_section_finalization(root, config, config_revision, id, &section)?;
+    let (work, prepared) = load(root, config, config_revision, id)?;
     let mut plan = work.plan_finalization_action(
-        session.root(),
+        root,
         &prepared.resources,
         &section.completed,
         &section.request,
@@ -1503,29 +1506,23 @@ pub(super) fn record_finalization_action(
 
 #[cfg(unix)]
 pub(super) fn finish_section(
-    root: &Path,
+    session: &lk_vault::MutationSession,
     config: &lk_core::config::Config,
     config_revision: &str,
     id: &str,
     prepared_section: SectionFinalization,
     body: String,
 ) -> miette::Result<()> {
+    let root = session.root();
     validate_section_response(&prepared_section.request, &body)?;
-    let session = lk_vault::MutationSession::acquire(root).into_diagnostic()?;
-    revalidate_section_finalization(
-        session.root(),
-        config,
-        config_revision,
-        id,
-        &prepared_section,
-    )?;
-    let (work, prepared) = load(session.root(), config, config_revision, id)?;
+    revalidate_section_finalization(root, config, config_revision, id, &prepared_section)?;
+    let (work, prepared) = load(root, config, config_revision, id)?;
     let result = lk_queue::SectionResult {
         body,
         ..prepared_section.result
     };
     let (_, mut mutation) = plan_finish_expected(
-        &session,
+        session,
         &work,
         &prepared,
         serde_json::to_value(result).into_diagnostic()?,
@@ -1632,12 +1629,11 @@ fn queue_result_path(kind: lk_queue::TaskKind, result: &Value) -> miette::Result
 }
 
 pub(super) fn restage_finished(
-    root: &Path,
+    session: &lk_vault::MutationSession,
     config: &lk_core::config::Config,
     config_revision: &str,
     id: &str,
 ) -> miette::Result<()> {
-    let session = lk_vault::MutationSession::acquire(root).into_diagnostic()?;
     let root = session.root();
     let (work, prepared) = load(root, config, config_revision, id)?;
     let final_path = PathBuf::from(".lorekeeper/work")
@@ -1809,8 +1805,9 @@ pub async fn run(opts: &GlobalOptions, command: WorkCommand) -> miette::Result<(
         } => {
             let output = serde_json::from_slice(&std::fs::read(file).into_diagnostic()?)
                 .into_diagnostic()?;
+            let session = lk_vault::MutationSession::acquire(&root).into_diagnostic()?;
             let completed = record_screening(
-                &root,
+                &session,
                 &config,
                 &config_revision,
                 &task_id,
@@ -2523,7 +2520,7 @@ mod tests {
                 "reason":"Decide this source-scoped card before reading selected evidence."})
         }).collect::<Vec<_>>();
         record_screening(
-            &root,
+            &MutationSession::acquire(&root).unwrap(),
             &config,
             &config_revision,
             &task.task_id,
@@ -2647,9 +2644,11 @@ mod tests {
                 )
                 .unwrap();
             }
-            let TaskWork::Partitioned { id } =
-                prepare_task(&root, &config, &config_revision, &task.task_id).unwrap()
-            else {
+            let prepared = {
+                let session = MutationSession::acquire(&root).unwrap();
+                prepare_task(&session, &config, &config_revision, &task.task_id).unwrap()
+            };
+            let TaskWork::Partitioned { id } = prepared else {
                 panic!("fixture must require bounded work");
             };
             let (before, input) =
@@ -2681,8 +2680,15 @@ mod tests {
                 );
             }
             assert!(
-                record_inspection(&root, &config, &config_revision, &id, node, output.clone())
-                    .is_err()
+                record_inspection(
+                    &MutationSession::acquire(&root).unwrap(),
+                    &config,
+                    &config_revision,
+                    &id,
+                    node,
+                    output.clone()
+                )
+                .is_err()
             );
             assert!(
                 !root
@@ -2697,8 +2703,15 @@ mod tests {
             } else {
                 write(&root, context, original_context);
             }
-            let after =
-                record_inspection(&root, &config, &config_revision, &id, node, output).unwrap();
+            let after = record_inspection(
+                &MutationSession::acquire(&root).unwrap(),
+                &config,
+                &config_revision,
+                &id,
+                node,
+                output,
+            )
+            .unwrap();
             assert!(after.completed > before.completed);
             assert!(!after.ready.contains(node));
         }

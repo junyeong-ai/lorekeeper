@@ -147,6 +147,9 @@ pub enum WikiCommand {
         /// JSON assessments with exact subject and semantic input revisions
         #[arg(long)]
         file: PathBuf,
+        /// Wait cancellably for vault writer access; configuration changes refuse
+        #[arg(long)]
+        wait_for_vault: bool,
     },
     /// Publish reviewed concept metadata and durable reviews with exact evidence guards
     Curate {
@@ -223,6 +226,9 @@ pub enum WikiCommand {
         /// Vault root override (default: vault.root from config)
         #[arg(long)]
         root: Option<PathBuf>,
+        /// Wait cancellably for vault writer access; configuration changes refuse
+        #[arg(long)]
+        wait_for_vault: bool,
     },
     /// List all concept pages in the vault
     Concepts {
@@ -632,15 +638,19 @@ pub async fn run(opts: &super::GlobalOptions, cmd: WikiCommand) -> miette::Resul
             println!("{}", serde_json::json!({"recorded": true}));
             Ok(())
         }
-        WikiCommand::AuditRecord { file } => {
-            let (config, config_revision) = super::load_config_with_revision(&find_config(opts)?)?;
+        WikiCommand::AuditRecord {
+            file,
+            wait_for_vault,
+        } => {
+            let config_path = find_config(opts)?;
+            let (config, config_revision) = super::load_config_with_revision(&config_path)?;
+            let pin = super::ConfigurationPin::from_loaded(config_path, config_revision.clone());
             let results: lk_graph::audit::AuditResults = serde_json::from_slice(
                 &std::fs::read(file).map_err(|error| miette::miette!("{error}"))?,
             )
             .map_err(|error| miette::miette!("{error}"))?;
             let root = config.vault.root_path();
-            let session = lk_vault::MutationSession::acquire(&root)
-                .map_err(|error| miette::miette!("{error}"))?;
+            let session = super::execution::acquire_mutation(&root, wait_for_vault, &pin).await?;
             let pages = lk_graph::scan::scan_vault(&root, config.graph.scope.follow_links)
                 .map_err(|error| miette::miette!("{error}"))?;
             let selection = results
@@ -946,7 +956,10 @@ pub async fn run(opts: &super::GlobalOptions, cmd: WikiCommand) -> miette::Resul
             );
             Ok(())
         }
-        WikiCommand::Refresh { root } => run_refresh(opts, root).await,
+        WikiCommand::Refresh {
+            root,
+            wait_for_vault,
+        } => run_refresh_with_wait(opts, root, wait_for_vault).await,
         WikiCommand::Concepts { json } => run_concepts(opts, json).await,
         WikiCommand::Search {
             query,
@@ -1220,7 +1233,15 @@ pub async fn run_refresh(
     opts: &super::GlobalOptions,
     root_override: Option<PathBuf>,
 ) -> miette::Result<()> {
-    let super::RootConfig { root, config } = super::resolve_root_config(opts, root_override)?;
+    run_refresh_with_wait(opts, root_override, false).await
+}
+
+pub async fn run_refresh_with_wait(
+    opts: &super::GlobalOptions,
+    root_override: Option<PathBuf>,
+    wait_for_vault: bool,
+) -> miette::Result<()> {
+    let super::RootConfig { root, config, pin } = super::resolve_root_config(opts, root_override)?;
     refuse_navigation_inbox_overlap(&root, config.as_ref())?;
     let locale = config
         .as_ref()
@@ -1231,8 +1252,7 @@ pub async fn run_refresh(
         .map(|config| config.vault.dirs.clone())
         .unwrap_or_default();
     std::fs::create_dir_all(&root).map_err(|error| miette::miette!("create vault: {error}"))?;
-    let session = lk_vault::MutationSession::acquire(&root)
-        .map_err(|error| miette::miette!("vault mutation: {error}"))?;
+    let session = super::execution::acquire_mutation(&root, wait_for_vault, &pin).await?;
     let plan = lk_vault::plan_navigation_entry(session.root(), locale, &dirs)
         .map_err(|error| miette::miette!("validate navigation entry: {error}"))?;
     let snapshot = prepare_discovery_snapshot(

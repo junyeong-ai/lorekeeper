@@ -679,6 +679,16 @@ fn sync_parent(path: &Path) -> io::Result<()> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn an_unusable_lock_is_not_reported_as_contention() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join(".lorekeeper/mutation/lock")).unwrap();
+        assert!(matches!(
+            MutationClaim::acquire(root.path()),
+            Err(VaultError::Io(_))
+        ));
+    }
+
     fn plan() -> MutationPlan {
         let mut p = MutationPlan::default();
         p.rename("Old.md", "new.md", "original".into());

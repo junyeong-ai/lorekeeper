@@ -38,6 +38,37 @@ pub struct GlobalOptions {
     pub template_dir: Option<PathBuf>,
 }
 
+pub(super) enum ConfigurationPin {
+    Absent,
+    Loaded { path: PathBuf, revision: String },
+}
+
+impl ConfigurationPin {
+    pub fn from_loaded(path: PathBuf, revision: String) -> Self {
+        Self::Loaded { path, revision }
+    }
+
+    pub fn validate(&self) -> miette::Result<()> {
+        let Self::Loaded { path, revision } = self else {
+            return Ok(());
+        };
+        let selected = path
+            .canonicalize()
+            .map_err(|error| miette::miette!("selected configuration is unavailable: {error}"))?;
+        if selected != *path {
+            return Err(miette::miette!("selected configuration path changed"));
+        }
+        let raw = std::fs::read_to_string(path)
+            .map_err(|error| miette::miette!("selected configuration is unavailable: {error}"))?;
+        if lk_core::concept::file_revision(&raw) != *revision {
+            return Err(miette::miette!(
+                "selected configuration changed during the job; unfinished work is retained"
+            ));
+        }
+        Ok(())
+    }
+}
+
 pub fn find_config(opts: &GlobalOptions) -> miette::Result<PathBuf> {
     find_optional_config(opts)?.ok_or_else(|| {
         miette::miette!(
@@ -151,6 +182,7 @@ pub(crate) struct RootConfig {
     /// parse/validate propagates the error instead of silently degrading to defaults —
     /// otherwise a typo'd config would make the command read/write the WRONG dirs/locale.
     pub config: Option<lk_core::config::Config>,
+    pub pin: ConfigurationPin,
 }
 
 /// Resolve `(root, config)` for a `--root`-capable command. The ONE place the override
@@ -162,22 +194,28 @@ pub(crate) fn resolve_root_config(
     opts: &GlobalOptions,
     root_override: Option<PathBuf>,
 ) -> miette::Result<RootConfig> {
-    match root_override.map(resolve_root_override).transpose()? {
-        Some(root) => Ok(RootConfig {
-            root,
-            config: find_optional_config(opts)?
-                .map(|path| load_config(&path))
-                .transpose()?,
-        }),
-        None => {
-            let path = find_config(opts)?;
-            let config = load_config(&path)?;
-            Ok(RootConfig {
-                root: config.vault.root_path(),
-                config: Some(config),
-            })
+    let override_root = root_override.map(resolve_root_override).transpose()?;
+    let selected = if override_root.is_some() {
+        find_optional_config(opts)?
+    } else {
+        Some(find_config(opts)?)
+    };
+    let (config, pin) = match selected {
+        Some(path) => {
+            let (config, revision) = load_config_with_revision(&path)?;
+            (Some(config), ConfigurationPin::from_loaded(path, revision))
         }
-    }
+        None => (None, ConfigurationPin::Absent),
+    };
+    let root = match override_root {
+        Some(root) => root,
+        None => config
+            .as_ref()
+            .expect("mandatory config was loaded")
+            .vault
+            .root_path(),
+    };
+    Ok(RootConfig { root, config, pin })
 }
 
 /// Spell a `--root` the way `vault.root` is spelled, against the process CWD.

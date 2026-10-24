@@ -66,7 +66,18 @@ fn plan(
         .collect()
 }
 
-pub async fn run(opts: &GlobalOptions, dry_run: bool, wait_for_vault: bool) -> miette::Result<()> {
+pub async fn run(
+    opts: &GlobalOptions,
+    dry_run: bool,
+    wait_for_vault: bool,
+    publication_workflow: Option<super::PublicationWorkflow>,
+) -> miette::Result<()> {
+    #[cfg(not(unix))]
+    if !dry_run && publication_workflow.is_some() {
+        return Err(miette::miette!(
+            "publication workflow leases require Unix; Windows is unsupported"
+        ));
+    }
     let config_path = find_config(opts)?;
     let (config, revision) = load_config_with_revision(&config_path)?;
     let today = jiff::Timestamp::now()
@@ -127,13 +138,22 @@ pub async fn run(opts: &GlobalOptions, dry_run: bool, wait_for_vault: bool) -> m
                 Some(source.id.clone()),
                 Some(date.to_string()),
                 false,
-                wait_for_vault,
+                super::IngestAccess {
+                    wait_for_vault,
+                    publication_workflow,
+                },
                 Some(identity),
                 Some(&revision),
             )
             .await;
             super::ensure_config_current(&config_path, &revision)?;
             if let Err(error) = result {
+                if error
+                    .downcast_ref::<crate::commands::workflow::WorkflowBusy>()
+                    .is_some()
+                {
+                    return Err(error);
+                }
                 failed = true;
                 eprintln!(
                     "[recovery] {} {date}: failed; coverage remains pending: {error}",

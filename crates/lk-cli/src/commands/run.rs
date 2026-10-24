@@ -226,6 +226,12 @@ mod native {
     }
 
     #[derive(Default, Serialize)]
+    struct MutationAccessMetrics {
+        attempts: usize,
+        duration_ms: u64,
+    }
+
+    #[derive(Default, Serialize)]
     struct QueueApplicationMetrics {
         attempts: usize,
         duration_ms: u64,
@@ -288,6 +294,7 @@ mod native {
         #[serde(flatten)]
         work_telemetry: WorkTelemetry,
         queue_planning: QueuePlanningMetrics,
+        mutation_access: MutationAccessMetrics,
         queue_application: QueueApplicationMetrics,
         audit: Option<Vec<lk_graph::audit::AuditCompletion>>,
         audit_progress: Option<AuditProgress>,
@@ -314,6 +321,8 @@ mod native {
         inspection_deferred: std::collections::BTreeMap<String, String>,
         audit_batch: Option<Vec<lk_graph::audit::AuditCandidate>>,
         queue_turn: Option<QueueTurn>,
+        queue_replan: bool,
+        writer_access_failed: bool,
         started_at: Instant,
         result: JobResult,
     }
@@ -362,20 +371,13 @@ mod native {
             if self.configuration_failed {
                 return false;
             }
-            let path = self.opts.config.as_ref().expect("resolved config");
-            let current = path.canonicalize().and_then(|selected| {
-                if selected != *path {
-                    return Err(std::io::Error::other("selected configuration path changed"));
-                }
-                std::fs::read_to_string(path).map(|body| lk_core::concept::file_revision(&body))
-            });
-            let failure = match current {
-                Ok(revision) if revision == self.config_revision => return true,
-                Ok(_) => {
-                    "selected configuration changed during the job; unfinished work is retained"
-                        .into()
-                }
-                Err(error) => format!("selected configuration is unavailable: {error}"),
+            let pin = crate::commands::ConfigurationPin::from_loaded(
+                self.opts.config.as_ref().expect("resolved config").clone(),
+                self.config_revision.clone(),
+            );
+            let failure = match pin.validate() {
+                Ok(()) => return true,
+                Err(error) => error.to_string(),
             };
             self.configuration_failed = true;
             self.failure("configuration", failure)
@@ -439,7 +441,15 @@ mod native {
             if args == ["queue", "check"] {
                 return self.check_queue(name);
             }
-            match execution::lore_command(self.opts, args) {
+            let mut command_args = args.to_vec();
+            if args == ["schema"]
+                || args == ["graph", "backlinks-sync"]
+                || args == ["wiki", "refresh"]
+                || args.starts_with(&["wiki", "audit-record"])
+            {
+                command_args.push("--wait-for-vault");
+            }
+            match execution::lore_command(self.opts, &command_args) {
                 Ok(command) => self.child(name, command, None).await,
                 Err(error) => self.failure(name, error),
             }
@@ -473,11 +483,13 @@ mod native {
         }
 
         async fn apply_queue(&mut self, name: &str) -> bool {
-            let mut command =
-                match execution::lore_command(self.opts, &["queue", "apply", "--json"]) {
-                    Ok(command) => command,
-                    Err(error) => return self.failure(name, error),
-                };
+            let mut command = match execution::lore_command(
+                self.opts,
+                &["queue", "apply", "--json", "--wait-for-vault"],
+            ) {
+                Ok(command) => command,
+                Err(error) => return self.failure(name, error),
+            };
             self.configure_child(&mut command);
             let started_at = Instant::now();
             self.result.queue_application.attempts += 1;
@@ -563,6 +575,57 @@ mod native {
                     Some("cancelled while waiting".into()),
                 ),
                 Err(error) => self.failure("workflow lease", error),
+            }
+        }
+
+        async fn mutation_session(
+            &mut self,
+            name: &str,
+        ) -> Option<(lk_vault::MutationSession, bool)> {
+            if self.result.halted {
+                return None;
+            }
+            self.recording_session(name).await
+        }
+
+        async fn recording_session(
+            &mut self,
+            name: &str,
+        ) -> Option<(lk_vault::MutationSession, bool)> {
+            if self.writer_access_failed
+                || self.result.cancelled
+                || !self.configuration_is_current()
+            {
+                return None;
+            }
+            let pin = crate::commands::ConfigurationPin::from_loaded(
+                self.opts.config.as_ref().expect("resolved config").clone(),
+                self.config_revision.clone(),
+            );
+            self.result.mutation_access.attempts += 1;
+            let started_at = Instant::now();
+            let acquired = self
+                .supervisor
+                .acquire_mutation(&self.root, || pin.validate())
+                .await;
+            self.result.mutation_access.duration_ms += started_at.elapsed().as_millis() as u64;
+            match acquired {
+                Ok(Some(acquired)) => Some(acquired),
+                Ok(None) => {
+                    self.record(
+                        name,
+                        StageState::Cancelled,
+                        Some("cancelled while waiting for vault mutation access".into()),
+                    );
+                    None
+                }
+                Err(error) => {
+                    self.writer_access_failed = true;
+                    if self.configuration_is_current() {
+                        self.failure(name, error);
+                    }
+                    None
+                }
             }
         }
 
@@ -668,7 +731,7 @@ mod native {
             );
             match command {
                 Ok(mut command) => {
-                    if !self.reserve_queue_turn() {
+                    if !self.reserve_queue_turn().await {
                         return false;
                     }
                     self.result.semantic_calls += 1;
@@ -777,7 +840,10 @@ mod native {
                     }
                 };
             let timeout = self.selected.as_ref().expect("prepared agent").timeout();
-            if !self.reserve_queue_turn() {
+            if !self.reserve_queue_turn().await {
+                if self.result.cancelled {
+                    metrics.outcome = WorkOutcome::Cancelled;
+                }
                 return None;
             }
             self.result.semantic_calls += 1;
@@ -843,9 +909,10 @@ mod native {
                 return ObservationStep::Failed;
             };
             self.record_observation(id, node, &request, completed, reply, metrics)
+                .await
         }
 
-        fn record_observation(
+        async fn record_observation(
             &mut self,
             id: &str,
             node: &str,
@@ -868,9 +935,15 @@ mod native {
             };
             metrics.result_json_bytes = Some(bytes);
             let started_at = Instant::now();
+            let Some((session, _)) = self.recording_session("bounded work receipt").await else {
+                if self.result.cancelled {
+                    metrics.outcome = WorkOutcome::Cancelled;
+                }
+                return ObservationStep::Failed;
+            };
             let recorded = match response {
                 execution::observation::ObservationResponse::Complete(output) => {
-                    crate::commands::work::record_inspection(&self.root, &self.config, &self.config_revision, id, node, output)
+                    crate::commands::work::record_inspection(&session, &self.config, &self.config_revision, id, node, output)
                         .and_then(|progress| {
                             if progress.completed > completed && !progress.ready.iter().any(|ready| ready == node) {
                                 Ok(None)
@@ -880,7 +953,7 @@ mod native {
                         })
                 }
                 execution::observation::ObservationResponse::NeedsAction(reason) => {
-                    crate::commands::work::record_inspection_action(&self.root, &self.config, &self.config_revision,
+                    crate::commands::work::record_inspection_action(&session, &self.config, &self.config_revision,
                         id, request, reason.clone()).map(|()| Some(reason))
                 }
             };
@@ -915,12 +988,20 @@ mod native {
             }
         }
 
-        fn reserve_queue_turn(&mut self) -> bool {
+        async fn reserve_queue_turn(&mut self) -> bool {
             let Some(turn) = self.queue_turn.take() else {
                 return true;
             };
-            match scheduler::reserve(
-                &self.root,
+            let Some((session, waited)) = self.mutation_session("queue scheduling").await else {
+                return false;
+            };
+            if waited {
+                self.queue_replan = true;
+                self.record("queue input refresh", StageState::Skipped, Some("writer access became available; preparing current inputs before invocation".into()));
+                return false;
+            }
+            match scheduler::reserve_in_session(
+                &session,
                 scheduler::Stage::Queue,
                 &turn.keys,
                 &turn.targets,
@@ -1105,8 +1186,38 @@ mod native {
             } else {
                 &reserved_targets[1..]
             };
-            if let Err(error) = scheduler::reserve(&self.root, stage, keys, reservations) {
-                return Some(self.failure("bounded work scheduling", error));
+            {
+                let Some((session, waited)) =
+                    self.mutation_session("bounded work scheduling").await
+                else {
+                    self.record_uninvoked_observations(turns);
+                    return Some(false);
+                };
+                if waited && stage == scheduler::Stage::Queue {
+                    self.queue_replan = true;
+                    self.record("queue input refresh", StageState::Skipped, Some("writer access became available; preparing current inputs before invocation".into()));
+                    self.record_uninvoked_observations(turns);
+                    return Some(true);
+                }
+                if waited {
+                    for turn in &turns {
+                        if let Err(error) = crate::commands::work::validate_inspection_request(
+                            session.root(),
+                            &self.config,
+                            &self.config_revision,
+                            &turn.work_id,
+                            &turn.node_id,
+                            &turn.request,
+                        ) {
+                            return Some(self.failure("bounded work scheduling", error));
+                        }
+                    }
+                }
+                if let Err(error) =
+                    scheduler::reserve_in_session(&session, stage, keys, reservations)
+                {
+                    return Some(self.failure("bounded work scheduling", error));
+                }
             }
             self.result.semantic_calls += requests.len();
             let attempts = self.supervisor.run_requests(requests).await;
@@ -1160,24 +1271,35 @@ mod native {
                     self.result.work_telemetry.record(turn.metrics);
                     continue;
                 }
-                let step = self.record_observation(
-                    &turn.work_id,
-                    &turn.node_id,
-                    &turn.request,
-                    turn.completed,
-                    ObservationReply {
-                        engine,
-                        bytes: child.stdout,
-                        limit: budget.max_result_bytes,
-                    },
-                    &mut turn.metrics,
-                );
+                let step = self
+                    .record_observation(
+                        &turn.work_id,
+                        &turn.node_id,
+                        &turn.request,
+                        turn.completed,
+                        ObservationReply {
+                            engine,
+                            bytes: child.stdout,
+                            limit: budget.max_result_bytes,
+                        },
+                        &mut turn.metrics,
+                    )
+                    .await;
                 if matches!(step, ObservationStep::Failed) {
                     accepted = false;
                 }
                 self.result.work_telemetry.record(turn.metrics);
             }
             Some(accepted)
+        }
+
+        fn record_uninvoked_observations(&mut self, turns: Vec<ObservationTurn>) {
+            for mut turn in turns {
+                if self.result.cancelled {
+                    turn.metrics.outcome = WorkOutcome::Cancelled;
+                }
+                self.result.work_telemetry.record(turn.metrics);
+            }
         }
 
         async fn bounded_observation_step(&mut self, id: &str) -> ObservationStep {
@@ -1305,8 +1427,15 @@ mod native {
             };
             metrics.result_json_bytes = Some(bytes);
             let started = Instant::now();
+            let Some((session, _)) = self.mutation_session("whole-section publication").await
+            else {
+                if self.result.cancelled {
+                    metrics.outcome = WorkOutcome::Cancelled;
+                }
+                return WorkStep::Failed;
+            };
             let result = crate::commands::work::section::finish(
-                &self.root,
+                &session,
                 &self.config,
                 &self.config_revision,
                 section,
@@ -1363,10 +1492,17 @@ mod native {
             };
             metrics.result_json_bytes = Some(bytes);
             let started_at = Instant::now();
+            let Some((session, _)) = self.mutation_session("bounded section finalization").await
+            else {
+                if self.result.cancelled {
+                    metrics.outcome = WorkOutcome::Cancelled;
+                }
+                return WorkStep::Failed;
+            };
             let (finished, action) = match response {
                 execution::finalization::SectionResponse::Complete(body) => (
                     crate::commands::work::finish_section(
-                        &self.root,
+                        &session,
                         &self.config,
                         &self.config_revision,
                         id,
@@ -1377,7 +1513,7 @@ mod native {
                 ),
                 execution::finalization::SectionResponse::NeedsAction(reason) => (
                     crate::commands::work::record_finalization_action(
-                        &self.root,
+                        &session,
                         &self.config,
                         &self.config_revision,
                         id,
@@ -1441,8 +1577,16 @@ mod native {
             match finished {
                 Ok(true) => {
                     let started_at = Instant::now();
+                    let Some((session, _)) = self.mutation_session("bounded work completion").await
+                    else {
+                        if self.result.cancelled {
+                            metrics.outcome = WorkOutcome::Cancelled;
+                        }
+                        self.result.work_telemetry.record(metrics);
+                        return WorkStep::Failed;
+                    };
                     let restaged = crate::commands::work::restage_finished(
-                        &self.root,
+                        &session,
                         &self.config,
                         &self.config_revision,
                         id,
@@ -1639,8 +1783,14 @@ mod native {
                 return None;
             }
             let started_at = Instant::now();
+            let Some((session, _)) = self.mutation_session("candidate screening").await else {
+                if self.result.cancelled {
+                    metrics.outcome = WorkOutcome::Cancelled;
+                }
+                return None;
+            };
             let recorded = crate::commands::work::record_screening(
-                &self.root,
+                &session,
                 &self.config,
                 &self.config_revision,
                 &task.task_id,
@@ -1668,7 +1818,7 @@ mod native {
             Some(completed == before.batches)
         }
 
-        fn queue_dispatches(
+        async fn queue_dispatches(
             &mut self,
             blocked: &std::collections::BTreeMap<String, String>,
         ) -> miette::Result<QueuePlan> {
@@ -1685,8 +1835,10 @@ mod native {
                     );
                 }
             }
-            let session = lk_vault::MutationSession::acquire(&self.root)
-                .map_err(|error| miette::miette!("{error}"))?;
+            let (session, _) = self
+                .mutation_session("queue planning")
+                .await
+                .ok_or_else(|| miette::miette!("queue planning did not acquire writer access"))?;
             let mut tasks = crate::commands::queue::current_tasks(session.root())?;
             tasks.sort_by(|left, right| {
                 (left.created_at, &left.task_id).cmp(&(right.created_at, &right.task_id))
@@ -1911,33 +2063,39 @@ mod native {
             })
         }
 
-        fn expanded_extraction_handoff(
-            &self,
+        async fn expanded_extraction_handoff(
+            &mut self,
             tasks: &[lk_queue::QueueTask],
         ) -> miette::Result<bool> {
+            let (session, _) = self
+                .mutation_session("expanded extraction work")
+                .await
+                .ok_or_else(|| {
+                    miette::miette!("extraction preparation did not acquire writer access")
+                })?;
+            let root = session.root();
             let mut unfinished = false;
             for task in tasks {
-                if crate::commands::queue::tasks_completed(&self.root, std::slice::from_ref(task))?
-                {
+                if crate::commands::queue::tasks_completed(root, std::slice::from_ref(task))? {
                     continue;
                 }
                 unfinished = true;
                 if task.kind != lk_queue::TaskKind::ExtractConcepts {
                     return Ok(false);
                 }
-                let current = crate::commands::queue::current_task(&self.root, &task.task_id)?;
+                let current = crate::commands::queue::current_task(root, &task.task_id)?;
                 if current.kind != task.kind
                     || current.cache_hash != task.cache_hash
                     || current.target != task.target
                     || current.input != task.input
                     || current.created_at != task.created_at
-                    || !crate::commands::work::has_current_discovery(&self.root, &current)?
+                    || !crate::commands::work::has_current_discovery(root, &current)?
                     || !matches!(
                         crate::commands::work::prepare_task(
-                            &self.root,
+                            &session,
                             &self.config,
                             &self.config_revision,
-                            &task.task_id,
+                            &current.task_id,
                         )?,
                         crate::commands::work::TaskWork::Partitioned { .. }
                             | crate::commands::work::TaskWork::Source { .. }
@@ -1954,16 +2112,21 @@ mod native {
         async fn dispatch_queue(&mut self) -> bool {
             let mut blocked = std::collections::BTreeMap::<String, String>::new();
             'planning: loop {
+                self.queue_replan = false;
                 if self.result.halted || self.result.cancelled || !self.configuration_is_current() {
                     return false;
                 }
                 self.queue_turn = None;
                 let started_at = Instant::now();
+                let acquisition_before = self.result.mutation_access.duration_ms;
                 self.result.queue_planning.attempts += 1;
-                let planned = self.queue_dispatches(&blocked);
-                self.result.queue_planning.duration_ms += started_at.elapsed().as_millis() as u64;
+                let planned = self.queue_dispatches(&blocked).await;
+                let acquisition_ms = self.result.mutation_access.duration_ms - acquisition_before;
+                self.result.queue_planning.duration_ms +=
+                    (started_at.elapsed().as_millis() as u64).saturating_sub(acquisition_ms);
                 let plan = match planned {
                     Ok(plan) => plan,
+                    Err(_) if self.result.halted || self.result.cancelled => return false,
                     Err(error) => return self.failure("queue planning", error),
                 };
                 if plan.needs_application {
@@ -2023,6 +2186,9 @@ mod native {
                         if !completed {
                             return false;
                         }
+                        if self.queue_replan {
+                            continue 'planning;
+                        }
                         if bounded_jobs
                             .values()
                             .any(|id| self.inspection_deferred.contains_key(id))
@@ -2046,6 +2212,7 @@ mod native {
                             match self.whole_section_step(task).await {
                                 WorkStep::Staged => {}
                                 WorkStep::Deferred(_) => continue 'planning,
+                                WorkStep::Failed if self.queue_replan => continue 'planning,
                                 WorkStep::Failed => return false,
                                 WorkStep::Pending => {
                                     unreachable!("single section has no evidence nodes")
@@ -2083,6 +2250,9 @@ mod native {
                                 )
                                 .await
                             {
+                                if self.queue_replan {
+                                    continue 'planning;
+                                }
                                 return false;
                             }
                             match crate::commands::work::has_current_discovery(&self.root, task) {
@@ -2098,6 +2268,7 @@ mod native {
                                     blocked.insert(id.clone(), reason);
                                     continue 'planning;
                                 }
+                                WorkStep::Failed if self.queue_replan => continue 'planning,
                                 WorkStep::Failed => return false,
                                 WorkStep::Staged => {}
                             }
@@ -2121,6 +2292,7 @@ mod native {
                                     blocked.insert(id.clone(), reason);
                                     continue 'planning;
                                 }
+                                ObservationStep::Failed if self.queue_replan => continue 'planning,
                                 ObservationStep::Failed => return false,
                             }
                         }
@@ -2128,6 +2300,7 @@ mod native {
                             match self.screening_step(task).await {
                                 Some(true) => continue 'planning,
                                 Some(false) => continue,
+                                None if self.queue_replan => continue 'planning,
                                 None => return false,
                             }
                         }
@@ -2163,6 +2336,9 @@ mod native {
                                 .consumer("lore-process", &operation, Some(directory.path()))
                                 .await
                             {
+                                if self.queue_replan {
+                                    continue 'planning;
+                                }
                                 return false;
                             }
                         }
@@ -2238,12 +2414,15 @@ mod native {
                             continue 'planning;
                         }
                         if matches!(jobs[&selected], QueueDispatch::WholeInput { .. }) {
-                            match self.expanded_extraction_handoff(&unfinished) {
+                            match self.expanded_extraction_handoff(&unfinished).await {
                                 Ok(true) => {
                                     self.record("expanded extraction work", StageState::Completed, Some("discovery requires retained source/screening/evidence work or explicit scope admission; replanning unfinished extraction".into()));
                                     continue 'planning;
                                 }
                                 Ok(false) => {}
+                                Err(_) if self.result.halted || self.result.cancelled => {
+                                    return false;
+                                }
                                 Err(error) => {
                                     return self.failure("selected queue receipt", error);
                                 }
@@ -2442,9 +2621,11 @@ mod native {
             Ok(plan)
         }
 
-        fn admit_audit(&mut self) -> miette::Result<lk_graph::audit::AuditPlan> {
-            let session = lk_vault::MutationSession::acquire(&self.root)
-                .map_err(|error| miette::miette!("{error}"))?;
+        async fn admit_audit(&mut self) -> miette::Result<lk_graph::audit::AuditPlan> {
+            let (session, _) = self
+                .mutation_session("audit admission")
+                .await
+                .ok_or_else(|| miette::miette!("audit admission did not acquire writer access"))?;
             let pages =
                 lk_graph::scan::scan_vault(&self.root, self.config.graph.scope.follow_links)
                     .map_err(|error| miette::miette!("{error}"))?;
@@ -2633,8 +2814,9 @@ mod native {
             if !self.inspect_review_health() {
                 return;
             }
-            let mut plan = match self.admit_audit() {
+            let mut plan = match self.admit_audit().await {
                 Ok(plan) => plan,
+                Err(_) if self.result.halted || self.result.cancelled => return,
                 Err(error) => {
                     self.failure("audit planning", error);
                     return;
@@ -2755,8 +2937,12 @@ mod native {
                 let mut jobs = std::collections::BTreeMap::new();
                 for candidate in &plan.candidates {
                     let path = &candidate.path;
+                    let Some((session, _)) = self.mutation_session("bounded audit planning").await
+                    else {
+                        return;
+                    };
                     let work = match crate::commands::work::prepare_audit(
-                        &self.root,
+                        &session,
                         &self.config,
                         &self.config_revision,
                         candidate,
@@ -2785,15 +2971,22 @@ mod native {
                         return;
                     }
                     let keys = jobs.keys().cloned().collect();
-                    let selected =
-                        match scheduler::select(&self.root, scheduler::Stage::Audit, &keys) {
-                            Ok(Some(selected)) => selected,
-                            Ok(None) => break,
-                            Err(error) => {
-                                self.failure("audit scheduling", error);
-                                return;
-                            }
-                        };
+                    let Some((session, _)) = self.mutation_session("audit scheduling").await else {
+                        return;
+                    };
+                    let selected = match scheduler::select_in_session(
+                        &session,
+                        scheduler::Stage::Audit,
+                        &keys,
+                    ) {
+                        Ok(Some(selected)) => selected,
+                        Ok(None) => break,
+                        Err(error) => {
+                            self.failure("audit scheduling", error);
+                            return;
+                        }
+                    };
+                    drop(session);
                     let work = &jobs[&selected];
                     if let Some(completed) = self
                         .bounded_observation_wave(&selected, &jobs, &keys, scheduler::Stage::Audit)
@@ -3018,6 +3211,8 @@ mod native {
             inspection_deferred: std::collections::BTreeMap::new(),
             audit_batch: None,
             queue_turn: None,
+            queue_replan: false,
+            writer_access_failed: false,
             started_at: Instant::now(),
             result: JobResult {
                 operation,
@@ -3031,6 +3226,7 @@ mod native {
                 semantic_calls: 0,
                 work_telemetry: WorkTelemetry::default(),
                 queue_planning: QueuePlanningMetrics::default(),
+                mutation_access: MutationAccessMetrics::default(),
                 queue_application: QueueApplicationMetrics::default(),
                 audit: None,
                 audit_progress: None,
@@ -3046,6 +3242,7 @@ mod native {
             return runner.finish();
         }
         if matches!(operation, Operation::Daily) {
+            let publication_workflow = if wait { "wait" } else { "refuse" };
             if board {
                 runner
                     .native(
@@ -3058,12 +3255,26 @@ mod native {
                 runner
                     .native(
                         "source recovery",
-                        &["ingest", "--recover", "--wait-for-vault"],
+                        &[
+                            "ingest",
+                            "--recover",
+                            "--wait-for-vault",
+                            "--publication-workflow",
+                            publication_workflow,
+                        ],
                     )
                     .await;
             }
             runner
-                .native("ingest", &["ingest", "--wait-for-vault"])
+                .native(
+                    "ingest",
+                    &[
+                        "ingest",
+                        "--wait-for-vault",
+                        "--publication-workflow",
+                        publication_workflow,
+                    ],
+                )
                 .await;
         }
         if !runner.result.cancelled && runner.acquire(wait).await {

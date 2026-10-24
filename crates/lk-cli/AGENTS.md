@@ -33,8 +33,11 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   renamed binary cannot silently delegate skill commands to another installation.
 - `commands/run.rs` owns daily/process/knowledge sequencing; `execution.rs` owns
   host-specific invocation and supervised Unix process groups. The shared
-  WorkflowLease covers semantic reads through final publication. Collection precedes
-  that lease; independent recovery stages continue after source failure, while
+  WorkflowLease covers semantic reads through final publication. Native daily
+  acquisition precedes a separate publication-only lease; `--wait` selects waiting
+  rather than refusal at that boundary. Release it before the parent semantic lease.
+  Never hold a writer claim across collection or workflow waiting. Independent
+  recovery stages continue after source failure, while
   dependent period stages stop on failure. Cancellation stops further stages.
   Preserve observed cancellation through cleanup errors and report those errors;
   send group SIGKILL once before reaping a forced foreground child.
@@ -52,7 +55,12 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   finalizer JSON sizes are unobserved. Revalidation and recording share one measured operation.
   Parallel invocation durations are summed and can exceed elapsed job time.
   Queue-planning metrics count local checkpoints and shared synthesis captures,
-  separately from later revalidation and host work.
+  separately from later revalidation and host work. `mutation_access` measures
+  in-process writer acquisition, including waiting, config validation and recovery;
+  queue-planning duration excludes it. Child-command waits are not in that metric.
+  Native writer waiting is cancellable, retries only typed contention and validates
+  the same-read config pin before recovery. A pre-host cursor wait discards prepared
+  requests and replans before invocation; post-host recording reloads fresh inputs.
   Native consumers own selected semantic reads and guarded publication; the controller
   owns final global reconciliation/checks. Keep this boundary explicit in the host
   instruction and shared skills; standalone skills still perform their own final checks.
@@ -188,6 +196,10 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   it. Deadlines include retries/pagination/conversion, cancel async waits and reject
   over-budget blocking returns; they are not OS preemption or source completeness.
   `--wait-for-vault` permits publication waiting; dry run never takes that lock.
+  Optional `--publication-workflow refuse|wait` fences publication after acquisition,
+  leaving source cursor/admission claims and network I/O outside that lease. Native
+  daily selects the mode explicitly; ordinary ingest retains its short-writer contract.
+  Do not nest the option inside an existing workflow. Dry run ignores both waits.
 - Dry run publishes no pages, receipts, cursors, logs or queue writes; real source
   errors still return nonzero. Authentication may persist a required rotated OAuth
   successor. A noop provider makes no promise to queue work.

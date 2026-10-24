@@ -210,13 +210,12 @@ pub(in crate::commands) fn prepare(
 }
 
 pub(in crate::commands) fn finish(
-    root: &Path,
+    session: &lk_vault::MutationSession,
     config: &lk_core::config::Config,
     config_revision: &str,
     section: Section,
     response: crate::commands::execution::finalization::SectionResponse,
 ) -> miette::Result<Option<String>> {
-    let session = lk_vault::MutationSession::acquire(root).into_diagnostic()?;
     let root = session.root();
     let current = prepare(root, config, config_revision, &section.result.task_id)?;
     let Preparation::Ready(current) = current else {
@@ -364,7 +363,15 @@ mod tests {
                 body: body.clone(),
                 ..section.result.clone()
             };
-            super::super::finish_section(&root, &config, &revision, &id, *section, body).unwrap();
+            super::super::finish_section(
+                &lk_vault::MutationSession::acquire(&root).unwrap(),
+                &config,
+                &revision,
+                &id,
+                *section,
+                body,
+            )
+            .unwrap();
             result
         } else {
             let Preparation::Ready(section) =
@@ -377,7 +384,7 @@ mod tests {
                 ..section.result.clone()
             };
             finish(
-                &root,
+                &lk_vault::MutationSession::acquire(&root).unwrap(),
                 &config,
                 &revision,
                 *section,

@@ -62,6 +62,7 @@ pub(super) fn order(
     Ok(ordered(&load(root)?.1, stage, candidates))
 }
 
+#[cfg(test)]
 pub(super) fn reserve(
     root: &Path,
     stage: Stage,
@@ -72,6 +73,18 @@ pub(super) fn reserve(
         return Ok(());
     }
     let session = lk_vault::MutationSession::acquire(root).into_diagnostic()?;
+    reserve_in_session(&session, stage, candidates, expected)
+}
+
+pub(super) fn reserve_in_session(
+    session: &lk_vault::MutationSession,
+    stage: Stage,
+    candidates: &BTreeSet<String>,
+    expected: &[String],
+) -> miette::Result<()> {
+    if expected.is_empty() {
+        return Ok(());
+    }
     let (before, mut cursor) = load(session.root())?;
     let order = ordered(&cursor, stage, candidates);
     if order.is_empty()
@@ -103,6 +116,7 @@ pub(super) fn reserve(
 
 /// Reserve one round-robin turn before starting its external worker. A cancelled
 /// worker keeps its work but does not monopolize the next resumed run.
+#[cfg(test)]
 pub(super) fn select(
     root: &Path,
     stage: Stage,
@@ -111,11 +125,23 @@ pub(super) fn select(
     if candidates.is_empty() {
         return Ok(None);
     }
-    let selected = order(root, stage, candidates)?
+    let session = lk_vault::MutationSession::acquire(root).into_diagnostic()?;
+    select_in_session(&session, stage, candidates)
+}
+
+pub(super) fn select_in_session(
+    session: &lk_vault::MutationSession,
+    stage: Stage,
+    candidates: &BTreeSet<String>,
+) -> miette::Result<Option<String>> {
+    if candidates.is_empty() {
+        return Ok(None);
+    }
+    let selected = order(session.root(), stage, candidates)?
         .into_iter()
         .next()
         .expect("nonempty candidates");
-    reserve(root, stage, candidates, std::slice::from_ref(&selected))?;
+    reserve_in_session(session, stage, candidates, std::slice::from_ref(&selected))?;
     Ok(Some(selected))
 }
 

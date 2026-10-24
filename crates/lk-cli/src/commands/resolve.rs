@@ -109,7 +109,7 @@ async fn answers(
     names: &[String],
     root: Option<PathBuf>,
 ) -> miette::Result<Vec<Answer>> {
-    let super::RootConfig { root, config } = super::resolve_root_config(opts, root)?;
+    let super::RootConfig { root, config, .. } = super::resolve_root_config(opts, root)?;
     let dirs = config.map(|config| config.vault.dirs).unwrap_or_default();
     let registry = lk_vault::load_concept_registry(&lk_vault::FsVault::new(root), &dirs)
         .await

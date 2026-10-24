@@ -58,7 +58,7 @@ pub async fn run(opts: &super::GlobalOptions, cmd: ConfigCommand) -> miette::Res
             // Same resolution `lore schema` writes through, so the path this prints is the path
             // that command creates — including under `--root`, where only the root is overridden
             // and the configured wiki dir still applies.
-            let super::RootConfig { root, config } = super::resolve_root_config(opts, root)?;
+            let super::RootConfig { root, config, .. } = super::resolve_root_config(opts, root)?;
             let wiki = config
                 .map(|c| c.vault.dirs.wiki)
                 .unwrap_or_else(|| lk_core::config::VaultDirs::default().wiki);

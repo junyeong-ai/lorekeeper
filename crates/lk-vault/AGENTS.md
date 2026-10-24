@@ -52,6 +52,8 @@ canonical; SQLite navigation is derived.
 - `MutationClaim` acquires the same writer boundary without reading or recovering
   journals. Installation uses it for settlement inspection and replacement; it is
   not a publication session and must be released before schema publication.
+  `into_session` recovers under the same held claim without an unlock gap.
+  Only `VaultError::MutationBusy` denotes contention; other lock I/O stays fatal.
 - Preflight rejects conflicting publication addresses resolving to one file entry,
   including absent case/Unicode aliases and missing descendants under directory aliases.
   Missing names use disposable directory-only probes beneath their existing parent;

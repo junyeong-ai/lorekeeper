@@ -85,6 +85,9 @@ pub enum Command {
         /// Wait for exclusive vault access instead of refusing a busy writer (ignored for dry-run)
         #[arg(long)]
         wait_for_vault: bool,
+        /// Collect first, then claim a publication workflow; refuse or wait on contention (ignored for dry-run)
+        #[arg(long, value_enum)]
+        publication_workflow: Option<commands::ingest::PublicationWorkflow>,
     },
     /// Save an HTML article, Markdown or text document into a manual source's inbox
     Fetch {
@@ -180,6 +183,9 @@ pub enum Command {
         /// Vault root override (default: vault.root from config)
         #[arg(long)]
         root: Option<PathBuf>,
+        /// Wait cancellably for vault writer access; configuration changes refuse
+        #[arg(long)]
+        wait_for_vault: bool,
     },
     /// Prune the ingest log and drained queue files past the configured retention (default 90 days); streaming event logs are permanent, and each source's latest log entry is kept whatever its age
     Maintenance {
@@ -309,7 +315,7 @@ pub async fn run() -> miette::Result<()> {
             .await
         }
         Command::Workflow { wait, command } => {
-            commands::workflow::run(&opts, protection.installation(), wait, command)
+            commands::workflow::run(&opts, protection.installation(), wait, command).await
         }
         Command::Init { target } => match target {
             InitTarget::Credentials { vault } => commands::init::credentials(&opts, vault).await,
@@ -318,7 +324,10 @@ pub async fn run() -> miette::Result<()> {
         Command::Input { cmd } => commands::input::run(&opts, cmd).await,
         Command::Validate => commands::validate::run(&opts).await,
         Command::Config { cmd } => commands::config::run(&opts, cmd).await,
-        Command::Schema { root } => commands::schema::run(&opts, root).await,
+        Command::Schema {
+            root,
+            wait_for_vault,
+        } => commands::schema::run_with_wait(&opts, root, wait_for_vault).await,
         Command::Status => commands::status::run(&opts).await,
         Command::Ingest {
             source,
@@ -326,11 +335,26 @@ pub async fn run() -> miette::Result<()> {
             recover,
             dry_run,
             wait_for_vault,
+            publication_workflow,
         } => {
             if recover {
-                commands::ingest::recovery::run(&opts, dry_run, wait_for_vault).await
+                commands::ingest::recovery::run(
+                    &opts,
+                    dry_run,
+                    wait_for_vault,
+                    publication_workflow,
+                )
+                .await
             } else {
-                commands::ingest::run(&opts, source, date, dry_run, wait_for_vault).await
+                commands::ingest::run(
+                    &opts,
+                    source,
+                    date,
+                    dry_run,
+                    wait_for_vault,
+                    publication_workflow,
+                )
+                .await
             }
         }
         Command::Task { cmd } => commands::task::run(&opts, cmd).await,

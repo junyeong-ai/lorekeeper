@@ -754,12 +754,21 @@ pub async fn run(
     opts: &super::GlobalOptions,
     root_override: Option<PathBuf>,
 ) -> miette::Result<()> {
+    run_with_wait(opts, root_override, false).await
+}
+
+pub async fn run_with_wait(
+    opts: &super::GlobalOptions,
+    root_override: Option<PathBuf>,
+    wait_for_vault: bool,
+) -> miette::Result<()> {
     // Single override semantics (shared with `wiki`/`graph`): a present config drives
     // locale/dirs/personal even under `--root`; defaults apply ONLY when no config file exists;
     // a present-but-broken config fails loudly (never silently emit AGENTS.md for the wrong dirs).
     let super::RootConfig {
         root: vault_root,
         config,
+        pin,
     } = super::resolve_root_config(opts, root_override)?;
     super::wiki::refuse_navigation_inbox_overlap(&vault_root, config.as_ref())?;
     let (locale, dirs, personal, board) = match config {
@@ -785,8 +794,7 @@ pub async fn run(
     };
 
     std::fs::create_dir_all(&vault_root).map_err(|e| miette::miette!("create vault: {e}"))?;
-    let _mutation = lk_vault::MutationSession::acquire(&vault_root)
-        .map_err(|e| miette::miette!("vault mutation: {e}"))?;
+    let _mutation = super::execution::acquire_mutation(&vault_root, wait_for_vault, &pin).await?;
 
     let content = render_agents_md(locale, &dirs, personal, board.as_deref());
 

@@ -1,5 +1,17 @@
 //! Cooperative Unix leases shared by manual agents and native job execution.
 
+#[derive(Debug)]
+pub(super) struct WorkflowBusy;
+
+impl std::fmt::Display for WorkflowBusy {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("workflow busy; command not started")
+    }
+}
+
+impl std::error::Error for WorkflowBusy {}
+impl miette::Diagnostic for WorkflowBusy {}
+
 #[cfg(unix)]
 pub(super) struct WorkflowLease {
     id: lk_core::execution::WorkflowId,
@@ -13,12 +25,6 @@ pub(super) struct WorkflowLease {
 
 #[cfg(unix)]
 impl WorkflowLease {
-    pub fn prepare(opts: &super::GlobalOptions) -> miette::Result<Self> {
-        let config_path = super::find_config(opts)?;
-        let (config, revision) = super::load_config_with_revision(&config_path)?;
-        Self::prepare_selected(opts, &config, config_path, revision)
-    }
-
     pub fn prepare_selected(
         opts: &super::GlobalOptions,
         config: &lk_core::config::Config,
@@ -103,6 +109,53 @@ impl WorkflowLease {
         })
     }
 
+    pub async fn acquire_selected(
+        opts: &super::GlobalOptions,
+        config: &lk_core::config::Config,
+        config_path: std::path::PathBuf,
+        config_revision: String,
+        wait: bool,
+    ) -> miette::Result<Self> {
+        let pin =
+            super::ConfigurationPin::from_loaded(config_path.clone(), config_revision.clone());
+        pin.validate()?;
+        let lease = Self::prepare_selected(opts, config, config_path, config_revision)?;
+        loop {
+            pin.validate()?;
+            match lease.try_lock() {
+                Ok(()) => {
+                    pin.validate()?;
+                    return Ok(lease);
+                }
+                Err(std::fs::TryLockError::WouldBlock) if wait => {}
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    return Err(miette::Report::new(WorkflowBusy));
+                }
+                Err(std::fs::TryLockError::Error(error)) => {
+                    return Err(miette::miette!("workflow lock unavailable: {error}"));
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    }
+
+    pub async fn acquire_publication(
+        opts: &super::GlobalOptions,
+        config: &lk_core::config::Config,
+        config_path: std::path::PathBuf,
+        config_revision: String,
+        wait: bool,
+    ) -> miette::Result<Self> {
+        use rustix::io::{FdFlags, fcntl_getfd, fcntl_setfd};
+        let lease =
+            Self::acquire_selected(opts, config, config_path, config_revision, wait).await?;
+        let flags = fcntl_getfd(&lease.lock)
+            .map_err(|error| miette::miette!("read publication workflow descriptor: {error}"))?;
+        fcntl_setfd(&lease.lock, flags | FdFlags::CLOEXEC)
+            .map_err(|error| miette::miette!("isolate publication workflow descriptor: {error}"))?;
+        Ok(lease)
+    }
+
     pub fn try_lock(&self) -> Result<(), std::fs::TryLockError> {
         self.lock.try_lock()
     }
@@ -124,7 +177,7 @@ impl WorkflowLease {
     }
 }
 
-pub fn run(
+pub async fn run(
     opts: &super::GlobalOptions,
     installation: &lk_dist::Installation,
     wait: bool,
@@ -144,18 +197,13 @@ pub fn run(
         let (program, arguments) = command
             .split_first()
             .ok_or_else(|| miette::miette!("workflow requires a command after --"))?;
-        let lease = WorkflowLease::prepare(opts)?;
+        let config_path = super::find_config(opts)?;
+        let (config, revision) = super::load_config_with_revision(&config_path)?;
         if wait {
             eprintln!("Waiting for the vault workflow lease...");
-            lease
-                .lock
-                .lock()
-                .map_err(|e| miette::miette!("lock workflow: {e}"))?;
-        } else {
-            lease.try_lock().map_err(|e| {
-                miette::miette!("workflow busy or lock unavailable; command not started: {e}")
-            })?;
         }
+        let lease =
+            WorkflowLease::acquire_selected(opts, &config, config_path, revision, wait).await?;
         let mut child = std::process::Command::new(program);
         child.args(arguments);
         child.env("LORE_INSTALL_DATA_DIR", installation.data_dir());

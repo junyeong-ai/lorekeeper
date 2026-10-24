@@ -470,6 +470,8 @@ node and assessment remain incomplete. Workers can cite native-verified assigned
 without guessing finer offsets. Native `lore run process --json` reports
 per-step JSON sizes and preparation, agent invocation and validation wall times in
 `work_steps`. Unobserved values are `null`; these are not token counts or billed cost.
+`mutation_access` reports native in-process writer acquisition, waiting and recovery;
+queue-planning time excludes those acquisitions.
 See [native run measurements](skills/lore-process/references/bounded-work.md#native-run-measurements)
 for coverage and limits.
 
@@ -637,7 +639,10 @@ resume ready periods. Collection failures and semantic failures remain distinct;
 unfinished work is not reported as success. JSON results use stdout, child logs stderr.
 
 A cooperative Unix workflow lease and exact revision guards coordinate semantic
-sessions. Start manual work before reading evidence with `lore workflow -- claude`
+sessions. Daily jobs collect over the network first, then fence publication with a
+separate workflow lease. `--wait` waits there; omission refuses contention. Native
+short writer waits prepare current inputs afterward and revalidate after host calls;
+no writer claim spans network or model execution. Start manual work before reading evidence with `lore workflow -- claude`
 or `lore workflow -- codex`. Configuration edits stop the remaining job. Regenerate
 OS definitions after changing host authentication directories, PATH or proxy environment.
 Native agent jobs/workflow are unsupported on Windows. See [scheduling](skills/lore-ingest/references/scheduling.md)

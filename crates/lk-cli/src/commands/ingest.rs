@@ -91,14 +91,39 @@ fn ensure_config_current(path: &std::path::Path, expected: &str) -> miette::Resu
     Ok(())
 }
 
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub enum PublicationWorkflow {
+    Refuse,
+    Wait,
+}
+
+#[derive(Clone, Copy, Default)]
+struct IngestAccess {
+    wait_for_vault: bool,
+    publication_workflow: Option<PublicationWorkflow>,
+}
+
 pub async fn run(
     opts: &super::GlobalOptions,
     source: Option<String>,
     date_str: Option<String>,
     dry_run: bool,
     wait_for_vault: bool,
+    publication_workflow: Option<PublicationWorkflow>,
 ) -> miette::Result<()> {
-    run_with_identity(opts, source, date_str, dry_run, wait_for_vault, None, None).await
+    run_with_identity(
+        opts,
+        source,
+        date_str,
+        dry_run,
+        IngestAccess {
+            wait_for_vault,
+            publication_workflow,
+        },
+        None,
+        None,
+    )
+    .await
 }
 
 async fn run_with_identity(
@@ -106,10 +131,24 @@ async fn run_with_identity(
     source: Option<String>,
     date_str: Option<String>,
     dry_run: bool,
-    wait_for_vault: bool,
+    access: IngestAccess,
     expected_identity: Option<&lk_source::CollectionIdentity>,
     expected_config_revision: Option<&str>,
 ) -> miette::Result<()> {
+    #[cfg(not(unix))]
+    if !dry_run && access.publication_workflow.is_some() {
+        return Err(miette::miette!(
+            "publication workflow leases require Unix; Windows is unsupported"
+        ));
+    }
+    if !dry_run
+        && access.publication_workflow.is_some()
+        && std::env::var_os("LORE_WORKFLOW_ID").is_some()
+    {
+        return Err(miette::miette!(
+            "ingest --publication-workflow cannot nest a publication workflow; omit the option inside an existing workflow"
+        ));
+    }
     let config_path = find_config(opts)?;
     let (config, config_revision) = load_config_with_revision(&config_path)?;
     if expected_config_revision.is_some_and(|expected| expected != config_revision) {
@@ -229,10 +268,14 @@ async fn run_with_identity(
     // Filtered and historical replay leave the ordinary full-run turn intact.
     if source.is_none() && target_date.is_none_or(|date| date == today) {
         let candidates = sources.iter().map(|(id, _)| id.clone()).collect();
-        if let Some(first) =
-            cursor::reserve_start(&vault_root, &candidates, dry_run, wait_for_vault, || {
-                ensure_config_current(&config_path, &config_revision)
-            })?
+        if let Some(first) = cursor::reserve_start(
+            &vault_root,
+            &candidates,
+            dry_run,
+            access.wait_for_vault,
+            || ensure_config_current(&config_path, &config_revision),
+        )
+        .await?
         {
             let start = sources
                 .iter()
@@ -337,7 +380,7 @@ async fn run_with_identity(
                     &source_ctx,
                     &pipeline,
                     dry_run,
-                    wait_for_vault,
+                    access.wait_for_vault,
                     || ensure_config_current(&config_path, &config_revision),
                 )
                 .await
@@ -407,18 +450,41 @@ async fn run_with_identity(
     }
 
     ensure_config_current(&config_path, &config_revision)?;
+    #[cfg(unix)]
+    let _publication_workflow = if dry_run || access.publication_workflow.is_none() {
+        None
+    } else {
+        std::fs::create_dir_all(&vault_root)
+            .map_err(|error| miette::miette!("create vault: {error}"))?;
+        {
+            let selected = super::GlobalOptions {
+                config: Some(config_path.clone()),
+                template_dir: opts.template_dir.clone(),
+            };
+            eprintln!("Claiming the vault workflow before publishing collected inputs...");
+            Some(
+                super::workflow::WorkflowLease::acquire_publication(
+                    &selected,
+                    &config,
+                    config_path.clone(),
+                    config_revision.clone(),
+                    matches!(access.publication_workflow, Some(PublicationWorkflow::Wait)),
+                )
+                .await?,
+            )
+        }
+    };
     let _mutation = if dry_run {
         None
     } else {
         std::fs::create_dir_all(&vault_root).map_err(|e| miette::miette!("create vault: {e}"))?;
         Some(
-            if wait_for_vault {
-                eprintln!("Waiting for exclusive vault access...");
-                lk_vault::MutationSession::acquire_waiting(&vault_root)
-            } else {
-                lk_vault::MutationSession::acquire(&vault_root)
-            }
-            .map_err(|e| miette::miette!("vault mutation: {e}"))?,
+            super::execution::acquire_mutation(
+                &vault_root,
+                access.wait_for_vault,
+                &super::ConfigurationPin::from_loaded(config_path.clone(), config_revision.clone()),
+            )
+            .await?,
         )
     };
 
@@ -1145,7 +1211,7 @@ mod observation_log_tests {
             Some("notes".into()),
             Some("2020-01-01".into()),
             false,
-            false,
+            super::IngestAccess::default(),
             None,
             Some(&expected),
         )

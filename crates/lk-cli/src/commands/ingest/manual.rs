@@ -481,16 +481,10 @@ pub(super) async fn acquire(
     let root = &context.vault_root;
     if !dry_run {
         std::fs::create_dir_all(root).map_err(error)?;
-        if wait {
-            eprintln!("Waiting for exclusive vault access... (manual admission recovery)");
-        }
-        let _session = if wait {
-            lk_vault::MutationSession::acquire_waiting(root)
-        } else {
-            lk_vault::MutationSession::acquire(root)
-        }
-        .map_err(error)?;
-        validate_config().map_err(error)?;
+        let _session =
+            super::super::execution::acquire_mutation_checked(root, wait, &validate_config)
+                .await
+                .map_err(error)?;
     }
     let inbox = lk_source::manual_inbox_dir(&source.params, root, &context.vault_dirs)?;
     let (path, marker_path, marker) = state_paths(id, &inbox);
@@ -557,13 +551,10 @@ pub(super) async fn acquire(
     let turn = state.reserve(&entries, &verified, limit)?;
     let reserved = serde_json::to_string(&state).map_err(error)?;
     if !dry_run {
-        let session = if wait {
-            lk_vault::MutationSession::acquire_waiting(root)
-        } else {
-            lk_vault::MutationSession::acquire(root)
-        }
-        .map_err(error)?;
-        validate_config().map_err(error)?;
+        let session =
+            super::super::execution::acquire_mutation_checked(root, wait, &validate_config)
+                .await
+                .map_err(error)?;
         if lk_source::manual_inbox_dir(&source.params, root, &context.vault_dirs)? != inbox {
             return Err(error("canonical inbox changed before reservation"));
         }

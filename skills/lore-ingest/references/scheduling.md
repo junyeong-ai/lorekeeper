@@ -60,12 +60,22 @@ assessments after final global reconciliation; completed audits do not turn an
 unfinished global queue into a successful job.
 
 The native runner holds the cooperative Unix workflow lease through semantic
-reading and publication. Do not reacquire it inside a skill. Cancellation and
+reading and publication. Native daily jobs collect first, then fence publication
+with a separate workflow lease before starting semantic processing. `--wait` waits
+at that boundary; without it, busy publication refuses. Source cursor/admission
+claims and network acquisition remain outside the publication lease. Standalone
+ingest retains its short-writer behavior unless `--publication-workflow` is explicit.
+Do not nest that option or reacquire the lease inside a skill. Cancellation and
 session deadlines terminate the foreground process group and preserve unfinished
 work. Manual agent sessions can use `lore workflow -- claude` or
 `lore workflow -- codex` before reading inputs. Closing inherited descriptors or
 detaching work is outside the manual exec lease's guarantee. Windows is unsupported
 for workflow leases and native agent jobs.
+
+Native short writer acquisition waits cancellably for typed contention, rechecks
+the pinned configuration before journal recovery and prepares current inputs after
+waiting. Recording after a host call validates fresh scope before publication.
+Other storage errors remain failures; waiting never retries a model invocation.
 
 Unattended skills come from the binary's data directory, independently of user or
 project interactive deployment. The runtime verifies every required packaged file.

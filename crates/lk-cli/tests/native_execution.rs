@@ -5044,3 +5044,435 @@ fn explicit_inspection_actions_allow_an_independent_audit_assessment() {
         assert_eq!(repeated["halted"], false, "{repeated}");
     }
 }
+
+fn writer_contention_fixture(engine: &str, before_host: bool) -> Fixture {
+    let fixture = Fixture::new(engine, 30, RECORD_BOUNDED_AUDIT);
+    let config = std::fs::read_to_string(&fixture.config)
+        .unwrap()
+        .replace("concept_policy: supported-new", "concept_policy: disabled")
+        .replace(
+            "  default_profile: primary\n",
+            "  default_profile: primary\n  work: {max_input_bytes: 16384, max_result_bytes: 4096, max_calls: 1}\n",
+        );
+    std::fs::write(&fixture.config, config).unwrap();
+    std::fs::write(
+        fixture.root().join("vault/inbox/source.md"),
+        format!(
+            "# Bounded source\n\n{}",
+            "A source-scoped observation remains exact.\n\n".repeat(1600)
+        ),
+    )
+    .unwrap();
+    let ingested = fixture.command().arg("ingest").output().unwrap();
+    assert!(
+        ingested.status.success(),
+        "{}",
+        String::from_utf8_lossy(&ingested.stderr)
+    );
+    let agent = fixture.root().join("agent executable");
+    let script = std::fs::read_to_string(&agent).unwrap();
+    let pause = "printf ready > \"$TEST_EXECUTION_ROOT/writer-ready\"; while [ ! -f \"$TEST_EXECUTION_ROOT/writer-release\" ]; do sleep 0.02; done; ";
+    let script = if before_host {
+        script.replacen("then printf", &format!("then {pause}printf"), 1)
+    } else {
+        script.replacen(
+            RECORD_BOUNDED_AUDIT,
+            &format!("{pause}\n{RECORD_BOUNDED_AUDIT}"),
+            1,
+        )
+    };
+    std::fs::write(agent, script).unwrap();
+    fixture
+}
+
+fn start_contention_run(fixture: &Fixture) -> std::process::Child {
+    let mut child = fixture
+        .command()
+        .args(["run", "process", "--json"])
+        .stdout(std::fs::File::create(fixture.root().join("contention-result.json")).unwrap())
+        .stderr(std::fs::File::create(fixture.root().join("contention-stderr.log")).unwrap())
+        .stdin(Stdio::null())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !fixture.root().join("writer-ready").exists() {
+        assert!(
+            Instant::now() < deadline,
+            "native run never reached the controlled boundary"
+        );
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "{}",
+            std::fs::read_to_string(fixture.root().join("contention-stderr.log")).unwrap()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    child
+}
+
+fn finish_contention_run(fixture: &Fixture, mut child: std::process::Child) -> serde_json::Value {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while child.try_wait().unwrap().is_none() {
+        assert!(
+            Instant::now() < deadline,
+            "native writer wait did not finish"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    serde_json::from_slice(&std::fs::read(fixture.root().join("contention-result.json")).unwrap())
+        .unwrap()
+}
+
+#[test]
+fn native_writer_contention_replans_before_invocation_and_preserves_cancel_and_config_guards() {
+    for engine in ["codex", "claude-code"] {
+        for outcome in ["resume", "cancel", "config"] {
+            let fixture = writer_contention_fixture(engine, true);
+            let mut child = start_contention_run(&fixture);
+            let lock = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(fixture.root().join("vault/.lorekeeper/mutation/lock"))
+                .unwrap();
+            lock.lock().unwrap();
+            let cursor = fixture
+                .root()
+                .join("vault/.lorekeeper/execution-cursor.json");
+            let before_cursor = std::fs::read(&cursor).ok();
+            std::fs::write(fixture.root().join("writer-release"), "release").unwrap();
+            std::thread::sleep(Duration::from_millis(250));
+            assert!(child.try_wait().unwrap().is_none());
+            assert!(bounded_calls(&fixture).is_empty());
+            match outcome {
+                "cancel" => {
+                    let pid =
+                        rustix::process::Pid::from_raw(i32::try_from(child.id()).unwrap()).unwrap();
+                    rustix::process::kill_process(pid, rustix::process::Signal::TERM).unwrap();
+                }
+                "config" => {
+                    let config = std::fs::read_to_string(&fixture.config)
+                        .unwrap()
+                        .replace("name: Test", "name: Changed");
+                    std::fs::write(&fixture.config, config).unwrap();
+                }
+                _ => {}
+            }
+            if outcome == "resume" {
+                drop(lock);
+            }
+            let report = finish_contention_run(&fixture, child);
+            assert!(
+                !fixture
+                    .root()
+                    .join("vault/.lorekeeper/mutation/pending.json")
+                    .exists()
+            );
+            if outcome == "resume" {
+                assert_eq!(report["halted"], false, "{report}");
+                assert_eq!(report["cancelled"], false, "{report}");
+                assert_eq!(report["semantic_calls"], 1, "{report}");
+                assert!(report["queue_planning"]["attempts"].as_u64().unwrap() >= 2);
+                assert_eq!(
+                    report["work_steps"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .filter(|step| step["outcome"] == "recorded")
+                        .count(),
+                    1
+                );
+            } else {
+                assert_eq!(report["semantic_calls"], 0, "{report}");
+                assert_eq!(std::fs::read(&cursor).ok(), before_cursor);
+                assert_eq!(report["cancelled"], outcome == "cancel", "{report}");
+                assert_eq!(report["halted"], outcome == "config", "{report}");
+            }
+        }
+    }
+}
+
+#[test]
+fn native_post_host_record_waits_then_revalidates_without_another_invocation() {
+    for engine in ["codex", "claude-code"] {
+        let fixture = writer_contention_fixture(engine, false);
+        let mut child = start_contention_run(&fixture);
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(fixture.root().join("vault/.lorekeeper/mutation/lock"))
+            .unwrap();
+        lock.lock().unwrap();
+        std::fs::write(fixture.root().join("writer-release"), "release").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while bounded_calls(&fixture).is_empty() {
+            assert!(Instant::now() < deadline);
+            assert!(child.try_wait().unwrap().is_none());
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        std::thread::sleep(Duration::from_millis(150));
+        assert!(child.try_wait().unwrap().is_none());
+        drop(lock);
+        let report = finish_contention_run(&fixture, child);
+        assert_eq!(report["halted"], false, "{report}");
+        assert_eq!(report["semantic_calls"], 1);
+        assert_eq!(bounded_calls(&fixture).len(), 1);
+        let step = report["work_steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|step| step["outcome"] == "recorded")
+            .unwrap();
+        let progress = execution_json(
+            &fixture,
+            &["work", "status", step["work_id"].as_str().unwrap()],
+        );
+        assert_eq!(progress["completed"], 1);
+        assert_eq!(progress["complete"], false);
+    }
+}
+
+#[test]
+fn owned_publication_commands_keep_default_refusal_and_explicit_guarded_waiting() {
+    for command in ["schema", "apply", "backlinks", "refresh", "audit"] {
+        for outcome in ["resume", "cancel", "config"] {
+            let fixture = Fixture::new("codex", 30, "exit 91");
+            write_audit_concept(&fixture, "subject");
+            let arguments: Vec<String> = match command {
+                "schema" => vec!["schema".into()],
+                "apply" => vec!["queue".into(), "apply".into(), "--json".into()],
+                "backlinks" => vec!["graph".into(), "backlinks-sync".into()],
+                "refresh" => vec!["wiki".into(), "refresh".into()],
+                "audit" => {
+                    record_discovery(&fixture, "wiki/concepts/subject.md");
+                    let plan = execution_json(
+                        &fixture,
+                        &["wiki", "audit-plan", "--path", "wiki/concepts/subject.md"],
+                    );
+                    let candidate = &plan["candidates"][0];
+                    let file = fixture.root().join("assessment.json");
+                    std::fs::write(&file, serde_json::to_vec(&serde_json::json!({"assessments":[{
+                        "path":candidate["path"], "file_revision":candidate["file_revision"], "input_revision":candidate["input_revision"],
+                        "disposition":"reviewed", "reason":"Fixture verifies publication guards, not semantic truth.", "reviews":[]
+                    }]})).unwrap()).unwrap();
+                    vec![
+                        "wiki".into(),
+                        "audit-record".into(),
+                        "--file".into(),
+                        file.to_string_lossy().into_owned(),
+                    ]
+                }
+                _ => unreachable!(),
+            };
+            let session =
+                lk_vault::MutationSession::acquire(&fixture.root().join("vault")).unwrap();
+            let refused = fixture.command().args(&arguments).output().unwrap();
+            assert!(
+                !refused.status.success(),
+                "{command}: default must refuse contention"
+            );
+            assert!(String::from_utf8_lossy(&refused.stderr).contains("vault mutation is busy"));
+            if matches!(command, "apply" | "backlinks") {
+                let pending = fixture
+                    .root()
+                    .join("vault/.lorekeeper/mutation/pending.json");
+                let raw = b"unreadable pending state must remain untouched in dry-run";
+                std::fs::write(&pending, raw).unwrap();
+                let dry = fixture
+                    .command()
+                    .args(&arguments)
+                    .args(["--dry-run", "--wait-for-vault"])
+                    .output()
+                    .unwrap();
+                assert!(
+                    dry.status.success(),
+                    "{command}: {}",
+                    String::from_utf8_lossy(&dry.stderr)
+                );
+                assert_eq!(std::fs::read(&pending).unwrap(), raw);
+                std::fs::remove_file(pending).unwrap();
+            }
+            let pending = fixture
+                .root()
+                .join("vault/.lorekeeper/mutation/pending.json");
+            let pending_before = if outcome == "resume" {
+                None
+            } else {
+                let raw = b"pending journal must not be recovered before a cancelled or changed-config claim".to_vec();
+                std::fs::write(&pending, &raw).unwrap();
+                Some(raw)
+            };
+            let target = fixture.root().join("vault/wiki/concepts/subject.md");
+            let before = std::fs::read(&target).unwrap();
+            let mut child = fixture
+                .command()
+                .args(&arguments)
+                .arg("--wait-for-vault")
+                .stdout(std::fs::File::create(fixture.root().join("wait-out")).unwrap())
+                .stderr(std::fs::File::create(fixture.root().join("wait-error")).unwrap())
+                .spawn()
+                .unwrap();
+            std::thread::sleep(Duration::from_millis(200));
+            assert!(
+                child.try_wait().unwrap().is_none(),
+                "{command} did not wait"
+            );
+            assert_eq!(std::fs::read(&target).unwrap(), before);
+            match outcome {
+                "cancel" => {
+                    let pid =
+                        rustix::process::Pid::from_raw(i32::try_from(child.id()).unwrap()).unwrap();
+                    rustix::process::kill_process(pid, rustix::process::Signal::TERM).unwrap();
+                }
+                "config" => {
+                    let raw = std::fs::read_to_string(&fixture.config)
+                        .unwrap()
+                        .replace("name: Test", "name: Changed");
+                    std::fs::write(&fixture.config, raw).unwrap();
+                }
+                _ => {}
+            }
+            if outcome == "resume" {
+                drop(session);
+            }
+            let deadline = Instant::now() + Duration::from_secs(15);
+            let status = loop {
+                if let Some(status) = child.try_wait().unwrap() {
+                    break status;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "{command}/{outcome} failed to leave writer wait"
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            };
+            let error = std::fs::read_to_string(fixture.root().join("wait-error")).unwrap();
+            assert_eq!(
+                status.success(),
+                outcome == "resume",
+                "{command}/{outcome}: {error}"
+            );
+            if outcome != "resume" {
+                assert_eq!(std::fs::read(&target).unwrap(), before);
+                assert_eq!(std::fs::read(&pending).ok(), pending_before);
+                if outcome == "cancel" {
+                    use std::os::unix::process::ExitStatusExt;
+                    assert_eq!(status.signal(), Some(15));
+                } else {
+                    assert!(error.contains("configuration changed"), "{error}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn native_collection_publication_preserves_bootstrap_and_independent_drain_after_source_failure() {
+    for failed_source in [false, true] {
+        let fixture = Fixture::with_whole_sections("codex", 30, "exit 91");
+        let inbox = fixture.root().join("collection-inbox");
+        std::fs::create_dir(&inbox).unwrap();
+        std::fs::write(
+            inbox.join("source.md"),
+            "# Source\n\nAn exact source observation.\n",
+        )
+        .unwrap();
+        let config = std::fs::read_to_string(&fixture.config)
+            .unwrap()
+            .replace("concept_policy: supported-new", "concept_policy: disabled")
+            .replace(
+                "{inbox_dir: inbox}",
+                &format!("{{inbox_dir: {}}}", serde_json::to_string(&inbox).unwrap()),
+            );
+        let config = if failed_source {
+            config.replace("execution:\n", "  unavailable:\n    type: manual\n    params: {inbox_dir: missing-inbox}\nexecution:\n")
+        } else {
+            config
+        };
+        std::fs::write(&fixture.config, config).unwrap();
+        std::fs::remove_dir_all(fixture.root().join("vault")).unwrap();
+        let (output, report) = fixture.run("daily");
+        assert_eq!(report["halted"], false, "{report}");
+        assert_eq!(output.status.success(), !failed_source, "{report}");
+        let ingest = report["stages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|stage| stage["name"] == "ingest")
+            .unwrap();
+        assert_eq!(
+            ingest["state"],
+            if failed_source { "failed" } else { "completed" }
+        );
+        assert!(
+            fixture
+                .root()
+                .join("vault/wiki/documents/source.md")
+                .is_file()
+        );
+        assert_eq!(report["semantic_calls"], 1);
+        assert!(
+            fixture
+                .command()
+                .args(["queue", "check"])
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
+    }
+}
+
+#[test]
+fn native_daily_without_wait_refuses_busy_publication_before_semantic_execution() {
+    let fixture = Fixture::new("codex", 30, "exit 91");
+    std::fs::write(
+        fixture.root().join("vault/inbox/source.md"),
+        "# Source\n\nRetain this uncommitted input.\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(fixture.root().join("vault/.lorekeeper")).unwrap();
+    let lease = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(fixture.root().join("vault/.lorekeeper/workflow.lock"))
+        .unwrap();
+    lease.lock().unwrap();
+    let out = fixture.root().join("daily-refused.json");
+    let mut child = fixture
+        .command()
+        .args(["run", "daily", "--json"])
+        .stdout(std::fs::File::create(&out).unwrap())
+        .stderr(std::fs::File::create(fixture.root().join("daily-refused-error")).unwrap())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while child.try_wait().unwrap().is_none() {
+        if Instant::now() >= deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("default daily workflow contention must refuse, not wait");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let report: serde_json::Value = serde_json::from_slice(&std::fs::read(out).unwrap()).unwrap();
+    assert_eq!(report["semantic_calls"], 0);
+    assert_eq!(report["halted"], true);
+    assert!(
+        report["stages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|stage| stage["name"] == "workflow lease" && stage["state"] == "failed")
+    );
+    assert!(fixture.root().join("vault/inbox/source.md").is_file());
+    assert!(
+        !fixture
+            .root()
+            .join("vault/wiki/documents/source.md")
+            .exists()
+    );
+    assert!(!fixture.root().join("vault/.lorekeeper/queue").exists());
+    assert!(!fixture.root().join("arguments").exists());
+}
