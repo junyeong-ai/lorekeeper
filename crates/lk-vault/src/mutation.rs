@@ -208,8 +208,11 @@ impl MutationClaim {
         if wait {
             lock.lock()?;
         } else {
-            lock.try_lock()
-                .map_err(|e| io::Error::other(format!("vault mutation is busy: {e}")))?;
+            match lock.try_lock() {
+                Ok(()) => {}
+                Err(std::fs::TryLockError::WouldBlock) => return Err(VaultError::MutationBusy),
+                Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
+            }
         }
         Ok(Self {
             root,
@@ -220,6 +223,10 @@ impl MutationClaim {
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    pub fn into_session(self) -> Result<MutationSession, VaultError> {
+        MutationSession::from_claim(self)
     }
 }
 
@@ -240,11 +247,15 @@ impl MutationSession {
     }
 
     fn acquire_with_wait(root: &Path, wait: bool) -> Result<Self, VaultError> {
+        Self::from_claim(MutationClaim::acquire_with_wait(root, wait)?)
+    }
+
+    fn from_claim(claim: MutationClaim) -> Result<Self, VaultError> {
         let MutationClaim {
             root,
             journal,
             _lock,
-        } = MutationClaim::acquire_with_wait(root, wait)?;
+        } = claim;
         let session = Self {
             root,
             journal,
@@ -696,20 +707,30 @@ mod tests {
 
         let claim = MutationClaim::acquire(root.path()).unwrap();
         assert_eq!(claim.root(), root.path().canonicalize().unwrap());
-        assert!(MutationClaim::acquire(root.path()).is_err());
-        assert!(MutationSession::acquire(root.path()).is_err());
+        assert!(matches!(
+            MutationClaim::acquire(root.path()),
+            Err(VaultError::MutationBusy)
+        ));
+        assert!(matches!(
+            MutationSession::acquire(root.path()),
+            Err(VaultError::MutationBusy)
+        ));
         assert!(!root.path().join("page.md").exists());
         assert_eq!(fs::read(&journal).unwrap(), pending_bytes);
         assert_eq!(fs::read(&progress).unwrap(), progress_bytes);
-        drop(claim);
-
-        let _session = MutationSession::acquire(root.path()).unwrap();
+        let session = claim.into_session().unwrap();
+        assert!(matches!(
+            MutationClaim::acquire(root.path()),
+            Err(VaultError::MutationBusy)
+        ));
         assert_eq!(
             fs::read_to_string(root.path().join("page.md")).unwrap(),
             "new"
         );
         assert!(!journal.exists());
         assert!(!progress.exists());
+        drop(session);
+        assert!(MutationClaim::acquire(root.path()).is_ok());
     }
 
     #[cfg(unix)]

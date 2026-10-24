@@ -119,6 +119,8 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum VaultError {
+    #[error("vault mutation is busy: lock acquisition would block")]
+    MutationBusy,
     #[error("section: {0}")]
     SectionBody(#[from] lk_core::markdown::SectionBodyError),
     #[error("missing or duplicate section: {0}")]
