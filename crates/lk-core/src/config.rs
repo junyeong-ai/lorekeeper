@@ -543,7 +543,12 @@ fn work_policy_revision(content: &str) -> Result<String, ConfigError> {
             .get_mut("work")
             .and_then(serde_json::Value::as_object_mut)
         {
-            for key in ["max_calls", "max_parallel", "max_screening_batches"] {
+            for key in [
+                "max_calls",
+                "max_parallel",
+                "max_screening_batches",
+                "max_consecutive_calls",
+            ] {
                 work.remove(key);
             }
             if work.is_empty() {
@@ -1770,6 +1775,7 @@ mod tests {
         let operational = base
             .replace("max_calls: 4", "max_calls: 9")
             .replace("max_parallel: 1", "max_parallel: 3")
+            .replace("work: {", "work: {max_consecutive_calls: 8, ")
             .replace("timeout_seconds: 30", "timeout_seconds: 60")
             .replace(
                 "work: {max_calls:",
@@ -1817,7 +1823,13 @@ mod tests {
             .semantic_work_revision()
             .unwrap()
             .to_owned();
-        for execution in ["null", "{}", "{work: null}", "{work: {max_calls: 9}}"] {
+        for execution in [
+            "null",
+            "{}",
+            "{work: null}",
+            "{work: {max_calls: 9}}",
+            "{work: {max_consecutive_calls: 8}}",
+        ] {
             std::fs::write(&path, format!("{base}execution: {execution}\n")).unwrap();
             assert_eq!(
                 Config::load(&path).unwrap().semantic_work_revision(),
@@ -1838,7 +1850,7 @@ mod tests {
             for (before, after) in [
                 (
                     default,
-                    "{max_calls: 9, max_parallel: 2, max_screening_batches: 1}",
+                    "{max_calls: 9, max_parallel: 2, max_screening_batches: 1, max_consecutive_calls: 8}",
                 ),
                 ("{max_calls: 9}", default),
             ] {

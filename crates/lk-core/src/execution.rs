@@ -92,6 +92,7 @@ pub struct SemanticWorkConfig {
     pub max_result_bytes: usize,
     pub max_calls: usize,
     pub max_parallel: usize,
+    pub max_consecutive_calls: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_screening_batches: Option<NonZeroUsize>,
     pub extraction_context: ExtractionContext,
@@ -104,6 +105,7 @@ pub struct SemanticWorkOverrides {
     pub max_result_bytes: Option<usize>,
     pub max_calls: Option<usize>,
     pub max_parallel: Option<usize>,
+    pub max_consecutive_calls: Option<usize>,
     pub max_screening_batches: Option<NonZeroUsize>,
     pub extraction_context: Option<ExtractionContext>,
 }
@@ -115,6 +117,9 @@ impl SemanticWorkOverrides {
             max_result_bytes: self.max_result_bytes.unwrap_or(defaults.max_result_bytes),
             max_calls: self.max_calls.unwrap_or(defaults.max_calls),
             max_parallel: self.max_parallel.unwrap_or(defaults.max_parallel),
+            max_consecutive_calls: self
+                .max_consecutive_calls
+                .unwrap_or(defaults.max_consecutive_calls),
             max_screening_batches: self
                 .max_screening_batches
                 .or(defaults.max_screening_batches),
@@ -132,9 +137,10 @@ impl SemanticWorkConfig {
             || self.max_result_bytes > self.max_input_bytes / 4
             || self.max_calls == 0
             || self.max_parallel == 0
+            || self.max_consecutive_calls == 0
         {
             return Err(ConfigError::Validation(
-                "semantic work requires max_input_bytes >= 4096, max_result_bytes >= 1024 and <= max_input_bytes/4, max_calls > 0, and max_parallel > 0".into(),
+                "semantic work requires max_input_bytes >= 4096, max_result_bytes >= 1024 and <= max_input_bytes/4, max_calls > 0, max_parallel > 0, and max_consecutive_calls > 0".into(),
             ));
         }
         Ok(())
@@ -148,6 +154,7 @@ impl Default for SemanticWorkConfig {
             max_result_bytes: 32_768,
             max_calls: 64,
             max_parallel: 1,
+            max_consecutive_calls: 4,
             max_screening_batches: None,
             extraction_context: ExtractionContext::Progressive,
         }
@@ -414,6 +421,7 @@ mod tests {
             assert_eq!(config.work.max_input_bytes, 262_144);
             assert_eq!(config.work.max_result_bytes, 32_768);
             assert_eq!(config.work.max_calls, 64);
+            assert_eq!(config.work.max_consecutive_calls, 4);
             assert_eq!(
                 config.work.extraction_context,
                 ExtractionContext::Progressive
@@ -465,6 +473,8 @@ mod tests {
             "work: {max_calls: 1.5}",
             "work: {max_parallel: -1}",
             "work: {max_parallel: true}",
+            "work: {max_consecutive_calls: -1}",
+            "work: {max_consecutive_calls: true}",
             "work: {max_input_bytes: true}",
             "work: {max_result_bytes: many}",
             "work: {extraction_context: automatic}",
@@ -494,6 +504,34 @@ mod tests {
         ] {
             let config: ExecutionConfig = crate::yaml::from_str(body).unwrap();
             assert!(config.validate().is_err());
+        }
+    }
+
+    #[test]
+    fn consecutive_work_calls_are_positive_and_profile_scoped() {
+        let config: ExecutionConfig = crate::yaml::from_str(
+            "work: {max_consecutive_calls: 6}\nprofiles:\n  inherited: {engine: codex, timeout_seconds: 60}\n  alternate: {engine: codex, timeout_seconds: 60, work: {max_consecutive_calls: 1}}\n",
+        )
+        .unwrap();
+        config.validate().unwrap();
+        assert_eq!(
+            config.work_for("inherited").unwrap().max_consecutive_calls,
+            6
+        );
+        assert_eq!(
+            config.work_for("alternate").unwrap().max_consecutive_calls,
+            1
+        );
+        for body in [
+            "work: {max_consecutive_calls: 0}",
+            "profiles:\n  broken: {engine: codex, timeout_seconds: 60, work: {max_consecutive_calls: 0}}",
+        ] {
+            assert!(
+                crate::yaml::from_str::<ExecutionConfig>(body)
+                    .unwrap()
+                    .validate()
+                    .is_err()
+            );
         }
     }
 
@@ -545,6 +583,7 @@ mod tests {
                 max_result_bytes: 4096,
                 max_calls: 2,
                 max_parallel: 1,
+                max_consecutive_calls: 4,
                 extraction_context: ExtractionContext::Progressive,
             }
         );
