@@ -933,12 +933,14 @@ impl Screening {
     }
 }
 
-fn current_screenings(
+fn map_current_screenings<T>(
     root: &Path,
     config: &lk_core::config::Config,
     config_revision: &str,
     task_ids: &[&str],
-) -> miette::Result<(Vec<Screening>, lk_vault::DiscoveryCaptureMetrics)> {
+    mut visit: impl FnMut(miette::Result<Screening>) -> T,
+) -> miette::Result<(Vec<T>, lk_vault::DiscoveryCaptureMetrics, u64)> {
+    let started_at = std::time::Instant::now();
     let queries = task_ids
         .iter()
         .map(|task_id| {
@@ -960,23 +962,29 @@ fn current_screenings(
         Some(&reports),
     )
     .into_diagnostic()?;
-    let screenings = task_ids
+    let mut duration_ms = started_at.elapsed().as_millis() as u64;
+    let values = task_ids
         .iter()
         .zip(captures)
         .map(|(task_id, capture)| {
-            let inventory = resources::selection_inventory_with_capture(
-                root,
-                config,
-                task_id,
-                capture,
-                reports.clone(),
-            )?;
-            screening_with_inventory(root, config, config_revision, inventory)?
-                .into_candidates()
-                .map(|screening| *screening)
+            let started_at = std::time::Instant::now();
+            let screening = (|| {
+                let inventory = resources::selection_inventory_with_capture(
+                    root,
+                    config,
+                    task_id,
+                    capture,
+                    reports.clone(),
+                )?;
+                screening_with_inventory(root, config, config_revision, inventory)?
+                    .into_candidates()
+                    .map(|screening| *screening)
+            })();
+            duration_ms += started_at.elapsed().as_millis() as u64;
+            visit(screening)
         })
-        .collect::<miette::Result<Vec<_>>>()?;
-    Ok((screenings, metrics))
+        .collect();
+    Ok((values, metrics, duration_ms))
 }
 
 pub(super) struct ScreeningTurns {
@@ -990,18 +998,16 @@ pub(super) fn prepare_screenings(
     config_revision: &str,
     task_ids: &[&str],
 ) -> miette::Result<ScreeningTurns> {
-    let (screenings, discovery_io) = current_screenings(root, config, config_revision, task_ids)?;
-    let turns = screenings
-        .iter()
-        .map(|screening| {
+    let (turns, discovery_io, _) =
+        map_current_screenings(root, config, config_revision, task_ids, |screening| {
+            let screening = screening?;
             if let Some(reason) = screening.selection.admission_reason(config, root)? {
                 return Err(miette::miette!("{reason}"));
             }
             screening.turn(root)
-        })
-        .collect::<miette::Result<Vec<_>>>()?;
+        })?;
     Ok(ScreeningTurns {
-        turns,
+        turns: turns.into_iter().collect::<miette::Result<Vec<_>>>()?,
         discovery_io,
     })
 }
@@ -1027,16 +1033,17 @@ pub(super) fn record_screenings(
         .iter()
         .map(|(task_id, _)| *task_id)
         .collect::<Vec<_>>();
-    let started_at = std::time::Instant::now();
-    let (screenings, discovery_io) =
-        current_screenings(session.root(), config, config_revision, &task_ids)?;
-    let revalidation_duration_ms = started_at.elapsed().as_millis() as u64;
-    let records = screenings
-        .into_iter()
-        .zip(replies)
-        .map(|(screening, (_, output))| {
+    let mut outputs = replies.into_iter().map(|(_, output)| output);
+    let (records, discovery_io, revalidation_duration_ms) = map_current_screenings(
+        session.root(),
+        config,
+        config_revision,
+        &task_ids,
+        |screening| {
+            let output = outputs.next().expect("one output per selected task");
             let started_at = std::time::Instant::now();
-            let recorded = (|| {
+            let result = (|| {
+                let screening = screening?;
                 Ok(screening
                     .selection
                     .record(
@@ -1048,11 +1055,11 @@ pub(super) fn record_screenings(
                     .completed_batches)
             })();
             ScreeningRecord {
-                result: recorded,
+                result,
                 duration_ms: started_at.elapsed().as_millis() as u64,
             }
-        })
-        .collect();
+        },
+    )?;
     Ok(RecordedScreenings {
         records,
         discovery_io,
