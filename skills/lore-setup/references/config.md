@@ -213,11 +213,15 @@ evidence inspection/reduction requests, bounded by the remaining call budget.
 Screening, interactive sessions, finalization and publication remain serial.
 Recording reloads current inputs after the observers return; changed inputs refuse
 old observations. Parallelism does not increase `max_calls` or guarantee a speedup.
+Positive `max_consecutive_calls` defaults to 4. An admitted exact queue Work or
+screening phase can use this many fresh attempts before another fair turn. It uses
+the same total call budget; publication, deferral, changed phases and writer-wait
+replanning end that admission. Restart/cancellation keeps the durable next target.
 Optional positive `max_screening_batches` limits the complete candidate-card
 selection's packet count. Omission is unlimited; exceeding it preserves the full
 scope and paid decisions, defers that task before invocation and permits independent
 work. Use `lore work cost --task-id ID` to inspect counts/JSON bytes without writes.
-For new Work and candidate selections, call/parallel/screening-packet limits and
+For new Work and candidate selections, call/parallel/consecutive-call/screening-packet limits and
 profile timeouts can change between workflows without discarding paid observations.
 Every configuration byte is still pinned during execution. Model/effort, input/result
 limits and semantic policies remain identity inputs. Legacy byte-bound work requires

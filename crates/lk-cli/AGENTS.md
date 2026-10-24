@@ -12,7 +12,7 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
 - Workflow configuration is loaded and revisioned from one read. Pass its selected
   path and `LORE_CONFIG_REVISION` to children; every CLI config load rejects changed
   bytes or another path. Native jobs stop after drift and retain unfinished work.
-  New semantic Work and selection identities exclude only execution call/parallel/
+  New semantic Work and selection identities exclude only execution call/parallel/consecutive-call/
   screening-packet limits and profile session timeouts. Input/result byte limits,
   extraction policy, model/effort and all other configuration remain semantic inputs.
   The live workflow still pins every configuration byte. Legacy byte-bound manifests
@@ -54,8 +54,8 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   and cancellation. Invocation counts and wall time are not tokens or billed cost.
   Native work telemetry retains at most 1024 evidence/screening/finalizer steps and counts
   omissions. Measure existing operations only; unknown/inapplicable fields are null.
-  Compact request/decoded-result bytes exclude prompts and host envelopes; interactive
-  finalizer JSON sizes are unobserved. Revalidation and recording share one measured operation.
+  Compact request/decoded-result bytes exclude prompts and host envelopes; prepared interactive
+  finalizer request bytes are measured; interactive response bytes remain unobserved. Revalidation and recording share one measured operation.
   Parallel invocation durations are summed and can exceed elapsed job time.
   Queue-planning metrics count local checkpoints and shared synthesis captures,
   separately from later revalidation and host work. `mutation_access` measures
@@ -152,9 +152,21 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   unchanged actions defer before invocation. Scoped SectionResult values retain an optional
   context revision, revalidated against current reviews at apply. Omission preserves the
   legacy section wire contract. Pending identities protect actions during queue pruning.
+- Prepared native selections/finalizers supply exact metadata, admitted evidence/root and
+  complete shared contracts once, within the complete serialized input bound. Their private
+  transport never authorizes changed scope or certifies a read. Native finalizer children
+  pin the original request bytes; `work finish` checks that inherited pin even when
+  `--prepared` is omitted, then compares current completion before sealing. Standalone
+  record/result contracts and saved Work remain unchanged.
 - Native queue scheduling chooses one task per target so publication cannot invalidate
   another simultaneous task on the same page. Whole-input tasks share an evidence-bounded
   batch; oversized work reserves fair inspection/reduction/finalization turns.
+  `execution.work.max_consecutive_calls` defaults to 4 and bounds host attempts for an
+  admitted exact queue Work or screening phase. Reserve the durable fair turn once;
+  continuation requires an in-process exact phase token and freshly prepared inputs.
+  Charge every attempted host including parallel peers against the same total budget.
+  Publication, phase changes, deferral and writer-wait replanning discard admission;
+  restart/cancellation retain the already reserved next target.
   `execution.work.max_parallel` defaults to 1 and bounds simultaneous dependency-ready
   evidence observers within remaining calls. Screening, interactive roles, finalizers
   and publication remain serial. Supervise every child through exit and cleanup;

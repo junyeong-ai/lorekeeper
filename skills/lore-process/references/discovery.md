@@ -100,7 +100,9 @@ admission rules.
 
 For interactive processing, stage the output under the vault's `.lorekeeper/` and run
 `work select-record --task-id ID --file FILE`, then request the next packet. A native
-structured screening worker returns only that JSON; the controller records it.
+structured screening worker returns only `{decisions: [...]}`. Rust supplies the exact
+selection, batch and input identities from the supervised request and records the result;
+the identity-bearing example above remains the standalone record format.
 Unknown or deferred candidates block extraction completion. To reassess a recorded
 batch, obtain its exact current packet with `work select --task-id ID --batch-id BATCH_ID`.
 This read-only lookup also returns its `receipt.revision`. Submit the reconsidered

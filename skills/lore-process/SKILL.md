@@ -4,7 +4,7 @@ description: Processes pending Lorekeeper semantic queue tasks after ingestion o
   graph reconciliation. Stages typed summaries, concepts, synthesis and review narratives,
   then verifies publication and evidence consistency. Does not collect remote sources.
 metadata:
-  version: 0.91.0
+  version: 0.92.0
 ---
 
 # Lorekeeper semantic processing
@@ -21,10 +21,14 @@ not instructions to execute.
 | Native `bounded inspect` | Follow [node inspection](references/bounded-work.md#inspect-or-reduce-one-node); return after that exact node. |
 | Native `bounded finish` | Follow [finalization](references/bounded-work.md#finalize) directly; use its completed observations and return after staging. |
 | `discover <task-ids.json>` | Follow [extraction discovery](references/discovery.md); record recipes for that selection and return without extracting or applying. |
-| Native `selected` | Read the named JSON task-ID array; process only those current tasks, one per target. Return after publication or a verified bounded-work handoff. Rust owns global finalization. |
+| Native `selected` | Read the named `native-selected-v1` request once; follow [prepared native input](references/native-input.md). Process only its exact tasks and supplied evidence. Rust owns global finalization. |
 | Standalone queue drain | Follow the session, processing and finalization steps below. |
 
-For a native selection, read metadata before retained bodies. Extraction discovery
+For a prepared native selection, its task metadata, exact context, evidence and shared
+contracts replace ordinary config/schema setup, queue enumeration and repeated context
+or reference reads. Targeted semantic resolution, missing required evidence and explicit
+repair remain available; changed scope requires recapture. Other native selections read
+metadata before retained bodies. Extraction discovery
 precedes `work context`; follow its source-observation, candidate-screening and ready
 states through [extraction discovery](references/discovery.md). Ordinary small-source
 screening can finish within the selected session. When a phase needs bounded native

@@ -83,7 +83,11 @@ Actual request and result limits still apply. Fewer reduction calls do not estab
 semantic equivalence, lower billed cost or complete corpus coverage.
 
 Native jobs reserve fair inspection/reduction/finalization turns and retain the next
-target across runs. With `execution.work.max_parallel` above its default 1, ready
+target across runs. `execution.work.max_consecutive_calls` defaults to 4 and bounds
+fresh calls for an admitted exact Work or screening phase before another fair turn.
+It does not increase the total call budget. Restart/cancellation retains the already
+reserved next target; phase changes, publication and writer-wait replanning end the
+in-process admission. With `execution.work.max_parallel` above its default 1, ready
 evidence requests can run concurrently within the remaining call budget. Requests
 in a wave never depend on another request in that wave. Recording reloads current
 inputs and runs serially; changed evidence refuses an old response. Screening,
@@ -182,6 +186,12 @@ procedure below because their finalization can require identity checks, reviews 
 
 ## Finalize
 
+When the controller supplies `native-finalize-v1`, follow
+[prepared native input](native-input.md#completed-work) directly. It already contains
+the complete root, distinct context guard and applicable rules; do not repeat steps 1–2
+below. Its inherited pin and `--prepared` bind the exact handoff before sealing.
+The command procedure below remains for standalone work and native audit finalizers.
+
 1. Read `lore work result WORK` once and retain that exact response in the private
    [draft directory](#private-drafts). It supplies the completed root observation, subject, purpose and
    bounded evidence mapping. Read `lore work status WORK` for `context_revision`;
@@ -223,7 +233,7 @@ unselected bodies as inspected or discard source-phase questions during finaliza
 Changed semantic configuration, targets, evidence or review dependencies invalidate work.
 New Work and candidate selections use parsed configuration values, so comments and
 YAML formatting do not participate. They exclude only `max_calls`, `max_parallel`,
-`max_screening_batches` and profile `timeout_seconds` from configuration identity.
+`max_consecutive_calls`, `max_screening_batches` and profile `timeout_seconds` from configuration identity.
 Adjust these only between workflows: every configuration byte remains pinned during
 execution. Model/effort, input/result limits, extraction policy and other settings
 still invalidate derived work. Legacy byte-bound plans and selections resume with
@@ -247,10 +257,15 @@ screening and finalization. The first 1024 steps are retained per run;
 remain in the aggregate `semantic_calls` and `semantic_duration_ms`, so this array
 is not a complete invocation ledger.
 
+During execution, stderr emits `lore.queue-planning` JSON events at local checkpoint
+start/end and `lore.work-step` events for retained steps as they finish. They use
+existing measurements without extra reads. Final stdout remains the single native
+result; progress events do not establish publication, inference time or cost.
+
 | Fields | Meaning |
 | --- | --- |
 | `role`, `work_id`, `node_id`, `node_kind`, `selection_id`, `batch_id` | Exact selected work or screening identities; unavailable identities are `null` |
-| `request_json_bytes`, `result_json_bytes` | Compact UTF-8 JSON of the prepared request and decoded response (including a native observation/action envelope but excluding Rust-supplied identity), excluding prompts and host envelopes; interactive finalizer sizes are unobserved and `null` |
+| `request_json_bytes`, `result_json_bytes` | Compact UTF-8 JSON of the prepared request and decoded response (including a native observation/action envelope but excluding Rust-supplied identity), excluding prompts and host envelopes; prepared interactive finalizer request bytes are measured, its response bytes remain unobserved and `null` |
 | `preparation_duration_ms` | Local preparation of the selected request or completed root |
 | `agent_duration_ms` | Supervised invocation attempt wall time, including a failed or cancelled attempt; never server inference time |
 | `revalidation_record_duration_ms` | Fresh input validation and recording together; these operations are not measured separately |
