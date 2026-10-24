@@ -72,15 +72,13 @@ else:
     if (root/'mode').read_text()=='unresolved' and kind=='inspect':
         unresolved=[{'id':work['node_id']+':review','question':'A scoped review must be recorded first.',
                      'evidence':[request['input']['ranges'][0]['range']]}]
-    output={'work_id':work['work_id'],'node_id':work['node_id'],'input_revision':work['input_revision'],
-            'summary':'Read the assigned evidence. Deployment is not verified.',
+    output={'summary':'Read the assigned evidence. Deployment is not verified.',
             'findings':[],'source_questions':questions,'unresolved':unresolved,'resolutions':[]}
 if kind in ['inspect','reduce']:
     output={'status':'complete','observation':output,'action':None}
     mode=(root/'mode').read_text()
     if mode in ['inspection-action','inspection-action-wrong-id','inspection-action-drift']:
-        action={key:request[key] for key in ['work_id','node_id','input_revision']}
-        action['reason']='Cannot complete this assigned evidence inspection without further action.'
+        action={'reason':'Cannot complete this assigned evidence inspection without further action.'}
         if mode=='inspection-action-wrong-id': action['node_id']='not-selected'
         if mode=='inspection-action-drift':
             path=root/'vault'/request['context']['subject']['target']
