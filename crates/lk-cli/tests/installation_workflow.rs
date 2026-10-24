@@ -589,7 +589,7 @@ fn native_consumer_protects_project_skills_in_its_vault_working_directory() {
     let fake_host = first.directory.path().join("fake-codex");
     std::fs::write(
         &fake_host,
-        "#!/bin/sh\nif [ \"$1\" = --version ]; then printf 'codex-cli 0.163.0\\n'; exit 0; fi\ncase \"$*\" in *--output-schema*) cat > /dev/null; printf '%s\\n' '{\"status\":\"complete\",\"body\":\"An active consumer reads project skills from its vault.\",\"reason\":null}'; exit 0 ;; esac\npwd -P > \"$TEST_INSTALLATION_ROOT/host-cwd\"\n: > \"$TEST_INSTALLATION_ROOT/host-ready\"\nattempt=0\nwhile [ ! -e \"$TEST_INSTALLATION_ROOT/host-release\" ]; do\n  attempt=$((attempt + 1))\n  [ \"$attempt\" -lt 3000 ] || exit 92\n  sleep 0.01\ndone\nexit 91\n",
+        "#!/bin/sh\nif [ \"$1\" = --version ]; then printf 'codex-cli 0.163.0\\n'; exit 0; fi\ncase \"$*\" in *--output-last-message*) ;; *--output-schema*) cat > /dev/null; printf '%s\\n' '{\"status\":\"complete\",\"body\":\"An active consumer reads project skills from its vault.\",\"reason\":null}'; exit 0 ;; esac\npwd -P > \"$TEST_INSTALLATION_ROOT/host-cwd\"\n: > \"$TEST_INSTALLATION_ROOT/host-ready\"\nattempt=0\nwhile [ ! -e \"$TEST_INSTALLATION_ROOT/host-release\" ]; do\n  attempt=$((attempt + 1))\n  [ \"$attempt\" -lt 3000 ] || exit 92\n  sleep 0.01\ndone\nexit 91\n",
     )
     .unwrap();
     std::fs::set_permissions(&fake_host, std::fs::Permissions::from_mode(0o755)).unwrap();
