@@ -1006,17 +1006,39 @@ mod tests {
                 + &emit(serde_json::json!({"status":"ready","runtime":runtime()}))
                 + "exec /bin/sleep 30\n"),
         );
-        config.timeout_seconds = std::num::NonZeroU64::new(1).unwrap();
-        assert!(matches!(
-            super::super::project_file_with_cache(
+        config.timeout_seconds = std::num::NonZeroU64::new(normal_timeout.get() + 1).unwrap();
+        let timed_out = {
+            let projection = super::super::project_file_with_cache(
                 &captured,
                 InputFormat::Tiff,
                 Some(&config),
-                Some(&cache)
-            )
-            .await,
-            Err(ProcessingError::Timeout)
-        ));
+                Some(&cache),
+            );
+            tokio::pin!(projection);
+            let workers_started = async {
+                while !["layout", "recognition"].iter().all(|name| {
+                    ["pid", "options"].iter().all(|suffix| {
+                        std::fs::metadata(root.path().join(format!("{name}.{suffix}")))
+                            .is_ok_and(|metadata| metadata.len() > 0)
+                    })
+                }) {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            };
+            tokio::select! {
+                result = &mut projection => panic!("projection ended before both workers started: {result:?}"),
+                () = workers_started => {}
+            }
+            tokio::time::pause();
+            tokio::time::advance(std::time::Duration::from_secs(
+                config.timeout_seconds.get() + 1,
+            ))
+            .await;
+            let result = projection.await;
+            tokio::time::resume();
+            result
+        };
+        assert!(matches!(timed_out, Err(ProcessingError::Timeout)));
         for name in ["layout", "recognition"] {
             let pid = std::fs::read_to_string(root.path().join(format!("{name}.pid")))
                 .unwrap()

@@ -46,7 +46,7 @@ tempfile = { workspace = true }
 # and only for tests: the shipped binary keeps reading the OS tzdb, which stays current.
 jiff = { workspace = true, features = ["tzdb-bundle-always"] }
 strum = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt"] }
+tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
 proptest = { workspace = true }
 
 [target.'cfg(unix)'.dev-dependencies]
