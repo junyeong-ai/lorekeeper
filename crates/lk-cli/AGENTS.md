@@ -160,7 +160,10 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   One queue-planning checkpoint captures all ready synthesis inputs against the
   complete graph universe for its selected window; discard that view before host execution.
   Enumerate and validate the complete queue and physical target owners before selecting
-  a fair preparation window of at most 64 targets. Small tasks also obey the input-byte
+  a fair preparation window. Section/progressive windows obey remaining-call and
+  parallel bounds, capped at 64; possible interactive batches retain 64 targets even
+  when one call remains. Stop at typed capability boundaries without skipping targets;
+  actual prepared TaskWork remains authoritative, including saved plans. Small tasks also obey the input-byte
   bound. Share discovery traversal, projection and immutable raw bytes within that
   checkpoint while preserving task-local recipes, reviews, guards and identities.
   Unprepared targets remain pending. Empty or deferred windows never prove settlement.

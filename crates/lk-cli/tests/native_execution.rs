@@ -4764,7 +4764,7 @@ fn native_queue_limits_preparation_and_reserves_whole_sections_in_fair_order() {
     let (output, report) = fixture.run("process");
     assert!(!output.status.success(), "mock publishes nothing: {report}");
     assert_eq!(report["semantic_calls"], 1);
-    assert_eq!(report["queue_planning"]["prepared_targets"], 64);
+    assert_eq!(report["queue_planning"]["prepared_targets"], 1);
     let cursor_path = fixture
         .root()
         .join("vault/.lorekeeper/execution-cursor.json");
@@ -4781,14 +4781,14 @@ fn native_queue_limits_preparation_and_reserves_whole_sections_in_fair_order() {
         65
     );
     let (_, report) = fixture.run("process");
-    assert_eq!(report["queue_planning"]["prepared_targets"], 64);
+    assert_eq!(report["queue_planning"]["prepared_targets"], 1);
     let cursor: serde_json::Value =
         serde_json::from_slice(&std::fs::read(cursor_path).unwrap()).unwrap();
     assert_eq!(cursor["queue"], "wiki/documents/source-002.md");
 }
 
 #[test]
-fn native_queue_does_not_materialize_the_sixty_fifth_target_before_first_call() {
+fn native_queue_does_not_materialize_unselected_targets_before_first_call() {
     let fixture = queue_window_fixture(65, true);
     let (output, report) = fixture.run("process");
     assert!(
@@ -4796,9 +4796,9 @@ fn native_queue_does_not_materialize_the_sixty_fifth_target_before_first_call() 
         "one call retains incomplete work: {report}"
     );
     assert_eq!(report["semantic_calls"], 1);
-    assert_eq!(report["queue_planning"]["prepared_targets"], 64);
+    assert_eq!(report["queue_planning"]["prepared_targets"], 1);
     let subjects = planned_queue_subjects(&fixture);
-    assert_eq!(subjects.len(), 64);
+    assert_eq!(subjects.len(), 1);
     assert!(
         !subjects
             .iter()
@@ -4806,10 +4806,80 @@ fn native_queue_does_not_materialize_the_sixty_fifth_target_before_first_call() 
     );
     let (_, report) = fixture.run("process");
     assert_eq!(report["semantic_calls"], 1);
-    assert_eq!(planned_queue_subjects(&fixture).len(), 65);
+    assert_eq!(planned_queue_subjects(&fixture).len(), 2);
     let calls = bounded_calls(&fixture);
     assert_eq!(calls.len(), 2);
     assert_ne!(calls[0]["work_id"], calls[1]["work_id"]);
+}
+
+#[test]
+fn native_queue_preserves_interactive_batching_and_stops_at_capability_boundaries() {
+    for start_at_summary in [false, true] {
+        let fixture = queue_window_fixture(3, false);
+        write_synthesis_pair(&fixture, "a-ready", None, 1);
+        write_synthesis_pair(&fixture, "b-ready", None, 1);
+        if start_at_summary {
+            std::fs::write(
+                fixture
+                    .root()
+                    .join("vault/.lorekeeper/execution-cursor.json"),
+                r#"{"queue":"wiki/documents/source-002.md","audit":null}"#,
+            )
+            .unwrap();
+        } else {
+            let agent = fixture.root().join("agent executable");
+            let script = std::fs::read_to_string(&agent).unwrap();
+            let capture = r#"exec python3 - "$@" <<'BATCH'
+import json, os, sys
+from pathlib import Path
+prompt='\n'.join(sys.argv[1:])
+path,_=json.JSONDecoder().raw_decode(prompt.split('Selected queue task manifest: ',1)[1])
+Path(os.environ['TEST_EXECUTION_ROOT'],'selected-batch.json').write_bytes(Path(path).read_bytes())
+BATCH"#;
+            std::fs::write(agent, script.replacen("exit 0", capture, 1)).unwrap();
+        }
+        let (_, report) = fixture.run("process");
+        assert_eq!(report["semantic_calls"], 1, "{report}");
+        assert_eq!(report["queue_planning"]["attempts"], 1, "{report}");
+        assert_eq!(
+            report["queue_planning"]["prepared_targets"],
+            if start_at_summary { 1 } else { 2 },
+            "{report}"
+        );
+        assert_eq!(
+            report["queue_planning"]["synthesis_subjects"],
+            if start_at_summary { 0 } else { 2 },
+            "{report}"
+        );
+        let cursor: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(
+                fixture
+                    .root()
+                    .join("vault/.lorekeeper/execution-cursor.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            cursor["queue"],
+            if start_at_summary {
+                "wiki/concepts/a-ready.md"
+            } else {
+                "wiki/documents/source-000.md"
+            }
+        );
+        if !start_at_summary {
+            let selected: Vec<String> = serde_json::from_slice(
+                &std::fs::read(fixture.root().join("selected-batch.json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                selected.len(),
+                2,
+                "one interactive invocation retains both exact task IDs"
+            );
+        }
+    }
 }
 
 #[test]
@@ -4835,82 +4905,95 @@ fn native_queue_keeps_global_unreadable_refusal_outside_prepared_window() {
 
 #[test]
 fn native_queue_shares_discovery_without_changing_existing_task_selection_ids() {
-    let (fixture, task) =
-        progressive_extraction_fixture("codex", RECORD_PROGRESSIVE_EXTRACTION, 12, 65536, 16384);
-    let mut input = task.input.clone();
-    input.insert("target".into(), serde_json::to_value(&task.target).unwrap());
-    let mut input: lk_queue::ExtractConceptsRequest =
-        serde_json::from_value(serde_json::Value::Object(input)).unwrap();
-    input.target.vault_path = "wiki/documents/source-two.md".into();
-    let queue = fixture.root().join("vault/.lorekeeper/queue");
-    let second = lk_queue::QueueLlmClient::new(queue.clone()).build_task(
-        "ext",
-        lk_queue::TaskKind::ExtractConcepts,
-        input,
-    );
-    let source =
-        std::fs::read_to_string(fixture.root().join("vault/wiki/documents/source.md")).unwrap();
-    std::fs::write(
-        fixture.root().join("vault/wiki/documents/source-two.md"),
-        source.replace(&task.cache_hash, &second.cache_hash),
-    )
-    .unwrap();
-    std::fs::write(
-        queue.join("fixture.jsonl"),
-        format!(
-            "{}\n{}\n",
-            serde_json::to_string(&task).unwrap(),
-            serde_json::to_string(&second).unwrap()
-        ),
-    )
-    .unwrap();
-    let config = std::fs::read_to_string(&fixture.config)
-        .unwrap()
-        .replace("max_calls: 64", "max_calls: 1");
-    std::fs::write(&fixture.config, config).unwrap();
-    let status = execution_json(&fixture, &["queue", "status", "--json"]);
-    let mut expected = std::collections::BTreeSet::new();
-    for task in [&task, &second] {
-        let row = status["data"]["tasks"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|row| row["task_id"] == task.task_id)
-            .unwrap();
-        let file = fixture.root().join("recipe.json");
-        std::fs::write(&file, serde_json::to_vec(&serde_json::json!({"target_revision":row["target_revision"],"queries":[{"query":"transactional outbox","phrase":true,"spacing":false}]})).unwrap()).unwrap();
-        let result = fixture
-            .command()
-            .args(["work", "discover", "--task-id", &task.task_id, "--file"])
-            .arg(&file)
-            .output()
-            .unwrap();
-        assert!(
-            result.status.success(),
-            "{}",
-            String::from_utf8_lossy(&result.stderr)
+    for (parallel, calls, prepared) in [(1, 1, 1), (2, 2, 2)] {
+        let (fixture, task) = progressive_extraction_fixture(
+            "codex",
+            if parallel == 1 {
+                RECORD_PROGRESSIVE_EXTRACTION
+            } else {
+                "exit 51"
+            },
+            12,
+            65536,
+            16384,
         );
-        let selected = execution_json(&fixture, &["work", "select", "--task-id", &task.task_id]);
-        expected.insert(
-            selected["request"]["selection_id"]
-                .as_str()
+        let mut input = task.input.clone();
+        input.insert("target".into(), serde_json::to_value(&task.target).unwrap());
+        let mut input: lk_queue::ExtractConceptsRequest =
+            serde_json::from_value(serde_json::Value::Object(input)).unwrap();
+        input.target.vault_path = "wiki/documents/source-two.md".into();
+        let queue = fixture.root().join("vault/.lorekeeper/queue");
+        let second = lk_queue::QueueLlmClient::new(queue.clone()).build_task(
+            "ext",
+            lk_queue::TaskKind::ExtractConcepts,
+            input,
+        );
+        let source =
+            std::fs::read_to_string(fixture.root().join("vault/wiki/documents/source.md")).unwrap();
+        std::fs::write(
+            fixture.root().join("vault/wiki/documents/source-two.md"),
+            source.replace(&task.cache_hash, &second.cache_hash),
+        )
+        .unwrap();
+        std::fs::write(
+            queue.join("fixture.jsonl"),
+            format!(
+                "{}\n{}\n",
+                serde_json::to_string(&task).unwrap(),
+                serde_json::to_string(&second).unwrap()
+            ),
+        )
+        .unwrap();
+        let config = std::fs::read_to_string(&fixture.config).unwrap().replace(
+            "max_calls: 64",
+            &format!("max_calls: {calls}, max_parallel: {parallel}"),
+        );
+        std::fs::write(&fixture.config, config).unwrap();
+        let status = execution_json(&fixture, &["queue", "status", "--json"]);
+        let mut expected = std::collections::BTreeSet::new();
+        for task in [&task, &second] {
+            let row = status["data"]["tasks"]
+                .as_array()
                 .unwrap()
-                .to_owned(),
+                .iter()
+                .find(|row| row["task_id"] == task.task_id)
+                .unwrap();
+            let file = fixture.root().join("recipe.json");
+            std::fs::write(&file, serde_json::to_vec(&serde_json::json!({"target_revision":row["target_revision"],"queries":[{"query":"transactional outbox","phrase":true,"spacing":false}]})).unwrap()).unwrap();
+            let result = fixture
+                .command()
+                .args(["work", "discover", "--task-id", &task.task_id, "--file"])
+                .arg(&file)
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            let selected =
+                execution_json(&fixture, &["work", "select", "--task-id", &task.task_id]);
+            expected.insert(
+                selected["request"]["selection_id"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned(),
+            );
+        }
+        assert_eq!(expected.len(), 2, "task purposes remain distinct");
+        let (output, report) = fixture.run("process");
+        assert!(
+            !output.status.success(),
+            "one screening call cannot settle both tasks: {report}"
+        );
+        assert_eq!(report["semantic_calls"], 1);
+        assert_eq!(report["queue_planning"]["discovery_captures"], 1);
+        assert_eq!(report["queue_planning"]["prepared_targets"], prepared);
+        assert!(
+            expected.contains(report["work_steps"][0]["selection_id"].as_str().unwrap()),
+            "existing selection IDs remain valid: {report}"
         );
     }
-    assert_eq!(expected.len(), 2, "task purposes remain distinct");
-    let (output, report) = fixture.run("process");
-    assert!(
-        !output.status.success(),
-        "one screening call cannot settle both tasks: {report}"
-    );
-    assert_eq!(report["semantic_calls"], 1);
-    assert_eq!(report["queue_planning"]["discovery_captures"], 1);
-    assert_eq!(report["queue_planning"]["prepared_targets"], 2);
-    assert!(
-        expected.contains(report["work_steps"][0]["selection_id"].as_str().unwrap()),
-        "existing selection IDs remain valid: {report}"
-    );
 }
 
 #[test]

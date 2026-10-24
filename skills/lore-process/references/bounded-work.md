@@ -282,8 +282,12 @@ An incomplete job can still publish independent work and verify selected audits;
 neither field implies full-corpus semantic coverage.
 
 Queue planning validates the complete task inventory, target owners and typed input
-readiness, then prepares at most 64 targets in fair cursor order per window. Small
-whole-input batches also obey the serialized input limit. Unprepared targets remain
+readiness, then prepares targets in fair cursor order. Section/progressive preparation
+is bounded by remaining calls and configured parallel capacity, capped at 64. Possible
+interactive batches retain the 64-target and serialized input bounds because one call
+can process several tasks. Capability boundaries do not reorder the cursor or change
+actual saved Work phases. Only selected targets' derived manifests are materialized
+and validated at that turn. Unprepared targets remain
 pending; deferred windows do not establish settlement. Lookahead consumes no execution
 turns. Actual invocation reserves its target sequence, including all whole-input
 batch members. Discovery shares a fresh traversal and exact immutable bytes within

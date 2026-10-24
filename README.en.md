@@ -476,7 +476,9 @@ See [native run measurements](skills/lore-process/references/bounded-work.md#nat
 for coverage and limits.
 
 Queue planning validates the full task inventory, owners and dependencies, then
-prepares at most 64 targets in fair order. Discovery computation is shared within
+prepares targets in fair order. Section/progressive work preparation is bounded by
+remaining calls and parallel capacity; possible interactive batches retain the
+64-target and input-byte bounds. Discovery computation is shared within
 that checkpoint while preserving each task's complete candidates and revisions;
 recording freshly validates inputs after execution. Unprepared work stays pending.
 

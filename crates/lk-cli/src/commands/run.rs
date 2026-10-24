@@ -210,6 +210,21 @@ mod native {
 
     const MAX_PREPARED_QUEUE_TARGETS: usize = 64;
 
+    fn is_interactive_batch_candidate(
+        kind: lk_queue::TaskKind,
+        context: lk_core::execution::ExtractionContext,
+    ) -> bool {
+        match kind {
+            lk_queue::TaskKind::SynthesizeConcept => true,
+            lk_queue::TaskKind::ExtractConcepts => {
+                context == lk_core::execution::ExtractionContext::FullContext
+            }
+            lk_queue::TaskKind::Summarize
+            | lk_queue::TaskKind::RefineEvents
+            | lk_queue::TaskKind::IdentifyThemes => false,
+        }
+    }
+
     struct QueueTurn {
         keys: std::collections::BTreeSet<String>,
         targets: Vec<String>,
@@ -1907,7 +1922,33 @@ mod native {
                 });
             }
             let order = scheduler::order(session.root(), scheduler::Stage::Queue, &keys)?;
-            for window in order.chunks(MAX_PREPARED_QUEUE_TARGETS) {
+            let independent_limit = budget
+                .max_parallel
+                .min(budget.max_calls.saturating_sub(self.result.semantic_calls))
+                .min(MAX_PREPARED_QUEUE_TARGETS);
+            let mut next = 0;
+            while next < order.len() {
+                let batch = is_interactive_batch_candidate(
+                    targets[&order[next]].kind,
+                    budget.extraction_context,
+                );
+                let limit = if batch {
+                    MAX_PREPARED_QUEUE_TARGETS
+                } else {
+                    independent_limit
+                };
+                let count = order[next..]
+                    .iter()
+                    .take(limit)
+                    .take_while(|target| {
+                        is_interactive_batch_candidate(
+                            targets[*target].kind,
+                            budget.extraction_context,
+                        ) == batch
+                    })
+                    .count();
+                let window = &order[next..next + count];
+                next += count;
                 let mut materialize = Vec::new();
                 for target in window {
                     let task = &targets[target];
