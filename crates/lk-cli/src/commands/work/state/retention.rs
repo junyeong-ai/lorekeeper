@@ -139,6 +139,7 @@ fn capture_retention(root: &Path, id: &str, cutoff: i64) -> miette::Result<Reten
     let mut known = [
         "plan.json",
         "seal.json",
+        "frontier-seal.json",
         "final.json",
         "assessment.json",
         "publication.json",
@@ -175,6 +176,12 @@ fn capture_retention(root: &Path, id: &str, cutoff: i64) -> miette::Result<Reten
         }
         let raw = read_optional(root, &path)?
             .ok_or_else(|| fail("work artifact disappeared during retention capture"))?;
+        if path
+            .file_name()
+            .is_some_and(|name| name == "frontier-seal.json")
+        {
+            super::frontier::FrontierSeal::decode(&raw, &work)?;
+        }
         if path
             .file_name()
             .is_some_and(|name| name == "finalization-action.json")
@@ -221,23 +228,36 @@ fn capture_retention(root: &Path, id: &str, cutoff: i64) -> miette::Result<Reten
     }
     let expired = if let Some(raw) = publication {
         let receipt: Publication = serde_json::from_str(&raw).map_err(fail)?;
-        let seal: Seal = serde_json::from_str(
-            &read("seal.json")?.ok_or_else(|| fail("published work seal is missing"))?,
-        )
-        .map_err(fail)?;
+        let sealed_revision = match (read("seal.json")?, read("frontier-seal.json")?) {
+            (Some(raw), None) => {
+                let seal: Seal = serde_json::from_str(&raw).map_err(fail)?;
+                if seal.work_id != id {
+                    return Err(fail("published work seal identity differs"));
+                }
+                seal.final_result_revision
+            }
+            (None, Some(raw)) => {
+                let seal = super::frontier::FrontierSeal::decode(&raw, &work)?;
+                seal.verify_stored(root, &work)?;
+                seal.final_result_revision
+            }
+            _ => return Err(fail("published work requires exactly one completion seal")),
+        };
         let result: Value = serde_json::from_str(
             &read("final.json")?.ok_or_else(|| fail("published work result is missing"))?,
         )
         .map_err(fail)?;
         if receipt.work_id != id
-            || seal.work_id != id
-            || receipt.final_result_revision != seal.final_result_revision
+            || receipt.final_result_revision != sealed_revision
             || revision(&result)? != receipt.final_result_revision
         {
             return Err(fail("published work receipt, seal or result differs"));
         }
         !unknown && receipt.published_at.as_second() < cutoff
     } else if let Some(raw) = consumption {
+        if read("frontier-seal.json")?.is_some() {
+            return Err(fail("source consumption cannot use a frontier seal"));
+        }
         let receipt: Consumption = serde_json::from_str(&raw).map_err(fail)?;
         let Subject::Queue {
             task_id,

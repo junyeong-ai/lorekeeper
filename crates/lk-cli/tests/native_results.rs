@@ -16,7 +16,7 @@ raw=sys.stdin.read()
 request=json.loads(raw.split('\nNative request:\n',1)[1])
 with (root/'calls.jsonl').open('a') as f: f.write(json.dumps(request)+'\n')
 mode=(root/'mode').read_text()
-if request.get('schema') in ['native-selected-results-v2','native-finalize-results-v1']:
+if request.get('schema') in ['native-selected-results-v2','native-finalize-results-v1','native-finalize-frontier-v1']:
     assert '--safe-mode' not in sys.argv
     assert '--output-schema' in sys.argv or '--json-schema' in sys.argv
     assert 'Do not write result files' in raw or 'do not write result files' in raw
@@ -25,12 +25,16 @@ if request.get('schema') in ['native-selected-results-v2','native-finalize-resul
         assert sys.argv[sys.argv.index('--output-format')+1]=='json'
     else:
         assert sys.argv[sys.argv.index('--sandbox')+1]=='workspace-write'
-    tasks=request.get('tasks') or [{'task':{'kind':request['completed']['context']['purpose']['task_kind'],
-        'target':request['completed']['context']['purpose']['target']}}]
+    completed=request.get('completed') or request.get('frontier')
+    if request['schema']=='native-finalize-frontier-v1':
+        (root/'last-frontier.json').write_text(json.dumps(request))
+        assert completed['observations'] and completed['proof']['nodes']
+    tasks=request.get('tasks') or [{'task':{'kind':completed['context']['purpose']['task_kind'],
+        'target':completed['context']['purpose']['target']}}]
     results=[]
     for item in tasks:
         task=item['task']; target=task['target']['vault_path']
-        if (mode=='action' and 'blocked' in target) or (mode=='batch-capacity' and 'blocked' in target and request['max_response_bytes'] < item['max_response_bytes']):
+        if mode=='frontier-action' or (mode=='action' and 'blocked' in target) or (mode=='batch-capacity' and 'blocked' in target and request['max_response_bytes'] < item['max_response_bytes']):
             results.append({'status':'needs-action','value':None,'reason':'A scoped review action is required.'}); continue
         if mode=='changed-target':
             path=root/'vault'/target; path.write_text(path.read_text()+'\nExternal change.\n')
@@ -56,6 +60,7 @@ if request.get('schema') in ['native-selected-results-v2','native-finalize-resul
         raise SystemExit()
 else:
     assert request['kind'] in ['inspect','reduce']
+    assert mode!='frontier', 'complete paid frontier must not invoke another evidence node'
     output={'status':'complete','observation':{'summary':'Exact supplied evidence; deployment unknown.',
         'findings':[],'source_questions':[],'unresolved':[],'resolutions':[]},'action':None}
 if engine=='claude-code': output={'type':'result','subtype':'success','is_error':False,'structured_output':output}
@@ -139,17 +144,31 @@ impl Fixture {
         kind: lk_queue::TaskKind,
         planned: bool,
     ) -> (lk_queue::QueueTask, Option<Value>) {
+        self.add_with_text(
+            name,
+            kind,
+            planned,
+            "An explicit protocol proposal; deployment is unknown.",
+        )
+    }
+    fn add_with_text(
+        &self,
+        name: &str,
+        kind: lk_queue::TaskKind,
+        planned: bool,
+        text: &str,
+    ) -> (lk_queue::QueueTask, Option<Value>) {
         let queue = self.root().join("vault/.lorekeeper/queue");
         let client = lk_queue::QueueLlmClient::new(queue.clone());
         let task = if kind == lk_queue::TaskKind::ExtractConcepts {
             client.build_task("fixture",kind,serde_json::from_value::<lk_queue::ExtractConceptsRequest>(json!({
-                "text":"An explicit protocol proposal; deployment is unknown.","source_id":"notes","source_type":"manual","date":"2026-10-24","locale":"en","concept_policy":"supported-new","focus":null,"categories":[],
+                "text":text,"source_id":"notes","source_type":"manual","date":"2026-10-24","locale":"en","concept_policy":"supported-new","focus":null,"categories":[],
                 "target":{"vault_path":format!("wiki/documents/{name}.md"),"kind":"document-concepts","anchor":"## Related Concepts"}
             })).unwrap())
         } else {
             let path = format!("wiki/documents/evidence-{name}.md");
             let raw = format!(
-                "---\ntype: document\ntitle: Evidence {name}\n---\n# Evidence\nThe protocol defines [{name}](../concepts/{name}.md); deployment is unknown.\n"
+                "---\ntype: document\ntitle: Evidence {name}\n---\n# Evidence\nThe protocol defines [{name}](../concepts/{name}.md); deployment is unknown.\n{text}\n"
             );
             std::fs::write(self.root().join("vault").join(&path), &raw).unwrap();
             let revision = lk_core::concept::source_revision(&lk_vault::parse_page(&raw).unwrap());
@@ -209,6 +228,45 @@ impl Fixture {
         }
         let plan = planned.then(|| self.json(&["work", "plan", "--task-id", &task.task_id]));
         (task, plan)
+    }
+    fn paid_frontier(&self, kind: lk_queue::TaskKind) -> (lk_queue::QueueTask, Value, Vec<Value>) {
+        let config = std::fs::read_to_string(&self.config).unwrap();
+        std::fs::write(
+            &self.config,
+            config
+                .replace("max_input_bytes: 65536", "max_input_bytes: 262144")
+                .replace("max_result_bytes: 8192", "max_result_bytes: 32768"),
+        )
+        .unwrap();
+        let (task, plan) = self.add_with_text(
+            "frontier",
+            kind,
+            true,
+            &"A retained protocol observation. ".repeat(36000),
+        );
+        let plan = plan.unwrap();
+        let id = plan["work_id"].as_str().unwrap();
+        let status = self.json(&["work", "status", id, "--limit", "100"]);
+        let ready = status["ready"].as_array().unwrap();
+        assert!(ready.len() >= 5, "{status}");
+        let mut observations = Vec::new();
+        for (index, node) in ready.iter().enumerate() {
+            let node = node.as_str().unwrap();
+            let request = self.json(&["work", "read", id, node]);
+            assert_eq!(request["kind"], "inspect");
+            let evidence = request["input"]["ranges"][0]["range"].clone();
+            let output = json!({"work_id":id,"node_id":node,"input_revision":request["input_revision"],
+                "summary":"Complete assigned source; deployment remains unknown.",
+                "findings":[{"statement":format!("Source {index}: {}", "observed detail ".repeat(180)),"evidence":[evidence.clone()]}],
+                "source_questions":(0..4).map(|n|json!({"id":format!("{node}:source:{n}"),"question":format!("Was condition {index}/{n} verified? {}", "unknown source condition ".repeat(35)),"evidence":[evidence.clone()]})).collect::<Vec<_>>(),
+                "unresolved":[],"resolutions":[]});
+            let file = self.root().join("observation.json");
+            std::fs::write(&file, serde_json::to_vec(&output).unwrap()).unwrap();
+            self.json(&["work", "record", "--file", file.to_str().unwrap()]);
+            observations.push(output);
+        }
+        assert!(serde_json::to_vec(&observations).unwrap().len() > 32768);
+        (task, plan, observations)
     }
     fn done(&self, task: &lk_queue::QueueTask) -> bool {
         let raw = std::fs::read_to_string(self.root().join("vault").join(&task.target.vault_path))
@@ -535,4 +593,106 @@ fn legacy_request_action_does_not_suppress_current_singleton_contract() {
     let report = fixture.run();
     assert_eq!(fixture.calls(), 2, "{report}");
     assert!(!fixture.done(&task));
+}
+
+#[test]
+fn current_complete_frontier_finalizes_without_a_reduction_or_rewriting_paid_nodes() {
+    for engine in ["codex", "claude-code"] {
+        for kind in [
+            lk_queue::TaskKind::ExtractConcepts,
+            lk_queue::TaskKind::SynthesizeConcept,
+        ] {
+            let fixture = Fixture::new(engine);
+            let (task, plan, observations) = fixture.paid_frontier(kind);
+            let id = plan["work_id"].as_str().unwrap();
+            let directory = fixture.root().join("vault/.lorekeeper/work").join(id);
+            let original_plan = std::fs::read(directory.join("plan.json")).unwrap();
+            let nodes = observations
+                .iter()
+                .map(|output| {
+                    let path = directory
+                        .join("nodes")
+                        .join(format!("{}.json", output["node_id"].as_str().unwrap()));
+                    let raw = std::fs::read(&path).unwrap();
+                    (path, raw)
+                })
+                .collect::<Vec<_>>();
+            std::fs::write(fixture.root().join("mode"), "frontier").unwrap();
+            let report = fixture.run();
+            assert_eq!(report["halted"], false, "{engine}/{kind:?}: {report}");
+            assert!(fixture.done(&task), "{report}");
+            assert_eq!(fixture.calls(), 1, "{report}");
+            assert!(directory.join("frontier-seal.json").is_file());
+            assert!(!directory.join("seal.json").exists());
+            assert_eq!(
+                std::fs::read(directory.join("plan.json")).unwrap(),
+                original_plan
+            );
+            for (path, raw) in nodes {
+                assert_eq!(std::fs::read(path).unwrap(), raw);
+            }
+            let request: Value = serde_json::from_slice(
+                &std::fs::read(fixture.root().join("last-frontier.json")).unwrap(),
+            )
+            .unwrap();
+            let frontier = &request["frontier"];
+            assert_eq!(
+                frontier["observations"].as_array().unwrap().len(),
+                observations.len()
+            );
+            for (sent, original) in frontier["observations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .zip(&observations)
+            {
+                assert_eq!(
+                    sent["output"]["source_questions"],
+                    original["source_questions"]
+                );
+            }
+            let root = frontier["root_node"].as_str().unwrap();
+            assert!(
+                !directory
+                    .join("nodes")
+                    .join(format!("{root}.json"))
+                    .exists()
+            );
+            assert!(serde_json::to_vec(&request).unwrap().len() <= 262144);
+        }
+    }
+}
+
+#[test]
+fn frontier_finalization_keeps_exact_action_and_fresh_scope_guards() {
+    for mode in ["action", "changed-target", "changed-review"] {
+        let fixture = Fixture::new("codex");
+        let (task, plan, _) = fixture.paid_frontier(lk_queue::TaskKind::SynthesizeConcept);
+        let directory = fixture
+            .root()
+            .join("vault/.lorekeeper/work")
+            .join(plan["work_id"].as_str().unwrap());
+        std::fs::write(
+            fixture.root().join("mode"),
+            if mode == "action" {
+                "frontier-action"
+            } else {
+                mode
+            },
+        )
+        .unwrap();
+        let report = fixture.run();
+        assert!(!fixture.done(&task), "{mode}: {report}");
+        assert!(!directory.join("frontier-seal.json").exists());
+        if mode == "action" {
+            assert_eq!(report["halted"], false, "{report}");
+            assert!(directory.join("finalization-action.json").is_file());
+            let count = fixture.calls();
+            let again = fixture.run();
+            assert_eq!(again["halted"], false, "{again}");
+            assert_eq!(fixture.calls(), count);
+        } else {
+            assert_eq!(report["halted"], true, "{mode}: {report}");
+        }
+    }
 }

@@ -213,6 +213,10 @@ mod native {
             id: String,
             task: lk_queue::QueueTask,
         },
+        Finalization {
+            id: String,
+            task: lk_queue::QueueTask,
+        },
         Source {
             id: String,
         },
@@ -235,6 +239,7 @@ mod native {
         fn binding(&self, target: &str) -> Option<scheduler::TurnBinding> {
             let identity = match self {
                 Self::Partitioned { id, .. } | Self::Source { id } => format!("work:{id}"),
+                Self::Finalization { id, .. } => format!("finalize:{id}"),
                 Self::Screening { selection_id, .. } => format!("screening:{selection_id}"),
                 Self::Discovery { .. } | Self::Section { .. } | Self::WholeInput { .. } => {
                     return None;
@@ -2089,6 +2094,16 @@ mod native {
                     metrics.preparation_duration_ms = Some(preparation_duration_ms);
                 }
             }
+            self.bounded_finish(id, skill, metrics, false).await
+        }
+
+        async fn bounded_finish(
+            &mut self,
+            id: &str,
+            skill: &str,
+            mut metrics: WorkStepMetrics,
+            frontier: bool,
+        ) -> WorkStep {
             let started_at = Instant::now();
             let finished = crate::commands::work::is_finished(
                 &self.root,
@@ -2138,12 +2153,28 @@ mod native {
                 }
             }
             let started_at = Instant::now();
-            let section = crate::commands::work::prepare_finalization(
-                &self.root,
-                &self.config,
-                &self.config_revision,
-                id,
-            );
+            let section = if frontier {
+                match crate::commands::work::prepare_frontier_finalization(
+                    &self.root,
+                    &self.config,
+                    &self.config_revision,
+                    id,
+                ) {
+                    Ok(Some(prepared)) => Ok(prepared),
+                    Ok(None) => {
+                        self.queue_replan = true;
+                        return WorkStep::Failed;
+                    }
+                    Err(error) => Err(error),
+                }
+            } else {
+                crate::commands::work::prepare_finalization(
+                    &self.root,
+                    &self.config,
+                    &self.config_revision,
+                    id,
+                )
+            };
             *metrics
                 .preparation_duration_ms
                 .as_mut()
@@ -2865,6 +2896,18 @@ mod native {
                                 flush(&mut batch, &mut jobs);
                             }
                         }
+                        crate::commands::work::TaskWork::Finalization { id } => {
+                            flush(&mut batch, &mut jobs);
+                            if let Some(reason) = blocked.get(&id) {
+                                keys.remove(target);
+                                deferred.insert(target.clone(), vec![reason.clone()]);
+                            } else {
+                                jobs.insert(
+                                    target.clone(),
+                                    QueueDispatch::Finalization { id, task },
+                                );
+                            }
+                        }
                         crate::commands::work::TaskWork::Partitioned { id } => {
                             flush(&mut batch, &mut jobs);
                             if let Some(reason) = blocked
@@ -2951,6 +2994,7 @@ mod native {
                             &current.task_id,
                         )?,
                         crate::commands::work::TaskWork::Partitioned { .. }
+                            | crate::commands::work::TaskWork::Finalization { .. }
                             | crate::commands::work::TaskWork::Source { .. }
                             | crate::commands::work::TaskWork::Screening { .. }
                             | crate::commands::work::TaskWork::Admission { .. }
@@ -3150,6 +3194,23 @@ mod native {
                                 Err(error) => return self.failure("extraction discovery receipt", error),
                             }
                         }
+                        QueueDispatch::Finalization { id, .. } => {
+                            let mut metrics = WorkStepMetrics::new(WorkRole::Finalizer);
+                            metrics.work_id = Some(id.clone());
+                            metrics.preparation_duration_ms = Some(0);
+                            match self.bounded_finish(id, "lore-process", metrics, true).await {
+                                WorkStep::Staged => {}
+                                WorkStep::Deferred(reason) => {
+                                    blocked.insert(id.clone(), reason);
+                                    continue 'planning;
+                                }
+                                WorkStep::Failed if self.queue_replan => continue 'planning,
+                                WorkStep::Failed => return false,
+                                WorkStep::Pending => {
+                                    unreachable!("frontier finalization has no pending inspection")
+                                }
+                            }
+                        }
                         QueueDispatch::Partitioned { id, .. } => {
                             match self.bounded_step(id, "lore-process").await {
                                 WorkStep::Pending => continue,
@@ -3223,6 +3284,7 @@ mod native {
                     let tasks = match &jobs[&selected] {
                         QueueDispatch::WholeInput { tasks, .. } => tasks.as_slice(),
                         QueueDispatch::Partitioned { task, .. }
+                        | QueueDispatch::Finalization { task, .. }
                         | QueueDispatch::Section { task } => std::slice::from_ref(task),
                         QueueDispatch::Discovery { .. } => {
                             unreachable!("discovery restarts planning")

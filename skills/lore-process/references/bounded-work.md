@@ -44,6 +44,11 @@ Saved plans, node observations and standalone record formats stay unchanged. A c
 native response/instruction contract can reconsider a prior processing action; it never
 retags or adopts an invalid historical response.
 
+A valid decoded native evidence reply above its result allowance records an exact
+native capacity rejection, not an observation. The same request defers without another
+call and independent tasks continue. The byte limit remains enforced; no oversized
+reply is trimmed or adopted. Malformed transport or corrupt state still refuses.
+
 ## Plan and resume
 
 For extraction, first follow [discovery and examination](discovery.md) until ready
@@ -81,6 +86,18 @@ of observed answers. Saved plans retain their declared topology; plans without t
 declaration retain binary reduction and resume without rewriting their observations.
 Actual request and result limits still apply. Fewer reduction calls do not establish
 semantic equivalence, lower billed cost or complete corpus coverage.
+
+For native queue extraction and concept synthesis, a complete current set of disjoint
+observations may finalize directly when the entire request, evidence and generation
+rules fit the input limit and no processing concern remains. This has a separate
+frontier seal; it neither writes a missing reduction nor changes its completion status.
+Missing, stale, oversized or blocked coverage retains normal reduction. Source-only
+screening work, sections and audits use their existing completion procedures.
+Fresh observations and the final typed result are revalidated before sealing and apply.
+A corrected observation invalidates the prior frontier result and requires fresh
+finalization. Prior proposals and paid observations remain retained; standalone
+`work finish` still requires a complete current root. Corrupt or conflicting seals
+refuse; an unpublished authority transition is journaled with its prior final bytes.
 
 Native jobs reserve fair inspection/reduction/finalization turns and retain the next
 target across runs. `execution.work.max_consecutive_calls` defaults to 4 and bounds
@@ -189,10 +206,11 @@ standalone processing use the command procedure below.
 
 ## Finalize
 
-When the controller supplies `native-finalize-results-v1`, follow
+When the controller supplies `native-finalize-results-v1` or
+`native-finalize-frontier-v1`, follow
 [prepared native input](native-input.md#completed-work) directly. It already contains
-the complete root, distinct context guard and applicable rules; do not repeat steps 1–2
-below. Rust reconstructs the exact current request/root before sealing the assembled result.
+the complete root or observation coverage, distinct context guard and applicable rules; do not repeat steps 1–2
+below. Rust reconstructs the exact current request and completion authority before sealing the assembled result.
 The command procedure below remains for standalone work and native audit finalizers.
 
 1. Read the complete `lore work result WORK`, continuing with bounded reads if a

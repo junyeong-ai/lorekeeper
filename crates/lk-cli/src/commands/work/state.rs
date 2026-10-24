@@ -9,8 +9,10 @@ use lk_vault::{MutationPlan, MutationSession};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+mod frontier;
 mod inspection;
 mod retention;
+use frontier::{FrontierProof, FrontierSeal};
 pub(crate) use inspection::OutputCapacity;
 pub(crate) use retention::prune_published;
 
@@ -19,6 +21,7 @@ pub(super) enum CompletionRefusal {
     IncompleteReduction,
     UnsealedResult,
     ChangedResult,
+    ChangedObservations,
 }
 
 impl std::fmt::Display for CompletionRefusal {
@@ -27,6 +30,9 @@ impl std::fmt::Display for CompletionRefusal {
             Self::IncompleteReduction => "work reduction is incomplete",
             Self::UnsealedResult => "work final result is not sealed",
             Self::ChangedResult => "sealed result or completed reduction changed",
+            Self::ChangedObservations => {
+                "sealed frontier observations changed; a fresh final result is required"
+            }
         })
     }
 }
@@ -221,7 +227,9 @@ impl FinalizationAction {
         let root = work.nodes()?.last().expect("nonempty work tree").id.clone();
         if !matches!(
             action.schema.as_str(),
-            "section-finalization-action-v1" | "bounded-finalization-action-v1"
+            "section-finalization-action-v1"
+                | "bounded-finalization-action-v1"
+                | "frontier-finalization-action-v1"
         ) || action.work_id != work.plan.id
             || action.root_node != root
             || action.reason.trim().is_empty()
@@ -247,9 +255,21 @@ struct Evaluation<'a> {
 pub(super) struct CompletedWork {
     work_id: String,
     root_node: String,
-    root_output_revision: String,
+    authority: CompletionAuthority,
     result: Value,
     guards: BTreeMap<PathBuf, String>,
+    absent: BTreeSet<PathBuf>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum CompletionKind {
+    Root,
+    Frontier,
+}
+
+enum CompletionAuthority {
+    Root(String),
+    Frontier(FrontierProof),
 }
 
 impl CompletedWork {
@@ -257,21 +277,111 @@ impl CompletedWork {
         &self.result
     }
 
+    fn kind(&self) -> CompletionKind {
+        match self.authority {
+            CompletionAuthority::Root(_) => CompletionKind::Root,
+            CompletionAuthority::Frontier(_) => CompletionKind::Frontier,
+        }
+    }
+
+    fn completion_revision(&self) -> miette::Result<String> {
+        match &self.authority {
+            CompletionAuthority::Root(revision) => Ok(revision.clone()),
+            CompletionAuthority::Frontier(proof) => revision(proof),
+        }
+    }
+
     pub fn plan_seal(
         self,
+        work: &Work,
         mutation: &mut MutationPlan,
         root: &Path,
         final_result: &Value,
-    ) -> miette::Result<()> {
-        let path = work_path(&self.work_id, "seal.json")?;
-        let seal = Seal {
-            work_id: self.work_id,
-            root_node: self.root_node,
-            root_output_revision: self.root_output_revision,
-            final_result_revision: revision(final_result)?,
+    ) -> miette::Result<Option<String>> {
+        if work.plan.id != self.work_id {
+            return Err(fail("completion belongs to another work"));
+        }
+        let prior_final = read_optional(root, &work_path(&self.work_id, "final.json")?)?;
+        let (name, other, after) = match self.authority {
+            CompletionAuthority::Root(root_output_revision) => (
+                "seal.json",
+                "frontier-seal.json",
+                encoded(&Seal {
+                    work_id: self.work_id.clone(),
+                    root_node: self.root_node.clone(),
+                    root_output_revision,
+                    final_result_revision: revision(final_result)?,
+                })?,
+            ),
+            CompletionAuthority::Frontier(proof) => (
+                "frontier-seal.json",
+                "seal.json",
+                encoded(&FrontierSeal {
+                    schema: "work-frontier-seal-v1".into(),
+                    proof,
+                    final_result_revision: revision(final_result)?,
+                })?,
+            ),
         };
+        let path = work_path(&self.work_id, name)?;
         let before = read_optional(root, &path)?;
-        let after = encoded(&seal)?;
+        if name == "frontier-seal.json"
+            && let Some(raw) = &before
+        {
+            let prior = FrontierSeal::decode(raw, work)?;
+            let final_result: Value = serde_json::from_str(
+                prior_final
+                    .as_deref()
+                    .ok_or_else(|| fail("sealed final result is missing"))?,
+            )
+            .map_err(fail)?;
+            if prior.final_result_revision != revision(&final_result)? {
+                return Err(fail("prior frontier seal differs from its final result"));
+            }
+        }
+        let other_path = work_path(&self.work_id, other)?;
+        if let Some(raw) = read_optional(root, &other_path)? {
+            if before.is_some() {
+                return Err(fail("work has conflicting completion seals"));
+            }
+            let prior: Value = serde_json::from_str(
+                prior_final
+                    .as_deref()
+                    .ok_or_else(|| fail("sealed final result is missing"))?,
+            )
+            .map_err(fail)?;
+            let (work_id, root_node, final_revision) = if other == "seal.json" {
+                let seal: Seal = serde_json::from_str(&raw).map_err(fail)?;
+                require_id(&seal.root_output_revision)?;
+                (seal.work_id, seal.root_node, seal.final_result_revision)
+            } else {
+                let seal = FrontierSeal::decode(&raw, work)?;
+                (
+                    seal.proof.work_id().into(),
+                    seal.proof.root_node().into(),
+                    seal.final_result_revision,
+                )
+            };
+            if work_id != self.work_id
+                || root_node != self.root_node
+                || final_revision != revision(&prior)?
+            {
+                return Err(fail(
+                    "prior completion authority differs from its final result",
+                ));
+            }
+            let publication_path = work_path(&self.work_id, "publication.json")?;
+            if read_optional(root, &publication_path)?.is_some() {
+                return Err(fail("published completion authority cannot be replaced"));
+            }
+            mutation.require_absent(publication_path);
+            mutation.remove(other_path, raw);
+        } else {
+            mutation.require_absent(other_path);
+        }
+        for path in self.absent {
+            mutation.require_absent(path);
+        }
         for (path, raw) in self.guards {
             mutation.require_unchanged(path, raw);
         }
@@ -282,7 +392,7 @@ impl CompletedWork {
                 .publish_expected(root, path, before, after)
                 .map_err(fail)?;
         }
-        Ok(())
+        Ok(prior_final)
     }
 }
 
@@ -369,7 +479,7 @@ fn output_path(work: &str, node: &str) -> miette::Result<PathBuf> {
     work_path(work, &format!("nodes/{node}.json"))
 }
 
-fn read_optional(root: &Path, path: &Path) -> miette::Result<Option<String>> {
+pub(super) fn read_optional(root: &Path, path: &Path) -> miette::Result<Option<String>> {
     let full = lk_vault::page_path(root, path).map_err(fail)?;
     match std::fs::symlink_metadata(&full) {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
@@ -1102,17 +1212,40 @@ impl Work {
         request: &Value,
         reason: String,
     ) -> miette::Result<MutationPlan> {
-        let completed = self.capture_completion(root, resources)?;
+        self.plan_finalization_action_for(
+            root,
+            resources,
+            expected,
+            request,
+            reason,
+            CompletionKind::Root,
+        )
+    }
+
+    pub(super) fn plan_finalization_action_for(
+        &self,
+        root: &Path,
+        resources: &[SemanticResource],
+        expected: &Value,
+        request: &Value,
+        reason: String,
+        kind: CompletionKind,
+    ) -> miette::Result<MutationPlan> {
+        let completed = self.capture_native_completion(root, resources, kind)?;
         if completed.result() != expected {
             return Err(fail(
                 "completed observations changed before recording required finalization action",
             ));
         }
         let action = FinalizationAction {
-            schema: "bounded-finalization-action-v1".into(),
+            schema: match completed.kind() {
+                CompletionKind::Root => "bounded-finalization-action-v1",
+                CompletionKind::Frontier => "frontier-finalization-action-v1",
+            }
+            .into(),
             work_id: self.plan.id.clone(),
-            root_node: completed.root_node,
-            completion_revision: completed.root_output_revision,
+            root_node: completed.root_node.clone(),
+            completion_revision: completed.completion_revision()?,
             request_revision: lk_core::rss_original::digest(
                 &serde_json::to_vec(request).map_err(fail)?,
             ),
@@ -1128,6 +1261,9 @@ impl Work {
         let mut plan = MutationPlan::default();
         for (path, raw) in completed.guards {
             plan.require_unchanged(path, raw);
+        }
+        for path in completed.absent {
+            plan.require_absent(path);
         }
         plan.publish_expected(root, path, before, raw)
             .map_err(fail)?;
@@ -1176,9 +1312,10 @@ impl Work {
         Ok(CompletedWork {
             work_id: self.plan.id.clone(),
             root_node: node.id.clone(),
-            root_output_revision: output.output_revision.clone(),
+            authority: CompletionAuthority::Root(output.output_revision.clone()),
             result,
             guards: evaluated.raw,
+            absent: BTreeSet::new(),
         })
     }
 
@@ -1433,7 +1570,7 @@ impl Work {
     ) -> miette::Result<()> {
         let mut mutation = MutationPlan::default();
         self.capture_completion(session.root(), resources)?
-            .plan_seal(&mut mutation, session.root(), &final_result)?;
+            .plan_seal(self, &mut mutation, session.root(), &final_result)?;
         session.apply(mutation).map_err(fail)
     }
 
@@ -1444,6 +1581,12 @@ impl Work {
         resources: &[SemanticResource],
         final_result: &Value,
     ) -> miette::Result<()> {
+        if let Some(raw) = read_optional(root, &work_path(&self.plan.id, "frontier-seal.json")?)? {
+            if read_optional(root, &work_path(&self.plan.id, "seal.json")?)?.is_some() {
+                return Err(fail("work has conflicting completion seals"));
+            }
+            return self.guard_frontier_completion(mutation, root, resources, final_result, raw);
+        }
         let evaluated = self.evaluate(root, resources)?;
         let node = evaluated.nodes.last().expect("nonempty tree");
         let output = evaluated
@@ -1465,6 +1608,7 @@ impl Work {
             mutation.require_unchanged(path, raw);
         }
         mutation.require_unchanged(seal_path, raw);
+        mutation.require_absent(work_path(&self.plan.id, "frontier-seal.json")?);
         Ok(())
     }
 
@@ -2305,7 +2449,7 @@ mod tests {
         let mut retry = MutationPlan::default();
         work.capture_completion(root.path(), &source)
             .unwrap()
-            .plan_seal(&mut retry, root.path(), &final_result)
+            .plan_seal(&work, &mut retry, root.path(), &final_result)
             .unwrap();
         retry.create("retry-publication.md", "must not publish".into());
         std::fs::write(&seal_path, format!("{seal_before}\n")).unwrap();
@@ -2869,5 +3013,379 @@ mod tests {
         }
         finish(&work, &session, &source);
         assert!(work.progress(root.path(), &source).unwrap().complete);
+    }
+    fn frontier_fixture(session: &MutationSession) -> (Work, Vec<SemanticResource>) {
+        let source = evidence_pages(5, 25_000);
+        let context = json!({"subject":{"kind":"queue","task_id":"task","cache_hash":"hash","target":"wiki/concepts/test.md","target_revision":"target"},
+            "purpose":{"task_kind":"synthesize-concept","target":{"vault_path":"wiki/concepts/test.md","kind":"concept-synthesis","anchor":"## Synthesis"}}});
+        let work = Work::create(
+            session,
+            &source,
+            "subject",
+            context,
+            WorkLimits {
+                max_input_bytes: 262144,
+                max_result_bytes: 32768,
+            },
+        )
+        .unwrap();
+        assert_eq!(work.plan.parts.len(), 5);
+        (work, source)
+    }
+
+    fn inspect_frontier(work: &Work, session: &MutationSession, source: &[SemanticResource]) {
+        for part in &work.plan.parts {
+            let mut output = draft(work, session.root(), &part.id, source);
+            output.source_questions.push(WorkQuestion {
+                id: format!("{}:source", part.id),
+                question: "Whether the source's claim was verified remains unknown.".into(),
+                evidence: vec![part.ranges[0].clone()],
+            });
+            work.record(session, output, source).unwrap();
+        }
+    }
+
+    fn seal_frontier(
+        work: &Work,
+        session: &MutationSession,
+        source: &[SemanticResource],
+        result: &Value,
+    ) {
+        let mut plan = MutationPlan::default();
+        let prior = work
+            .capture_frontier(session.root(), source)
+            .unwrap()
+            .unwrap()
+            .plan_seal(work, &mut plan, session.root(), result)
+            .unwrap();
+        let path = work_path(&work.plan.id, "final.json").unwrap();
+        plan.publish_expected(session.root(), path, prior, encoded(result).unwrap())
+            .unwrap();
+        session.apply(plan).unwrap();
+    }
+
+    #[test]
+    fn frontier_requires_current_complete_nonoverlapping_observations_without_blockers() {
+        let root = tempfile::tempdir().unwrap();
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let (work, source) = frontier_fixture(&session);
+        assert!(
+            work.capture_frontier(root.path(), &source)
+                .unwrap()
+                .is_none()
+        );
+        inspect_frontier(&work, &session, &source);
+        let completed = work
+            .capture_frontier(root.path(), &source)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            completed.result()["observations"].as_array().unwrap().len(),
+            5
+        );
+        assert!(!work.progress(root.path(), &source).unwrap().complete);
+        let mut proof: FrontierProof =
+            serde_json::from_value(completed.result()["proof"].clone()).unwrap();
+        let mut value = serde_json::to_value(&proof).unwrap();
+        let duplicate = value["nodes"][0].clone();
+        value["nodes"].as_array_mut().unwrap().push(duplicate);
+        proof = serde_json::from_value(value).unwrap();
+        let mut bad = serde_json::to_value(&proof).unwrap();
+        bad["work_id"] = json!("f".repeat(64));
+        let seal = json!({"schema":"work-frontier-seal-v1","proof":bad,"final_result_revision":"a".repeat(64)});
+        assert!(FrontierSeal::decode(&encoded(&seal).unwrap(), &work).is_err());
+        let part = &work.plan.parts[0];
+        let mut blocked = draft(&work, root.path(), &part.id, &source);
+        blocked.unresolved.push(WorkQuestion {
+            id: format!("{}:blocker", part.id),
+            question: "Required processing input is missing.".into(),
+            evidence: vec![part.ranges[0].clone()],
+        });
+        work.record(&session, blocked, &source).unwrap();
+        assert!(
+            work.capture_frontier(root.path(), &source)
+                .unwrap()
+                .is_none()
+        );
+        let mut changed = source.clone();
+        changed[0].revision = "changed".into();
+        assert!(work.capture_frontier(root.path(), &changed).is_err());
+    }
+
+    #[test]
+    fn frontier_seals_refuse_changed_nodes_and_allow_fresh_resealing_and_root_transition() {
+        let root = tempfile::tempdir().unwrap();
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let (work, source) = frontier_fixture(&session);
+        inspect_frontier(&work, &session, &source);
+        let first = json!({"synthesis":"Source claim; unknown deployment."});
+        seal_frontier(&work, &session, &source, &first);
+        work.guard_completion(&mut MutationPlan::default(), root.path(), &source, &first)
+            .unwrap();
+        let part = &work.plan.parts[0];
+        let mut corrected = draft(&work, root.path(), &part.id, &source);
+        corrected.summary = "Corrected source attribution.".into();
+        work.record(&session, corrected, &source).unwrap();
+        let error = work
+            .guard_completion(&mut MutationPlan::default(), root.path(), &source, &first)
+            .unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<CompletionRefusal>(),
+            Some(CompletionRefusal::ChangedObservations)
+        ));
+        let second = json!({"synthesis":"Fresh result after corrected source observation."});
+        seal_frontier(&work, &session, &source, &second);
+        work.guard_completion(&mut MutationPlan::default(), root.path(), &source, &second)
+            .unwrap();
+        let mut forged = second.clone();
+        forged["synthesis"] = json!("changed without a seal");
+        assert!(matches!(
+            work.guard_completion(&mut MutationPlan::default(), root.path(), &source, &forged)
+                .unwrap_err()
+                .downcast_ref::<CompletionRefusal>(),
+            Some(CompletionRefusal::ChangedResult)
+        ));
+        finish(&work, &session, &source);
+        let seal_path = root
+            .path()
+            .join(work_path(&work.plan.id, "frontier-seal.json").unwrap());
+        let original = std::fs::read_to_string(&seal_path).unwrap();
+        for field in ["schema", "nodes", "revision"] {
+            let mut corrupted: Value = serde_json::from_str(&original).unwrap();
+            match field {
+                "schema" => corrupted["proof"]["schema"] = json!("unknown"),
+                "nodes" => corrupted["proof"]["nodes"] = json!([]),
+                _ => corrupted["proof"]["nodes"][0]["output_revision"] = json!("not-a-revision"),
+            }
+            std::fs::write(&seal_path, encoded(&corrupted).unwrap()).unwrap();
+            assert!(
+                work.capture_completion(root.path(), &source)
+                    .unwrap()
+                    .plan_seal(&work, &mut MutationPlan::default(), root.path(), &second)
+                    .is_err()
+            );
+            assert_eq!(
+                std::fs::read_to_string(&seal_path).unwrap(),
+                encoded(&corrupted).unwrap()
+            );
+        }
+        std::fs::write(&seal_path, original).unwrap();
+        let mut mutation = MutationPlan::default();
+        work.capture_completion(root.path(), &source)
+            .unwrap()
+            .plan_seal(&work, &mut mutation, root.path(), &second)
+            .unwrap();
+        session.apply(mutation).unwrap();
+        assert!(
+            !root
+                .path()
+                .join(work_path(&work.plan.id, "frontier-seal.json").unwrap())
+                .exists()
+        );
+        work.guard_completion(&mut MutationPlan::default(), root.path(), &source, &second)
+            .unwrap();
+    }
+
+    #[test]
+    fn frontier_capture_guards_missing_nodes_and_all_paid_observations_before_sealing() {
+        for change in ["node", "root"] {
+            let root = tempfile::tempdir().unwrap();
+            let session = MutationSession::acquire(root.path()).unwrap();
+            let (work, source) = frontier_fixture(&session);
+            inspect_frontier(&work, &session, &source);
+            let mut mutation = MutationPlan::default();
+            work.capture_frontier(root.path(), &source)
+                .unwrap()
+                .unwrap()
+                .plan_seal(
+                    &work,
+                    &mut mutation,
+                    root.path(),
+                    &json!({"synthesis":"source"}),
+                )
+                .unwrap();
+            let id = if change == "node" {
+                work.plan.parts[0].id.clone()
+            } else {
+                work.progress(root.path(), &source).unwrap().root_node
+            };
+            let mut output = draft(&work, root.path(), &id, &source);
+            output.summary = "Changed after capture.".into();
+            work.record(&session, output, &source).unwrap();
+            assert!(session.apply(mutation).is_err());
+            assert!(
+                !root
+                    .path()
+                    .join(work_path(&work.plan.id, "frontier-seal.json").unwrap())
+                    .exists()
+            );
+        }
+    }
+
+    #[test]
+    fn published_frontier_retention_validates_dependencies_before_removing_expired_work() {
+        for corrupt in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let session = MutationSession::acquire(root.path()).unwrap();
+            let (work, source) = frontier_fixture(&session);
+            inspect_frontier(&work, &session, &source);
+            let result = json!({"synthesis":"Guarded source claim."});
+            seal_frontier(&work, &session, &source, &result);
+            let mut mutation = MutationPlan::default();
+            work.plan_publication(&mut mutation, root.path(), &result)
+                .unwrap();
+            session.apply(mutation).unwrap();
+            if corrupt {
+                let path = output_path(&work.plan.id, &work.plan.parts[0].id).unwrap();
+                std::fs::write(root.path().join(path), "{}").unwrap();
+                assert!(prune_published(root.path(), None, i64::MAX).is_err());
+            } else {
+                let report = prune_published(root.path(), Some(&session), i64::MAX).unwrap();
+                assert_eq!(report.removed, 1);
+                assert!(
+                    !root
+                        .path()
+                        .join(work_path(&work.plan.id, "plan.json").unwrap())
+                        .exists()
+                );
+            }
+        }
+    }
+    #[test]
+    fn frontier_authority_transition_refuses_conflicting_seals_and_late_publication() {
+        for changed in ["dual", "publication"] {
+            let root = tempfile::tempdir().unwrap();
+            let session = MutationSession::acquire(root.path()).unwrap();
+            let (work, source) = frontier_fixture(&session);
+            inspect_frontier(&work, &session, &source);
+            let result = json!({"synthesis":"Guarded source claim."});
+            seal_frontier(&work, &session, &source, &result);
+            finish(&work, &session, &source);
+            if changed == "dual" {
+                let seal = Seal {
+                    work_id: work.plan.id.clone(),
+                    root_node: work.progress(root.path(), &source).unwrap().root_node,
+                    root_output_revision: "a".repeat(64),
+                    final_result_revision: revision(&result).unwrap(),
+                };
+                std::fs::write(
+                    root.path()
+                        .join(work_path(&work.plan.id, "seal.json").unwrap()),
+                    encoded(&seal).unwrap(),
+                )
+                .unwrap();
+                assert!(
+                    work.capture_completion(root.path(), &source)
+                        .unwrap()
+                        .plan_seal(&work, &mut MutationPlan::default(), root.path(), &result)
+                        .is_err()
+                );
+            } else {
+                let mut mutation = MutationPlan::default();
+                work.capture_completion(root.path(), &source)
+                    .unwrap()
+                    .plan_seal(&work, &mut mutation, root.path(), &result)
+                    .unwrap();
+                let mut publication = MutationPlan::default();
+                work.plan_publication(&mut publication, root.path(), &result)
+                    .unwrap();
+                session.apply(publication).unwrap();
+                assert!(session.apply(mutation).is_err());
+                assert!(
+                    root.path()
+                        .join(work_path(&work.plan.id, "frontier-seal.json").unwrap())
+                        .exists()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn oversized_frontiers_keep_normal_reduction_and_exclude_source_only_work() {
+        let root = tempfile::tempdir().unwrap();
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let source = evidence_pages(4, 1000);
+        let context = json!({"subject":{"kind":"queue","task_id":"task","cache_hash":"hash","target":"wiki/concepts/test.md","target_revision":"target"},"purpose":{"task_kind":"synthesize-concept"}});
+        let work = Work::create(
+            &session,
+            &source,
+            "subject",
+            context,
+            WorkLimits {
+                max_input_bytes: 5000,
+                max_result_bytes: 1500,
+            },
+        )
+        .unwrap();
+        for part in &work.plan.parts {
+            let mut output = draft(&work, root.path(), &part.id, &source);
+            output.summary = "Exact assigned observation. ".repeat(20);
+            work.record(&session, output, &source).unwrap();
+        }
+        assert!(
+            work.capture_frontier(root.path(), &source)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            !work
+                .progress(root.path(), &source)
+                .unwrap()
+                .ready
+                .is_empty()
+        );
+        let mut unsupported = work.clone();
+        unsupported.context["purpose"]["task_kind"] = json!("summarize");
+        assert!(
+            unsupported
+                .capture_frontier(root.path(), &source)
+                .unwrap()
+                .is_none()
+        );
+        unsupported.context["purpose"]["task_kind"] = json!("extract-concepts");
+        unsupported.context["purpose"]["extraction_scope"] =
+            json!({"policy":"source-proposals-v1"});
+        assert!(
+            unsupported
+                .capture_frontier(root.path(), &source)
+                .unwrap()
+                .is_none()
+        );
+    }
+    #[test]
+    fn frontier_authority_replacement_uses_one_prior_final_read() {
+        let root = tempfile::tempdir().unwrap();
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let (work, source) = frontier_fixture(&session);
+        inspect_frontier(&work, &session, &source);
+        let original = json!({"synthesis":"Original guarded source claim."});
+        seal_frontier(&work, &session, &source, &original);
+        finish(&work, &session, &source);
+        let next = json!({"synthesis":"A newly generated complete root result."});
+        let mut mutation = MutationPlan::default();
+        let before = work
+            .capture_completion(root.path(), &source)
+            .unwrap()
+            .plan_seal(&work, &mut mutation, root.path(), &next)
+            .unwrap();
+        assert_eq!(
+            before.as_deref(),
+            Some(encoded(&original).unwrap().as_str())
+        );
+        let path = work_path(&work.plan.id, "final.json").unwrap();
+        std::fs::write(
+            root.path().join(&path),
+            encoded(&json!({"synthesis":"External changed final result."})).unwrap(),
+        )
+        .unwrap();
+        mutation
+            .publish_expected(root.path(), path, before, encoded(&next).unwrap())
+            .unwrap();
+        assert!(session.apply(mutation).is_err());
+        assert!(
+            root.path()
+                .join(work_path(&work.plan.id, "frontier-seal.json").unwrap())
+                .exists()
+        );
     }
 }

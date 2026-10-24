@@ -1197,6 +1197,10 @@ pub(super) enum TaskWork {
     Partitioned {
         id: String,
     },
+    #[cfg(unix)]
+    Finalization {
+        id: String,
+    },
     Source {
         id: String,
     },
@@ -1216,13 +1220,43 @@ fn validate_native_finalization(
     prepared: &Prepared,
     request: &Value,
 ) -> miette::Result<Value> {
-    let completed = work.result(root, &prepared.resources)?;
+    validate_result_finalization(
+        root,
+        config,
+        work,
+        prepared,
+        request,
+        state::CompletionKind::Root,
+    )
+}
+
+#[cfg(unix)]
+fn validate_result_finalization(
+    root: &Path,
+    config: &lk_core::config::Config,
+    work: &Work,
+    prepared: &Prepared,
+    request: &Value,
+    kind: state::CompletionKind,
+) -> miette::Result<Value> {
+    let snapshot = work.capture_native_completion(root, &prepared.resources, kind)?;
+    let completed = snapshot.result().clone();
     let Subject::Queue { task_id, .. } = &prepared.subject else {
         return Err(miette::miette!("native result requires a queue task"));
     };
     let task = super::queue::current_task(root, task_id)?;
-    let current =
-        native::finalization_request(config, &task, work, &work.plan.subject_revision, &completed)?;
+    let current = match kind {
+        state::CompletionKind::Root => native::finalization_request(
+            config,
+            &task,
+            work,
+            &work.plan.subject_revision,
+            &completed,
+        )?,
+        state::CompletionKind::Frontier => {
+            native::frontier_request(config, &task, work, &completed)?
+        }
+    };
     if &current != request {
         return Err(miette::miette!(
             "native finalization scope or completed observations changed; reread and regenerate"
@@ -1462,6 +1496,33 @@ fn prepare_task_in_session(
         }
     }
     persist_prepared(session, config, config_revision, &prepared)?;
+    #[cfg(unix)]
+    {
+        let seal = PathBuf::from(".lorekeeper/work")
+            .join(&work.plan.id)
+            .join("frontier-seal.json");
+        if state::read_optional(root, &seal)?.is_some() {
+            match verify_finished_prepared(root, &work, &prepared) {
+                Ok(()) => return Ok(TaskWork::Finalization { id: work.plan.id }),
+                Err(error)
+                    if matches!(
+                        error.downcast_ref::<state::CompletionRefusal>(),
+                        Some(state::CompletionRefusal::ChangedObservations)
+                    ) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        if let Some(result) = frontier_result(root, config, task, &work, &prepared)? {
+            if let Some(reason) = work.load_finalization_action_for(
+                root,
+                &result.request,
+                &result.completed["result_revision"],
+            )? {
+                return Ok(TaskWork::Admission { reason });
+            }
+            return Ok(TaskWork::Finalization { id: work.plan.id });
+        }
+    }
     Ok(TaskWork::Partitioned { id: work.plan.id })
 }
 
@@ -1621,6 +1682,62 @@ pub(super) struct SectionFinalization {
 pub(super) struct ResultFinalization {
     pub request: Value,
     completed: Value,
+    kind: state::CompletionKind,
+}
+
+#[cfg(unix)]
+fn frontier_result(
+    root: &Path,
+    config: &lk_core::config::Config,
+    task: &lk_queue::QueueTask,
+    work: &Work,
+    prepared: &Prepared,
+) -> miette::Result<Option<ResultFinalization>> {
+    let Some(snapshot) = work.capture_frontier(root, &prepared.resources)? else {
+        return Ok(None);
+    };
+    let completed = snapshot.result().clone();
+    let request = match native::frontier_request(config, task, work, &completed) {
+        Ok(request) => request,
+        Err(error) if error.downcast_ref::<generation::ResultCapacity>().is_some() => {
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    };
+    if serde_json::to_vec(&request).into_diagnostic()?.len() > work.max_input_bytes {
+        return Ok(None);
+    }
+    Ok(Some(ResultFinalization {
+        request,
+        completed,
+        kind: state::CompletionKind::Frontier,
+    }))
+}
+
+#[cfg(unix)]
+pub(super) fn prepare_frontier_finalization(
+    root: &Path,
+    config: &lk_core::config::Config,
+    config_revision: &str,
+    id: &str,
+) -> miette::Result<Option<FinalizationPreparation>> {
+    let root = root.canonicalize().into_diagnostic()?;
+    let (work, prepared) = load(&root, config, config_revision, id)?;
+    let Subject::Queue { task_id, .. } = &prepared.subject else {
+        return Ok(None);
+    };
+    let task = super::queue::current_task(&root, task_id)?;
+    let Some(result) = frontier_result(&root, config, &task, &work, &prepared)? else {
+        return Ok(None);
+    };
+    if let Some(reason) = work.load_finalization_action_for(
+        &root,
+        &result.request,
+        &result.completed["result_revision"],
+    )? {
+        return Ok(Some(FinalizationPreparation::NeedsAction(reason)));
+    }
+    Ok(Some(FinalizationPreparation::Result(Box::new(result))))
 }
 
 #[cfg(unix)]
@@ -1743,7 +1860,11 @@ pub(super) fn prepare_finalization(
             ));
         }
         return Ok(FinalizationPreparation::Result(Box::new(
-            ResultFinalization { request, completed },
+            ResultFinalization {
+                request,
+                completed,
+                kind: state::CompletionKind::Root,
+            },
         )));
     }
     let scope = resources::section_task(&root, config, task_id)?;
@@ -1831,7 +1952,8 @@ pub(super) fn finish_result(
 ) -> miette::Result<Option<String>> {
     let root = session.root();
     let (work, prepared) = load(root, config, config_revision, id)?;
-    let completed = validate_native_finalization(root, config, &work, &prepared, &result.request)?;
+    let completed =
+        validate_result_finalization(root, config, &work, &prepared, &result.request, result.kind)?;
     if completed != result.completed {
         return Err(miette::miette!(
             "completed Work changed before native finalization"
@@ -1849,20 +1971,27 @@ pub(super) fn finish_result(
         work.plan.max_result_bytes,
     )? {
         generation::Outcome::NeedsAction(reason) => {
-            let mut plan = work.plan_finalization_action(
+            let mut plan = work.plan_finalization_action_for(
                 root,
                 &prepared.resources,
                 &completed,
                 &result.request,
                 reason.clone(),
+                result.kind,
             )?;
             prepared.guard_pages(&mut plan);
             session.apply(plan).into_diagnostic()?;
             Ok(Some(reason))
         }
         generation::Outcome::Complete(value) => {
-            let (_, plan) =
-                plan_finish_expected(session, &work, &prepared, value, Some(&completed))?;
+            let (_, plan) = plan_finish_completion(
+                session,
+                &work,
+                &prepared,
+                value,
+                Some(&completed),
+                result.kind,
+            )?;
             session.apply(plan).into_diagnostic()?;
             Ok(None)
         }
@@ -2010,7 +2139,18 @@ pub(super) fn is_finished(
     match std::fs::symlink_metadata(path) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(miette::miette!("inspect final result: {error}")),
-        Ok(_) => verify_finished_prepared(&root, &work, &prepared).map(|()| true),
+        Ok(_) => match verify_finished_prepared(&root, &work, &prepared) {
+            Ok(()) => Ok(true),
+            Err(error)
+                if matches!(
+                    error.downcast_ref::<state::CompletionRefusal>(),
+                    Some(state::CompletionRefusal::ChangedObservations)
+                ) =>
+            {
+                Ok(false)
+            }
+            Err(error) => Err(error),
+        },
     }
 }
 
@@ -2391,6 +2531,24 @@ fn plan_finish_expected(
     result: Value,
     expected: Option<&Value>,
 ) -> miette::Result<(PathBuf, lk_vault::MutationPlan)> {
+    plan_finish_completion(
+        session,
+        work,
+        prepared,
+        result,
+        expected,
+        state::CompletionKind::Root,
+    )
+}
+
+fn plan_finish_completion(
+    session: &lk_vault::MutationSession,
+    work: &Work,
+    prepared: &Prepared,
+    result: Value,
+    expected: Option<&Value>,
+    kind: state::CompletionKind,
+) -> miette::Result<(PathBuf, lk_vault::MutationPlan)> {
     if prepared.context["purpose"]["extraction_scope"]["policy"] == "source-proposals-v1" {
         return Err(miette::miette!(
             "source observations support candidate screening; they cannot publish a final knowledge result"
@@ -2437,7 +2595,7 @@ fn plan_finish_expected(
             "final typed result exceeds the bounded result limit"
         ));
     }
-    let completed = work.capture_completion(session.root(), &prepared.resources)?;
+    let completed = work.capture_native_completion(session.root(), &prepared.resources, kind)?;
     if expected.is_some_and(|expected| expected != completed.result()) {
         return Err(miette::miette!(
             "completed observations changed during section finalization; result retained without publication"
@@ -2535,16 +2693,11 @@ fn plan_finish_expected(
     };
     let mut mutation = lk_vault::MutationPlan::default();
     prepared.guard_pages(&mut mutation);
-    completed.plan_seal(&mut mutation, session.root(), &result)?;
+    let final_before = completed.plan_seal(work, &mut mutation, session.root(), &result)?;
     let raw = serde_json::to_string(&result).into_diagnostic()?;
     let final_path = PathBuf::from(".lorekeeper/work")
         .join(&work.plan.id)
         .join("final.json");
-    let final_before = match std::fs::read_to_string(session.root().join(&final_path)) {
-        Ok(raw) => Some(raw),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(error) => return Err(miette::miette!("read final result: {error}")),
-    };
     mutation
         .publish_expected(session.root(), final_path, final_before, raw.clone())
         .into_diagnostic()?;

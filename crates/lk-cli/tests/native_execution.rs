@@ -2384,10 +2384,10 @@ fn build_extraction_behavior(discovery_handler: &str) -> String {
     behavior = behavior.replace("native=('--output-schema'", r#"result_role='--output-last-message' in sys.argv or ('--json-schema' in sys.argv and '--safe-mode' not in sys.argv)
 if result_role:
     prepared=json.loads((root/'interactive-request.txt').read_text().split('\nNative request:\n',1)[1])
-    if prepared['schema']=='native-finalize-results-v1':
+    if prepared['schema'] in ['native-finalize-results-v1','native-finalize-frontier-v1']:
         output={'results':[{'status':'complete','value':{'concepts':[]},'reason':None}]}
         with (root/'bounded-calls.jsonl').open('a') as stream:
-            stream.write(json.dumps({'action':'finish','work_id':prepared['completed']['work_id']})+'\n')
+            stream.write(json.dumps({'action':'finish','work_id':(prepared.get('completed') or prepared['frontier'])['work_id']})+'\n')
         if '--output-last-message' in sys.argv:
             Path(sys.argv[sys.argv.index('--output-last-message')+1]).write_text(json.dumps(output))
         else: print(json.dumps({'type':'result','subtype':'success','is_error':False,'structured_output':output}))

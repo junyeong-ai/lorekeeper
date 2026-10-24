@@ -232,6 +232,50 @@ pub(in crate::commands) fn finalization_request(
     }))
 }
 
+pub(in crate::commands) fn frontier_request(
+    config: &Config,
+    task: &QueueTask,
+    work: &Work,
+    frontier: &Value,
+) -> miette::Result<Value> {
+    if frontier["kind"] != "finalize-frontier"
+        || frontier["work_id"] != work.plan.id
+        || frontier["context"] != work.context
+        || !frontier["observations"].is_array()
+        || frontier["input_revision"]
+            .as_str()
+            .is_none_or(str::is_empty)
+    {
+        return Err(miette::miette!(
+            "native frontier transport differs from its captured Work"
+        ));
+    }
+    let purpose = &work.context["purpose"];
+    let kind: TaskKind = serde_json::from_value(purpose["task_kind"].clone()).into_diagnostic()?;
+    let target: TaskTarget = serde_json::from_value(purpose["target"].clone()).into_diagnostic()?;
+    if !matches!(
+        kind,
+        TaskKind::ExtractConcepts | TaskKind::SynthesizeConcept
+    ) || purpose["extraction_scope"]["policy"] == "source-proposals-v1"
+    {
+        return Err(miette::miette!(
+            "this Work cannot use native frontier finalization"
+        ));
+    }
+    let subject: Subject =
+        serde_json::from_value(work.context["subject"].clone()).into_diagnostic()?;
+    let contracts =
+        crate::commands::execution::finalization::generation_contracts(config, kind, target.kind)?;
+    Ok(json!({
+        "schema":"native-finalize-frontier-v1", "context_revision":work.plan.subject_revision,
+        "frontier":frontier, "contracts":contracts,
+        "max_input_bytes":work.max_input_bytes,"max_result_bytes":work.plan.max_result_bytes,
+        "max_response_bytes":super::generation::response_limit(task, &subject, &work.context, &work.plan.subject_revision, work.plan.max_result_bytes)?,
+        "response_schema":super::generation::schema(),
+        "instructions":format!("Finalize only this exact Work from the supplied complete current frontier. Its observations cover every planned inspection exactly once; no combined reduction or joint verdict has been recorded. Read every observation and evidence mapping. Compare claims only under their declared scope and effective time, and preserve every source question with attribution; an inherited resolution is not authority to resolve another open question. Processing concerns cannot be relabeled as source uncertainty. The frontier replaces work result/status setup reads; do not restart paid inspections or write a reduction output. Rust owns its distinct guarded completion proof and final publication. {}", super::generation::instruction()),
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

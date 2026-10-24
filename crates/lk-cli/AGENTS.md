@@ -100,6 +100,15 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   New work fixes reduction topology from the exact envelope plus each child's full result
   allowance; every child and its evidence mapping participates. Persist the policy and
   preserve missing-policy binary plans, node IDs and seals without rewriting them on resume.
+  Native queue extraction/synthesis may finalize a disjoint current frontier covering
+  every planned inspection when all observations, evidence and rules fit the existing
+  input limit and no processing blocker remains. Its distinct frontier seal never
+  marks a missing root complete or rewrites paid nodes. Missing/stale/oversized/blocked
+  coverage retains normal reduction; source-only work, sections and audits are excluded.
+  Revalidate the exact full request and completion proof after host execution and at apply.
+  Corrected observations require a newly generated result; preserve old proposals.
+  Authority replacement refuses corruption/dual seals and published work; journal its
+  prior final bytes and publication absence in the same mutation.
   Completion requires exact sealed typed results and source/work guards in the canonical
   publication journal. Keep the queue target's guard in its publication edit: a separate
   unchanged guard for the same target would reject the journal's own recovery.
@@ -147,6 +156,10 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   evidence. Actions record no observation, discharge no concerns and defer only their
   Work. Bind the receipt to the complete request and response/instruction contract; skip
   unchanged calls, revalidate before recording and preserve independent parallel results.
+  A valid decoded evidence output above its allowance records a typed exact capacity
+  rejection through the same fresh Work/node guards. It supplies no observation,
+  prevents unchanged paid retries and preserves independent progress. Transport errors,
+  malformed responses and corrupt state remain failures; never truncate the reply.
   Deferred audit subjects remain unassessed; verify receipts only for the other selected
   subjects and retain an incomplete overall result. Corrupt or unknown-scope state stops.
   A section `needs-action` response records an exact request-bound action receipt;

@@ -1,7 +1,7 @@
 # Prepared native results
 
-Use only when the native controller supplies `native-selected-results-v2` or
-`native-finalize-results-v1`. The complete request arrives through supervised stdin.
+Use only when the native controller supplies `native-selected-results-v2`,
+`native-finalize-results-v1` or `native-finalize-frontier-v1`. The complete request arrives through supervised stdin.
 It is neither semantic completion nor permission to process unrelated work.
 
 ## Selected tasks
@@ -21,6 +21,18 @@ processing concerns. Its `input_revision` is distinct from the publication
 `context_revision`. Generate from those observations without restarting preceding
 intake, discovery or full-source reading. Preserve source questions as attributed
 uncertainty; processing blockers do not become source questions or approval.
+
+## Complete observation coverage
+
+`native-finalize-frontier-v1` supplies `frontier` instead of `completed`. Its current
+observations jointly cover every planned inspection exactly once, but no combined
+root observation has been recorded. Read every supplied observation, its source
+questions, resolutions and evidence mapping. Compare claims under their stated scope
+and time; an inherited resolution does not resolve another open question. Generate
+one semantic result from the whole set, or return `needs-action` for a required step.
+Do not create a reduction output or restart paid reads. Rust checks complete disjoint
+coverage, request bounds and fresh observation revisions, then seals this distinct
+completion authority. This does not mark the missing root node complete.
 
 ## Semantic response
 
@@ -54,6 +66,6 @@ The complete request remains subject to `max_input_bytes`. `max_response_bytes`
 reserves native result metadata within `max_result_bytes`; complete assembled results
 are checked again. An oversized request defers or enters the existing exact Work
 protocol without clipping evidence/rules or rewriting paid plans. After the host,
-Rust reconstructs the current full request/root before recording, then apply validates
+Rust reconstructs the current full request and completion authority before recording, then apply validates
 publication scope again. Codex's explicit final-response file and Claude's terminal
 `structured_output` are the response authorities; tool logs and prose are not results.

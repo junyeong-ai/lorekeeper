@@ -479,7 +479,12 @@ setting can change between workflows without rewriting new semantic Work identit
 the live workflow still pins every configuration byte.
 
 New bounded plans group observations using request and maximum result sizes; saved
-plans resume with their existing topology. An observer unable to complete assigned
+plans resume with their existing topology. Native extraction/synthesis can finalize
+complete current observation coverage directly when all observations, evidence and rules
+fit the input limit. A distinct seal guards that result without creating or marking a
+missing reduction complete. Otherwise normal reduction remains available. Oversized
+valid evidence replies remain unrecorded and defer their exact request without another
+paid retry; independent work continues. An observer unable to complete assigned
 reading returns an identity-bound processing action instead of an observation.
 Native evidence reading and candidate screening return judgment fields only; Rust binds
 identities from the supervised invocation. Models do not transcribe native identities;
