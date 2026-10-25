@@ -6,422 +6,205 @@
 
 > **English** | **[한국어](README.md)**
 
-**Turn your scattered daily work into a knowledge wiki that grows itself.**
-Lorekeeper collects Gmail, Slack, Jira, Calendar, RSS and notes into source-linked Markdown knowledge, using links rather than embeddings. Rust owns collection, search and publication checks; a configured LLM host judges summaries, concepts and relationships.
+**Turn scattered work records into reusable knowledge you can trace to its sources.**
 
----
+Lorekeeper collects email, Slack, issues, documents and personal notes into a connected Markdown wiki.
+Claude Code or Codex judges summaries, concepts and relationships; the Rust CLI validates inputs, evidence and revisions before publication.
+Read it in Obsidian, ask an agent a question, or use the Markdown files directly.
+
+[Quick start](#quick-start) · [Use your knowledge](#find-and-use-your-knowledge) · [Sources](#sources) · [Execution](#agents-and-execution) · [Operations](#operations-and-completion)
 
 ## Why Lorekeeper?
 
-Growing knowledge needs continuing checks of cross-references, categories, duplicate candidates and competing claims. Lorekeeper automates reproducible checks and leaves evidence-based semantic judgments to explicit LLM work.
-
-> 📖 **New to the terms?** — **vault**: a folder of markdown files (i.e. your knowledge store) · **concept**: one page per topic · **link**: a `[Display](relative/path.md)` markdown link between pages (resolves in Obsidian, GitHub, and any OKF consumer).
-
-| | |
+| Recurring problem | What you can do with Lorekeeper |
 |---|---|
-| 📥 **Scheduled collection** | Select sources and an agent, then register OS jobs for recurring runs |
-| 🧹 **Cuts the noise** | Dedup, filters irrelevant items, splits *your* work into a work-log automatically |
-| 🧩 **Concept accumulation** | Reuse an existing subject after checking scope; preserve its names, aliases and evidence |
-| 🔗 **A connected knowledge graph** | Markdown links, backlinks, and clusters connect concepts |
-| ✅ **Completed work → knowledge** | Preserve completed tasks and notes; configured tasks collection and semantic processing feed daily pages, concepts and personal reviews |
-| 📈 **Compounding** | Weekly / monthly / quarterly / annual synthesis — value grows over time |
-| 🔑 **Reuse CLI login** | Uses existing Claude Code or Codex authentication; Lore needs no separate LLM API client |
+| Decisions are scattered across email, chat and documents | Collect source records and follow an interpretation back to its evidence |
+| Each investigation starts from scratch | Check existing names, aliases and scope, then accumulate evidence under the same concept |
+| Summaries lose conditions and uncertainty | Keep observations, claims and open questions distinct; reassess when evidence changes |
+| Records accumulate without helping future work | Search → read → follow sources and relationships |
 
-> Inspired by [Andrej Karpathy's LLM Wiki](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f): separate sources, derived wiki and writing conventions, then repeat ingest/query/lint. Lorekeeper uses `config.yaml` for collection/execution and the vault's `AGENTS.md` for page and evidence contracts.
+Connect work sources for a team's records, or start a personal knowledge store with local notes alone.
+The task board and personal work reviews are optional.
 
----
-
-## At a glance
+## How records become knowledge
 
 ```mermaid
 flowchart LR
-    S["Configured sources"] --> C["Collect · preprocess<br/>retain originals/observations"]
-    C --> Q["Typed semantic queue"]
-    Q --> A["Claude Code · Codex"]
-    A --> P["Validate input, revisions and evidence<br/>then publish"]
-    P --> V[("Markdown<br/>sources · concepts · reviews")]
-    V --> N[("SQLite discovery snapshot")]
-    N --> R["Search → body → evidence/relations<br/>review · correct"]
-    R -. "Reviewed resynthesis requests" .-> Q
+    S["Source records"] --> C["Collect · normalize<br/>Rust"]
+    C --> A["Summaries · concepts<br/>relationships<br/>Claude Code or Codex"]
+    A --> G["Input · evidence<br/>revision checks<br/>Rust"]
+    G --> W[("Markdown wiki")]
+    W -. "Search · review · reprocess" .-> A
 ```
 
-`lore` owns collection, execution ordering and guarded publication. Claude Code or Codex follows the shared `lore-process` skill to judge summaries, concepts and relationships. Markdown is authoritative; SQLite is a rebuildable search and navigation index.
-
----
-
-## Core ideas
-
-| Storage or stage | Responsibility |
+| What is stored | What it is for |
 |---|---|
-| Originals and source pages | Preserve manual originals/dependencies and collected RSS text separately; refetch is not historical restoration |
-| `daily/`, `wiki/documents/` | Source observations and documents; the pipeline owns structure and queues semantic work |
-| `wiki/concepts/` | Durable retrieval subjects with resolved names, aliases, evidence and supported relationships |
-| `wiki/explorations/` | Comparisons, judgments and open reviews with exact evidence revisions and retained prior decisions |
-| `me/`, period synthesis | Optional personal work-log/reviews, separate from weekly knowledge themes |
-| SQLite and `index.md` | Rebuildable discovery and a small entry guide; Markdown remains authoritative |
+| Source records and documents (`daily/`, `wiki/documents/`) | Read collected content alongside its summary |
+| Concepts (`wiki/concepts/`) | Accumulate evidence, explanations and relationships for a shared subject |
+| Explorations and reviews (`wiki/explorations/`) | Keep comparisons, competing claims, open questions and judgment history |
 
-Structure and semantic results have different owners. Reuse requires a matching
-input hash and completion marker plus the owned section; filled prose alone does
-not prove completion.
-Future dates do not materialize. `vault.locale` controls generated prose, while
-source text and source-written concept names retain their language. Established
-concept prose follows the [per-kind language policy](skills/lore-process/references/processing-kinds.md#output-language-all-kinds).
+These are default paths; configuration can change them. **Markdown is authoritative**;
+SQLite is a rebuildable search and navigation index. Retrieval uses names, text and explicit links rather than embeddings.
+Source bodies and concept names retain their language; generated prose and headings follow the vault's language policy.
 
-Exact source identities deduplicate repeated observations. Similar documents from
-different sources are not automatically merged. The model judges meaning; Rust
-validates input identity, revisions, evidence and publication. Passing structural
-checks does not establish complete semantic consistency or factual truth.
+### Different records, one shared subject
 
-## Reading path
+For example, an incident review and a design note might support the same retry policy:
 
-[First setup](#quick-start) → [Example output](#what-do-you-actually-get) → [Sources](#sources) → [Execution profiles](#agent-skills-and-execution-profiles) → [Scheduling](#scheduling).
-Use the [task references](#commands) for detailed command and evidence contracts.
+```mermaid
+graph LR
+    A["Incident review · document"] --> R["Retry policy · concept"]
+    B["Design note · document"] --> R
+    B --> I["Idempotency · concept"]
+```
+
+Similar names do not cause automatic merging. The agent checks existing names, aliases and actual scope before reuse.
+It can propose a new concept when the evidence supports one, or return no concepts.
+Competing claims remain reviewable rather than being settled by date or citation count alone.
+
+> Collection, semantic publication and completed review are different states. Passing structural checks does not prove that every claim is true or the entire corpus has been reviewed.
 
 ## Quick start
 
-> **Before you start, you'll need** — nothing exotic:
-> - 💻 **macOS or Linux** (Windows ships a PowerShell installer)
-> - 🤖 **Claude Code or Codex** — uses existing CLI authentication for summaries, concepts and relationships
-> - 🔑 **Credentials only for the sources you enable** — e.g. Google sign-in for Gmail/Drive/Calendar, a token for Slack
-> - 🗂️ **(optional) Obsidian** — for pretty graph browsing. Without it, the output is still plain markdown
->
-> 💡 The starter enables **one local note inbox without provider credentials**. Add RSS, work sources or personal tracking when needed. Summaries and concepts require an authenticated agent CLI. Set `execution.profiles.primary.engine` in the copied `config.yaml` to `claude-code` or `codex`.
+Start with **one local note** to check collection, processing and retrieval. This path needs no source-service credentials.
+
+- Use **macOS (Apple Silicon) or Linux (x86_64/ARM64)** and an authenticated **Claude Code or Codex** CLI. Lorekeeper uses that host's authentication.
+- **Obsidian is optional**. The output is ordinary Markdown.
+- A Windows installer is available; native agent jobs and `workflow` are supported on Unix.
+
+### 1. Install
 
 ```bash
-# 1) Install — binary + templates + skills for both hosts
 curl -fsSL https://raw.githubusercontent.com/junyeong-ai/lorekeeper/main/scripts/install.sh | bash
+```
 
-# 2) First setup — preserve an existing config.yaml and edit it
+This installs the binary, templates and agent skills. See [installation](skills/lore-ingest/references/installation.md#install) for Windows and source builds.
+For an existing installation, follow [the update procedure](skills/lore-ingest/references/installation.md#update-and-repair) rather than bootstrapping again.
+
+### 2. Choose a vault and agent
+
+```bash
 LORE_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/lorekeeper"
 cp -n "$LORE_CONFIG_DIR/config.starter.yaml" "$LORE_CONFIG_DIR/config.yaml"
-${EDITOR:-vi} "$LORE_CONFIG_DIR/config.yaml"  # set vault.root, timezone, locale and identity
+${EDITOR:-vi} "$LORE_CONFIG_DIR/config.yaml"
+```
 
-# 3) Validate locally and generate the knowledge-writing contract
+An existing `config.yaml` is preserved. Set these values for your environment:
+
+| Setting | What to choose |
+|---|---|
+| `vault.root` | The folder that will hold your knowledge: the vault |
+| `vault.timezone`, `vault.locale` | Date timezone and generated language (`ko` or `en`) |
+| `identity` | Your name and email |
+| `execution.profiles.primary.engine` | The authenticated `claude-code` or `codex` host |
+
+```bash
 lore validate
 lore schema
 mkdir -p "$(lore config vault-root)/inbox"
 ```
 
-Put one note in the vault's `inbox/`, then collect it. `inbox_dir: inbox` follows
-your selected `vault.root`. The starter does not need the provider credential wizard.
+`validate` checks local configuration. `schema` generates the wiki's writing contract, `AGENTS.md`.
+See [initial setup](skills/lore-setup/references/config.md#initial-setup) for config selection and authentication.
+
+### 3. Add a note and run
+
+Put a Markdown note in the selected vault's `inbox/`. The starter's `inbox_dir: inbox` follows `vault.root`.
 
 ```bash
-# 4) Check input access, then collect for real
-lore ingest --dry-run
-lore run daily
+lore ingest --dry-run   # check input access without writing pages
+lore run daily         # collect → process → publish and verify
 ```
 
-`lore run daily` collects sources, runs the selected agent and verifies semantic
-publication. Collection alone does not complete knowledge processing. Then verify:
+Use `lore ingest` for collection alone, or `lore run process` for pending semantic work without collection.
+Large inputs may need several calls and runs; exhausted budgets and deferred work remain incomplete.
+
+### 4. Check the result and evidence
 
 ```bash
 lore queue check
 lore wiki reviews --check
-lore wiki search "your note's topic" --json
-
-# 5) Optional automation: generate definitions, then register with the OS
-lore schedule > lorekeeper.cron
-#    review and merge with crontab -e; on macOS see "Scheduling" below
+lore wiki search "your note's main subject" --json
 ```
 
-`config.example.yaml` is the full option catalog, with every source disabled.
-Copy only the blocks you need into your real `config.yaml`, fill in their scope and
-account values, then enable them. `/lore-setup` helps with those choices and ID discovery.
-For an authenticated source, run `lore init credentials` and then
-`lore ingest --dry-run <source-id>`. Definition generation, OS registration and an
-actual run are separate steps; follow [Scheduling](#scheduling).
+Open the returned documents and concepts, then follow their source evidence.
+Distinguish unfinished work reported by `queue check` from reassessment reported by `reviews --check`.
+Retrieval follows below; [operations and completion](#operations-and-completion) explains the other status checks.
 
-### Binary documents and large inputs
+## Find and use your knowledge
 
-For DOCX, XLSX and PDF on macOS/Linux, run `lore input install DIRECTORY` and merge its printed
-configuration. On Apple Silicon with macOS 14 or later,
-`lore input install-vision VISION_DIRECTORY --python python3.12` installs PaddleOCR-VL 1.6.
-With `vision` configured, PDFs retain native text and visual recognition of every page
-by default. Choose `pdf: {mode: native}` or explicit physical pages to control cost.
-Tesseract literal-text OCR is also available. Recognition is not semantic approval.
+### Ask an agent
 
-Check installation with `lore input check` and projections with `lore input inspect FILE.pdf`.
-Original entries default to 32 MiB; explicitly raise `ingest.originals` limits for larger files.
-`ingest.inputs` admits serialized normalized/projected input up to 64 MiB per source and
-256 MiB per run by default. Manual inboxes attempt up to `params.max_entries_per_run`
-entries (default 2048, range 1..2048) and continue pending inputs on later runs. Exact
-publication receipts skip unchanged bundles only when processing rules and document
-ownership still match; semantic completion remains separate. An indivisible input
-closure that exceeds a limit is refused. Original, projected-input and model-request
-limits are separate; none caps total process memory.
-Projection size, page count and execution time have separate bounds. Retries reuse
-verified derived caches; `inspect` and `--dry-run` never write them. See
-[preprocessing configuration and scope](skills/lore-setup/references/config.md#document-preprocessing)
-for memory limits and preservation of tables, formulas, pages and sheets.
+In Claude Code, try `/lore-wiki query What evidence supports our retry policy?`.
+In Codex, select `$lore-wiki` and ask your question.
 
----
+| What you want to do | Skill |
+|---|---|
+| Answer from evidence, examine relationships or competing claims | `lore-wiki` |
+| Capture an insight from the current work | `lore-wiki` with `capture` |
+| Extract knowledge from repository documents and code | `lore-extract`: `scan → run → audit` |
+| Add sources and configure the vault | `lore-setup` |
+| Collect, schedule or operate | `lore-ingest` |
+| Complete pending summaries, concepts and synthesis | `lore-process` |
+| Read today's agenda, knowledge brief and completed work | `lore-day` |
 
-## What do you actually get?
+With the personal board enabled, use `lore agenda`, `lore task add` and `lore task done --note` to record work and learning.
+The configured tasks source collects completed records for semantic processing.
+Weekly knowledge synthesis and personal performance reviews are separate features.
 
-Let's walk through a hypothetical. **Sumin**, an AI engineer, drops a RAG troubleshooting note into the vault's `inbox/`.
-
-> The page examples below show **key fields only** — real files also carry housekeeping frontmatter such as `updated`.
-
-### 📝 Input — `inbox/rag-retrieval-quality.md`
-
-```markdown
-# RAG pipeline: fixing low-recall retrieval
-
-Problem: ~30% of queries retrieved irrelevant chunks, so the generator hallucinated.
-Cause: (1) 2000-token chunks were too coarse — a chunk's embedding averaged several
-       topics. (2) We embedded the raw conversational question.
-Design: a vector database (Vector DB) stores embeddings and retrieves records similar to a query vector.
-Fix: re-chunk to ~400 tokens, use query rewriting to make a standalone question, switch
-     similarity L2 → cosine. Recall@5: 0.62 → 0.91.
-```
-
-### ▶️ Run
-
-```console
-$ lore ingest
-▸ notes (manual)
-  extracted: 1 items
-  ✓ wrote: wiki/documents/rag-pipeline-fixing-low-recall-retrieval.md (document)
-
-Done. 1 pages written, 0 personal items tracked.
-```
-
-The page exists, but its `## Summary` / `## Related Concepts` are still empty — `lore ingest` queued the LLM work:
-
-```console
-$ lore queue status
-  [current] sum-… (summarize)        → wiki/documents/rag-pipeline-…
-  [current] ext-… (extract-concepts) → wiki/documents/rag-pipeline-…
-queue: 2 current, 0 done, 0 stale, 0 missing-target, 0 unreadable across 2 task(s)
-```
-
-Run **`lore run process`**. The configured Claude Code or Codex host follows the shared skill, while Rust checks source and target revisions before publication. After successful completion, `lore queue status` reports `0 current` and the page is filled:
-
-### ✅ Result ① — the document page (summary + concept links filled in)
-
-```markdown
----
-id: rag-pipeline-fixing-low-recall-retrieval
-type: document
-title: "RAG pipeline: fixing low-recall retrieval"
-created: 2026-06-13
-tags: ["document"]
----
-
-## Summary
-Re-chunking from 2000→400 tokens, rewriting conversational questions into standalone
-queries, and switching similarity from L2 to cosine lifted Recall@5 from 0.62 → 0.91.
-This note reports a joint intervention; it does not isolate the effect of each
-change or establish a ranking across other environments.
-
-## Content
-… (normalized, preserved from the original) …
-
-## Related Concepts
-- [Vector Database](../../wiki/concepts/vector-database.md)
-- [Query Rewriting](../../wiki/concepts/query-rewriting.md)
-```
-
-### ✅ Result ② — concept pages **converge** (the key payoff)
-
-Days later Sumin drops another note, *"Choosing a vector database for production."* "Vector database" appears in both notes — but instead of forking a new page, it **joins the existing concept**:
-
-```markdown
----
-id: vector-database
-type: concept
-title: "Vector Database"
-aliases: ["Vector DB"]
-category: ai-ml
-source_count: 2          # ← two documents cite this one concept
----
-
-## Synthesis
-A vector database stores embeddings and retrieves records similar to a query vector. The second note chose pgvector in an existing
-PostgreSQL environment to reduce the cost of operating a separate system. Keep the
-conditions of that decision separate from the first note's retrieval-quality observation.
-
-## Sources
-<!-- lorekeeper:concept-sources:v1 -->
-
-Run `lore wiki prepare` for a snapshot ID, then `lore wiki citations EXACT_CONCEPT_PATH --snapshot ID` for complete source citations.
-```
-
-> This example assumes both notes support the same subject and scope. The registered `Vector DB` alias resolves to that owner; similar names alone never authorize merging. Extracting no concepts is also valid.
-
-Each source's `concept_policy` controls admission. `disabled` collects documents and
-summaries without extracting concepts; `existing-only` links published owners;
-`supported-new` also permits supported new subjects. Omission means `disabled`.
-`focus` separately limits subject scope. The policy enters task identity and is
-enforced by native publication, rather than by prompts alone.
-Disabling extraction retains established citations; retract mistaken citations through explicit review and correction.
-
-### ✅ Result ③ — disclose detail as needed
+### Explore through the CLI
 
 ```bash
-lore wiki prepare                              # verify current originals and return a snapshot ID
-lore wiki search "Vector DB" --snapshot <id> --limit 10 --json
-lore wiki context wiki/concepts/vector-database.md --snapshot <id> --limit 10
-lore wiki neighbors wiki/concepts/vector-database.md --snapshot <id> --type document --limit 10
-lore wiki read wiki/concepts/vector-database.md  # outline → selected --section ID
-lore wiki citations wiki/concepts/vector-database.md --snapshot <id> --limit 20
-lore wiki reviews                              # related judgments and unresolved reviews
+lore wiki search "retry" --json
+lore wiki read wiki/concepts/retry-policy.md
+lore wiki prepare
 ```
 
-Narrow candidates by names, aliases and text, then expand selected sections,
-relationships and direct evidence. Use `wiki search --body` for literal body text,
-`--spacing` for whitespace differences, and `wiki browse --category ... --tag ...`
-for metadata filters. Candidates, ordinary links and citations have different
-meanings; ranking and citation counts are not confidence scores.
-Compose search with `--repository ID` or `--provider TYPE --namespace ID`, and
-`--path-prefix` to narrow declared document ownership. `--from`/`--to` constrain
-declared creation dates, not collection time. `wiki neighbors` expands distinct
-connected pages; `wiki links` inspects individual occurrences.
+Replace the `wiki read` path with an actual search result. Use the snapshot ID returned by `wiki prepare`
+to inspect relationships and citations from the same capture:
 
-Each search/browse metadata facet returns up to 20 values by default, plus its
-distinct-value total and next offset. Follow `--facet-limit` and `--facet-offset`
-independently of hit `--offset`. Each hit previews at most 3 scoped reviews with
-complete totals and state counts; expand the rest through `wiki context` in the
-same snapshot.
-
-`index.md` is a small entry guide; `.lorekeeper/search.sqlite` holds discovery.
-Reuse a snapshot and `next_offset` for a session, then verify evidence with returned
-revisions. Replacing the one current snapshot makes its old ID unavailable.
-Omitting `--snapshot` reads live Markdown. `wiki prepare` verifies the complete
-current corpus, so it need not run before every query.
-
-See [query, relationship and original lookup](skills/lore-wiki/references/query.md)
-and [conflict review](skills/lore-wiki/references/audit.md) for detailed procedures.
-Recency or citation frequency cannot settle a conflict; preserve unresolved
-judgments and reassess evidence that changes.
-
-### ✅ Result ④ — a knowledge graph forms
-
-These are the concept citations supported by the example documents.
-Clusters and `suggest-links` supply candidates; meaningful relationships require evidence review.
-
-```mermaid
-graph LR
-    A["RAG retrieval-quality note"] --> V["Vector Database"]
-    A --> Q["Query Rewriting"]
-    B["Choosing a production vector DB"] --> V
+```bash
+lore wiki context wiki/concepts/retry-policy.md --snapshot SNAPSHOT_ID --limit 10
+lore wiki citations wiki/concepts/retry-policy.md --snapshot SNAPSHOT_ID --limit 20
 ```
 
-### 📈 Over time — compounding
-
-```mermaid
-flowchart LR
-    D["Daily<br/>ingest + concepts accrue"] --> W["Weekly<br/>theme synthesis · review"]
-    W --> Mo["Monthly<br/>review"]
-    Mo --> Q["Quarterly<br/>review"]
-    Q --> Y["Annual<br/>review"]
-    style D fill:#f0fdf4,stroke:#22c55e
-    style Y fill:#fef2f2,stroke:#ef4444
-```
-
-Collection connects sources and concepts; period synthesis uses ready daily records or child periods. Changed inputs can require renewed synthesis. Weekly knowledge themes and personal performance reviews remain separate outputs.
-
----
+Replace `SNAPSHOT_ID` and the path with actual values. Narrow search by body, aliases, source ownership, dates or tags.
+Follow `next_offset` when you need the complete list. Reuse the snapshot, then refresh after new publication.
+See [search, relationships and originals](skills/lore-wiki/references/query.md) for the complete procedure.
 
 ## Sources
 
-| Type | Use for | Auth |
+| Type | Records collected | Authentication or prerequisites |
 |---|---|---|
-| `gmail` | Email digest (filter by label / sender) | Google OAuth |
-| `slack-channel` | Whole channel = team activity (threads, bot filter, watch_users) | Slack token |
-| `slack-search` | Keyword-trend search | Slack user token |
-| `jira` | Current issues selected by JQL (updated time/current assignee, ADF→Markdown) | Jira API |
-| `confluence` | Spaces and pages selected by CQL (storage format→Markdown) | Atlassian OAuth or API token |
-| `google-calendar` | Schedule + meeting notes (auto-extracted from Drive links) | Google OAuth |
-| `google-drive` | Curated docs in a Drive folder | Google OAuth |
-| `rss` | Vendor blogs / news → concepts (no auth, multi-feed) | none |
-| `nodex` | A project repository's own decision and learning records → concepts (needs `nodex.toml` and nodex `>=0.63,<0.64`; see [binary selection and evidence versions](skills/lore-setup/references/config.md#nodex-binary-selection)) | none |
-| `manual` | Inbox Markdown, text and HTML; optional DOCX, XLSX, PDF and image recognition | No source credentials; binary decoding needs an optional runtime |
-| `tasks` | Your own finished tasks — what `lore task` closed becomes the day's page | none |
+| `gmail` | Mail selected by labels, senders and other filters | Google OAuth |
+| `slack-channel` | Channel messages and threads | Slack token |
+| `slack-search` | Messages matching a search | Slack user token |
+| `jira` | Issues selected by JQL | Jira API authentication |
+| `confluence` | Spaces and pages selected by CQL | Atlassian OAuth or API token |
+| `google-calendar` | Events and supported Drive meeting notes | Google OAuth |
+| `google-drive` | Documents from a selected folder | Google OAuth |
+| `rss` | Feeds and optional full article text | None |
+| `nodex` | A project repository's decision and learning records | `nodex.toml`, nodex `>=0.63,<0.64` |
+| `manual` | Local Markdown, text, HTML and supported binary documents | No authentication for basic inputs |
+| `tasks` | Tasks and notes completed through Lorekeeper | None |
 
-Define several sources of the same type when needed (e.g. `team-slack`, `ai-news`).
-Daily aggregates use `<daily>/<source-key>/DATE.md`; document-unit manual, nodex and
-Drive sources share `<wiki>/documents/` with stable document identities.
-Full reference: [`config.example.yaml`](config.example.yaml).
+[`config.example.yaml`](config.example.yaml) is the full option catalog, with every source disabled.
+Copy only needed blocks into your actual config, fill in scope and accounts, then enable them. Multiple sources can share a type.
+Use `lore init credentials` for service authentication and `lore ingest --dry-run SOURCE_ID` to check access.
 
-To add external knowledge, copy the catalog's `ai-news` or `tech-news` block into your actual config and enable it. The selected feeds cover official announcements, model methods, AI implementation, product evaluation and Korean engineering accounts; additional labs, newsletters and aggregators are optional. `fetch_full_text` retrieves articles from short feeds, but access failures retain only the feed text. `focus` guides summaries and concept extraction without filtering raw collection. Current feed listings and query caps guarantee neither complete history nor factual accuracy.
+- **DOCX, XLSX, PDF and images** need optional decoding or OCR. Follow [document preprocessing](skills/lore-setup/references/config.md#document-preprocessing).
+- **Concept scope** uses each source's `focus` and `concept_policy`. Omitted policy disables extraction. See the [full configuration](config.example.yaml).
+- **Past dates and large inboxes** have explicit [collection and resume contracts](skills/lore-ingest/references/ingestion.md). A past-date refetch is not restoration of the original historical input.
 
-New sources register adapter types, configuration, document identity, observation scope
-and partial-failure contracts. Adding a configuration name alone does not install an
-adapter. There is no dedicated YouTube source; see [configuration](skills/lore-setup/references/config.md)
-for Drive/web format and historical-scope limits.
+## Agents and execution
 
-## Commands
-
-```bash
-lore validate                    # validate configuration
-lore run daily                   # collect → process → reconcile/discover → resume ready periods
-lore run process                 # process already collected semantic work
-lore run knowledge               # one configured semantic audit batch
-lore ingest <source-id>          # collect one source; does not rebuild the cross-source work-log
-lore status                     # subsystem status and follow-up commands
-lore health --json              # source collection times and overdue state
-lore queue check                # unfinished work, staged results and interrupted publication
-lore wiki reviews --check       # invalid reviews/evidence drift; open judgments are separate
-lore graph lint                 # structural violations and observations
-lore maintenance --dry-run      # preview retention-based cleanup
-```
-
-The command/flag authority is `lore --help` and `lore <command> --help`.
-Continue with the reference for your task:
-
-| Task | Detailed procedure |
-|---|---|
-| Search, body text, relationships, citations and originals | [Query](skills/lore-wiki/references/query.md) |
-| Add files/URLs and migrate imported document identity | [Add](skills/lore-wiki/references/add.md) |
-| Collection, original preservation, retries and date recovery | [Ingestion](skills/lore-ingest/references/ingestion.md) |
-| Correct names, tags, categories/lifecycle or resynthesize concepts | [Curation](skills/lore-wiki/references/curation.md) |
-| Review relationships, contradictions and duplicate meanings | [Audit](skills/lore-wiki/references/audit.md) |
-| Recurring semantic review, progress and resumption | [Maintenance](skills/lore-wiki/references/maintenance.md) |
-| Partition and reduce large evidence | [Bounded work](skills/lore-process/references/bounded-work.md) |
-| Retain originals, repository captures and working caches | [Source retention](skills/lore-extract/references/manifest.md#source-retention) |
-
-## Agent skills and execution profiles
-
-Canonical skill bodies and references live under `skills/`. Claude metadata lives
-in `agents/claude.json`; Codex invocation policy uses `agents/openai.yaml` where
-needed. Deployment generates host entry files from those shared procedures.
-Following the [official skill authoring guide](https://platform.claude.com/docs/en/agents-and-tools/agent-skills/best-practices),
-entry files describe responsibilities and routing; detailed contracts are directly linked references.
-
-| Skill | Responsibility |
-|---|---|
-| `lore-process` | Queue summaries, concepts, synthesis and reviews; guarded publication |
-| `lore-setup` | Sources, configuration, authentication, first processing and scheduling |
-| `lore-wiki` | `query`, `add`, `capture`, `audit`, `curate`, `maintain`, `status` |
-| `lore-extract` | Repository knowledge extraction: scan → run → audit |
-| `lore-ingest` | Collection, period synthesis, status, scheduling and maintenance |
-| `lore-day` | Agenda, knowledge briefing, tasks, reminders and day closing |
-
-In Claude Code use `/lore-wiki query ...`; in Codex use `$lore-wiki`.
-`lore self deploy --skills user --agent codex` deploys interactive skills to Codex.
-`--agent both` selects both hosts, and `--skills project` selects the current project.
-Claude discovers `.claude/skills`; Codex discovers `.agents/skills`.
-Unattended jobs use verified copies under `<data>/skills/<engine>/` independently
-of interactive deployment. Missing or modified required files refuse execution.
-
-Supported CLI contracts are Claude Code `>=2.1.303,<3` and Codex `>=0.163.0,<1`.
-Shared skills and typed results stay independent of host-specific authentication,
-tools and sandbox adapters. Publication checks do not replace OS access controls.
-
-For example, select Claude for daily processing and Codex for semantic review:
+Source collection and LLM execution have separate settings. Select profiles by operation:
 
 ```yaml
 llm:
   provider: queue
 execution:
   default_profile: primary
-  work:
-    extraction_context: progressive
-    max_input_bytes: 262144
-    max_result_bytes: 32768
-    max_calls: 64
-    max_consecutive_calls: 4
   profiles:
     primary:
       engine: claude-code
@@ -433,359 +216,87 @@ execution:
     knowledge: reviewer
 ```
 
-Selection is explicit `--profile`, then operation profile, then default profile;
-an unavailable host never switches automatically. Set optional `executable`, `model`,
-Claude `config_directory` or Codex `profile` only where needed. `execution.work` bounds
-request/result JSON bytes and calls per run; large evidence uses fresh inspection
-and reduction sessions. These are not token or billing caps. Default
-`extraction_context: progressive` examines bounded cards for the complete candidate set,
-then reads selected bodies and their required reviews/evidence. It does not certify
-unselected bodies; deferred decisions block extraction completion. The retained source
-still requires complete reading, and candidate/review changes remain guarded. Select
-`full-context` to read every retrieved candidate body; profiles can override this setting
-under `work`. See [extraction discovery](skills/lore-process/references/discovery.md)
-for manual processing and resumption.
-Before sending candidate bodies to a model, `lore work cost --task-id ID` reports
-complete candidate/packet counts, per-query matches, compact JSON bytes and remaining
-screening coverage. Optional `max_screening_batches` defers oversized incomplete
-screening without removing candidates; completed ledgers remain usable. These counts
-are not tokens, prices or semantic judgments. Unfinished work is
-preserved and reported as failure. See [execution configuration](skills/lore-setup/references/config.md#execution-profiles)
-for profile-specific limits and manual selection, and [bounded work](skills/lore-process/references/bounded-work.md)
-for result contracts.
+Selection is `--profile` → operation-specific `operations` → `default_profile`.
+Failure never switches hosts automatically. Optional model and effort settings belong to each host.
+Supported CLI contracts are Claude Code `>=2.1.303,<3` and Codex `>=0.163.0,<1`.
 
-Small summaries, event refinement and theme extraction use one structured request with
-source text, scoped reviews and applicable generation rules. Saved bounded work resumes
-its observations and binds fresh reviews and evidence separately before using those same section rules. A complete request exceeding
-the input bound defers only that target; independent work continues. The model returns
-a section body. Rust owns task identity,
-revision checks, staging and publication. A required read or review defers the task without
-calling the same unchanged request again; independent work continues. Concept extraction and
-synthesis retain tools with a schema-constrained semantic response; Rust assembles the
-original task/result metadata and owns finish, staging and publication. Audits retain
-their interactive finalization protocol. Native queue selections and
-completed extraction/synthesis finalizers receive [prepared native input](skills/lore-process/references/native-input.md)
-through supervised stdin, with exact captured metadata, evidence and applicable shared rules.
-Native result workers do not recreate result metadata/files or call finish/apply.
-An explicit needs-action response retains work and suppresses unchanged calls.
-This replaces routine setup reads; targeted identity checks and explicit repair remain available.
-Changed scope or completed observations refuse before sealing and publication.
+Set these budgets under `execution.work`; a profile's `work` overrides only the specified fields.
 
-`max_consecutive_calls` defaults to 4 fresh attempts for an admitted exact Work or
-screening phase, within the same total call and parallel limits. Durable fair order
-survives restart; publication, deferral, phase changes and writer-wait replanning end
-admission. Setting 1 uses one-attempt turns. Like call/parallel limits, this operational
-setting can change between workflows without rewriting new semantic Work identities;
-the live workflow still pins every configuration byte.
-
-Native reductions retain inherited questions with their exact kind, text and evidence in
-Rust. Models resolve only current local question keys; closed resolution history is
-read-only. Saved Work and standalone record formats remain unchanged.
-
-New bounded plans group observations using request and maximum result sizes; saved
-plans resume with their existing topology. Native extraction/synthesis can finalize
-complete current observation coverage directly when all observations, evidence and rules
-fit the input limit. A distinct seal guards that result without creating or marking a
-missing reduction complete. Otherwise normal reduction remains available. Oversized
-valid evidence replies remain unrecorded and defer their exact request without another
-paid retry; independent work continues. An observer unable to complete assigned
-reading returns an identity-bound processing action instead of an observation.
-Native evidence reading and candidate screening return judgment fields only; Rust binds
-identities from the supervised invocation. Models do not transcribe native identities;
-freshness, scope and complete stored-result bounds remain enforced.
-Unchanged requests defer without another call; independent work continues, while the
-node and assessment remain incomplete. Workers can cite native-verified assigned ranges
-without guessing finer offsets. Native `lore run process --json` reports
-per-step JSON sizes and preparation, agent invocation and validation wall times in
-`work_steps`. Unobserved values are `null`; these are not token counts or billed cost.
-`mutation_access` reports native in-process writer acquisition, waiting and recovery;
-queue-planning time excludes those acquisitions. Bounded step and planning progress
-also appears on stderr as JSON events; stdout remains the single final native result.
-See [native run measurements](skills/lore-process/references/bounded-work.md#native-run-measurements)
-for coverage and limits.
-
-Queue planning validates the full task inventory, owners and dependencies, then
-prepares targets in fair order. Section/progressive work preparation is bounded by
-remaining calls and parallel capacity; possible interactive batches retain the
-64-target and input-byte bounds. Discovery computation is shared within
-that checkpoint while preserving each task's complete candidates and revisions;
-recording freshly validates inputs after execution. Unprepared work stays pending.
-
-`lore queue apply --json` reports each result's task, exact files, validation scope
-and applied, dropped or rejected outcome. A rejection with verified ownership and
-scope defers that task and its dependents while native execution can continue
-independent tasks and ready audits. The job remains incomplete and nonzero.
-An unchanged rejected attempt does not trigger another agent invocation; deterministic
-application is still retried. Corrected conditions or proposals are revalidated;
-stale evidence requires fresh reading and a regenerated answer. Corrupt records,
-unknown ownership, storage errors and host failures stop further processing.
-
-`llm.provider: queue` retains semantic requests separately from host selection.
-`noop` creates no LLM work. Search, navigation and deterministic collection need no agent.
-
----
-
-## Install · build
-
-```bash
-# Windows (PowerShell)
-irm https://raw.githubusercontent.com/junyeong-ai/lorekeeper/main/scripts/install.ps1 | iex
-
-# Build from source
-cargo build --release && ./target/release/lore --help
-```
-
-Install flags: `--version`, `--install-dir`, `--data-dir`, `--skill {user,project,none}`, `--agent {claude-code,codex,both}`, `--from-source`, `--force`, `--yes`, `--dry-run` (`--help` lists them all).
-
-The installer deploys `config.starter.yaml` and `config.example.yaml` in the config
-directory and preserves your `config.yaml`. Beside them, `data-dir` records the
-installation path and `deployed-skills` records deployed skills. These automatic
-records support updates and removal; they contain no credentials.
-
-## Tasks and personal reviews
-
-```bash
-lore agenda                       # today: what is committed, what woke, what is due
-lore task add "review the spec" --state today
-lore task add "answer the index question" --link https://acme.slack.com/archives/C123/p1755600000 --label thread
-lore task done 7k2p --note "refresh tokens rotate; retrying after a committed rotation kills the grant"
-lore task sync                    # record what you changed in Obsidian
-```
-
-The board is `<personal>/tasks.md` — ordinary markdown checkboxes under
-`Today / Proposed / Next / Waiting / Someday`. Tick one on your phone or drag a line
-to another section; the next `lore task sync` or task mutation command records that change.
-The heading is its state, and `Proposed` means it has not been accepted yet.
-
-`lore task done` stores the completion and `--note` in the transition log. Ingesting
-the configured tasks source over a window containing that completion date creates
-that day's daily page; `/lore-process`
-handles the queued summary and concept extraction. Full-source ingestion also
-updates the work-log, and the scheduled daily pipeline runs ingestion and semantic
-processing together. **What you did becomes evidence alongside what you read.**
-
-Personal reviews verify each published work-log against its actual personal
-contribution inputs. Changed inputs after filtered collection, or known work
-without a log, block synthesis. Full-source `lore ingest --date YYYY-MM-DD` can
-refresh that binding only when it actually publishes that day's log. Empty or
-unavailable historical input does not authorize deleting or adopting a retained
-log. History outside the observed query remains unverified.
-
-## Updates and removal
-
-```bash
-lore self status      # is every deployed copy still the one this binary carries (non-zero if not)
-lore self update      # replace the binary with a release, then redeploy interactive/runtime skills, templates and AGENTS.md
-lore self deploy      # redeploy only — the repair `self status` reports
-lore self uninstall   # remove what was installed; the vault is never touched
-```
-
-The interactive/runtime skills, templates and both config examples are **compiled into the binary**, and deployed copies can drift; `lore self status` checks them, while `lore self deploy` writes the copies. `lore self update` uses the same settlement check as `lore queue check`: pending work, unreadable or unparseable input, staged results and interrupted publication all block replacement. `--force` permits inspectable unfinished work but never bypasses configuration or storage inspection errors. Older releases are refused unless explicitly selected with `--version`.
-
-Unix CLI commands retain shared claims on their selected installation resources. The entire
-`run`, including collection, and participating `workflow` children are protected. Deployment,
-replacement and removal refuse while another vault uses the same binary, runtime or skills;
-`--force` never overrides active claims. After downloading, updates reacquire protection and
-recheck configuration, binary bytes and queue settlement. Adjacent `.lorekeeper-*.lock` files
-are persistent operational state: never unlink them during execution or cache cleanup.
-Creating them requires write access to the resource's parent directory.
-Schedule rendering does not acquire installation claims or create files.
-
-Use `lore self update` for existing Unix installations. Bootstrap scripts, `cargo install`,
-manual binary replacement and older versions do not participate in installation locking.
-Before reinstalling through those paths, pause schedules and manual sessions for every vault
-sharing the installation, wait for their children to exit and require each vault's
-`lore queue check` to pass. After replacement, run `lore self deploy` and `lore self status`
-before resuming work.
-
-Custom templates use `markdown_text` for titles/authors, `markdown_fragment` for source
-bodies, and `url | markdown_link(label)` for source links. Bodies are parsed independently
-so headings, references, footnotes and code blocks cannot take over later generated sections.
-EOF-terminated HTML comments/scripts are displayed as `html` code blocks instead of inventing closing tags.
-
----
-
-## Credentials
-
-Environment variables or `<vault>/.lorekeeper/credentials.json` (0600). Env vars take precedence over the file.
-On macOS and Linux, credential and lock files granting group or other-user permissions
-are refused. Restrict manually created or restored files with `chmod 600` before use.
-Writes always use `0600`; the setup wizard refuses an unreadable or malformed existing
-store rather than initializing it with empty credentials.
-For vaults using the same accounts, optional `credentials.file` selects one shared
-store; relative paths resolve against the config file. Cooperating processes lock
-OAuth refresh and successor persistence together. Do not copy rotating refresh
-tokens into independent files; other applications should use their own OAuth app.
-
-```bash
-lore init credentials   # interactive wizard — Google tokens minted via browser OAuth
-```
-
-- **Google**: `LORE_GOOGLE_CLIENT_ID/SECRET/REFRESH_TOKEN` — Gmail/Drive/Calendar **read-only** scopes. Needs a "Desktop app" OAuth client.
-- **Slack**: `LORE_SLACK_TOKEN` (bot `xoxb-`) or `LORE_SLACK_USER_TOKEN` (`xoxp-`). `slack-search` requires the user token.
-- **Atlassian** (Jira/Confluence): `LORE_ATLASSIAN_SITE_URL` + `LORE_ATLASSIAN_PAT` (Data Center), or `+ LORE_ATLASSIAN_EMAIL` + `LORE_ATLASSIAN_API_TOKEN` (a Cloud CLASSIC token, addressed at the site). Add `LORE_ATLASSIAN_CLOUD_ID` for a SCOPED token — that value is what selects the gateway route, and without it the token is treated as classic and sent to the site. OAuth is deliberately not env-supplied — its refresh token rotates and must be persisted, so mint it with `lore init credentials`.
-
-> The default credential file is excluded from Git. Keep explicitly selected shared stores out of commits and synchronization too.
-
----
-
-
-
-
-## Scheduling
-
-```bash
-lore schedule > lorekeeper.cron   # Linux: review, then merge with crontab -e
-lore schedule --format launchd --bin "$(command -v lore)"   # macOS
-```
-
-`lore schedule` prints definitions; it does not register OS jobs. Preserve existing
-cron entries. On macOS, save each plist at its named LaunchAgents path, create the
-log directory, then run `launchctl bootstrap gui/$(id -u) <absolute-plist-path>`.
-Inspect registration and an actual execution. After changes, boot out existing
-jobs before registering replacements; unload disabled jobs too. `self uninstall`
-does not unregister OS jobs.
-
-If the vault is in a protected macOS folder such as Documents, Desktop or Downloads,
-the scheduled `lore` process needs permission to access that folder. Approval for a
-terminal app does not establish permission for launchd execution. Start the actual
-job, approve any macOS permission prompt, then inspect its logs and exit status.
-A binary update that changes its signing identity may require approval again.
-Signature verification or a successful `--version` does not establish actual vault access.
-File mode `0600` does not replace this OS consent. See
-[Apple's folder-access documentation](https://developer.apple.com/documentation/bundleresources/information-property-list/nsdocumentsfolderusagedescription).
-
-Scheduled jobs execute native Rust commands:
-
-| Schedule | Command |
+| What to adjust | Setting and meaning |
 |---|---|
-| `ingest.schedule` | `lore run daily --wait` |
-| `graph.audit.schedule` | `lore run knowledge --wait` |
-| Weekly/monthly/quarterly/annual | `lore synthesis <period> --previous --defer --wait-for-vault` |
-| Maintenance | `lore maintenance --prune-queue --wait-for-vault` |
-| Reminders | `lore task remind notify` |
+| Calls per run | `execution.work.max_calls` — default 64 |
+| Concurrent ready evidence reads and distinct-target screening | `max_parallel` — default 1; recording, publication and finalization stay serial |
+| Consecutive calls for one Work or screening phase | `max_consecutive_calls` — default 4, within the same total budget and fair order |
+| Request and result size | `max_input_bytes` / `max_result_bytes` — default 262144 / 32768 JSON bytes |
 
-Daily jobs collect, process semantic work, reconcile relationships/discovery and
-resume ready periods. Collection failures and semantic failures remain distinct;
-unfinished work is not reported as success. JSON results use stdout, child logs stderr.
+Large evidence is inspected in parts and combined; verified observations are retained for resumption.
+Default `progressive` extraction screens cards for the complete retrieved candidate set, then reads selected bodies.
+Deferred work is incomplete, and a card-only exclusion is not a full-body assessment.
 
-A cooperative Unix workflow lease and exact revision guards coordinate semantic
-sessions. Daily jobs collect over the network first, then fence publication with a
-separate workflow lease. `--wait` waits there; omission refuses contention. Native
-short writer waits prepare current inputs afterward and revalidate after host calls;
-no writer claim spans network or model execution. Start manual work before reading evidence with `lore workflow -- claude`
-or `lore workflow -- codex`. Configuration edits stop the remaining job. Regenerate
-OS definitions after changing host authentication directories, PATH or proxy environment.
-Native agent jobs/workflow are unsupported on Windows. See [scheduling](skills/lore-ingest/references/scheduling.md)
-for registration, contention and captured-environment details.
+These settings are not token or billing caps, or a throughput guarantee. Start with `lore work cost --task-id ID`
+and actual `lore run process --json` results to inspect scope, calls, preparation and validation time.
+See [execution profiles](skills/lore-setup/references/config.md#execution-profiles),
+[bounded work](skills/lore-process/references/bounded-work.md) and [measurement definitions](skills/lore-process/references/bounded-work.md#native-run-measurements)
+for tuning and resume contracts.
 
-### Recover after interruptions
+## Operations and completion
 
-Launchd coalesces missed runs after sleep; cron skips them. Neither restores every
-missed date. Triggers use host local time; document dates use the vault timezone.
-Opt in with explicit activation boundaries and budgets:
+### Check the state you need
 
-```yaml
-ingest:
-  recovery: {start_date: "2026-10-01", max_days_per_source_per_run: 3}
-synthesis:
-  recovery: {start_date: "2026-10-01", max_periods_per_run: 8}
+| What to check | Command | What it establishes |
+|---|---|---|
+| Next action | `lore status` | Installation, sources, queue and subsystem guidance |
+| Collection age | `lore health --json` | Source collection freshness |
+| Pending semantic work | `lore queue status --json` / `lore queue check` | Task state, unpublished results and interrupted publication |
+| Structure | `lore graph lint` | Link and page-contract violations |
+| Judgment currency | `lore wiki reviews --check` | Invalid review records and changed evidence |
+| Semantic audit scope | `lore wiki audit-plan --ready` | Assessment coverage and readiness of the checked selection |
+
+A budget-limited run can already have published some tasks. Check the full result and remaining state before continuing.
+Diagnose authentication, storage or validation errors before repeating the same input.
+Configuration is pinned during a run; changed input requires a fresh answer rather than new hashes on an old draft.
+
+### Automation and recurring review
+
+```bash
+lore schedule > lorekeeper.cron                              # Linux: review, then merge with crontab
+lore schedule --format launchd --bin "$(command -v lore)"     # macOS: print plist definitions
+lore run knowledge                                          # one ready semantic audit batch
 ```
 
-The first requeries [missing collection dates](skills/lore-ingest/references/ingestion.md#missing-date-recovery).
-The second registers closed periods starting on or after its activation date.
-Its budget counts examined slots, including existing requests, and resumes a
-persisted cursor. Neither setting invents historical originals or semantic completion.
-Inspect `lore ingest --recover --dry-run` and `lore synthesis pending --status --json`
-for selected reach and blockers.
-Collection recovery previews also verify the provider account and dataset. Token
-rotation preserves coverage; another account/site or an unbound historical receipt
-cannot establish that the current selection was already collected.
+Printed definitions are not registered OS jobs. Review and register them, then inspect an actual run and its logs.
+Protected macOS folders may require separate permission for scheduled execution.
+A Unix workflow lease coordinates cooperating agent sessions; publication checks inputs again.
+Start manual publishing sessions before reading evidence with `lore workflow -- claude` or `lore workflow -- codex`.
 
-### Recurring semantic review
+| Operational task | Guide |
+|---|---|
+| Register, stop or change scheduled jobs | [Scheduling](skills/lore-ingest/references/scheduling.md) |
+| Initial corpus review, recurring audits and coverage | [Semantic maintenance](skills/lore-wiki/references/maintenance.md) |
+| Update, repair, back up or move devices | [Installation and data preservation](skills/lore-ingest/references/installation.md) |
+| Correct mistaken evidence, concepts or relationships | [Queue recovery](skills/lore-process/references/recovery.md), [curation](skills/lore-wiki/references/curation.md) |
 
-```yaml
-graph:
-  audit:
-    schedule: "0 7 * * 0"
-    batch_size: 5
-    max_input_bytes: 262144
+Use `lore self update` for updates. Active installation users prevent replacement, and pending work blocks it by default.
+Back up the entire vault, including hidden state. Originals, paid observations, queues and review history are different from rebuildable caches.
+
+## Further reading and development
+
+| Goal | Starting point |
+|---|---|
+| Minimal config / all options | [Starter](config.starter.yaml) / [configuration catalog](config.example.yaml) |
+| Commands and flags | `lore --help`, `lore COMMAND --help`, [operations reference](skills/lore-ingest/references/commands.md) |
+| Agent procedures | [Shared skills](skills/), [skill authoring guide](https://platform.claude.com/docs/en/agents-and-tools/agent-skills/best-practices) |
+| Page and evidence contracts | The vault's `AGENTS.md`, generated by `lore schema` |
+| Code structure and contribution rules | [Development rules](AGENTS.md), [DeepWiki](https://deepwiki.com/junyeong-ai/lorekeeper) |
+
+Rust 2024 edition; build toolchain and MSRV **1.99.1**.
+The stack uses Tokio/reqwest for async collection, Jiff for dates, serde-saphyr for YAML, MiniJinja for templates,
+petgraph for the link graph and SQLite for discovery.
+
+```bash
+cargo build --release --locked
+./target/release/lore --help
+./scripts/check.sh                 # complete CI gates; use focused checks first while developing
 ```
 
-Review changed and first-time concepts/documents independently of collection and
-period synthesis. Ready subjects get a turn; `audit_deferred` exposes blockers.
-Dependencies added by discovery defer the affected subjects; ready batch members
-and queue processing continue. Deferred diagnostics describe the latest checked
-scope, not a corpus-wide blocked count.
-Progress can coexist with unrelated queue backlog while the overall job remains
-incomplete. Judgments and evidence revisions stay in Markdown reviews; one source
-or a high citation count alone never authorizes merging or deletion.
-
-For an initial backlog, select a registered profile and execution budget:
-`lore run knowledge --profile reviewer --batches 20 --json`. `batch-limit` means
-the budget was reached; `settled` means the current eligible plan has no pending
-subjects. Neither proves universal truth or review of every external original.
-Size the initial campaign from `lore wiki audit-plan`
-and a small run's actual completions, calls and duration; then check that recurring
-capacity keeps up with new and changed subjects. `batch_size` caps selected subjects,
-not completions or cost when work is deferred, partitioned or fails.
-Use `lore wiki audit-plan --ready` to preview ready subjects and blockers.
-`execution.work.max_parallel` defaults to 1 and permits concurrent ready evidence
-reads within the call budget; recording and publication stay serial. Measure local
-preparation and invocation time before adjusting it. Summed parallel invocation
-times can exceed elapsed job time.
-New Work and candidate selections use parsed configuration values rather than comments
-or YAML formatting. Only call/parallel/screening-packet limits and profile timeouts are
-excluded from semantic identity, so these can change between workflows. Every config byte
-remains pinned during execution; model/effort, input/result bounds and semantic policies
-still invalidate derived work. Legacy byte-bound records resume with their exact original
-configuration; operational edits do not migrate them.
-See [semantic maintenance](skills/lore-wiki/references/maintenance.md)
-for discovery scope, complete evidence reads, repair and reassessment.
-
-Reminders retire after the OS accepts them, not after proof that a person read
-them. A crash before retirement can cause redelivery; failed submissions stay pending.
-
----
-
-### Versioning the vault with Git (optional)
-
-Keep a backup or a reviewed Git commit before substantial rewrites or merges. Pipelines never stage or commit automatically because they cannot distinguish concurrent user edits from their own output. A mutation journal resumes interrupted changes; it is not a historical backup.
-
-Exclude `.lorekeeper/`, credentials and any private local state from Git. Review `git status` and `git diff`, then stage only the intended files. The small generated `index.md` entry guide can be excluded under the configured wiki directory. Check the sharing scope before using a remote repository.
-
-### Backup, restore and moving devices
-
-Back up the **entire vault, including hidden files**, separately from Git history.
-Original/evidence archives, observations, review receipts, work state and unfinished
-queues/journals under `.lorekeeper/` cannot be reconstructed from Markdown alone.
-Stop scheduled and interactive writers and external editors, wait for foreground
-work to finish, then take a consistent copy or filesystem snapshot. Include the
-selected configuration and custom templates. Protect credential backups separately
-or authenticate again on the new device; do not add all private state to public Git.
-
-Restore to a separate location with the same CLI version. Adjust the copied config's
-`vault.root` and external paths, reinstall optional document processing, and retain
-credential permissions `0600`. Inspect `lore status`, `lore queue check` and
-`lore wiki reviews` before resuming writes. Resolve unfinished work/conflicts through
-the existing recovery protocol rather than deleting state to appear healthy. Then
-rebuild derived SQLite with `lore wiki prepare`, run `lore graph lint` and inspect
-retained originals. SQLite and lock files cannot restore originals or work state.
-
-Manual inbox publication receipts bind the source ID and canonical path. Restoring
-at another location refuses automatic adoption: restore the original binding or
-plan an explicit ownership migration before collecting again. Deleting state or
-using a new source ID does not transfer existing document ownership. See
-[manual inbox state and resume](skills/lore-ingest/references/ingestion.md#manual-inbox-batches).
-
----
-
-## Learn more
-
-- **Full config reference** — [`config.example.yaml`](config.example.yaml) (every source and option, commented)
-- **Page-format schema** — `lore schema` generates `wiki/AGENTS.md` in your vault
-- **Architecture deep-dive** — [DeepWiki](https://deepwiki.com/junyeong-ai/lorekeeper)
-
-## Built with
-
-Rust 2024 edition · build toolchain and MSRV 1.99.1. Source builds track the checked-in stable toolchain. `tokio`/`reqwest` (async sources), `jiff` (timezone-correct dates), `serde-saphyr` (YAML), `minijinja` (templates), `feed-rs` (feeds), `petgraph` (link graph), `blake3` (event/cache hashing). License: MIT.
+Inspired by the [LLM Wiki approach](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f) of separating sources, the derived wiki and writing conventions. License: [MIT](LICENSE).

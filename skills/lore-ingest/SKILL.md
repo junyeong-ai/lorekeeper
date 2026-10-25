@@ -1,8 +1,8 @@
 ---
 name: lore-ingest
-description: Runs Lorekeeper collection and operations commands for configured sources,
-  manual inboxes, period synthesis, schedules and maintenance. Collection writes structured
-  pages and queues semantic work; lore-process completes that work.
+description: Runs Lorekeeper collection and operations for configured sources or manual
+  inboxes, including period synthesis, schedules, installation updates, backups and
+  maintenance. Collection queues semantic work; lore-process completes it.
 metadata:
   version: 0.96.0
 ---
@@ -17,6 +17,7 @@ for current flags; read only the relevant reference:
 | Collect all/one source, backfill, retry, or inspect raw inbox preservation | [Ingestion](references/ingestion.md) before collecting |
 | Select a CLI operation or period synthesis | [Commands](references/commands.md) |
 | Install or change a schedule | [Scheduling](references/scheduling.md) |
+| Install, update, repair, back up or move a vault | [Installation and data preservation](references/installation.md) |
 
 For morning brief/task-board requests, use `/lore-day`; for wiki evidence lookup,
 use `/lore-wiki`. Configuration discovery is `--config`/`LORE_CONFIG`, then
