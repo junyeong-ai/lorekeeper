@@ -151,7 +151,14 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   Rust binds native work/node/input and screening selection/batch/input identities from
   the supervised invocation; reject model-supplied identity fields without adopting or
   repairing them. Fixed schemas and exact reply allowances reserve stored identity bytes.
-  Standalone record formats and fresh owner/currentness validation remain authoritative. Native range/text mapping is already verified; workers can copy
+  Native new questions contain only semantic text/evidence; Rust supplies IDs and
+  retains inherited active questions unchanged unless an exact local question key is
+  explicitly resolved. Native child question tuples separate active keys from closed
+  resolution history without expanding canonical inputs. Bind action receipts to the
+  exact delivered presentation as well as schema/instructions. Keep canonical Work
+  requests, node input revisions and standalone record formats unchanged.
+  Fresh owner/currentness validation remains authoritative. Native range/text mapping
+  is already verified; workers can copy
   assigned ranges without inventing finer offsets. Every observation concern still needs
   evidence. Actions record no observation, discharge no concerns and defer only their
   Work. Bind the receipt to the complete request and response/instruction contract; skip

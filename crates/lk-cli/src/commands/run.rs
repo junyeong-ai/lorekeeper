@@ -842,6 +842,7 @@ mod native {
                 WorkRole::Evidence => execution::observation::build_invocation(
                     profile,
                     request,
+                    budget.max_input_bytes,
                     budget.max_result_bytes,
                 ),
                 WorkRole::Screening => execution::observation::build_screening_invocation(
@@ -931,6 +932,7 @@ mod native {
                         return None;
                     }
                 };
+            metrics.request_json_bytes = Some(invocation.request_json_bytes);
             let timeout = self.selected.as_ref().expect("prepared agent").timeout();
             if let Some(binding) = self
                 .queue_turn
@@ -1404,12 +1406,13 @@ mod native {
             let mut requests = Vec::new();
             let mut directories = Vec::new();
             let mut engines = Vec::new();
-            for turn in &turns {
+            for turn in &mut turns {
                 let (invocation, capture_limit) =
                     match self.observation_invocation(&turn.request, WorkRole::Evidence, budget) {
                         Ok(invocation) => invocation,
                         Err(error) => return Some(self.failure("bounded work receipt", error)),
                     };
+                turn.metrics.request_json_bytes = Some(invocation.request_json_bytes);
                 engines.push(invocation.engine);
                 let (request, directory) = invocation.into_request(timeout, capture_limit);
                 requests.push(request);

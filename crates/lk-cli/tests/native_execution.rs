@@ -1288,7 +1288,7 @@ if action=='inspect':
     else:
         assert len(request['children'])>=2
         row['child_count']=len(request['children'])
-    unresolved=[concern for child in request.get('children', []) for concern in child['output']['unresolved']]
+    unresolved=[] if native else [concern for child in request.get('children', []) for concern in child['output']['unresolved']]
     output={'work_id':work_id, 'node_id':node_id, 'input_revision':request['input_revision'],
             'summary':'Fixture observation of this exact request; structural coverage is not factual verification.',
             'findings':[], 'source_questions':[], 'unresolved':unresolved, 'resolutions':[]}
@@ -1539,6 +1539,62 @@ fn maintenance_prunes_published_work_only_after_exclusive_access_without_changin
     assert!(!work.exists());
     assert_eq!(std::fs::read(knowledge).unwrap(), knowledge_before);
     assert_eq!(std::fs::read(audit).unwrap(), audit_before);
+}
+
+#[test]
+fn native_audit_reductions_resolve_only_active_questions_on_both_hosts() {
+    let behavior = RECORD_BOUNDED_AUDIT.replace(
+        "    if native:\n        for key in ['work_id','node_id','input_revision']:",
+        r#"    if native:
+        row['closed_history']=any(child['output'].get('resolved_history') for child in request.get('children', []))
+        keys=sorted({q[0] for child in request.get('children', []) for q in child['output'].get('source_questions', [])})
+        row['active_questions']=len(keys)
+        if request['kind']=='inspect' and not (root/'new-question').exists():
+            (root/'new-question').write_text('created')
+            output['source_questions']=[{'question':'Which release was verified?', 'evidence':[request['input']['ranges'][0]['range']]}]
+        elif request['kind']=='reduce':
+            questions={q[0]:q for child in request['children'] for q in child['output'].get('source_questions', [])}
+            output['resolutions']=[{'question_key':key,'reason':'The cited source supplies the release verification.', 'evidence':questions[key][2]} for key in keys]
+        for key in ['work_id','node_id','input_revision']:"#,
+    );
+    assert_ne!(behavior, RECORD_BOUNDED_AUDIT);
+    for engine in ["codex", "claude-code"] {
+        let fixture = bounded_audit_fixture(engine, 64, &behavior);
+        let config = std::fs::read_to_string(&fixture.config)
+            .unwrap()
+            .replace("max_result_bytes: 1024", "max_result_bytes: 2048");
+        std::fs::write(&fixture.config, config).unwrap();
+        let path = fixture.root().join("vault/wiki/concepts/large.md");
+        let body = std::fs::read_to_string(&path).unwrap()
+            + &"\nSource-specific evidence with Unicode 한🙂 and scoped verification.\n"
+                .repeat(180);
+        std::fs::write(path, body).unwrap();
+        record_discovery(&fixture, "wiki/concepts/large.md");
+        let (output, result) = fixture.run("knowledge");
+        assert!(
+            output.status.success(),
+            "{result}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let calls = bounded_calls(&fixture);
+        assert!(calls.iter().any(|call| call["active_questions"] == 1));
+        assert!(
+            calls
+                .iter()
+                .any(|call| call["closed_history"] == true && call["active_questions"] == 0)
+        );
+        assert!(
+            result["work_steps"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|step| matches!(step["outcome"].as_str(), Some("recorded" | "staged")))
+        );
+        assert_eq!(
+            result["audit"][0]["assessed_path"],
+            "wiki/concepts/large.md"
+        );
+    }
 }
 
 #[test]

@@ -117,7 +117,7 @@ pub(crate) struct WorkOutput {
 }
 
 #[derive(Clone, Copy, PartialEq)]
-enum QuestionKind {
+pub(crate) enum QuestionKind {
     Source,
     Processing,
 }
@@ -565,6 +565,24 @@ fn validate_references(
     Ok(())
 }
 
+pub(crate) fn inherited_questions<'a>(
+    children: &[&'a WorkOutput],
+) -> miette::Result<BTreeMap<&'a str, (QuestionKind, &'a WorkQuestion)>> {
+    let mut inherited = BTreeMap::new();
+    for child in children {
+        for (kind, question) in child.questions() {
+            if let Some(prior) = inherited.insert(question.id.as_str(), (kind, question))
+                && prior != (kind, question)
+            {
+                return Err(fail(
+                    "child question ids collide; preserve distinct namespaced ids",
+                ));
+            }
+        }
+    }
+    Ok(inherited)
+}
+
 fn validate_output(
     output: &WorkOutput,
     node: &Node,
@@ -605,18 +623,7 @@ fn validate_output(
             ));
         }
     }
-    let mut inherited = BTreeMap::new();
-    for child in children {
-        for (kind, question) in child.questions() {
-            if let Some(prior) = inherited.insert(question.id.as_str(), (kind, question))
-                && prior != (kind, question)
-            {
-                return Err(fail(
-                    "child question ids collide; preserve distinct namespaced ids",
-                ));
-            }
-        }
-    }
+    let inherited = inherited_questions(children)?;
     for (id, prior) in &inherited {
         if let Some(current) = output.questions().find(|(_, question)| question.id == *id) {
             if current != *prior {
@@ -2537,6 +2544,110 @@ mod tests {
             evidence: concern.evidence,
         });
         work.record(&session, output, &source).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_reduction_resumes_legacy_closed_history_without_rewriting_paid_nodes() {
+        use crate::commands::execution::observation::{ObservationResponse, decode_observation};
+        let root = tempfile::tempdir().unwrap();
+        let source = resources();
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let mut work = Work::build(&source, "subject", context("one"), limits()).unwrap();
+        work.reduction = ReductionPolicy::BinaryV1;
+        assert!(work.plan.parts.len() >= 3);
+        let path = work_path(&work.plan.id, "plan.json").unwrap();
+        let mut plan = MutationPlan::default();
+        plan.publish_expected(root.path(), &path, None, encoded(&work).unwrap())
+            .unwrap();
+        session.apply(plan).unwrap();
+        for (index, part) in work.plan.parts.iter().enumerate() {
+            let mut output = draft(&work, root.path(), &part.id, &source);
+            if index + 1 == work.plan.parts.len() {
+                output.source_questions.push(WorkQuestion {
+                    id: format!("{}:legacy-question", part.id),
+                    question: "Was the release actually verified?".into(),
+                    evidence: vec![part.ranges[0].clone()],
+                });
+            }
+            work.record(&session, output, &source).unwrap();
+        }
+        let mut saved =
+            BTreeMap::from([(path.clone(), std::fs::read(root.path().join(path)).unwrap())]);
+        let root_children = match &work.nodes().unwrap().last().unwrap().kind {
+            NodeKind::Reduce { children } => children.clone(),
+            NodeKind::Inspect { .. } => panic!("expected a reduction"),
+        };
+        let mut closed = None;
+        loop {
+            let progress = work.progress(root.path(), &source).unwrap();
+            if progress.ready == [progress.root_node.clone()] {
+                break;
+            }
+            for id in progress.ready {
+                let mut output = draft(&work, root.path(), &id, &source);
+                if root_children.contains(&id) && !output.source_questions.is_empty() {
+                    let question = output.source_questions.remove(0);
+                    let resolution = WorkResolution {
+                        id: question.id,
+                        reason: "The cited release record supplies verification.".into(),
+                        evidence: question.evidence,
+                    };
+                    closed = Some(resolution.clone());
+                    output.resolutions.push(resolution);
+                }
+                work.record(&session, output, &source).unwrap();
+            }
+        }
+        let progress = work.progress(root.path(), &source).unwrap();
+        for node in work
+            .nodes()
+            .unwrap()
+            .into_iter()
+            .filter(|node| node.id != progress.root_node)
+        {
+            let path = output_path(&work.plan.id, &node.id).unwrap();
+            saved.insert(path.clone(), std::fs::read(root.path().join(path)).unwrap());
+        }
+        let request = work
+            .input(root.path(), &progress.root_node, &source)
+            .unwrap();
+        assert!(request["children"].as_array().unwrap().iter().any(|child| {
+            !child["output"]["resolutions"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        }));
+        let mut rejected = draft(&work, root.path(), &progress.root_node, &source);
+        rejected.resolutions.push(closed.unwrap());
+        assert!(
+            work.record(&session, rejected, &source)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("unknown inherited concern")
+        );
+        let canonical = encoded(&request).unwrap();
+        let reply = json!({"status":"complete","observation":{"summary":"All child observations inspected; closed history is retained in the children.","findings":[],"source_questions":[],"unresolved":[],"resolutions":[]},"action":null});
+        let ObservationResponse::Complete(output) =
+            decode_observation(reply, &request, work.plan.max_result_bytes).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(
+            encoded(
+                &work
+                    .input(root.path(), &progress.root_node, &source)
+                    .unwrap()
+            )
+            .unwrap(),
+            canonical
+        );
+        work.record(&session, output, &source).unwrap();
+        assert!(work.progress(root.path(), &source).unwrap().complete);
+        for (path, before) in saved {
+            assert_eq!(std::fs::read(root.path().join(path)).unwrap(), before);
+        }
     }
 
     #[test]

@@ -62,15 +62,14 @@ if kind in ['finalize-section','whole-section']:
         output={'status':'complete','body':body,'reason':None}
         if mode=='forged-guards': output['task_id']='forged'
 else:
-    inherited=[q for child in request.get('children',[]) for q in child['output'].get('source_questions',[])]
-    questions=inherited
+    questions=[]
     if kind=='inspect':
         span=request['input']['ranges'][0]['range']
-        questions=[{'id':work['node_id']+':deployment','question':'The retained source does not verify deployment.',
+        questions=[{'question':'The retained source does not verify deployment.',
                     'evidence':[{key:span[key] for key in ['resource','start','end']}]}]
     unresolved=[]
     if (root/'mode').read_text()=='unresolved' and kind=='inspect':
-        unresolved=[{'id':work['node_id']+':review','question':'A scoped review must be recorded first.',
+        unresolved=[{'question':'A scoped review must be recorded first.',
                      'evidence':[request['input']['ranges'][0]['range']]}]
     output={'summary':'Read the assigned evidence. Deployment is not verified.',
             'findings':[],'source_questions':questions,'unresolved':unresolved,'resolutions':[]}
@@ -90,7 +89,7 @@ if kind in ['inspect','reduce']:
             path=root/'vault'/request['context']['subject']['target']
             path.write_text(path.read_text()+'\nExternal edit during oversized inspection.\n')
     if mode=='empty-inspection-evidence':
-        output['observation']['unresolved']=[{'id':work['node_id']+':mapping','question':'Cannot establish mapping.','evidence':[]}]
+        output['observation']['unresolved']=[{'question':'Cannot establish mapping.','evidence':[]}]
 if engine=='claude-code':
     output={'type':'result','subtype':'success','is_error':False,'structured_output':output}
 print(json.dumps(output))

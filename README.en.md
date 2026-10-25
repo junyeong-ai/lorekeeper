@@ -478,6 +478,10 @@ admission. Setting 1 uses one-attempt turns. Like call/parallel limits, this ope
 setting can change between workflows without rewriting new semantic Work identities;
 the live workflow still pins every configuration byte.
 
+Native reductions retain inherited questions with their exact kind, text and evidence in
+Rust. Models resolve only current local question keys; closed resolution history is
+read-only. Saved Work and standalone record formats remain unchanged.
+
 New bounded plans group observations using request and maximum result sizes; saved
 plans resume with their existing topology. Native extraction/synthesis can finalize
 complete current observation coverage directly when all observations, evidence and rules

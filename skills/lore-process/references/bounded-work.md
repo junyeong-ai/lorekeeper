@@ -28,8 +28,19 @@ and input identity from the supervised invocation; never return those fields. Na
 screening similarly returns only `{decisions: [...]}`; Rust binds selection, batch
 and input identity. Standalone `work record` and `work select-record` still require
 their complete identity-bearing formats. Native replies use the supplied fixed schema
-and reply allowance, which reserves identity and newline bytes within the stored result
-limit. Native Rust validates the supplied
+and reply allowance. Native new questions contain only `question` and `evidence`;
+Rust supplies their namespaced IDs. In a native reduction, each child
+`source_questions` or `unresolved` entry is `[question_key, question, evidence]`.
+Rust retains every inherited question unchanged in its original collection unless
+`resolutions` explicitly resolves its `question_key` with `reason` and `evidence`.
+Do not repeat inherited questions as new questions. Child `resolved_history` entries
+are `[id, active_question_key_or_null, reason, evidence]`. A key relates that history
+to a question still open in another child; history creates no active question and
+must not be returned as another resolution.
+Unknown or duplicate resolution keys refuse. The assembled result, including all
+retained questions and generated IDs, must fit the stored result limit independently
+of the reply allowance. Standalone record questions and resolutions retain their
+identity-bearing object formats. Native Rust validates the supplied
 range/text mapping: copy the assigned `range` for the corresponding inspected text;
 finer contained offsets are optional when established. `total_characters` describes the
 full resource; `continued` marks a split Markdown block, not omitted assigned text.
@@ -287,7 +298,7 @@ result; progress events do not establish publication, inference time or cost.
 | Fields | Meaning |
 | --- | --- |
 | `role`, `work_id`, `node_id`, `node_kind`, `selection_id`, `batch_id` | Exact selected work or screening identities; unavailable identities are `null` |
-| `request_json_bytes`, `result_json_bytes` | Compact UTF-8 JSON of the prepared request and decoded response (including a native observation/action envelope but excluding Rust-supplied identity), excluding prompts and host envelopes; tool-enabled native extraction/synthesis response bytes are measured, while ordinary interactive audit response bytes remain unobserved and `null` |
+| `request_json_bytes`, `result_json_bytes` | Compact UTF-8 JSON of the delivered native request and decoded response (including a native observation/action envelope but excluding Rust-supplied identity), excluding prompts and host envelopes; tool-enabled native extraction/synthesis response bytes are measured, while ordinary interactive audit response bytes remain unobserved and `null` |
 | `preparation_duration_ms`, `preparation_from_queue_plan` | Additional local preparation of the selected request or completed root; a screening request carried from the same queue checkpoint has `null` duration and `true` reuse |
 | `agent_duration_ms` | Supervised invocation attempt wall time, including a failed or cancelled attempt; never server inference time |
 | `revalidation_record_duration_ms` | Fresh input validation and recording together; these operations are not measured separately |

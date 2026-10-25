@@ -1619,7 +1619,7 @@ pub(super) fn inspection_action(
     state::Work::load(root, id)?.load_inspection_action(
         root,
         request,
-        &super::execution::observation::contract_revision(),
+        &super::execution::observation::contract_revision(request)?,
     )
 }
 
@@ -1638,7 +1638,7 @@ pub(super) fn record_inspection_action(
         root,
         &prepared.resources,
         request,
-        &super::execution::observation::contract_revision(),
+        &super::execution::observation::contract_revision(request)?,
         reason,
     )?;
     prepared.guard_pages(&mut plan);
@@ -1661,7 +1661,7 @@ pub(super) fn record_inspection_capacity(
         root,
         &prepared.resources,
         request,
-        &super::execution::observation::contract_revision(),
+        &super::execution::observation::contract_revision(request)?,
         capacity,
     )?;
     prepared.guard_pages(&mut plan);
