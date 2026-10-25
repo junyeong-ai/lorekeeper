@@ -25,8 +25,16 @@ using a concrete nonblank reason. An action records no observation or assessment
 and never supplies invented evidence. The native observation contains only `summary`,
 `findings`, `source_questions`, `unresolved` and `resolutions`. Rust binds work, node
 and input identity from the supervised invocation; never return those fields. Native
-screening similarly returns only `{decisions: [...]}`; Rust binds selection, batch
-and input identity. Standalone `work record` and `work select-record` still require
+screening returns only `{decisions: [{candidate_ref, decision, reason}, ...]}`.
+Copy each short reference from its assigned card; never return a candidate path or
+derive a reference from response order. Rust requires complete unique coverage and
+binds each reference to its original path, plus selection, batch and input identity.
+The native presentation omits opaque file/source guard hashes; canonical requests
+and fresh scope checks retain them. The reply allowance reserves full path expansion.
+A reference-coverage rejection records no decisions and defers that task under an
+exact request/contract receipt. Unchanged native calls are suppressed; changed scope
+or contracts may be reconsidered. Corrupt receipts and unknown failures still stop.
+Standalone `work record` and `work select-record` still require
 their complete identity-bearing formats. Native replies use the supplied fixed schema
 and reply allowance. Native new questions contain only `question` and `evidence`;
 Rust supplies their namespaced IDs. In a native reduction, each child

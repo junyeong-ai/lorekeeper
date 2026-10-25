@@ -157,6 +157,15 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   Rust binds native work/node/input and screening selection/batch/input identities from
   the supervised invocation; reject model-supplied identity fields without adopting or
   repairing them. Fixed schemas and exact reply allowances reserve stored identity bytes.
+  Native screening assigns a short `candidate_ref` to each exact card. Validate complete,
+  unique reference coverage before mapping decisions to canonical paths; reply order is
+  irrelevant. Canonical requests retain full owner/source revisions while the native
+  presentation leaves those opaque guard hashes to Rust. Reserve path expansion in the
+  reply allowance. Reference-coverage rejection journals an exact request/contract-bound
+  receipt, records no decisions and defers only that task; unchanged requests spend no
+  calls. Changed requests/contracts can be reconsidered. Malformed replies, corrupt
+  receipts and failed fresh scope validation remain failures. Standalone full-path
+  `select-record`, selection identities and existing paid decisions remain unchanged.
   Native new questions contain only semantic text/evidence; Rust supplies IDs and
   retains inherited active questions unchanged unless an exact local question key is
   explicitly resolved. Native child question tuples separate active keys from closed

@@ -7,6 +7,9 @@ use miette::IntoDiagnostic;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+mod rejection;
+pub(in crate::commands) use rejection::ScreeningRejection;
+
 const POLICY: &str = "progressive-evidence-v1";
 const CARD_SCOPE: &str = "candidate-card-only";
 
@@ -57,7 +60,7 @@ pub(super) struct SelectionBinding {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-pub(super) enum ScreeningDecision {
+pub(in crate::commands) enum ScreeningDecision {
     Inspect,
     NotSelected,
     Defer,
@@ -781,6 +784,9 @@ impl Selection {
             raw.insert(path, bytes);
             answers.push(output);
         }
+        if let Some((path, bytes)) = self.capture_rejections(root)? {
+            raw.insert(path, bytes);
+        }
         progress.complete = progress.unknown == 0 && progress.deferred == 0;
         Ok(CapturedLedger {
             ledger: SelectionLedger {
@@ -792,6 +798,11 @@ impl Selection {
             raw,
             next,
         })
+    }
+
+    #[cfg(unix)]
+    pub fn max_input_bytes(&self) -> usize {
+        self.manifest.max_input_bytes
     }
 
     pub fn prepare(&self, root: &Path) -> miette::Result<(SelectionProgress, Option<Value>)> {
@@ -1908,6 +1919,23 @@ mod tests {
         .unwrap();
         fixture.create(&selection);
         let request = selection.prepare(&fixture.root).unwrap().1.unwrap();
+        {
+            let session = MutationSession::acquire(&fixture.root).unwrap();
+            selection
+                .record_rejection(
+                    &session,
+                    &fixture.pages(),
+                    &request,
+                    &"c".repeat(64),
+                    ScreeningRejection {
+                        missing: 1,
+                        duplicate: 0,
+                        unknown: 1,
+                        response_revision: "d".repeat(64),
+                    },
+                )
+                .unwrap();
+        }
         fixture
             .record(
                 &selection,
@@ -1953,6 +1981,136 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(fixture.root.join("wiki/documents/source.md")).unwrap(),
             fixture.source
+        );
+    }
+
+    #[test]
+    fn screening_rejections_bind_exact_requests_and_allow_explicit_valid_records() {
+        let fixture = Fixture::new(2);
+        let selection = fixture.selection(8192, 8192);
+        fixture.create(&selection);
+        let request = selection.prepare(&fixture.root).unwrap().1.unwrap();
+        let manifest = std::fs::read(fixture.root.join(selection.manifest_path())).unwrap();
+        let contract = "c".repeat(64);
+        let changed_contract = "e".repeat(64);
+        let rejected = ScreeningRejection {
+            missing: 1,
+            duplicate: 0,
+            unknown: 1,
+            response_revision: "d".repeat(64),
+        };
+        let candidate = fixture.root.join(&selection.manifest.candidates[0].owner);
+        let candidate_before = std::fs::read(&candidate).unwrap();
+        std::fs::write(&candidate, "Changed evidence after preparation.").unwrap();
+        {
+            let session = MutationSession::acquire(&fixture.root).unwrap();
+            assert!(
+                selection
+                    .record_rejection(
+                        &session,
+                        &fixture.pages(),
+                        &request,
+                        &contract,
+                        rejected.clone()
+                    )
+                    .is_err()
+            );
+            assert!(
+                !fixture
+                    .root
+                    .join(selection.directory.join("rejections.json"))
+                    .exists()
+            );
+        }
+        std::fs::write(&candidate, candidate_before).unwrap();
+        {
+            let session = MutationSession::acquire(&fixture.root).unwrap();
+            let mut changed = request.clone();
+            changed["source_context"]["text"] = json!("Changed text.");
+            assert!(
+                selection
+                    .record_rejection(
+                        &session,
+                        &fixture.pages(),
+                        &changed,
+                        &contract,
+                        rejected.clone()
+                    )
+                    .is_err()
+            );
+            selection
+                .record_rejection(
+                    &session,
+                    &fixture.pages(),
+                    &request,
+                    &contract,
+                    rejected.clone(),
+                )
+                .unwrap();
+        }
+        assert!(
+            selection
+                .rejection_reason(&fixture.root, &request, &contract)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            selection
+                .rejection_reason(&fixture.root, &request, &changed_contract)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            selection
+                .ledger(&fixture.root)
+                .unwrap()
+                .progress
+                .completed_batches,
+            0
+        );
+        assert_eq!(
+            selection.prepare(&fixture.root).unwrap().1.unwrap(),
+            request
+        );
+        assert_eq!(
+            std::fs::read(fixture.root.join(selection.manifest_path())).unwrap(),
+            manifest
+        );
+
+        let path = fixture
+            .root
+            .join(selection.directory.join("rejections.json"));
+        let raw = std::fs::read_to_string(&path).unwrap();
+        for corrupt in [json!([]), json!({}), {
+            let mut value: Value = serde_json::from_str(&raw).unwrap();
+            value["batches"][request["batch_id"].as_str().unwrap()]["input_revision"] =
+                json!("f".repeat(64));
+            value
+        }] {
+            std::fs::write(&path, encoded(&corrupt).unwrap()).unwrap();
+            assert!(
+                selection
+                    .rejection_reason(&fixture.root, &request, &changed_contract)
+                    .is_err()
+            );
+            let session = MutationSession::acquire(&fixture.root).unwrap();
+            assert!(prune(&session, &BTreeSet::new()).is_err());
+            assert!(fixture.root.join(selection.manifest_path()).exists());
+        }
+        std::fs::write(&path, &raw).unwrap();
+        fixture
+            .record(
+                &selection,
+                answer(&request, ScreeningDecision::Inspect),
+                None,
+            )
+            .unwrap();
+        assert!(selection.ledger(&fixture.root).unwrap().progress.complete);
+        let session = MutationSession::acquire(&fixture.root).unwrap();
+        assert!(
+            selection
+                .record_rejection(&session, &fixture.pages(), &request, &contract, rejected)
+                .is_err()
         );
     }
 

@@ -2775,7 +2775,7 @@ if native:
     assert request['discovery']==[{'query':'transactional outbox','phrase':True,'spacing':False}]
     assert len(request['candidates'])<120
     output={}
-    output['decisions']=[{'candidate_key':candidate['candidate_key'],
+    output['decisions']=[{'candidate_ref':candidate['candidate_ref'],
         'decision':'inspect' if candidate['candidate_key'].endswith('/candidate-000.md') else 'not-selected',
         'reason':'This assigned card has a fixture-defined scope; not-selected is not a full-body judgment.'}
         for candidate in request['candidates']]
@@ -6075,8 +6075,12 @@ if leader and mode=='unreadable':
 if leader and mode=='config':
     with (root/'config.yaml').open('a') as stream: stream.write('\n# changed\n')
 if not leader: time.sleep(.1)
-output={'decisions':[{'candidate_key':candidate['candidate_key'],'decision':'not-selected',
+output={'decisions':[{'candidate_ref':candidate['candidate_ref'],'decision':'not-selected',
     'reason':'Card-only fixture decision; no full-body assessment.'} for candidate in request['candidates']]}
+if leader and mode=='unknown-reference': output['decisions'][0]['candidate_ref']+='x'
+if leader and mode=='duplicate-reference': output['decisions'][1]['candidate_ref']=output['decisions'][0]['candidate_ref']
+if leader and mode=='missing-reference': output['decisions'].pop()
+output['decisions'].reverse()
 if '--safe-mode' in sys.argv:
     print(json.dumps({'type':'result','subtype':'success','is_error':False,'structured_output':output}))
 else: print(json.dumps(output))
@@ -6242,6 +6246,121 @@ fn native_screening_wave_preserves_independent_response_when_a_peer_fails() {
                 .count(),
             1
         );
+    }
+}
+
+#[test]
+fn native_screening_reference_rejection_preserves_independent_wave_records() {
+    for engine in ["codex", "claude-code"] {
+        for mode in [
+            "unknown-reference",
+            "duplicate-reference",
+            "missing-reference",
+        ] {
+            let fixture = parallel_screening_fixture(engine, mode, 2);
+            let (_, report) = fixture.run("process");
+            assert_eq!(report["semantic_calls"], 2, "{report}");
+            assert_eq!(screening_receipts(&fixture), 1, "{mode}: {report}");
+            let steps = report["work_steps"].as_array().unwrap();
+            assert_eq!(
+                steps
+                    .iter()
+                    .filter(|step| step["outcome"] == "rejected")
+                    .count(),
+                1
+            );
+            assert_eq!(
+                steps
+                    .iter()
+                    .filter(|step| step["outcome"] == "recorded")
+                    .count(),
+                1
+            );
+            assert!(
+                steps
+                    .iter()
+                    .all(|step| step["revalidation_record_duration_ms"].is_number())
+            );
+            assert!(!report["stages"].as_array().unwrap().iter().any(|stage| {
+                stage["detail"]
+                    .as_str()
+                    .is_some_and(|detail| detail.contains("worker screening does not match"))
+            }));
+            assert_eq!(
+                screening_settlement(&fixture)["data"]["pending_mutation"],
+                false
+            );
+        }
+    }
+}
+
+#[test]
+fn rejected_native_screening_suppresses_exact_request_and_publishes_independent_section() {
+    for engine in ["codex", "claude-code"] {
+        let section = WHOLE_SECTION.replace("if request['kind']!=", "if request.get('kind')!=");
+        let screening = RECORD_PROGRESSIVE_EXTRACTION.replace(
+            "    log({'action':'screen'",
+            "    output['decisions'][0]['candidate_ref']+='x'\n    log({'action':'screen'",
+        );
+        let (fixture, task) = progressive_extraction_fixture(
+            engine,
+            &format!("{section}\n{screening}"),
+            6,
+            65536,
+            4096,
+        );
+        let root = fixture.root().join("vault");
+        let target = root.join(&task.target.vault_path);
+        let before = std::fs::read(&target).unwrap();
+        let queue = root.join(".lorekeeper/queue");
+        let summary = lk_queue::QueueLlmClient::new(queue.clone()).build_task("summary", lk_queue::TaskKind::Summarize,
+            serde_json::from_value::<lk_queue::SummarizeRequest>(serde_json::json!({"text":"Independent source.","max_sentences":2,"locale":"en",
+                "target":{"vault_path":"wiki/documents/independent.md","anchor":"## Summary","kind":"document-summary"}})).unwrap());
+        std::fs::write(root.join(&summary.target.vault_path), format!("---\ntype: document\ntitle: Independent\nllm_inputs:\n  summary: {}\n---\n# Independent\n\n## Summary\n", summary.cache_hash)).unwrap();
+        lk_queue::write_tasks_atomic(
+            &queue.join("independent.jsonl"),
+            std::slice::from_ref(&summary),
+        )
+        .unwrap();
+        let (output, report) = fixture.run("process");
+        assert!(
+            !output.status.success(),
+            "blocked task remains incomplete: {report}"
+        );
+        assert_eq!(report["halted"], false, "{report}");
+        let status = execution_json(&fixture, &["queue", "status", "--json"]);
+        for (id, expected) in [(&task.task_id, "current"), (&summary.task_id, "done")] {
+            assert!(
+                status["data"]["tasks"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|row| row["task_id"] == *id && row["status"] == expected),
+                "{status}"
+            );
+        }
+        let progress = execution_json(&fixture, &["work", "select", "--task-id", &task.task_id]);
+        assert_eq!(progress["progress"]["completed_batches"], 0);
+        let markers = walkdir::WalkDir::new(queue.join("selection"))
+            .into_iter()
+            .map(Result::unwrap)
+            .filter(|entry| entry.file_name() == "rejections.json")
+            .map(|entry| entry.path().to_path_buf())
+            .collect::<Vec<_>>();
+        assert_eq!(markers.len(), 1);
+        let receipt = std::fs::read(&markers[0]).unwrap();
+        let (_, repeated) = fixture.run("process");
+        assert_eq!(repeated["semantic_calls"], 0, "{repeated}");
+        assert_eq!(std::fs::read(&markers[0]).unwrap(), receipt);
+        assert_eq!(std::fs::read(&target).unwrap(), before);
+        std::fs::write(&markers[0], "{}").unwrap();
+        let (_, corrupt) = fixture.run("process");
+        assert_eq!(corrupt["semantic_calls"], 0);
+        assert_eq!(
+            corrupt["halted"], true,
+            "corrupt receipt must refuse: {corrupt}"
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), before);
     }
 }
 

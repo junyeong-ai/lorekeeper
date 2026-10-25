@@ -20,6 +20,7 @@ mod selection;
 pub(crate) mod state;
 
 pub(super) use publication::publication_scope;
+pub(super) use selection::{ScreeningDecision, ScreeningRejection};
 #[cfg(unix)]
 pub(super) const FINALIZATION_REQUEST_ENV: &str = "LORE_WORK_FINALIZATION_REQUEST";
 #[cfg(unix)]
@@ -939,12 +940,39 @@ pub(super) struct ScreeningTurn {
     pub deferred: usize,
     pub completed_batches: usize,
     pub batches: usize,
+    pub blocked_reason: Option<String>,
 }
 
 impl Screening {
     fn turn(&self, root: &Path) -> miette::Result<ScreeningTurn> {
         let (progress, request) = self.selection.prepare(root)?;
+        #[cfg(unix)]
+        let blocked_reason = request
+            .as_ref()
+            .map(|request| {
+                let native = super::execution::observation::screening_request(request)?;
+                let bytes = serde_json::to_vec(&native).into_diagnostic()?.len();
+                if bytes > self.selection.max_input_bytes() {
+                    return Ok(Some(
+                        selection::ScreeningCapacity::Input {
+                            required_bytes: bytes,
+                            max_bytes: self.selection.max_input_bytes(),
+                        }
+                        .to_string(),
+                    ));
+                }
+                self.selection.rejection_reason(
+                    root,
+                    request,
+                    &super::execution::observation::screening_contract_revision(request)?,
+                )
+            })
+            .transpose()?
+            .flatten();
+        #[cfg(not(unix))]
+        let blocked_reason = None;
         Ok(ScreeningTurn {
+            blocked_reason,
             selection_id: self.selection.id.clone(),
             request,
             complete: progress.complete,
@@ -1046,8 +1074,22 @@ pub(super) fn prepare_screenings(
     })
 }
 
+#[derive(Clone)]
+pub(super) enum ScreeningResponse {
+    Decisions(Value),
+    Rejected {
+        request: Value,
+        rejection: ScreeningRejection,
+    },
+}
+
+pub(super) enum ScreeningRecordOutcome {
+    Recorded(usize),
+    Deferred(String),
+}
+
 pub(super) struct ScreeningRecord {
-    pub result: miette::Result<usize>,
+    pub result: miette::Result<ScreeningRecordOutcome>,
     pub duration_ms: u64,
 }
 
@@ -1061,7 +1103,7 @@ pub(super) fn record_screenings(
     session: &lk_vault::MutationSession,
     config: &lk_core::config::Config,
     config_revision: &str,
-    replies: Vec<(&str, Value)>,
+    replies: Vec<(&str, ScreeningResponse)>,
     read: &lk_vault::ReadControl,
 ) -> miette::Result<RecordedScreenings> {
     let task_ids = replies
@@ -1079,15 +1121,30 @@ pub(super) fn record_screenings(
             let started_at = std::time::Instant::now();
             let result = (|| {
                 let screening = screening?;
-                Ok(screening
-                    .selection
-                    .record(
-                        session,
-                        &screening.inventory.pages,
-                        serde_json::from_value(output).into_diagnostic()?,
-                        None,
-                    )?
-                    .completed_batches)
+                match output {
+                    ScreeningResponse::Decisions(output) => Ok(ScreeningRecordOutcome::Recorded(
+                        screening
+                            .selection
+                            .record(
+                                session,
+                                &screening.inventory.pages,
+                                serde_json::from_value(output).into_diagnostic()?,
+                                None,
+                            )?
+                            .completed_batches,
+                    )),
+                    ScreeningResponse::Rejected { request, rejection } => {
+                        let reason = rejection.to_string();
+                        screening.selection.record_rejection(
+                            session,
+                            &screening.inventory.pages,
+                            &request,
+                            &super::execution::observation::screening_contract_revision(&request)?,
+                            rejection,
+                        )?;
+                        Ok(ScreeningRecordOutcome::Deferred(reason))
+                    }
+                }
             })();
             ScreeningRecord {
                 result,
@@ -1500,8 +1557,14 @@ fn prepare_task_in_session(
                     .create(session, &screening.inventory.pages)?;
                 let ledger = screening.selection.ledger(root)?;
                 if !ledger.progress.complete {
+                    let turn = screening.turn(root)?;
+                    if let Some(reason) = &turn.blocked_reason {
+                        return Ok(TaskWork::Admission {
+                            reason: reason.clone(),
+                        });
+                    }
                     return Ok(TaskWork::Screening {
-                        turn: Box::new(screening.turn(root)?),
+                        turn: Box::new(turn),
                     });
                 }
                 admitted_task(&screening, &ledger.binding()?, &ledger.selected_owners)?

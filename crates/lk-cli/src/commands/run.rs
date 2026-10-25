@@ -193,7 +193,7 @@ mod native {
 
     struct ScreeningReply {
         task_id: String,
-        output: serde_json::Value,
+        output: crate::commands::work::ScreeningResponse,
         completed_batches: usize,
         batches: usize,
         metric_index: usize,
@@ -2412,6 +2412,12 @@ mod native {
                     self.queue_replan = true;
                     return true;
                 }
+                if let Some(reason) = before.blocked_reason {
+                    self.queue_admitted.clear();
+                    self.queue_replan = true;
+                    self.record("candidate screening", StageState::Failed, Some(reason));
+                    return true;
+                }
                 let Some(request) = before.request else {
                     return self.failure(
                         "candidate screening",
@@ -2431,11 +2437,15 @@ mod native {
                 metrics.preparation_from_queue_plan = reuse;
                 metrics.preparation_duration_ms =
                     (index == 0 && !reuse).then_some(preparation_duration_ms);
-                metrics.request_json_bytes = Some(
-                    serde_json::to_vec(&request)
-                        .expect("JSON request serializes")
-                        .len(),
-                );
+                metrics.request_json_bytes =
+                    match execution::observation::screening_request(&request) {
+                        Ok(native) => Some(
+                            serde_json::to_vec(&native)
+                                .expect("native request serializes")
+                                .len(),
+                        ),
+                        Err(error) => return self.failure("candidate screening", error),
+                    };
                 turns.push(ScreeningAttempt {
                     task_id,
                     completed_batches: before.completed_batches,
@@ -2574,7 +2584,13 @@ mod native {
                                         &request,
                                         budget.max_result_bytes,
                                     ) {
-                                        Ok(output) => Some(output),
+                                        Ok(output) => Some(crate::commands::work::ScreeningResponse::Decisions(output)),
+                                        Err(error) if error.downcast_ref::<crate::commands::work::ScreeningRejection>().is_some() => {
+                                            Some(crate::commands::work::ScreeningResponse::Rejected {
+                                                request: request.clone(),
+                                                rejection: error.downcast_ref::<crate::commands::work::ScreeningRejection>().expect("typed rejection").clone(),
+                                            })
+                                        }
                                         Err(error) => {
                                             self.failure("candidate screening", error);
                                             None
@@ -2660,7 +2676,21 @@ mod native {
                                     + if index == 0 { shared_duration_ms } else { 0 },
                             );
                             match record.result {
-                                Ok(completed) if completed > reply.completed_batches => {
+                                Ok(crate::commands::work::ScreeningRecordOutcome::Deferred(
+                                    reason,
+                                )) => {
+                                    step.outcome = WorkOutcome::Rejected;
+                                    self.queue_replan = true;
+                                    self.queue_admitted.clear();
+                                    self.record(
+                                        "candidate screening",
+                                        StageState::Failed,
+                                        Some(reason),
+                                    );
+                                }
+                                Ok(crate::commands::work::ScreeningRecordOutcome::Recorded(
+                                    completed,
+                                )) if completed > reply.completed_batches => {
                                     step.outcome = WorkOutcome::Recorded;
                                     self.record("candidate screening", StageState::Completed, Some(format!("{completed}/{} screening batches recorded; card decisions are not full-body assessments", reply.batches)));
                                     self.queue_replan |= completed == reply.batches;
