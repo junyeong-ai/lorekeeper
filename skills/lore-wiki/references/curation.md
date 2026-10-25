@@ -79,9 +79,7 @@ then omit `--dry-run` to queue current-evidence synthesis. Unlike retained-input
 An exact broken concept address can be repaired without regenerating prose:
 
 ```bash
-lore graph repair-link wiki/concepts/source.md \
-  --from wiki/concepts/missing.md --to wiki/concepts/owner.md \
-  --revision SOURCE_FILE_REVISION --to-revision OWNER_FILE_REVISION --dry-run
+lore graph repair-link wiki/concepts/source.md --from wiki/concepts/missing.md --to wiki/concepts/owner.md --revision SOURCE_FILE_REVISION --to-revision OWNER_FILE_REVISION --dry-run
 ```
 
 Read both pages through `wiki read` and explicitly establish the destination before
