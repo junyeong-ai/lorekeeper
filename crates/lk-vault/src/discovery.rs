@@ -276,20 +276,15 @@ fn capture_discovery_batch_inner(
         })
         .collect::<Vec<_>>();
     let has_queries = query_sets.iter().any(|queries| !queries.is_empty());
-    let mut vocabulary = Vec::new();
-    if has_queries {
-        search::visit_collections_measured(
+    let vocabulary = if has_queries {
+        search::ConceptVocabulary::load(
             &root,
             dirs,
-            vec![lk_core::vault_path::concepts_dir(dirs)],
             metrics.as_mut().map(|metrics| &mut metrics.vocabulary),
-            |mut page, _| {
-                page.page.body.clear();
-                vocabulary.push(page);
-                Ok(())
-            },
-        )?;
-    }
+        )?
+    } else {
+        search::ConceptVocabulary::default()
+    };
     let mut captures = query_sets
         .into_iter()
         .map(|queries| {
@@ -298,7 +293,7 @@ fn capture_discovery_batch_inner(
                 .map(|query| {
                     let identity = identity_key(&query.query);
                     QueryPlan {
-                        spellings: search::spellings_of(identity.as_deref(), &vocabulary),
+                        spellings: vocabulary.spellings(identity.as_deref()),
                         terms: search::query_terms(&query.query, query.phrase),
                         identity,
                     }
@@ -658,25 +653,14 @@ pub fn discover_queries(
     if let Some(matches) = indexed_queries(root, dirs, queries)? {
         return Ok(matches);
     }
-    let mut vocabulary = Vec::new();
-    search::visit_collections(
-        root,
-        dirs,
-        vec![lk_core::vault_path::concepts_dir(dirs)],
-        |mut page, _| {
-            page.page.body = String::new();
-            page.page.original = None;
-            vocabulary.push(page);
-            Ok(())
-        },
-    )?;
+    let vocabulary = search::ConceptVocabulary::load(root, dirs, None)?;
     let plans = queries
         .iter()
         .collect::<BTreeSet<_>>()
         .into_iter()
         .map(|query| {
             let identity = identity_key(&query.query);
-            let spellings = search::spellings_of(identity.as_deref(), &vocabulary);
+            let spellings = vocabulary.spellings(identity.as_deref());
             let terms = search::query_terms(&query.query, query.phrase);
             (query, identity, spellings, terms)
         })
@@ -839,7 +823,10 @@ mod tests {
         );
         assert_eq!(metrics.captures, 1);
         assert_eq!(metrics.vocabulary.files, 1);
-        assert_eq!(metrics.vocabulary.bytes, concept.len());
+        assert_eq!(
+            metrics.vocabulary.bytes,
+            lk_core::frontmatter::body_offset(concept).unwrap()
+        );
         assert_eq!(metrics.knowledge.files, 2);
         assert_eq!(metrics.knowledge.bytes, concept.len() + document.len());
         assert_eq!(metrics.matched_rereads.files, 2);

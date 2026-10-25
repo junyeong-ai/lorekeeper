@@ -565,6 +565,7 @@ pub(super) fn visit_pages_measured(
     visit_collections_measured(vault_root, dirs, directories, metrics, visit)
 }
 
+#[cfg(test)]
 pub(super) fn visit_collections(
     vault_root: &Path,
     dirs: &VaultDirs,
@@ -578,8 +579,84 @@ pub(super) fn visit_collections_measured(
     vault_root: &Path,
     dirs: &VaultDirs,
     directories: Vec<PathBuf>,
-    mut metrics: Option<&mut crate::discovery::DiscoveryReadMetrics>,
+    metrics: Option<&mut crate::discovery::DiscoveryReadMetrics>,
     mut visit: impl FnMut(Page, usize) -> Result<(), VaultError>,
+) -> Result<(), VaultError> {
+    visit_collection_files(
+        vault_root,
+        dirs,
+        directories,
+        metrics,
+        |path, full, concept_collection, mut metrics| {
+            let started_at = metrics.as_ref().map(|_| std::time::Instant::now());
+            let raw = std::fs::read_to_string(full)?;
+            if let Some(metrics) = metrics.as_mut() {
+                metrics.record_read(raw.len(), started_at.expect("measured read").elapsed());
+            }
+            let started_at = metrics.as_ref().map(|_| std::time::Instant::now());
+            let mut page = crate::parse_page(&raw).map_err(VaultError::Frontmatter)?;
+            if let Some(metrics) = metrics.as_mut() {
+                metrics.parse_duration_us +=
+                    started_at.expect("measured parse").elapsed().as_micros() as u64;
+            }
+            page.original = None;
+            let knowledge_status = page
+                .frontmatter
+                .knowledge_status()
+                .map_err(VaultError::Frontmatter)?;
+            if page.frontmatter.get("type").and_then(|v| v.as_str()) == Some("task-board") {
+                return Ok(());
+            }
+            let concept = concept_collection && page.frontmatter.is_concept_or_legacy();
+            let id = path
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let title = page
+                .frontmatter
+                .get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&id)
+                .to_string();
+            let body_line_offset = lk_core::markdown::lines_with_endings(&raw).count()
+                - lk_core::markdown::lines_with_endings(&page.body).count();
+            visit(
+                Page {
+                    file_revision: lk_core::concept::file_revision(&raw),
+                    body_line_offset,
+                    // Taken from where the file actually sits rather than assembled from the
+                    // directory and the name: the walk is recursive, so a page filed in a
+                    // subdirectory would otherwise be reported at an address resolving nowhere.
+                    rel_path: path.to_path_buf(),
+                    aliases: string_array(&page, "aliases"),
+                    id,
+                    title,
+                    concept,
+                    citations_captured: false,
+                    page,
+                    knowledge_status,
+                    reviews: Vec::new(),
+                    review_states: crate::ReviewCounts::default(),
+                    projection: None,
+                },
+                body_line_offset,
+            )?;
+            Ok(())
+        },
+    )
+}
+
+fn visit_collection_files(
+    vault_root: &Path,
+    dirs: &VaultDirs,
+    directories: Vec<PathBuf>,
+    mut metrics: Option<&mut crate::discovery::DiscoveryReadMetrics>,
+    mut visit: impl FnMut(
+        &Path,
+        &Path,
+        bool,
+        Option<&mut crate::discovery::DiscoveryReadMetrics>,
+    ) -> Result<(), VaultError>,
 ) -> Result<(), VaultError> {
     let reserved = crate::navigation::ReservedNavigationPaths::load(vault_root, dirs)?;
     let mut visited = std::collections::BTreeSet::new();
@@ -610,63 +687,96 @@ pub(super) fn visit_collections_measured(
                 metrics.address_duration_us +=
                     started_at.expect("measured address").elapsed().as_micros() as u64;
             }
-            let started_at = metrics.as_ref().map(|_| std::time::Instant::now());
-            let raw = std::fs::read_to_string(full)?;
-            if let Some(metrics) = metrics.as_mut() {
-                metrics.record_read(raw.len(), started_at.expect("measured read").elapsed());
-            }
-            let started_at = metrics.as_ref().map(|_| std::time::Instant::now());
-            let mut page = crate::parse_page(&raw).map_err(VaultError::Frontmatter)?;
-            if let Some(metrics) = metrics.as_mut() {
-                metrics.parse_duration_us +=
-                    started_at.expect("measured parse").elapsed().as_micros() as u64;
-            }
-            page.original = None;
-            let knowledge_status = page
-                .frontmatter
-                .knowledge_status()
-                .map_err(VaultError::Frontmatter)?;
-            if page.frontmatter.get("type").and_then(|v| v.as_str()) == Some("task-board") {
-                continue;
-            }
-            let concept = concept_collection && page.frontmatter.is_concept_or_legacy();
-            let id = path
-                .file_stem()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            let title = page
-                .frontmatter
-                .get("title")
-                .and_then(|v| v.as_str())
-                .unwrap_or(&id)
-                .to_string();
-            let body_line_offset = lk_core::markdown::lines_with_endings(&raw).count()
-                - lk_core::markdown::lines_with_endings(&page.body).count();
-            visit(
-                Page {
-                    file_revision: lk_core::concept::file_revision(&raw),
-                    body_line_offset,
-                    // Taken from where the file actually sits rather than assembled from the
-                    // directory and the name: the walk is recursive, so a page filed in a
-                    // subdirectory would otherwise be reported at an address resolving nowhere.
-                    rel_path: path.strip_prefix(vault_root).unwrap_or(&path).to_path_buf(),
-                    aliases: string_array(&page, "aliases"),
-                    id,
-                    title,
-                    concept,
-                    citations_captured: false,
-                    page,
-                    knowledge_status,
-                    reviews: Vec::new(),
-                    review_states: crate::ReviewCounts::default(),
-                    projection: None,
-                },
-                body_line_offset,
-            )?;
+            let relative = path
+                .strip_prefix(vault_root)
+                .map_err(std::io::Error::other)?;
+            visit(relative, &full, concept_collection, metrics.as_deref_mut())?;
         }
     }
-
     Ok(())
+}
+
+#[derive(Default)]
+pub(super) struct ConceptVocabulary {
+    names: Vec<(String, Vec<String>)>,
+}
+
+impl ConceptVocabulary {
+    pub(super) fn load(
+        root: &Path,
+        dirs: &VaultDirs,
+        metrics: Option<&mut crate::discovery::DiscoveryReadMetrics>,
+    ) -> Result<Self, VaultError> {
+        let mut vocabulary = Self::default();
+        visit_collection_files(
+            root,
+            dirs,
+            vec![concepts_dir(dirs)],
+            metrics,
+            |path, full, _, mut metrics| {
+                let started_at = metrics.as_ref().map(|_| std::time::Instant::now());
+                let input = std::io::BufReader::new(std::fs::File::open(full)?);
+                let (header, bytes) = crate::store::read_frontmatter_header(input)?;
+                if let Some(metrics) = metrics.as_mut() {
+                    metrics
+                        .record_read(bytes, started_at.expect("measured metadata read").elapsed());
+                }
+                let started_at = metrics.as_ref().map(|_| std::time::Instant::now());
+                let metadata = match header {
+                    Some(header) => {
+                        crate::parse_page(&header)
+                            .map_err(VaultError::Frontmatter)?
+                            .frontmatter
+                    }
+                    None => crate::Frontmatter::default(),
+                };
+                if let Some(metrics) = metrics.as_mut() {
+                    metrics.parse_duration_us += started_at
+                        .expect("measured metadata parse")
+                        .elapsed()
+                        .as_micros() as u64;
+                }
+                metadata
+                    .knowledge_status()
+                    .map_err(VaultError::Frontmatter)?;
+                if !metadata.is_concept_or_legacy() {
+                    return Ok(());
+                }
+                let id = path
+                    .file_stem()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let title = metadata
+                    .get("title")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or(&id)
+                    .to_owned();
+                let aliases = metadata
+                    .get("aliases")
+                    .and_then(|value| value.as_array())
+                    .map(|values| {
+                        values
+                            .iter()
+                            .filter_map(|value| value.as_str())
+                            .map(String::from)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                vocabulary.names.push((title, aliases));
+                Ok(())
+            },
+        )?;
+        Ok(vocabulary)
+    }
+
+    pub(super) fn spellings(&self, query_identity: Option<&str>) -> Vec<String> {
+        resolve_spellings(
+            query_identity,
+            self.names
+                .iter()
+                .map(|(title, aliases)| (title.as_str(), aliases.as_slice())),
+        )
+    }
 }
 
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
@@ -1153,7 +1263,7 @@ impl Page {
     }
 
     pub(super) fn names(&self) -> impl Iterator<Item = &str> {
-        std::iter::once(self.title.as_str()).chain(self.aliases.iter().map(String::as_str))
+        declared_names(&self.title, &self.aliases)
     }
 }
 
@@ -1180,41 +1290,51 @@ impl Page {
 /// compound; such matches are retrieval candidates, not semantic identity decisions.
 /// Excerpts expose the matched prose for the caller to assess.
 pub(super) fn spellings_of(query_identity: Option<&str>, pages: &[Page]) -> Vec<String> {
+    resolve_spellings(
+        query_identity,
+        pages
+            .iter()
+            .filter(|page| page.concept)
+            .map(|page| (page.title.as_str(), page.aliases.as_slice())),
+    )
+}
+
+fn resolve_spellings<'a>(
+    query_identity: Option<&str>,
+    concepts: impl Iterator<Item = (&'a str, &'a [String])> + Clone,
+) -> Vec<String> {
     let Some(key) = query_identity else {
         return Vec::new();
     };
-    let mut owners: Vec<_> = pages
-        .iter()
-        .filter(|p| p.concept)
-        .filter(|p| {
-            p.names()
-                .any(|name| identity_key(name).as_deref() == Some(key))
-        })
+    let mut owners: Vec<_> = concepts
+        .clone()
+        .filter(|p| declared_names(p.0, p.1).any(|name| identity_key(name).as_deref() == Some(key)))
         .collect();
     if owners.is_empty() {
         let folded = fold_name(key);
-        owners = pages
-            .iter()
-            .filter(|p| p.concept)
-            .filter(|p| p.names().any(|name| fold_name(name) == folded))
+        owners = concepts
+            .clone()
+            .filter(|p| declared_names(p.0, p.1).any(|name| fold_name(name) == folded))
             .collect();
     }
     if owners.is_empty() {
         let key = spacing_key(key);
-        owners = pages
-            .iter()
-            .filter(|p| p.concept)
-            .filter(|p| p.names().any(|name| spacing_key(name) == key))
+        owners = concepts
+            .clone()
+            .filter(|p| declared_names(p.0, p.1).any(|name| spacing_key(name) == key))
             .collect();
     }
     if owners.len() != 1 {
         return Vec::new();
     }
-    owners[0]
-        .names()
+    declared_names(owners[0].0, owners[0].1)
         .map(fold_name)
         .filter(|name| !name.is_empty())
         .collect()
+}
+
+fn declared_names<'a>(title: &'a str, aliases: &'a [String]) -> impl Iterator<Item = &'a str> {
+    std::iter::once(title).chain(aliases.iter().map(String::as_str))
 }
 
 /// The strongest claim this page has on the query, or `None` when some term is nowhere on it.
@@ -1996,6 +2116,101 @@ pub(crate) fn markdown_files(root: &Path, dir: &Path) -> Result<Vec<PathBuf>, Va
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn metadata_vocabulary_preserves_names_and_skips_large_bodies() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let directory = root.path().join(concepts_dir(&dirs));
+        std::fs::create_dir_all(&directory).unwrap();
+        let header = "\u{feff}---\r\ntype: concept\r\ntitle: Helios\r\naliases: [Sun, 지식그래프, 지식 그래프]\r\n---\r\n";
+        let content = format!(
+            "{header}## Synthesis\n{}",
+            "Complete evidence. ".repeat(32768)
+        );
+        std::fs::write(directory.join("helios.md"), &content).unwrap();
+        std::fs::write(
+            directory.join("legacy.md"),
+            "A legacy page without metadata.",
+        )
+        .unwrap();
+        std::fs::write(
+            directory.join("document.md"),
+            "---\ntype: document\ntitle: Helios\naliases: [Not a concept]\n---\nSource.\n",
+        )
+        .unwrap();
+        let mut metrics = crate::DiscoveryReadMetrics::default();
+        let vocabulary = ConceptVocabulary::load(root.path(), &dirs, Some(&mut metrics)).unwrap();
+        let mut pages = Vec::new();
+        visit_collections(root.path(), &dirs, vec![concepts_dir(&dirs)], |page, _| {
+            pages.push(page);
+            Ok(())
+        })
+        .unwrap();
+        for name in [
+            "Helios",
+            "Sun",
+            "SUN",
+            "지식그래프",
+            "지식 그래프",
+            "legacy",
+            "Not a concept",
+        ] {
+            let identity = identity_key(name);
+            assert_eq!(
+                vocabulary.spellings(identity.as_deref()),
+                spellings_of(identity.as_deref(), &pages),
+                "{name}"
+            );
+        }
+        assert_eq!(metrics.files, 3);
+        assert!(metrics.bytes < 256);
+        assert!(content.len() > 500_000);
+        let query = lk_core::discovery::DiscoveryQuery {
+            query: "Complete evidence".into(),
+            phrase: true,
+            spacing: false,
+        };
+        let capture = crate::capture_discovery(root.path(), &dirs, &[query]).unwrap();
+        assert_eq!(capture.candidates.len(), 1);
+        assert_eq!(
+            capture.guarded_pages().values().next().unwrap().as_str(),
+            content
+        );
+    }
+
+    #[test]
+    fn metadata_only_vocabulary_never_excuses_unreadable_body_or_invalid_metadata() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let directory = root.path().join(concepts_dir(&dirs));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("helios.md");
+        let mut raw = b"---\ntype: concept\ntitle: Helios\n---\n".to_vec();
+        raw.push(0xff);
+        std::fs::write(&path, raw).unwrap();
+        assert!(ConceptVocabulary::load(root.path(), &dirs, None).is_ok());
+        assert!(
+            crate::capture_discovery(
+                root.path(),
+                &dirs,
+                &[lk_core::discovery::DiscoveryQuery {
+                    query: "Helios".into(),
+                    phrase: true,
+                    spacing: false,
+                }]
+            )
+            .is_err()
+        );
+        for raw in [
+            "---\ntitle: Unclosed\n",
+            "---\ntitle: First\ntitle: Second\n---\n",
+            "---\ntype: concept\nknowledge_status: unknown\n---\n",
+        ] {
+            std::fs::write(&path, raw).unwrap();
+            assert!(ConceptVocabulary::load(root.path(), &dirs, None).is_err());
+        }
+    }
 
     #[test]
     fn streamed_search_keeps_only_the_requested_rank_window_and_complete_facets() {

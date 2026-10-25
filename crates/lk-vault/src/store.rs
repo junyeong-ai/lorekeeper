@@ -114,7 +114,9 @@ pub(crate) fn read_page(root: &Path, path: &Path) -> Result<VaultPage, VaultErro
         .map_err(|error| VaultError::Frontmatter(format!("{}: {error}", path.display())))
 }
 
-fn load_frontmatter(mut input: impl std::io::BufRead) -> Result<Frontmatter, VaultError> {
+pub(crate) fn read_frontmatter_header(
+    mut input: impl std::io::BufRead,
+) -> Result<(Option<String>, usize), VaultError> {
     use std::io::{BufRead, Read};
 
     let mut opening = Vec::new();
@@ -122,7 +124,7 @@ fn load_frontmatter(mut input: impl std::io::BufRead) -> Result<Frontmatter, Vau
     input.by_ref().take(9).read_until(b'\n', &mut opening)?;
     let first = opening.strip_prefix(b"\xef\xbb\xbf").unwrap_or(&opening);
     if first != b"---\n" && first != b"---\r\n" {
-        return Ok(Frontmatter::default());
+        return Ok((None, opening.len()));
     }
     let mut header = String::from_utf8(opening).map_err(std::io::Error::other)?;
     loop {
@@ -131,10 +133,19 @@ fn load_frontmatter(mut input: impl std::io::BufRead) -> Result<Frontmatter, Vau
             return Err(VaultError::Frontmatter("unclosed frontmatter block".into()));
         }
         if frontmatter::is_delimiter_line(&header[start..]) {
-            return frontmatter::parse_page(&header)
-                .map(|page| page.frontmatter)
-                .map_err(VaultError::Frontmatter);
+            let bytes = header.len();
+            return Ok((Some(header), bytes));
         }
+    }
+}
+
+fn load_frontmatter(input: impl std::io::BufRead) -> Result<Frontmatter, VaultError> {
+    let (header, _) = read_frontmatter_header(input)?;
+    match header {
+        Some(header) => frontmatter::parse_page(&header)
+            .map(|page| page.frontmatter)
+            .map_err(VaultError::Frontmatter),
+        None => Ok(Frontmatter::default()),
     }
 }
 
