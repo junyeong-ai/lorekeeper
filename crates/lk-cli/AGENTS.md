@@ -340,6 +340,13 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   Open valid reviews and drift needing attention are distinct, not all “resolved.”
   Provenance is metadata-first, bounded and revision-pinned; relation/direction are
   explicit. Discovery must not incidentally prepare a new snapshot.
+- `graph repair-link` repairs an explicitly mapped missing concept address in one
+  exact concept page. Pin origin and destination file revisions, require canonical
+  declared concepts and an absent old address, use shared CommonMark link rewriting,
+  and journal target/absence guards with the source edit. Preserve prose, frontmatter
+  and completion values; never regenerate semantics or infer mappings from names.
+  Typed RSS evidence requires its provenance-aware path. The preview is inert and
+  refuses pending journals; the local repair makes no global lint or audit claim.
 
 ## Queue processing (`commands/queue/`, `commands/synthesis.rs`)
 

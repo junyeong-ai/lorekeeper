@@ -75,6 +75,27 @@ sections or queue completion markers. Use `graph resynthesize` and `/lore-proces
 semantic corrections: preview `lore graph resynthesize wiki/concepts/subject.md --dry-run`,
 then omit `--dry-run` to queue current-evidence synthesis. Unlike retained-input
 `queue regenerate`, this does not require the original extraction task.
+
+An exact broken concept address can be repaired without regenerating prose:
+
+```bash
+lore graph repair-link wiki/concepts/source.md \
+  --from wiki/concepts/missing.md --to wiki/concepts/owner.md \
+  --revision SOURCE_FILE_REVISION --to-revision OWNER_FILE_REVISION --dry-run
+```
+
+Read both pages through `wiki read` and explicitly establish the destination before
+selecting this mapping. `--from` is the complete missing vault-relative address the
+old link resolves to, not its raw relative href or a guessed name. The command
+requires canonical declared concepts and refuses an occupied old address. It uses
+the shared Markdown parser, retaining labels, anchors and titles while leaving code,
+images, other prose, frontmatter and completion values unchanged. Preview first;
+omit `--dry-run` for guarded publication under the workflow lease. It creates no
+semantic result and does not retag saved Work or receipts. Verify exact file changes,
+then run graph checks and normal reconciliation. This local repair alone establishes
+neither current semantic assessments nor whole-vault health. Typed RSS evidence
+uses its provenance-aware correction path instead.
+
 Compare both complete concepts and their sources before proposing a merge; shared
 words or source count are insufficient. Preview with
 `lore graph merge <from> <into> --dry-run`, using exact addresses relative to the

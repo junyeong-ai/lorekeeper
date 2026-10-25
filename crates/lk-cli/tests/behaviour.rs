@@ -162,6 +162,10 @@ const SWEEP: &[&[&str]] = &[
 /// rather than an omission.
 const EXEMPT: &[(&[&str], &str)] = &[
     (
+        &["graph", "repair-link"],
+        "requires exact operator-pinned source and destination revisions; graph_repair_link executes preview/publication and exact byte restoration, with unit guards for aliases, drift, occupied addresses and journal recovery",
+    ),
+    (
         &["input", "install"],
         "installs the optional external runtime; input tests refuse existing directories, first-user proof verifies pinned installation",
     ),

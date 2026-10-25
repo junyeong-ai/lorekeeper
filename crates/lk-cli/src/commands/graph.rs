@@ -1,3 +1,4 @@
+mod repair_link;
 mod resynthesize;
 mod retract_citation;
 
@@ -51,6 +52,26 @@ pub enum GraphCommand {
     Orphans,
     /// Find broken links pointing to non-existent pages
     Broken,
+    /// Repair an explicitly mapped broken concept link without regenerating prose
+    RepairLink {
+        /// Exact existing vault-relative concept page containing the broken link
+        origin: PathBuf,
+        /// Exact missing vault-relative concept address currently resolved by the link
+        #[arg(long)]
+        from: PathBuf,
+        /// Exact existing vault-relative concept address to use instead
+        #[arg(long)]
+        to: PathBuf,
+        /// Full origin file revision from the operator's read
+        #[arg(long)]
+        revision: String,
+        /// Full destination file revision from the operator's read
+        #[arg(long)]
+        to_revision: String,
+        /// Validate and preview without recovering or publishing
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Follow direct incoming/outgoing links across managed pages, including daily evidence
     Neighbors {
         /// Exact vault-relative Markdown path returned by search or browse
@@ -290,6 +311,7 @@ async fn run_inner(
             | GraphCommand::BacklinksSync { dry_run: false, .. }
             | GraphCommand::Resynthesize { dry_run: false, .. }
             | GraphCommand::RetractCitation { dry_run: false, .. }
+            | GraphCommand::RepairLink { dry_run: false, .. }
     ) {
         Some(
             super::publication::acquire_mutation(&rc.root, wait_for_vault, &rc.pin)
@@ -299,6 +321,34 @@ async fn run_inner(
     } else {
         None
     };
+
+    if let GraphCommand::RepairLink {
+        origin,
+        from,
+        to,
+        revision,
+        to_revision,
+        dry_run,
+    } = &cmd
+    {
+        let report = repair_link::request(
+            &rc,
+            repair_link::Request {
+                origin,
+                from,
+                to,
+                revision,
+                to_revision,
+            },
+            *dry_run,
+            mutation.as_ref(),
+        )?;
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report).map_err(|error| error.to_string())?
+        );
+        return Ok(false);
+    }
 
     let views = scan::VaultViews::resolve(&rc.root, &rc.graph, &rc.vault_dirs)
         .map_err(|e| format!("{e}"))?;
@@ -318,6 +368,9 @@ async fn run_inner(
     let g = graph::WikiGraph::build_with_existence(&views.pages, &views.existence, &rc.vault_dirs);
 
     let violated = match cmd {
+        GraphCommand::RepairLink { .. } => {
+            unreachable!("scoped link repair precedes graph capture")
+        }
         GraphCommand::RetractCitation {
             origin,
             concept,
