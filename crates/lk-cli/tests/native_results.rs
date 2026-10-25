@@ -16,7 +16,7 @@ raw=sys.stdin.read()
 request=json.loads(raw.split('\nNative request:\n',1)[1])
 with (root/'calls.jsonl').open('a') as f: f.write(json.dumps(request)+'\n')
 mode=(root/'mode').read_text()
-if request.get('schema') in ['native-selected-results-v2','native-finalize-results-v1','native-finalize-frontier-v1']:
+if request.get('schema') in ['native-selected-results-v3','native-finalize-results-v2','native-finalize-frontier-v2']:
     assert '--safe-mode' not in sys.argv
     assert '--output-schema' in sys.argv or '--json-schema' in sys.argv
     assert 'Do not write result files' in raw or 'do not write result files' in raw
@@ -26,7 +26,7 @@ if request.get('schema') in ['native-selected-results-v2','native-finalize-resul
     else:
         assert sys.argv[sys.argv.index('--sandbox')+1]=='workspace-write'
     completed=request.get('completed') or request.get('frontier')
-    if request['schema']=='native-finalize-frontier-v1':
+    if request['schema']=='native-finalize-frontier-v2':
         (root/'last-frontier.json').write_text(json.dumps(request))
         assert completed['observations'] and completed['proof']['nodes']
     tasks=request.get('tasks') or [{'task':{'kind':completed['context']['purpose']['task_kind'],
@@ -34,6 +34,18 @@ if request.get('schema') in ['native-selected-results-v2','native-finalize-resul
     results=[]
     for item in tasks:
         task=item['task']; target=task['target']['vault_path']
+        if mode.startswith('discovery') and ('recover' in target or 'frontier' in target):
+            context=item.get('context') or completed['context']
+            old=context['purpose']['discovery']['queries']
+            fresh=any(q['query']=='fresh terminology' for q in old)
+            if mode!='discovery-once' or not fresh:
+                query='protocol' if mode=='discovery-same' or (mode=='discovery-cycle' and fresh) else 'fresh terminology'
+                value={'queries':[{'query':query,'phrase':True,'spacing':False}]}
+                if mode=='discovery-empty': value={'queries':[]}
+                if mode=='discovery-identity': value['task_id']='forged'
+                if mode=='discovery-target-drift':
+                    path=root/'vault'/target; path.write_text(path.read_text()+'\nExternal change.\n')
+                results.append({'status':'needs-discovery','value':value,'reason':'Explicit fresh owner discovery is required.'}); continue
         if mode=='frontier-action' or (mode=='action' and 'blocked' in target) or (mode=='batch-capacity' and 'blocked' in target and request['max_response_bytes'] < item['max_response_bytes']):
             results.append({'status':'needs-action','value':None,'reason':'A scoped review action is required.'}); continue
         if mode=='changed-target':
@@ -268,6 +280,15 @@ impl Fixture {
         assert!(serde_json::to_vec(&observations).unwrap().len() > 32768);
         (task, plan, observations)
     }
+
+    fn recovery(&self, task: &lk_queue::QueueTask) -> PathBuf {
+        self.root()
+            .join("vault/.lorekeeper/queue/discovery")
+            .join(format!(
+                "{}.recovery.json",
+                lk_core::rss_original::digest(task.task_id.as_bytes())
+            ))
+    }
     fn done(&self, task: &lk_queue::QueueTask) -> bool {
         let raw = std::fs::read_to_string(self.root().join("vault").join(&task.target.vault_path))
             .unwrap();
@@ -338,6 +359,196 @@ fn native_actions_defer_unchanged_work_without_calls_and_keep_independent_public
         assert_eq!(fixture.calls(), count, "{report}");
         assert!(!fixture.done(&blocked));
     }
+}
+
+#[test]
+fn extraction_discovery_recovery_replans_selected_and_root_on_both_hosts() {
+    for engine in ["codex", "claude-code"] {
+        for planned in [false, true] {
+            let fixture = Fixture::new(engine);
+            let (task, plan) = fixture.add("recover", lk_queue::TaskKind::ExtractConcepts, planned);
+            std::fs::write(fixture.root().join("mode"), "discovery-once").unwrap();
+            let report = fixture.run();
+            assert!(fixture.done(&task), "{engine}/{planned}: {report}");
+            assert!(!report["halted"].as_bool().unwrap(), "{report}");
+            assert!(
+                report["stages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|s| s["name"] == "extraction discovery recovery"),
+                "{report}"
+            );
+            let calls = std::fs::read_to_string(fixture.root().join("calls.jsonl")).unwrap();
+            let requests: Vec<Value> = calls
+                .lines()
+                .map(|s| serde_json::from_str(s).unwrap())
+                .collect();
+            assert!(
+                requests
+                    .iter()
+                    .any(|r| r.to_string().contains("fresh terminology")),
+                "{calls}"
+            );
+            if let Some(plan) = plan {
+                let directory = fixture
+                    .root()
+                    .join("vault/.lorekeeper/work")
+                    .join(plan["work_id"].as_str().unwrap());
+                assert!(directory.join("plan.json").exists());
+                assert!(
+                    !directory.join("seal.json").exists(),
+                    "recovery must not seal old-scope work"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn unchanged_discovery_and_cycles_defer_without_repeating_calls_and_keep_independent_progress() {
+    for engine in ["codex", "claude-code"] {
+        for mode in ["discovery-same", "discovery-cycle"] {
+            let fixture = Fixture::new(engine);
+            let (task, _) = fixture.add("recover", lk_queue::TaskKind::ExtractConcepts, false);
+            let (ready, _) = fixture.add("ready", lk_queue::TaskKind::ExtractConcepts, false);
+            std::fs::write(fixture.root().join("mode"), mode).unwrap();
+            let report = fixture.run();
+            assert!(!fixture.done(&task), "{engine}/{mode}: {report}");
+            assert!(fixture.done(&ready), "{report}");
+            assert!(!report["halted"].as_bool().unwrap(), "{report}");
+            let raw = std::fs::read(fixture.recovery(&task)).unwrap();
+            let receipt: Value = serde_json::from_slice(&raw).unwrap();
+            assert!(!receipt["receipts"].as_array().unwrap().is_empty());
+            let requests = std::fs::read_to_string(fixture.root().join("calls.jsonl")).unwrap();
+            let actual: Vec<_> = requests
+                .lines()
+                .map(|line| {
+                    let request: Value = serde_json::from_str(line).unwrap();
+                    lk_core::concept::file_revision(&serde_json::to_string(&request).unwrap())
+                })
+                .collect();
+            for receipt in receipt["receipts"].as_array().unwrap() {
+                assert!(
+                    actual
+                        .iter()
+                        .any(|digest| receipt["request_revision"] == *digest),
+                    "receipt must bind an actually delivered request"
+                );
+            }
+            let calls = fixture.calls();
+            let report = fixture.run();
+            assert_eq!(fixture.calls(), calls, "{engine}/{mode}: {report}");
+            assert_eq!(std::fs::read(fixture.recovery(&task)).unwrap(), raw);
+        }
+    }
+}
+
+#[test]
+fn discovery_recovery_refuses_invalid_queries_non_extraction_and_changed_target() {
+    for engine in ["codex", "claude-code"] {
+        for (mode, kind) in [
+            ("discovery-empty", lk_queue::TaskKind::ExtractConcepts),
+            ("discovery-identity", lk_queue::TaskKind::ExtractConcepts),
+            (
+                "discovery-target-drift",
+                lk_queue::TaskKind::ExtractConcepts,
+            ),
+            ("discovery-same", lk_queue::TaskKind::SynthesizeConcept),
+        ] {
+            let fixture = Fixture::new(engine);
+            let (task, _) = fixture.add("recover", kind, false);
+            std::fs::write(fixture.root().join("mode"), mode).unwrap();
+            let report = fixture.run();
+            assert!(
+                report["halted"].as_bool().unwrap(),
+                "{engine}/{mode}: {report}"
+            );
+            assert!(!fixture.done(&task));
+            assert!(!fixture.recovery(&task).exists());
+        }
+    }
+}
+
+#[test]
+fn corrupt_discovery_history_is_fatal_and_never_overwritten() {
+    let fixture = Fixture::new("codex");
+    let (task, _) = fixture.add("recover", lk_queue::TaskKind::ExtractConcepts, false);
+    std::fs::write(fixture.recovery(&task), "{corrupt").unwrap();
+    let report = fixture.run();
+    assert!(report["halted"].as_bool().unwrap(), "{report}");
+    assert_eq!(fixture.calls(), 0);
+    assert_eq!(
+        std::fs::read_to_string(fixture.recovery(&task)).unwrap(),
+        "{corrupt"
+    );
+}
+
+#[test]
+fn frontier_discovery_keeps_paid_nodes_unsealed_and_same_request_spends_no_more_calls() {
+    for engine in ["codex", "claude-code"] {
+        let fixture = Fixture::new(engine);
+        let (task, plan, _) = fixture.paid_frontier(lk_queue::TaskKind::ExtractConcepts);
+        let directory = fixture
+            .root()
+            .join("vault/.lorekeeper/work")
+            .join(plan["work_id"].as_str().unwrap());
+        let saved: Vec<_> = std::fs::read_dir(directory.join("nodes"))
+            .unwrap()
+            .map(|entry| {
+                let path = entry.unwrap().path();
+                let raw = std::fs::read(&path).unwrap();
+                (path, raw)
+            })
+            .collect();
+        std::fs::write(fixture.root().join("mode"), "discovery-same").unwrap();
+        let report = fixture.run();
+        assert!(!report["halted"].as_bool().unwrap(), "{engine}: {report}");
+        assert!(!fixture.done(&task));
+        let receipt: Value =
+            serde_json::from_slice(&std::fs::read(fixture.recovery(&task)).unwrap()).unwrap();
+        assert_eq!(receipt["receipts"].as_array().unwrap().len(), 1);
+        assert_eq!(receipt["receipts"][0]["disposition"], "unchanged");
+        assert!(!directory.join("final.json").exists());
+        assert!(!directory.join("seal.json").exists());
+        assert!(!directory.join("frontier-seal.json").exists());
+        for (path, raw) in saved {
+            assert_eq!(std::fs::read(path).unwrap(), raw);
+        }
+        let calls = fixture.calls();
+        let report = fixture.run();
+        assert_eq!(fixture.calls(), calls, "{report}");
+        assert!(!fixture.done(&task));
+    }
+}
+
+#[test]
+fn changed_target_reconsiders_discovery_without_retagging_old_receipts() {
+    let fixture = Fixture::new("codex");
+    let (task, _) = fixture.add("recover", lk_queue::TaskKind::ExtractConcepts, false);
+    std::fs::write(fixture.root().join("mode"), "discovery-same").unwrap();
+    let report = fixture.run();
+    assert!(!report["halted"].as_bool().unwrap(), "{report}");
+    let prior: Value =
+        serde_json::from_slice(&std::fs::read(fixture.recovery(&task)).unwrap()).unwrap();
+    let count = fixture.calls();
+    let target = fixture.root().join("vault").join(&task.target.vault_path);
+    let mut raw = std::fs::read_to_string(&target).unwrap();
+    raw.push_str("\nA newly authored source detail.\n");
+    std::fs::write(target, raw).unwrap();
+    let report = fixture.run();
+    assert!(!report["halted"].as_bool().unwrap(), "{report}");
+    assert!(fixture.calls() > count, "{report}");
+    let next: Value =
+        serde_json::from_slice(&std::fs::read(fixture.recovery(&task)).unwrap()).unwrap();
+    assert_eq!(next["receipts"][0], prior["receipts"][0]);
+    assert!(
+        next["receipts"].as_array().unwrap().len() > prior["receipts"].as_array().unwrap().len()
+    );
+    let count = fixture.calls();
+    fixture.run();
+    assert_eq!(fixture.calls(), count);
+    assert!(!fixture.done(&task));
 }
 
 #[test]
@@ -444,7 +655,7 @@ fn result_identity_capacity_defers_without_calls_and_preserves_independent_work(
         let mut observed_capacity = false;
         for line in calls.lines() {
             let call: Value = serde_json::from_str(line).unwrap();
-            if call["schema"] == "native-selected-results-v2" {
+            if call["schema"] == "native-selected-results-v3" {
                 assert!(
                     call["tasks"]
                         .as_array()
@@ -453,7 +664,7 @@ fn result_identity_capacity_defers_without_calls_and_preserves_independent_work(
                         .all(|task| task["task"]["task_id"] != blocked.task_id)
                 );
             } else {
-                assert_ne!(call["schema"], "native-finalize-results-v1");
+                assert_ne!(call["schema"], "native-finalize-results-v2");
             }
         }
         for stage in report["stages"].as_array().unwrap() {

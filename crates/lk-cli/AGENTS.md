@@ -150,7 +150,14 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   typed task/target kinds. Extraction/synthesis use tool-enabled final-schema responses;
   audits retain interactive finalization. Native Rust assembles TaskResult/SynthesisResult
   metadata from the exact prepared scope, reserves envelope bytes and owns finish/staging.
-  Models return semantic values or needs-action only. Do not couple output schema to
+  Models return semantic values, needs-action, or extraction-only needs-discovery
+  with explicit DiscoveryQuery values. Discovery recovery journals the legacy recipe
+  and native request-bound sidecar together under vault→queue claims. Preserve exact
+  current Source Work; changed knowledge scope replans without retagging paid nodes.
+  Recovery is incomplete; exact repeated requests/cycles defer before another host.
+  Retention protects pending task identities and validates recovery sidecars before
+  removing them. Never interpret old reason text as a recovery query.
+  Do not couple output schema to
   tool prohibition, scrape events/prose or mutate saved Work to adopt a reply.
   Selected action receipts bind the actual batch request. Reconsider action-bearing
   tasks individually after request changes, then suppress unchanged singleton actions;

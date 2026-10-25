@@ -4,6 +4,8 @@ use lk_core::discovery::DiscoveryQuery;
 use miette::IntoDiagnostic;
 use serde::{Deserialize, Serialize};
 
+pub(super) mod recovery;
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct DiscoveryRequest {
@@ -20,6 +22,20 @@ struct DiscoveryRecord {
     queries: Vec<DiscoveryQuery>,
 }
 
+impl DiscoveryRecord {
+    fn current_queries(
+        &self,
+        task: &lk_queue::QueueTask,
+        target_revision: &str,
+    ) -> miette::Result<Option<Vec<DiscoveryQuery>>> {
+        let queries = validate_queries(&self.queries)?;
+        Ok((self.task_id == task.task_id
+            && self.cache_hash == task.cache_hash
+            && self.target_revision == target_revision)
+            .then_some(queries))
+    }
+}
+
 fn path(task_id: &str) -> PathBuf {
     PathBuf::from(".lorekeeper/queue/discovery").join(format!(
         "{}.json",
@@ -32,6 +48,7 @@ pub(super) fn retire(
     task: &lk_queue::QueueTask,
     plan: &mut lk_vault::MutationPlan,
 ) -> miette::Result<()> {
+    recovery::retire(root, task, plan)?;
     let path = path(&task.task_id);
     let raw = match std::fs::read_to_string(lk_vault::page_path(root, &path).into_diagnostic()?) {
         Ok(raw) => raw,
@@ -68,6 +85,14 @@ pub(super) fn prune(
     let mut plan = lk_vault::MutationPlan::default();
     for entry in entries {
         let entry = entry.into_diagnostic()?;
+        if entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.ends_with(".recovery.json"))
+        {
+            removed += usize::from(recovery::prune_entry(root, &entry, pending, &mut plan)?);
+            continue;
+        }
         if !entry.file_type().into_diagnostic()?.is_file()
             || entry
                 .path()
@@ -129,15 +154,11 @@ pub(super) fn current(
         Err(error) => return Err(miette::miette!("read extraction discovery: {error}")),
     };
     let record: DiscoveryRecord = serde_json::from_str(&raw).into_diagnostic()?;
-    let queries = validate_queries(&record.queries)?;
     let target = std::fs::read_to_string(
         lk_vault::page_path(root, Path::new(&task.target.vault_path)).into_diagnostic()?,
     )
     .into_diagnostic()?;
-    Ok((record.task_id == task.task_id
-        && record.cache_hash == task.cache_hash
-        && record.target_revision == lk_core::concept::file_revision(&target))
-    .then_some(queries))
+    record.current_queries(task, &lk_core::concept::file_revision(&target))
 }
 
 pub(super) fn record(
@@ -164,6 +185,7 @@ pub(super) fn record(
         ));
     }
     let queries = validate_queries(&request.queries)?;
+    let history = recovery::has_history(root, &task)?;
     let target_path = Path::new(&task.target.vault_path);
     let target = std::fs::read_to_string(lk_vault::page_path(root, target_path).into_diagnostic()?)
         .into_diagnostic()?;
@@ -181,6 +203,12 @@ pub(super) fn record(
     let after = serde_json::to_string_pretty(&record).into_diagnostic()?;
     let path = path(task_id);
     let mut plan = lk_vault::MutationPlan::default();
+    if history {
+        let receipt_path = recovery::path(task_id);
+        let raw = super::state::read_optional(root, &receipt_path)?
+            .ok_or_else(|| miette::miette!("discovery recovery history disappeared"))?;
+        plan.require_unchanged(receipt_path, raw);
+    }
     plan.require_unchanged(target_path, target);
     match std::fs::read_to_string(lk_vault::page_path(root, &path).into_diagnostic()?) {
         Ok(before) => plan.edit(path, before, after),

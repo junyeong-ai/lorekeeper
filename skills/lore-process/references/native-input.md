@@ -1,7 +1,7 @@
 # Prepared native results
 
-Use only when the native controller supplies `native-selected-results-v2`,
-`native-finalize-results-v1` or `native-finalize-frontier-v1`. The complete request arrives through supervised stdin.
+Use only when the native controller supplies `native-selected-results-v3`,
+`native-finalize-results-v2` or `native-finalize-frontier-v2`. The complete request arrives through supervised stdin.
 It is neither semantic completion nor permission to process unrelated work.
 
 ## Selected tasks
@@ -31,7 +31,7 @@ uncertainty; processing blockers do not become source questions or approval.
 
 ## Complete observation coverage
 
-`native-finalize-frontier-v1` supplies `frontier` instead of `completed`. Its current
+`native-finalize-frontier-v2` supplies `frontier` instead of `completed`. Its current
 observations jointly cover every planned inspection exactly once, but no combined
 root observation has been recorded. Read every supplied observation, its source
 questions, resolutions and evidence mapping. Compare claims under their stated scope
@@ -51,6 +51,9 @@ a completed Work. Each entry has exactly `status`, `value` and `reason`:
 
 - Complete: `status: complete`, a semantic `value` object and `reason: null`.
 - Required action: `status: needs-action`, `value: null` and a concrete nonblank reason.
+- Extraction discovery: `status: needs-discovery`, `value: {queries: [...]}` and a
+  concrete nonblank reason. Each explicit lexical query has `query`, `phrase` and
+  `spacing`; supply 1–16 nonblank queries. Other task kinds cannot use this state.
 
 An extraction value is `{concepts: [...]}` using the supplied concept schema: names,
 aliases, categories, explicit new/reuse admission, grounding and RSS article selections
@@ -63,9 +66,16 @@ Do not write result files or invoke `work finish`/`queue apply` in this native r
 Standalone processing and `work finish` retain their existing full-result contracts.
 
 Targeted name/alias resolution, missing decision-relevant reads and review/repair tools
-remain available. Do not repeat setup or drain other tasks. New discovery, changed
-scope or review publication requires fresh preparation and regeneration, never new
-guards on old prose. Return `needs-action` when a required step cannot be completed.
+remain available. Do not repeat setup or drain other tasks. When extraction needs a
+new candidate search, return `needs-discovery` with your explicit queries. Rust
+atomically records the recipe and a receipt bound to the actual request, then
+replans through normal admission. It reuses Source Work only if its exact source
+scope remains current; changed knowledge scope needs a fresh plan. Existing paid
+observations remain retained. Recovery grants no observation, seal, publication or
+semantic approval. Identical requests and exact request cycles defer without another
+call. Never infer queries from an earlier action reason or edit recovery receipts.
+Changed scope or review publication requires fresh preparation and regeneration,
+never new guards on old prose. Return `needs-action` for other required steps.
 An unchanged exact request/action defers before another call; independent work continues.
 Actions bind the actual supplied request, including its selected tasks and shared response
 allowance. A changed action request is reconsidered individually; a new unchanged action

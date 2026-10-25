@@ -246,6 +246,58 @@ pub(super) fn current_task(root: &Path, task_id: &str) -> miette::Result<QueueTa
     select_task(root, task_id, TaskSelection::Current)
 }
 
+/// Called under vault then queue claims; retain the exact request during replay.
+#[cfg(unix)]
+pub(super) fn guard_current_task(
+    root: &Path,
+    task: &QueueTask,
+    plan: &mut lk_vault::MutationPlan,
+) -> miette::Result<()> {
+    use miette::IntoDiagnostic;
+    let current = current_task(root, &task.task_id)?;
+    if serde_json::to_value(&current).into_diagnostic()?
+        != serde_json::to_value(task).into_diagnostic()?
+    {
+        return Err(miette::miette!("current task changed before recovery"));
+    }
+    let mut found = false;
+    for path in pending_queue_files(&root.join(".lorekeeper/queue"))? {
+        let (raw, file) = lk_queue::read_tasks_snapshot(&path).into_diagnostic()?;
+        if !file.is_rewritable() {
+            return Err(miette::miette!(
+                "unparseable queue prevents discovery recovery"
+            ));
+        }
+        if let Some(entry) = file
+            .tasks
+            .iter()
+            .find(|entry| entry.task_id == task.task_id)
+        {
+            if found {
+                return Err(miette::miette!("ambiguous task during discovery recovery"));
+            }
+            if serde_json::to_value(entry).into_diagnostic()?
+                != serde_json::to_value(task).into_diagnostic()?
+            {
+                return Err(miette::miette!(
+                    "current task changed during recovery capture"
+                ));
+            }
+            found = true;
+            plan.require_unchanged(
+                path.strip_prefix(root).into_diagnostic()?,
+                String::from_utf8(raw).into_diagnostic()?,
+            );
+        }
+    }
+    if !found {
+        return Err(miette::miette!(
+            "task disappeared before discovery recovery"
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy)]
 pub(super) enum TaskSelection {
     Current,

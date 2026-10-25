@@ -204,6 +204,7 @@ mod native {
         Pending,
         Staged,
         Deferred(String),
+        Replan,
         Failed,
     }
 
@@ -1878,7 +1879,7 @@ mod native {
             );
             metrics.revalidation_record_duration_ms = Some(started.elapsed().as_millis() as u64);
             match finished {
-                Ok(Some(reason)) => {
+                Ok(crate::commands::work::ResultFinish::NeedsAction(reason)) => {
                     self.record(
                         "native finalization action",
                         StageState::Skipped,
@@ -1886,7 +1887,7 @@ mod native {
                     );
                     WorkStep::Deferred(reason)
                 }
-                Ok(None) => {
+                Ok(crate::commands::work::ResultFinish::Staged) => {
                     metrics.outcome = WorkOutcome::Staged;
                     self.record(
                         "bounded work completion",
@@ -1894,6 +1895,17 @@ mod native {
                         Some(id.into()),
                     );
                     WorkStep::Staged
+                }
+                Ok(crate::commands::work::ResultFinish::DiscoveryRecorded) => {
+                    self.record(
+                        "extraction discovery recovery",
+                        StageState::Skipped,
+                        Some(id.into()),
+                    );
+                    self.queue_admitted.clear();
+                    self.queue_turn = None;
+                    self.queue_replan = true;
+                    WorkStep::Replan
                 }
                 Err(error) => {
                     self.failure("native finalization", error);
@@ -1934,6 +1946,7 @@ mod native {
             let mut deferred = false;
             let mut failed = false;
             let mut staged = false;
+            let mut recovered = false;
             for (input, reply) in inputs.iter().zip(replies) {
                 match crate::commands::work::generation::finish_selected(
                     &session,
@@ -1943,6 +1956,14 @@ mod native {
                     input,
                     reply,
                 ) {
+                    Ok(crate::commands::work::generation::SelectedFinish::DiscoveryRecorded) => {
+                        recovered = true;
+                        self.record(
+                            "extraction discovery recovery",
+                            StageState::Skipped,
+                            input["task"]["task_id"].as_str().map(str::to_owned),
+                        );
+                    }
                     Ok(crate::commands::work::generation::SelectedFinish::NeedsAction(reason)) => {
                         deferred = true;
                         self.record("native selected action", StageState::Skipped, Some(reason));
@@ -1977,6 +1998,11 @@ mod native {
             self.record_work_step(metrics);
             if failed {
                 WorkStep::Failed
+            } else if recovered {
+                self.queue_admitted.clear();
+                self.queue_turn = None;
+                self.queue_replan = true;
+                WorkStep::Replan
             } else if deferred {
                 WorkStep::Deferred("selected tasks require explicit actions".into())
             } else {
@@ -3263,6 +3289,7 @@ mod native {
                             match self.whole_section_step(task).await {
                                 WorkStep::Staged => {}
                                 WorkStep::Deferred(_) => continue 'planning,
+                                WorkStep::Replan => continue 'planning,
                                 WorkStep::Failed if self.queue_replan => continue 'planning,
                                 WorkStep::Failed => return false,
                                 WorkStep::Pending => {
@@ -3322,6 +3349,7 @@ mod native {
                                     blocked.insert(id.clone(), reason);
                                     continue 'planning;
                                 }
+                                WorkStep::Replan => continue 'planning,
                                 WorkStep::Failed if self.queue_replan => continue 'planning,
                                 WorkStep::Failed => return false,
                                 WorkStep::Pending => {
@@ -3336,6 +3364,7 @@ mod native {
                                     blocked.insert(id.clone(), reason);
                                     continue 'planning;
                                 }
+                                WorkStep::Replan => continue 'planning,
                                 WorkStep::Failed if self.queue_replan => continue 'planning,
                                 WorkStep::Failed => return false,
                                 WorkStep::Staged => {}
@@ -3369,6 +3398,9 @@ mod native {
                             match self.selected_result_step(inputs).await {
                                 WorkStep::Staged => {}
                                 WorkStep::Deferred(_) => generation_deferred = true,
+                                WorkStep::Replan => {
+                                    generation_deferred = true;
+                                }
                                 WorkStep::Failed if self.queue_replan => continue 'planning,
                                 WorkStep::Failed => return false,
                                 WorkStep::Pending => {
@@ -4056,6 +4088,9 @@ mod native {
                             continue;
                         }
                         WorkStep::Failed => return,
+                        WorkStep::Replan => {
+                            unreachable!("audit cannot request extraction discovery")
+                        }
                         WorkStep::Staged => {}
                     }
                     let assessment = self

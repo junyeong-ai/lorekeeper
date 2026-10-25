@@ -516,7 +516,7 @@ else:
 prompt=(Path(os.environ['TEST_EXECUTION_ROOT'])/'interactive-request.txt').read_text() or '\n'.join(sys.argv[1:])
 raw=prompt.split('\nNative request:\n',1)[1]
 request=json.loads(raw)
-assert request['schema']=='native-selected-results-v2'
+assert request['schema']=='native-selected-results-v3'
 assert request['tasks'] and request['contracts'] and request['response_schema']
 for selected in request['tasks']:
     assert selected['task']['task_id'] and selected['resources']
@@ -600,7 +600,7 @@ fn knowledge_queue_consumer_receives_bounded_maintenance_context() {
     );
     assert_eq!(result["ok"], false);
     let prompt = std::fs::read_to_string(fixture.root().join("interactive-request.txt")).unwrap();
-    assert!(prompt.contains("native-selected-results-v2"));
+    assert!(prompt.contains("native-selected-results-v3"));
     assert!(prompt.contains("scoped"));
     assert!(prompt.contains("native controller owns final reconciliation"));
     assert!(
@@ -2511,7 +2511,7 @@ fn build_extraction_behavior(discovery_handler: &str) -> String {
     behavior = behavior.replace("native=('--output-schema'", r#"result_role='--output-last-message' in sys.argv or ('--json-schema' in sys.argv and '--safe-mode' not in sys.argv)
 if result_role:
     prepared=json.loads((root/'interactive-request.txt').read_text().split('\nNative request:\n',1)[1])
-    if prepared['schema'] in ['native-finalize-results-v1','native-finalize-frontier-v1']:
+    if prepared['schema'] in ['native-finalize-results-v2','native-finalize-frontier-v2']:
         output={'results':[{'status':'complete','value':{'concepts':[]},'reason':None}]}
         with (root/'bounded-calls.jsonl').open('a') as stream:
             stream.write(json.dumps({'action':'finish','work_id':(prepared.get('completed') or prepared['frontier'])['work_id']})+'\n')
@@ -2629,7 +2629,7 @@ fn small_extraction_hands_expanded_discovery_to_bounded_work_on_both_hosts() {
         r#"    if match is None:
         prompt=(Path(os.environ['TEST_EXECUTION_ROOT'])/'interactive-request.txt').read_text() or '\n'.join(sys.argv[1:])
         prepared=json.loads(prompt.split('\nNative request:\n',1)[1])
-        assert prepared['schema']=='native-selected-results-v2'
+        assert prepared['schema']=='native-selected-results-v3'
         assert prepared['contracts']
         ids=[selected['task']['task_id'] for selected in prepared['tasks']]
         lore=os.environ['LORE_BIN']
@@ -2812,7 +2812,7 @@ def log(row):
 result_role='--output-last-message' in sys.argv or ('--json-schema' in sys.argv and '--safe-mode' not in sys.argv)
 if result_role:
     prepared=json.loads((root/'interactive-request.txt').read_text().split('\nNative request:\n',1)[1])
-    assert prepared['schema']=='native-selected-results-v2'
+    assert prepared['schema']=='native-selected-results-v3'
     output={'results':[]}
     for selected in prepared['tasks']:
         task=selected['task']
@@ -5399,7 +5399,7 @@ BATCH"#;
                 &std::fs::read(fixture.root().join("selected-batch.json")).unwrap(),
             )
             .unwrap();
-            assert_eq!(selected["schema"], "native-selected-results-v2");
+            assert_eq!(selected["schema"], "native-selected-results-v3");
             assert!(!selected["contracts"].as_array().unwrap().is_empty());
             let tasks = selected["tasks"].as_array().unwrap();
             assert_eq!(

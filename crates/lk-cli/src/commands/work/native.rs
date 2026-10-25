@@ -181,7 +181,7 @@ pub(in crate::commands) fn selected_request(
         .min()
         .expect("nonempty selection");
     Ok(json!({
-        "schema":"native-selected-results-v2", "tasks":selected, "contracts":contracts,
+        "schema":"native-selected-results-v3", "tasks":selected, "contracts":contracts,
         "max_input_bytes":limits.max_input_bytes,
         "max_result_bytes":limits.max_result_bytes,
         "max_response_bytes":max_response_bytes,
@@ -223,7 +223,7 @@ pub(in crate::commands) fn finalization_request(
     let subject: Subject =
         serde_json::from_value(work.context["subject"].clone()).into_diagnostic()?;
     Ok(json!({
-        "schema":"native-finalize-results-v1", "context_revision":context_revision,
+        "schema":"native-finalize-results-v2", "context_revision":context_revision,
         "completed":completed, "contracts":contracts,
         "max_input_bytes":work.max_input_bytes, "max_result_bytes":work.plan.max_result_bytes,
         "max_response_bytes":super::generation::response_limit(task, &subject, &work.context, context_revision, work.plan.max_result_bytes)?,
@@ -267,7 +267,7 @@ pub(in crate::commands) fn frontier_request(
     let contracts =
         crate::commands::execution::finalization::generation_contracts(config, kind, target.kind)?;
     Ok(json!({
-        "schema":"native-finalize-frontier-v1", "context_revision":work.plan.subject_revision,
+        "schema":"native-finalize-frontier-v2", "context_revision":work.plan.subject_revision,
         "frontier":frontier, "contracts":contracts,
         "max_input_bytes":work.max_input_bytes,"max_result_bytes":work.plan.max_result_bytes,
         "max_response_bytes":super::generation::response_limit(task, &subject, &work.context, &work.plan.subject_revision, work.plan.max_result_bytes)?,

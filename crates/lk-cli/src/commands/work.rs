@@ -1651,11 +1651,9 @@ fn prepare_task_in_session(
             }
         }
         if let Some(result) = frontier_result(root, config, task, &work, &prepared)? {
-            if let Some(reason) = work.load_finalization_action_for(
-                root,
-                &result.request,
-                &result.completed["result_revision"],
-            )? {
+            if let Some(reason) =
+                native_finalization_action(root, task, &work, &result.request, &result.completed)?
+            {
                 return Ok(TaskWork::Admission { reason });
             }
             return Ok(TaskWork::Finalization { id: work.plan.id });
@@ -1859,6 +1857,19 @@ fn frontier_result(
 }
 
 #[cfg(unix)]
+fn native_finalization_action(
+    root: &Path,
+    task: &lk_queue::QueueTask,
+    work: &Work,
+    request: &Value,
+    completed: &Value,
+) -> miette::Result<Option<String>> {
+    let action = work.load_finalization_action_for(root, request, &completed["result_revision"])?;
+    let recovery = discovery::recovery::blocked(root, task, request)?;
+    Ok(action.or(recovery))
+}
+
+#[cfg(unix)]
 fn prepare_frontier_finalization(
     root: &Path,
     config: &lk_core::config::Config,
@@ -1872,11 +1883,9 @@ fn prepare_frontier_finalization(
     let Some(result) = frontier_result(root, config, &task, work, prepared)? else {
         return Ok(None);
     };
-    if let Some(reason) = work.load_finalization_action_for(
-        root,
-        &result.request,
-        &result.completed["result_revision"],
-    )? {
+    if let Some(reason) =
+        native_finalization_action(root, &task, work, &result.request, &result.completed)?
+    {
         return Ok(Some(FinalizationPreparation::NeedsAction(reason)));
     }
     Ok(Some(FinalizationPreparation::Result(Box::new(result))))
@@ -2054,9 +2063,7 @@ fn prepare_finalization_from_capture(
                 max_input_bytes: work.max_input_bytes,
             });
         }
-        if let Some(reason) =
-            work.load_finalization_action_for(root, &request, &completed["result_revision"])?
-        {
+        if let Some(reason) = native_finalization_action(root, &task, work, &request, &completed)? {
             return Ok(FinalizationPreparation::NeedsAction(reason));
         }
         if completed["output"]["unresolved"]
@@ -2150,6 +2157,13 @@ fn prepare_finalization_from_capture(
 }
 
 #[cfg(unix)]
+pub(super) enum ResultFinish {
+    Staged,
+    NeedsAction(String),
+    DiscoveryRecorded,
+}
+
+#[cfg(unix)]
 pub(super) fn finish_result(
     session: &lk_vault::MutationSession,
     config: &lk_core::config::Config,
@@ -2158,7 +2172,7 @@ pub(super) fn finish_result(
     result: ResultFinalization,
     reply: Value,
     read: &lk_vault::ReadControl,
-) -> miette::Result<Option<String>> {
+) -> miette::Result<ResultFinish> {
     let root = session.root();
     let (work, prepared) = load_controlled(root, config, config_revision, id, read)?;
     let completed =
@@ -2179,6 +2193,30 @@ pub(super) fn finish_result(
         reply,
         work.plan.max_result_bytes,
     )? {
+        generation::Outcome::NeedsDiscovery(recovery, reason) => {
+            let capture = work.capture_native_completion(root, &prepared.resources, result.kind)?;
+            if capture.result() != &completed {
+                return Err(miette::miette!(
+                    "completed Work changed before discovery recovery"
+                ));
+            }
+            let mut plan = lk_vault::MutationPlan::default();
+            capture.plan_read_guards(&mut plan);
+            discovery::recovery::record(
+                session,
+                discovery::recovery::Binding {
+                    task: &task,
+                    prepared: &prepared,
+                    request: &result.request,
+                    context_revision: &work.plan.subject_revision,
+                    work_id: &work.plan.id,
+                },
+                recovery,
+                reason,
+                plan,
+            )?;
+            Ok(ResultFinish::DiscoveryRecorded)
+        }
         generation::Outcome::NeedsAction(reason) => {
             let mut plan = work.plan_finalization_action_for(
                 root,
@@ -2190,7 +2228,7 @@ pub(super) fn finish_result(
             )?;
             prepared.guard_pages(&mut plan);
             session.apply(plan).into_diagnostic()?;
-            Ok(Some(reason))
+            Ok(ResultFinish::NeedsAction(reason))
         }
         generation::Outcome::Complete(value) => {
             let (_, plan) = plan_finish_completion(
@@ -2202,7 +2240,7 @@ pub(super) fn finish_result(
                 result.kind,
             )?;
             session.apply(plan).into_diagnostic()?;
-            Ok(None)
+            Ok(ResultFinish::Staged)
         }
     }
 }

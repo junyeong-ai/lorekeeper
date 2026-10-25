@@ -18,12 +18,14 @@ struct Reply {
 pub(in crate::commands) enum Outcome {
     Complete(Value),
     NeedsAction(String),
+    NeedsDiscovery(super::discovery::recovery::Recovery, String),
 }
 
 pub(in crate::commands) enum SelectedFinish {
     Staged,
     NeedsAction(String),
     ScopeChanged,
+    DiscoveryRecorded,
 }
 
 pub(in crate::commands) fn schema() -> Value {
@@ -42,10 +44,12 @@ pub(in crate::commands) fn schema() -> Value {
         "required":["admission","name","category","aliases","synthesis","rss_evidence"]});
     let value = json!({"anyOf":[{"type":"null"},
         {"type":"object","additionalProperties":false,"properties":{"concepts":{"type":"array","items":concept}},"required":["concepts"]},
-        {"type":"object","additionalProperties":false,"properties":{"synthesis":{"type":"string"},"related":{"type":["string","null"]}},"required":["synthesis","related"]}]});
+        {"type":"object","additionalProperties":false,"properties":{"synthesis":{"type":"string"},"related":{"type":["string","null"]}},"required":["synthesis","related"]},
+        {"type":"object","additionalProperties":false,"properties":{"queries":{"type":"array","minItems":1,"maxItems":16,"items":{
+            "type":"object","additionalProperties":false,"properties":{"query":{"type":"string","minLength":1},"phrase":{"type":"boolean"},"spacing":{"type":"boolean"}},"required":["query","phrase","spacing"]}}},"required":["queries"]}]});
     json!({"type":"object","additionalProperties":false,"properties":{"results":{"type":"array","items":{
         "type":"object","additionalProperties":false,"properties":{
-            "status":{"type":"string","enum":["complete","needs-action"]},"value":value,"reason":{"type":["string","null"]}},
+            "status":{"type":"string","enum":["complete","needs-action","needs-discovery"]},"value":value,"reason":{"type":["string","null"]}},
         "required":["status","value","reason"]}}},"required":["results"]})
 }
 
@@ -81,6 +85,13 @@ pub(super) fn assemble(
     let semantic = match (reply.status.as_str(), reply.value, reply.reason) {
         ("needs-action", None, Some(reason)) if !reason.trim().is_empty() => {
             return Ok(Outcome::NeedsAction(reason));
+        }
+        ("needs-discovery", Some(value), Some(reason))
+            if task.kind == TaskKind::ExtractConcepts && !reason.trim().is_empty() =>
+        {
+            let recovery: super::discovery::recovery::Recovery =
+                serde_json::from_value(value).into_diagnostic()?;
+            return Ok(Outcome::NeedsDiscovery(recovery.validate()?, reason));
         }
         ("complete", Some(value), None) if value.is_object() => value,
         _ => {
@@ -243,7 +254,7 @@ pub(super) fn response_limit(
 }
 
 pub(super) fn instruction() -> &'static str {
-    "Return one results entry for each supplied task, in exact supplied order (one entry for a completed Work). Each entry is {status: complete, value: semantic_object, reason: null}, or {status: needs-action, value: null, reason: nonblank}. Extraction semantic_object contains only concepts in the shared ReportedConcept format; synthesis contains only synthesis and related. Rust supplies all TaskResult/SynthesisResult task/cache/target/context/date/discovery/selection metadata and owns result-file serialization, finish, seals, staging and publication. Never return metadata, source_questions fields or extra keys. Preserve source_questions as attributed uncertainty in the semantic prose, never invent answers. Read the supplied scope/contracts completely. Exact owner/name/alias checks, targeted missing reads and review/repair capabilities remain available when necessary. Do not repeat setup/queue enumeration or reconstruct guards. Native revisions are opaque and domain-specific: compare only the same named field from native output, never a raw checksum or another revision field. Rust validates captured revisions. If scope changes, return needs-action for fresh discovery/readiness; never attach new hashes to an old answer. Unknown semantic support is not approval. Processing blockers, missing required reads or actions require needs-action. Honor max_response_bytes, which reserves the native result envelope inside max_result_bytes. Do not drop evidence, unresolved issues or source questions to fit; return needs-action instead. Native guards revalidate the complete current scope after the host and again at publication."
+    "Return one results entry for each supplied task, in exact supplied order (one entry for a completed Work). Each entry is {status: complete, value: semantic_object, reason: null}, or {status: needs-action, value: null, reason: nonblank}. Extraction alone may return {status: needs-discovery, value: {queries: [{query: explicit_query, phrase: boolean, spacing: boolean}]}, reason: nonblank} when new lexical discovery is needed. Supply 1..16 explicit queries, never paths, task IDs or revisions. This records an incomplete recovery request; it grants no semantic approval or completion. Extraction semantic_object contains only concepts in the shared ReportedConcept format; synthesis contains only synthesis and related. Rust supplies all TaskResult/SynthesisResult task/cache/target/context/date/discovery/selection metadata and owns result-file serialization, finish, seals, staging and publication. Never return metadata, source_questions fields or extra keys. Preserve source_questions as attributed uncertainty in the semantic prose, never invent answers. Read the supplied scope/contracts completely. Exact owner/name/alias checks, targeted missing reads and review/repair capabilities remain available when necessary. Do not repeat setup/queue enumeration or reconstruct guards. Native revisions are opaque and domain-specific: compare only the same named field from native output, never a raw checksum or another revision field. Rust validates captured revisions. If extraction needs new discovery, use needs-discovery with explicit queries. Other scope changes require needs-action for fresh readiness; never attach new hashes to an old answer. Unknown semantic support is not approval. Processing blockers, missing required reads or actions require needs-action. Honor max_response_bytes, which reserves the native result envelope inside max_result_bytes. Do not drop evidence, unresolved issues or source questions to fit; return needs-action instead. Native guards revalidate the complete current scope after the host and again at publication."
 }
 
 pub(super) enum Admission {
@@ -263,10 +274,22 @@ pub(super) fn admission(
             .as_str()
             .ok_or_else(|| miette::miette!("missing selected task"))?,
     )?;
-    let Some((_, action)) = GENERATION.read(root, &task.task_id, &task.cache_hash)? else {
-        return Ok(Admission::Batch);
-    };
     let request = super::native::selected_request(config, std::slice::from_ref(input))?;
+    let action = GENERATION.read(root, &task.task_id, &task.cache_hash)?;
+    let history = match super::discovery::recovery::admission(root, &task, &request)? {
+        super::discovery::recovery::Admission::Blocked(reason) => {
+            return Ok(Admission::Deferred(reason));
+        }
+        super::discovery::recovery::Admission::Changed => true,
+        super::discovery::recovery::Admission::New => false,
+    };
+    let Some((_, action)) = action else {
+        return Ok(if history {
+            Admission::Single
+        } else {
+            Admission::Batch
+        });
+    };
     if action.request_revision != digest(&request)? {
         return Ok(Admission::Single);
     }
@@ -321,7 +344,6 @@ pub(in crate::commands) fn finish_selected(
         .map(|(raw, _)| raw);
     let path = GENERATION.path(&task.task_id, &task.cache_hash);
     let mut plan = lk_vault::MutationPlan::default();
-    prepared.guard_pages(&mut plan);
     let reason = match assemble_prepared(
         &task,
         &prepared,
@@ -329,7 +351,24 @@ pub(in crate::commands) fn finish_selected(
         reply,
         work.plan.max_result_bytes,
     )? {
+        Outcome::NeedsDiscovery(recovery, reason) => {
+            super::discovery::recovery::record(
+                session,
+                super::discovery::recovery::Binding {
+                    task: &task,
+                    prepared: &prepared,
+                    request,
+                    context_revision: &work.plan.subject_revision,
+                    work_id: &work.plan.id,
+                },
+                recovery,
+                reason,
+                plan,
+            )?;
+            return Ok(SelectedFinish::DiscoveryRecorded);
+        }
         Outcome::NeedsAction(reason) => {
+            prepared.guard_pages(&mut plan);
             plan.publish_expected(
                 root,
                 path,
@@ -348,6 +387,7 @@ pub(in crate::commands) fn finish_selected(
             SelectedFinish::NeedsAction(reason)
         }
         Outcome::Complete(result) => {
+            prepared.guard_pages(&mut plan);
             super::guard_queue(
                 root,
                 config,
