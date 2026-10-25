@@ -298,12 +298,16 @@ result; progress events do not establish publication, inference time or cost.
 | Fields | Meaning |
 | --- | --- |
 | `role`, `work_id`, `node_id`, `node_kind`, `selection_id`, `batch_id` | Exact selected work or screening identities; unavailable identities are `null` |
-| `request_json_bytes`, `result_json_bytes` | Compact UTF-8 JSON of the delivered native request and decoded response (including a native observation/action envelope but excluding Rust-supplied identity), excluding prompts and host envelopes; tool-enabled native extraction/synthesis response bytes are measured, while ordinary interactive audit response bytes remain unobserved and `null` |
+| `request_json_bytes`, `result_json_bytes` | Compact UTF-8 JSON of the prepared request and decoded response (including a native observation/action envelope but excluding Rust-supplied identity), excluding prompts and host envelopes; tool-enabled native extraction/synthesis response bytes are measured, while ordinary interactive audit response bytes remain unobserved and `null` |
 | `preparation_duration_ms`, `preparation_from_queue_plan` | Additional local preparation of the selected request or completed root; a screening request carried from the same queue checkpoint has `null` duration and `true` reuse |
 | `agent_duration_ms` | Supervised invocation attempt wall time, including a failed or cancelled attempt; never server inference time |
 | `revalidation_record_duration_ms` | Fresh input validation and recording together; these operations are not measured separately |
 | `verification_duration_ms` | Finalizer completion and sealed-result verification |
 | `outcome` | `recorded`, `staged`, `restaged`, `already-complete`, `rejected`, `failed` or `cancelled` |
+
+Native evidence request bytes describe the native presentation after invocation
+preparation. If preflight stops earlier, they can describe the canonical prepared
+Work request instead; neither value proves delivery or an agent invocation.
 
 Unobserved or inapplicable measurements stay `null`; a preflight rejection does not
 invent an agent duration. Byte counts are not token counts or billed cost. A recorded
