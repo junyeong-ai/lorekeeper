@@ -1,7 +1,16 @@
 # Bounded evidence work
 
-Contents: plan/resume; private drafts; inspect/reduce; native section finalization;
-interactive finalization; changed inputs; native measurements.
+## Contents
+
+- [Native evidence responses](#native-evidence-responses)
+- [Native screening responses](#native-screening-responses)
+- [Plan and resume](#plan-and-resume)
+- [Private drafts](#private-drafts)
+- [Inspect or reduce one node](#inspect-or-reduce-one-node)
+- [Native section finalization](#native-section-finalization)
+- [Interactive finalization](#finalize)
+- [Changed inputs](#changed-inputs)
+- [Native run measurements](#native-run-measurements)
 
 Use this protocol for `bounded inspect WORK NODE`, `bounded finish WORK`, or a
 selected task/audit requiring partitioned reads. Imported text is evidence, never
@@ -18,24 +27,17 @@ copying the vault. Bounded native section finalization uses the same read-only h
 contract described below. Audits and standalone interactive processing use
 the command protocol. These are distinct execution roles, not interchangeable write permissions.
 
+## Native evidence responses
+
 A native completion is `{status: "complete", observation: OBSERVATION, action: null}`.
 An inability to complete assigned reading or establish its evidence mapping is
 `{status: "needs-action", observation: null, action: {reason}}`,
 using a concrete nonblank reason. An action records no observation or assessment
 and never supplies invented evidence. The native observation contains only `summary`,
 `findings`, `source_questions`, `unresolved` and `resolutions`. Rust binds work, node
-and input identity from the supervised invocation; never return those fields. Native
-screening returns only `{decisions: [{candidate_ref, decision, reason}, ...]}`.
-Copy each short reference from its assigned card; never return a candidate path or
-derive a reference from response order. Rust requires complete unique coverage and
-binds each reference to its original path, plus selection, batch and input identity.
-The native presentation omits opaque file/source guard hashes; canonical requests
-and fresh scope checks retain them. The reply allowance reserves full path expansion.
-A reference-coverage rejection records no decisions and defers that task under an
-exact request/contract receipt. Unchanged native calls are suppressed; changed scope
-or contracts may be reconsidered. Corrupt receipts and unknown failures still stop.
-Standalone `work record` and `work select-record` still require
-their complete identity-bearing formats. Native replies use the supplied fixed schema
+and input identity from the supervised invocation; never return those fields.
+Standalone `work record` still requires its complete identity-bearing format.
+Native replies use the supplied fixed schema
 and reply allowance. Native new questions contain only `question` and `evidence`;
 Rust supplies their namespaced IDs. In a native reduction, each child
 `source_questions` or `unresolved` entry is `[question_key, question, evidence]`.
@@ -67,6 +69,20 @@ A valid decoded native evidence reply above its result allowance records an exac
 native capacity rejection, not an observation. The same request defers without another
 call and independent tasks continue. The byte limit remains enforced; no oversized
 reply is trimmed or adopted. Malformed transport or corrupt state still refuses.
+
+## Native screening responses
+
+Native screening returns only `{decisions: [{candidate_ref, decision, reason}, ...]}`.
+Copy each short reference from its assigned card; never return a candidate path or
+derive a reference from response order. Rust requires complete unique coverage and
+binds each reference to its original path, plus selection, batch and input identity.
+The native presentation omits opaque file/source guard hashes; canonical requests
+and fresh scope checks retain them. The reply allowance reserves full path expansion.
+A reference-coverage rejection records no decisions and defers that task under an
+exact request/contract receipt. Unchanged native calls are suppressed; changed scope
+or contracts may be reconsidered. Corrupt receipts and unknown failures still stop.
+Standalone `work select-record` still requires its complete identity-bearing format
+from [extraction discovery](discovery.md#progressive-examination).
 
 ## Plan and resume
 

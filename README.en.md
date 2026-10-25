@@ -241,6 +241,15 @@ for tuning and resume contracts.
 
 ## Operations and completion
 
+| Work to run | Command and scope |
+|---|---|
+| Collect and process | `lore run daily` — collect sources, process the queue, publish and run final checks |
+| Process collected work | `lore run process` — process the queue without new collection or semantic audits |
+| Review knowledge | `lore run knowledge` — structural preflight, one ready audit batch, then queue processing and currentness checks for the selected assessments |
+
+`knowledge --batches N` caps the number of audit batches. Check each batch's call budget and remaining work separately;
+running the requested batches does not establish whole-corpus completion.
+
 ### Check the state you need
 
 | What to check | Command | What it establishes |
@@ -261,7 +270,6 @@ Configuration is pinned during a run; changed input requires a fresh answer rath
 ```bash
 lore schedule > lorekeeper.cron                              # Linux: review, then merge with crontab
 lore schedule --format launchd --bin "$(command -v lore)"     # macOS: print plist definitions
-lore run knowledge                                          # one ready semantic audit batch
 ```
 
 Printed definitions are not registered OS jobs. Review and register them, then inspect an actual run and its logs.
@@ -275,6 +283,7 @@ Start manual publishing sessions before reading evidence with `lore workflow -- 
 | Initial corpus review, recurring audits and coverage | [Semantic maintenance](skills/lore-wiki/references/maintenance.md) |
 | Update, repair, back up or move devices | [Installation and data preservation](skills/lore-ingest/references/installation.md) |
 | Correct mistaken evidence, concepts or relationships | [Queue recovery](skills/lore-process/references/recovery.md), [curation](skills/lore-wiki/references/curation.md) |
+| Repair a broken concept link with a verified destination | [Address repair](skills/lore-wiki/references/curation.md#repair-a-broken-concept-address) — revision guards preserve prose and completion values |
 
 Use `lore self update` for updates. Active installation users prevent replacement, and pending work blocks it by default.
 Back up the entire vault, including hidden state. Originals, paid observations, queues and review history are different from rebuildable caches.

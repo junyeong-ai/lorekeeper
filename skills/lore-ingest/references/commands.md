@@ -5,7 +5,7 @@
 | `lore validate` | Parse + validate config, print summary |
 | `lore run daily [--profile NAME] [--wait] [--json]` | Complete collection, semantic processing, graph reconciliation and retained periods using the configured agent |
 | `lore run process [--profile NAME]` | Process queued semantic work and verify native publication |
-| `lore run knowledge [--profile NAME]` | Review one configured semantic audit batch and verify its completion |
+| `lore run knowledge [--profile NAME] [--batches N]` | Run structural preflight, review a ready audit batch, then process the queue and verify selected assessments. Explicitly budget multiple batches with `--batches`; this is not whole-corpus completion |
 | `lore ingest` | Collect ALL enabled sources, write pages; render the cross-source work-log when a `personal:` module is configured |
 | `lore ingest <source>` | Refresh one source's pages only — never rewrites the work-log (it sees a subset) |
 | `lore ingest --dry-run` | Preview without vault writes |

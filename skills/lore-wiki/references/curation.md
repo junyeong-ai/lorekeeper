@@ -1,5 +1,11 @@
 # Reviewed knowledge curation
 
+## Contents
+
+- [Metadata and review corrections](#metadata-and-review-corrections)
+- [Repair a broken concept address](#repair-a-broken-concept-address)
+- [Merge equivalent concepts](#merge-equivalent-concepts)
+
 Use this operation for authorized repairs identified by an audit. Read the relevant
 concept, complete supporting context and any existing review under the workflow
 lease before drafting changes. Counts and lexical similarity do not decide meaning.
@@ -13,6 +19,8 @@ lease before drafting changes. Counts and lexical similarity do not decide meani
   from normal discovery. Preserve the concept address, prose and historical judgments.
 - Alias only the same subject and scope. Product vs method, family vs version and a
   homonym need distinct names. Search spelling variants never authorize a merge.
+
+## Metadata and review corrections
 
 `lore wiki curate --file PLAN.json --dry-run` validates a proposed plan without changing
 pages or recovering journals. Missing addresses use temporary directory-only probes
@@ -76,6 +84,8 @@ semantic corrections: preview `lore graph resynthesize wiki/concepts/subject.md 
 then omit `--dry-run` to queue current-evidence synthesis. Unlike retained-input
 `queue regenerate`, this does not require the original extraction task.
 
+## Repair a broken concept address
+
 An exact broken concept address can be repaired without regenerating prose:
 
 ```bash
@@ -93,6 +103,8 @@ semantic result and does not retag saved Work or receipts. Verify exact file cha
 then run graph checks and normal reconciliation. This local repair alone establishes
 neither current semantic assessments nor whole-vault health. Typed RSS evidence
 uses its provenance-aware correction path instead.
+
+## Merge equivalent concepts
 
 Compare both complete concepts and their sources before proposing a merge; shared
 words or source count are insufficient. Preview with

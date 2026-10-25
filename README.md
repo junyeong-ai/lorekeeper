@@ -240,6 +240,15 @@ execution:
 
 ## 운영과 완료 확인
 
+| 실행할 작업 | 명령과 범위 |
+|---|---|
+| 수집부터 처리까지 | `lore run daily` — 소스를 수집하고 큐 처리·게시·최종 검사 |
+| 이미 수집한 작업 처리 | `lore run process` — 새 수집이나 의미 감사 없이 큐 처리 |
+| 지식의 의미 검토 | `lore run knowledge` — 구조 검사 후 준비된 감사 한 배치, 이어서 큐 처리와 선택한 평가의 현재성 확인 |
+
+`knowledge --batches N`은 실행할 감사 배치 수의 상한입니다. 각 배치의 호출 예산과
+남은 작업은 별도로 확인해야 하며, 지정한 배치를 실행했다고 전체 감사가 끝나는 것은 아닙니다.
+
 ### 상태에 맞는 명령 선택
 
 | 확인할 것 | 명령 | 결과가 뜻하는 범위 |
@@ -260,7 +269,6 @@ execution:
 ```bash
 lore schedule > lorekeeper.cron                              # Linux: 검토 후 crontab에 병합
 lore schedule --format launchd --bin "$(command -v lore)"     # macOS: plist 정의 출력
-lore run knowledge                                          # 준비된 의미 감사 한 배치
 ```
 
 스케줄 출력은 OS 등록이 아닙니다. 정의를 검토·등록한 뒤 실제 실행과 로그를 확인하세요.
@@ -274,6 +282,7 @@ Unix workflow lease가 협력하는 에이전트 세션을 조정하고, 게시 
 | 전체 지식의 초기 검토·반복 감사·완료 범위 확인 | [의미 유지관리](skills/lore-wiki/references/maintenance.md) |
 | 업데이트·복구·백업·기기 이전 | [설치와 데이터 보존](skills/lore-ingest/references/installation.md) |
 | 잘못된 근거·개념·관계 수정 | [큐 복구](skills/lore-process/references/recovery.md), [큐레이션](skills/lore-wiki/references/curation.md) |
+| 목적지가 확인된 깨진 개념 링크 수정 | [주소 복구](skills/lore-wiki/references/curation.md#repair-a-broken-concept-address) — 본문·완료 표시를 보존하는 리비전 검증 |
 
 업데이트에는 `lore self update`를 사용하세요. 진행 중인 설치 사용자는 덮어쓸 수 없고,
 미완료 작업도 기본적으로 업데이트를 막습니다. 백업은 숨김 상태를 포함한 전체 볼트가 대상입니다.

@@ -17,6 +17,9 @@ publication contracts in SKILL.md and read the curation reference before repairs
 structural lint fails. Inspect `lore graph --json lint` and its exact affected pages.
 Use the audit and curation procedures for evidence-based name, alias or category
 corrections; guarded merge and normalization commands handle their respective repairs.
+For an exact broken concept address with a verified destination, use the
+[address repair procedure](curation.md#repair-a-broken-concept-address) to preserve prose
+and completion values rather than regenerate a semantic result.
 A duplicate name does not establish that two subjects are equivalent. Standalone
 audit and curation remain available while native maintenance is blocked. Preserve
 revision guards, reconcile the supported repair, then rerun `lore run knowledge`.

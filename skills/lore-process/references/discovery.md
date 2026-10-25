@@ -1,5 +1,11 @@
 # Extraction discovery
 
+## Contents
+
+- [Choose and record recipes](#choose-and-record-recipes)
+- [Progressive examination](#progressive-examination)
+- [Draft from admitted evidence](#draft-from-admitted-evidence)
+
 Use before concept extraction needs related-knowledge context. Discovery finds complete
 lexical candidates; screening chooses which bodies to inspect. Neither establishes
 identity, support, contradiction or a completed source read.
@@ -76,7 +82,8 @@ and every assigned card. Cards preserve declared identity, bounded openings/matc
 available section locators, truncation and review counts; they are not full page reads.
 Never load the whole manifest or all candidate bodies to perform screening.
 
-Return one strict output covering every candidate in that request exactly once:
+For standalone `select-record`, return one strict output covering every candidate in
+that request exactly once:
 
 ```json
 {
@@ -99,10 +106,11 @@ Insufficient previews do not establish irrelevance. Each reason’s serialized J
 admission rules.
 
 For interactive processing, stage the output under the vault's `.lorekeeper/` and run
-`work select-record --task-id ID --file FILE`, then request the next packet. A native
-structured screening worker returns only `{decisions: [...]}`. Rust supplies the exact
-selection, batch and input identities from the supervised request and records the result;
-the identity-bearing example above remains the standalone record format.
+`work select-record --task-id ID --file FILE`, then request the next packet.
+Native structured workers instead follow the [native screening response](bounded-work.md#native-screening-responses)
+contract: each decision uses its assigned `candidate_ref`, never `candidate_key` or
+response order. Rust binds the original path and selection/batch/input identities;
+the identity-bearing example above is not the native response format.
 Unknown or deferred candidates block extraction completion. To reassess a recorded
 batch, obtain its exact current packet with `work select --task-id ID --batch-id BATCH_ID`.
 This read-only lookup also returns its `receipt.revision`. Submit the reconsidered
