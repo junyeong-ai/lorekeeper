@@ -65,21 +65,20 @@ impl Drop for Supervisor {
 impl Supervisor {
     pub fn new() -> miette::Result<Self> {
         use tokio::signal::unix::{SignalKind, signal};
+        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let mut supervisor = Self {
             interrupt: signal(SignalKind::interrupt())
                 .map_err(|e| miette::miette!("interrupt handler: {e}"))?,
             terminate: signal(SignalKind::terminate())
                 .map_err(|e| miette::miette!("termination handler: {e}"))?,
-            read: lk_vault::ReadControl::default(),
+            read: lk_vault::ReadControl::new(cancelled.clone()),
             signal_flags: Vec::new(),
         };
-        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         for signal in [signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM] {
             let id = signal_hook::flag::register(signal, cancelled.clone())
                 .map_err(|e| miette::miette!("read cancellation handler: {e}"))?;
             supervisor.signal_flags.push(id);
         }
-        supervisor.read = lk_vault::ReadControl::new(cancelled);
         Ok(supervisor)
     }
 

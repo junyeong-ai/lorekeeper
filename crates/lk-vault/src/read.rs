@@ -10,16 +10,20 @@ use crate::VaultError;
 /// operation must return before the next check; cancellation never yields a partial capture.
 #[derive(Clone, Debug, Default)]
 pub struct ReadControl {
-    cancelled: Arc<AtomicBool>,
+    cancelled: Option<Arc<AtomicBool>>,
 }
 
 impl ReadControl {
     pub fn new(cancelled: Arc<AtomicBool>) -> Self {
-        Self { cancelled }
+        Self {
+            cancelled: Some(cancelled),
+        }
     }
 
     pub fn is_cancelled(&self) -> bool {
-        self.cancelled.load(Ordering::Relaxed)
+        self.cancelled
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::Relaxed))
     }
 
     pub fn check(&self) -> Result<(), VaultError> {

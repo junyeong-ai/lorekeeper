@@ -995,6 +995,7 @@ fn map_current_screenings<T>(
         .map(|(task_id, capture)| {
             let started_at = std::time::Instant::now();
             let screening = (|| {
+                read.check().into_diagnostic()?;
                 let inventory = resources::selection_inventory_with_capture(
                     root,
                     config,
@@ -3602,6 +3603,22 @@ mod tests {
         .unwrap()
         .turns
         .remove(0);
+        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let read = lk_vault::ReadControl::new(cancelled.clone());
+        let (attempts, _, _) = map_current_screenings(
+            &root,
+            &config,
+            &config_revision,
+            &[&task.task_id, &task.task_id],
+            |screening| {
+                let accepted = screening.is_ok();
+                cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+                accepted
+            },
+            &read,
+        )
+        .unwrap();
+        assert_eq!(attempts, [true, false]);
         let request = turn.request.unwrap();
         let decisions = request["candidates"].as_array().unwrap().iter().map(|candidate| {
             json!({"candidate_key":candidate["candidate_key"],
