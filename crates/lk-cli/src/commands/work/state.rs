@@ -277,6 +277,15 @@ impl CompletedWork {
         &self.result
     }
 
+    pub fn plan_read_guards(self, mutation: &mut MutationPlan) {
+        for (path, raw) in self.guards {
+            mutation.require_unchanged(path, raw);
+        }
+        for path in self.absent {
+            mutation.require_absent(path);
+        }
+    }
+
     fn kind(&self) -> CompletionKind {
         match self.authority {
             CompletionAuthority::Root(_) => CompletionKind::Root,
@@ -1266,12 +1275,7 @@ impl Work {
             FinalizationAction::decode(before, self)?;
         }
         let mut plan = MutationPlan::default();
-        for (path, raw) in completed.guards {
-            plan.require_unchanged(path, raw);
-        }
-        for path in completed.absent {
-            plan.require_absent(path);
-        }
+        completed.plan_read_guards(&mut plan);
         plan.publish_expected(root, path, before, raw)
             .map_err(fail)?;
         Ok(plan)
