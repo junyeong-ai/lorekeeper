@@ -2108,15 +2108,31 @@ mod native {
             frontier: bool,
         ) -> WorkStep {
             let started_at = Instant::now();
-            let finished = crate::commands::work::is_finished(
+            let checkpoint = match crate::commands::work::prepare_native_finalization(
                 &self.root,
                 &self.config,
                 &self.config_revision,
                 id,
-            );
-            metrics.verification_duration_ms = Some(started_at.elapsed().as_millis() as u64);
-            match finished {
-                Ok(true) => {
+                frontier,
+            ) {
+                Ok(checkpoint) => checkpoint,
+                Err(error) => {
+                    *metrics
+                        .preparation_duration_ms
+                        .as_mut()
+                        .expect("measured preparation") += started_at.elapsed().as_millis() as u64;
+                    self.result.work_telemetry.record(metrics);
+                    self.failure("bounded work completion", error);
+                    return WorkStep::Failed;
+                }
+            };
+            *metrics
+                .preparation_duration_ms
+                .as_mut()
+                .expect("measured preparation") += checkpoint.preparation_duration_ms;
+            metrics.verification_duration_ms = Some(checkpoint.verification_duration_ms);
+            let section = match checkpoint.state {
+                crate::commands::work::NativeFinalization::Finished => {
                     let started_at = Instant::now();
                     let Some((session, _)) = self.mutation_session("bounded work completion").await
                     else {
@@ -2148,51 +2164,23 @@ mod native {
                     );
                     return WorkStep::Staged;
                 }
-                Ok(false) => {}
-                Err(error) => {
-                    self.result.work_telemetry.record(metrics);
-                    self.failure("bounded work completion", error);
+                crate::commands::work::NativeFinalization::Ready(section) => section,
+                crate::commands::work::NativeFinalization::Replan => {
+                    self.queue_replan = true;
                     return WorkStep::Failed;
                 }
-            }
-            let started_at = Instant::now();
-            let section = if frontier {
-                match crate::commands::work::prepare_frontier_finalization(
-                    &self.root,
-                    &self.config,
-                    &self.config_revision,
-                    id,
-                ) {
-                    Ok(Some(prepared)) => Ok(prepared),
-                    Ok(None) => {
-                        self.queue_replan = true;
-                        return WorkStep::Failed;
-                    }
-                    Err(error) => Err(error),
-                }
-            } else {
-                crate::commands::work::prepare_finalization(
-                    &self.root,
-                    &self.config,
-                    &self.config_revision,
-                    id,
-                )
             };
-            *metrics
-                .preparation_duration_ms
-                .as_mut()
-                .expect("measured preparation") += started_at.elapsed().as_millis() as u64;
             match section {
-                Ok(crate::commands::work::FinalizationPreparation::Interactive) => {}
-                Ok(crate::commands::work::FinalizationPreparation::Result(result)) => {
+                crate::commands::work::FinalizationPreparation::Interactive => {}
+                crate::commands::work::FinalizationPreparation::Result(result) => {
                     let result = self.finalize_result(id, *result, &mut metrics).await;
                     self.result.work_telemetry.record(metrics);
                     return result;
                 }
-                Ok(crate::commands::work::FinalizationPreparation::Capacity {
+                crate::commands::work::FinalizationPreparation::Capacity {
                     request_bytes,
                     max_input_bytes,
-                }) => {
+                } => {
                     let reason = format!(
                         "complete section finalizer request requires {request_bytes} bytes, above max_input_bytes {max_input_bytes}; existing work is retained"
                     );
@@ -2204,7 +2192,7 @@ mod native {
                     self.result.work_telemetry.record(metrics);
                     return WorkStep::Deferred(reason);
                 }
-                Ok(crate::commands::work::FinalizationPreparation::NeedsAction(reason)) => {
+                crate::commands::work::FinalizationPreparation::NeedsAction(reason) => {
                     self.record(
                         "bounded section action",
                         StageState::Skipped,
@@ -2213,15 +2201,10 @@ mod native {
                     self.result.work_telemetry.record(metrics);
                     return WorkStep::Deferred(reason);
                 }
-                Ok(crate::commands::work::FinalizationPreparation::Ready(section)) => {
+                crate::commands::work::FinalizationPreparation::Ready(section) => {
                     let result = self.finalize_section(id, *section, &mut metrics).await;
                     self.result.work_telemetry.record(metrics);
                     return result;
-                }
-                Err(error) => {
-                    self.result.work_telemetry.record(metrics);
-                    self.failure("bounded section finalization", error);
-                    return WorkStep::Failed;
                 }
             };
             let operation = format!(

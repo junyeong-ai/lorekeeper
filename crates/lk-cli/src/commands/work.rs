@@ -1715,23 +1715,21 @@ fn frontier_result(
 }
 
 #[cfg(unix)]
-pub(super) fn prepare_frontier_finalization(
+fn prepare_frontier_finalization(
     root: &Path,
     config: &lk_core::config::Config,
-    config_revision: &str,
-    id: &str,
+    work: &Work,
+    prepared: &Prepared,
 ) -> miette::Result<Option<FinalizationPreparation>> {
-    let root = root.canonicalize().into_diagnostic()?;
-    let (work, prepared) = load(&root, config, config_revision, id)?;
     let Subject::Queue { task_id, .. } = &prepared.subject else {
         return Ok(None);
     };
-    let task = super::queue::current_task(&root, task_id)?;
-    let Some(result) = frontier_result(&root, config, &task, &work, &prepared)? else {
+    let task = super::queue::current_task(root, task_id)?;
+    let Some(result) = frontier_result(root, config, &task, work, prepared)? else {
         return Ok(None);
     };
     if let Some(reason) = work.load_finalization_action_for(
-        &root,
+        root,
         &result.request,
         &result.completed["result_revision"],
     )? {
@@ -1750,6 +1748,60 @@ pub(super) enum FinalizationPreparation {
         request_bytes: usize,
         max_input_bytes: usize,
     },
+}
+
+#[cfg(unix)]
+pub(super) enum NativeFinalization {
+    Finished,
+    Ready(FinalizationPreparation),
+    Replan,
+}
+
+#[cfg(unix)]
+pub(super) struct FinalizationCheckpoint {
+    pub state: NativeFinalization,
+    pub preparation_duration_ms: u64,
+    pub verification_duration_ms: u64,
+}
+
+#[cfg(unix)]
+pub(super) fn prepare_native_finalization(
+    root: &Path,
+    config: &lk_core::config::Config,
+    config_revision: &str,
+    id: &str,
+    frontier: bool,
+) -> miette::Result<FinalizationCheckpoint> {
+    let started_at = std::time::Instant::now();
+    let root = root.canonicalize().into_diagnostic()?;
+    let (work, prepared) = load(&root, config, config_revision, id)?;
+    let mut preparation_duration_ms = started_at.elapsed().as_millis() as u64;
+    let started_at = std::time::Instant::now();
+    let finished = is_finished_prepared(&root, &work, &prepared)?;
+    let verification_duration_ms = started_at.elapsed().as_millis() as u64;
+    let started_at = std::time::Instant::now();
+    let state = if finished {
+        NativeFinalization::Finished
+    } else if frontier {
+        match prepare_frontier_finalization(&root, config, &work, &prepared)? {
+            Some(preparation) => NativeFinalization::Ready(preparation),
+            None => NativeFinalization::Replan,
+        }
+    } else {
+        NativeFinalization::Ready(prepare_finalization_from_capture(
+            &root,
+            config,
+            config_revision,
+            &work,
+            &prepared,
+        )?)
+    };
+    preparation_duration_ms += started_at.elapsed().as_millis() as u64;
+    Ok(FinalizationCheckpoint {
+        state,
+        preparation_duration_ms,
+        verification_duration_ms,
+    })
 }
 
 #[cfg(unix)]
@@ -1805,7 +1857,7 @@ fn refinement_events(
     Ok(json!(events))
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, test))]
 pub(super) fn prepare_finalization(
     root: &Path,
     config: &lk_core::config::Config,
@@ -1814,6 +1866,17 @@ pub(super) fn prepare_finalization(
 ) -> miette::Result<FinalizationPreparation> {
     let root = root.canonicalize().into_diagnostic()?;
     let (work, prepared) = load(&root, config, config_revision, id)?;
+    prepare_finalization_from_capture(&root, config, config_revision, &work, &prepared)
+}
+
+#[cfg(unix)]
+fn prepare_finalization_from_capture(
+    root: &Path,
+    config: &lk_core::config::Config,
+    config_revision: &str,
+    work: &Work,
+    prepared: &Prepared,
+) -> miette::Result<FinalizationPreparation> {
     let Subject::Queue {
         task_id,
         cache_hash,
@@ -1823,13 +1886,13 @@ pub(super) fn prepare_finalization(
     else {
         return Ok(FinalizationPreparation::Interactive);
     };
-    let task = super::queue::current_task(&root, task_id)?;
-    let completed = work.result(&root, &prepared.resources)?;
+    let task = super::queue::current_task(root, task_id)?;
+    let completed = work.result(root, &prepared.resources)?;
     if !super::execution::finalization::supports(task.kind) {
         let request = match native::finalization_request(
             config,
             &task,
-            &work,
+            work,
             &work.plan.subject_revision,
             &completed,
         ) {
@@ -1847,7 +1910,7 @@ pub(super) fn prepare_finalization(
             });
         }
         if let Some(reason) =
-            work.load_finalization_action_for(&root, &request, &completed["result_revision"])?
+            work.load_finalization_action_for(root, &request, &completed["result_revision"])?
         {
             return Ok(FinalizationPreparation::NeedsAction(reason));
         }
@@ -1867,7 +1930,7 @@ pub(super) fn prepare_finalization(
             },
         )));
     }
-    let scope = resources::section_task(&root, config, task_id)?;
+    let scope = resources::section_task(root, config, task_id)?;
     let result = lk_queue::SectionResult {
         context_revision: Some(scope.revision(config_revision)?),
         task_id: task_id.clone(),
@@ -1884,7 +1947,7 @@ pub(super) fn prepare_finalization(
         .and_then(|limit| limit.checked_add(response_bytes))
         .ok_or_else(|| miette::miette!("section result identity exceeds max_result_bytes"))?;
     let events = (task.kind == lk_queue::TaskKind::RefineEvents)
-        .then(|| refinement_events(&root, &prepared, &task))
+        .then(|| refinement_events(root, prepared, &task))
         .transpose()?;
     let review_resources = scope
         .resources
@@ -1919,7 +1982,7 @@ pub(super) fn prepare_finalization(
             max_input_bytes,
         });
     }
-    if let Some(reason) = work.load_finalization_action(&root, &request)? {
+    if let Some(reason) = work.load_finalization_action(root, &request)? {
         return Ok(FinalizationPreparation::NeedsAction(reason));
     }
     if completed["output"]["unresolved"]
@@ -2008,8 +2071,8 @@ pub(super) fn record_finalization_action(
     reason: String,
 ) -> miette::Result<()> {
     let root = session.root();
-    revalidate_section_finalization(root, config, config_revision, id, &section)?;
-    let (work, prepared) = load(root, config, config_revision, id)?;
+    let (work, prepared) =
+        revalidate_section_finalization(root, config, config_revision, id, &section)?;
     let mut plan = work.plan_finalization_action(
         root,
         &prepared.resources,
@@ -2034,8 +2097,8 @@ pub(super) fn finish_section(
 ) -> miette::Result<()> {
     let root = session.root();
     validate_section_response(&prepared_section.request, &body)?;
-    revalidate_section_finalization(root, config, config_revision, id, &prepared_section)?;
-    let (work, prepared) = load(root, config, config_revision, id)?;
+    let (work, prepared) =
+        revalidate_section_finalization(root, config, config_revision, id, &prepared_section)?;
     let result = lk_queue::SectionResult {
         body,
         ..prepared_section.result
@@ -2059,9 +2122,10 @@ fn revalidate_section_finalization(
     config_revision: &str,
     id: &str,
     section: &SectionFinalization,
-) -> miette::Result<()> {
+) -> miette::Result<(Work, Prepared)> {
+    let (work, prepared) = load(root, config, config_revision, id)?;
     let FinalizationPreparation::Ready(current) =
-        prepare_finalization(root, config, config_revision, id)?
+        prepare_finalization_from_capture(root, config, config_revision, &work, &prepared)?
     else {
         return Err(miette::miette!(
             "section finalization scope changed; retained work requires a fresh request"
@@ -2072,7 +2136,7 @@ fn revalidate_section_finalization(
             "section finalization scope changed during generation; retained work requires a fresh request"
         ));
     }
-    Ok(())
+    Ok((work, prepared))
 }
 
 #[cfg(unix)]
@@ -2124,7 +2188,8 @@ fn verify_finished_prepared(root: &Path, work: &Work, prepared: &Prepared) -> mi
     )
 }
 
-pub(super) fn is_finished(
+#[cfg(test)]
+fn is_finished(
     root: &Path,
     config: &lk_core::config::Config,
     config_revision: &str,
@@ -2132,6 +2197,11 @@ pub(super) fn is_finished(
 ) -> miette::Result<bool> {
     let root = root.canonicalize().into_diagnostic()?;
     let (work, prepared) = load(&root, config, config_revision, id)?;
+    is_finished_prepared(&root, &work, &prepared)
+}
+
+#[cfg(any(unix, test))]
+fn is_finished_prepared(root: &Path, work: &Work, prepared: &Prepared) -> miette::Result<bool> {
     let path = root
         .join(".lorekeeper/work")
         .join(&work.plan.id)
@@ -2139,7 +2209,7 @@ pub(super) fn is_finished(
     match std::fs::symlink_metadata(path) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(miette::miette!("inspect final result: {error}")),
-        Ok(_) => match verify_finished_prepared(&root, &work, &prepared) {
+        Ok(_) => match verify_finished_prepared(root, work, prepared) {
             Ok(()) => Ok(true),
             Err(error)
                 if matches!(
@@ -2889,12 +2959,26 @@ mod tests {
         let (config, config_revision) =
             lk_core::config::Config::load_with_revision(&root.join("config.yaml")).unwrap();
         assert!(!is_finished(&root, &config, &config_revision, &work.plan.id).unwrap());
+        #[cfg(unix)]
+        assert!(matches!(
+            prepare_native_finalization(&root, &config, &config_revision, &work.plan.id, false)
+                .unwrap()
+                .state,
+            NativeFinalization::Ready(FinalizationPreparation::Interactive)
+        ));
         assert!(verify_finished(&root, &config, &config_revision, &work.plan.id).is_err());
         {
             let session = MutationSession::acquire(&root).unwrap();
             finish(&session, &work, &prepared, result).unwrap();
         }
         assert!(is_finished(&root, &config, &config_revision, &work.plan.id).unwrap());
+        #[cfg(unix)]
+        assert!(matches!(
+            prepare_native_finalization(&root, &config, &config_revision, &work.plan.id, false)
+                .unwrap()
+                .state,
+            NativeFinalization::Finished
+        ));
         verify_finished(&root, &config, &config_revision, &work.plan.id).unwrap();
 
         let final_path = root
@@ -2906,6 +2990,11 @@ mod tests {
         changed["assessments"][0]["reason"] = json!("A different unsealed assessment.");
         std::fs::write(&final_path, serde_json::to_vec(&changed).unwrap()).unwrap();
         assert!(is_finished(&root, &config, &config_revision, &work.plan.id).is_err());
+        #[cfg(unix)]
+        assert!(
+            prepare_native_finalization(&root, &config, &config_revision, &work.plan.id, false)
+                .is_err()
+        );
         assert!(verify_finished(&root, &config, &config_revision, &work.plan.id).is_err());
         std::fs::write(&final_path, &original).unwrap();
 
