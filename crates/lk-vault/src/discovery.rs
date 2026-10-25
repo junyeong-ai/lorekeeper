@@ -18,6 +18,8 @@ pub const DISCOVERY_CARD_MAX_BYTES: usize = 2048;
 #[derive(Clone, Copy, Debug, Default, Serialize)]
 pub struct DiscoveryReadMetrics {
     pub files: usize,
+    /// Logical bytes consumed: the header/probe for vocabulary, complete UTF-8
+    /// text for knowledge and matched rereads. Excludes buffered read-ahead.
     pub bytes: usize,
     pub enumeration_duration_us: u64,
     pub address_duration_us: u64,
@@ -221,7 +223,15 @@ fn capture_discovery_inner(
     queries: &[DiscoveryQuery],
     reports: Option<&[crate::ReviewReport]>,
 ) -> Result<DiscoveryCapture, VaultError> {
-    Ok(capture_discovery_batch_inner(root, dirs, &[queries], reports, None)?.remove(0))
+    Ok(capture_discovery_batch_inner(
+        root,
+        dirs,
+        &[queries],
+        reports,
+        None,
+        &crate::ReadControl::default(),
+    )?
+    .remove(0))
 }
 
 /// Capture task-local recipe sets in one fresh traversal. Output order matches the
@@ -236,7 +246,14 @@ pub fn capture_discovery_batch(
     reviews: Option<&[crate::ReviewReport]>,
 ) -> Result<Vec<DiscoveryCapture>, VaultError> {
     let query_sets = query_sets.iter().map(Vec::as_slice).collect::<Vec<_>>();
-    capture_discovery_batch_inner(root, dirs, &query_sets, reviews, None)
+    capture_discovery_batch_inner(
+        root,
+        dirs,
+        &query_sets,
+        reviews,
+        None,
+        &crate::ReadControl::default(),
+    )
 }
 
 pub fn capture_discovery_batch_measured(
@@ -245,10 +262,27 @@ pub fn capture_discovery_batch_measured(
     query_sets: &[Vec<DiscoveryQuery>],
     reviews: Option<&[crate::ReviewReport]>,
 ) -> Result<(Vec<DiscoveryCapture>, DiscoveryCaptureMetrics), VaultError> {
+    capture_discovery_batch_controlled(
+        root,
+        dirs,
+        query_sets,
+        reviews,
+        &crate::ReadControl::default(),
+    )
+}
+
+/// A complete fresh capture or cancellation, never a partial candidate inventory.
+pub fn capture_discovery_batch_controlled(
+    root: &Path,
+    dirs: &VaultDirs,
+    query_sets: &[Vec<DiscoveryQuery>],
+    reviews: Option<&[crate::ReviewReport]>,
+    read: &crate::ReadControl,
+) -> Result<(Vec<DiscoveryCapture>, DiscoveryCaptureMetrics), VaultError> {
     let mut metrics = DiscoveryCaptureMetrics::default();
     let query_sets = query_sets.iter().map(Vec::as_slice).collect::<Vec<_>>();
     let captures =
-        capture_discovery_batch_inner(root, dirs, &query_sets, reviews, Some(&mut metrics))?;
+        capture_discovery_batch_inner(root, dirs, &query_sets, reviews, Some(&mut metrics), read)?;
     metrics.captures = usize::from(query_sets.iter().any(|queries| !queries.is_empty()));
     Ok((captures, metrics))
 }
@@ -259,7 +293,9 @@ fn capture_discovery_batch_inner(
     query_sets: &[&[DiscoveryQuery]],
     reports: Option<&[crate::ReviewReport]>,
     mut metrics: Option<&mut DiscoveryCaptureMetrics>,
+    read: &crate::ReadControl,
 ) -> Result<Vec<DiscoveryCapture>, VaultError> {
+    read.check()?;
     let root = root.canonicalize()?;
     for query in query_sets.iter().flat_map(|queries| queries.iter()) {
         query.validate().map_err(std::io::Error::other)?;
@@ -277,10 +313,11 @@ fn capture_discovery_batch_inner(
         .collect::<Vec<_>>();
     let has_queries = query_sets.iter().any(|queries| !queries.is_empty());
     let vocabulary = if has_queries {
-        search::ConceptVocabulary::load(
+        search::ConceptVocabulary::load_controlled(
             &root,
             dirs,
             metrics.as_mut().map(|metrics| &mut metrics.vocabulary),
+            read,
         )?
     } else {
         search::ConceptVocabulary::default()
@@ -320,12 +357,14 @@ fn capture_discovery_batch_inner(
     let mut projection_match_duration_us = 0;
     if has_queries {
         let measured = metrics.is_some();
-        search::visit_pages_measured(
+        search::visit_pages_controlled(
             &root,
             dirs,
             false,
             metrics.as_mut().map(|metrics| &mut metrics.knowledge),
+            read,
             |mut page, _| {
+                read.check()?;
                 let started_at = measured.then(std::time::Instant::now);
                 let document = search::VisibleDocument::from_body(&page.page.body);
                 page.projection = Some(search::MatchProjection::from_document(&document));
@@ -364,6 +403,7 @@ fn capture_discovery_batch_inner(
                     projection_match_duration_us += started_at.elapsed().as_micros() as u64;
                 }
                 page.projection = None;
+                read.check()?;
                 if matches.is_empty() {
                     return Ok(());
                 }
@@ -374,7 +414,7 @@ fn capture_discovery_batch_inner(
                     .map_err(std::io::Error::other)?
                     .to_path_buf();
                 let started_at = measured.then(std::time::Instant::now);
-                let raw = std::fs::read_to_string(&full)?;
+                let raw = read.read_to_string(&full)?;
                 if let Some(started_at) = started_at {
                     matched_rereads.record_read(raw.len(), started_at.elapsed());
                 }
@@ -465,6 +505,7 @@ fn capture_discovery_batch_inner(
     captures
         .into_iter()
         .map(|capture| {
+            read.check()?;
             let review_identity = capture
                 .roster
                 .keys()
@@ -644,6 +685,16 @@ pub fn discover_queries(
     dirs: &VaultDirs,
     queries: &[DiscoveryQuery],
 ) -> Result<BTreeMap<DiscoveryQuery, Vec<Citation>>, VaultError> {
+    discover_queries_controlled(root, dirs, queries, &crate::ReadControl::default())
+}
+
+pub fn discover_queries_controlled(
+    root: &Path,
+    dirs: &VaultDirs,
+    queries: &[DiscoveryQuery],
+    read: &crate::ReadControl,
+) -> Result<BTreeMap<DiscoveryQuery, Vec<Citation>>, VaultError> {
+    read.check()?;
     for query in queries {
         query.validate().map_err(std::io::Error::other)?;
     }
@@ -651,9 +702,10 @@ pub fn discover_queries(
         return Ok(BTreeMap::new());
     }
     if let Some(matches) = indexed_queries(root, dirs, queries)? {
+        read.check()?;
         return Ok(matches);
     }
-    let vocabulary = search::ConceptVocabulary::load(root, dirs, None)?;
+    let vocabulary = search::ConceptVocabulary::load_controlled(root, dirs, None, read)?;
     let plans = queries
         .iter()
         .collect::<BTreeSet<_>>()
@@ -670,7 +722,7 @@ pub fn discover_queries(
             .iter()
             .map(|(query, ..)| ((*query).clone(), Vec::new())),
     );
-    search::visit_pages(root, dirs, false, |mut page, _| {
+    search::visit_pages_controlled(root, dirs, false, None, read, |mut page, _| {
         page.projection = Some(page.match_projection().into_owned());
         let mut revision = None;
         for (query, identity, spellings, terms) in &plans {

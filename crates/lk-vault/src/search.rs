@@ -550,6 +550,24 @@ pub(super) fn visit_pages_measured(
     metrics: Option<&mut crate::discovery::DiscoveryReadMetrics>,
     visit: impl FnMut(Page, usize) -> Result<(), VaultError>,
 ) -> Result<(), VaultError> {
+    visit_pages_controlled(
+        vault_root,
+        dirs,
+        include_sources,
+        metrics,
+        &crate::ReadControl::default(),
+        visit,
+    )
+}
+
+pub(super) fn visit_pages_controlled(
+    vault_root: &Path,
+    dirs: &VaultDirs,
+    include_sources: bool,
+    metrics: Option<&mut crate::discovery::DiscoveryReadMetrics>,
+    read: &crate::ReadControl,
+    visit: impl FnMut(Page, usize) -> Result<(), VaultError>,
+) -> Result<(), VaultError> {
     let mut directories = vec![
         concepts_dir(dirs),
         documents_dir(dirs),
@@ -562,7 +580,7 @@ pub(super) fn visit_pages_measured(
             PathBuf::from(&dirs.synthesis),
         ]);
     }
-    visit_collections_measured(vault_root, dirs, directories, metrics, visit)
+    visit_collections_controlled(vault_root, dirs, directories, metrics, read, visit)
 }
 
 #[cfg(test)]
@@ -575,11 +593,30 @@ pub(super) fn visit_collections(
     visit_collections_measured(vault_root, dirs, directories, None, visit)
 }
 
+#[cfg(test)]
 pub(super) fn visit_collections_measured(
     vault_root: &Path,
     dirs: &VaultDirs,
     directories: Vec<PathBuf>,
     metrics: Option<&mut crate::discovery::DiscoveryReadMetrics>,
+    visit: impl FnMut(Page, usize) -> Result<(), VaultError>,
+) -> Result<(), VaultError> {
+    visit_collections_controlled(
+        vault_root,
+        dirs,
+        directories,
+        metrics,
+        &crate::ReadControl::default(),
+        visit,
+    )
+}
+
+fn visit_collections_controlled(
+    vault_root: &Path,
+    dirs: &VaultDirs,
+    directories: Vec<PathBuf>,
+    metrics: Option<&mut crate::discovery::DiscoveryReadMetrics>,
+    read: &crate::ReadControl,
     mut visit: impl FnMut(Page, usize) -> Result<(), VaultError>,
 ) -> Result<(), VaultError> {
     visit_collection_files(
@@ -587,9 +624,10 @@ pub(super) fn visit_collections_measured(
         dirs,
         directories,
         metrics,
+        read,
         |path, full, concept_collection, mut metrics| {
             let started_at = metrics.as_ref().map(|_| std::time::Instant::now());
-            let raw = std::fs::read_to_string(full)?;
+            let raw = read.read_to_string(full)?;
             if let Some(metrics) = metrics.as_mut() {
                 metrics.record_read(raw.len(), started_at.expect("measured read").elapsed());
             }
@@ -608,6 +646,7 @@ pub(super) fn visit_collections_measured(
                 return Ok(());
             }
             let concept = concept_collection && page.frontmatter.is_concept_or_legacy();
+            read.check()?;
             let id = path
                 .file_stem()
                 .map(|s| s.to_string_lossy().into_owned())
@@ -651,6 +690,7 @@ fn visit_collection_files(
     dirs: &VaultDirs,
     directories: Vec<PathBuf>,
     mut metrics: Option<&mut crate::discovery::DiscoveryReadMetrics>,
+    read: &crate::ReadControl,
     mut visit: impl FnMut(
         &Path,
         &Path,
@@ -658,12 +698,18 @@ fn visit_collection_files(
         Option<&mut crate::discovery::DiscoveryReadMetrics>,
     ) -> Result<(), VaultError>,
 ) -> Result<(), VaultError> {
+    read.check()?;
     let reserved = crate::navigation::ReservedNavigationPaths::load(vault_root, dirs)?;
     let mut visited = std::collections::BTreeSet::new();
     for rel_dir in directories {
+        read.check()?;
         let concept_collection = rel_dir == concepts_dir(dirs);
         let started_at = metrics.as_ref().map(|_| std::time::Instant::now());
-        let files = markdown_files(vault_root, &vault_root.join(&rel_dir))?;
+        let files = crate::store::load_markdown_inventory_controlled(vault_root, &rel_dir, read)?
+            .owners
+            .into_iter()
+            .map(|path| vault_root.join(path))
+            .collect::<Vec<_>>();
         if let Some(metrics) = metrics.as_mut() {
             metrics.enumeration_duration_us += started_at
                 .expect("measured enumeration")
@@ -671,6 +717,7 @@ fn visit_collection_files(
                 .as_micros() as u64;
         }
         for path in files {
+            read.check()?;
             if !visited.insert(path.clone()) {
                 continue;
             }
@@ -691,6 +738,7 @@ fn visit_collection_files(
                 .strip_prefix(vault_root)
                 .map_err(std::io::Error::other)?;
             visit(relative, &full, concept_collection, metrics.as_deref_mut())?;
+            read.check()?;
         }
     }
     Ok(())
@@ -702,10 +750,20 @@ pub(super) struct ConceptVocabulary {
 }
 
 impl ConceptVocabulary {
+    #[cfg(test)]
     pub(super) fn load(
         root: &Path,
         dirs: &VaultDirs,
         metrics: Option<&mut crate::discovery::DiscoveryReadMetrics>,
+    ) -> Result<Self, VaultError> {
+        Self::load_controlled(root, dirs, metrics, &crate::ReadControl::default())
+    }
+
+    pub(super) fn load_controlled(
+        root: &Path,
+        dirs: &VaultDirs,
+        metrics: Option<&mut crate::discovery::DiscoveryReadMetrics>,
+        read: &crate::ReadControl,
     ) -> Result<Self, VaultError> {
         let mut vocabulary = Self::default();
         visit_collection_files(
@@ -713,10 +771,12 @@ impl ConceptVocabulary {
             dirs,
             vec![concepts_dir(dirs)],
             metrics,
+            read,
             |path, full, _, mut metrics| {
                 let started_at = metrics.as_ref().map(|_| std::time::Instant::now());
                 let input = std::io::BufReader::new(std::fs::File::open(full)?);
-                let (header, bytes) = crate::store::read_frontmatter_header(input)?;
+                let (header, bytes) =
+                    crate::store::read_frontmatter_header_controlled(input, read)?;
                 if let Some(metrics) = metrics.as_mut() {
                     metrics
                         .record_read(bytes, started_at.expect("measured metadata read").elapsed());
@@ -2116,6 +2176,42 @@ pub(crate) fn markdown_files(root: &Path, dir: &Path) -> Result<Vec<PathBuf>, Va
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cancelled_traversal_discards_incomplete_scope_before_reading_another_page() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let directory = root.path().join(documents_dir(&dirs));
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("a.md"), "First complete page.").unwrap();
+        std::fs::write(directory.join("b.md"), [0xff]).unwrap();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let read = crate::ReadControl::new(cancelled.clone());
+        let mut visited = Vec::new();
+        let result = visit_pages_controlled(root.path(), &dirs, false, None, &read, |page, _| {
+            visited.push(page.rel_path);
+            cancelled.store(true, Ordering::Relaxed);
+            Ok(())
+        });
+        assert!(matches!(result, Err(VaultError::Cancelled)));
+        assert_eq!(visited, [documents_dir(&dirs).join("a.md")]);
+        assert!(matches!(
+            crate::capture_discovery_batch_controlled(root.path(), &dirs, &[vec![]], None, &read),
+            Err(VaultError::Cancelled)
+        ));
+        assert!(matches!(
+            crate::store::load_markdown_inventory_controlled(
+                root.path(),
+                &documents_dir(&dirs),
+                &read
+            ),
+            Err(VaultError::Cancelled)
+        ));
+    }
 
     #[test]
     fn metadata_vocabulary_preserves_names_and_skips_large_bodies() {

@@ -48,18 +48,47 @@ fn child_attempt(started: Instant, result: miette::Result<ChildResult>) -> Child
 pub(super) struct Supervisor {
     interrupt: tokio::signal::unix::Signal,
     terminate: tokio::signal::unix::Signal,
+    read: lk_vault::ReadControl,
+    signal_flags: Vec<signal_hook::SigId>,
+}
+
+#[cfg(unix)]
+impl Drop for Supervisor {
+    fn drop(&mut self) {
+        for id in self.signal_flags.drain(..) {
+            signal_hook::low_level::unregister(id);
+        }
+    }
 }
 
 #[cfg(unix)]
 impl Supervisor {
     pub fn new() -> miette::Result<Self> {
         use tokio::signal::unix::{SignalKind, signal};
-        Ok(Self {
+        let mut supervisor = Self {
             interrupt: signal(SignalKind::interrupt())
                 .map_err(|e| miette::miette!("interrupt handler: {e}"))?,
             terminate: signal(SignalKind::terminate())
                 .map_err(|e| miette::miette!("termination handler: {e}"))?,
-        })
+            read: lk_vault::ReadControl::default(),
+            signal_flags: Vec::new(),
+        };
+        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        for signal in [signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM] {
+            let id = signal_hook::flag::register(signal, cancelled.clone())
+                .map_err(|e| miette::miette!("read cancellation handler: {e}"))?;
+            supervisor.signal_flags.push(id);
+        }
+        supervisor.read = lk_vault::ReadControl::new(cancelled);
+        Ok(supervisor)
+    }
+
+    pub fn read_control(&self) -> &lk_vault::ReadControl {
+        &self.read
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.read.is_cancelled()
     }
 
     pub async fn acquire(
@@ -69,6 +98,9 @@ impl Supervisor {
         revision: &str,
         wait: bool,
     ) -> miette::Result<Option<super::workflow::WorkflowLease>> {
+        if self.is_cancelled() {
+            return Ok(None);
+        }
         tokio::select! {
             biased;
             _ = self.interrupt.recv() => Ok(None),
@@ -82,6 +114,9 @@ impl Supervisor {
         root: &Path,
         mut validate: impl FnMut() -> miette::Result<()>,
     ) -> miette::Result<Option<(lk_vault::MutationSession, bool)>> {
+        if self.is_cancelled() {
+            return Ok(None);
+        }
         use miette::IntoDiagnostic;
         let acquisition = async {
             let mut waited = false;
@@ -804,6 +839,34 @@ pub(super) fn executable_path(path: &Path) -> miette::Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn synchronous_read_cancellation_does_not_require_runtime_polling() {
+        const CHILD: &str = "LORE_TEST_SYNCHRONOUS_READ_SIGNAL";
+        if std::env::var_os(CHILD).is_some() {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                for signal in [signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM] {
+                    let supervisor = Supervisor::new().unwrap();
+                    assert!(!supervisor.is_cancelled());
+                    signal_hook::low_level::raise(signal).unwrap();
+                    assert!(matches!(
+                        supervisor.read_control().check(),
+                        Err(lk_vault::VaultError::Cancelled)
+                    ));
+                }
+            });
+            return;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "commands::execution::tests::synchronous_read_cancellation_does_not_require_runtime_polling"])
+            .env(CHILD, "1").output().unwrap();
+        assert!(output.status.success(), "{output:?}");
+    }
 
     #[cfg(unix)]
     #[tokio::test]

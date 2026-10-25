@@ -17,6 +17,7 @@ mod neighbors;
 mod original_io;
 mod provenance;
 mod provenance_index;
+mod read;
 mod review;
 mod rss_evidence;
 mod rss_original;
@@ -52,8 +53,8 @@ pub use self::discovery::{
     DISCOVERY_CAPTURE_POLICY, DISCOVERY_CARD_MAX_BYTES, DiscoveryCandidate, DiscoveryCandidateCard,
     DiscoveryCapture, DiscoveryCaptureMetrics, DiscoveryHeading, DiscoveryMatch, DiscoveryPreview,
     DiscoveryQuery, DiscoveryReadMetrics, DiscoveryText, capture_discovery,
-    capture_discovery_batch, capture_discovery_batch_measured, capture_discovery_with_reviews,
-    discover_queries,
+    capture_discovery_batch, capture_discovery_batch_controlled, capture_discovery_batch_measured,
+    capture_discovery_with_reviews, discover_queries, discover_queries_controlled,
 };
 pub use self::document::{
     DocumentContent, DocumentOptions, DocumentSection, DocumentView, inspect_document,
@@ -81,6 +82,7 @@ pub use self::neighbors::{
 pub use self::provenance::{
     ProvenanceDirection, ProvenanceOptions, ProvenanceReport, inspect_provenance,
 };
+pub use self::read::ReadControl;
 pub use self::review::{
     EvidenceReport, KnowledgeReview, ReviewEffectiveState, ReviewReport, ReviewStatus,
     archive_evidence, evidence_archive_path, inspect_evidence, is_archived_evidence, list_reviews,
@@ -120,6 +122,8 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum VaultError {
+    #[error("vault read cancelled; incomplete capture discarded")]
+    Cancelled,
     #[error("vault mutation is busy: lock acquisition would block")]
     MutationBusy,
     #[error("section: {0}")]

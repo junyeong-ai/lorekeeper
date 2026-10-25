@@ -47,6 +47,7 @@ tempfile = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 rustix = { workspace = true, features = ["net", "process"] }
+signal-hook = { workspace = true }
 
 [dev-dependencies]
 insta = { workspace = true }

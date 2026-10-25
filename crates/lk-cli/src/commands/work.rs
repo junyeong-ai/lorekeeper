@@ -738,7 +738,26 @@ fn screening(
     task_id: &str,
     queries: &[lk_core::discovery::DiscoveryQuery],
 ) -> miette::Result<ScreeningPreparation> {
-    let inventory = resources::selection_inventory(root, config, task_id, queries)?;
+    screening_controlled(
+        root,
+        config,
+        config_revision,
+        task_id,
+        queries,
+        &lk_vault::ReadControl::default(),
+    )
+}
+
+fn screening_controlled(
+    root: &Path,
+    config: &lk_core::config::Config,
+    config_revision: &str,
+    task_id: &str,
+    queries: &[lk_core::discovery::DiscoveryQuery],
+    read: &lk_vault::ReadControl,
+) -> miette::Result<ScreeningPreparation> {
+    let inventory =
+        resources::selection_inventory_controlled(root, config, task_id, queries, read)?;
     screening_with_inventory(root, config, config_revision, inventory)
 }
 
@@ -943,7 +962,9 @@ fn map_current_screenings<T>(
     config_revision: &str,
     task_ids: &[&str],
     mut visit: impl FnMut(miette::Result<Screening>) -> T,
+    read: &lk_vault::ReadControl,
 ) -> miette::Result<(Vec<T>, lk_vault::DiscoveryCaptureMetrics, u64)> {
+    read.check().into_diagnostic()?;
     let started_at = std::time::Instant::now();
     let queries = task_ids
         .iter()
@@ -959,11 +980,12 @@ fn map_current_screenings<T>(
         })
         .collect::<miette::Result<Vec<_>>>()?;
     let reports = lk_vault::list_reviews(root, &config.vault.dirs).into_diagnostic()?;
-    let (captures, metrics) = lk_vault::capture_discovery_batch_measured(
+    let (captures, metrics) = lk_vault::capture_discovery_batch_controlled(
         root,
         &config.vault.dirs,
         &queries,
         Some(&reports),
+        read,
     )
     .into_diagnostic()?;
     let mut duration_ms = started_at.elapsed().as_millis() as u64;
@@ -1001,15 +1023,22 @@ pub(super) fn prepare_screenings(
     config: &lk_core::config::Config,
     config_revision: &str,
     task_ids: &[&str],
+    read: &lk_vault::ReadControl,
 ) -> miette::Result<ScreeningTurns> {
-    let (turns, discovery_io, _) =
-        map_current_screenings(root, config, config_revision, task_ids, |screening| {
+    let (turns, discovery_io, _) = map_current_screenings(
+        root,
+        config,
+        config_revision,
+        task_ids,
+        |screening| {
             let screening = screening?;
             if let Some(reason) = screening.selection.admission_reason(config, root)? {
                 return Err(miette::miette!("{reason}"));
             }
             screening.turn(root)
-        })?;
+        },
+        read,
+    )?;
     Ok(ScreeningTurns {
         turns: turns.into_iter().collect::<miette::Result<Vec<_>>>()?,
         discovery_io,
@@ -1032,6 +1061,7 @@ pub(super) fn record_screenings(
     config: &lk_core::config::Config,
     config_revision: &str,
     replies: Vec<(&str, Value)>,
+    read: &lk_vault::ReadControl,
 ) -> miette::Result<RecordedScreenings> {
     let task_ids = replies
         .iter()
@@ -1063,6 +1093,7 @@ pub(super) fn record_screenings(
                 duration_ms: started_at.elapsed().as_millis() as u64,
             }
         },
+        read,
     )?;
     Ok(RecordedScreenings {
         records,
@@ -1101,7 +1132,21 @@ fn selected_task(
     binding: &lk_queue::ExtractionSelection,
     mutation: &mut lk_vault::MutationPlan,
 ) -> miette::Result<(Prepared, std::collections::BTreeSet<String>)> {
-    let screening = match screening(root, config, config_revision, task_id, queries)? {
+    selected_task_with_screening(
+        root,
+        screening(root, config, config_revision, task_id, queries)?,
+        binding,
+        mutation,
+    )
+}
+
+fn selected_task_with_screening(
+    root: &Path,
+    preparation: ScreeningPreparation,
+    binding: &lk_queue::ExtractionSelection,
+    mutation: &mut lk_vault::MutationPlan,
+) -> miette::Result<(Prepared, std::collections::BTreeSet<String>)> {
+    let screening = match preparation {
         ScreeningPreparation::Candidates(screening) => screening,
         ScreeningPreparation::Capacity { .. } => {
             return Err(publication_rejection(
@@ -1177,8 +1222,26 @@ fn load(
     config_revision: &str,
     id: &str,
 ) -> miette::Result<(Work, Prepared)> {
+    load_controlled(
+        root,
+        config,
+        config_revision,
+        id,
+        &lk_vault::ReadControl::default(),
+    )
+}
+
+fn load_controlled(
+    root: &Path,
+    config: &lk_core::config::Config,
+    config_revision: &str,
+    id: &str,
+    read: &lk_vault::ReadControl,
+) -> miette::Result<(Work, Prepared)> {
+    read.check().into_diagnostic()?;
     let work = Work::load(root, id)?;
-    let prepared = resources::refresh(root, config, config_revision, &work.context)?;
+    let prepared =
+        resources::refresh_controlled(root, config, config_revision, &work.context, read)?;
     if expected(root, &prepared, config, config_revision)? != work {
         return Err(miette::miette!(
             "work inputs, configuration or bounded execution policy changed; replan"
@@ -1334,7 +1397,9 @@ pub(super) fn prepare_tasks_with_audit(
     config_revision: &str,
     tasks: &[lk_queue::QueueTask],
     audits: &std::collections::BTreeMap<String, lk_graph::audit::AuditCandidate>,
+    read: &lk_vault::ReadControl,
 ) -> miette::Result<(Vec<TaskWork>, lk_vault::DiscoveryCaptureMetrics)> {
+    read.check().into_diagnostic()?;
     let root = session.root();
     let mut recipes = Vec::new();
     let mut positions = Vec::new();
@@ -1353,11 +1418,12 @@ pub(super) fn prepare_tasks_with_audit(
     } else {
         lk_vault::list_reviews(root, &config.vault.dirs).into_diagnostic()?
     };
-    let (captures, metrics) = lk_vault::capture_discovery_batch_measured(
+    let (captures, metrics) = lk_vault::capture_discovery_batch_controlled(
         root,
         &config.vault.dirs,
         &recipes,
         Some(&reports),
+        read,
     )
     .into_diagnostic()?;
     let mut captures = positions.into_iter().zip(captures).peekable();
@@ -1365,6 +1431,7 @@ pub(super) fn prepare_tasks_with_audit(
         .iter()
         .enumerate()
         .map(|(index, task)| {
+            read.check().into_diagnostic()?;
             let task = super::queue::current_task(root, &task.task_id)?;
             let inventory = if captures.peek().is_some_and(|(at, _)| *at == index) {
                 let (_, capture) = captures.next().expect("indexed capture");
@@ -1555,9 +1622,10 @@ pub(super) fn prepare_inspection(
     config: &lk_core::config::Config,
     config_revision: &str,
     id: &str,
+    read: &lk_vault::ReadControl,
 ) -> miette::Result<(state::WorkProgress, Option<Value>)> {
     let root = root.canonicalize().into_diagnostic()?;
-    let (work, prepared) = load(&root, config, config_revision, id)?;
+    let (work, prepared) = load_controlled(&root, config, config_revision, id, read)?;
     work.prepare_inspection(&root, &prepared.resources)
 }
 
@@ -1569,8 +1637,9 @@ pub(super) fn validate_inspection_request(
     id: &str,
     node: &str,
     request: &Value,
+    read: &lk_vault::ReadControl,
 ) -> miette::Result<()> {
-    let (work, prepared) = load(root, config, config_revision, id)?;
+    let (work, prepared) = load_controlled(root, config, config_revision, id, read)?;
     if work.input(root, node, &prepared.resources)? != *request {
         return Err(miette::miette!(
             "inspection inputs changed while waiting for writer access; unfinished work retained"
@@ -1586,9 +1655,10 @@ pub(super) fn prepare_inspections(
     config_revision: &str,
     id: &str,
     limit: usize,
+    read: &lk_vault::ReadControl,
 ) -> miette::Result<(state::WorkProgress, Vec<Value>)> {
     let root = root.canonicalize().into_diagnostic()?;
-    let (work, prepared) = load(&root, config, config_revision, id)?;
+    let (work, prepared) = load_controlled(&root, config, config_revision, id, read)?;
     work.prepare_inspections(&root, &prepared.resources, limit)
 }
 
@@ -1599,6 +1669,7 @@ pub(super) fn record_inspection(
     id: &str,
     node: &str,
     output: WorkOutput,
+    read: &lk_vault::ReadControl,
 ) -> miette::Result<state::WorkProgress> {
     if output.work_id != id || output.node_id != node {
         return Err(miette::miette!(
@@ -1606,7 +1677,7 @@ pub(super) fn record_inspection(
         ));
     }
     let root = session.root();
-    let (work, prepared) = load(root, config, config_revision, id)?;
+    let (work, prepared) = load_controlled(root, config, config_revision, id, read)?;
     work.record(session, output, &prepared.resources)
 }
 
@@ -1631,9 +1702,10 @@ pub(super) fn record_inspection_action(
     id: &str,
     request: &Value,
     reason: String,
+    read: &lk_vault::ReadControl,
 ) -> miette::Result<()> {
     let root = session.root();
-    let (work, prepared) = load(root, config, config_revision, id)?;
+    let (work, prepared) = load_controlled(root, config, config_revision, id, read)?;
     let mut plan = work.plan_inspection_action(
         root,
         &prepared.resources,
@@ -1654,9 +1726,10 @@ pub(super) fn record_inspection_capacity(
     id: &str,
     request: &Value,
     capacity: state::OutputCapacity,
+    read: &lk_vault::ReadControl,
 ) -> miette::Result<()> {
     let root = session.root();
-    let (work, prepared) = load(root, config, config_revision, id)?;
+    let (work, prepared) = load_controlled(root, config, config_revision, id, read)?;
     let mut plan = work.plan_inspection_capacity(
         root,
         &prepared.resources,
@@ -1771,10 +1844,11 @@ pub(super) fn prepare_native_finalization(
     config_revision: &str,
     id: &str,
     frontier: bool,
+    read: &lk_vault::ReadControl,
 ) -> miette::Result<FinalizationCheckpoint> {
     let started_at = std::time::Instant::now();
     let root = root.canonicalize().into_diagnostic()?;
-    let (work, prepared) = load(&root, config, config_revision, id)?;
+    let (work, prepared) = load_controlled(&root, config, config_revision, id, read)?;
     let mut preparation_duration_ms = started_at.elapsed().as_millis() as u64;
     let started_at = std::time::Instant::now();
     let finished = is_finished_prepared(&root, &work, &prepared)?;
@@ -2012,9 +2086,10 @@ pub(super) fn finish_result(
     id: &str,
     result: ResultFinalization,
     reply: Value,
+    read: &lk_vault::ReadControl,
 ) -> miette::Result<Option<String>> {
     let root = session.root();
-    let (work, prepared) = load(root, config, config_revision, id)?;
+    let (work, prepared) = load_controlled(root, config, config_revision, id, read)?;
     let completed =
         validate_result_finalization(root, config, &work, &prepared, &result.request, result.kind)?;
     if completed != result.completed {
@@ -2069,10 +2144,11 @@ pub(super) fn record_finalization_action(
     id: &str,
     section: SectionFinalization,
     reason: String,
+    read: &lk_vault::ReadControl,
 ) -> miette::Result<()> {
     let root = session.root();
     let (work, prepared) =
-        revalidate_section_finalization(root, config, config_revision, id, &section)?;
+        revalidate_section_finalization(root, config, config_revision, id, &section, read)?;
     let mut plan = work.plan_finalization_action(
         root,
         &prepared.resources,
@@ -2094,11 +2170,18 @@ pub(super) fn finish_section(
     id: &str,
     prepared_section: SectionFinalization,
     body: String,
+    read: &lk_vault::ReadControl,
 ) -> miette::Result<()> {
     let root = session.root();
     validate_section_response(&prepared_section.request, &body)?;
-    let (work, prepared) =
-        revalidate_section_finalization(root, config, config_revision, id, &prepared_section)?;
+    let (work, prepared) = revalidate_section_finalization(
+        root,
+        config,
+        config_revision,
+        id,
+        &prepared_section,
+        read,
+    )?;
     let result = lk_queue::SectionResult {
         body,
         ..prepared_section.result
@@ -2122,8 +2205,9 @@ fn revalidate_section_finalization(
     config_revision: &str,
     id: &str,
     section: &SectionFinalization,
+    read: &lk_vault::ReadControl,
 ) -> miette::Result<(Work, Prepared)> {
-    let (work, prepared) = load(root, config, config_revision, id)?;
+    let (work, prepared) = load_controlled(root, config, config_revision, id, read)?;
     let FinalizationPreparation::Ready(current) =
         prepare_finalization_from_capture(root, config, config_revision, &work, &prepared)?
     else {
@@ -2241,9 +2325,10 @@ pub(super) fn restage_finished(
     config: &lk_core::config::Config,
     config_revision: &str,
     id: &str,
+    read: &lk_vault::ReadControl,
 ) -> miette::Result<()> {
     let root = session.root();
-    let (work, prepared) = load(root, config, config_revision, id)?;
+    let (work, prepared) = load_controlled(root, config, config_revision, id, read)?;
     let final_path = PathBuf::from(".lorekeeper/work")
         .join(id)
         .join("final.json");
@@ -2961,9 +3046,16 @@ mod tests {
         assert!(!is_finished(&root, &config, &config_revision, &work.plan.id).unwrap());
         #[cfg(unix)]
         assert!(matches!(
-            prepare_native_finalization(&root, &config, &config_revision, &work.plan.id, false)
-                .unwrap()
-                .state,
+            prepare_native_finalization(
+                &root,
+                &config,
+                &config_revision,
+                &work.plan.id,
+                false,
+                &lk_vault::ReadControl::default()
+            )
+            .unwrap()
+            .state,
             NativeFinalization::Ready(FinalizationPreparation::Interactive)
         ));
         assert!(verify_finished(&root, &config, &config_revision, &work.plan.id).is_err());
@@ -2974,9 +3066,16 @@ mod tests {
         assert!(is_finished(&root, &config, &config_revision, &work.plan.id).unwrap());
         #[cfg(unix)]
         assert!(matches!(
-            prepare_native_finalization(&root, &config, &config_revision, &work.plan.id, false)
-                .unwrap()
-                .state,
+            prepare_native_finalization(
+                &root,
+                &config,
+                &config_revision,
+                &work.plan.id,
+                false,
+                &lk_vault::ReadControl::default()
+            )
+            .unwrap()
+            .state,
             NativeFinalization::Finished
         ));
         verify_finished(&root, &config, &config_revision, &work.plan.id).unwrap();
@@ -2992,8 +3091,15 @@ mod tests {
         assert!(is_finished(&root, &config, &config_revision, &work.plan.id).is_err());
         #[cfg(unix)]
         assert!(
-            prepare_native_finalization(&root, &config, &config_revision, &work.plan.id, false)
-                .is_err()
+            prepare_native_finalization(
+                &root,
+                &config,
+                &config_revision,
+                &work.plan.id,
+                false,
+                &lk_vault::ReadControl::default()
+            )
+            .is_err()
         );
         assert!(verify_finished(&root, &config, &config_revision, &work.plan.id).is_err());
         std::fs::write(&final_path, &original).unwrap();
@@ -3013,6 +3119,44 @@ mod tests {
         std::fs::write(subject_path, subject).unwrap();
         assert!(is_finished(&root, &config, &config_revision, &work.plan.id).unwrap());
         assert_eq!(std::fs::read_to_string(final_path).unwrap(), original);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cancelled_native_capture_preserves_paid_work_and_does_not_stage_results() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let (work, _, _) = completed_audit_work(&root);
+        let (config, revision) =
+            lk_core::config::Config::load_with_revision(&root.join("config.yaml")).unwrap();
+        let work_dir = root.join(".lorekeeper/work").join(&work.plan.id);
+        let snapshot = || {
+            walkdir::WalkDir::new(&work_dir)
+                .into_iter()
+                .map(Result::unwrap)
+                .filter(|entry| entry.file_type().is_file())
+                .map(|entry| {
+                    (
+                        entry.path().strip_prefix(&work_dir).unwrap().to_path_buf(),
+                        std::fs::read(entry.path()).unwrap(),
+                    )
+                })
+                .collect::<std::collections::BTreeMap<_, _>>()
+        };
+        let before = snapshot();
+        let read = lk_vault::ReadControl::new(std::sync::Arc::new(
+            std::sync::atomic::AtomicBool::new(true),
+        ));
+        assert!(
+            prepare_native_finalization(&root, &config, &revision, &work.plan.id, false, &read)
+                .is_err()
+        );
+        assert!(prepare_inspections(&root, &config, &revision, &work.plan.id, 2, &read).is_err());
+        let session = lk_vault::MutationSession::acquire(&root).unwrap();
+        assert!(restage_finished(&session, &config, &revision, &work.plan.id, &read).is_err());
+        assert_eq!(snapshot(), before);
+        assert!(!work_dir.join("final.json").exists());
+        assert!(!work_dir.join("seal.json").exists());
     }
 
     #[test]
@@ -3448,10 +3592,16 @@ mod tests {
                 .persist(&session, &config, &config_revision)
                 .unwrap();
         }
-        let turn = prepare_screenings(&root, &config, &config_revision, &[&task.task_id])
-            .unwrap()
-            .turns
-            .remove(0);
+        let turn = prepare_screenings(
+            &root,
+            &config,
+            &config_revision,
+            &[&task.task_id],
+            &lk_vault::ReadControl::default(),
+        )
+        .unwrap()
+        .turns
+        .remove(0);
         let request = turn.request.unwrap();
         let decisions = request["candidates"].as_array().unwrap().iter().map(|candidate| {
             json!({"candidate_key":candidate["candidate_key"],
@@ -3590,8 +3740,14 @@ mod tests {
             let TaskWork::Partitioned { id } = prepared else {
                 panic!("fixture must require bounded work");
             };
-            let (before, input) =
-                prepare_inspection(&root, &config, &config_revision, &id).unwrap();
+            let (before, input) = prepare_inspection(
+                &root,
+                &config,
+                &config_revision,
+                &id,
+                &lk_vault::ReadControl::default(),
+            )
+            .unwrap();
             let input = input.unwrap();
             let node = before.ready.first().unwrap();
             assert_eq!(input["node_id"].as_str(), Some(node.as_str()));
@@ -3625,7 +3781,8 @@ mod tests {
                     &config_revision,
                     &id,
                     node,
-                    output.clone()
+                    output.clone(),
+                    &lk_vault::ReadControl::default(),
                 )
                 .is_err()
             );
@@ -3649,6 +3806,7 @@ mod tests {
                 &id,
                 node,
                 output,
+                &lk_vault::ReadControl::default(),
             )
             .unwrap();
             assert!(after.completed > before.completed);

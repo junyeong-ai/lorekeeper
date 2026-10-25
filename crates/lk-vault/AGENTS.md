@@ -113,7 +113,9 @@ canonical; SQLite navigation is derived.
   from source lifecycle. Review subjects are scoped assessments, not citations. Summary means opening statement, not whole synthesis.
   Default scope concepts/documents/explorations; source scope adds managed pages,
   never task boards. Concept vocabulary honors declared non-concept types, retaining
-  untyped legacy concepts. Resolve aliases across scope before metadata filtering;
+  untyped legacy concepts. Build that vocabulary from headers; full discovery still
+  reads and validates complete bodies. Vocabulary metrics count consumed header/probe
+  bytes, excluding buffered read-ahead. Resolve aliases across scope before metadata filtering;
   ambiguity doesn't expand. Declared names match phrases, other queries every term.
   Search and brief enumerate the shared verified Markdown owners per collection:
   contained leaf aliases remain readable, duplicate aliases share an owner, and hard links

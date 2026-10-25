@@ -55,6 +55,7 @@ mod native {
     };
     use lk_core::config::Config;
     use lk_core::execution::ExecutionProfile;
+    use miette::IntoDiagnostic;
     use std::path::{Path, PathBuf};
     use std::time::{Duration, Instant};
 
@@ -428,8 +429,26 @@ mod native {
         }
 
         fn failure(&mut self, name: &str, error: impl std::fmt::Display) -> bool {
+            if self.supervisor.is_cancelled() {
+                return self.record(name, StageState::Cancelled, Some(error.to_string()));
+            }
             self.result.halted = true;
             self.record(name, StageState::Failed, Some(error.to_string()))
+        }
+
+        fn record_work_step(&mut self, mut step: WorkStepMetrics) {
+            if self.supervisor.is_cancelled()
+                && !matches!(
+                    step.outcome,
+                    WorkOutcome::Recorded
+                        | WorkOutcome::Staged
+                        | WorkOutcome::Restaged
+                        | WorkOutcome::AlreadyComplete
+                )
+            {
+                step.outcome = WorkOutcome::Cancelled;
+            }
+            self.result.work_telemetry.record(step);
         }
 
         fn deferred(&mut self, name: &str, detail: impl std::fmt::Display) -> bool {
@@ -437,6 +456,16 @@ mod native {
         }
 
         fn configuration_is_current(&mut self) -> bool {
+            if self.supervisor.is_cancelled() {
+                if !self.result.cancelled {
+                    self.record(
+                        "cancellation",
+                        StageState::Cancelled,
+                        Some("interrupted".into()),
+                    );
+                }
+                return false;
+            }
             if self.configuration_failed {
                 return false;
             }
@@ -1100,18 +1129,38 @@ mod native {
             };
             let recorded = match response {
                 execution::observation::ObservationResponse::Complete(output) => {
-                    crate::commands::work::record_inspection(&session, &self.config, &self.config_revision, id, node, output)
-                        .and_then(|progress| {
-                            if progress.completed > completed && !progress.ready.iter().any(|ready| ready == node) {
-                                Ok(None)
-                            } else {
-                                Err(miette::miette!("worker exited without completing its selected node; unfinished work retained"))
-                            }
-                        })
+                    crate::commands::work::record_inspection(
+                        &session,
+                        &self.config,
+                        &self.config_revision,
+                        id,
+                        node,
+                        output,
+                        self.supervisor.read_control(),
+                    )
+                    .and_then(|progress| {
+                        if progress.completed > completed
+                            && !progress.ready.iter().any(|ready| ready == node)
+                        {
+                            Ok(None)
+                        } else {
+                            Err(miette::miette!(
+                                "worker exited without completing its selected node; unfinished work retained"
+                            ))
+                        }
+                    })
                 }
                 execution::observation::ObservationResponse::NeedsAction(reason) => {
-                    crate::commands::work::record_inspection_action(&session, &self.config, &self.config_revision,
-                        id, request, reason.clone()).map(|()| Some(reason))
+                    crate::commands::work::record_inspection_action(
+                        &session,
+                        &self.config,
+                        &self.config_revision,
+                        id,
+                        request,
+                        reason.clone(),
+                        self.supervisor.read_control(),
+                    )
+                    .map(|()| Some(reason))
                 }
             };
             metrics.revalidation_record_duration_ms = Some(started_at.elapsed().as_millis() as u64);
@@ -1156,6 +1205,7 @@ mod native {
                 id,
                 request,
                 capacity,
+                self.supervisor.read_control(),
             );
             metrics.revalidation_record_duration_ms = Some(started.elapsed().as_millis() as u64);
             match recorded {
@@ -1306,6 +1356,7 @@ mod native {
                         &self.config_revision,
                         id,
                         request_counts[id],
+                        self.supervisor.read_control(),
                     );
                     let duration_ms = started_at.elapsed().as_millis() as u64;
                     let (progress, requests) = match captured {
@@ -1390,7 +1441,7 @@ mod native {
                     } else {
                         WorkOutcome::Failed
                     };
-                    self.result.work_telemetry.record(turn.metrics);
+                    self.record_work_step(turn.metrics);
                 }
                 return Some(if self.result.cancelled {
                     self.record(
@@ -1446,6 +1497,7 @@ mod native {
                             &turn.work_id,
                             &turn.node_id,
                             &turn.request,
+                            self.supervisor.read_control(),
                         ) {
                             return Some(self.failure("bounded work scheduling", error));
                         }
@@ -1516,7 +1568,7 @@ mod native {
                     } else {
                         WorkOutcome::Rejected
                     };
-                    self.result.work_telemetry.record(turn.metrics);
+                    self.record_work_step(turn.metrics);
                     continue;
                 }
                 let child = match attempt.result {
@@ -1526,20 +1578,20 @@ mod native {
                         self.result.halted = true;
                         turn.metrics.outcome = WorkOutcome::Failed;
                         self.record("bounded work receipt", StageState::Failed, child.detail);
-                        self.result.work_telemetry.record(turn.metrics);
+                        self.record_work_step(turn.metrics);
                         continue;
                     }
                     Err(error) => {
                         accepted = false;
                         turn.metrics.outcome = WorkOutcome::Failed;
                         self.failure("bounded work receipt", error);
-                        self.result.work_telemetry.record(turn.metrics);
+                        self.record_work_step(turn.metrics);
                         continue;
                     }
                 };
                 if !self.configuration_is_current() {
                     accepted = false;
-                    self.result.work_telemetry.record(turn.metrics);
+                    self.record_work_step(turn.metrics);
                     continue;
                 }
                 let step = self
@@ -1559,7 +1611,7 @@ mod native {
                 if matches!(step, ObservationStep::Failed) {
                     accepted = false;
                 }
-                self.result.work_telemetry.record(turn.metrics);
+                self.record_work_step(turn.metrics);
             }
             Some(accepted)
         }
@@ -1569,7 +1621,7 @@ mod native {
                 if self.result.cancelled {
                     turn.metrics.outcome = WorkOutcome::Cancelled;
                 }
-                self.result.work_telemetry.record(turn.metrics);
+                self.record_work_step(turn.metrics);
             }
         }
 
@@ -1582,26 +1634,27 @@ mod native {
                 &self.config,
                 &self.config_revision,
                 id,
+                self.supervisor.read_control(),
             );
             let preparation_duration_ms = started_at.elapsed().as_millis() as u64;
             metrics.preparation_duration_ms = Some(preparation_duration_ms);
             let (before, request) = match prepared {
                 Ok(status) => status,
                 Err(error) => {
-                    self.result.work_telemetry.record(metrics);
+                    self.record_work_step(metrics);
                     self.failure("bounded work progress", error);
                     return ObservationStep::Failed;
                 }
             };
             if !before.complete {
                 let Some(node) = before.ready.first() else {
-                    self.result.work_telemetry.record(metrics);
+                    self.record_work_step(metrics);
                     self.failure("bounded work progress", "incomplete work has no ready node");
                     return ObservationStep::Failed;
                 };
                 metrics.node_id = Some(node.clone());
                 let Some(request) = request else {
-                    self.result.work_telemetry.record(metrics);
+                    self.record_work_step(metrics);
                     self.failure(
                         "bounded work progress",
                         "ready work has no inspection input",
@@ -1629,7 +1682,7 @@ mod native {
                             ObservationStep::Failed
                         }
                     };
-                self.result.work_telemetry.record(metrics);
+                self.record_work_step(metrics);
                 return result;
             }
             ObservationStep::Complete {
@@ -1789,6 +1842,7 @@ mod native {
                 id,
                 result,
                 reply,
+                self.supervisor.read_control(),
             );
             metrics.revalidation_record_duration_ms = Some(started.elapsed().as_millis() as u64);
             match finished {
@@ -1829,20 +1883,20 @@ mod native {
                 };
             metrics.preparation_duration_ms = Some(started.elapsed().as_millis() as u64);
             let Some(value) = self.request_result(&request, &mut metrics).await else {
-                self.result.work_telemetry.record(metrics);
+                self.record_work_step(metrics);
                 return WorkStep::Failed;
             };
             let replies = match crate::commands::work::generation::replies(value, inputs.len()) {
                 Ok(replies) => replies,
                 Err(error) => {
-                    self.result.work_telemetry.record(metrics);
+                    self.record_work_step(metrics);
                     self.failure("native selected response", error);
                     return WorkStep::Failed;
                 }
             };
             let started = Instant::now();
             let Some((session, _)) = self.mutation_session("native selected result").await else {
-                self.result.work_telemetry.record(metrics);
+                self.record_work_step(metrics);
                 return WorkStep::Failed;
             };
             let mut deferred = false;
@@ -1888,7 +1942,7 @@ mod native {
             if staged {
                 metrics.outcome = WorkOutcome::Staged;
             }
-            self.result.work_telemetry.record(metrics);
+            self.record_work_step(metrics);
             if failed {
                 WorkStep::Failed
             } else if deferred {
@@ -1911,26 +1965,26 @@ mod native {
             let section = match prepared {
                 Ok(crate::commands::work::section::Preparation::Ready(section)) => section,
                 Ok(crate::commands::work::section::Preparation::NeedsAction(reason)) => {
-                    self.result.work_telemetry.record(metrics);
+                    self.record_work_step(metrics);
                     return WorkStep::Deferred(reason);
                 }
                 Ok(crate::commands::work::section::Preparation::Capacity {
                     request_bytes,
                     max_input_bytes,
                 }) => {
-                    self.result.work_telemetry.record(metrics);
+                    self.record_work_step(metrics);
                     return WorkStep::Deferred(format!(
                         "complete section request needs {request_bytes} bytes, above max_input_bytes {max_input_bytes}; retained for explicit capacity adjustment"
                     ));
                 }
                 Err(error) => {
-                    self.result.work_telemetry.record(metrics);
+                    self.record_work_step(metrics);
                     self.failure("whole-section preparation", error);
                     return WorkStep::Failed;
                 }
             };
             let result = self.invoke_whole_section(*section, &mut metrics).await;
-            self.result.work_telemetry.record(metrics);
+            self.record_work_step(metrics);
             result
         }
 
@@ -2039,6 +2093,7 @@ mod native {
                         id,
                         section,
                         body,
+                        self.supervisor.read_control(),
                     ),
                     None,
                 ),
@@ -2050,6 +2105,7 @@ mod native {
                         id,
                         section,
                         reason.clone(),
+                        self.supervisor.read_control(),
                     ),
                     Some(reason),
                 ),
@@ -2114,6 +2170,7 @@ mod native {
                 &self.config_revision,
                 id,
                 frontier,
+                self.supervisor.read_control(),
             ) {
                 Ok(checkpoint) => checkpoint,
                 Err(error) => {
@@ -2121,7 +2178,7 @@ mod native {
                         .preparation_duration_ms
                         .as_mut()
                         .expect("measured preparation") += started_at.elapsed().as_millis() as u64;
-                    self.result.work_telemetry.record(metrics);
+                    self.record_work_step(metrics);
                     self.failure("bounded work completion", error);
                     return WorkStep::Failed;
                 }
@@ -2139,7 +2196,7 @@ mod native {
                         if self.result.cancelled {
                             metrics.outcome = WorkOutcome::Cancelled;
                         }
-                        self.result.work_telemetry.record(metrics);
+                        self.record_work_step(metrics);
                         return WorkStep::Failed;
                     };
                     let restaged = crate::commands::work::restage_finished(
@@ -2147,16 +2204,17 @@ mod native {
                         &self.config,
                         &self.config_revision,
                         id,
+                        self.supervisor.read_control(),
                     );
                     metrics.revalidation_record_duration_ms =
                         Some(started_at.elapsed().as_millis() as u64);
                     if let Err(error) = restaged {
-                        self.result.work_telemetry.record(metrics);
+                        self.record_work_step(metrics);
                         self.failure("bounded work completion", error);
                         return WorkStep::Failed;
                     }
                     metrics.outcome = WorkOutcome::Restaged;
-                    self.result.work_telemetry.record(metrics);
+                    self.record_work_step(metrics);
                     self.record(
                         "bounded work completion",
                         StageState::Skipped,
@@ -2174,7 +2232,7 @@ mod native {
                 crate::commands::work::FinalizationPreparation::Interactive => {}
                 crate::commands::work::FinalizationPreparation::Result(result) => {
                     let result = self.finalize_result(id, *result, &mut metrics).await;
-                    self.result.work_telemetry.record(metrics);
+                    self.record_work_step(metrics);
                     return result;
                 }
                 crate::commands::work::FinalizationPreparation::Capacity {
@@ -2189,7 +2247,7 @@ mod native {
                         StageState::Skipped,
                         Some(reason.clone()),
                     );
-                    self.result.work_telemetry.record(metrics);
+                    self.record_work_step(metrics);
                     return WorkStep::Deferred(reason);
                 }
                 crate::commands::work::FinalizationPreparation::NeedsAction(reason) => {
@@ -2198,12 +2256,12 @@ mod native {
                         StageState::Skipped,
                         Some(reason.clone()),
                     );
-                    self.result.work_telemetry.record(metrics);
+                    self.record_work_step(metrics);
                     return WorkStep::Deferred(reason);
                 }
                 crate::commands::work::FinalizationPreparation::Ready(section) => {
                     let result = self.finalize_section(id, *section, &mut metrics).await;
-                    self.result.work_telemetry.record(metrics);
+                    self.record_work_step(metrics);
                     return result;
                 }
             };
@@ -2225,7 +2283,7 @@ mod native {
                 } else {
                     WorkOutcome::Failed
                 };
-                self.result.work_telemetry.record(metrics);
+                self.record_work_step(metrics);
                 return WorkStep::Failed;
             }
             let started_at = Instant::now();
@@ -2254,7 +2312,7 @@ mod native {
                     WorkStep::Failed
                 }
             };
-            self.result.work_telemetry.record(metrics);
+            self.record_work_step(metrics);
             result
         }
 
@@ -2329,6 +2387,7 @@ mod native {
                     &self.config,
                     &self.config_revision,
                     &task_ids,
+                    self.supervisor.read_control(),
                 )
                 .map(|prepared| {
                     self.result
@@ -2567,6 +2626,7 @@ mod native {
                             .iter()
                             .map(|reply| (reply.task_id.as_str(), reply.output.clone()))
                             .collect(),
+                        self.supervisor.read_control(),
                     )
                 } else {
                     Err(miette::miette!(
@@ -2628,7 +2688,7 @@ mod native {
                 if self.result.cancelled && !matches!(step.outcome, WorkOutcome::Recorded) {
                     step.outcome = WorkOutcome::Cancelled;
                 }
-                self.result.work_telemetry.record(step);
+                self.record_work_step(step);
             }
             accepted
         }
@@ -2640,7 +2700,7 @@ mod native {
                 } else if failed {
                     turn.metrics.outcome = WorkOutcome::Failed;
                 }
-                self.result.work_telemetry.record(turn.metrics);
+                self.record_work_step(turn.metrics);
             }
         }
 
@@ -2736,6 +2796,7 @@ mod native {
                 .min(MAX_PREPARED_QUEUE_TARGETS);
             let mut next = 0;
             while next < order.len() {
+                self.supervisor.read_control().check().into_diagnostic()?;
                 let batch = is_interactive_batch_candidate(
                     targets[&order[next]].kind,
                     budget.extraction_context,
@@ -2807,6 +2868,7 @@ mod native {
                     &self.config_revision,
                     &materialize,
                     &synthesis_inputs,
+                    self.supervisor.read_control(),
                 )?;
                 self.result.queue_planning.discovery_captures += captures.captures;
                 self.result.queue_planning.discovery_io.accumulate(captures);
@@ -3221,7 +3283,7 @@ mod native {
                                     metrics.node_id = Some(root_node);
                                     metrics.preparation_duration_ms = Some(preparation_duration_ms);
                                     metrics.outcome = WorkOutcome::AlreadyComplete;
-                                    self.result.work_telemetry.record(metrics);
+                                    self.record_work_step(metrics);
                                     continue 'planning;
                                 }
                                 ObservationStep::Deferred(reason) => {

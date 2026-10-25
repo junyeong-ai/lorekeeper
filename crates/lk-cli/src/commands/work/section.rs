@@ -276,6 +276,7 @@ mod tests {
                 &id,
                 *section,
                 body,
+                &lk_vault::ReadControl::default(),
             )
             .unwrap();
             result

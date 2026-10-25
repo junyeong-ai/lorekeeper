@@ -19,6 +19,15 @@ pub fn load_markdown_inventory(
     root: &Path,
     rel_dir: &Path,
 ) -> Result<MarkdownInventory, VaultError> {
+    load_markdown_inventory_controlled(root, rel_dir, &crate::ReadControl::default())
+}
+
+pub(crate) fn load_markdown_inventory_controlled(
+    root: &Path,
+    rel_dir: &Path,
+    read: &crate::ReadControl,
+) -> Result<MarkdownInventory, VaultError> {
+    read.check()?;
     let full = crate::page_path(root, rel_dir)?;
     match std::fs::metadata(&full) {
         Ok(metadata) if metadata.is_dir() => {}
@@ -38,6 +47,7 @@ pub fn load_markdown_inventory(
     let mut directories = std::collections::BTreeSet::new();
     let mut directory_aliases = Vec::new();
     for entry in walkdir::WalkDir::new(&full).follow_links(false) {
+        read.check()?;
         let entry = entry.map_err(|error| std::io::Error::other(error.to_string()))?;
         if entry.depth() == 0 || entry.file_type().is_dir() {
             directories.insert(entry.path().canonicalize()?);
@@ -98,6 +108,7 @@ pub fn load_markdown_inventory(
         .collect::<Vec<_>>();
     paths.sort();
     addresses.sort();
+    read.check()?;
     Ok(MarkdownInventory {
         owners: paths,
         addresses,
@@ -115,11 +126,19 @@ pub(crate) fn read_page(root: &Path, path: &Path) -> Result<VaultPage, VaultErro
 }
 
 pub(crate) fn read_frontmatter_header(
+    input: impl std::io::BufRead,
+) -> Result<(Option<String>, usize), VaultError> {
+    read_frontmatter_header_controlled(input, &crate::ReadControl::default())
+}
+
+pub(crate) fn read_frontmatter_header_controlled(
     mut input: impl std::io::BufRead,
+    read: &crate::ReadControl,
 ) -> Result<(Option<String>, usize), VaultError> {
     use std::io::{BufRead, Read};
 
     let mut opening = Vec::new();
+    read.check()?;
     // BOM + delimiter + CRLF fit in eight bytes; the extra byte rejects longer first lines.
     input.by_ref().take(9).read_until(b'\n', &mut opening)?;
     let first = opening.strip_prefix(b"\xef\xbb\xbf").unwrap_or(&opening);
@@ -128,6 +147,7 @@ pub(crate) fn read_frontmatter_header(
     }
     let mut header = String::from_utf8(opening).map_err(std::io::Error::other)?;
     loop {
+        read.check()?;
         let start = header.len();
         if input.read_line(&mut header)? == 0 {
             return Err(VaultError::Frontmatter("unclosed frontmatter block".into()));

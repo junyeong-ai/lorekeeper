@@ -306,12 +306,34 @@ pub(super) fn task_with_discovery(
     task_id: &str,
     queries: &[lk_core::discovery::DiscoveryQuery],
 ) -> miette::Result<Prepared> {
+    task_with_discovery_controlled(
+        root,
+        config,
+        task_id,
+        queries,
+        &lk_vault::ReadControl::default(),
+    )
+}
+
+fn task_with_discovery_controlled(
+    root: &Path,
+    config: &Config,
+    task_id: &str,
+    queries: &[lk_core::discovery::DiscoveryQuery],
+    read: &lk_vault::ReadControl,
+) -> miette::Result<Prepared> {
     let task = super::super::queue::select_task(
         root,
         task_id,
         super::super::queue::TaskSelection::CurrentOrDoneExtraction,
     )?;
-    with_discovery(root, config, capture_task(root, config, task)?, queries)
+    with_discovery_controlled(
+        root,
+        config,
+        capture_task(root, config, task)?,
+        queries,
+        read,
+    )
 }
 
 pub(super) fn source_task(root: &Path, config: &Config, task_id: &str) -> miette::Result<Prepared> {
@@ -331,10 +353,34 @@ pub(super) fn selection_inventory(
     task_id: &str,
     queries: &[lk_core::discovery::DiscoveryQuery],
 ) -> miette::Result<SelectionInventory> {
+    selection_inventory_controlled(
+        root,
+        config,
+        task_id,
+        queries,
+        &lk_vault::ReadControl::default(),
+    )
+}
+
+pub(super) fn selection_inventory_controlled(
+    root: &Path,
+    config: &Config,
+    task_id: &str,
+    queries: &[lk_core::discovery::DiscoveryQuery],
+    read: &lk_vault::ReadControl,
+) -> miette::Result<SelectionInventory> {
+    read.check().into_diagnostic()?;
     let reports = lk_vault::list_reviews(root, &config.vault.dirs).into_diagnostic()?;
-    let capture =
-        lk_vault::capture_discovery_with_reviews(root, &config.vault.dirs, queries, &reports)
-            .into_diagnostic()?;
+    let (mut captures, _) = lk_vault::capture_discovery_batch_controlled(
+        root,
+        &config.vault.dirs,
+        &[queries.to_vec()],
+        Some(&reports),
+        read,
+    )
+    .into_diagnostic()?;
+    let capture = captures.remove(0);
+    read.check().into_diagnostic()?;
     selection_inventory_with_capture(root, config, task_id, capture, reports)
 }
 
@@ -594,8 +640,24 @@ pub(super) fn task_with_selection(
 pub(super) fn with_discovery(
     root: &Path,
     config: &Config,
+    prepared: Prepared,
+    queries: &[lk_core::discovery::DiscoveryQuery],
+) -> miette::Result<Prepared> {
+    with_discovery_controlled(
+        root,
+        config,
+        prepared,
+        queries,
+        &lk_vault::ReadControl::default(),
+    )
+}
+
+fn with_discovery_controlled(
+    root: &Path,
+    config: &Config,
     mut prepared: Prepared,
     queries: &[lk_core::discovery::DiscoveryQuery],
+    read: &lk_vault::ReadControl,
 ) -> miette::Result<Prepared> {
     if prepared.context["purpose"]["task_kind"]
         != serde_json::to_value(lk_queue::TaskKind::ExtractConcepts).into_diagnostic()?
@@ -605,8 +667,8 @@ pub(super) fn with_discovery(
         ));
     }
     let queries = super::discovery::validate_queries(queries)?;
-    let matches =
-        lk_vault::discover_queries(root, &config.vault.dirs, &queries).into_diagnostic()?;
+    let matches = lk_vault::discover_queries_controlled(root, &config.vault.dirs, &queries, read)
+        .into_diagnostic()?;
     let target_address = match &prepared.subject {
         Subject::Queue { target, .. } => target,
         _ => return Err(miette::miette!("discovery requires a queue subject")),
@@ -870,6 +932,23 @@ pub(super) fn refresh(
     config_revision: &str,
     context: &Value,
 ) -> miette::Result<Prepared> {
+    refresh_controlled(
+        root,
+        config,
+        config_revision,
+        context,
+        &lk_vault::ReadControl::default(),
+    )
+}
+
+pub(super) fn refresh_controlled(
+    root: &Path,
+    config: &Config,
+    config_revision: &str,
+    context: &Value,
+    read: &lk_vault::ReadControl,
+) -> miette::Result<Prepared> {
+    read.check().into_diagnostic()?;
     let subject: Subject = serde_json::from_value(
         context
             .get("subject")
@@ -890,12 +969,16 @@ pub(super) fn refresh(
                     context["purpose"]["extraction_scope"]["selection"].clone(),
                 )
                 .into_diagnostic()?;
-                super::selected_task(
+                super::selected_task_with_screening(
                     root,
-                    config,
-                    config_revision,
-                    task_id,
-                    &queries,
+                    super::screening_controlled(
+                        root,
+                        config,
+                        config_revision,
+                        task_id,
+                        &queries,
+                        read,
+                    )?,
                     &selection,
                     &mut Default::default(),
                 )?
@@ -903,13 +986,14 @@ pub(super) fn refresh(
             } else if let Some(discovery) = context["purpose"].get("discovery") {
                 let queries: Vec<lk_core::discovery::DiscoveryQuery> =
                     serde_json::from_value(discovery["queries"].clone()).into_diagnostic()?;
-                task_with_discovery(root, config, task_id, &queries)?
+                task_with_discovery_controlled(root, config, task_id, &queries, read)?
             } else {
                 task(root, config, task_id)?
             }
         }
         Subject::Audit { path, .. } => audit(root, config, path)?,
     };
+    read.check().into_diagnostic()?;
     if prepared.subject != subject || prepared.context != *context {
         return Err(super::publication_rejection(
             super::RejectionKind::SemanticContextChanged,

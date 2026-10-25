@@ -362,12 +362,20 @@ inputs, including added candidates, aliases and scoped reviews.
 `queue_planning.discovery_io`, `screening_preparation_io` and
 `screening_revalidation_io` count existing reads in successful complete discovery
 captures. They separate concept `vocabulary`, full `knowledge` traversal and
-`matched_rereads`: `files`, UTF-8 `bytes`, enumeration/address/read/parse durations
+`matched_rereads`: `files`, logical `bytes`, enumeration/address/read/parse durations
 and maximum individual read duration, all in microseconds. Read time includes
-`read_to_string` and opening/decoding; it does not identify an OS latency cause.
+opening and decoding; it does not identify an OS latency cause. Vocabulary bytes
+cover consumed frontmatter/probe bytes, excluding buffered read-ahead; knowledge
+and matched rereads cover complete UTF-8 text. Full body validation remains mandatory.
 `projection_match_duration_us` includes visible projection and lexical matching.
 These counters exclude review/source/Work reads, publication guards and journals;
 failed captures do not contribute partial counters. They never authorize cache reuse.
+Native discovery checks cancellation between directory entries, header lines and
+body chunks, discarding incomplete captures. A kernel I/O call must return before
+the next check; durable journal transitions retain their recovery guarantees.
+Within a finalization checkpoint, status and preparation share one fresh capture.
+Its elapsed time belongs to preparation; sealed-result checks belong to verification.
+Host calls and writer waits still require fresh post-host input validation.
 `screening_revalidation_duration_ms` sums successful fresh input reconstruction;
 `screening_record_duration_ms` sums attempted receipt validation/publication, including
 page guards, ledger checks and journal I/O. Writer acquisition remains in
