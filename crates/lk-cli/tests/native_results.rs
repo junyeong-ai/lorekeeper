@@ -485,6 +485,37 @@ fn corrupt_discovery_history_is_fatal_and_never_overwritten() {
 }
 
 #[test]
+fn discovery_recovery_does_not_hide_a_corrupt_active_generation_action() {
+    let fixture = Fixture::new("codex");
+    let (task, _) = fixture.add("recover", lk_queue::TaskKind::ExtractConcepts, false);
+    std::fs::write(fixture.root().join("mode"), "discovery-same").unwrap();
+    fixture.run();
+    let calls = std::fs::read_to_string(fixture.root().join("calls.jsonl")).unwrap();
+    let request: Value = serde_json::from_str(calls.lines().last().unwrap()).unwrap();
+    let key = blake3::hash(&serde_json::to_vec(&(&task.task_id, &task.cache_hash)).unwrap());
+    let directory = fixture
+        .root()
+        .join("vault/.lorekeeper/queue/result-actions");
+    std::fs::create_dir_all(&directory).unwrap();
+    let wrong_context = "f".repeat(64);
+    assert_ne!(request["tasks"][0]["context_revision"], wrong_context);
+    let action = json!({"schema":"native-result-action-v1","task_id":task.task_id,"cache_hash":task.cache_hash,
+        "context_revision":wrong_context,"request_revision":lk_core::concept::file_revision(&serde_json::to_string(&request).unwrap()),
+        "reason":"A stored action with an inconsistent scope."});
+    let path = directory.join(format!("{key}.json"));
+    std::fs::write(&path, serde_json::to_vec(&action).unwrap()).unwrap();
+    let count = fixture.calls();
+    let report = fixture.run();
+    assert!(report["halted"].as_bool().unwrap(), "{report}");
+    assert_eq!(fixture.calls(), count);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&std::fs::read(path).unwrap()).unwrap(),
+        action
+    );
+    assert!(!fixture.done(&task));
+}
+
+#[test]
 fn frontier_discovery_keeps_paid_nodes_unsealed_and_same_request_spends_no_more_calls() {
     for engine in ["codex", "claude-code"] {
         let fixture = Fixture::new(engine);

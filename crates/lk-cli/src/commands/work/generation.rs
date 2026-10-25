@@ -275,7 +275,16 @@ pub(super) fn admission(
             .ok_or_else(|| miette::miette!("missing selected task"))?,
     )?;
     let request = super::native::selected_request(config, std::slice::from_ref(input))?;
+    let request_revision = digest(&request)?;
     let action = GENERATION.read(root, &task.task_id, &task.cache_hash)?;
+    if action.as_ref().is_some_and(|(_, action)| {
+        action.request_revision == request_revision
+            && Some(action.context_revision.as_str()) != input["context_revision"].as_str()
+    }) {
+        return Err(miette::miette!(
+            "native action context differs from its request"
+        ));
+    }
     let history = match super::discovery::recovery::admission(root, &task, &request)? {
         super::discovery::recovery::Admission::Blocked(reason) => {
             return Ok(Admission::Deferred(reason));
@@ -290,13 +299,8 @@ pub(super) fn admission(
             Admission::Batch
         });
     };
-    if action.request_revision != digest(&request)? {
+    if action.request_revision != request_revision {
         return Ok(Admission::Single);
-    }
-    if Some(action.context_revision.as_str()) != input["context_revision"].as_str() {
-        return Err(miette::miette!(
-            "native action context differs from its request"
-        ));
     }
     Ok(Admission::Deferred(action.reason))
 }
