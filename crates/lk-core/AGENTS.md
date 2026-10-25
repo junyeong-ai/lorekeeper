@@ -13,6 +13,8 @@ config loading and the shared filesystem primitives intentionally perform I/O.
   excluding only execution call/parallel/consecutive-call/screening-packet limits and profile timeouts. Preserve
   the separate complete byte revision for live workflow pinning. Direct deserialization
   has no loaded policy revision; it must not fabricate one from resolved paths.
+- Filesystem vault roots remain `PathBuf` through resolution and runtime binding.
+  YAML roots are strings; runtime binding does not recompute the loaded semantic policy.
 - `SourceType::descriptor()` is exhaustive with no fallback. `streaming` means a
   past day cannot be completely refetched; `unit` decides daily versus document
   materialization. Adding a type requires deciding every descriptor trait.

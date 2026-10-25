@@ -450,12 +450,18 @@ async fn run_with_identity(
     }
 
     ensure_config_current(&config_path, &config_revision)?;
+    if !dry_run {
+        std::fs::create_dir_all(&vault_root)
+            .map_err(|error| miette::miette!("create vault: {error}"))?;
+    }
+    #[cfg(unix)]
+    let root_pin = (!dry_run)
+        .then(|| super::workflow::VaultRootPin::capture(&config.vault.root_path(), &vault_root))
+        .transpose()?;
     #[cfg(unix)]
     let _publication_workflow = if dry_run || access.publication_workflow.is_none() {
         None
     } else {
-        std::fs::create_dir_all(&vault_root)
-            .map_err(|error| miette::miette!("create vault: {error}"))?;
         {
             let selected = super::GlobalOptions {
                 config: Some(config_path.clone()),
@@ -466,6 +472,7 @@ async fn run_with_identity(
                 super::workflow::WorkflowLease::acquire_publication(
                     &selected,
                     &config,
+                    &vault_root,
                     config_path.clone(),
                     config_revision.clone(),
                     matches!(access.publication_workflow, Some(PublicationWorkflow::Wait)),
@@ -477,12 +484,20 @@ async fn run_with_identity(
     let _mutation = if dry_run {
         None
     } else {
-        std::fs::create_dir_all(&vault_root).map_err(|e| miette::miette!("create vault: {e}"))?;
+        let pin =
+            super::ConfigurationPin::from_loaded(config_path.clone(), config_revision.clone());
         Some(
-            super::publication::acquire_mutation(
+            super::publication::acquire_mutation_checked(
                 &vault_root,
                 access.wait_for_vault,
-                &super::ConfigurationPin::from_loaded(config_path.clone(), config_revision.clone()),
+                || {
+                    pin.validate()?;
+                    #[cfg(unix)]
+                    if let Some(root) = &root_pin {
+                        root.validate()?;
+                    }
+                    Ok(())
+                },
             )
             .await?,
         )

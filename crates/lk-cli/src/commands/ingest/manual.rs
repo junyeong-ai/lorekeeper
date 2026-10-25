@@ -694,7 +694,7 @@ mod tests {
                 .unwrap();
             }
             let mut config: lk_core::config::Config = lk_core::yaml::from_str("vault: {root: vault, timezone: UTC, locale: en}\nidentity: {name: Test, email: test@example.invalid}\nllm: {provider: noop}\nsources:\n  notes:\n    type: manual\n    concept_policy: disabled\n    params: {inbox_dir: inbox, archive_after_ingest: false, max_entries_per_run: 1}\n").unwrap();
-            config.vault.root = root.to_string_lossy().into();
+            config.vault.root = root.to_path_buf();
             let llm: Arc<dyn lk_queue::LlmClient> = Arc::new(lk_queue::NoopLlmClient);
             let pipeline = lk_pipeline::Pipeline::new(
                 &root,

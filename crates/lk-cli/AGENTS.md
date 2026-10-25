@@ -13,7 +13,12 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   publication. Ingestion pins its physical root before building acquisition clients.
 - Workflow configuration is loaded and revisioned from one read. Pass its selected
   path and `LORE_CONFIG_REVISION` to children; every CLI config load rejects changed
-  bytes or another path. Native jobs stop after drift and retain unfinished work.
+  bytes or another path. A workflow also pins its original root selector, working
+  path and directory identity. Bind parent and child I/O to that working path;
+  validate selection before and after waiting/recovery and before host/publication.
+  Same-directory aliases remain valid; another directory or incomplete inherited
+  context refuses. Root context validates scope, never lease ownership or reentrancy.
+  Native jobs stop after drift and retain unfinished work.
   New semantic Work and selection identities exclude only execution call/parallel/consecutive-call/
   screening-packet limits and profile session timeouts. Input/result byte limits,
   extraction policy, model/effort and all other configuration remain semantic inputs.

@@ -246,7 +246,10 @@ pub async fn run(opts: &super::GlobalOptions, command: IdentityCommand) -> miett
     };
     // Acquire before observing on apply; read-only commands never recover or lock.
     let session = if applying && !dry_run {
-        Some(lk_vault::MutationSession::acquire(&config.vault.root_path()).map_err(failure)?)
+        Some(
+            crate::commands::publication::acquire_mutation_now(&config.vault.root_path())
+                .map_err(failure)?,
+        )
     } else {
         None
     };

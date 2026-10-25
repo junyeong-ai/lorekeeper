@@ -87,6 +87,8 @@ do not participate in installation locking. Before those paths, pause schedules
 and manual sessions for every vault sharing the installation, wait for their
 children to exit and require each vault's `queue check` to pass. After replacement,
 run `self deploy` and `self status` before resuming. Do not force through active users.
+Start a fresh workflow after replacement. Its configuration and physical-root context
+belong to that session; saved Work resumes separately through currentness checks.
 
 After a signing-identity change, macOS may require renewed protected-folder consent
 for scheduled jobs. Verify actual scheduled vault access using the

@@ -13,7 +13,7 @@ pub(super) fn run(
 ) -> miette::Result<()> {
     let root = resolve_vault_root(opts, root)?;
     let session = (!dry_run)
-        .then(|| lk_vault::MutationSession::acquire(&root))
+        .then(|| crate::commands::publication::acquire_mutation_now(&root))
         .transpose()
         .map_err(|e| miette::miette!("{e}"))?;
     let root = session

@@ -85,7 +85,7 @@ impl Config {
                 documents.resolve_relative_to(parent);
             }
             if let Some(file) = config.credentials.file.as_mut() {
-                *file = resolve_vault_root(&file.to_string_lossy(), parent);
+                *file = resolve_vault_root(&*file, parent);
             }
         }
         Ok((config, crate::concept::file_revision(&content)))
@@ -119,7 +119,13 @@ impl Config {
         if let Some(documents) = &self.ingest.documents {
             documents.validate()?;
         }
-        if self.vault.root.trim().is_empty() {
+        if self.vault.root.as_os_str().is_empty()
+            || self
+                .vault
+                .root
+                .to_str()
+                .is_some_and(|root| root.trim().is_empty())
+        {
             return Err(ConfigError::Validation(
                 "vault.root must not be empty or whitespace-only".into(),
             ));
@@ -662,7 +668,7 @@ fn validate_cron_field(field: &str, min: u8, max: u8) -> Result<(), String> {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VaultConfig {
-    pub root: String,
+    pub root: PathBuf,
     #[serde(default)]
     pub dirs: VaultDirs,
     #[serde(default)]
@@ -676,7 +682,10 @@ pub struct VaultConfig {
 
 impl VaultConfig {
     pub fn root_path(&self) -> PathBuf {
-        expand_tilde(&self.root)
+        self.root
+            .to_str()
+            .map(expand_tilde)
+            .unwrap_or_else(|| self.root.clone())
     }
 
     /// Output locale for added labels/headers, parsed from `vault.locale`.
@@ -687,9 +696,7 @@ impl VaultConfig {
     /// Resolve a relative vault root against the config file's parent directory so the
     /// vault location is anchored to the config file, not to the process CWD.
     pub(crate) fn resolve_relative_to(&mut self, base: &Path) {
-        self.root = resolve_vault_root(&self.root, base)
-            .to_string_lossy()
-            .into_owned();
+        self.root = resolve_vault_root(&self.root, base);
     }
 
     pub fn timezone(&self) -> jiff::tz::TimeZone {
@@ -1672,8 +1679,12 @@ pub fn expand_tilde(path: &str) -> PathBuf {
 /// which is absolute and works but is a SECOND spelling of one path, and two spellings of one
 /// vault fail a string compare. Canonicalizing instead would resolve symlinks and fail outright
 /// on a vault that does not exist yet, which is the first run.
-pub fn resolve_vault_root(root: &str, base: &Path) -> PathBuf {
-    let expanded = expand_tilde(root);
+pub fn resolve_vault_root(root: impl AsRef<Path>, base: &Path) -> PathBuf {
+    let root = root.as_ref();
+    let expanded = root
+        .to_str()
+        .map(expand_tilde)
+        .unwrap_or_else(|| root.to_path_buf());
     let absolute = if expanded.is_relative() {
         base.join(&expanded)
     } else {
@@ -2432,6 +2443,31 @@ sources:
             "vault root should be anchored to config dir, got: {}",
             resolved.display()
         );
+    }
+
+    #[test]
+    fn runtime_vault_root_binding_preserves_loaded_semantic_policy() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.yaml");
+        std::fs::write(&path, "vault: {root: selected}\nidentity: {name: Test, email: test@example.com}\nsources: {notes: {type: manual, params: {inbox_dir: inbox}}}\n").unwrap();
+        let mut config = Config::load(&path).unwrap();
+        let revision = config.semantic_work_revision().unwrap().to_owned();
+        let root = directory.path().join("physical");
+        config.vault.root = root.clone();
+        assert_eq!(config.vault.root_path(), root);
+        assert_eq!(config.semantic_work_revision(), Some(revision.as_str()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_vault_paths_preserve_non_unicode_bytes() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let mut config: Config = crate::yaml::from_str("vault: {root: selected}\nidentity: {name: Test, email: test@example.com}\nsources: {notes: {type: manual, params: {inbox_dir: inbox}}}\n").unwrap();
+        let root = PathBuf::from(std::ffi::OsString::from_vec(b"/vault-\xff".to_vec()));
+        config.vault.root = root.clone();
+        assert_eq!(config.vault.root_path(), root);
+        assert_eq!(resolve_vault_root(&root, Path::new("/base")), root);
     }
 
     #[test]

@@ -148,7 +148,7 @@ mod tests {
     fn config(root: &Path) -> Config {
         let mut config: Config =
             lk_core::yaml::from_str(include_str!("../../../config.starter.yaml")).unwrap();
-        config.vault.root = root.to_string_lossy().into();
+        config.vault.root = root.to_path_buf();
         config
     }
 

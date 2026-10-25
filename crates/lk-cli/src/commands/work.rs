@@ -2513,7 +2513,7 @@ pub async fn run(opts: &GlobalOptions, command: WorkCommand) -> miette::Result<(
             }
             let session = batch_id
                 .is_none()
-                .then(|| lk_vault::MutationSession::acquire(&root).into_diagnostic())
+                .then(|| super::publication::acquire_mutation_now(&root))
                 .transpose()?;
             let prepared = current_screening(&root, &config, &config_revision, &task_id)?;
             if let Some(session) = &session {
@@ -2579,7 +2579,7 @@ pub async fn run(opts: &GlobalOptions, command: WorkCommand) -> miette::Result<(
         } => {
             let output = serde_json::from_slice(&std::fs::read(file).into_diagnostic()?)
                 .into_diagnostic()?;
-            let session = lk_vault::MutationSession::acquire(&root).into_diagnostic()?;
+            let session = super::publication::acquire_mutation_now(&root)?;
             let completed = record_screening(
                 &session,
                 &config,
@@ -2591,7 +2591,7 @@ pub async fn run(opts: &GlobalOptions, command: WorkCommand) -> miette::Result<(
             json!({"completed_batches":completed,"next_command":["lore","work","select","--task-id",task_id]})
         }
         WorkCommand::SourcePlan { task_id } => {
-            let session = lk_vault::MutationSession::acquire(&root).into_diagnostic()?;
+            let session = super::publication::acquire_mutation_now(&root)?;
             let prepared = resources::source_task(&root, &config, &task_id)?;
             let work = persist_prepared(&session, &config, &config_revision, &prepared)?;
             progress(&work, &root, &prepared, 20, 0)?
@@ -2599,7 +2599,7 @@ pub async fn run(opts: &GlobalOptions, command: WorkCommand) -> miette::Result<(
         WorkCommand::Discover { task_id, file } => {
             let request = serde_json::from_slice(&std::fs::read(file).into_diagnostic()?)
                 .into_diagnostic()?;
-            let session = lk_vault::MutationSession::acquire(&root).into_diagnostic()?;
+            let session = super::publication::acquire_mutation_now(&root)?;
             discovery::record(&session, &task_id, request)?;
             json!({"recorded":true,"task_id":task_id})
         }
@@ -2622,7 +2622,7 @@ pub async fn run(opts: &GlobalOptions, command: WorkCommand) -> miette::Result<(
             path,
             discovery_file,
         } => {
-            let session = lk_vault::MutationSession::acquire(&root).into_diagnostic()?;
+            let session = super::publication::acquire_mutation_now(&root)?;
             let discovery = discovery_file.as_deref().map(load_discovery).transpose()?;
             let prepared = match (task_id, path) {
                 (Some(id), None) => {
@@ -2654,7 +2654,7 @@ pub async fn run(opts: &GlobalOptions, command: WorkCommand) -> miette::Result<(
             let output: WorkOutput =
                 serde_json::from_slice(&std::fs::read(file).into_diagnostic()?)
                     .into_diagnostic()?;
-            let session = lk_vault::MutationSession::acquire(&root).into_diagnostic()?;
+            let session = super::publication::acquire_mutation_now(&root)?;
             let (work, prepared) = load(&root, &config, &config_revision, &output.work_id)?;
             let status = work.record(&session, output, &prepared.resources)?;
             progress_value(&work, &prepared, status, 20, 0)
@@ -2665,7 +2665,7 @@ pub async fn run(opts: &GlobalOptions, command: WorkCommand) -> miette::Result<(
             from_work,
             from_node,
         } => {
-            let session = lk_vault::MutationSession::acquire(&root).into_diagnostic()?;
+            let session = super::publication::acquire_mutation_now(&root)?;
             let (work, prepared) = load(&root, &config, &config_revision, &work_id)?;
             let prior = Work::load(&root, &from_work)?;
             let status =
@@ -2679,7 +2679,7 @@ pub async fn run(opts: &GlobalOptions, command: WorkCommand) -> miette::Result<(
         } => {
             let result: Value = serde_json::from_slice(&std::fs::read(file).into_diagnostic()?)
                 .into_diagnostic()?;
-            let session = lk_vault::MutationSession::acquire(&root).into_diagnostic()?;
+            let session = super::publication::acquire_mutation_now(&root)?;
             let (work, prepared) = load(&root, &config, &config_revision, &work_id)?;
             #[cfg(unix)]
             {

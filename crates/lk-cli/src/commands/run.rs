@@ -475,7 +475,23 @@ mod native {
                 self.config_revision.clone(),
             );
             let failure = match pin.validate() {
-                Ok(()) => return true,
+                Ok(()) => {
+                    let root = if let Some(lease) = &self.lease {
+                        lease.root_pin().validate()
+                    } else if lk_core::fs::canonical_prefix(&self.config.vault.root_path())
+                        == self.root
+                    {
+                        Ok(())
+                    } else {
+                        Err(miette::miette!(
+                            "workflow vault selection changed; unfinished work is retained"
+                        ))
+                    };
+                    match root {
+                        Ok(()) => return true,
+                        Err(error) => error.to_string(),
+                    }
+                }
                 Err(error) => error.to_string(),
             };
             self.configuration_failed = true;
@@ -674,10 +690,18 @@ mod native {
             }
             match self
                 .supervisor
-                .acquire(self.opts, &self.config, &self.config_revision, wait)
+                .acquire(
+                    self.opts,
+                    &self.config,
+                    &self.root,
+                    &self.config_revision,
+                    wait,
+                )
                 .await
             {
                 Ok(Some(lease)) => {
+                    self.root = lease.root_pin().root().to_path_buf();
+                    self.config.vault.root = self.root.clone();
                     self.result.workflow_id = Some(lease.id().clone());
                     self.lease = Some(lease);
                     self.configuration_is_current()
@@ -715,11 +739,18 @@ mod native {
                 self.opts.config.as_ref().expect("resolved config").clone(),
                 self.config_revision.clone(),
             );
+            let root_pin = self.lease.as_ref().map(|lease| lease.root_pin().clone());
             self.result.mutation_access.attempts += 1;
             let started_at = Instant::now();
             let acquired = self
                 .supervisor
-                .acquire_mutation(&self.root, || pin.validate())
+                .acquire_mutation(&self.root, || {
+                    pin.validate()?;
+                    if let Some(root) = &root_pin {
+                        root.validate()?;
+                    }
+                    Ok(())
+                })
                 .await;
             self.result.mutation_access.duration_ms += started_at.elapsed().as_millis() as u64;
             match acquired {
@@ -4217,7 +4248,7 @@ mod native {
             .is_some();
         let mut runner = Runner {
             installation,
-            root: config.vault.root_path(),
+            root: lk_core::fs::canonical_prefix(&config.vault.root_path()),
             queue_admitted: scheduler::AdmittedTurns::new(
                 config
                     .execution

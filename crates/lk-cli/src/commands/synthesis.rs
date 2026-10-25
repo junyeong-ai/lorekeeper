@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use super::{build_llm_client, find_config, load_config, parse_date};
+use super::{build_llm_client, find_config, parse_date};
 
 pub mod pending;
 
@@ -83,7 +83,9 @@ pub async fn run(
     period: Period,
     wait_for_vault: bool,
 ) -> miette::Result<()> {
-    let config = load_config(&find_config(opts)?)?;
+    let config_path = find_config(opts)?;
+    let (config, revision) = super::load_config_with_revision(&config_path)?;
+    let pin = super::ConfigurationPin::from_loaded(config_path, revision);
     let vault_root = config.vault.root_path();
     let tz = config.vault.timezone();
     let today = jiff::Timestamp::now().to_zoned(tz).date();
@@ -98,13 +100,7 @@ pub async fn run(
     // Hold the shared vault writer lease before reading evidence or existing pages.
     // External editors do not participate; publication still validates its own inputs.
     std::fs::create_dir_all(&vault_root).map_err(|e| miette::miette!("create vault: {e}"))?;
-    let _mutation = if wait_for_vault {
-        eprintln!("Waiting for exclusive vault access...");
-        lk_vault::MutationSession::acquire_waiting(&vault_root)
-    } else {
-        lk_vault::MutationSession::acquire(&vault_root)
-    }
-    .map_err(|e| miette::miette!("vault mutation: {e}"))?;
+    let _mutation = super::publication::acquire_mutation(&vault_root, wait_for_vault, &pin).await?;
     let vault_root = _mutation.root().to_path_buf();
     if let Period::Pending {
         reconcile: true,

@@ -94,6 +94,7 @@ impl Supervisor {
         &mut self,
         opts: &super::GlobalOptions,
         config: &lk_core::config::Config,
+        root: &Path,
         revision: &str,
         wait: bool,
     ) -> miette::Result<Option<super::workflow::WorkflowLease>> {
@@ -104,7 +105,7 @@ impl Supervisor {
             biased;
             _ = self.interrupt.recv() => Ok(None),
             _ = self.terminate.recv() => Ok(None),
-            lease = super::workflow::WorkflowLease::acquire_selected(opts, config, super::find_config(opts)?, revision.into(), wait) => lease.map(Some),
+            lease = super::workflow::WorkflowLease::acquire_selected(opts, config, root, super::find_config(opts)?, revision.into(), wait) => lease.map(Some),
         }
     }
 
@@ -124,10 +125,9 @@ impl Supervisor {
                 match lk_vault::MutationClaim::acquire(root) {
                     Ok(claim) => {
                         validate()?;
-                        return claim
-                            .into_session()
-                            .map(|session| Some((session, waited)))
-                            .into_diagnostic();
+                        let session = claim.into_session().into_diagnostic()?;
+                        validate()?;
+                        return Ok(Some((session, waited)));
                     }
                     Err(lk_vault::VaultError::MutationBusy) => {
                         if !waited {

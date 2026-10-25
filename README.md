@@ -275,6 +275,7 @@ lore schedule --format launchd --bin "$(command -v lore)"     # macOS: plist 정
 macOS의 보호 폴더는 예약 작업에도 별도 접근 허용이 필요할 수 있습니다.
 Unix workflow lease가 협력하는 에이전트 세션을 조정하고, 게시 시 현재 입력을 다시 검사합니다.
 수동 쓰기 세션은 근거를 읽기 전에 `lore workflow -- claude` 또는 `lore workflow -- codex`로 시작합니다.
+워크플로는 설정과 물리적 볼트 선택을 고정합니다. 다른 볼트의 작업은 새 세션에서 시작하세요.
 
 | 운영 작업 | 안내 |
 |---|---|

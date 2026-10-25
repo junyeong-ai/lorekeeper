@@ -16,8 +16,33 @@ fn fixture() -> (tempfile::TempDir, PathBuf) {
     (dir, config)
 }
 
+fn aliased_fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
+    let (directory, config) = fixture();
+    let alias = directory.path().join("selected");
+    std::os::unix::fs::symlink(directory.path().join("vault"), &alias).unwrap();
+    let raw = std::fs::read_to_string(&config)
+        .unwrap()
+        .replace("root: vault", "root: selected");
+    std::fs::write(&config, raw).unwrap();
+    (directory, config, alias)
+}
+
+fn retarget(alias: &Path, target: &Path) {
+    std::fs::remove_file(alias).unwrap();
+    std::os::unix::fs::symlink(target, alias).unwrap();
+}
+
 fn workflow(config: &Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_lore"));
+    for (key, _) in std::env::vars_os() {
+        if key.to_string_lossy().starts_with("LORE_") {
+            command.env_remove(key);
+        }
+    }
+    command.env(
+        "LORE_INSTALL_DATA_DIR",
+        config.parent().unwrap().join("data"),
+    );
     command.arg("--config").arg(config).args(["workflow", "--"]);
     command
 }
@@ -90,6 +115,28 @@ fn contention_runs_no_child_and_release_allows_short_writer() {
 }
 
 #[test]
+fn inherited_root_context_does_not_grant_workflow_reentrancy() {
+    let (directory, config) = fixture();
+    let marker = directory.path().join("must-not-start");
+    let output = workflow(&config)
+        .arg(env!("CARGO_BIN_EXE_lore"))
+        .args(["workflow", "--", "/usr/bin/touch"])
+        .arg(&marker)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("workflow busy"));
+    assert!(!marker.exists());
+    assert!(
+        workflow(&config)
+            .arg("/usr/bin/true")
+            .status()
+            .unwrap()
+            .success()
+    );
+}
+
+#[test]
 fn a_workflow_pins_the_selected_configuration_revision() {
     let (directory, config) = fixture();
     let output = workflow(&config)
@@ -117,6 +164,193 @@ fn a_workflow_pins_the_selected_configuration_revision() {
     assert!(!redirected.status.success());
     assert!(String::from_utf8_lossy(&redirected.stderr).contains("configuration changed"));
     assert!(!other.join("vault/wiki/AGENTS.md").exists());
+}
+
+#[test]
+fn retargeted_config_root_cannot_publish_into_another_live_workflow() {
+    let (first, config, alias) = aliased_fixture();
+    let before = std::fs::read(&config).unwrap();
+    let (mut owner, mut output) = held(
+        &config,
+        "printf 'ready\\n'; read -r release; \"$LORE_BIN\" schema 2>&1",
+    );
+    let (second, second_config) = fixture();
+    retarget(&alias, &second.path().join("vault"));
+    let (mut other_owner, _) = held(&second_config, "printf 'ready\\n'; read -r release");
+    assert!(
+        !workflow(&second_config)
+            .arg("/usr/bin/true")
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    owner
+        .0
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"release\n")
+        .unwrap();
+    let mut error = String::new();
+    output.read_to_string(&mut error).unwrap();
+    assert!(!owner.0.wait().unwrap().success());
+    assert!(
+        error.contains("workflow vault selection changed"),
+        "{error}"
+    );
+    assert_eq!(std::fs::read(&config).unwrap(), before);
+    for directory in [first.path(), second.path()] {
+        assert!(!directory.join("vault/wiki/AGENTS.md").exists());
+    }
+    other_owner
+        .0
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"release\n")
+        .unwrap();
+    assert!(other_owner.0.wait().unwrap().success());
+}
+
+#[test]
+fn same_directory_alias_changes_and_root_overrides_remain_valid() {
+    let (directory, config, alias) = aliased_fixture();
+    let root = directory.path().join("vault");
+    let equivalent = directory.path().join("equivalent");
+    std::os::unix::fs::symlink(&root, &equivalent).unwrap();
+    let (mut owner, _) = held(
+        &config,
+        "printf 'ready\\n'; read -r release; \"$LORE_BIN\" schema",
+    );
+    retarget(&alias, &equivalent);
+    owner
+        .0
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"release\n")
+        .unwrap();
+    assert!(owner.0.wait().unwrap().success());
+    assert!(root.join("wiki/AGENTS.md").exists());
+    let same = workflow(&config)
+        .arg(env!("CARGO_BIN_EXE_lore"))
+        .args(["schema", "--root"])
+        .arg(&equivalent)
+        .output()
+        .unwrap();
+    assert!(same.status.success(), "{same:?}");
+    let (other, _) = fixture();
+    let foreign = workflow(&config)
+        .arg(env!("CARGO_BIN_EXE_lore"))
+        .args(["schema", "--root"])
+        .arg(other.path().join("vault"))
+        .output()
+        .unwrap();
+    assert!(!foreign.status.success());
+    assert!(String::from_utf8_lossy(&foreign.stderr).contains("workflow vault selection changed"));
+    assert!(!other.path().join("vault/wiki/AGENTS.md").exists());
+}
+
+#[test]
+fn replacing_the_vault_directory_at_the_same_path_refuses_child_publication() {
+    let (directory, config) = fixture();
+    let root = directory.path().join("vault");
+    let (mut owner, mut output) = held(
+        &config,
+        "printf 'ready\\n'; read -r release; \"$LORE_BIN\" schema 2>&1",
+    );
+    std::fs::rename(&root, directory.path().join("old-vault")).unwrap();
+    std::fs::create_dir(&root).unwrap();
+    owner
+        .0
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"release\n")
+        .unwrap();
+    let mut error = String::new();
+    output.read_to_string(&mut error).unwrap();
+    assert!(!owner.0.wait().unwrap().success());
+    assert!(
+        error.contains("workflow vault selection changed"),
+        "{error}"
+    );
+    assert!(!root.join("wiki/AGENTS.md").exists());
+}
+
+#[test]
+fn partial_or_malformed_root_context_is_not_accepted() {
+    let (directory, config) = fixture();
+    let root = directory.path().join("vault");
+    for identity in [
+        None,
+        Some("not-json"),
+        Some("{\"device\":0,\"inode\":0,\"unknown\":1}"),
+    ] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_lore"));
+        command
+            .arg("--config")
+            .arg(&config)
+            .args(["config", "vault-root"])
+            .env("LORE_VAULT_ROOT", &root)
+            .env("LORE_VAULT_ROOT_SELECTOR", &root)
+            .env_remove("LORE_VAULT_ROOT_IDENTITY");
+        if let Some(identity) = identity {
+            command.env("LORE_VAULT_ROOT_IDENTITY", identity);
+        }
+        let output = command.output().unwrap();
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(error.contains("workflow vault"), "{error}");
+    }
+    let output = Command::new(env!("CARGO_BIN_EXE_lore"))
+        .arg("--config")
+        .arg(&config)
+        .args(["config", "vault-root"])
+        .env("LORE_CONFIG", config.canonicalize().unwrap())
+        .env(
+            "LORE_CONFIG_REVISION",
+            lk_core::concept::file_revision(&std::fs::read_to_string(&config).unwrap()),
+        )
+        .env("LORE_WORKFLOW_ID", "0".repeat(32))
+        .env_remove("LORE_VAULT_ROOT")
+        .env_remove("LORE_VAULT_ROOT_SELECTOR")
+        .env_remove("LORE_VAULT_ROOT_IDENTITY")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("workflow vault context is missing"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_workflow_preserves_non_unicode_physical_roots_and_bare_path_bytes() {
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+
+    let (directory, config, alias) = aliased_fixture();
+    let root = directory
+        .path()
+        .join(std::ffi::OsString::from_vec(b"vault-\xff".to_vec()));
+    std::fs::rename(directory.path().join("vault"), &root).unwrap();
+    retarget(&alias, &root);
+    let output = workflow(&config)
+        .args([
+            "/bin/sh",
+            "-c",
+            "\"$LORE_BIN\" schema --root \"$LORE_VAULT_ROOT\" && \"$LORE_BIN\" config schema-path --root \"$LORE_VAULT_ROOT\" && \"$LORE_BIN\" config vault-root",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let root = root.canonicalize().unwrap();
+    let mut expected = root.join("wiki/AGENTS.md").as_os_str().as_bytes().to_vec();
+    expected.push(b'\n');
+    expected.extend_from_slice(root.as_os_str().as_bytes());
+    expected.push(b'\n');
+    assert_eq!(output.stdout, expected);
+    assert!(root.join("wiki/AGENTS.md").exists());
 }
 
 #[test]
@@ -339,4 +573,46 @@ fn a_waiting_workflow_refuses_changed_configuration_before_starting_its_child() 
         .write_all(b"release\n")
         .unwrap();
     assert!(holder.0.wait().unwrap().success());
+}
+
+#[test]
+fn a_waiting_workflow_refuses_retargeted_root_before_starting_its_child() {
+    let (directory, config, alias) = aliased_fixture();
+    let (_holder, _) = held(&config, "printf 'ready\\n'; read -r release");
+    let marker = directory.path().join("must-not-start");
+    let error = directory.path().join("root-wait-error");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_lore"));
+    command
+        .arg("--config")
+        .arg(&config)
+        .env("LORE_INSTALL_DATA_DIR", directory.path().join("data"))
+        .args(["workflow", "--wait", "--", "/usr/bin/touch"])
+        .arg(&marker)
+        .stderr(std::fs::File::create(&error).unwrap());
+    let mut waiter = Held(command.spawn().unwrap());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while !std::fs::read_to_string(&error)
+        .unwrap()
+        .contains("Waiting for the vault workflow lease")
+    {
+        assert!(std::time::Instant::now() < deadline);
+        assert!(waiter.0.try_wait().unwrap().is_none());
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let (other, _) = fixture();
+    retarget(&alias, &other.path().join("vault"));
+    let status = loop {
+        if let Some(status) = waiter.0.try_wait().unwrap() {
+            break status;
+        }
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    assert!(!status.success());
+    assert!(!marker.exists());
+    assert!(
+        std::fs::read_to_string(error)
+            .unwrap()
+            .contains("workflow vault selection changed")
+    );
 }

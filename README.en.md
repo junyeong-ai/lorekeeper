@@ -276,6 +276,7 @@ Printed definitions are not registered OS jobs. Review and register them, then i
 Protected macOS folders may require separate permission for scheduled execution.
 A Unix workflow lease coordinates cooperating agent sessions; publication checks inputs again.
 Start manual publishing sessions before reading evidence with `lore workflow -- claude` or `lore workflow -- codex`.
+A workflow pins its configuration and physical vault. Start a new session to work on another vault.
 
 | Operational task | Guide |
 |---|---|

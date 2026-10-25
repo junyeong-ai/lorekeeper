@@ -1042,6 +1042,77 @@ exit 0
 }
 
 #[test]
+fn root_alias_drift_is_rejected_by_native_parent_and_child_on_both_hosts() {
+    for engine in ["codex", "claude-code"] {
+        let fixture = Fixture::new(
+            engine,
+            30,
+            r#"
+python3 - <<'RETARGET'
+import os
+from pathlib import Path
+root=Path(os.environ['TEST_EXECUTION_ROOT'])
+alias=root/'selected'
+alias.unlink()
+alias.symlink_to(root/'other-vault', target_is_directory=True)
+RETARGET
+"$LORE_BIN" schema > "$TEST_EXECUTION_ROOT/child-out" 2> "$TEST_EXECUTION_ROOT/child-error"
+printf '%s' "$?" > "$TEST_EXECUTION_ROOT/child-status"
+exit 0
+"#,
+        );
+        let alias = fixture.root().join("selected");
+        std::os::unix::fs::symlink(fixture.root().join("vault"), &alias).unwrap();
+        let raw = std::fs::read_to_string(&fixture.config)
+            .unwrap()
+            .replace("root: vault", "root: selected");
+        std::fs::write(&fixture.config, &raw).unwrap();
+        fixture.ingest();
+        std::fs::create_dir(fixture.root().join("other-vault")).unwrap();
+        let (output, result) = fixture.run("process");
+        assert!(!output.status.success(), "{engine}: {result}");
+        assert_eq!(result["halted"], true);
+        assert_eq!(result["semantic_calls"], 1);
+        assert!(
+            result["stages"].as_array().unwrap().iter().any(|stage| {
+                stage["name"] == "configuration"
+                    && stage["state"] == "failed"
+                    && stage["detail"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .contains("workflow vault selection changed")
+            }),
+            "{result}"
+        );
+        assert_eq!(std::fs::read_to_string(&fixture.config).unwrap(), raw);
+        assert_ne!(
+            std::fs::read_to_string(fixture.root().join("child-status")).unwrap(),
+            "0"
+        );
+        assert!(
+            std::fs::read_to_string(fixture.root().join("child-error"))
+                .unwrap()
+                .contains("workflow vault selection changed")
+        );
+        assert!(!fixture.root().join("other-vault/wiki/AGENTS.md").exists());
+        assert!(!fixture.root().join("other-vault/wiki/index.md").exists());
+        std::fs::remove_file(&alias).unwrap();
+        std::os::unix::fs::symlink(fixture.root().join("vault"), &alias).unwrap();
+        let pending = fixture.command().args(["queue", "count"]).output().unwrap();
+        assert!(pending.status.success());
+        assert_eq!(String::from_utf8(pending.stdout).unwrap().trim(), "2");
+        assert!(
+            fixture
+                .command()
+                .args(["workflow", "--", "/usr/bin/true"])
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+}
+
+#[test]
 fn audit_exit_zero_without_assessments_is_incomplete() {
     let fixture = Fixture::new("codex", 30, "exit 0");
     let concepts = fixture.root().join("vault/wiki/concepts");

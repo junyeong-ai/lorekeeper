@@ -75,7 +75,7 @@ pub async fn run(
 ) -> miette::Result<()> {
     let config_path = find_config(opts)?;
     let (config, config_revision) = super::load_config_with_revision(&config_path)?;
-    let vault_root = config.vault.root_path();
+    let vault_root = lk_core::fs::canonical_prefix(&config.vault.root_path());
     let work_present = vault_root
         .join(".lorekeeper/work")
         .try_exists()
@@ -85,11 +85,16 @@ pub async fn run(
         let lease = super::workflow::WorkflowLease::prepare_selected(
             opts,
             &config,
-            config_path,
-            config_revision,
+            &vault_root,
+            config_path.clone(),
+            config_revision.clone(),
         )?;
+        lease.root_pin().validate()?;
         match lease.try_lock() {
-            Ok(()) => Some(lease),
+            Ok(()) => {
+                lease.root_pin().validate()?;
+                Some(lease)
+            }
             Err(std::fs::TryLockError::WouldBlock) => None,
             Err(error) => return Err(miette::miette!("work retention lease: {error}")),
         }
@@ -99,22 +104,35 @@ pub async fn run(
     #[cfg(unix)]
     let work_available = dry_run || work_lease.is_some();
     #[cfg(not(unix))]
-    let work_available = {
-        let _ = config_revision;
-        dry_run
+    let work_available = { dry_run };
+    if !dry_run {
+        std::fs::create_dir_all(&vault_root).map_err(|e| miette::miette!("create vault: {e}"))?;
+    }
+    #[cfg(unix)]
+    let root_pin = if dry_run {
+        None
+    } else if let Some(lease) = &work_lease {
+        Some(lease.root_pin().clone())
+    } else {
+        Some(super::workflow::VaultRootPin::capture(
+            &config.vault.root_path(),
+            &vault_root,
+        )?)
     };
     let _mutation = if dry_run {
         None
     } else {
-        std::fs::create_dir_all(&vault_root).map_err(|e| miette::miette!("create vault: {e}"))?;
+        let pin = super::ConfigurationPin::from_loaded(config_path, config_revision);
         Some(
-            if wait_for_vault {
-                eprintln!("Waiting for exclusive vault access...");
-                lk_vault::MutationSession::acquire_waiting(&vault_root)
-            } else {
-                lk_vault::MutationSession::acquire(&vault_root)
-            }
-            .map_err(|e| miette::miette!("vault mutation: {e}"))?,
+            super::publication::acquire_mutation_checked(&vault_root, wait_for_vault, || {
+                pin.validate()?;
+                #[cfg(unix)]
+                if let Some(root) = &root_pin {
+                    root.validate()?;
+                }
+                Ok(())
+            })
+            .await?,
         )
     };
     let vault_root = _mutation

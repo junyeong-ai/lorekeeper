@@ -21,7 +21,7 @@ pub async fn run(opts: &super::GlobalOptions) -> miette::Result<()> {
     }
 
     eprintln!("Config valid: {}", path.display());
-    eprintln!("  vault: {}", config.vault.root);
+    eprintln!("  vault: {}", config.vault.root.display());
     eprintln!("  timezone: {:?}", config.vault.timezone);
     eprintln!("  sources ({}): {}", enabled.len(), enabled.join(", "));
 

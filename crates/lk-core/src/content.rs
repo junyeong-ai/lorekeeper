@@ -247,10 +247,9 @@ impl InputProcessingConfig {
     }
 
     pub(crate) fn resolve_relative_to(&mut self, parent: &Path) {
-        self.python = crate::config::resolve_vault_root(&self.python.to_string_lossy(), parent);
+        self.python = crate::config::resolve_vault_root(&self.python, parent);
         if let Some(ocr) = &mut self.ocr {
-            ocr.tessdata_dir =
-                crate::config::resolve_vault_root(&ocr.tessdata_dir.to_string_lossy(), parent);
+            ocr.tessdata_dir = crate::config::resolve_vault_root(&ocr.tessdata_dir, parent);
         }
         if let Some(VisionConfig::PaddleOcrVl {
             python,
@@ -258,9 +257,9 @@ impl InputProcessingConfig {
             models_dir,
         }) = &mut self.vision
         {
-            *python = crate::config::resolve_vault_root(&python.to_string_lossy(), parent);
-            *vlm_python = crate::config::resolve_vault_root(&vlm_python.to_string_lossy(), parent);
-            *models_dir = crate::config::resolve_vault_root(&models_dir.to_string_lossy(), parent);
+            *python = crate::config::resolve_vault_root(&*python, parent);
+            *vlm_python = crate::config::resolve_vault_root(&*vlm_python, parent);
+            *models_dir = crate::config::resolve_vault_root(&*models_dir, parent);
         }
     }
 }

@@ -226,6 +226,87 @@ impl Drop for Foreground {
 
 #[cfg(unix)]
 #[test]
+fn publication_workflow_wait_refuses_root_drift_without_publishing_or_retiring_inputs() {
+    use std::io::{BufRead, BufReader, Write};
+
+    let ws = Workspace::new();
+    let alias = ws.root.path().join("selected");
+    std::os::unix::fs::symlink(ws.vault(), &alias).unwrap();
+    let config = ws.root.path().join("config.yaml");
+    let raw = std::fs::read_to_string(&config)
+        .unwrap()
+        .replace("root: vault", "root: selected");
+    std::fs::write(&config, &raw).unwrap();
+    let mut holder = Foreground(
+        ws.base_command()
+            .args([
+                "workflow",
+                "--",
+                "/bin/sh",
+                "-c",
+                "printf 'ready\\n'; read release",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let mut ready = String::new();
+    BufReader::new(holder.stdout.take().unwrap())
+        .read_line(&mut ready)
+        .unwrap();
+    assert_eq!(ready, "ready\n");
+    let error = tempfile::NamedTempFile::new().unwrap();
+    let mut child = Foreground(
+        ws.command()
+            .args(["notes", "--publication-workflow", "wait"])
+            .stdout(Stdio::null())
+            .stderr(error.reopen().unwrap())
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !std::fs::read_to_string(error.path())
+        .unwrap()
+        .contains("Waiting for the vault workflow lease")
+    {
+        assert!(Instant::now() < deadline);
+        assert!(child.try_wait().unwrap().is_none());
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let other = ws.root.path().join("other-vault");
+    std::fs::create_dir(&other).unwrap();
+    let before = snapshot(&other);
+    std::fs::remove_file(&alias).unwrap();
+    std::os::unix::fs::symlink(&other, &alias).unwrap();
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert!(!status.success());
+    assert!(
+        std::fs::read_to_string(error.path())
+            .unwrap()
+            .contains("workflow vault selection changed")
+    );
+    assert_eq!(snapshot(&other), before);
+    assert!(!ws.vault().join("wiki/documents/note.md").exists());
+    assert!(ws.vault().join("inbox/note.md").is_file());
+    assert_eq!(std::fs::read_to_string(&config).unwrap(), raw);
+    holder
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"release\n")
+        .unwrap();
+    assert!(holder.wait().unwrap().success());
+}
+
+#[cfg(unix)]
+#[test]
 fn acquisition_wait_refuses_config_drift_before_recovering_cursor_or_manual_state() {
     for filtered in [false, true] {
         let ws = Workspace::new();

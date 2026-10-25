@@ -629,7 +629,7 @@ pub async fn run(opts: &super::GlobalOptions, cmd: WikiCommand) -> miette::Resul
             )
             .map_err(|error| miette::miette!("{error}"))?;
             let root = config.vault.root_path();
-            let session = lk_vault::MutationSession::acquire(&root)
+            let session = crate::commands::publication::acquire_mutation_now(&root)
                 .map_err(|error| miette::miette!("{error}"))?;
             let root = session.root().to_path_buf();
             let pages = lk_graph::scan::scan_vault(&root, config.graph.scope.follow_links)
@@ -725,8 +725,9 @@ pub async fn run(opts: &super::GlobalOptions, cmd: WikiCommand) -> miette::Resul
                     request,
                 )
             } else {
-                let session = lk_vault::MutationSession::acquire(&config.vault.root_path())
-                    .map_err(|error| miette::miette!("{error}"))?;
+                let session =
+                    crate::commands::publication::acquire_mutation_now(&config.vault.root_path())
+                        .map_err(|error| miette::miette!("{error}"))?;
                 lk_vault::curate(
                     &session,
                     &config.vault.dirs,
@@ -799,8 +800,9 @@ pub async fn run(opts: &super::GlobalOptions, cmd: WikiCommand) -> miette::Resul
         }
         WikiCommand::Prepare => {
             let config = load_config(&find_config(opts)?)?;
-            let session = lk_vault::MutationSession::acquire(&config.vault.root_path())
-                .map_err(|error| miette::miette!("{error}"))?;
+            let session =
+                crate::commands::publication::acquire_mutation_now(&config.vault.root_path())
+                    .map_err(|error| miette::miette!("{error}"))?;
             let snapshot = prepare_discovery_snapshot(
                 &session,
                 &config.vault.dirs,
@@ -888,7 +890,7 @@ pub async fn run(opts: &super::GlobalOptions, cmd: WikiCommand) -> miette::Resul
             let root = config.vault.root_path();
             let mutation = if archive {
                 Some(
-                    lk_vault::MutationSession::acquire(&root)
+                    crate::commands::publication::acquire_mutation_now(&root)
                         .map_err(|e| miette::miette!("vault mutation: {e}"))?,
                 )
             } else {

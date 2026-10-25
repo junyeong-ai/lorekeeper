@@ -49,6 +49,8 @@ operator to stop scheduled writers and verify their children have exited first.
 Detaching work or closing inherited descriptors breaks lease coverage; Windows is
 unsupported. External editors do not participate, so exact revision checks remain
 necessary throughout publication.
+The session pins its physical vault. A retargeted root or replaced directory refuses
+further work; another alias of the same directory remains valid.
 
 Resolve paths with `lore config vault-root` and `lore config schema-path`; do not
 reimplement config discovery or relative-path resolution. Read the returned schema,

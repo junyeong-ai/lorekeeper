@@ -1623,7 +1623,7 @@ mod input_admission_tests {
             "vault: {root: vault, timezone: UTC, locale: en}\nidentity: {name: Test, email: test@example.invalid}\nsources: {}\n",
         )
         .unwrap();
-        config.vault.root = root.display().to_string();
+        config.vault.root = root.to_path_buf();
         Pipeline::new(
             root,
             Arc::new(PipelineContext::build(None, llm, &config).unwrap()),

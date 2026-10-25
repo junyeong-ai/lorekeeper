@@ -1,5 +1,15 @@
 use super::{find_config, load_config};
 
+fn print_path(path: &std::path::Path) -> miette::Result<()> {
+    use std::io::Write;
+
+    let mut output = std::io::stdout().lock();
+    output
+        .write_all(path.as_os_str().as_encoded_bytes())
+        .and_then(|()| output.write_all(b"\n"))
+        .map_err(|error| miette::miette!("write path: {error}"))
+}
+
 #[derive(clap::Subcommand)]
 pub enum ConfigCommand {
     /// Print the resolved absolute vault root on stdout, and nothing else.
@@ -51,8 +61,7 @@ pub async fn run(opts: &super::GlobalOptions, cmd: ConfigCommand) -> miette::Res
     match cmd {
         ConfigCommand::VaultRoot => {
             let config = load_config(&find_config(opts)?)?;
-            println!("{}", config.vault.root_path().display());
-            Ok(())
+            print_path(&config.vault.root_path())
         }
         ConfigCommand::SchemaPath { root } => {
             // Same resolution `lore schema` writes through, so the path this prints is the path
@@ -62,13 +71,7 @@ pub async fn run(opts: &super::GlobalOptions, cmd: ConfigCommand) -> miette::Res
             let wiki = config
                 .map(|c| c.vault.dirs.wiki)
                 .unwrap_or_else(|| lk_core::config::VaultDirs::default().wiki);
-            println!(
-                "{}",
-                root.join(wiki)
-                    .join(lk_core::vault_path::SCHEMA_FILE)
-                    .display()
-            );
-            Ok(())
+            print_path(&root.join(wiki).join(lk_core::vault_path::SCHEMA_FILE))
         }
         ConfigCommand::ProposeFrom => {
             let config = load_config(&find_config(opts)?)?;
@@ -94,21 +97,12 @@ pub async fn run(opts: &super::GlobalOptions, cmd: ConfigCommand) -> miette::Res
                         "no task board is configured — add a `tasks:` block under `personal:`"
                     )
                 })?;
-            println!(
-                "{}",
-                config
-                    .vault
-                    .root_path()
-                    .join(
-                        lk_core::vault_path::VaultPath::task_board(
-                            &config.vault.dirs,
-                            &board.board
-                        )
-                        .as_ref()
-                    )
-                    .display()
-            );
-            Ok(())
+            print_path(
+                &config.vault.root_path().join(
+                    lk_core::vault_path::VaultPath::task_board(&config.vault.dirs, &board.board)
+                        .as_ref(),
+                ),
+            )
         }
         ConfigCommand::Categories => {
             let config = load_config(&find_config(opts)?)?;

@@ -43,6 +43,7 @@ impl Configuration {
     }
 
     fn validate(&self) -> miette::Result<()> {
+        crate::commands::workflow::validate_root(&self.root)?;
         let selected = self.path.canonicalize().map_err(|error| {
             miette::miette!("selected installation configuration is unavailable: {error}")
         })?;
@@ -246,6 +247,8 @@ impl Protection {
         config.validate()?;
         let claim = lk_vault::MutationClaim::acquire(&config.root)
             .map_err(|error| miette::miette!("claim installation publication boundary: {error}"))?;
+        config.validate()?;
+        crate::commands::workflow::validate_root(claim.root())?;
         let queue = claim.root().join(".lorekeeper/queue");
         if !lk_core::fs::canonical_prefix(&queue).starts_with(claim.root()) {
             return Err(miette::miette!("installation queue state escapes vault"));

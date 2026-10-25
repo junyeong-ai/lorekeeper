@@ -235,10 +235,11 @@ fn resolve_vault_root(
     opts: &super::GlobalOptions,
     root: Option<PathBuf>,
 ) -> miette::Result<PathBuf> {
-    match root {
+    let root = match root {
         Some(r) => super::resolve_root_override(r),
         None => Ok(load_config(&find_config(opts)?)?.vault.root_path()),
-    }
+    }?;
+    super::workflow::bind_root(root)
 }
 
 pub(super) fn current_task(root: &Path, task_id: &str) -> miette::Result<QueueTask> {
@@ -583,7 +584,7 @@ async fn apply_into(
     let config_path = find_config(opts)?;
     let (config, config_revision) = load_config_with_revision(&config_path)?;
     let pin = super::ConfigurationPin::from_loaded(config_path, config_revision.clone());
-    let vault_root = root.unwrap_or_else(|| config.vault.root_path());
+    let vault_root = super::workflow::bind_root(root.unwrap_or_else(|| config.vault.root_path()))?;
 
     // Global vault claim precedes narrower queue claims everywhere. Recovery runs
     // before deriving writes. Vault waiting is explicit; the narrow queue claim refuses contention.
@@ -1501,7 +1502,7 @@ struct PruneSummary {
 /// (temp + fsync + rename), and a file needing no change stays byte-identical.
 fn prune_queue(vault_root: &Path, queue_dir: &Path, dry_run: bool) -> miette::Result<PruneSummary> {
     let session = (!dry_run)
-        .then(|| lk_vault::MutationSession::acquire(vault_root))
+        .then(|| crate::commands::publication::acquire_mutation_now(vault_root))
         .transpose()
         .map_err(|error| miette::miette!("claim vault mutation: {error}"))?;
     prune_queue_with_session(vault_root, queue_dir, session.as_ref())

@@ -49,6 +49,7 @@ impl ConfigurationPin {
     }
 
     pub fn validate(&self) -> miette::Result<()> {
+        workflow::validate_context()?;
         let Self::Loaded { path, revision } = self else {
             return Ok(());
         };
@@ -169,6 +170,7 @@ pub(super) fn load_config_with_revision(
             return Err(miette::miette!("invalid execution profile context"));
         }
     }
+    loaded.0.vault.root = workflow::bind_root(loaded.0.vault.root_path())?;
     Ok(loaded)
 }
 
@@ -215,6 +217,7 @@ pub(crate) fn resolve_root_config(
             .vault
             .root_path(),
     };
+    let root = workflow::bind_root(root)?;
     Ok(RootConfig { root, config, pin })
 }
 
@@ -228,10 +231,7 @@ pub(crate) fn resolve_root_override(root: PathBuf) -> miette::Result<PathBuf> {
     let cwd = std::env::current_dir().map_err(|e| {
         miette::miette!("--root is relative and the working directory is unknown: {e}")
     })?;
-    Ok(lk_core::config::resolve_vault_root(
-        &root.to_string_lossy(),
-        &cwd,
-    ))
+    Ok(lk_core::config::resolve_vault_root(&root, &cwd))
 }
 
 /// Atomically write `contents` to an absolute `path` from an async command handler.

@@ -330,15 +330,14 @@ impl ExecutionConfig {
                     ..
                 } => {
                     if let Some(path) = config_directory {
-                        *path = crate::config::resolve_vault_root(&path.to_string_lossy(), parent);
+                        *path = crate::config::resolve_vault_root(&*path, parent);
                     }
                     executable
                 }
                 ExecutionProfile::Codex { executable, .. } => executable,
             };
             if executable.components().count() > 1 {
-                *executable =
-                    crate::config::resolve_vault_root(&executable.to_string_lossy(), parent);
+                *executable = crate::config::resolve_vault_root(&*executable, parent);
             }
         }
     }

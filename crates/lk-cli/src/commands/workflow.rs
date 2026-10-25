@@ -1,5 +1,53 @@
 //! Cooperative Unix leases shared by manual agents and native job execution.
 
+#[cfg(unix)]
+mod root;
+#[cfg(unix)]
+pub(super) use root::VaultRootPin;
+
+const ROOT_ENV: &str = "LORE_VAULT_ROOT";
+const SELECTOR_ENV: &str = "LORE_VAULT_ROOT_SELECTOR";
+const IDENTITY_ENV: &str = "LORE_VAULT_ROOT_IDENTITY";
+
+pub(super) fn validate_context() -> miette::Result<()> {
+    #[cfg(unix)]
+    if let Some(pin) = VaultRootPin::inherited()? {
+        pin.validate()?;
+    }
+    #[cfg(not(unix))]
+    if [ROOT_ENV, SELECTOR_ENV, IDENTITY_ENV]
+        .iter()
+        .any(|key| std::env::var_os(key).is_some())
+    {
+        return Err(miette::miette!("workflow vault context requires Unix"));
+    }
+    Ok(())
+}
+
+pub(super) fn validate_root(root: &std::path::Path) -> miette::Result<()> {
+    #[cfg(unix)]
+    if let Some(pin) = VaultRootPin::inherited()? {
+        pin.validate_target(root)?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = root;
+        validate_context()?;
+    }
+    Ok(())
+}
+
+pub(super) fn bind_root(root: std::path::PathBuf) -> miette::Result<std::path::PathBuf> {
+    #[cfg(unix)]
+    if let Some(pin) = VaultRootPin::inherited()? {
+        pin.validate_target(&root)?;
+        return Ok(pin.root().to_path_buf());
+    }
+    #[cfg(not(unix))]
+    validate_context()?;
+    Ok(root)
+}
+
 #[derive(Debug)]
 pub(super) struct WorkflowBusy;
 
@@ -16,6 +64,7 @@ impl miette::Diagnostic for WorkflowBusy {}
 pub(super) struct WorkflowLease {
     id: lk_core::execution::WorkflowId,
     lock: std::fs::File,
+    root: VaultRootPin,
     config_path: std::path::PathBuf,
     config_revision: String,
     executable: std::path::PathBuf,
@@ -28,6 +77,7 @@ impl WorkflowLease {
     pub fn prepare_selected(
         opts: &super::GlobalOptions,
         config: &lk_core::config::Config,
+        expected_root: &std::path::Path,
         config_path: std::path::PathBuf,
         config_revision: String,
     ) -> miette::Result<Self> {
@@ -48,13 +98,9 @@ impl WorkflowLease {
             std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
         ))
         .map_err(|e| miette::miette!("prepare workflow PATH: {e}"))?;
-        let root = config
-            .vault
-            .root_path()
-            .canonicalize()
-            .map_err(|e| miette::miette!("resolve workflow vault: {e}"))?;
-        let state = root.join(".lorekeeper");
-        if !lk_core::fs::canonical_prefix(&state).starts_with(&root) {
+        let root = VaultRootPin::capture(&config.vault.root_path(), expected_root)?;
+        let state = root.root().join(".lorekeeper");
+        if !lk_core::fs::canonical_prefix(&state).starts_with(root.root()) {
             return Err(miette::miette!("workflow state escapes vault"));
         }
         std::fs::create_dir_all(&state)
@@ -62,7 +108,7 @@ impl WorkflowLease {
         let state = state
             .canonicalize()
             .map_err(|e| miette::miette!("resolve workflow state: {e}"))?;
-        if !state.starts_with(&root) {
+        if !state.starts_with(root.root()) {
             return Err(miette::miette!("workflow state escapes vault"));
         }
         let directory = rustix::fs::open(
@@ -98,9 +144,11 @@ impl WorkflowLease {
             .map_err(|e| miette::miette!("resolve workflow template directory: {e}"))?;
         let mut identity = [0; 16];
         rand::fill(&mut identity);
+        root.validate()?;
         Ok(Self {
             id: lk_core::execution::WorkflowId::from_bytes(identity),
             lock,
+            root,
             config_path,
             config_revision,
             executable,
@@ -112,6 +160,7 @@ impl WorkflowLease {
     pub async fn acquire_selected(
         opts: &super::GlobalOptions,
         config: &lk_core::config::Config,
+        expected_root: &std::path::Path,
         config_path: std::path::PathBuf,
         config_revision: String,
         wait: bool,
@@ -119,15 +168,24 @@ impl WorkflowLease {
         let pin =
             super::ConfigurationPin::from_loaded(config_path.clone(), config_revision.clone());
         pin.validate()?;
-        let lease = Self::prepare_selected(opts, config, config_path, config_revision)?;
+        let lease =
+            Self::prepare_selected(opts, config, expected_root, config_path, config_revision)?;
+        let mut waiting = false;
         loop {
             pin.validate()?;
+            lease.root.validate()?;
             match lease.try_lock() {
                 Ok(()) => {
                     pin.validate()?;
+                    lease.root.validate()?;
                     return Ok(lease);
                 }
-                Err(std::fs::TryLockError::WouldBlock) if wait => {}
+                Err(std::fs::TryLockError::WouldBlock) if wait => {
+                    if !waiting {
+                        eprintln!("Waiting for the vault workflow lease...");
+                        waiting = true;
+                    }
+                }
                 Err(std::fs::TryLockError::WouldBlock) => {
                     return Err(miette::Report::new(WorkflowBusy));
                 }
@@ -142,13 +200,21 @@ impl WorkflowLease {
     pub async fn acquire_publication(
         opts: &super::GlobalOptions,
         config: &lk_core::config::Config,
+        expected_root: &std::path::Path,
         config_path: std::path::PathBuf,
         config_revision: String,
         wait: bool,
     ) -> miette::Result<Self> {
         use rustix::io::{FdFlags, fcntl_getfd, fcntl_setfd};
-        let lease =
-            Self::acquire_selected(opts, config, config_path, config_revision, wait).await?;
+        let lease = Self::acquire_selected(
+            opts,
+            config,
+            expected_root,
+            config_path,
+            config_revision,
+            wait,
+        )
+        .await?;
         let flags = fcntl_getfd(&lease.lock)
             .map_err(|error| miette::miette!("read publication workflow descriptor: {error}"))?;
         fcntl_setfd(&lease.lock, flags | FdFlags::CLOEXEC)
@@ -164,7 +230,12 @@ impl WorkflowLease {
         &self.id
     }
 
+    pub fn root_pin(&self) -> &VaultRootPin {
+        &self.root
+    }
+
     pub fn configure(&self, command: &mut std::process::Command) {
+        self.root.configure(command);
         command.env("LORE_WORKFLOW_ID", self.id.as_str());
         command.env(super::CONFIG_REVISION_ENV, &self.config_revision);
         command
@@ -199,11 +270,15 @@ pub async fn run(
             .ok_or_else(|| miette::miette!("workflow requires a command after --"))?;
         let config_path = super::find_config(opts)?;
         let (config, revision) = super::load_config_with_revision(&config_path)?;
-        if wait {
-            eprintln!("Waiting for the vault workflow lease...");
-        }
-        let lease =
-            WorkflowLease::acquire_selected(opts, &config, config_path, revision, wait).await?;
+        let lease = WorkflowLease::acquire_selected(
+            opts,
+            &config,
+            &config.vault.root_path(),
+            config_path,
+            revision,
+            wait,
+        )
+        .await?;
         let mut child = std::process::Command::new(program);
         child.args(arguments);
         child.env("LORE_INSTALL_DATA_DIR", installation.data_dir());
