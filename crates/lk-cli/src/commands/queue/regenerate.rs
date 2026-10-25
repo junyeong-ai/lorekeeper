@@ -16,6 +16,10 @@ pub(super) fn run(
         .then(|| lk_vault::MutationSession::acquire(&root))
         .transpose()
         .map_err(|e| miette::miette!("{e}"))?;
+    let root = session
+        .as_ref()
+        .map(|session| session.root().to_path_buf())
+        .unwrap_or(root);
     if dry_run
         && root
             .join(".lorekeeper/mutation/pending.json")

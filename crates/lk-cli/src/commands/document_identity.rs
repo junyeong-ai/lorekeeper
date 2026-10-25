@@ -250,6 +250,13 @@ pub async fn run(opts: &super::GlobalOptions, command: IdentityCommand) -> miett
     } else {
         None
     };
+    let root = session
+        .as_ref()
+        .map(|session| session.root().to_path_buf())
+        .map_or_else(
+            || config.vault.root_path().canonicalize().map_err(failure),
+            Ok,
+        )?;
     let expected: Option<Manifest> = if matches!(command, IdentityCommand::Plan { .. }) {
         None
     } else {
@@ -265,10 +272,17 @@ pub async fn run(opts: &super::GlobalOptions, command: IdentityCommand) -> miett
     };
     history_refs.sort();
     history_refs.dedup();
-    let observed = observe(&config, &source, revision(&config_raw), &history_refs).await?;
+    let observed = observe(
+        &root,
+        &config,
+        &source,
+        revision(&config_raw),
+        &history_refs,
+    )
+    .await?;
     verify_config(&config_path, &config_raw)?;
     if let Some(mut expected) = expected {
-        verify_manifest(&mut expected, &observed, &config.vault.root_path())?;
+        verify_manifest(&mut expected, &observed, &root)?;
     } else {
         use std::io::Write;
         let mut output = std::fs::OpenOptions::new()
@@ -305,7 +319,14 @@ pub async fn run(opts: &super::GlobalOptions, command: IdentityCommand) -> miett
         let plan = prepare_mutation(&session, &observed)?;
         // Archive publication may take time. Reobserve source, config and targets before commit.
         verify_config(&config_path, &config_raw)?;
-        let refreshed = observe(&config, &source, revision(&config_raw), &history_refs).await?;
+        let refreshed = observe(
+            &root,
+            &config,
+            &source,
+            revision(&config_raw),
+            &history_refs,
+        )
+        .await?;
         verify_config(&config_path, &config_raw)?;
         if refreshed != observed {
             return Err(failure("migration inputs changed while archiving"));
@@ -386,6 +407,7 @@ fn prepare_mutation(
 }
 
 async fn observe(
+    root: &Path,
     config: &lk_core::config::Config,
     source_id: &str,
     config_revision: String,
@@ -416,14 +438,13 @@ async fn observe(
     )
     .canonicalize()
     .map_err(failure)?;
-    let root = config.vault.root_path().canonicalize().map_err(failure)?;
     let timezone = config.vault.timezone();
     let ctx = lk_source::ExtractContext {
         target_date: jiff::Timestamp::now().to_zoned(timezone.clone()).date(),
         timezone: timezone.clone(),
         locale: config.vault.locale(),
         identity: config.identity.clone(),
-        vault_root: root.clone(),
+        vault_root: root.to_path_buf(),
         vault_dirs: config.vault.dirs.clone(),
         documents: config.ingest.documents.clone(),
         projection_cache: None,
@@ -446,28 +467,26 @@ async fn observe(
             .as_str()
             .cmp(&b.metadata["source_file"].as_str())
     });
-    let snapshot = revision(&serde_json::to_string(&events).map_err(failure)?);
     build_manifest(
+        root,
         config,
         source_id,
         config_revision,
-        snapshot,
         &repo,
         events,
         history_refs,
     )
 }
 fn build_manifest(
+    root: &Path,
     config: &lk_core::config::Config,
     source_id: &str,
     config_revision: String,
-    snapshot: String,
     repo: &Path,
     events: Vec<lk_core::event::Event>,
     history_refs: &[String],
 ) -> miette::Result<Manifest> {
-    let root_path = config.vault.root_path().canonicalize().map_err(failure)?;
-    let root = root_path.as_path();
+    let snapshot = revision(&serde_json::to_string(&events).map_err(failure)?);
     let params = config.sources.get(source_id).map(|s| &s.params);
     let repository = params
         .and_then(|p| p.get("repository_id"))
@@ -907,10 +926,10 @@ mod tests {
         std::fs::write(&target, &raw).unwrap();
         let make = |events| {
             build_manifest(
+                &root,
                 &config,
                 "repo",
                 "config".into(),
-                "snapshot".into(),
                 &repo,
                 events,
                 std::slice::from_ref(&old),
@@ -996,10 +1015,10 @@ mod tests {
         }
         fn manifest(&self) -> Manifest {
             build_manifest(
+                &self.root(),
                 &self.config,
                 "repo",
                 "config".into(),
-                revision(&serde_json::to_string(&self.events).unwrap()),
                 &self.temp.path().canonicalize().unwrap().join("repo"),
                 self.events.clone(),
                 &[],

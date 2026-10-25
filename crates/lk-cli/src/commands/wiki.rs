@@ -631,6 +631,7 @@ pub async fn run(opts: &super::GlobalOptions, cmd: WikiCommand) -> miette::Resul
             let root = config.vault.root_path();
             let session = lk_vault::MutationSession::acquire(&root)
                 .map_err(|error| miette::miette!("{error}"))?;
+            let root = session.root().to_path_buf();
             let pages = lk_graph::scan::scan_vault(&root, config.graph.scope.follow_links)
                 .map_err(|error| miette::miette!("{error}"))?;
             lk_graph::audit::record_discovery(&session, &config.vault.dirs, &pages, request)
@@ -651,6 +652,7 @@ pub async fn run(opts: &super::GlobalOptions, cmd: WikiCommand) -> miette::Resul
             .map_err(|error| miette::miette!("{error}"))?;
             let root = config.vault.root_path();
             let session = super::publication::acquire_mutation(&root, wait_for_vault, &pin).await?;
+            let root = session.root().to_path_buf();
             let pages = lk_graph::scan::scan_vault(&root, config.graph.scope.follow_links)
                 .map_err(|error| miette::miette!("{error}"))?;
             let selection = results
@@ -884,7 +886,7 @@ pub async fn run(opts: &super::GlobalOptions, cmd: WikiCommand) -> miette::Resul
         WikiCommand::Evidence { paths, archive } => {
             let config = load_config(&find_config(opts)?)?;
             let root = config.vault.root_path();
-            let _mutation = if archive {
+            let mutation = if archive {
                 Some(
                     lk_vault::MutationSession::acquire(&root)
                         .map_err(|e| miette::miette!("vault mutation: {e}"))?,
@@ -892,6 +894,10 @@ pub async fn run(opts: &super::GlobalOptions, cmd: WikiCommand) -> miette::Resul
             } else {
                 None
             };
+            let root = mutation
+                .as_ref()
+                .map(|session| session.root().to_path_buf())
+                .unwrap_or(root);
             let report = if archive {
                 lk_vault::archive_evidence(&root, &paths)
             } else {

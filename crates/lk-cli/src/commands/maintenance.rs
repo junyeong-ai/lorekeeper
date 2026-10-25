@@ -117,6 +117,10 @@ pub async fn run(
             .map_err(|e| miette::miette!("vault mutation: {e}"))?,
         )
     };
+    let vault_root = _mutation
+        .as_ref()
+        .map(|session| session.root().to_path_buf())
+        .unwrap_or(vault_root);
     let retention_days = config.maintenance.retention_days;
     let log_path = vault_root.join(".lorekeeper").join("ingest.jsonl");
     let cutoff_secs = prune_cutoff_secs(jiff::Timestamp::now().as_second(), retention_days);

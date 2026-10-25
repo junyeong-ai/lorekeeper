@@ -9,6 +9,8 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
 - `commands/mod.rs` resolves flag/environment config, working-directory config,
   then XDG config; never silently use config.example.yaml. Resolve the selected
   config absolutely; relative vault roots are relative to that config.
+- A mutation session's canonical root owns every page and queue path derived for
+  publication. Ingestion pins its physical root before building acquisition clients.
 - Workflow configuration is loaded and revisioned from one read. Pass its selected
   path and `LORE_CONFIG_REVISION` to children; every CLI config load rejects changed
   bytes or another path. Native jobs stop after drift and retain unfinished work.

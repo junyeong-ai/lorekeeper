@@ -794,7 +794,8 @@ pub async fn run_with_wait(
     };
 
     std::fs::create_dir_all(&vault_root).map_err(|e| miette::miette!("create vault: {e}"))?;
-    let _mutation = super::publication::acquire_mutation(&vault_root, wait_for_vault, &pin).await?;
+    let mutation = super::publication::acquire_mutation(&vault_root, wait_for_vault, &pin).await?;
+    let vault_root = mutation.root().to_path_buf();
 
     let content = render_agents_md(locale, &dirs, personal, board.as_deref());
 

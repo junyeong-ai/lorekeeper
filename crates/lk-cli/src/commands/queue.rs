@@ -584,7 +584,6 @@ async fn apply_into(
     let (config, config_revision) = load_config_with_revision(&config_path)?;
     let pin = super::ConfigurationPin::from_loaded(config_path, config_revision.clone());
     let vault_root = root.unwrap_or_else(|| config.vault.root_path());
-    let queue_dir = vault_root.join(".lorekeeper").join("queue");
 
     // Global vault claim precedes narrower queue claims everywhere. Recovery runs
     // before deriving writes. Vault waiting is explicit; the narrow queue claim refuses contention.
@@ -593,6 +592,11 @@ async fn apply_into(
     } else {
         Some(super::publication::acquire_mutation(&vault_root, wait_for_vault, &pin).await?)
     };
+    let vault_root = mutation
+        .as_ref()
+        .map(|session| session.root().to_path_buf())
+        .unwrap_or(vault_root);
+    let queue_dir = vault_root.join(".lorekeeper").join("queue");
     let _claim = claim_writer(&queue_dir, dry_run)?;
     rejections::validate_store(&vault_root)?;
 
@@ -1508,6 +1512,12 @@ fn prune_queue_with_session(
     queue_dir: &Path,
     session: Option<&lk_vault::MutationSession>,
 ) -> miette::Result<PruneSummary> {
+    let queue_relative = queue_dir
+        .strip_prefix(vault_root)
+        .map_err(|error| miette::miette!("queue directory is outside its vault: {error}"))?;
+    let vault_root = session.map_or(vault_root, lk_vault::MutationSession::root);
+    let queue_dir = vault_root.join(queue_relative);
+    let queue_dir = queue_dir.as_path();
     let dry_run = session.is_none();
     let _claim = claim_writer(queue_dir, dry_run)?;
     rejections::validate_store(vault_root)?;
@@ -2087,6 +2097,35 @@ mod tests {
             1
         );
         assert!(!pending.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pruning_uses_the_claimed_root_after_its_alias_changes() {
+        use std::os::unix::fs::symlink;
+
+        let first = TempDir::new().unwrap();
+        let second = TempDir::new().unwrap();
+        let relative = ".lorekeeper/queue/empty.jsonl";
+        for root in [first.path(), second.path()] {
+            let pending = root.join(relative);
+            std::fs::create_dir_all(pending.parent().unwrap()).unwrap();
+            std::fs::write(pending, "").unwrap();
+        }
+        let aliases = TempDir::new().unwrap();
+        let alias = aliases.path().join("selected");
+        symlink(first.path(), &alias).unwrap();
+        let session = lk_vault::MutationSession::acquire(&alias).unwrap();
+        std::fs::remove_file(&alias).unwrap();
+        symlink(second.path(), &alias).unwrap();
+
+        let report =
+            prune_queue_with_session(&alias, &alias.join(".lorekeeper/queue"), Some(&session))
+                .unwrap();
+        assert_eq!(report.files_deleted, 1);
+        assert!(!first.path().join(relative).exists());
+        assert_eq!(std::fs::read(second.path().join(relative)).unwrap(), b"");
+        assert!(!second.path().join(".lorekeeper/mutation").exists());
     }
 
     #[test]

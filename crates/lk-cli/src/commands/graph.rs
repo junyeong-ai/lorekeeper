@@ -303,7 +303,7 @@ async fn run_inner(
             ..
         }
     );
-    let mut rc = resolve_config_full(opts, root_override)?;
+    let rc = resolve_config_full(opts, root_override)?;
     let mutation = if matches!(
         &cmd,
         GraphCommand::Normalize { fix: true }
@@ -321,6 +321,19 @@ async fn run_inner(
     } else {
         None
     };
+
+    run_resolved(rc, cmd, json, mutation)
+}
+
+fn run_resolved(
+    mut rc: ResolvedConfig,
+    cmd: GraphCommand,
+    json: bool,
+    mutation: Option<lk_vault::MutationSession>,
+) -> Result<bool, String> {
+    if let Some(session) = &mutation {
+        rc.root = session.root().to_path_buf();
+    }
 
     if let GraphCommand::RepairLink {
         origin,
@@ -891,6 +904,49 @@ mod tests {
 
     fn pages(config: &ResolvedConfig) -> Vec<scan::ScannedPage> {
         scan::scan_vault(&config.root, false).unwrap()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn graph_publication_uses_the_claimed_root_after_its_alias_changes() {
+        use std::os::unix::fs::symlink;
+
+        let (first, mut config) = fixture();
+        let (second, _) = fixture();
+        let target_before = std::fs::read(second.path().join(TARGET)).unwrap();
+        std::fs::write(
+            first.path().join("wiki/documents/extra.md"),
+            "---\ntype: document\n---\nExtra [Retry](../concepts/retry.md).\n",
+        )
+        .unwrap();
+        let aliases = tempfile::tempdir().unwrap();
+        let alias = aliases.path().join("selected");
+        symlink(first.path(), &alias).unwrap();
+        config.root = alias.clone();
+        config.llm.provider = lk_core::config::LlmProvider::Noop;
+        let session = lk_vault::MutationSession::acquire(&config.root).unwrap();
+        std::fs::remove_file(&alias).unwrap();
+        symlink(second.path(), &alias).unwrap();
+
+        assert!(
+            !run_resolved(
+                config,
+                GraphCommand::BacklinksSync {
+                    dry_run: false,
+                    wait_for_vault: false,
+                },
+                true,
+                Some(session),
+            )
+            .unwrap()
+        );
+        let updated = std::fs::read_to_string(first.path().join(TARGET)).unwrap();
+        assert!(updated.contains("source_count: 2"), "{updated}");
+        assert_eq!(
+            std::fs::read(second.path().join(TARGET)).unwrap(),
+            target_before
+        );
+        assert!(!second.path().join(".lorekeeper").exists());
     }
 
     #[test]

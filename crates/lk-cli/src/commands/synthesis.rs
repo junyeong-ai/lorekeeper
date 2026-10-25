@@ -105,6 +105,7 @@ pub async fn run(
         lk_vault::MutationSession::acquire(&vault_root)
     }
     .map_err(|e| miette::miette!("vault mutation: {e}"))?;
+    let vault_root = _mutation.root().to_path_buf();
     if let Period::Pending {
         reconcile: true,
         json,

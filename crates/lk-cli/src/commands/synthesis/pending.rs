@@ -460,7 +460,7 @@ pub fn reconcile(
     today: Date,
     json: bool,
 ) -> miette::Result<()> {
-    let root = config.vault.root_path();
+    let root = session.root().to_path_buf();
     let (mut state, before) = load(&root)?;
     let result = reconcile_periods(&mut state, config, today)?;
     save(&root, session, &state, before)?;
@@ -620,7 +620,7 @@ pub fn record_collection(
         targeted,
         work_logs,
     } = publication;
-    let root = config.vault.root_path();
+    let root = session.root().to_path_buf();
     let (mut state, before) = load(&root)?;
     let batch = CollectionBatch {
         at: jiff::Timestamp::now(),
@@ -1226,7 +1226,7 @@ pub fn defer(
     periods: Vec<ClosedPeriod>,
     today: Date,
 ) -> miette::Result<()> {
-    let root = config.vault.root_path();
+    let root = session.root().to_path_buf();
     let (mut state, before) = load(&root)?;
     for period in periods {
         request(&mut state, period, config, today)?;
@@ -1641,11 +1641,11 @@ fn personal_work_logs_ready(
 }
 
 async fn input_pages(
+    reader: &FsVault,
     config: &Config,
     intent: &Intent,
     child_periods: &[ClosedPeriod],
 ) -> miette::Result<Result<CapturedInputs, String>> {
-    let reader = FsVault::new(config.vault.root_path());
     let mut paths = BTreeMap::new();
     if child_periods.is_empty() {
         let mut date = intent.period.start;
@@ -1698,7 +1698,7 @@ async fn input_pages(
     let mut guards = MutationPlan::default();
     let mut work_logs = BTreeMap::new();
     for (path, contributes) in paths {
-        if let Some(source) = page(&reader, Path::new(&path)).await? {
+        if let Some(source) = page(reader, Path::new(&path)).await? {
             if !page_semantics_ready(&source) {
                 return Ok(Err(format!("semantic input pending: {path}")));
             }
@@ -1782,7 +1782,7 @@ pub async fn resume(
     json: bool,
     today: Date,
 ) -> miette::Result<()> {
-    let root = config.vault.root_path();
+    let root = session.root().to_path_buf();
     let (mut state, before) = load(&root)?;
     let reader = FsVault::new(&root);
     // Materialize child obligations before the base stage, including those whose
@@ -2007,7 +2007,7 @@ async fn process(
         has_contributing_page,
         mut guards,
         work_logs,
-    } = match input_pages(config, intent, &child_periods).await? {
+    } = match input_pages(reader, config, intent, &child_periods).await? {
         Ok(inputs) => inputs,
         Err(reason) => {
             blocked(intent, reason);
@@ -2294,7 +2294,11 @@ mod tests {
         let root = config.vault.root_path();
         std::fs::create_dir_all(&root).unwrap();
         let intent = Intent::new(period(), &config).unwrap();
-        let captured = input_pages(&config, &intent, &[]).await.unwrap().unwrap();
+        let reader = FsVault::new(config.vault.root_path());
+        let captured = input_pages(&reader, &config, &intent, &[])
+            .await
+            .unwrap()
+            .unwrap();
         let absent = captured
             .pages
             .iter()
@@ -2848,9 +2852,15 @@ mod tests {
         let heading = lk_core::i18n::Locale::default().strings().summary;
         std::fs::write(&path,format!("---\ntype: daily\nllm_inputs:\n  {key}: captured\n---\n## {heading}\n\nTeam activity; no own events.\n")).unwrap();
         let mut intent = Intent::new(period(), &config).unwrap();
-        assert!(input_pages(&config, &intent, &[]).await.unwrap().is_err());
+        let reader = FsVault::new(config.vault.root_path());
+        assert!(
+            input_pages(&reader, &config, &intent, &[])
+                .await
+                .unwrap()
+                .is_err()
+        );
         std::fs::write(&path,format!("---\ntype: daily\nllm_inputs:\n  {key}: captured\n  {done}: captured\n---\n## {heading}\n\nTeam activity; no own events.\n")).unwrap();
-        let captured = input_pages(&config, &intent, &[])
+        let captured = input_pages(&reader, &config, &intent, &[])
             .await
             .unwrap()
             .ok()

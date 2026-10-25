@@ -156,7 +156,7 @@ async fn run_with_identity(
             "selected configuration changed since recovery planning; no source acquisition or publication was started"
         ));
     }
-    let vault_root = config.vault.root_path();
+    let vault_root = lk_core::fs::canonical_prefix(&config.vault.root_path());
 
     // Dry-run must NOT mutate filesystem. In queue mode the LLM client buffers tasks
     // during planning and writes a queue file on `flush()`; rather than thread dry-run
