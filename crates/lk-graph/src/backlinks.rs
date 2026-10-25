@@ -1071,23 +1071,9 @@ fn guard_backlink_sources(
                 source.page.path.display()
             )));
         }
-        for alias in &source.aliases {
-            let full = lk_vault::page_path(root, &alias.path)
-                .map_err(|error| GraphError::Io(error.to_string()))?;
-            if full
-                .canonicalize()
-                .map_err(|error| GraphError::Io(error.to_string()))?
-                != source.owner
-                || std::fs::read_to_string(&full)
-                    .map_err(|error| GraphError::Io(error.to_string()))?
-                    != raw
-            {
-                return Err(GraphError::Io(format!(
-                    "backlink source alias changed during planning: {}",
-                    alias.path.display()
-                )));
-            }
-        }
+        guard_source_aliases(root, canonical_root, source, &raw, |path| {
+            std::fs::read_to_string(path).map_err(|error| GraphError::Io(error.to_string()))
+        })?;
         let owner = source
             .owner
             .strip_prefix(canonical_root)
@@ -1097,6 +1083,35 @@ fn guard_backlink_sources(
                 .map_err(|error| GraphError::Io(error.to_string()))?;
         }
         plan.require_unchanged(owner, raw);
+    }
+    Ok(())
+}
+
+fn guard_source_aliases(
+    root: &Path,
+    canonical_root: &Path,
+    source: &CitationSource<'_>,
+    raw: &str,
+    mut read: impl FnMut(&Path) -> Result<String, GraphError>,
+) -> Result<(), GraphError> {
+    let direct = source
+        .owner
+        .strip_prefix(canonical_root)
+        .map_err(|error| GraphError::Io(error.to_string()))?;
+    for alias in &source.aliases {
+        let full = lk_vault::page_path(root, &alias.path)
+            .map_err(|error| GraphError::Io(error.to_string()))?;
+        if full
+            .canonicalize()
+            .map_err(|error| GraphError::Io(error.to_string()))?
+            != source.owner
+            || (alias.path != direct && read(&full)? != raw)
+        {
+            return Err(GraphError::Io(format!(
+                "backlink source alias changed during planning: {}",
+                alias.path.display()
+            )));
+        }
     }
     Ok(())
 }
@@ -1235,6 +1250,48 @@ mod tests {
         std::fs::write(root.path().join("daily/report.md"), "---\ntype: daily\n---\n[Topic](../wiki/concepts/topic.md)\n[Other](../wiki/concepts/other.md)\n").unwrap();
         let pages = crate::scan::scan_vault(root.path(), false).unwrap();
         (root, dirs, pages)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_alias_guards_reuse_direct_bytes_and_reject_same_content_retargeting() {
+        let (root, dirs, pages) = build_guarded_fixture();
+        let evidence = CitationGraph::build(&pages, root.path(), &dirs).unwrap();
+        let source = evidence.sources.values().next().unwrap();
+        let raw = std::fs::read_to_string(&source.owner).unwrap();
+        let canonical_root = root.path().canonicalize().unwrap();
+        let mut reads = Vec::new();
+        guard_source_aliases(root.path(), &canonical_root, source, &raw, |path| {
+            reads.push(path.to_path_buf());
+            Ok(std::fs::read_to_string(path).unwrap())
+        })
+        .unwrap();
+        assert!(reads.is_empty());
+
+        let mut alias = source.page.clone();
+        alias.path = PathBuf::from("daily/alias.md");
+        alias.id = crate::scan::page_id(&alias.path);
+        std::os::unix::fs::symlink("report.md", root.path().join(&alias.path)).unwrap();
+        let aliased = CitationSource {
+            page: source.page,
+            owner: source.owner.clone(),
+            aliases: vec![source.page, &alias],
+        };
+        guard_source_aliases(root.path(), &canonical_root, &aliased, &raw, |path| {
+            reads.push(path.to_path_buf());
+            Ok(std::fs::read_to_string(path).unwrap())
+        })
+        .unwrap();
+        assert_eq!(reads, [root.path().join(&alias.path)]);
+        std::fs::write(root.path().join("daily/other.md"), &raw).unwrap();
+        std::fs::remove_file(root.path().join(&alias.path)).unwrap();
+        std::os::unix::fs::symlink("other.md", root.path().join(&alias.path)).unwrap();
+        assert!(
+            guard_source_aliases(root.path(), &canonical_root, &aliased, &raw, |_| {
+                panic!("changed alias owner must refuse before reading it")
+            })
+            .is_err()
+        );
     }
 
     #[test]

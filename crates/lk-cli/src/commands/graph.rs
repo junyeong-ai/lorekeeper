@@ -365,6 +365,16 @@ async fn run_inner(
     if !errors.is_empty() {
         return Err(errors.join("; "));
     }
+    if let GraphCommand::BacklinksSync { dry_run, .. } = &cmd {
+        let report = synchronize_backlinks(&rc, &views.scanned, *dry_run, mutation.as_ref())?;
+        let violated = !report.sync.skipped.is_empty();
+        if json {
+            output::print_json(&report, violated)?;
+        } else {
+            output::print_backlinks(&report);
+        }
+        return Ok(violated);
+    }
     let g = graph::WikiGraph::build_with_existence(&views.pages, &views.existence, &rc.vault_dirs);
 
     let violated = match cmd {
@@ -631,16 +641,8 @@ async fn run_inner(
             }
             violated
         }
-        GraphCommand::BacklinksSync { dry_run, .. } => {
-            let report = synchronize_backlinks(&rc, &views.scanned, dry_run, mutation.as_ref())?;
-            // Skipped pages need metadata/section repair before derived state can publish.
-            let violated = !report.sync.skipped.is_empty();
-            if json {
-                output::print_json(&report, violated)?;
-            } else {
-                output::print_backlinks(&report);
-            }
-            violated
+        GraphCommand::BacklinksSync { .. } => {
+            unreachable!("backlink reconciliation precedes topology construction")
         }
         GraphCommand::Merge {
             ref from,
