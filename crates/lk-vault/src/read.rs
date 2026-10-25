@@ -1,10 +1,18 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
 
 use crate::VaultError;
+
+/// Exact bytes and vault-relative owner checked in the current verification phase.
+/// The owner is an address, preserving distinct hard links rather than inode identity.
+#[derive(Debug)]
+pub struct VerifiedFileRevision {
+    pub owner: PathBuf,
+    pub file_revision: String,
+}
 
 /// Cooperative cancellation between synchronous read operations. A pending kernel
 /// operation must return before the next check; cancellation never yields a partial capture.

@@ -82,7 +82,7 @@ pub use self::neighbors::{
 pub use self::provenance::{
     ProvenanceDirection, ProvenanceOptions, ProvenanceReport, inspect_provenance,
 };
-pub use self::read::ReadControl;
+pub use self::read::{ReadControl, VerifiedFileRevision};
 pub use self::review::{
     EvidenceReport, KnowledgeReview, ReviewEffectiveState, ReviewReport, ReviewStatus,
     archive_evidence, evidence_archive_path, inspect_evidence, is_archived_evidence, list_reviews,
@@ -105,6 +105,7 @@ pub use self::search::{
 };
 pub use self::search_index::{
     SearchSnapshot, inspect_search_snapshot, prepare_search, prepare_search_with_citations,
+    prepare_search_with_verified_citations,
 };
 pub use self::section::{
     PageSection, SectionKey, clear_llm_input, record_llm_input, replace_section,

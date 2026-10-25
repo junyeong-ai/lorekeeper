@@ -6,7 +6,7 @@ use rusqlite::{Connection, OpenFlags, params};
 use serde::Serialize;
 
 use crate::search::{MatchProjection, Page, SearchOptions, SearchResult, fold_name, spacing_key};
-use crate::{MutationSession, VaultError};
+use crate::{MutationSession, VaultError, VerifiedFileRevision};
 
 pub(super) const INDEX_PATH: &str = ".lorekeeper/search.sqlite";
 const VERSION: i32 = 28;
@@ -88,7 +88,7 @@ pub fn prepare_search(
     session: &MutationSession,
     dirs: &VaultDirs,
 ) -> Result<SearchSnapshot, VaultError> {
-    prepare_search_inner(session, dirs, None, |_| Ok(()))
+    prepare_search_inner(session, dirs, None, |_| Ok(BTreeMap::new()))
 }
 
 /// Include graph-authoritative citations in the same snapshot transaction. The provider's
@@ -100,6 +100,24 @@ pub fn prepare_search_with_citations(
     citations: &crate::ConceptCitationProjection,
     verify: impl FnOnce(&[(PathBuf, String)]) -> Result<(), VaultError>,
 ) -> Result<SearchSnapshot, VaultError> {
+    prepare_search_inner(session, dirs, Some(citations), |selected| {
+        verify(selected)?;
+        Ok(BTreeMap::new())
+    })
+}
+
+/// Share exact file reads from the provider's final graph verification. The callback
+/// must freshly validate its complete capture and return only revisions read in that
+/// phase. Search still enumerates its full independent inventory, checks physical
+/// owners and reads every selected file not covered by that verification.
+pub fn prepare_search_with_verified_citations(
+    session: &MutationSession,
+    dirs: &VaultDirs,
+    citations: &crate::ConceptCitationProjection,
+    verify: impl FnOnce(
+        &[(PathBuf, String)],
+    ) -> Result<BTreeMap<PathBuf, VerifiedFileRevision>, VaultError>,
+) -> Result<SearchSnapshot, VaultError> {
     prepare_search_inner(session, dirs, Some(citations), verify)
 }
 
@@ -107,7 +125,9 @@ fn prepare_search_inner(
     session: &MutationSession,
     dirs: &VaultDirs,
     citations: Option<&crate::ConceptCitationProjection>,
-    verify: impl FnOnce(&[(PathBuf, String)]) -> Result<(), VaultError>,
+    verify: impl FnOnce(
+        &[(PathBuf, String)],
+    ) -> Result<BTreeMap<PathBuf, VerifiedFileRevision>, VaultError>,
 ) -> Result<SearchSnapshot, VaultError> {
     let root = session.root();
     let mut pages = Vec::new();
@@ -159,10 +179,10 @@ fn prepare_search_inner(
                 Ok((row.get(0)?, row.get(1)?, row.get(2)?))
             })?;
         if current == (snapshot.clone(), context.clone(), VERSION) {
+            let verified = verify(&selected_revisions)?;
             if citations.is_some() {
-                verify_selected_capture(root, dirs, &selected_revisions)?;
+                verify_selected_capture(root, dirs, &selected_revisions, &verified)?;
             }
-            verify(&selected_revisions)?;
             connection.execute(
                 "UPDATE snapshot SET verified_at = ?1",
                 [jiff::Timestamp::now().to_string()],
@@ -464,10 +484,10 @@ fn prepare_search_inner(
     crate::citations::write(&transaction, citations)?;
     write_browse_facets(&transaction)?;
     transaction.execute_batch("PRAGMA optimize=0x10002;")?;
+    let verified = verify(&selected_revisions)?;
     if citations.is_some() {
-        verify_selected_capture(root, dirs, &selected_revisions)?;
+        verify_selected_capture(root, dirs, &selected_revisions, &verified)?;
     }
-    verify(&selected_revisions)?;
     let verified_at = jiff::Timestamp::now();
     transaction.execute("DELETE FROM snapshot", [])?;
     transaction.execute(
@@ -518,17 +538,61 @@ fn verify_selected_capture(
     root: &Path,
     dirs: &VaultDirs,
     selected: &[(PathBuf, String)],
+    verified: &BTreeMap<PathBuf, VerifiedFileRevision>,
 ) -> Result<(), VaultError> {
-    let expected = selected
+    verify_selected_capture_with(root, dirs, selected, verified, |path| {
+        crate::ReadControl::default().read_to_string(path)
+    })
+}
+
+fn verify_selected_capture_with(
+    root: &Path,
+    dirs: &VaultDirs,
+    selected: &[(PathBuf, String)],
+    verified: &BTreeMap<PathBuf, VerifiedFileRevision>,
+    mut read: impl FnMut(&Path) -> Result<String, VaultError>,
+) -> Result<(), VaultError> {
+    let mut remaining = selected
         .iter()
         .cloned()
         .collect::<std::collections::BTreeMap<_, _>>();
-    let mut current = std::collections::BTreeMap::new();
-    super::search::visit_pages(root, dirs, true, |page, _| {
-        current.insert(page.rel_path, page.file_revision);
+    super::search::visit_page_files(root, dirs, true, |path, full| {
+        if let Some(expected) = remaining.get(path)
+            && let Some(current) = verified.get(path)
+        {
+            if current.file_revision != *expected
+                || crate::find_page_owner(root, path)?.as_ref() != Some(&current.owner)
+            {
+                return Err(invalid(
+                    "selected search inputs changed during citation snapshot",
+                ));
+            }
+            remaining.remove(path);
+            return Ok(());
+        }
+        let raw = read(full)?;
+        let revision = lk_core::concept::file_revision(&raw);
+        if remaining.get(path) == Some(&revision) {
+            remaining.remove(path);
+            return Ok(());
+        }
+        let page = crate::parse_page(&raw).map_err(VaultError::Frontmatter)?;
+        page.frontmatter
+            .knowledge_status()
+            .map_err(VaultError::Frontmatter)?;
+        if page
+            .frontmatter
+            .get("type")
+            .and_then(|value| value.as_str())
+            != Some("task-board")
+        {
+            return Err(invalid(
+                "selected search inputs changed during citation snapshot",
+            ));
+        }
         Ok(())
     })?;
-    if current != expected {
+    if !remaining.is_empty() {
         return Err(invalid(
             "selected search inputs changed during citation snapshot",
         ));
@@ -2168,15 +2232,195 @@ mod tests {
     fn citation_capture_guards_the_selected_search_inventory_separately() {
         let root = tempfile::tempdir().unwrap();
         let dirs = VaultDirs::default();
-        verify_selected_capture(root.path(), &dirs, &[]).unwrap();
+        verify_selected_capture(root.path(), &dirs, &[], &BTreeMap::new()).unwrap();
         let path = PathBuf::from("wiki/documents/.drafts/hidden.md");
         let raw = "---\ntype: document\n---\nSearchable hidden draft.\n";
         write(root.path(), path.to_str().unwrap(), raw);
-        assert!(verify_selected_capture(root.path(), &dirs, &[]).is_err());
+        assert!(verify_selected_capture(root.path(), &dirs, &[], &BTreeMap::new()).is_err());
         let selected = vec![(path.clone(), lk_core::concept::file_revision(raw))];
-        verify_selected_capture(root.path(), &dirs, &selected).unwrap();
+        verify_selected_capture(root.path(), &dirs, &selected, &BTreeMap::new()).unwrap();
         std::fs::write(root.path().join(&path), raw.replace("draft", "revision")).unwrap();
-        assert!(verify_selected_capture(root.path(), &dirs, &selected).is_err());
+        assert!(verify_selected_capture(root.path(), &dirs, &selected, &BTreeMap::new()).is_err());
+    }
+
+    fn verified_files(
+        root: &Path,
+        selected: &[(PathBuf, String)],
+    ) -> BTreeMap<PathBuf, VerifiedFileRevision> {
+        selected
+            .iter()
+            .map(|(path, _)| {
+                (
+                    path.clone(),
+                    VerifiedFileRevision {
+                        owner: crate::find_page_owner(root, path).unwrap().unwrap(),
+                        file_revision: lk_core::concept::file_revision(
+                            &std::fs::read_to_string(root.join(path)).unwrap(),
+                        ),
+                    },
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn final_search_verification_reads_only_files_outside_the_verified_graph_capture() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let raw = "---\ntype: document\n---\nExact 한글 🦀 body.\n";
+        let selected = [
+            "wiki/documents/visible.md",
+            "wiki/documents/.drafts/hidden.md",
+        ]
+        .map(|path| {
+            write(root.path(), path, raw);
+            (PathBuf::from(path), lk_core::concept::file_revision(raw))
+        });
+        let mut reads = Vec::new();
+        verify_selected_capture_with(root.path(), &dirs, &selected, &BTreeMap::new(), |path| {
+            reads.push(path.to_path_buf());
+            Ok(std::fs::read_to_string(path)?)
+        })
+        .unwrap();
+        assert_eq!(reads.len(), 2);
+        reads.clear();
+        let verified = verified_files(root.path(), &selected[..1]);
+        verify_selected_capture_with(root.path(), &dirs, &selected, &verified, |path| {
+            reads.push(path.to_path_buf());
+            Ok(std::fs::read_to_string(path)?)
+        })
+        .unwrap();
+        assert_eq!(reads, [root.path().join(&selected[1].0)]);
+    }
+
+    #[test]
+    fn shared_verification_keeps_hidden_inventory_and_invalid_input_guards() {
+        for change in [
+            "addition",
+            "removal",
+            "revision",
+            "invalid-yaml",
+            "invalid-utf8",
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let dirs = VaultDirs::default();
+            let raw = "---\ntype: document\n---\nExact input.\n";
+            let visible = "wiki/documents/visible.md";
+            let hidden = "wiki/documents/.drafts/hidden.md";
+            write(root.path(), visible, raw);
+            write(root.path(), hidden, raw);
+            let selected = [visible, hidden]
+                .map(|path| (PathBuf::from(path), lk_core::concept::file_revision(raw)));
+            let verified = verified_files(root.path(), &selected[..1]);
+            match change {
+                "addition" => write(root.path(), "wiki/documents/.drafts/new.md", raw),
+                "removal" => std::fs::remove_file(root.path().join(hidden)).unwrap(),
+                "revision" => write(root.path(), hidden, &format!("{raw}Changed.\n")),
+                "invalid-yaml" => write(root.path(), hidden, "---\ntype: [\n---\n"),
+                "invalid-utf8" => std::fs::write(root.path().join(hidden), [0xff]).unwrap(),
+                _ => unreachable!(),
+            }
+            assert!(
+                verify_selected_capture(root.path(), &dirs, &selected, &verified).is_err(),
+                "{change}"
+            );
+        }
+    }
+
+    #[test]
+    fn shared_verification_failure_rolls_back_index_views_and_preserves_capture() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let raw = "---\ntype: document\n---\nOriginal input.\n";
+        let path = "wiki/documents/source.md";
+        let hidden = "wiki/documents/.drafts/hidden.md";
+        write(root.path(), path, raw);
+        write(root.path(), hidden, raw);
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let projection = citation_projection(&[]);
+        let before =
+            prepare_search_with_citations(&session, &dirs, &projection, |_| Ok(())).unwrap();
+        let rows = database_rows(root.path());
+        write(root.path(), path, &raw.replace("Original", "Changed"));
+        let result =
+            prepare_search_with_verified_citations(&session, &dirs, &projection, |selected| {
+                let verified = verified_files(
+                    root.path(),
+                    &selected
+                        .iter()
+                        .filter(|(path, _)| path != Path::new(hidden))
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                );
+                write(root.path(), hidden, &raw.replace("Original", "Late edit"));
+                Ok(verified)
+            });
+        assert!(result.is_err());
+        assert_eq!(database_rows(root.path()), rows);
+        assert_eq!(
+            inspect_search_snapshot(root.path(), &dirs)
+                .unwrap()
+                .snapshot,
+            before.snapshot
+        );
+    }
+
+    #[test]
+    fn shared_verification_preserves_task_board_exclusion_and_checks_provided_revisions() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let raw = "---\ntype: document\n---\nExact input.\n";
+        let path = "wiki/documents/source.md";
+        write(root.path(), path, raw);
+        let selected = [(PathBuf::from(path), lk_core::concept::file_revision(raw))];
+        let mut verified = verified_files(root.path(), &selected);
+        write(
+            root.path(),
+            "wiki/documents/.drafts/tasks.md",
+            "---\ntype: task-board\n---\nTasks.\n",
+        );
+        verify_selected_capture(root.path(), &dirs, &selected, &verified).unwrap();
+        verified.get_mut(Path::new(path)).unwrap().file_revision = "different".into();
+        assert!(verify_selected_capture(root.path(), &dirs, &selected, &verified).is_err());
+        let verified = verified_files(root.path(), &selected);
+        write(
+            root.path(),
+            "wiki/documents/.drafts/tasks.md",
+            "---\ntype: task-board\nknowledge_status: invalid\n---\nTasks.\n",
+        );
+        assert!(verify_selected_capture(root.path(), &dirs, &selected, &verified).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shared_verification_rejects_retargeted_aliases_and_keeps_hard_link_entries() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let raw = "---\ntype: document\n---\nIdentical bytes.\n";
+        write(root.path(), "authored/first.md", raw);
+        write(root.path(), "authored/second.md", raw);
+        std::fs::create_dir_all(root.path().join("wiki/documents")).unwrap();
+        let alias = "wiki/documents/link.md";
+        std::os::unix::fs::symlink("../../authored/first.md", root.path().join(alias)).unwrap();
+        let selected = [(PathBuf::from(alias), lk_core::concept::file_revision(raw))];
+        let verified = verified_files(root.path(), &selected);
+        verify_selected_capture(root.path(), &dirs, &selected, &verified).unwrap();
+        std::fs::remove_file(root.path().join(alias)).unwrap();
+        std::os::unix::fs::symlink("../../authored/second.md", root.path().join(alias)).unwrap();
+        assert!(verify_selected_capture(root.path(), &dirs, &selected, &verified).is_err());
+        std::fs::remove_file(root.path().join(alias)).unwrap();
+        let first = "wiki/documents/first.md";
+        let second = "wiki/documents/second.md";
+        write(root.path(), first, raw);
+        std::fs::hard_link(root.path().join(first), root.path().join(second)).unwrap();
+        let selected =
+            [first, second].map(|path| (PathBuf::from(path), lk_core::concept::file_revision(raw)));
+        let verified = verified_files(root.path(), &selected);
+        assert_ne!(
+            verified[Path::new(first)].owner,
+            verified[Path::new(second)].owner
+        );
+        verify_selected_capture(root.path(), &dirs, &selected, &verified).unwrap();
     }
 
     #[test]

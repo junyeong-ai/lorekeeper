@@ -568,6 +568,11 @@ pub(super) fn visit_pages_controlled(
     read: &crate::ReadControl,
     visit: impl FnMut(Page, usize) -> Result<(), VaultError>,
 ) -> Result<(), VaultError> {
+    let directories = page_directories(dirs, include_sources);
+    visit_collections_controlled(vault_root, dirs, directories, metrics, read, visit)
+}
+
+fn page_directories(dirs: &VaultDirs, include_sources: bool) -> Vec<PathBuf> {
     let mut directories = vec![
         concepts_dir(dirs),
         documents_dir(dirs),
@@ -580,7 +585,23 @@ pub(super) fn visit_pages_controlled(
             PathBuf::from(&dirs.synthesis),
         ]);
     }
-    visit_collections_controlled(vault_root, dirs, directories, metrics, read, visit)
+    directories
+}
+
+pub(super) fn visit_page_files(
+    vault_root: &Path,
+    dirs: &VaultDirs,
+    include_sources: bool,
+    mut visit: impl FnMut(&Path, &Path) -> Result<(), VaultError>,
+) -> Result<(), VaultError> {
+    visit_collection_files(
+        vault_root,
+        dirs,
+        page_directories(dirs, include_sources),
+        None,
+        &crate::ReadControl::default(),
+        |path, full, _, _| visit(path, full),
+    )
 }
 
 #[cfg(test)]

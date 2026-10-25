@@ -1278,11 +1278,16 @@ fn prepare_discovery_snapshot(
     let captured =
         lk_graph::backlinks::capture_concept_citations(session.root(), dirs, follow_links)
             .map_err(|error| miette::miette!("capture concept citations: {error}"))?;
-    lk_vault::prepare_search_with_citations(session, dirs, captured.projection(), |selected| {
-        captured
-            .verify(selected)
-            .map_err(|error| std::io::Error::other(error.to_string()).into())
-    })
+    lk_vault::prepare_search_with_verified_citations(
+        session,
+        dirs,
+        captured.projection(),
+        |selected| {
+            captured
+                .verify_file_revisions(selected)
+                .map_err(|error| std::io::Error::other(error.to_string()).into())
+        },
+    )
     .map_err(|error| miette::miette!("prepare discovery snapshot: {error}"))
 }
 

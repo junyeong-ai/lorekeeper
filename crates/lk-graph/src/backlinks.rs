@@ -509,6 +509,7 @@ pub struct CapturedConceptCitations {
     dirs: VaultDirs,
     follow_links: bool,
     file_revisions: BTreeMap<PathBuf, Option<String>>,
+    resolutions: BTreeMap<PathBuf, Option<PathBuf>>,
     projection: lk_vault::ConceptCitationProjection,
 }
 
@@ -522,6 +523,46 @@ impl CapturedConceptCitations {
     /// excluded by graph scan policy (for example hidden descendants).
     /// This detects drift; it does not freeze external editors after the final check.
     pub fn verify(&self, selected: &[(PathBuf, String)]) -> Result<(), GraphError> {
+        self.verify_capture(selected).map(|_| ())
+    }
+
+    /// Return the fresh graph verification's exact file reads for overlapping search
+    /// inputs. The search owner must still validate its complete independent inventory.
+    pub fn verify_file_revisions(
+        &self,
+        selected: &[(PathBuf, String)],
+    ) -> Result<BTreeMap<PathBuf, lk_vault::VerifiedFileRevision>, GraphError> {
+        let current = self.verify_capture(selected)?;
+        current
+            .file_revisions
+            .into_iter()
+            .filter_map(|(path, revision)| revision.map(|revision| (path, revision)))
+            .map(|(path, file_revision)| {
+                let owner = current
+                    .resolutions
+                    .get(&path)
+                    .and_then(Option::as_ref)
+                    .ok_or_else(|| {
+                        GraphError::Io(format!(
+                            "verified file has no current owner: {}",
+                            path.display()
+                        ))
+                    })?
+                    .strip_prefix(&current.root)
+                    .map_err(|error| GraphError::Io(error.to_string()))?
+                    .to_path_buf();
+                Ok((
+                    path,
+                    lk_vault::VerifiedFileRevision {
+                        owner,
+                        file_revision,
+                    },
+                ))
+            })
+            .collect()
+    }
+
+    fn verify_capture(&self, selected: &[(PathBuf, String)]) -> Result<Self, GraphError> {
         for (path, revision) in selected {
             if let Some(captured) = self.file_revisions.get(path)
                 && captured.as_ref() != Some(revision)
@@ -538,7 +579,7 @@ impl CapturedConceptCitations {
                 "graph evidence inputs or filesystem resolution changed during snapshot".into(),
             ));
         }
-        Ok(())
+        Ok(current)
     }
 }
 
@@ -587,7 +628,7 @@ pub fn capture_concept_citations(
         dirs,
         follow_links,
         &scanned.file_revisions,
-        resolutions,
+        &resolutions,
         &concepts,
     ))
     .map_err(|error| GraphError::Io(error.to_string()))?;
@@ -596,6 +637,7 @@ pub fn capture_concept_citations(
         dirs: dirs.clone(),
         follow_links,
         file_revisions: scanned.file_revisions,
+        resolutions,
         projection: lk_vault::ConceptCitationProjection {
             input_revision: lk_core::concept::file_revision(&identity),
             concepts,
@@ -1704,19 +1746,32 @@ mod tests {
         );
 
         let session = lk_vault::MutationSession::acquire(root.path()).unwrap();
+        let legacy_snapshot = lk_vault::prepare_search_with_citations(
+            &session,
+            &dirs,
+            captured.projection(),
+            |selected| {
+                captured
+                    .verify(selected)
+                    .map_err(|error| std::io::Error::other(error.to_string()).into())
+            },
+        )
+        .unwrap();
         let prepare = |captured: &CapturedConceptCitations| {
-            lk_vault::prepare_search_with_citations(
+            lk_vault::prepare_search_with_verified_citations(
                 &session,
                 &dirs,
                 captured.projection(),
                 |selected| {
                     captured
-                        .verify(selected)
+                        .verify_file_revisions(selected)
                         .map_err(|error| std::io::Error::other(error.to_string()).into())
                 },
             )
         };
         let snapshot = prepare(&captured).unwrap();
+        assert_eq!(snapshot.snapshot, legacy_snapshot.snapshot);
+        assert_eq!(snapshot.captured_at, legacy_snapshot.captured_at);
         let before = std::fs::read(root.path().join(".lorekeeper/search.sqlite")).unwrap();
         let options = lk_vault::CitationOptions {
             snapshot: &snapshot.snapshot,

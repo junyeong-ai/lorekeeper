@@ -173,6 +173,9 @@ canonical; SQLite navigation is derived.
   revisions; default search is live. External edits aren't frozen during capture.
   Scope facets and bounded SQLite planner statistics are prepared in that transaction;
   read-only queries never optimize or refresh the capture.
+  Final graph verification may supply exact file revisions and verified page owners
+  for overlapping search inputs. Enumerate the complete search inventory independently,
+  check owners and read uncovered paths; never reuse initial or prior-phase proofs.
   Projection/schema changes bump snapshot version.
   Per-page graph capture membership distinguishes uncaptured concepts from captured empty
   evidence; missing evidence rows for captured concepts remain errors.
