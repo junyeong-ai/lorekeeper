@@ -188,6 +188,7 @@ mod native {
         completed_batches: usize,
         batches: usize,
         request: serde_json::Value,
+        contract_revision: String,
         metrics: WorkStepMetrics,
     }
 
@@ -2446,7 +2447,13 @@ mod native {
                         ),
                         Err(error) => return self.failure("candidate screening", error),
                     };
+                let contract_revision =
+                    match execution::observation::screening_contract_revision(&request) {
+                        Ok(revision) => revision,
+                        Err(error) => return self.failure("candidate screening", error),
+                    };
                 turns.push(ScreeningAttempt {
+                    contract_revision,
                     task_id,
                     completed_batches: before.completed_batches,
                     batches: before.batches,
@@ -2554,6 +2561,7 @@ mod native {
                     completed_batches,
                     batches,
                     request,
+                    contract_revision,
                     metrics: mut step,
                 } = turn;
                 step.agent_duration_ms = Some(attempt.duration_ms);
@@ -2588,6 +2596,7 @@ mod native {
                                         Err(error) if error.downcast_ref::<crate::commands::work::ScreeningRejection>().is_some() => {
                                             Some(crate::commands::work::ScreeningResponse::Rejected {
                                                 request: request.clone(),
+                                                contract_revision,
                                                 rejection: error.downcast_ref::<crate::commands::work::ScreeningRejection>().expect("typed rejection").clone(),
                                             })
                                         }

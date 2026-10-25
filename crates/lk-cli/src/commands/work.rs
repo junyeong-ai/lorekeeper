@@ -20,7 +20,9 @@ mod selection;
 pub(crate) mod state;
 
 pub(super) use publication::publication_scope;
-pub(super) use selection::{ScreeningDecision, ScreeningRejection};
+#[cfg(unix)]
+pub(super) use selection::ScreeningDecision;
+pub(super) use selection::ScreeningRejection;
 #[cfg(unix)]
 pub(super) const FINALIZATION_REQUEST_ENV: &str = "LORE_WORK_FINALIZATION_REQUEST";
 #[cfg(unix)]
@@ -1079,6 +1081,7 @@ pub(super) enum ScreeningResponse {
     Decisions(Value),
     Rejected {
         request: Value,
+        contract_revision: String,
         rejection: ScreeningRejection,
     },
 }
@@ -1133,13 +1136,17 @@ pub(super) fn record_screenings(
                             )?
                             .completed_batches,
                     )),
-                    ScreeningResponse::Rejected { request, rejection } => {
+                    ScreeningResponse::Rejected {
+                        request,
+                        contract_revision,
+                        rejection,
+                    } => {
                         let reason = rejection.to_string();
                         screening.selection.record_rejection(
                             session,
                             &screening.inventory.pages,
                             &request,
-                            &super::execution::observation::screening_contract_revision(&request)?,
+                            &contract_revision,
                             rejection,
                         )?;
                         Ok(ScreeningRecordOutcome::Deferred(reason))
