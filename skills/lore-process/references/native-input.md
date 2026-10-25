@@ -14,6 +14,13 @@ These values replace ordinary configuration, queue enumeration, repeated `work c
 and reference-file intake. A candidate is not automatically the same concept or
 independent corroboration.
 
+## Revision ownership
+
+Native revisions are opaque identifiers with distinct domains. Compare only the same
+named field from native output, such as `wiki fingerprint`'s `file_revision`.
+A raw SHA-256 or another revision field is not interchangeable and does not establish
+that an input changed. Rust validates captured revisions; do not reconstruct guards.
+
 ## Completed Work
 
 `completed` supplies the exact complete root, evidence mapping, source questions and
@@ -32,7 +39,10 @@ and time; an inherited resolution does not resolve another open question. Genera
 one semantic result from the whole set, or return `needs-action` for a required step.
 Do not create a reduction output or restart paid reads. Rust checks complete disjoint
 coverage, request bounds and fresh observation revisions, then seals this distinct
-completion authority. This does not mark the missing root node complete.
+completion authority. The evidence mapping lists resources cited by these observations,
+not all inspected resources; an omitted resource does not negate inspection coverage.
+Coverage establishes which planned inputs were inspected, not the truth of their claims.
+This does not mark the missing root node complete.
 
 ## Semantic response
 
