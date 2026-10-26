@@ -2297,8 +2297,9 @@ mod native {
                     request_bytes,
                     max_input_bytes,
                 } => {
-                    let reason = format!(
-                        "complete section finalizer request requires {request_bytes} bytes, above max_input_bytes {max_input_bytes}; existing work is retained"
+                    let reason = crate::commands::work::finalization_capacity_reason(
+                        request_bytes,
+                        max_input_bytes,
                     );
                     self.record(
                         "bounded section capacity",
@@ -3042,15 +3043,11 @@ mod native {
                         }
                         crate::commands::work::TaskWork::Finalization { id } => {
                             flush(&mut batch, &mut jobs);
-                            if let Some(reason) = blocked.get(&id) {
-                                keys.remove(target);
-                                deferred.insert(target.clone(), vec![reason.clone()]);
-                            } else {
-                                jobs.insert(
-                                    target.clone(),
-                                    QueueDispatch::Finalization { id, task },
-                                );
-                            }
+                            jobs.insert(target.clone(), QueueDispatch::Finalization { id, task });
+                        }
+                        crate::commands::work::TaskWork::RootFinalization { id } => {
+                            flush(&mut batch, &mut jobs);
+                            jobs.insert(target.clone(), QueueDispatch::Partitioned { id, task });
                         }
                         crate::commands::work::TaskWork::Partitioned { id } => {
                             flush(&mut batch, &mut jobs);
@@ -3139,6 +3136,7 @@ mod native {
                         )?,
                         crate::commands::work::TaskWork::Partitioned { .. }
                             | crate::commands::work::TaskWork::Finalization { .. }
+                            | crate::commands::work::TaskWork::RootFinalization { .. }
                             | crate::commands::work::TaskWork::Source { .. }
                             | crate::commands::work::TaskWork::Screening { .. }
                             | crate::commands::work::TaskWork::Admission { .. }

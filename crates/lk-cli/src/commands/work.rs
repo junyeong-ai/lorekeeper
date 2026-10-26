@@ -1329,6 +1329,10 @@ pub(super) enum TaskWork {
     Finalization {
         id: String,
     },
+    #[cfg(unix)]
+    RootFinalization {
+        id: String,
+    },
     Source {
         id: String,
     },
@@ -1520,6 +1524,7 @@ pub(super) fn prepare_tasks_with_audit(
             )
         })
         .collect::<miette::Result<Vec<_>>>()?;
+    read.check().into_diagnostic()?;
     Ok((work, metrics))
 }
 
@@ -1636,6 +1641,33 @@ fn prepare_task_in_session(
     persist_prepared(session, config, config_revision, &prepared)?;
     #[cfg(unix)]
     {
+        if work.has_root_output(root)? && work.progress(root, &prepared.resources)?.complete {
+            let checkpoint = prepare_native_finalization_from_capture(
+                root,
+                config,
+                config_revision,
+                &work,
+                &prepared,
+                false,
+            )?;
+            match checkpoint.state {
+                NativeFinalization::Ready(FinalizationPreparation::NeedsAction(reason)) => {
+                    return Ok(TaskWork::Admission { reason });
+                }
+                NativeFinalization::Ready(FinalizationPreparation::Capacity {
+                    request_bytes,
+                    max_input_bytes,
+                }) => {
+                    return Ok(TaskWork::Admission {
+                        reason: finalization_capacity_reason(request_bytes, max_input_bytes),
+                    });
+                }
+                NativeFinalization::Finished | NativeFinalization::Ready(_) => {
+                    return Ok(TaskWork::RootFinalization { id: work.plan.id });
+                }
+                NativeFinalization::Replan => {}
+            }
+        }
         let seal = PathBuf::from(".lorekeeper/work")
             .join(&work.plan.id)
             .join("frontier-seal.json");
@@ -1929,33 +1961,61 @@ pub(super) fn prepare_native_finalization(
     let started_at = std::time::Instant::now();
     let root = root.canonicalize().into_diagnostic()?;
     let (work, prepared) = load_controlled(&root, config, config_revision, id, read)?;
-    let mut preparation_duration_ms = started_at.elapsed().as_millis() as u64;
+    let capture_duration_ms = started_at.elapsed().as_millis() as u64;
+    let mut checkpoint = prepare_native_finalization_from_capture(
+        &root,
+        config,
+        config_revision,
+        &work,
+        &prepared,
+        frontier,
+    )?;
+    checkpoint.preparation_duration_ms += capture_duration_ms;
+    read.check().into_diagnostic()?;
+    Ok(checkpoint)
+}
+
+#[cfg(unix)]
+fn prepare_native_finalization_from_capture(
+    root: &Path,
+    config: &lk_core::config::Config,
+    config_revision: &str,
+    work: &Work,
+    prepared: &Prepared,
+    frontier: bool,
+) -> miette::Result<FinalizationCheckpoint> {
     let started_at = std::time::Instant::now();
-    let finished = is_finished_prepared(&root, &work, &prepared)?;
+    let finished = is_finished_prepared(root, work, prepared)?;
     let verification_duration_ms = started_at.elapsed().as_millis() as u64;
     let started_at = std::time::Instant::now();
     let state = if finished {
         NativeFinalization::Finished
     } else if frontier {
-        match prepare_frontier_finalization(&root, config, &work, &prepared)? {
+        match prepare_frontier_finalization(root, config, work, prepared)? {
             Some(preparation) => NativeFinalization::Ready(preparation),
             None => NativeFinalization::Replan,
         }
     } else {
         NativeFinalization::Ready(prepare_finalization_from_capture(
-            &root,
+            root,
             config,
             config_revision,
-            &work,
-            &prepared,
+            work,
+            prepared,
         )?)
     };
-    preparation_duration_ms += started_at.elapsed().as_millis() as u64;
     Ok(FinalizationCheckpoint {
         state,
-        preparation_duration_ms,
+        preparation_duration_ms: started_at.elapsed().as_millis() as u64,
         verification_duration_ms,
     })
+}
+
+#[cfg(unix)]
+pub(super) fn finalization_capacity_reason(request_bytes: usize, max_input_bytes: usize) -> String {
+    format!(
+        "complete section finalizer request requires {request_bytes} bytes, above max_input_bytes {max_input_bytes}; existing work is retained"
+    )
 }
 
 #[cfg(unix)]
@@ -2395,12 +2455,18 @@ fn is_finished(
 
 #[cfg(any(unix, test))]
 fn is_finished_prepared(root: &Path, work: &Work, prepared: &Prepared) -> miette::Result<bool> {
-    let path = root
-        .join(".lorekeeper/work")
-        .join(&work.plan.id)
-        .join("final.json");
-    match std::fs::symlink_metadata(path) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+    let directory = Path::new(".lorekeeper/work").join(&work.plan.id);
+    match std::fs::symlink_metadata(root.join(&directory).join("final.json")) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            for seal in ["seal.json", "frontier-seal.json"] {
+                if state::read_optional(root, &directory.join(seal))?.is_some() {
+                    return Err(miette::miette!(
+                        "completion seal exists without a final result"
+                    ));
+                }
+            }
+            Ok(false)
+        }
         Err(error) => Err(miette::miette!("inspect final result: {error}")),
         Ok(_) => match verify_finished_prepared(root, work, prepared) {
             Ok(()) => Ok(true),

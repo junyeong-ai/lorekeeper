@@ -9,7 +9,7 @@ use lk_queue::{QueueLlmClient, QueueTask, SummarizeRequest, TaskKind, ThemeReque
 use serde_json::{Value, json};
 
 const HOST: &str = r#"#!/usr/bin/env python3
-import json, os, signal, sys, time
+import json, os, signal, subprocess, sys, time
 from pathlib import Path
 root=Path(os.environ['TEST_SECTION_ROOT'])
 engine=os.environ['TEST_SECTION_ENGINE']
@@ -25,6 +25,7 @@ work_id=work.get('work_id') or work.get('context_revision')
 with (root/'calls.jsonl').open('a') as f:
     f.write(json.dumps({'kind':kind,'work_id':work_id,'node_id':work.get('node_id')})+'\n')
 if kind in ['finalize-section','whole-section']:
+    if (root/'measure-planning').exists(): print('FINALIZER_ADMISSION_HOST',file=sys.stderr,flush=True)
     assert all(key in request for key in ['instructions','max_response_bytes','events'])
     assert 'No tools' in request['instructions']
     assert work['context']['purpose']['parameters']['locale']=='ko'
@@ -49,6 +50,14 @@ if kind in ['finalize-section','whole-section']:
         path.write_text(path.read_text()+'\nThe scoped assessment changed during finalization.\n')
     blocked=root/'blocked-work'
     needs=mode=='needs-action' and (not blocked.exists() or blocked.read_text()==work_id)
+    if mode=='amend-after-action':
+        if work_id==blocked.read_text(): needs=not (root/'amended').exists()
+        elif not (root/'amended').exists():
+            # Simulate another guarded writer while this read-only host is running.
+            receipt=root/'vault/.lorekeeper/work'/blocked.read_text()/'finalization-action.json'
+            (root/'original-action.json').write_bytes(receipt.read_bytes())
+            subprocess.run([os.environ['LORE_BIN'],'work','record','--file',str(root/'amend-observation.json')],check=True,stdout=subprocess.DEVNULL,close_fds=False)
+            (root/'amended').write_text('guarded correction recorded')
     if needs:
         output={'status':'needs-action','body':None,'reason':'A scoped open review must be recorded before completing this section.'}
     else:
@@ -288,6 +297,26 @@ impl Fixture {
         completed
     }
 
+    fn record_source(&self, plan: &Value) {
+        let id = plan["work_id"].as_str().unwrap();
+        loop {
+            let status = self.json(&["work", "status", id]);
+            if status["complete"] == true {
+                return;
+            }
+            for node in status["ready"].as_array().unwrap() {
+                let node = node.as_str().unwrap();
+                let request = self.json(&["work", "read", id, node]);
+                let output = json!({"work_id":id,"node_id":node,"input_revision":request["input_revision"],
+                    "summary":"The source describes a proposal; deployment remains unverified.",
+                    "findings":[],"source_questions":[],"unresolved":[],"resolutions":[]});
+                let file = self.root().join("source-observation.json");
+                std::fs::write(&file, serde_json::to_vec(&output).unwrap()).unwrap();
+                self.json(&["work", "record", "--file", file.to_str().unwrap()]);
+            }
+        }
+    }
+
     fn source_snapshot(&self, plan: &Value) -> BTreeMap<PathBuf, Vec<u8>> {
         let mut files = BTreeMap::from([(
             PathBuf::from("plan.json"),
@@ -323,6 +352,137 @@ impl Fixture {
         assert_eq!(reports[0]["effective_state"], "open", "{reports}");
         assert_eq!(reports[0]["errors"], json!([]));
         (review.into(), evidence.into())
+    }
+}
+
+#[test]
+fn completed_root_actions_are_admitted_before_dispatch_without_restarting_planning() {
+    for engine in ["codex", "claude-code"] {
+        let fixture = Fixture::new(engine, 32768);
+        let mut blocked = Vec::new();
+        for name in ["a-blocked", "b-blocked", "c-blocked"] {
+            let (task, plan) = fixture.add(name, TaskKind::Summarize);
+            fixture.record_source(&plan);
+            std::fs::write(
+                fixture.root().join("blocked-work"),
+                plan["work_id"].as_str().unwrap(),
+            )
+            .unwrap();
+            fixture.mode("needs-action");
+            let (_, report) = fixture.run();
+            assert_eq!(report["semantic_calls"], 1, "{engine}: {report}");
+            blocked.push((task, plan.clone(), fixture.source_snapshot(&plan)));
+        }
+        let (ready, plan) = fixture.add("z-ready", TaskKind::Summarize);
+        fixture.record_source(&plan);
+        fixture.mode("complete");
+        std::fs::write(fixture.root().join("measure-planning"), "").unwrap();
+        let calls = fixture.calls().len();
+        let (output, report) = fixture.run();
+        assert_eq!(report["semantic_calls"], 1, "{report}");
+        assert_eq!(fixture.calls().len(), calls + 1);
+        let stderr = std::str::from_utf8(&output.stderr).unwrap();
+        let mut plans = 0;
+        let mut reached_host = false;
+        for line in stderr.lines() {
+            if line == "FINALIZER_ADMISSION_HOST" {
+                reached_host = true;
+                break;
+            }
+            if let Ok(value) = serde_json::from_str::<Value>(line) {
+                plans += usize::from(
+                    value["type"] == "lore.queue-planning" && value["state"] == "completed",
+                );
+            }
+        }
+        assert!(reached_host, "{stderr}");
+        assert_eq!(
+            plans, 1,
+            "cached root actions must be excluded in the same planning checkpoint: {report}"
+        );
+        let status = fixture.json(&["queue", "status", "--json"]);
+        let rows = status["data"]["tasks"].as_array().unwrap();
+        assert!(
+            rows.iter()
+                .any(|row| row["task_id"] == ready.task_id && row["status"] == "done"),
+            "{status}"
+        );
+        for (task, plan, snapshot) in blocked {
+            assert!(
+                rows.iter()
+                    .any(|row| row["task_id"] == task.task_id && row["status"] == "current")
+            );
+            assert_eq!(fixture.source_snapshot(&plan), snapshot);
+            assert!(!fixture.work_path(&plan, "seal.json").exists());
+        }
+        assert!(
+            !output.status.success(),
+            "blocked work remains honestly incomplete"
+        );
+    }
+}
+
+#[test]
+fn cached_root_action_cannot_hide_an_orphaned_completion_seal() {
+    for engine in ["codex", "claude-code"] {
+        for seal in ["seal.json", "frontier-seal.json"] {
+            let fixture = Fixture::new(engine, 32768);
+            let (_, plan) = fixture.add("source", TaskKind::Summarize);
+            fixture.record_source(&plan);
+            fixture.mode("needs-action");
+            fixture.run();
+            let path = fixture.work_path(&plan, seal);
+            std::fs::write(&path, "{}").unwrap();
+            let calls = fixture.calls().len();
+            let (_, report) = fixture.run();
+            assert_eq!(report["semantic_calls"], 0, "{engine}/{seal}: {report}");
+            assert_eq!(report["halted"], true, "{engine}/{seal}: {report}");
+            assert_eq!(fixture.calls().len(), calls);
+            assert_eq!(std::fs::read(&path).unwrap(), b"{}");
+            assert!(!fixture.work_path(&plan, "final.json").exists());
+        }
+    }
+}
+
+#[test]
+fn changed_same_work_request_reconsiders_a_deferred_root_within_one_run() {
+    for engine in ["codex", "claude-code"] {
+        let fixture = Fixture::new(engine, 32768);
+        let config = std::fs::read_to_string(&fixture.config).unwrap();
+        std::fs::write(
+            &fixture.config,
+            config.replace("max_calls: 2", "max_calls: 4"),
+        )
+        .unwrap();
+        let (_, first) = fixture.add("a-first", TaskKind::Summarize);
+        fixture.record_source(&first);
+        let (_, independent) = fixture.add("z-independent", TaskKind::Summarize);
+        fixture.record_source(&independent);
+        let id = first["work_id"].as_str().unwrap();
+        std::fs::write(fixture.root().join("blocked-work"), id).unwrap();
+        let completed = fixture.json(&["work", "result", id]);
+        let mut corrected = completed["output"].clone();
+        corrected["summary"] = json!("A guarded correction preserves unverified deployment.");
+        std::fs::write(
+            fixture.root().join("amend-observation.json"),
+            serde_json::to_vec(&corrected).unwrap(),
+        )
+        .unwrap();
+        let manifest = std::fs::read(fixture.work_path(&first, "plan.json")).unwrap();
+        fixture.mode("amend-after-action");
+        let (output, report) = fixture.run();
+        assert!(output.status.success(), "{engine}: {report}");
+        assert_eq!(report["semantic_calls"], 3, "{report}");
+        assert!(fixture.work_path(&first, "publication.json").exists());
+        assert!(fixture.work_path(&independent, "publication.json").exists());
+        assert_eq!(
+            std::fs::read(fixture.work_path(&first, "plan.json")).unwrap(),
+            manifest
+        );
+        assert_eq!(
+            std::fs::read(fixture.work_path(&first, "finalization-action.json")).unwrap(),
+            std::fs::read(fixture.root().join("original-action.json")).unwrap()
+        );
     }
 }
 

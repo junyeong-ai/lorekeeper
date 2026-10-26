@@ -1107,6 +1107,13 @@ impl Work {
         Ok(self.evaluate(root, resources)?.progress())
     }
 
+    #[cfg(unix)]
+    pub(super) fn has_root_output(&self, root: &Path) -> miette::Result<bool> {
+        let nodes = self.nodes()?;
+        let node = nodes.last().expect("nonempty work tree");
+        Ok(read_optional(root, &output_path(&self.plan.id, &node.id)?)?.is_some())
+    }
+
     pub(super) fn capture_progress(
         &self,
         root: &Path,
