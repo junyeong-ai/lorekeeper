@@ -11,9 +11,14 @@ use serde_json::{Value, json};
 
 mod frontier;
 mod inspection;
+mod output;
 mod retention;
 use frontier::{FrontierProof, FrontierSeal};
 pub(crate) use inspection::OutputCapacity;
+#[cfg(unix)]
+pub(crate) use output::result_bytes as output_result_bytes;
+#[cfg(unix)]
+pub(crate) use output::retention_overhead as question_retention_overhead;
 pub(crate) use retention::prune_published;
 
 #[derive(Debug)]
@@ -157,13 +162,12 @@ struct Node {
     ranges: Vec<SemanticRange>,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone)]
 struct StoredOutput {
     output: WorkOutput,
     output_revision: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     reused_from: Option<Reuse>,
+    retained: Option<output::RetainedQuestions>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -414,15 +418,34 @@ impl Evaluation<'_> {
     }
 }
 
+#[derive(Debug)]
+pub(crate) struct InputCapacity {
+    pub actual_bytes: usize,
+    pub max_bytes: usize,
+}
+
+impl std::fmt::Display for InputCapacity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "complete worker input requires {} bytes, above its {} byte allowance",
+            self.actual_bytes, self.max_bytes
+        )
+    }
+}
+
+impl std::error::Error for InputCapacity {}
+impl miette::Diagnostic for InputCapacity {}
+
 enum NodeInputError {
-    Bound,
+    Bound(InputCapacity),
     Other(miette::Report),
 }
 
 impl NodeInputError {
     fn report(self) -> miette::Report {
         match self {
-            Self::Bound => fail("serialized worker input including context exceeds its bound"),
+            Self::Bound(capacity) => capacity.into(),
             Self::Other(error) => error,
         }
     }
@@ -956,8 +979,12 @@ impl Work {
             .as_object_mut()
             .expect("input object")
             .insert("input_revision".into(), input_revision.into());
-        if encoded(&input)?.len() > self.max_input_bytes {
-            return Err(NodeInputError::Bound);
+        let actual_bytes = encoded(&input)?.len();
+        if actual_bytes > self.max_input_bytes {
+            return Err(NodeInputError::Bound(InputCapacity {
+                actual_bytes,
+                max_bytes: self.max_input_bytes,
+            }));
         }
         Ok(input)
     }
@@ -1016,8 +1043,12 @@ impl Work {
             .as_object_mut()
             .expect("input object")
             .insert("input_revision".into(), input_revision.into());
-        if encoded(&input)?.len() > self.max_input_bytes {
-            return Err(NodeInputError::Bound);
+        let actual_bytes = encoded(&input)?.len();
+        if actual_bytes > self.max_input_bytes {
+            return Err(NodeInputError::Bound(InputCapacity {
+                actual_bytes,
+                max_bytes: self.max_input_bytes,
+            }));
         }
         Ok(input)
     }
@@ -1047,12 +1078,12 @@ impl Work {
                 if stored.output.work_id != self.plan.id
                     || stored.output.node_id != node.id
                     || revision(&stored.output)? != stored.output_revision
-                    || encoded(&stored.output)?.len() > self.plan.max_result_bytes
                 {
                     return Err(fail(
                         "stored work output identity, checksum or bound is invalid",
                     ));
                 }
+                stored.validate_bounds(self)?;
                 raw.insert(path, stored_raw.clone());
             }
             let children = match &node.kind {
@@ -1069,7 +1100,7 @@ impl Work {
             };
             let input = match self.node_input(node, &inputs, &current) {
                 Ok(input) => input,
-                Err(NodeInputError::Bound) => {
+                Err(NodeInputError::Bound(_)) => {
                     ready.push(node.id.clone());
                     continue;
                 }
@@ -1081,6 +1112,7 @@ impl Work {
                     .map(|child| &child.output)
                     .collect::<Vec<_>>();
                 validate_output(&stored.output, node, &child_outputs)?;
+                stored.validate_inheritance(&child_outputs)?;
                 current.insert(node.id.clone(), stored);
             } else {
                 ready.push(node.id.clone());
@@ -1350,8 +1382,13 @@ impl Work {
             .as_object_mut()
             .expect("result object")
             .insert("input_revision".into(), input_revision.into());
-        if encoded(&result)?.len() > self.max_input_bytes {
-            return Err(fail("serialized finalizer input exceeds its input bound"));
+        let actual_bytes = encoded(&result)?.len();
+        if actual_bytes > self.max_input_bytes {
+            return Err(InputCapacity {
+                actual_bytes,
+                max_bytes: self.max_input_bytes,
+            }
+            .into());
         }
         Ok(result)
     }
@@ -1408,9 +1445,6 @@ impl Work {
         if input["input_revision"].as_str() != Some(output.input_revision.as_str()) {
             return Err(fail("output was written from stale or different inputs"));
         }
-        if encoded(&output)?.len() > self.plan.max_result_bytes {
-            return Err(fail("serialized work output exceeds its result bound"));
-        }
         let children = match &node.kind {
             NodeKind::Inspect { .. } => Vec::new(),
             NodeKind::Reduce { children } => children
@@ -1419,11 +1453,10 @@ impl Work {
                 .collect(),
         };
         validate_output(&output, node, &children)?;
-        let stored = StoredOutput {
-            output_revision: revision(&output)?,
-            output,
-            reused_from,
-        };
+        let stored =
+            StoredOutput::build(output, &children, self.plan.max_result_bytes, reused_from)?;
+        stored.validate_bounds(self)?;
+        stored.validate_inheritance(&children)?;
         let path = output_path(&self.plan.id, &node.id)?;
         let before = evaluated.raw.get(&path).cloned();
         let mut mutation = MutationPlan::default();
@@ -1510,12 +1543,13 @@ impl Work {
             || old.output.node_id != old_node_id
             || old_input["input_revision"].as_str() != Some(old.output.input_revision.as_str())
             || revision(&old.output)? != old.output_revision
-            || encoded(&old.output)?.len() > prior.plan.max_result_bytes
         {
             return Err(fail(
                 "prior leaf observation is not a verified matching output",
             ));
         }
+        old.validate_bounds(prior)?;
+        old.validate_inheritance(&[])?;
         validate_output(&old.output, &old_node, &[])?;
         let mut output = old.output.clone();
         output.work_id = self.plan.id.clone();
@@ -2667,6 +2701,183 @@ mod tests {
         for (path, before) in saved {
             assert_eq!(std::fs::read(root.path().join(path)).unwrap(), before);
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inherited_questions_survive_intermediate_and_root_capacity_without_rewriting_paid_nodes() {
+        use crate::commands::execution::observation::{ObservationResponse, decode_observation};
+        let root = tempfile::tempdir().unwrap();
+        let source = evidence_pages(8, 1100);
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let mut purpose = context("one");
+        purpose["subject"] = json!(crate::commands::work::resources::Subject::Queue {
+            task_id: "task".into(),
+            cache_hash: "cache".into(),
+            target: "wiki/concepts/subject.md".into(),
+            target_revision: "target-revision".into(),
+        });
+        purpose["purpose"]["task_kind"] = json!(lk_queue::TaskKind::SynthesizeConcept);
+        let work = Work::create(
+            &session,
+            &source,
+            "subject",
+            purpose,
+            WorkLimits {
+                max_input_bytes: 12_000,
+                max_result_bytes: 1500,
+            },
+        )
+        .unwrap();
+        assert!(work.plan.parts.len() >= 8);
+        for part in &work.plan.parts {
+            let mut output = draft(&work, root.path(), &part.id, &source);
+            output.source_questions.push(WorkQuestion {
+                id: format!("{}:source:0", part.id),
+                question: "Which source supplies the missing scope? ".repeat(15),
+                evidence: vec![part.ranges[0].clone()],
+            });
+            assert!(encoded(&output).unwrap().len() < work.plan.max_result_bytes);
+            work.record(&session, output, &source).unwrap();
+        }
+        let manifest = work_path(&work.plan.id, "plan.json").unwrap();
+        let saved = std::iter::once(manifest)
+            .chain(
+                work.plan
+                    .parts
+                    .iter()
+                    .map(|part| output_path(&work.plan.id, &part.id).unwrap()),
+            )
+            .map(|path| (path.clone(), std::fs::read(root.path().join(path)).unwrap()))
+            .collect::<BTreeMap<_, _>>();
+        let root_id = work.progress(root.path(), &source).unwrap().root_node;
+        let mut packed = BTreeSet::new();
+        let mut frontier_verified = false;
+        loop {
+            let progress = work.progress(root.path(), &source).unwrap();
+            if progress.complete {
+                break;
+            }
+            if progress.ready == [root_id.clone()] {
+                let completed = work
+                    .capture_frontier(root.path(), &source)
+                    .unwrap()
+                    .unwrap();
+                let CompletionAuthority::Frontier(proof) = completed.authority else {
+                    panic!()
+                };
+                let proof_value = serde_json::to_value(&proof).unwrap();
+                assert!(
+                    proof_value["nodes"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|node| packed.contains(node["node_id"].as_str().unwrap()))
+                );
+                let seal = FrontierSeal {
+                    schema: "work-frontier-seal-v1".into(),
+                    proof,
+                    final_result_revision: "0".repeat(64),
+                };
+                let seal = FrontierSeal::decode(&encoded(&seal).unwrap(), &work).unwrap();
+                seal.verify_stored(root.path(), &work).unwrap();
+                frontier_verified = true;
+            }
+            for id in progress.ready {
+                let request = work.input(root.path(), &id, &source).unwrap();
+                assert!(encoded(&request).unwrap().len() <= work.max_input_bytes);
+                let ObservationResponse::Complete(output) = decode_observation(json!({
+                    "status":"complete", "observation":{"summary":"Every child and its evidence mapping were inspected; source unknowns remain open.","findings":[],"source_questions":[],"unresolved":[],"resolutions":[]}, "action":null
+                }), &request, work.plan.max_result_bytes).unwrap() else { panic!() };
+                let full = output.clone();
+                if encoded(&output).unwrap().len() > work.plan.max_result_bytes {
+                    packed.insert(id.clone());
+                }
+                work.record(&session, output, &source).unwrap();
+                let raw = std::fs::read_to_string(
+                    root.path().join(output_path(&work.plan.id, &id).unwrap()),
+                )
+                .unwrap();
+                let stored: StoredOutput = serde_json::from_str(&raw).unwrap();
+                assert_eq!(stored.output, full);
+                assert_eq!(stored.output_revision, revision(&full).unwrap());
+                stored.validate_bounds(&work).unwrap();
+                if packed.contains(&id) {
+                    let wire: Value = serde_json::from_str(&raw).unwrap();
+                    assert_eq!(wire["schema"], "work-output-retained-questions-v1");
+                    assert_eq!(wire["output"]["source_questions"], Value::Null);
+                    assert_eq!(
+                        wire["retained_questions"]["source_questions"]
+                            .as_array()
+                            .unwrap()
+                            .len(),
+                        full.source_questions.len()
+                    );
+                    #[derive(Deserialize)]
+                    #[serde(deny_unknown_fields)]
+                    struct OldReader {
+                        #[serde(rename = "output")]
+                        _output: WorkOutput,
+                        #[serde(rename = "output_revision")]
+                        _revision: String,
+                    }
+                    assert!(serde_json::from_str::<OldReader>(&raw).is_err());
+                }
+            }
+        }
+        assert!(packed.contains(&root_id));
+        assert!(packed.iter().any(|id| id != &root_id));
+        assert!(frontier_verified);
+        let result = work.result(root.path(), &source).unwrap();
+        assert_eq!(
+            result["output"]["source_questions"]
+                .as_array()
+                .unwrap()
+                .len(),
+            work.plan.parts.len()
+        );
+        let final_result = json!({"body":"Source uncertainties remain explicitly attributed."});
+        work.seal(&session, &source, final_result.clone()).unwrap();
+        for (path, before) in saved {
+            assert_eq!(std::fs::read(root.path().join(path)).unwrap(), before);
+        }
+        let mut publication = MutationPlan::default();
+        work.guard_completion(&mut publication, root.path(), &source, &final_result)
+            .unwrap();
+        work.plan_publication(&mut publication, root.path(), &final_result)
+            .unwrap();
+        publication
+            .publish_expected(
+                root.path(),
+                work_path(&work.plan.id, "final.json").unwrap(),
+                None,
+                encoded(&final_result).unwrap(),
+            )
+            .unwrap();
+        session.apply(publication).unwrap();
+        assert_eq!(
+            prune_published(root.path(), None, i64::MAX)
+                .unwrap()
+                .removed,
+            1
+        );
+        assert!(
+            root.path()
+                .join(work_path(&work.plan.id, "plan.json").unwrap())
+                .exists()
+        );
+        assert_eq!(
+            prune_published(root.path(), Some(&session), i64::MAX)
+                .unwrap()
+                .removed,
+            1
+        );
+        assert!(
+            !root
+                .path()
+                .join(work_path(&work.plan.id, "").unwrap())
+                .exists()
+        );
     }
 
     #[test]

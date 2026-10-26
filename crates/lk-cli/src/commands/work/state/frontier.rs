@@ -100,13 +100,13 @@ impl FrontierProof {
                 || revision(&output.output)? != reference.output_revision
                 || output.output.work_id != work.plan.id
                 || output.output.node_id != node.id
-                || encoded(&output.output)?.len() > work.plan.max_result_bytes
                 || !output.output.unresolved.is_empty()
             {
                 return Err(fail(
                     "frontier observation identity, bound or processing concerns differ",
                 ));
             }
+            output.validate_bounds(work)?;
             for (kind, question) in output.output.questions() {
                 if let Some(prior) = inherited.insert(question.id.as_str(), (kind, question))
                     && prior != (kind, question)
@@ -155,12 +155,12 @@ impl FrontierSeal {
             if stored.output.work_id != work.plan.id
                 || stored.output.node_id != id
                 || revision(&stored.output)? != stored.output_revision
-                || encoded(&stored.output)?.len() > work.plan.max_result_bytes
             {
                 return Err(fail(
                     "invalid frontier dependency identity, checksum or bound",
                 ));
             }
+            stored.validate_bounds(work)?;
             require_id(&stored.output.input_revision)?;
             let children = match &node.kind {
                 NodeKind::Inspect { .. } => Vec::new(),
@@ -175,6 +175,7 @@ impl FrontierSeal {
                 }
             };
             validate_output(&stored.output, node, &children)?;
+            stored.validate_inheritance(&children)?;
             if let NodeKind::Reduce { children: ids } = &node.kind {
                 let children = ids.iter().map(|id| json!({"node_id":id,"result_revision":outputs[id].output_revision,"output":outputs[id].output})).collect();
                 let request = work.reduction_request(

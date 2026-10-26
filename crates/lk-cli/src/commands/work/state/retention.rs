@@ -203,6 +203,7 @@ fn capture_retention(root: &Path, id: &str, cutoff: i64) -> miette::Result<Reten
             {
                 return Err(fail("invalid retained work observation"));
             }
+            stored.validate_bounds(&work)?;
             if let Some(reused) = stored.reused_from {
                 require_id(&reused.work_id)?;
                 require_id(&reused.node_id)?;

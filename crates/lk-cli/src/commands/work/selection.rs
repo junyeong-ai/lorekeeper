@@ -23,6 +23,10 @@ pub(super) enum ScreeningCapacity {
         required_bytes: usize,
         max_bytes: usize,
     },
+    SourceInput {
+        required_bytes: usize,
+        max_bytes: usize,
+    },
 }
 
 impl std::fmt::Display for ScreeningCapacity {
@@ -36,6 +40,15 @@ impl std::fmt::Display for ScreeningCapacity {
                 required_bytes,
                 max_bytes,
             } => ("result", required_bytes, max_bytes),
+            Self::SourceInput {
+                required_bytes,
+                max_bytes,
+            } => {
+                return write!(
+                    formatter,
+                    "complete source observations require {required_bytes} input bytes, above the configured bound {max_bytes}; the complete scope is retained"
+                );
+            }
         };
         write!(
             formatter,

@@ -116,8 +116,13 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   Saved section finalizers capture fresh scoped reviews separately from source-only Work;
   guard the complete final request after the host and its context again at apply. Do not
   incorporate reviews into old Work identities or rewrite paid nodes to acquire that scope.
-  New work fixes reduction topology from the exact envelope plus each child's full result
-  allowance; every child and its evidence mapping participates. Persist the policy and
+  New work fixes reduction topology from the exact envelope plus each child's authored result
+  allowance; every child and its evidence mapping participates. A reduction can retain
+  unchanged inherited questions in a self-contained versioned node snapshot. Its authored
+  result and position metadata obey the result bound; the snapshot obeys the input bound.
+  Full reconstructed questions participate in every parent and finalizer input. Actual
+  complete-input overflow defers that Work before invocation, never clips or replans it.
+  Persist the policy and
   preserve missing-policy binary plans, node IDs and seals without rewriting them on resume.
   Native queue extraction/synthesis may finalize a disjoint current frontier covering
   every planned inspection when all observations, evidence and rules fit the existing
@@ -194,7 +199,12 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   explicitly resolved. Native child question tuples separate active keys from closed
   resolution history without expanding canonical inputs. Bind action receipts to the
   exact delivered presentation as well as schema/instructions. Keep canonical Work
-  requests, node input revisions and standalone record formats unchanged.
+  requests, node input revisions and standalone record formats unchanged. New node records
+  use `work-output-retained-questions-v1` only when needed: preserve exact question kinds,
+  IDs, payloads and ordering, and digest the reconstructed full output. Older readers refuse
+  the new record; keep legacy bytes, seals and paid observations untouched. Only reductions
+  with active inherited questions change their native instruction contract. Reserve the
+  native retained-position envelope before the host call; reject actual assembled overflow.
   Fresh owner/currentness validation remains authoritative. Native range/text mapping
   is already verified; workers can copy
   assigned ranges without inventing finer offsets. Every observation concern still needs

@@ -825,7 +825,22 @@ fn screening_with_inventory(
     if !source_fits {
         let work = expected(root, &inventory.source, config, config_revision)?;
         let observed = if work.is_planned(root)? {
-            work.result_if_complete_with_guards(root, &inventory.source.resources)?
+            match work.result_if_complete_with_guards(root, &inventory.source.resources) {
+                Ok(observed) => observed,
+                Err(error) => {
+                    let Some(capacity) = error.downcast_ref::<state::InputCapacity>() else {
+                        return Err(error);
+                    };
+                    let capacity = selection::ScreeningCapacity::SourceInput {
+                        required_bytes: capacity.actual_bytes,
+                        max_bytes: capacity.max_bytes,
+                    };
+                    return Ok(ScreeningPreparation::Capacity {
+                        inventory: Box::new(inventory),
+                        capacity,
+                    });
+                }
+            }
         } else {
             None
         };
@@ -1569,6 +1584,14 @@ fn prepare_task_in_session(
             }
             ScreeningPreparation::Source { work, prepared } => {
                 persist_prepared(session, config, config_revision, &prepared)?;
+                if let Err(error) = work.prepare_inspection(root, &prepared.resources) {
+                    if error.downcast_ref::<state::InputCapacity>().is_some() {
+                        return Ok(TaskWork::Admission {
+                            reason: error.to_string(),
+                        });
+                    }
+                    return Err(error);
+                }
                 return Ok(TaskWork::Source { id: work.plan.id });
             }
             ScreeningPreparation::Candidates(screening) => {
@@ -1701,6 +1724,14 @@ fn prepare_task_in_session(
             }
             return Ok(TaskWork::Finalization { id: work.plan.id });
         }
+    }
+    if let Err(error) = work.prepare_inspection(root, &prepared.resources) {
+        if error.downcast_ref::<state::InputCapacity>().is_some() {
+            return Ok(TaskWork::Admission {
+                reason: error.to_string(),
+            });
+        }
+        return Err(error);
     }
     Ok(TaskWork::Partitioned { id: work.plan.id })
 }
@@ -2206,7 +2237,7 @@ fn prepare_native_finalization_from_capture(
 #[cfg(unix)]
 pub(super) fn finalization_capacity_reason(request_bytes: usize, max_input_bytes: usize) -> String {
     format!(
-        "complete section finalizer request requires {request_bytes} bytes, above max_input_bytes {max_input_bytes}; existing work is retained"
+        "complete finalizer request requires {request_bytes} bytes, above max_input_bytes {max_input_bytes}; existing work is retained"
     )
 }
 
@@ -2283,6 +2314,18 @@ fn prepare_finalization_from_capture(
     work: &Work,
     prepared: &Prepared,
 ) -> miette::Result<FinalizationPreparation> {
+    let completed = match work.result(root, &prepared.resources) {
+        Ok(completed) => completed,
+        Err(error) => {
+            let Some(capacity) = error.downcast_ref::<state::InputCapacity>() else {
+                return Err(error);
+            };
+            return Ok(FinalizationPreparation::Capacity {
+                request_bytes: capacity.actual_bytes,
+                max_input_bytes: capacity.max_bytes,
+            });
+        }
+    };
     let Subject::Queue {
         task_id,
         cache_hash,
@@ -2293,7 +2336,6 @@ fn prepare_finalization_from_capture(
         return Ok(FinalizationPreparation::Interactive);
     };
     let task = super::queue::current_task(root, task_id)?;
-    let completed = work.result(root, &prepared.resources)?;
     if !super::execution::finalization::supports(task.kind) {
         let request = match native::finalization_request(
             config,

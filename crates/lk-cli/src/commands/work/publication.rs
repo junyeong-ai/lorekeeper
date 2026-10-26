@@ -92,6 +92,12 @@ pub(in crate::commands) fn publication_scope(
                     } => {
                         json!({"kind":"result","required_bytes":required_bytes,"max_bytes":max_bytes})
                     }
+                    super::selection::ScreeningCapacity::SourceInput {
+                        required_bytes,
+                        max_bytes,
+                    } => {
+                        json!({"kind":"source-input","required_bytes":required_bytes,"max_bytes":max_bytes})
+                    }
                 };
                 let phase = json!({
                     "inventory_revision":inventory_revision,

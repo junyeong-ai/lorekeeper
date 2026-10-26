@@ -29,8 +29,8 @@ pub(super) struct ActiveQuestions {
 }
 
 impl ActiveQuestions {
-    pub fn from_request(request: &Value) -> miette::Result<Self> {
-        let children = match request["kind"].as_str() {
+    pub fn children(request: &Value) -> miette::Result<Vec<WorkOutput>> {
+        Ok(match request["kind"].as_str() {
             Some("inspect") => Vec::new(),
             Some("reduce") => request["children"]
                 .as_array()
@@ -43,7 +43,11 @@ impl ActiveQuestions {
                 })
                 .collect::<miette::Result<Vec<_>>>()?,
             _ => return Err(miette::miette!("unknown evidence request kind")),
-        };
+        })
+    }
+
+    pub fn from_request(request: &Value) -> miette::Result<Self> {
+        let children = Self::children(request)?;
         let inherited = inherited_questions(&children.iter().collect::<Vec<_>>())?
             .into_values()
             .map(|(kind, question)| (kind, question.clone()))
@@ -68,6 +72,25 @@ impl ActiveQuestions {
             inherited,
             used_ids,
         })
+    }
+
+    pub fn has_inherited(&self) -> bool {
+        !self.inherited.is_empty()
+    }
+
+    pub fn retention_overhead(&self) -> miette::Result<usize> {
+        if !self.has_inherited() {
+            return Ok(0);
+        }
+        let source = self
+            .inherited
+            .iter()
+            .filter(|(kind, _)| *kind == QuestionKind::Source)
+            .count();
+        crate::commands::work::state::question_retention_overhead(
+            source,
+            self.inherited.len() - source,
+        )
     }
 
     pub fn request(&self, request: &Value) -> Value {

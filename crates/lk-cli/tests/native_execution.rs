@@ -1669,6 +1669,124 @@ fn native_audit_reductions_resolve_only_active_questions_on_both_hosts() {
 }
 
 #[test]
+fn native_audit_retains_over_cap_inherited_questions_on_both_hosts() {
+    let behavior = RECORD_BOUNDED_AUDIT.replace(
+        "    if native:\n        for key in ['work_id','node_id','input_revision']:",
+        r#"    if native:
+        if request['kind']=='inspect':
+            output['source_questions']=[{'question':'Which source establishes the effective scope? '*22, 'evidence':[request['input']['ranges'][0]['range']]}]
+        else:
+            assert request['question_retention']=='native-snapshot-v1'
+            row['active_questions']=len({q[0] for child in request['children'] for q in child['output'].get('source_questions',[])})
+        for key in ['work_id','node_id','input_revision']:"#,
+    );
+    assert_ne!(behavior, RECORD_BOUNDED_AUDIT);
+    for engine in ["codex", "claude-code"] {
+        let fixture = bounded_audit_fixture(engine, 64, &behavior);
+        let config = std::fs::read_to_string(&fixture.config)
+            .unwrap()
+            .replace("max_result_bytes: 1024", "max_result_bytes: 2048");
+        std::fs::write(&fixture.config, config).unwrap();
+        let (output, result) = fixture.run("knowledge");
+        assert!(
+            output.status.success(),
+            "{result}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(bounded_calls(&fixture).iter().any(|call| {
+            call["active_questions"]
+                .as_u64()
+                .is_some_and(|count| count >= 2)
+        }));
+        let directory = fixture.root().join("vault/.lorekeeper/work");
+        let mut packed = 0;
+        for work in std::fs::read_dir(directory).unwrap() {
+            let nodes = work.unwrap().path().join("nodes");
+            for node in std::fs::read_dir(nodes).unwrap() {
+                let raw = std::fs::read_to_string(node.unwrap().path()).unwrap();
+                let wire: serde_json::Value = serde_json::from_str(&raw).unwrap();
+                if wire["schema"] == "work-output-retained-questions-v1" {
+                    packed += 1;
+                    assert!(
+                        wire["retained_questions"]["source_questions"]
+                            .as_array()
+                            .unwrap()
+                            .len()
+                            >= 2
+                    );
+                    assert!(wire["output"]["source_questions"].is_null());
+                }
+            }
+        }
+        assert!(
+            packed > 0,
+            "{engine}: expected a self-contained retained-question record"
+        );
+        assert_eq!(
+            result["audit"][0]["assessed_path"],
+            "wiki/concepts/large.md"
+        );
+    }
+}
+
+#[test]
+fn inherited_context_capacity_defers_before_host_and_allows_independent_audit() {
+    let behavior = RECORD_BOUNDED_AUDIT.replace(
+        "    if native:\n        for key in ['work_id','node_id','input_revision']:",
+        r#"    if native:
+        if request['kind']=='inspect' and request['context']['subject'].get('path')=='wiki/concepts/large.md':
+            output['source_questions']=[{'question':'Which source establishes the effective scope? '*22, 'evidence':[request['input']['ranges'][0]['range']]}]
+        for key in ['work_id','node_id','input_revision']:"#,
+    ).replace("\"$TEST_EXECUTION_ROOT/native-request.txt\"", "\"$TEST_EXECUTION_ROOT/native-request-$$.txt\"")
+        .replace("(root/'native-request.txt')", "(root/('native-request-'+str(os.getpid())+'.txt'))");
+    assert_ne!(behavior, RECORD_BOUNDED_AUDIT);
+    for engine in ["codex", "claude-code"] {
+        let fixture = bounded_audit_fixture(engine, 64, &behavior);
+        let config = std::fs::read_to_string(&fixture.config)
+            .unwrap()
+            .replace("max_result_bytes: 1024", "max_result_bytes: 2048")
+            .replace("batch_size: 1", "batch_size: 2")
+            .replace("max_calls: 64}", "max_calls: 64, max_parallel: 2}");
+        std::fs::write(&fixture.config, config).unwrap();
+        let large = fixture.root().join("vault/wiki/concepts/large.md");
+        let text = std::fs::read_to_string(&large).unwrap()
+            + &"\nA complete source range retains its explicit unverified scope.\n".repeat(1600);
+        std::fs::write(large, text).unwrap();
+        write_audit_concept(&fixture, "second");
+        record_discovery(&fixture, "wiki/concepts/large.md");
+        record_discovery(&fixture, "wiki/concepts/second.md");
+        let (output, report) = fixture.run("knowledge");
+        assert!(!output.status.success(), "{report}");
+        assert_eq!(report["execution"]["work"]["max_parallel"], 2);
+        assert_eq!(
+            report["halted"],
+            false,
+            "{engine}: {report}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(report["semantic_calls"].as_u64().unwrap() < 64, "{report}");
+        assert_eq!(report["audit"].as_array().unwrap().len(), 1, "{report}");
+        assert_eq!(
+            report["audit"][0]["assessed_path"],
+            "wiki/concepts/second.md"
+        );
+        assert!(
+            report["stages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|stage| stage["name"] == "bounded work capacity"),
+            "{report}"
+        );
+        let calls = bounded_calls(&fixture).len();
+        let (_, repeat) = fixture.run("knowledge");
+        assert_eq!(repeat["semantic_calls"], 0, "{repeat}");
+        assert_eq!(repeat["halted"], false, "{repeat}");
+        assert_eq!(bounded_calls(&fixture).len(), calls);
+    }
+}
+
+#[test]
 fn oversized_audit_completes_through_fresh_bounded_workers_on_both_hosts() {
     for engine in ["claude-code", "codex"] {
         let fixture = bounded_audit_fixture(engine, 64, RECORD_BOUNDED_AUDIT);

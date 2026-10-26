@@ -1557,6 +1557,13 @@ mod native {
             for ((id, _), result) in demands.into_iter().zip(captured.turns) {
                 let (progress, requests) = match result {
                     Ok(captured) => captured,
+                    Err(error)
+                        if error
+                            .downcast_ref::<crate::commands::work::state::InputCapacity>()
+                            .is_some() =>
+                    {
+                        return None;
+                    }
                     Err(error) => return Some(self.failure("bounded work progress", error)),
                 };
                 if !progress.complete && requests.is_empty() {
@@ -1856,6 +1863,16 @@ mod native {
             metrics.preparation_duration_ms = Some(preparation_duration_ms);
             let (before, request) = match prepared {
                 Ok(status) => status,
+                Err(error)
+                    if error
+                        .downcast_ref::<crate::commands::work::state::InputCapacity>()
+                        .is_some() =>
+                {
+                    let reason = error.to_string();
+                    self.deferred("bounded work capacity", &reason);
+                    self.record_work_step(metrics);
+                    return ObservationStep::Deferred(reason);
+                }
                 Err(error) => {
                     self.record_work_step(metrics);
                     self.failure("bounded work progress", error);
@@ -2812,6 +2829,16 @@ mod native {
                 for ((id, _), result) in demands.into_iter().zip(captured.turns) {
                     let (progress, requests) = match result {
                         Ok(captured) => captured,
+                        Err(error)
+                            if error
+                                .downcast_ref::<crate::commands::work::state::InputCapacity>()
+                                .is_some() =>
+                        {
+                            self.deferred("bounded work capacity", error);
+                            self.queue_replan = true;
+                            self.queue_admitted.clear();
+                            return true;
+                        }
                         Err(error) => return self.failure("bounded work progress", error),
                     };
                     if progress.complete {

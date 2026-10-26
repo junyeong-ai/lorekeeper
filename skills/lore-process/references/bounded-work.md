@@ -47,9 +47,14 @@ Do not repeat inherited questions as new questions. Child `resolved_history` ent
 are `[id, active_question_key_or_null, reason, evidence]`. A key relates that history
 to a question still open in another child; history creates no active question and
 must not be returned as another resolution.
-Unknown or duplicate resolution keys refuse. The assembled result, including all
-retained questions and generated IDs, must fit the stored result limit independently
-of the reply allowance. Standalone record questions and resolutions retain their
+Unknown or duplicate resolution keys refuse. New semantic values, generated IDs and
+retained-position metadata must fit the result limit independently of the reply allowance.
+When necessary, Rust stores exactly unchanged inherited questions in a self-contained
+snapshot in the same node file, preserving their kinds, IDs, full text, evidence and order.
+That snapshot obeys the input bound; all reconstructed questions still participate in
+every complete parent and finalizer request. Input overflow defers that Work before a
+host call. No question is removed or resolved to make a result fit.
+Standalone record questions and resolutions retain their
 identity-bearing object formats. Native Rust validates the supplied
 range/text mapping: copy the assigned `range` for the corresponding inspected text;
 finer contained offsets are optional when established. `total_characters` describes the
@@ -61,9 +66,11 @@ unchanged action defers before another host call; independent queue and audit wo
 continue, while the overall job remains incomplete. Changed requests can be reconsidered.
 An explicit guarded `work record` can supply a corrected observation; never edit action,
 node or plan files to bypass guards. Malformed responses and corrupt receipts refuse.
-Saved plans, node observations and standalone record formats stay unchanged. A changed
-native response/instruction contract can reconsider a prior processing action; it never
-retags or adopts an invalid historical response.
+Existing plans, node observations and standalone record formats stay unchanged. New
+`work-output-retained-questions-v1` records require a compatible reader; older readers
+refuse them. Their logical revision still identifies the full reconstructed observation.
+A changed native response/instruction contract can reconsider a prior processing action;
+it never retags or adopts an invalid historical response.
 
 A valid decoded native evidence reply above its result allowance records an exact
 native capacity rejection, not an observation. The same request defers without another
@@ -232,8 +239,9 @@ Unknown source facts alone are not processing blockers. Both use `id`, `question
 question unchanged in its original collection, or explicitly resolve it with an
 inherited question's `id`, `reason`, `evidence`. Never relabel a blocker as a source
 question to enable publication.
-An inspection cannot resolve another part's concern. The output must fit the
-request's result-byte limit; all evidence references must lie within its assigned
+An inspection cannot resolve another part's concern. New output values and native metadata
+must fit the request's result-byte limit; exactly unchanged inherited questions can use
+the native snapshot described above. All evidence references must lie within assigned
 coverage. Return after the selected node is recorded; do not drain other tasks.
 
 ## Native section finalization
