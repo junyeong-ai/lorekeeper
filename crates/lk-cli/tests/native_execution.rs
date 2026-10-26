@@ -6408,6 +6408,136 @@ fn native_evidence_wave_records_siblings_and_preserves_valid_independent_replies
 }
 
 #[test]
+fn native_read_only_queue_wave_fills_mixed_roles_in_fair_prefix_order() {
+    for engine in ["codex", "claude-code"] {
+        for (with_synthesis, failed_role) in [
+            (false, None),
+            (true, None),
+            (false, Some("screening")),
+            (false, Some("evidence")),
+        ] {
+            let fixture = parallel_screening_fixture(engine, "good", 3);
+            let queue = fixture.root().join("vault/.lorekeeper/queue/fixture.jsonl");
+            let mut tasks = lk_queue::read_tasks_snapshot(&queue).unwrap().1.tasks;
+            let mut input = tasks[0].input.clone();
+            input.insert(
+                "target".into(),
+                serde_json::to_value(&tasks[0].target).unwrap(),
+            );
+            let mut request: lk_queue::ExtractConceptsRequest =
+                serde_json::from_value(serde_json::Value::Object(input)).unwrap();
+            request.text = "A transactional outbox retains exact source evidence.\n".repeat(3000);
+            request.target.vault_path = "wiki/documents/source-v.md".into();
+            let task = lk_queue::QueueLlmClient::new(queue.parent().unwrap().to_path_buf())
+                .build_task("ext", lk_queue::TaskKind::ExtractConcepts, request);
+            let target = fixture.root().join("vault").join(&task.target.vault_path);
+            let raw = format!(
+                "---\ntype: document\ntitle: Source V\nllm_inputs:\n  concepts: {}\n---\n## Content\n{}\n## Related Concepts\n",
+                task.cache_hash,
+                task.input["text"].as_str().unwrap()
+            );
+            std::fs::write(&target, &raw).unwrap();
+            tasks.push(task.clone());
+            lk_queue::write_tasks_atomic(&queue, &tasks).unwrap();
+            let file = fixture.root().join("third-discovery.json");
+            std::fs::write(&file,serde_json::to_vec(&serde_json::json!({"target_revision":lk_core::concept::file_revision(&raw),"queries":[{"query":"transactional outbox","phrase":true,"spacing":false}]})).unwrap()).unwrap();
+            execution_json(
+                &fixture,
+                &[
+                    "work",
+                    "discover",
+                    "--task-id",
+                    &task.task_id,
+                    "--file",
+                    file.to_str().unwrap(),
+                ],
+            );
+            let config = std::fs::read_to_string(&fixture.config)
+                .unwrap()
+                .replace("max_parallel: 2", "max_parallel: 3");
+            std::fs::write(&fixture.config, config).unwrap();
+            let count = if with_synthesis { 4 } else { 3 };
+            if with_synthesis {
+                write_synthesis_pair(&fixture, "mixed-synthesis", None, 3000);
+                execution_json(&fixture, &["graph", "--json", "backlinks-sync"]);
+                let config = std::fs::read_to_string(&fixture.config)
+                    .unwrap()
+                    .replace("max_calls: 3", "max_calls: 4")
+                    .replace("max_parallel: 3", "max_parallel: 4");
+                std::fs::write(&fixture.config, config).unwrap();
+            }
+            std::fs::write(fixture.root().join("mixed-expected"), count.to_string()).unwrap();
+            std::fs::write(fixture.root().join("mixed-fail"), failed_role.unwrap_or("")).unwrap();
+            let behavior = r#"
+export TEST_READ_ONLY_INPUT="$TEST_EXECUTION_ROOT/read-only-request-$$"
+/bin/cat > "$TEST_READ_ONLY_INPUT"
+exec python3 - "$@" <<'MIXED'
+import json,os,sys,time
+from pathlib import Path
+root=Path(os.environ['TEST_EXECUTION_ROOT'])
+request=json.loads(Path(os.environ['TEST_READ_ONLY_INPUT']).read_text().split('\nNative request:\n',1)[1])
+screen='candidates' in request
+identity=request['selection_id'] if screen else request['work_id']
+(root/('mixed-'+identity+'.json')).write_text(json.dumps(request))
+deadline=time.monotonic()+10
+while len(list(root.glob('mixed-*.json')))<int((root/'mixed-expected').read_text()):
+    if time.monotonic()>deadline: raise SystemExit('mixed read-only peers did not overlap')
+    time.sleep(.01)
+failed=(root/'mixed-fail').read_text()
+if failed==('screening' if screen else 'evidence'):
+    peers=[json.loads(path.read_text()) for path in root.glob('mixed-*.json')]
+    identities=sorted(peer['selection_id'] for peer in peers if 'candidates' in peer)
+    if not screen or identity==identities[0]: raise SystemExit(51)
+if screen:
+    output={'decisions':[{'candidate_ref':card['candidate_ref'],'decision':'not-selected','reason':'Card-scoped exclusion.'} for card in request['candidates']]}
+else:
+    output={'status':'complete','observation':{'summary':'The assigned source retains exact observations.','findings':[],'source_questions':[],'unresolved':[],'resolutions':[]},'action':None}
+if '--safe-mode' in sys.argv: output={'type':'result','subtype':'success','is_error':False,'structured_output':output}
+print(json.dumps(output))
+MIXED
+"#;
+            let agent = fixture.root().join("agent executable");
+            let script = std::fs::read_to_string(&agent).unwrap();
+            std::fs::write(agent, script.replace(PARALLEL_SCREENING, behavior)).unwrap();
+            let (_, report) = fixture.run("process");
+            assert_eq!(report["semantic_calls"], count, "{report}");
+            assert_eq!(report["halted"], failed_role.is_some(), "{report}");
+            let steps = report["work_steps"].as_array().unwrap();
+            assert_eq!(
+                steps
+                    .iter()
+                    .filter(|step| step["role"] == "screening" && step["outcome"] == "recorded")
+                    .count(),
+                if failed_role == Some("screening") {
+                    1
+                } else {
+                    2
+                },
+                "{report}"
+            );
+            assert_eq!(
+                steps
+                    .iter()
+                    .filter(|step| step["role"] == "evidence" && step["outcome"] == "recorded")
+                    .count(),
+                if failed_role == Some("evidence") {
+                    0
+                } else if with_synthesis {
+                    2
+                } else {
+                    1
+                },
+                "{report}"
+            );
+            assert_eq!(
+                screening_settlement(&fixture)["data"]["pending_mutation"],
+                false
+            );
+        }
+    }
+}
+
+#[test]
 fn native_screening_wave_overlaps_distinct_tasks_and_shares_fresh_capture_on_both_hosts() {
     for engine in ["codex", "claude-code"] {
         let fixture = parallel_screening_fixture(engine, "good", 2);

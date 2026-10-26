@@ -74,7 +74,7 @@ mod native {
         Reduce,
     }
 
-    #[derive(Serialize)]
+    #[derive(Clone, Copy, Serialize)]
     #[serde(rename_all = "kebab-case")]
     enum WorkOutcome {
         Recorded,
@@ -204,6 +204,40 @@ mod native {
         metric_index: usize,
     }
 
+    enum QueueReadTurn {
+        Evidence(ObservationTurn),
+        Screening(ScreeningAttempt),
+    }
+
+    impl QueueReadTurn {
+        fn role(&self) -> WorkRole {
+            match self {
+                Self::Evidence(_) => WorkRole::Evidence,
+                Self::Screening(_) => WorkRole::Screening,
+            }
+        }
+
+        fn request(&self) -> &serde_json::Value {
+            match self {
+                Self::Evidence(turn) => &turn.request,
+                Self::Screening(turn) => &turn.request,
+            }
+        }
+
+        fn metrics_mut(&mut self) -> &mut WorkStepMetrics {
+            match self {
+                Self::Evidence(turn) => &mut turn.metrics,
+                Self::Screening(turn) => &mut turn.metrics,
+            }
+        }
+        fn into_metrics(self) -> WorkStepMetrics {
+            match self {
+                Self::Evidence(turn) => turn.metrics,
+                Self::Screening(turn) => turn.metrics,
+            }
+        }
+    }
+
     enum WorkStep {
         Pending,
         Staged,
@@ -221,6 +255,10 @@ mod native {
             task: lk_queue::QueueTask,
         },
         Finalization {
+            id: String,
+            task: lk_queue::QueueTask,
+        },
+        RootFinalization {
             id: String,
             task: lk_queue::QueueTask,
         },
@@ -243,9 +281,18 @@ mod native {
     }
 
     impl QueueDispatch {
+        fn is_read_only(&self) -> bool {
+            matches!(
+                self,
+                Self::Partitioned { .. } | Self::Source { .. } | Self::Screening { .. }
+            )
+        }
+
         fn binding(&self, target: &str) -> Option<scheduler::TurnBinding> {
             let identity = match self {
-                Self::Partitioned { id, .. } | Self::Source { id } => format!("work:{id}"),
+                Self::Partitioned { id, .. }
+                | Self::Source { id }
+                | Self::RootFinalization { id, .. } => format!("work:{id}"),
                 Self::Finalization { id, .. } => format!("finalize:{id}"),
                 Self::Screening { selection_id, .. } => format!("screening:{selection_id}"),
                 Self::Discovery { .. } | Self::Section { .. } | Self::WholeInput { .. } => {
@@ -1323,12 +1370,11 @@ mod native {
             true
         }
 
-        async fn bounded_observation_wave(
+        async fn bounded_audit_wave(
             &mut self,
             selected: &str,
             jobs: &std::collections::BTreeMap<String, String>,
             keys: &std::collections::BTreeSet<String>,
-            stage: scheduler::Stage,
         ) -> Option<bool> {
             let budget = match self.config.execution.effective_work() {
                 Ok(budget) => budget,
@@ -1340,23 +1386,7 @@ mod native {
             if limit <= 1 || !jobs.contains_key(selected) {
                 return None;
             }
-            let continued = stage == scheduler::Stage::Queue
-                && self.queue_admitted.remaining_bindings().any(|binding| {
-                    binding.target == selected
-                        && binding.identity == format!("work:{}", jobs[selected])
-                });
-            let mut order = if continued {
-                self.queue_admitted
-                    .remaining_bindings()
-                    .filter(|binding| {
-                        jobs.get(&binding.target)
-                            .is_some_and(|id| binding.identity == format!("work:{id}"))
-                    })
-                    .map(|binding| binding.target.clone())
-                    .collect::<Vec<_>>()
-            } else {
-                keys.iter().cloned().collect::<Vec<_>>()
-            };
+            let mut order = keys.iter().cloned().collect::<Vec<_>>();
             let first = order
                 .iter()
                 .position(|target| target == selected)
@@ -1366,31 +1396,12 @@ mod native {
             let mut request_counts = std::collections::BTreeMap::<String, usize>::new();
             let mut planned_targets = Vec::new();
             let mut index = 0;
-            let mut skipped = 0;
             while planned_targets.len() < limit {
                 let target = &order[index % order.len()];
                 index += 1;
                 let Some(id) = jobs.get(target) else {
                     break;
                 };
-                let allowance = if stage != scheduler::Stage::Queue {
-                    usize::MAX
-                } else if continued {
-                    self.queue_admitted.remaining(&scheduler::TurnBinding {
-                        target: target.clone(),
-                        identity: format!("work:{id}"),
-                    })
-                } else {
-                    budget.max_consecutive_calls
-                };
-                if request_counts.get(id).copied().unwrap_or(0) >= allowance {
-                    skipped += 1;
-                    if skipped == order.len() {
-                        break;
-                    }
-                    continue;
-                }
-                skipped = 0;
                 *request_counts.entry(id.clone()).or_default() += 1;
                 planned_targets.push(target.clone());
             }
@@ -1524,11 +1535,7 @@ mod native {
                 requests.push(request);
                 directories.push(directory);
             }
-            let reservations = if stage == scheduler::Stage::Queue {
-                reserved_targets.as_slice()
-            } else {
-                &reserved_targets[1..]
-            };
+            let reservations = &reserved_targets[1..];
             {
                 let Some((session, waited)) =
                     self.mutation_session("bounded work scheduling").await
@@ -1536,13 +1543,6 @@ mod native {
                     self.record_uninvoked_observations(turns);
                     return Some(false);
                 };
-                if waited && stage == scheduler::Stage::Queue {
-                    self.queue_admitted.clear();
-                    self.queue_replan = true;
-                    self.record("queue input refresh", StageState::Skipped, Some("writer access became available; preparing current inputs before invocation".into()));
-                    self.record_uninvoked_observations(turns);
-                    return Some(true);
-                }
                 if waited {
                     for turn in &turns {
                         if let Err(error) = crate::commands::work::validate_inspection_request(
@@ -1558,42 +1558,12 @@ mod native {
                         }
                     }
                 }
-                if stage == scheduler::Stage::Queue {
-                    let bindings = reserved_targets
-                        .iter()
-                        .zip(&turns)
-                        .map(|(target, turn)| scheduler::TurnBinding {
-                            target: target.clone(),
-                            identity: format!("work:{}", turn.work_id),
-                        })
-                        .collect::<Vec<_>>();
-                    if !self.queue_admitted.can_continue(&bindings) {
-                        let mut seen = std::collections::BTreeSet::new();
-                        let admitted = bindings
-                            .iter()
-                            .filter(|binding| seen.insert(binding.target.clone()))
-                            .cloned()
-                            .collect::<Vec<_>>();
-                        let targets = admitted
-                            .iter()
-                            .map(|binding| binding.target.clone())
-                            .collect::<Vec<_>>();
-                        if let Err(error) =
-                            scheduler::reserve_in_session(&session, stage, keys, &targets)
-                        {
-                            return Some(self.failure("bounded work scheduling", error));
-                        }
-                        self.queue_admitted.clear();
-                        if let Err(error) = self.queue_admitted.admit(&admitted) {
-                            return Some(self.failure("bounded work scheduling", error));
-                        }
-                    }
-                    if let Err(error) = self.queue_admitted.charge(&bindings) {
-                        return Some(self.failure("bounded work scheduling", error));
-                    }
-                } else if let Err(error) =
-                    scheduler::reserve_in_session(&session, stage, keys, reservations)
-                {
+                if let Err(error) = scheduler::reserve_in_session(
+                    &session,
+                    scheduler::Stage::Audit,
+                    keys,
+                    reservations,
+                ) {
                     return Some(self.failure("bounded work scheduling", error));
                 }
             }
@@ -1603,6 +1573,26 @@ mod native {
             let cancelled = attempts
                 .iter()
                 .any(|attempt| attempt.result.as_ref().is_ok_and(|child| child.cancelled));
+            Some(
+                self.settle_observation_attempts(
+                    turns,
+                    attempts,
+                    engines,
+                    budget.max_result_bytes,
+                    cancelled,
+                )
+                .await,
+            )
+        }
+
+        async fn settle_observation_attempts(
+            &mut self,
+            turns: Vec<ObservationTurn>,
+            attempts: Vec<execution::ChildAttempt>,
+            engines: Vec<lk_core::execution::AgentEngine>,
+            result_limit: usize,
+            cancelled: bool,
+        ) -> bool {
             let current = self.configuration_is_current();
             if cancelled {
                 self.record(
@@ -1656,7 +1646,7 @@ mod native {
                     ObservationReply {
                         engine,
                         bytes: child.stdout,
-                        limit: budget.max_result_bytes,
+                        limit: result_limit,
                     },
                     &mut turn.metrics,
                 ) else {
@@ -1699,7 +1689,7 @@ mod native {
                     }
                 }
             }
-            Some(accepted)
+            accepted
         }
 
         fn record_uninvoked_observations(&mut self, turns: Vec<ObservationTurn>) {
@@ -2428,7 +2418,120 @@ mod native {
             result
         }
 
-        async fn screening_wave(
+        fn prepare_queue_screenings(
+            &mut self,
+            targets: &[String],
+            jobs: &mut std::collections::BTreeMap<String, QueueDispatch>,
+        ) -> miette::Result<Option<Vec<ScreeningAttempt>>> {
+            if targets.is_empty() {
+                return Ok(Some(Vec::new()));
+            }
+            let task_ids = targets
+                .iter()
+                .map(|target| match &jobs[target] {
+                    QueueDispatch::Screening { task, .. } => task.task_id.as_str(),
+                    _ => unreachable!("selected screening target"),
+                })
+                .collect::<Vec<_>>();
+            let reuse = targets.iter().all(|target| {
+                matches!(&jobs[target],
+                QueueDispatch::Screening {prepared:Some(_), prepared_at_call, ..}
+                    if *prepared_at_call==self.result.semantic_calls)
+            });
+            let started = Instant::now();
+            let prepared = if reuse {
+                targets
+                    .iter()
+                    .map(
+                        |target| match jobs.get_mut(target).expect("selected target") {
+                            QueueDispatch::Screening { prepared, .. } => {
+                                *prepared.take().expect("prepared screening")
+                            }
+                            _ => unreachable!(),
+                        },
+                    )
+                    .collect::<Vec<_>>()
+            } else {
+                let captured = crate::commands::work::prepare_screenings(
+                    &self.root,
+                    &self.config,
+                    &self.config_revision,
+                    &task_ids,
+                    self.supervisor.read_control(),
+                )?;
+                self.result
+                    .work_telemetry
+                    .screening_preparation_io
+                    .accumulate(captured.discovery_io);
+                captured.turns
+            };
+            let duration_ms = started.elapsed().as_millis() as u64;
+            let mut turns = Vec::new();
+            for (index, (target, before)) in targets.iter().zip(prepared).enumerate() {
+                let expected = jobs[target].binding(target).expect("screening binding");
+                if expected.identity != format!("screening:{}", before.selection_id)
+                    || before.complete
+                {
+                    self.queue_replan = true;
+                    return Ok(None);
+                }
+                if let Some(reason) = before.blocked_reason {
+                    self.queue_replan = true;
+                    self.record("candidate screening", StageState::Failed, Some(reason));
+                    return Ok(None);
+                }
+                let request = before.request.ok_or_else(|| {
+                    miette::miette!(
+                        "{} deferred and {} unknown candidate decisions remain; work retained",
+                        before.deferred,
+                        before.unknown
+                    )
+                })?;
+                let task_id = match &jobs[target] {
+                    QueueDispatch::Screening { task, .. } => task.task_id.clone(),
+                    _ => unreachable!(),
+                };
+                let mut metrics = WorkStepMetrics::new(WorkRole::Screening);
+                metrics.selection_id = Some(before.selection_id);
+                metrics.batch_id = request["batch_id"].as_str().map(str::to_owned);
+                metrics.preparation_from_queue_plan = reuse;
+                metrics.preparation_duration_ms = (index == 0 && !reuse).then_some(duration_ms);
+                metrics.request_json_bytes = Some(
+                    serde_json::to_vec(&execution::observation::screening_request(&request)?)
+                        .expect("native request serializes")
+                        .len(),
+                );
+                let contract_revision =
+                    execution::observation::screening_contract_revision(&request)?;
+                turns.push(ScreeningAttempt {
+                    task_id,
+                    completed_batches: before.completed_batches,
+                    batches: before.batches,
+                    request,
+                    contract_revision,
+                    metrics,
+                });
+            }
+            Ok(Some(turns))
+        }
+
+        fn record_uninvoked_queue_reads(
+            &mut self,
+            turns: Vec<(String, QueueReadTurn)>,
+            outcome: WorkOutcome,
+        ) {
+            for (_, turn) in turns {
+                let mut metrics = turn.into_metrics();
+                metrics.outcome = if self.result.cancelled {
+                    WorkOutcome::Cancelled
+                } else {
+                    outcome
+                };
+                self.record_work_step(metrics);
+            }
+        }
+
+        async fn queue_read_wave(
             &mut self,
             selected: &str,
             jobs: &mut std::collections::BTreeMap<String, QueueDispatch>,
@@ -2441,6 +2544,9 @@ mod native {
             let limit = budget
                 .max_parallel
                 .min(budget.max_calls.saturating_sub(self.result.semantic_calls));
+            if limit == 0 {
+                return self.call_budget_available();
+            }
             let continued = jobs[selected].binding(selected).is_some_and(|binding| {
                 self.queue_admitted
                     .can_continue(std::slice::from_ref(&binding))
@@ -2453,208 +2559,365 @@ mod native {
             } else {
                 match scheduler::order(&self.root, scheduler::Stage::Queue, keys) {
                     Ok(order) => order,
-                    Err(error) => return self.failure("candidate screening scheduling", error),
+                    Err(error) => return self.failure("queue scheduling", error),
                 }
             };
             let first = order
                 .iter()
                 .position(|target| target == selected)
-                .expect("selected screening target");
+                .expect("selected queue target");
             order.rotate_left(first);
             let targets = order
-                .into_iter()
+                .iter()
                 .take(limit)
                 .take_while(|target| {
-                    matches!(jobs.get(target), Some(QueueDispatch::Screening { .. }))
-                })
-                .collect::<Vec<_>>();
-            let task_ids = targets
-                .iter()
-                .map(|target| match &jobs[target] {
-                    QueueDispatch::Screening { task, .. } => task.task_id.as_str(),
-                    _ => unreachable!("screening target"),
-                })
-                .collect::<Vec<_>>();
-            let reuse = targets.iter().all(|target| {
-                matches!(&jobs[target],
-                QueueDispatch::Screening { prepared: Some(_), prepared_at_call, .. }
-                    if *prepared_at_call == self.result.semantic_calls)
-            });
-            let started_at = Instant::now();
-            let prepared = if reuse {
-                Ok(targets
-                    .iter()
-                    .map(
-                        |target| match jobs.get_mut(target).expect("screening target") {
-                            QueueDispatch::Screening { prepared, .. } => {
-                                *prepared.take().expect("prepared screening")
-                            }
-                            _ => unreachable!("screening target"),
-                        },
+                    matches!(
+                        jobs.get(*target),
+                        Some(
+                            QueueDispatch::Screening { .. }
+                                | QueueDispatch::Partitioned { .. }
+                                | QueueDispatch::Source { .. }
+                        )
                     )
-                    .collect::<Vec<_>>())
-            } else {
-                crate::commands::work::prepare_screenings(
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            let mut planned = targets.clone();
+            let mut demands = std::collections::BTreeMap::<String, usize>::new();
+            for target in &targets {
+                if let QueueDispatch::Partitioned { id, .. } | QueueDispatch::Source { id } =
+                    &jobs[target]
+                {
+                    *demands.entry(id.clone()).or_default() += 1;
+                }
+            }
+            if targets.len() == order.len() {
+                while planned.len() < limit {
+                    let before = planned.len();
+                    for target in &targets {
+                        if planned.len() == limit {
+                            break;
+                        }
+                        let (QueueDispatch::Partitioned { id, .. } | QueueDispatch::Source { id }) =
+                            &jobs[target]
+                        else {
+                            continue;
+                        };
+                        let binding = jobs[target].binding(target).expect("work binding");
+                        let allowance = if continued {
+                            self.queue_admitted.remaining(&binding)
+                        } else {
+                            budget.max_consecutive_calls
+                        };
+                        let count = demands.get_mut(id).expect("selected work demand");
+                        if *count < allowance {
+                            *count += 1;
+                            planned.push(target.clone());
+                        }
+                    }
+                    if planned.len() == before {
+                        break;
+                    }
+                }
+            }
+            let screen_targets = targets
+                .iter()
+                .filter(|target| matches!(jobs[*target], QueueDispatch::Screening { .. }))
+                .cloned()
+                .collect::<Vec<_>>();
+            let screenings = match self.prepare_queue_screenings(&screen_targets, jobs) {
+                Ok(Some(turns)) => turns,
+                Ok(None) => {
+                    self.queue_admitted.clear();
+                    return true;
+                }
+                Err(error) => return self.failure("candidate screening", error),
+            };
+            let mut screening_turns = screen_targets
+                .into_iter()
+                .zip(screenings)
+                .collect::<std::collections::BTreeMap<_, _>>();
+            let demands = demands.into_iter().collect::<Vec<_>>();
+            let mut prepared = std::collections::BTreeMap::new();
+            let mut preparation_duration_ms = None;
+            if !demands.is_empty() {
+                let captured = match crate::commands::work::prepare_inspections_batch(
                     &self.root,
                     &self.config,
                     &self.config_revision,
-                    &task_ids,
+                    &demands,
                     self.supervisor.read_control(),
-                )
-                .map(|prepared| {
-                    self.result
-                        .work_telemetry
-                        .screening_preparation_io
-                        .accumulate(prepared.discovery_io);
-                    prepared.turns
-                })
-            };
-            let preparation_duration_ms = started_at.elapsed().as_millis() as u64;
-            let prepared = match prepared {
-                Ok(prepared) => prepared,
-                Err(error) => return self.failure("candidate screening", error),
-            };
-            let mut turns = Vec::new();
-            for (index, (target, before)) in targets.iter().zip(prepared).enumerate() {
-                let expected = jobs[target].binding(target).expect("screening binding");
-                if expected.identity != format!("screening:{}", before.selection_id)
-                    || before.complete
-                {
-                    self.queue_admitted.clear();
-                    self.queue_replan = true;
-                    return true;
-                }
-                if let Some(reason) = before.blocked_reason {
-                    self.queue_admitted.clear();
-                    self.queue_replan = true;
-                    self.record("candidate screening", StageState::Failed, Some(reason));
-                    return true;
-                }
-                let Some(request) = before.request else {
-                    return self.failure(
-                        "candidate screening",
-                        format!(
-                            "{} deferred and {} unknown candidate decisions remain; work retained",
-                            before.deferred, before.unknown
-                        ),
+                ) {
+                    Ok(captured) => captured,
+                    Err(error) => return self.failure("bounded work progress", error),
+                };
+                self.result
+                    .work_telemetry
+                    .evidence_preparation_io
+                    .accumulate(captured.discovery_io);
+                self.result.work_telemetry.evidence_preparation_duration_ms += captured.duration_ms;
+                preparation_duration_ms = Some(captured.duration_ms);
+                for ((id, _), result) in demands.into_iter().zip(captured.turns) {
+                    let (progress, requests) = match result {
+                        Ok(captured) => captured,
+                        Err(error) => return self.failure("bounded work progress", error),
+                    };
+                    if progress.complete {
+                        let completed = jobs
+                            .iter()
+                            .filter_map(|(target, job)| match job {
+                                QueueDispatch::Partitioned { id: current, task }
+                                    if current == &id =>
+                                {
+                                    Some((target.clone(), task.clone()))
+                                }
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>();
+                        if completed.is_empty() {
+                            let mut metrics = WorkStepMetrics::new(WorkRole::Evidence);
+                            metrics.work_id = Some(id);
+                            metrics.preparation_duration_ms = preparation_duration_ms;
+                            metrics.outcome = WorkOutcome::AlreadyComplete;
+                            self.record_work_step(metrics);
+                            self.queue_replan = true;
+                            self.queue_admitted.clear();
+                        } else {
+                            for (target, task) in completed {
+                                jobs.insert(
+                                    target,
+                                    QueueDispatch::RootFinalization {
+                                        id: id.clone(),
+                                        task,
+                                    },
+                                );
+                            }
+                        }
+                        return true;
+                    }
+                    if requests.is_empty() {
+                        return self
+                            .failure("bounded work progress", "incomplete work has no ready node");
+                    }
+                    prepared.insert(
+                        id,
+                        PreparedObservations {
+                            completed: progress.completed,
+                            requests: requests.into(),
+                        },
                     );
+                }
+            }
+            let mut turns = Vec::new();
+            for target in planned {
+                let turn = match &jobs[&target] {
+                    QueueDispatch::Screening { .. } => QueueReadTurn::Screening(
+                        screening_turns
+                            .remove(&target)
+                            .expect("one screening per target"),
+                    ),
+                    QueueDispatch::Partitioned { id, .. } | QueueDispatch::Source { id } => {
+                        let work = prepared.get_mut(id).expect("prepared work");
+                        let Some(request) = work.requests.pop_front() else {
+                            continue;
+                        };
+                        match crate::commands::work::inspection_action(&self.root, id, &request) {
+                            Ok(Some(reason)) => {
+                                self.inspection_deferred.insert(id.clone(), reason.clone());
+                                self.deferred("bounded work action", reason);
+                                self.queue_replan = true;
+                                self.queue_admitted.clear();
+                                self.record_uninvoked_queue_reads(turns, WorkOutcome::Rejected);
+                                return true;
+                            }
+                            Ok(None) => {}
+                            Err(error) => return self.failure("bounded work action", error),
+                        }
+                        let node_id = request["node_id"]
+                            .as_str()
+                            .expect("prepared node identity")
+                            .to_owned();
+                        let mut metrics = WorkStepMetrics::new(WorkRole::Evidence);
+                        metrics.work_id = Some(id.clone());
+                        metrics.node_id = Some(node_id.clone());
+                        metrics.node_kind = Some(match request["kind"].as_str() {
+                            Some("inspect") => NodeKind::Inspect,
+                            Some("reduce") => NodeKind::Reduce,
+                            _ => unreachable!("prepared node kind"),
+                        });
+                        metrics.preparation_duration_ms = preparation_duration_ms.take();
+                        QueueReadTurn::Evidence(ObservationTurn {
+                            work_id: id.clone(),
+                            node_id,
+                            completed: work.completed,
+                            request,
+                            metrics,
+                        })
+                    }
+                    _ => unreachable!("read-only queue prefix"),
                 };
-                let task_id = match &jobs[target] {
-                    QueueDispatch::Screening { task, .. } => task.task_id.clone(),
-                    _ => unreachable!("screening target"),
-                };
-                let mut metrics = WorkStepMetrics::new(WorkRole::Screening);
-                metrics.selection_id = Some(before.selection_id.clone());
-                metrics.batch_id = request["batch_id"].as_str().map(str::to_owned);
-                metrics.preparation_from_queue_plan = reuse;
-                metrics.preparation_duration_ms =
-                    (index == 0 && !reuse).then_some(preparation_duration_ms);
-                metrics.request_json_bytes =
-                    match execution::observation::screening_request(&request) {
-                        Ok(native) => Some(
-                            serde_json::to_vec(&native)
-                                .expect("native request serializes")
-                                .len(),
-                        ),
-                        Err(error) => return self.failure("candidate screening", error),
-                    };
-                let contract_revision =
-                    match execution::observation::screening_contract_revision(&request) {
-                        Ok(revision) => revision,
-                        Err(error) => return self.failure("candidate screening", error),
-                    };
-                turns.push(ScreeningAttempt {
-                    contract_revision,
-                    task_id,
-                    completed_batches: before.completed_batches,
-                    batches: before.batches,
-                    request,
-                    metrics,
-                });
+                turns.push((target, turn));
             }
             if self.result.halted || self.result.cancelled || !self.configuration_is_current() {
-                self.record_uninvoked_screenings(turns, false);
+                self.record_uninvoked_queue_reads(turns, WorkOutcome::Rejected);
                 return false;
             }
             if self.config.llm.provider == lk_core::config::LlmProvider::Noop {
-                self.record_uninvoked_screenings(turns, true);
+                self.record_uninvoked_queue_reads(turns, WorkOutcome::Failed);
                 return self.failure(
-                    "candidate screening",
+                    "bounded queue receipt",
                     "semantic execution is disabled by llm.provider",
                 );
             }
             if let Err(error) = self.prepare_agent().await {
-                self.record_uninvoked_screenings(turns, true);
+                self.record_uninvoked_queue_reads(turns, WorkOutcome::Failed);
                 return if self.result.cancelled {
                     self.record(
-                        "candidate screening",
+                        "bounded queue receipt",
                         StageState::Cancelled,
                         Some(error.to_string()),
                     )
                 } else {
-                    self.failure("candidate screening", error)
+                    self.failure("bounded queue receipt", error)
                 };
             }
             let timeout = self.selected.as_ref().expect("prepared agent").timeout();
             let mut requests = Vec::new();
             let mut directories = Vec::new();
             let mut engines = Vec::new();
-            for turn in &turns {
+            for (_, turn) in &mut turns {
                 let (invocation, limit) =
-                    match self.observation_invocation(&turn.request, WorkRole::Screening, budget) {
+                    match self.observation_invocation(turn.request(), turn.role(), budget) {
                         Ok(invocation) => invocation,
                         Err(error) => {
-                            self.record_uninvoked_screenings(turns, true);
-                            return self.failure("candidate screening", error);
+                            self.record_uninvoked_queue_reads(turns, WorkOutcome::Failed);
+                            return self.failure("bounded queue receipt", error);
                         }
                     };
+                turn.metrics_mut().request_json_bytes = Some(invocation.request_json_bytes);
                 engines.push(invocation.engine);
                 let (request, directory) = invocation.into_request(timeout, limit);
                 requests.push(request);
                 directories.push(directory);
             }
             {
-                let Some((session, waited)) = self
-                    .mutation_session("candidate screening scheduling")
-                    .await
+                let Some((session, waited)) = self.mutation_session("queue scheduling").await
                 else {
+                    self.record_uninvoked_queue_reads(turns, WorkOutcome::Failed);
                     return false;
                 };
                 if waited {
                     self.queue_admitted.clear();
                     self.queue_replan = true;
-                    self.record("queue input refresh", StageState::Skipped, Some("writer access became available; preparing current inputs before invocation".into()));
-                    self.record_uninvoked_screenings(turns, false);
+                    self.record("queue input refresh",StageState::Skipped,Some("writer access became available; preparing current inputs before invocation".into()));
+                    self.record_uninvoked_queue_reads(turns, WorkOutcome::Rejected);
                     return true;
                 }
-                let bindings = targets
+                let bindings = turns
                     .iter()
-                    .map(|target| jobs[target].binding(target).expect("screening binding"))
+                    .map(|(target, _)| jobs[target].binding(target).expect("read-only binding"))
                     .collect::<Vec<_>>();
                 if !self.queue_admitted.can_continue(&bindings) {
+                    let mut seen = std::collections::BTreeSet::new();
+                    let admitted = bindings
+                        .iter()
+                        .filter(|binding| seen.insert(binding.target.clone()))
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    let targets = admitted
+                        .iter()
+                        .map(|binding| binding.target.clone())
+                        .collect::<Vec<_>>();
                     if let Err(error) = scheduler::reserve_in_session(
                         &session,
                         scheduler::Stage::Queue,
                         keys,
                         &targets,
                     ) {
-                        return self.failure("candidate screening scheduling", error);
+                        return self.failure("queue scheduling", error);
                     }
                     self.queue_admitted.clear();
-                    if let Err(error) = self.queue_admitted.admit(&bindings) {
-                        return self.failure("candidate screening scheduling", error);
+                    if let Err(error) = self.queue_admitted.admit(&admitted) {
+                        return self.failure("queue scheduling", error);
                     }
                 }
                 if let Err(error) = self.queue_admitted.charge(&bindings) {
-                    return self.failure("candidate screening scheduling", error);
+                    return self.failure("queue scheduling", error);
                 }
             }
+            eprintln!(
+                "{}",
+                serde_json::json!({
+                    "type":"lore.queue-read-wave",
+                    "request_count":requests.len(),
+                    "evidence_requests":turns.iter().filter(|(_,turn)|matches!(turn,QueueReadTurn::Evidence(_))).count(),
+                    "screening_requests":turns.iter().filter(|(_,turn)|matches!(turn,QueueReadTurn::Screening(_))).count(),
+                    "max_parallel":budget.max_parallel,
+                    "remaining_calls":budget.max_calls.saturating_sub(self.result.semantic_calls),
+                    "elapsed_job_ms":self.started_at.elapsed().as_millis(),
+                })
+            );
             self.result.semantic_calls += requests.len();
             let attempts = self.supervisor.run_requests(requests).await;
             drop(directories);
             let cancelled = attempts
                 .iter()
                 .any(|attempt| attempt.result.as_ref().is_ok_and(|child| child.cancelled));
+            let mut observations = Vec::new();
+            let mut observed = Vec::new();
+            let mut observation_engines = Vec::new();
+            let mut screenings = Vec::new();
+            let mut screened = Vec::new();
+            let mut screening_engines = Vec::new();
+            for (((_, turn), attempt), engine) in turns.into_iter().zip(attempts).zip(engines) {
+                match turn {
+                    QueueReadTurn::Evidence(turn) => {
+                        observations.push(turn);
+                        observed.push(attempt);
+                        observation_engines.push(engine);
+                    }
+                    QueueReadTurn::Screening(turn) => {
+                        screenings.push(turn);
+                        screened.push(attempt);
+                        screening_engines.push(engine);
+                    }
+                }
+            }
+            let screening_ok = if screenings.is_empty() {
+                true
+            } else {
+                self.settle_screening_attempts(
+                    screenings,
+                    screened,
+                    screening_engines,
+                    budget.max_result_bytes,
+                    cancelled,
+                )
+                .await
+            };
+            let observation_ok = if observations.is_empty() {
+                true
+            } else {
+                self.settle_observation_attempts(
+                    observations,
+                    observed,
+                    observation_engines,
+                    budget.max_result_bytes,
+                    cancelled,
+                )
+                .await
+            };
+            screening_ok && observation_ok
+        }
+
+        async fn settle_screening_attempts(
+            &mut self,
+            turns: Vec<ScreeningAttempt>,
+            attempts: Vec<execution::ChildAttempt>,
+            engines: Vec<lk_core::execution::AgentEngine>,
+            result_limit: usize,
+            cancelled: bool,
+        ) -> bool {
             let current = self.configuration_is_current();
             if cancelled {
                 self.record(
@@ -2690,7 +2953,7 @@ mod native {
                             match execution::observation::decode_response(
                                 engine,
                                 &child.stdout,
-                                budget.max_result_bytes,
+                                result_limit,
                             ) {
                                 Ok(output) => {
                                     step.result_json_bytes = Some(
@@ -2701,7 +2964,7 @@ mod native {
                                     match execution::observation::decode_screening(
                                         output,
                                         &request,
-                                        budget.max_result_bytes,
+                                        result_limit,
                                     ) {
                                         Ok(output) => Some(crate::commands::work::ScreeningResponse::Decisions(output)),
                                         Err(error) if error.downcast_ref::<crate::commands::work::ScreeningRejection>().is_some() => {
@@ -2843,17 +3106,6 @@ mod native {
             accepted
         }
 
-        fn record_uninvoked_screenings(&mut self, turns: Vec<ScreeningAttempt>, failed: bool) {
-            for mut turn in turns {
-                if self.result.cancelled {
-                    turn.metrics.outcome = WorkOutcome::Cancelled;
-                } else if failed {
-                    turn.metrics.outcome = WorkOutcome::Failed;
-                }
-                self.record_work_step(turn.metrics);
-            }
-        }
-
         async fn queue_dispatches(
             &mut self,
             blocked: &std::collections::BTreeMap<String, String>,
@@ -2951,10 +3203,10 @@ mod native {
                     targets[&order[next]].kind,
                     budget.extraction_context,
                 );
-                let limit = if batch {
+                let limit = if batch && jobs.is_empty() {
                     MAX_PREPARED_QUEUE_TARGETS
                 } else {
-                    independent_limit
+                    independent_limit.saturating_sub(jobs.len())
                 };
                 let count = order[next..]
                     .iter()
@@ -3100,7 +3352,10 @@ mod native {
                         }
                         crate::commands::work::TaskWork::RootFinalization { id } => {
                             flush(&mut batch, &mut jobs);
-                            jobs.insert(target.clone(), QueueDispatch::Partitioned { id, task });
+                            jobs.insert(
+                                target.clone(),
+                                QueueDispatch::RootFinalization { id, task },
+                            );
                         }
                         crate::commands::work::TaskWork::Partitioned { id } => {
                             flush(&mut batch, &mut jobs);
@@ -3141,7 +3396,10 @@ mod native {
                     }
                 }
                 flush(&mut batch, &mut jobs);
-                if !jobs.is_empty() {
+                if !jobs.is_empty()
+                    && (jobs.len() >= independent_limit
+                        || jobs.values().any(|job| !job.is_read_only()))
+                {
                     break;
                 }
             }
@@ -3254,14 +3512,6 @@ mod native {
                     }
                     return true;
                 }
-                let bounded_jobs =
-                    jobs.iter()
-                        .filter_map(|(target, job)| match job {
-                            QueueDispatch::Partitioned { id, .. }
-                            | QueueDispatch::Source { id } => Some((target.clone(), id.clone())),
-                            _ => None,
-                        })
-                        .collect();
                 loop {
                     if !self.call_budget_available() {
                         return false;
@@ -3291,33 +3541,18 @@ mod native {
                     if !jobs.contains_key(&selected) {
                         continue 'planning;
                     }
-                    if matches!(jobs[&selected], QueueDispatch::Screening { .. }) {
-                        if !self.screening_wave(&selected, &mut jobs, keys).await {
+                    if jobs[&selected].is_read_only() {
+                        if !self.queue_read_wave(&selected, &mut jobs, keys).await {
                             return false;
                         }
-                        if self.queue_replan {
-                            continue 'planning;
-                        }
-                        continue;
-                    }
-                    if let Some(completed) = self
-                        .bounded_observation_wave(
-                            &selected,
-                            &bounded_jobs,
-                            keys,
-                            scheduler::Stage::Queue,
-                        )
-                        .await
-                    {
-                        if !completed {
-                            return false;
-                        }
-                        if self.queue_replan {
-                            continue 'planning;
-                        }
-                        if bounded_jobs
-                            .values()
-                            .any(|id| self.inspection_deferred.contains_key(id))
+                        if self.queue_replan
+                            || jobs.values().any(|job| match job {
+                                QueueDispatch::Partitioned { id, .. }
+                                | QueueDispatch::Source { id } => {
+                                    self.inspection_deferred.contains_key(id)
+                                }
+                                _ => false,
+                            })
                         {
                             continue 'planning;
                         }
@@ -3408,7 +3643,7 @@ mod native {
                                 }
                             }
                         }
-                        QueueDispatch::Partitioned { id, .. } => {
+                        QueueDispatch::RootFinalization { id, .. } => {
                             match self.bounded_step(id, "lore-process").await {
                                 WorkStep::Pending => continue,
                                 WorkStep::Deferred(reason) => {
@@ -3421,30 +3656,11 @@ mod native {
                                 WorkStep::Staged => {}
                             }
                         }
-                        QueueDispatch::Source { id, .. } => {
-                            match self.bounded_observation_step(id).await {
-                                ObservationStep::Recorded => continue,
-                                ObservationStep::Complete {
-                                    root_node,
-                                    preparation_duration_ms,
-                                } => {
-                                    let mut metrics = WorkStepMetrics::new(WorkRole::Evidence);
-                                    metrics.work_id = Some(id.clone());
-                                    metrics.node_id = Some(root_node);
-                                    metrics.preparation_duration_ms = Some(preparation_duration_ms);
-                                    metrics.outcome = WorkOutcome::AlreadyComplete;
-                                    self.record_work_step(metrics);
-                                    continue 'planning;
-                                }
-                                ObservationStep::Deferred(reason) => {
-                                    blocked.insert(id.clone(), reason);
-                                    continue 'planning;
-                                }
-                                ObservationStep::Failed if self.queue_replan => continue 'planning,
-                                ObservationStep::Failed => return false,
-                            }
+                        QueueDispatch::Partitioned { .. }
+                        | QueueDispatch::Source { .. }
+                        | QueueDispatch::Screening { .. } => {
+                            unreachable!("read-only queue wave handled above")
                         }
-                        QueueDispatch::Screening { .. } => unreachable!("screening wave"),
                         QueueDispatch::WholeInput { tasks: _, inputs } => {
                             match self.selected_result_step(inputs).await {
                                 WorkStep::Staged => {}
@@ -3485,6 +3701,7 @@ mod native {
                     let tasks = match &jobs[&selected] {
                         QueueDispatch::WholeInput { tasks, .. } => tasks.as_slice(),
                         QueueDispatch::Partitioned { task, .. }
+                        | QueueDispatch::RootFinalization { task, .. }
                         | QueueDispatch::Finalization { task, .. }
                         | QueueDispatch::Section { task } => std::slice::from_ref(task),
                         QueueDispatch::Discovery { .. } => {
@@ -4121,9 +4338,7 @@ mod native {
                     };
                     drop(session);
                     let work = &jobs[&selected];
-                    if let Some(completed) = self
-                        .bounded_observation_wave(&selected, &jobs, &keys, scheduler::Stage::Audit)
-                        .await
+                    if let Some(completed) = self.bounded_audit_wave(&selected, &jobs, &keys).await
                     {
                         if !completed {
                             return;
