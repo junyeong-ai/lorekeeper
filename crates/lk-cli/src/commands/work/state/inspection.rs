@@ -25,6 +25,7 @@ impl miette::Diagnostic for OutputCapacity {}
 pub(super) struct InspectionActions {
     schema: String,
     work_id: String,
+    #[serde(deserialize_with = "crate::commands::work::receipt::unique_entries")]
     actions: BTreeMap<String, InspectionAction>,
 }
 
@@ -40,11 +41,7 @@ struct InspectionAction {
 
 impl InspectionActions {
     pub(super) fn decode(raw: &str, work: &Work) -> miette::Result<Self> {
-        let value: Value = serde_json::from_str(raw).map_err(fail)?;
-        if !value.is_object() {
-            return Err(fail("inspection action receipt must be a JSON object"));
-        }
-        let actions: Self = serde_json::from_value(value).map_err(fail)?;
+        let actions: Self = crate::commands::work::receipt::decode(raw).map_err(fail)?;
         if !matches!(
             actions.schema.as_str(),
             "inspection-actions-v1" | "inspection-actions-v2"
@@ -281,6 +278,30 @@ mod tests {
             .path()
             .join(work_path(&work.plan.id, "inspection-actions.json").unwrap());
         let original = std::fs::read_to_string(&path).unwrap();
+        let value: Value = serde_json::from_str(&original).unwrap();
+        let raw = serde_json::to_string(&value).unwrap();
+        let needle = "\"reason\":\"Explicit processing action.\"";
+        assert!(raw.contains(needle));
+        let node = requests[0]["node_id"].as_str().unwrap();
+        let duplicate_field = raw.replacen(needle, &format!("\"reason\":null,{needle}"), 1);
+        let duplicate_node = raw.replacen(
+            "\"actions\":{",
+            &format!(
+                "\"actions\":{{{}:{},",
+                serde_json::to_string(node).unwrap(),
+                value["actions"][node]
+            ),
+            1,
+        );
+        for corrupt in [duplicate_field, duplicate_node] {
+            std::fs::write(&path, &corrupt).unwrap();
+            assert!(
+                work.load_inspection_action(root.path(), &requests[0], "contract-1")
+                    .is_err()
+            );
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), corrupt);
+        }
+        std::fs::write(&path, &original).unwrap();
         for corrupt in [json!([]), json!({}), {
             let mut value: Value = serde_json::from_str(&original).unwrap();
             value["actions"] = json!({});

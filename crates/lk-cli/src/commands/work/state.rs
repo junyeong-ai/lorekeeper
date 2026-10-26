@@ -219,11 +219,7 @@ struct FinalizationAction {
 
 impl FinalizationAction {
     fn decode(raw: &str, work: &Work) -> miette::Result<Self> {
-        let value: Value = serde_json::from_str(raw).map_err(fail)?;
-        if !value.is_object() {
-            return Err(fail("finalization action receipt must be a JSON object"));
-        }
-        let action: Self = serde_json::from_value(value).map_err(fail)?;
+        let action: Self = crate::commands::work::receipt::decode(raw).map_err(fail)?;
         let root = work.nodes()?.last().expect("nonempty work tree").id.clone();
         if !matches!(
             action.schema.as_str(),
@@ -1859,6 +1855,18 @@ mod tests {
             .path()
             .join(work_path(&work.plan.id, "finalization-action.json").unwrap());
         let original = std::fs::read(&path).unwrap();
+        let raw =
+            serde_json::to_string(&serde_json::from_slice::<Value>(&original).unwrap()).unwrap();
+        let needle = "\"reason\":\"Record a scoped review first.\"";
+        assert!(raw.contains(needle));
+        let duplicate = raw.replacen(needle, &format!("\"reason\":null,{needle}"), 1);
+        std::fs::write(&path, &duplicate).unwrap();
+        assert!(
+            work.load_finalization_action(root.path(), &request)
+                .is_err()
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), duplicate);
+        std::fs::write(&path, &original).unwrap();
         for corrupt in [b"{}".as_slice(), b"[]".as_slice()] {
             std::fs::write(&path, corrupt).unwrap();
             assert!(

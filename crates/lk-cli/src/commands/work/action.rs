@@ -65,11 +65,7 @@ impl Store {
     }
 
     fn decode(&self, path: &Path, raw: &str) -> miette::Result<Action> {
-        let value: Value = serde_json::from_str(raw).into_diagnostic()?;
-        if !value.is_object() {
-            return Err(miette::miette!("generation action must be an object"));
-        }
-        let action: Action = serde_json::from_value(value).into_diagnostic()?;
+        let action: Action = super::receipt::decode(raw).into_diagnostic()?;
         let revision = |value: &str, length: usize| {
             value.len() == length
                 && value
@@ -127,5 +123,45 @@ impl Store {
             session.apply(plan).into_diagnostic()?;
         }
         Ok(removed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stored_generation_actions_require_unambiguous_objects() {
+        for store in [SECTION, GENERATION] {
+            let action = Action {
+                schema: store.schema.into(),
+                task_id: "task".into(),
+                cache_hash: "a".repeat(32),
+                context_revision: "b".repeat(64),
+                request_revision: "c".repeat(64),
+                reason: "An explicit review is required.".into(),
+            };
+            let path = store.path(&action.task_id, &action.cache_hash);
+            let raw = serde_json::to_string(&action).unwrap();
+            assert!(store.decode(&path, &raw).is_ok());
+            for (field, value) in [
+                ("schema", action.schema.as_str()),
+                ("request_revision", action.request_revision.as_str()),
+                ("reason", action.reason.as_str()),
+            ] {
+                let needle = format!("\"{field}\":{}", serde_json::to_string(value).unwrap());
+                let duplicate = raw.replacen(&needle, &format!("\"{field}\":null,{needle}"), 1);
+                assert!(store.decode(&path, &duplicate).is_err());
+            }
+            let array = serde_json::json!([
+                action.schema,
+                action.task_id,
+                action.cache_hash,
+                action.context_revision,
+                action.request_revision,
+                action.reason
+            ]);
+            assert!(store.decode(&path, &array.to_string()).is_err());
+        }
     }
 }

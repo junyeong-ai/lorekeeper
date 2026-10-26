@@ -94,6 +94,7 @@ impl miette::Diagnostic for ScreeningRejection {}
 struct Rejections {
     schema: String,
     selection_id: String,
+    #[serde(deserialize_with = "crate::commands::work::receipt::unique_entries")]
     batches: BTreeMap<String, Rejection>,
 }
 
@@ -111,6 +112,7 @@ struct Rejection {
 struct LegacyRejections {
     schema: String,
     selection_id: String,
+    #[serde(deserialize_with = "crate::commands::work::receipt::unique_entries")]
     batches: BTreeMap<String, LegacyRejection>,
 }
 
@@ -138,10 +140,15 @@ fn require_revision(revision: &str) -> miette::Result<()> {
 
 impl Rejections {
     fn decode(raw: &str, selection: &Selection) -> miette::Result<Self> {
-        let value: Value = serde_json::from_str(raw).into_diagnostic()?;
-        let receipt: Self = match value["schema"].as_str() {
-            Some("screening-rejections-v1") => {
-                let legacy: LegacyRejections = serde_json::from_value(value).into_diagnostic()?;
+        #[derive(Deserialize)]
+        struct Header {
+            schema: String,
+        }
+        let header: Header = crate::commands::work::receipt::decode(raw).into_diagnostic()?;
+        let receipt: Self = match header.schema.as_str() {
+            "screening-rejections-v1" => {
+                let legacy: LegacyRejections =
+                    crate::commands::work::receipt::decode(raw).into_diagnostic()?;
                 if legacy.schema != "screening-rejections-v1" {
                     return Err(fail("invalid legacy screening rejection schema"));
                 }
@@ -170,7 +177,9 @@ impl Rejections {
                         .collect(),
                 }
             }
-            Some("screening-rejections-v2") => serde_json::from_value(value).into_diagnostic()?,
+            "screening-rejections-v2" => {
+                crate::commands::work::receipt::decode(raw).into_diagnostic()?
+            }
             _ => return Err(fail("invalid screening rejection schema")),
         };
         if receipt.schema != "screening-rejections-v2"

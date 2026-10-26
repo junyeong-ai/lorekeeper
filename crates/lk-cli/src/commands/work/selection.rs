@@ -2221,6 +2221,111 @@ mod tests {
     }
 
     #[test]
+    fn rejection_receipts_refuse_duplicate_fields_and_batches_in_both_versions() {
+        let fixture = Fixture::new(2);
+        let selection = fixture.selection(8192, 8192);
+        fixture.create(&selection);
+        let request = selection.prepare(&fixture.root).unwrap().1.unwrap();
+        let contract = "c".repeat(64);
+        {
+            let session = MutationSession::acquire(&fixture.root).unwrap();
+            selection
+                .record_rejection(
+                    &session,
+                    &fixture.pages(),
+                    &request,
+                    &contract,
+                    ScreeningRejection::ReferenceCoverage {
+                        missing: 1,
+                        duplicate: 0,
+                        unknown: 1,
+                        response_revision: "d".repeat(64),
+                    },
+                )
+                .unwrap();
+        }
+        let path = fixture
+            .root
+            .join(selection.directory.join("rejections.json"));
+        let original: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let batch = request["batch_id"].as_str().unwrap();
+        for legacy in [false, true] {
+            let mut valid = original.clone();
+            if legacy {
+                valid["schema"] = json!("screening-rejections-v1");
+                valid["batches"][batch]["rejection"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("kind");
+            }
+            let raw = serde_json::to_string(&valid).unwrap();
+            std::fs::write(&path, &raw).unwrap();
+            assert!(
+                selection
+                    .rejection_reason(&fixture.root, &request, &contract)
+                    .unwrap()
+                    .is_some()
+            );
+            let entry = &valid["batches"][batch];
+            let mut fields = vec![
+                ("schema", valid["schema"].clone()),
+                ("selection_id", valid["selection_id"].clone()),
+                ("input_revision", entry["input_revision"].clone()),
+                ("request_revision", entry["request_revision"].clone()),
+                ("contract_revision", entry["contract_revision"].clone()),
+                ("missing", entry["rejection"]["missing"].clone()),
+                (
+                    "response_revision",
+                    entry["rejection"]["response_revision"].clone(),
+                ),
+            ];
+            if !legacy {
+                fields.push(("kind", entry["rejection"]["kind"].clone()));
+            }
+            for (field, value) in fields {
+                let key = serde_json::to_string(field).unwrap();
+                let encoded = serde_json::to_string(&value).unwrap();
+                let needle = format!("{key}:{encoded}");
+                assert!(raw.contains(&needle));
+                for conflicting in ["null".to_owned(), encoded.clone()] {
+                    let corrupt =
+                        raw.replacen(&needle, &format!("{key}:{conflicting},{needle}"), 1);
+                    std::fs::write(&path, &corrupt).unwrap();
+                    assert!(
+                        selection
+                            .rejection_reason(&fixture.root, &request, &contract)
+                            .is_err(),
+                        "legacy={legacy} field={field}"
+                    );
+                    let session = MutationSession::acquire(&fixture.root).unwrap();
+                    assert!(prune(&session, &BTreeSet::new()).is_err());
+                    assert_eq!(std::fs::read_to_string(&path).unwrap(), corrupt);
+                }
+            }
+            let key = serde_json::to_string(batch).unwrap();
+            let corrupt = raw.replacen(
+                "\"batches\":{",
+                &format!(
+                    "\"batches\":{{{key}:{},",
+                    serde_json::to_string(entry).unwrap()
+                ),
+                1,
+            );
+            std::fs::write(&path, &corrupt).unwrap();
+            assert!(
+                selection
+                    .rejection_reason(&fixture.root, &request, &contract)
+                    .is_err(),
+                "duplicate batch legacy={legacy}"
+            );
+            std::fs::write(&path, &raw).unwrap();
+            selection.ledger(&fixture.root).unwrap();
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), raw);
+        }
+    }
+
+    #[test]
     fn selection_retention_refuses_malformed_unowned_and_unknown_state_before_deletion() {
         for scenario in ["manifest", "receipt", "unowned", "unknown", "staged"] {
             let fixture = Fixture::new(1);

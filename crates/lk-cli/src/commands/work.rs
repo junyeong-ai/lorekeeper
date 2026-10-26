@@ -13,6 +13,7 @@ pub(super) mod generation;
 #[cfg(unix)]
 pub(super) mod native;
 mod publication;
+mod receipt;
 mod resources;
 #[cfg(unix)]
 pub(super) mod section;
