@@ -44,6 +44,18 @@ pub(super) struct SelectionInventory {
 }
 
 impl Prepared {
+    pub fn validate_context(self, context: &Value) -> miette::Result<Self> {
+        let subject: Subject =
+            serde_json::from_value(context["subject"].clone()).into_diagnostic()?;
+        if self.subject != subject || self.context != *context {
+            return Err(super::publication_rejection(
+                super::RejectionKind::SemanticContextChanged,
+                "semantic work inputs changed; replan and reread changed evidence",
+            ));
+        }
+        Ok(self)
+    }
+
     pub fn revision(&self, config_revision: &str) -> miette::Result<String> {
         self.legacy_revision(
             self.semantic_config_revision
@@ -994,13 +1006,7 @@ pub(super) fn refresh_controlled(
         Subject::Audit { path, .. } => audit(root, config, path)?,
     };
     read.check().into_diagnostic()?;
-    if prepared.subject != subject || prepared.context != *context {
-        return Err(super::publication_rejection(
-            super::RejectionKind::SemanticContextChanged,
-            "semantic work inputs changed; replan and reread changed evidence",
-        ));
-    }
-    Ok(prepared)
+    prepared.validate_context(context)
 }
 
 #[cfg(test)]

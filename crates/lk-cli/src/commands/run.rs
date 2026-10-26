@@ -131,6 +131,11 @@ mod native {
     struct WorkTelemetry {
         work_steps: Vec<WorkStepMetrics>,
         work_steps_omitted: usize,
+        evidence_preparation_io: lk_vault::DiscoveryCaptureMetrics,
+        evidence_preparation_duration_ms: u64,
+        evidence_revalidation_io: lk_vault::DiscoveryCaptureMetrics,
+        evidence_revalidation_duration_ms: u64,
+        evidence_record_duration_ms: u64,
         screening_preparation_io: lk_vault::DiscoveryCaptureMetrics,
         screening_revalidation_io: lk_vault::DiscoveryCaptureMetrics,
         screening_revalidation_duration_ms: u64,
@@ -172,7 +177,6 @@ mod native {
     struct PreparedObservations {
         completed: usize,
         requests: std::collections::VecDeque<serde_json::Value>,
-        preparation_duration_ms: Option<u64>,
     }
 
     struct ObservationTurn {
@@ -1105,32 +1109,29 @@ mod native {
                 .await
         }
 
-        async fn record_observation(
+        fn decode_observation_reply(
             &mut self,
-            id: &str,
-            node: &str,
             request: &serde_json::Value,
-            completed: usize,
             reply: ObservationReply,
             metrics: &mut WorkStepMetrics,
-        ) -> ObservationStep {
+        ) -> Option<crate::commands::work::InspectionResponse> {
             let output = match execution::observation::decode_response(
                 reply.engine,
                 &reply.bytes,
                 reply.limit,
             ) {
-                Ok(response) => response,
+                Ok(output) => output,
                 Err(error) => {
                     if let Some(capacity) =
                         error.downcast_ref::<crate::commands::work::state::OutputCapacity>()
                     {
                         metrics.result_json_bytes = Some(capacity.actual_bytes);
-                        return self
-                            .reject_inspection_capacity(id, request, capacity.clone(), metrics)
-                            .await;
+                        return Some(crate::commands::work::InspectionResponse::Capacity(
+                            capacity.clone(),
+                        ));
                     }
                     self.failure("bounded work receipt", error);
-                    return ObservationStep::Failed;
+                    return None;
                 }
             };
             metrics.result_json_bytes = Some(
@@ -1138,67 +1139,81 @@ mod native {
                     .expect("decoded observation serializes")
                     .len(),
             );
-            let response =
-                match execution::observation::decode_observation(output, request, reply.limit) {
-                    Ok(response) => response,
-                    Err(error) => {
-                        if let Some(capacity) =
-                            error.downcast_ref::<crate::commands::work::state::OutputCapacity>()
-                        {
-                            return self
-                                .reject_inspection_capacity(id, request, capacity.clone(), metrics)
-                                .await;
-                        }
-                        self.failure("bounded work receipt", error);
+            match execution::observation::decode_observation(output, request, reply.limit) {
+                Ok(execution::observation::ObservationResponse::Complete(output)) => {
+                    Some(crate::commands::work::InspectionResponse::Complete(output))
+                }
+                Ok(execution::observation::ObservationResponse::NeedsAction(reason)) => Some(
+                    crate::commands::work::InspectionResponse::NeedsAction(reason),
+                ),
+                Err(error) => {
+                    if let Some(capacity) =
+                        error.downcast_ref::<crate::commands::work::state::OutputCapacity>()
+                    {
+                        return Some(crate::commands::work::InspectionResponse::Capacity(
+                            capacity.clone(),
+                        ));
+                    }
+                    self.failure("bounded work receipt", error);
+                    None
+                }
+            }
+        }
+
+        async fn record_observation_batch(
+            &mut self,
+            replies: Vec<crate::commands::work::InspectionReply>,
+        ) -> Option<(crate::commands::work::RecordedInspections, u64)> {
+            let started = Instant::now();
+            let (session, _) = self.recording_session("bounded work receipt").await?;
+            match crate::commands::work::record_inspections(
+                &session,
+                &self.config,
+                &self.config_revision,
+                replies,
+                self.supervisor.read_control(),
+            ) {
+                Ok(recorded) => {
+                    let record_ms = recorded
+                        .records
+                        .iter()
+                        .map(|record| record.duration_ms)
+                        .sum::<u64>();
+                    self.result
+                        .work_telemetry
+                        .evidence_revalidation_io
+                        .accumulate(recorded.discovery_io);
+                    self.result.work_telemetry.evidence_revalidation_duration_ms +=
+                        recorded.revalidation_duration_ms;
+                    self.result.work_telemetry.evidence_record_duration_ms += record_ms;
+                    let shared_ms =
+                        (started.elapsed().as_millis() as u64).saturating_sub(record_ms);
+                    Some((recorded, shared_ms))
+                }
+                Err(error) => {
+                    self.failure("bounded work receipt", error);
+                    None
+                }
+            }
+        }
+
+        fn finish_observation_record(
+            &mut self,
+            id: &str,
+            node: &str,
+            completed: usize,
+            result: miette::Result<crate::commands::work::InspectionRecordOutcome>,
+            metrics: &mut WorkStepMetrics,
+        ) -> ObservationStep {
+            use crate::commands::work::InspectionRecordOutcome;
+            match result {
+                Ok(InspectionRecordOutcome::Recorded(progress)) => {
+                    if progress.completed <= completed
+                        || progress.ready.iter().any(|ready| ready == node)
+                    {
+                        self.failure("bounded work receipt", "worker exited without completing its selected node; unfinished work retained");
                         return ObservationStep::Failed;
                     }
-                };
-            let started_at = Instant::now();
-            let Some((session, _)) = self.recording_session("bounded work receipt").await else {
-                if self.result.cancelled {
-                    metrics.outcome = WorkOutcome::Cancelled;
-                }
-                return ObservationStep::Failed;
-            };
-            let recorded = match response {
-                execution::observation::ObservationResponse::Complete(output) => {
-                    crate::commands::work::record_inspection(
-                        &session,
-                        &self.config,
-                        &self.config_revision,
-                        id,
-                        node,
-                        output,
-                        self.supervisor.read_control(),
-                    )
-                    .and_then(|progress| {
-                        if progress.completed > completed
-                            && !progress.ready.iter().any(|ready| ready == node)
-                        {
-                            Ok(None)
-                        } else {
-                            Err(miette::miette!(
-                                "worker exited without completing its selected node; unfinished work retained"
-                            ))
-                        }
-                    })
-                }
-                execution::observation::ObservationResponse::NeedsAction(reason) => {
-                    crate::commands::work::record_inspection_action(
-                        &session,
-                        &self.config,
-                        &self.config_revision,
-                        id,
-                        request,
-                        reason.clone(),
-                        self.supervisor.read_control(),
-                    )
-                    .map(|()| Some(reason))
-                }
-            };
-            metrics.revalidation_record_duration_ms = Some(started_at.elapsed().as_millis() as u64);
-            match recorded {
-                Ok(None) => {
                     metrics.outcome = WorkOutcome::Recorded;
                     self.record(
                         "bounded work receipt",
@@ -1207,9 +1222,19 @@ mod native {
                     );
                     ObservationStep::Recorded
                 }
-                Ok(Some(reason)) => {
+                Ok(outcome) => {
+                    let (stage, reason) = match outcome {
+                        InspectionRecordOutcome::Deferred(reason) => {
+                            ("bounded work action", reason)
+                        }
+                        InspectionRecordOutcome::Rejected(reason) => {
+                            metrics.outcome = WorkOutcome::Rejected;
+                            ("bounded output capacity", reason)
+                        }
+                        InspectionRecordOutcome::Recorded(_) => unreachable!(),
+                    };
                     self.inspection_deferred.insert(id.into(), reason.clone());
-                    self.deferred("bounded work action", &reason);
+                    self.deferred(stage, &reason);
                     ObservationStep::Deferred(reason)
                 }
                 Err(error) => {
@@ -1219,40 +1244,34 @@ mod native {
             }
         }
 
-        async fn reject_inspection_capacity(
+        async fn record_observation(
             &mut self,
             id: &str,
+            node: &str,
             request: &serde_json::Value,
-            capacity: crate::commands::work::state::OutputCapacity,
+            completed: usize,
+            reply: ObservationReply,
             metrics: &mut WorkStepMetrics,
         ) -> ObservationStep {
-            let reason = capacity.to_string();
-            let started = Instant::now();
-            let Some((session, _)) = self.recording_session("bounded output capacity").await else {
+            let Some(response) = self.decode_observation_reply(request, reply, metrics) else {
                 return ObservationStep::Failed;
             };
-            let recorded = crate::commands::work::record_inspection_capacity(
-                &session,
-                &self.config,
-                &self.config_revision,
-                id,
-                request,
-                capacity,
-                self.supervisor.read_control(),
-            );
-            metrics.revalidation_record_duration_ms = Some(started.elapsed().as_millis() as u64);
-            match recorded {
-                Ok(()) => {
-                    metrics.outcome = WorkOutcome::Rejected;
-                    self.inspection_deferred.insert(id.into(), reason.clone());
-                    self.deferred("bounded output capacity", &reason);
-                    ObservationStep::Deferred(reason)
+            let replies = vec![crate::commands::work::InspectionReply {
+                work_id: id.into(),
+                node_id: node.into(),
+                request: request.clone(),
+                response,
+            }];
+            let Some((mut recorded, shared_ms)) = self.record_observation_batch(replies).await
+            else {
+                if self.result.cancelled {
+                    metrics.outcome = WorkOutcome::Cancelled;
                 }
-                Err(error) => {
-                    self.failure("bounded output capacity", error);
-                    ObservationStep::Failed
-                }
-            }
+                return ObservationStep::Failed;
+            };
+            let record = recorded.records.pop().expect("one selected observation");
+            metrics.revalidation_record_duration_ms = Some(shared_ms + record.duration_ms);
+            self.finish_observation_record(id, node, completed, record.result, metrics)
         }
 
         fn call_budget_available(&mut self) -> bool {
@@ -1375,42 +1394,45 @@ mod native {
                 *request_counts.entry(id.clone()).or_default() += 1;
                 planned_targets.push(target.clone());
             }
+            let demands = request_counts.into_iter().collect::<Vec<_>>();
+            let captured = match crate::commands::work::prepare_inspections_batch(
+                &self.root,
+                &self.config,
+                &self.config_revision,
+                &demands,
+                self.supervisor.read_control(),
+            ) {
+                Ok(captured) => captured,
+                Err(error) => return Some(self.failure("bounded work progress", error)),
+            };
+            self.result
+                .work_telemetry
+                .evidence_preparation_io
+                .accumulate(captured.discovery_io);
+            self.result.work_telemetry.evidence_preparation_duration_ms += captured.duration_ms;
+            let mut preparation_duration_ms = Some(captured.duration_ms);
+            for ((id, _), result) in demands.into_iter().zip(captured.turns) {
+                let (progress, requests) = match result {
+                    Ok(captured) => captured,
+                    Err(error) => return Some(self.failure("bounded work progress", error)),
+                };
+                if !progress.complete && requests.is_empty() {
+                    return Some(
+                        self.failure("bounded work progress", "incomplete work has no ready node"),
+                    );
+                }
+                prepared.insert(
+                    id,
+                    PreparedObservations {
+                        completed: progress.completed,
+                        requests: requests.into(),
+                    },
+                );
+            }
             let mut turns = Vec::new();
             let mut reserved_targets = Vec::new();
             for target in planned_targets {
                 let Some(id) = jobs.get(&target) else { break };
-                if let std::collections::btree_map::Entry::Vacant(entry) =
-                    prepared.entry(id.clone())
-                {
-                    let started_at = Instant::now();
-                    let captured = crate::commands::work::prepare_inspections(
-                        &self.root,
-                        &self.config,
-                        &self.config_revision,
-                        id,
-                        request_counts[id],
-                        self.supervisor.read_control(),
-                    );
-                    let duration_ms = started_at.elapsed().as_millis() as u64;
-                    let (progress, requests) = match captured {
-                        Ok(captured) => captured,
-                        Err(error) => return Some(self.failure("bounded work progress", error)),
-                    };
-                    if progress.complete {
-                        break;
-                    }
-                    if requests.is_empty() {
-                        return Some(self.failure(
-                            "bounded work progress",
-                            "incomplete work has no ready node",
-                        ));
-                    }
-                    entry.insert(PreparedObservations {
-                        completed: progress.completed,
-                        requests: requests.into(),
-                        preparation_duration_ms: Some(duration_ms),
-                    });
-                }
                 let work = prepared.get_mut(id).expect("captured work");
                 let Some(request) = work.requests.pop_front() else {
                     break;
@@ -1437,7 +1459,7 @@ mod native {
                     Some("reduce") => Some(NodeKind::Reduce),
                     _ => unreachable!("prepared evidence node kind"),
                 };
-                metrics.preparation_duration_ms = work.preparation_duration_ms.take();
+                metrics.preparation_duration_ms = preparation_duration_ms.take();
                 metrics.request_json_bytes = Some(
                     serde_json::to_vec(&request)
                         .expect("JSON request serializes")
@@ -1592,6 +1614,8 @@ mod native {
                 );
             }
             let mut accepted = current && !cancelled;
+            let mut replies = Vec::new();
+            let mut returned = Vec::new();
             for ((mut turn, attempt), engine) in turns.into_iter().zip(attempts).zip(engines) {
                 turn.metrics.agent_duration_ms = Some(attempt.duration_ms);
                 self.result.semantic_duration_ms += attempt.duration_ms;
@@ -1627,24 +1651,53 @@ mod native {
                     self.record_work_step(turn.metrics);
                     continue;
                 }
-                let step = self
-                    .record_observation(
-                        &turn.work_id,
-                        &turn.node_id,
-                        &turn.request,
-                        turn.completed,
-                        ObservationReply {
-                            engine,
-                            bytes: child.stdout,
-                            limit: budget.max_result_bytes,
-                        },
-                        &mut turn.metrics,
-                    )
-                    .await;
-                if matches!(step, ObservationStep::Failed) {
+                let Some(response) = self.decode_observation_reply(
+                    &turn.request,
+                    ObservationReply {
+                        engine,
+                        bytes: child.stdout,
+                        limit: budget.max_result_bytes,
+                    },
+                    &mut turn.metrics,
+                ) else {
                     accepted = false;
+                    self.record_work_step(turn.metrics);
+                    continue;
+                };
+                replies.push(crate::commands::work::InspectionReply {
+                    work_id: turn.work_id.clone(),
+                    node_id: turn.node_id.clone(),
+                    request: turn.request.clone(),
+                    response,
+                });
+                returned.push(turn);
+            }
+            if !replies.is_empty() {
+                match self.record_observation_batch(replies).await {
+                    Some((recorded, shared_ms)) => {
+                        for (index, (mut turn, record)) in
+                            returned.into_iter().zip(recorded.records).enumerate()
+                        {
+                            turn.metrics.revalidation_record_duration_ms =
+                                Some(record.duration_ms + if index == 0 { shared_ms } else { 0 });
+                            let step = self.finish_observation_record(
+                                &turn.work_id,
+                                &turn.node_id,
+                                turn.completed,
+                                record.result,
+                                &mut turn.metrics,
+                            );
+                            if matches!(step, ObservationStep::Failed) {
+                                accepted = false;
+                            }
+                            self.record_work_step(turn.metrics);
+                        }
+                    }
+                    None => {
+                        accepted = false;
+                        self.record_uninvoked_observations(returned);
+                    }
                 }
-                self.record_work_step(turn.metrics);
             }
             Some(accepted)
         }

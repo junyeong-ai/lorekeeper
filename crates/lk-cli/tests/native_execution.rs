@@ -6250,6 +6250,163 @@ fn screening_receipts(fixture: &Fixture) -> usize {
         .sum()
 }
 
+fn evidence_wave_fixture(engine: &str, mode: &str) -> Fixture {
+    let fixture = parallel_screening_fixture(engine, "good", 2);
+    let candidate = fixture.root().join("vault/wiki/documents/candidate-000.md");
+    let raw = std::fs::read_to_string(&candidate).unwrap();
+    std::fs::write(
+        &candidate,
+        raw + &"Detailed transactional outbox evidence.\n".repeat(3000),
+    )
+    .unwrap();
+    let queue = fixture.root().join("vault/.lorekeeper/queue/fixture.jsonl");
+    let tasks = lk_queue::read_tasks_snapshot(&queue).unwrap().1.tasks;
+    for task in &tasks {
+        let turn = execution_json(&fixture, &["work", "select", "--task-id", &task.task_id]);
+        let file = fixture.root().join("decisions.json");
+        std::fs::write(
+            &file,
+            serde_json::to_vec(&screening_decisions(&turn["request"], false)).unwrap(),
+        )
+        .unwrap();
+        execution_json(
+            &fixture,
+            &[
+                "work",
+                "select-record",
+                "--task-id",
+                &task.task_id,
+                "--file",
+                file.to_str().unwrap(),
+            ],
+        );
+    }
+    let behavior = r#"
+export TEST_EVIDENCE_INPUT="$TEST_EXECUTION_ROOT/evidence-request-$$"
+/bin/cat > "$TEST_EVIDENCE_INPUT"
+exec python3 - "$@" <<'EVIDENCE'
+import json, os, sys, time
+from pathlib import Path
+root=Path(os.environ['TEST_EXECUTION_ROOT'])
+request=json.loads(Path(os.environ['TEST_EVIDENCE_INPUT']).read_text().split('\nNative request:\n',1)[1])
+assert request['kind']=='inspect'
+marker=root/('evidence-'+request['work_id']+'-'+request['node_id']+'.json')
+marker.write_text(json.dumps(request))
+deadline=time.monotonic()+10
+while len(list(root.glob('evidence-*.json')))<2:
+    if time.monotonic()>deadline: raise SystemExit('independent evidence workers did not overlap')
+    time.sleep(.01)
+mode=(root/'evidence-mode').read_text()
+leader=marker.name==sorted(path.name for path in root.glob('evidence-*.json'))[0]
+if leader and mode=='failed': raise SystemExit(51)
+if leader and mode=='malformed':
+    print('invalid evidence response')
+    raise SystemExit(0)
+if leader and mode=='changed':
+    with (root/'vault/wiki/documents/candidate-000.md').open('a') as f: f.write('Changed assigned evidence.\n')
+if leader and mode=='added':
+    (root/'vault/wiki/documents/new.md').write_text('---\ntype: document\n---\nNew transactional outbox evidence.\n')
+response={'status':'complete','observation':{'summary':'The assigned source is observed; deployment is unverified.','findings':[],'source_questions':[],'unresolved':[],'resolutions':[]},'action':None}
+if leader and mode=='capacity': response['observation']['summary']='x'*20000
+if leader and mode=='action': response={'status':'needs-action','observation':None,'action':{'reason':'An explicit evidence action is required.'}}
+if '--safe-mode' in sys.argv: response={'type':'result','subtype':'success','is_error':False,'structured_output':response}
+print(json.dumps(response))
+EVIDENCE
+"#;
+    let agent = fixture.root().join("agent executable");
+    let script = std::fs::read_to_string(&agent).unwrap();
+    assert!(script.contains(PARALLEL_SCREENING));
+    std::fs::write(&agent, script.replace(PARALLEL_SCREENING, behavior)).unwrap();
+    std::fs::write(fixture.root().join("evidence-mode"), mode).unwrap();
+    fixture
+}
+
+#[test]
+fn native_evidence_wave_shares_fresh_discovery_for_distinct_work_on_both_hosts() {
+    for engine in ["codex", "claude-code"] {
+        let fixture = evidence_wave_fixture(engine, "good");
+        let (_, report) = fixture.run("process");
+        assert_eq!(report["semantic_calls"], 2, "{report}");
+        let steps = report["work_steps"].as_array().unwrap();
+        assert_eq!(steps.len(), 2, "{report}");
+        assert!(
+            steps
+                .iter()
+                .all(|step| step["role"] == "evidence" && step["outcome"] == "recorded"),
+            "{report}"
+        );
+        assert_ne!(steps[0]["work_id"], steps[1]["work_id"]);
+        assert_eq!(report["evidence_preparation_io"]["captures"], 1, "{report}");
+        assert_eq!(
+            report["evidence_revalidation_io"]["captures"], 1,
+            "{report}"
+        );
+        assert_eq!(screening_receipts(&fixture), 2);
+        for step in steps {
+            let status = execution_json(
+                &fixture,
+                &["work", "status", step["work_id"].as_str().unwrap()],
+            );
+            assert_eq!(status["completed"], 1);
+            assert_eq!(status["complete"], false);
+        }
+    }
+}
+
+#[test]
+fn native_evidence_wave_records_siblings_and_preserves_valid_independent_replies() {
+    for (mode, siblings) in [
+        ("good", true),
+        ("failed", false),
+        ("malformed", false),
+        ("capacity", false),
+        ("action", false),
+        ("changed", false),
+        ("added", false),
+    ] {
+        let fixture = evidence_wave_fixture("codex", mode);
+        if siblings {
+            let queue = fixture.root().join("vault/.lorekeeper/queue/fixture.jsonl");
+            let mut tasks = lk_queue::read_tasks_snapshot(&queue).unwrap().1.tasks;
+            tasks.truncate(1);
+            lk_queue::write_tasks_atomic(&queue, &tasks).unwrap();
+        }
+        let (_, report) = fixture.run("process");
+        assert_eq!(report["semantic_calls"], 2, "{mode}: {report}");
+        let steps = report["work_steps"].as_array().unwrap();
+        let recorded = steps
+            .iter()
+            .filter(|step| step["outcome"] == "recorded")
+            .count();
+        let expected = if siblings {
+            2
+        } else if matches!(mode, "changed" | "added") {
+            0
+        } else {
+            1
+        };
+        assert_eq!(recorded, expected, "{mode}: {report}");
+        assert_eq!(
+            report["halted"],
+            matches!(mode, "failed" | "malformed" | "changed" | "added"),
+            "{mode}: {report}"
+        );
+        if siblings {
+            assert_eq!(steps[0]["work_id"], steps[1]["work_id"]);
+            assert_ne!(steps[0]["node_id"], steps[1]["node_id"]);
+            let status = execution_json(
+                &fixture,
+                &["work", "status", steps[0]["work_id"].as_str().unwrap()],
+            );
+            assert_eq!(status["completed"], 2);
+        }
+        assert_eq!(
+            screening_settlement(&fixture)["data"]["pending_mutation"],
+            false
+        );
+    }
+}
+
 #[test]
 fn native_screening_wave_overlaps_distinct_tasks_and_shares_fresh_capture_on_both_hosts() {
     for engine in ["codex", "claude-code"] {

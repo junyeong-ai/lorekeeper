@@ -1307,6 +1307,16 @@ fn load_controlled(
     let work = Work::load(root, id)?;
     let prepared =
         resources::refresh_controlled(root, config, config_revision, &work.context, read)?;
+    validate_loaded_work(root, config, config_revision, work, prepared)
+}
+
+fn validate_loaded_work(
+    root: &Path,
+    config: &lk_core::config::Config,
+    config_revision: &str,
+    work: Work,
+    prepared: Prepared,
+) -> miette::Result<(Work, Prepared)> {
     if expected(root, &prepared, config, config_revision)? != work {
         return Err(miette::miette!(
             "work inputs, configuration or bounded execution policy changed; replan"
@@ -1750,39 +1760,6 @@ pub(super) fn validate_inspection_request(
 }
 
 #[cfg(unix)]
-pub(super) fn prepare_inspections(
-    root: &Path,
-    config: &lk_core::config::Config,
-    config_revision: &str,
-    id: &str,
-    limit: usize,
-    read: &lk_vault::ReadControl,
-) -> miette::Result<(state::WorkProgress, Vec<Value>)> {
-    let root = root.canonicalize().into_diagnostic()?;
-    let (work, prepared) = load_controlled(&root, config, config_revision, id, read)?;
-    work.prepare_inspections(&root, &prepared.resources, limit)
-}
-
-pub(super) fn record_inspection(
-    session: &lk_vault::MutationSession,
-    config: &lk_core::config::Config,
-    config_revision: &str,
-    id: &str,
-    node: &str,
-    output: WorkOutput,
-    read: &lk_vault::ReadControl,
-) -> miette::Result<state::WorkProgress> {
-    if output.work_id != id || output.node_id != node {
-        return Err(miette::miette!(
-            "observation does not answer the selected work node"
-        ));
-    }
-    let root = session.root();
-    let (work, prepared) = load_controlled(root, config, config_revision, id, read)?;
-    work.record(session, output, &prepared.resources)
-}
-
-#[cfg(unix)]
 pub(super) fn inspection_action(
     root: &Path,
     id: &str,
@@ -1796,51 +1773,265 @@ pub(super) fn inspection_action(
 }
 
 #[cfg(unix)]
-pub(super) fn record_inspection_action(
-    session: &lk_vault::MutationSession,
-    config: &lk_core::config::Config,
-    config_revision: &str,
-    id: &str,
-    request: &Value,
-    reason: String,
-    read: &lk_vault::ReadControl,
-) -> miette::Result<()> {
-    let root = session.root();
-    let (work, prepared) = load_controlled(root, config, config_revision, id, read)?;
-    let mut plan = work.plan_inspection_action(
-        root,
-        &prepared.resources,
-        request,
-        &super::execution::observation::contract_revision(request)?,
-        reason,
-    )?;
-    prepared.guard_pages(&mut plan);
-    session.apply(plan).into_diagnostic()?;
-    Ok(())
+pub(super) enum InspectionResponse {
+    Complete(WorkOutput),
+    NeedsAction(String),
+    Capacity(state::OutputCapacity),
 }
 
 #[cfg(unix)]
-pub(super) fn record_inspection_capacity(
+pub(super) struct InspectionReply {
+    pub work_id: String,
+    pub node_id: String,
+    pub request: Value,
+    pub response: InspectionResponse,
+}
+
+#[cfg(unix)]
+pub(super) enum InspectionRecordOutcome {
+    Recorded(state::WorkProgress),
+    Deferred(String),
+    Rejected(String),
+}
+
+#[cfg(unix)]
+pub(super) struct InspectionRecord {
+    pub result: miette::Result<InspectionRecordOutcome>,
+    pub duration_ms: u64,
+}
+
+#[cfg(unix)]
+pub(super) struct RecordedInspections {
+    pub records: Vec<InspectionRecord>,
+    pub discovery_io: lk_vault::DiscoveryCaptureMetrics,
+    pub revalidation_duration_ms: u64,
+}
+
+#[cfg(unix)]
+struct InspectionWorks {
+    works: std::collections::BTreeMap<String, miette::Result<(Work, Prepared)>>,
+    discovery_io: lk_vault::DiscoveryCaptureMetrics,
+    duration_ms: u64,
+}
+
+#[cfg(unix)]
+fn load_inspection_works(
+    root: &Path,
+    config: &lk_core::config::Config,
+    config_revision: &str,
+    ids: &[&str],
+    read: &lk_vault::ReadControl,
+) -> miette::Result<InspectionWorks> {
+    let started = std::time::Instant::now();
+    let mut loaded = std::collections::BTreeMap::new();
+    let mut progressive = Vec::new();
+    for id in ids {
+        read.check().into_diagnostic()?;
+        if loaded.contains_key(*id) {
+            continue;
+        }
+        let work = Work::load(root, id);
+        if work.as_ref().is_ok_and(|work| {
+            work.context["purpose"]["extraction_scope"]["policy"] == "progressive-evidence-v1"
+        }) {
+            progressive.push(work.as_ref().expect("validated work").clone());
+        }
+        let result = work.and_then(|work| {
+            if work.context["purpose"]["extraction_scope"]["policy"] == "progressive-evidence-v1" {
+                return Ok(None);
+            }
+            let prepared =
+                resources::refresh_controlled(root, config, config_revision, &work.context, read)?;
+            validate_loaded_work(root, config, config_revision, work, prepared).map(Some)
+        });
+        loaded.insert((*id).to_owned(), result);
+    }
+    let task_ids = progressive
+        .iter()
+        .map(|work| {
+            work.context["subject"]["task_id"]
+                .as_str()
+                .ok_or_else(|| miette::miette!("progressive work requires a queue task subject"))
+        })
+        .collect::<miette::Result<Vec<_>>>()?;
+    let (prepared, discovery_io) = if task_ids.is_empty() {
+        (Vec::new(), lk_vault::DiscoveryCaptureMetrics::default())
+    } else {
+        let mut work_iter = progressive.iter();
+        let (prepared, discovery_io, _) = map_current_screenings(
+            root,
+            config,
+            config_revision,
+            &task_ids,
+            |screening| {
+                let work = work_iter.next().expect("one capture per work");
+                (|| {
+                    let selection = serde_json::from_value(
+                        work.context["purpose"]["extraction_scope"]["selection"].clone(),
+                    )
+                    .into_diagnostic()?;
+                    let prepared = selected_task_with_screening(
+                        root,
+                        ScreeningPreparation::Candidates(Box::new(screening?)),
+                        &selection,
+                        &mut Default::default(),
+                    )?
+                    .0
+                    .validate_context(&work.context)?;
+                    validate_loaded_work(root, config, config_revision, work.clone(), prepared)
+                })()
+            },
+            read,
+        )?;
+        (prepared, discovery_io)
+    };
+    for (work, prepared) in progressive.into_iter().zip(prepared) {
+        loaded.insert(work.plan.id, prepared.map(Some));
+    }
+    let works = loaded
+        .into_iter()
+        .map(|(id, result)| (id, result.map(|work| work.expect("captured work"))))
+        .collect();
+    Ok(InspectionWorks {
+        works,
+        discovery_io,
+        duration_ms: started.elapsed().as_millis() as u64,
+    })
+}
+
+#[cfg(unix)]
+pub(super) struct PreparedInspections {
+    pub turns: Vec<miette::Result<(state::WorkProgress, Vec<Value>)>>,
+    pub discovery_io: lk_vault::DiscoveryCaptureMetrics,
+    pub duration_ms: u64,
+}
+
+#[cfg(unix)]
+pub(super) fn prepare_inspections_batch(
+    root: &Path,
+    config: &lk_core::config::Config,
+    config_revision: &str,
+    demands: &[(String, usize)],
+    read: &lk_vault::ReadControl,
+) -> miette::Result<PreparedInspections> {
+    let started = std::time::Instant::now();
+    let mut ids = std::collections::BTreeSet::new();
+    if demands
+        .iter()
+        .any(|(id, limit)| *limit == 0 || !ids.insert(id.as_str()))
+    {
+        return Err(miette::miette!(
+            "inspection demands require unique work and positive limits"
+        ));
+    }
+    let root = root.canonicalize().into_diagnostic()?;
+    let mut loaded = load_inspection_works(
+        &root,
+        config,
+        config_revision,
+        &ids.into_iter().collect::<Vec<_>>(),
+        read,
+    )?;
+    let turns = demands
+        .iter()
+        .map(|(id, limit)| {
+            read.check().into_diagnostic()?;
+            let (work, prepared) = loaded.works.remove(id).expect("selected work")?;
+            work.prepare_inspections(&root, &prepared.resources, *limit)
+        })
+        .collect();
+    Ok(PreparedInspections {
+        turns,
+        discovery_io: loaded.discovery_io,
+        duration_ms: started.elapsed().as_millis() as u64,
+    })
+}
+
+#[cfg(unix)]
+pub(super) fn record_inspections(
     session: &lk_vault::MutationSession,
     config: &lk_core::config::Config,
     config_revision: &str,
-    id: &str,
-    request: &Value,
-    capacity: state::OutputCapacity,
+    replies: Vec<InspectionReply>,
     read: &lk_vault::ReadControl,
-) -> miette::Result<()> {
+) -> miette::Result<RecordedInspections> {
     let root = session.root();
-    let (work, prepared) = load_controlled(root, config, config_revision, id, read)?;
-    let mut plan = work.plan_inspection_capacity(
-        root,
-        &prepared.resources,
-        request,
-        &super::execution::observation::contract_revision(request)?,
-        capacity,
-    )?;
-    prepared.guard_pages(&mut plan);
-    session.apply(plan).into_diagnostic()?;
-    Ok(())
+    let ids = replies
+        .iter()
+        .map(|reply| reply.work_id.as_str())
+        .collect::<Vec<_>>();
+    let loaded = load_inspection_works(root, config, config_revision, &ids, read)?;
+    let mut selected = std::collections::BTreeSet::new();
+    let records = replies
+        .into_iter()
+        .map(|reply| {
+            let started = std::time::Instant::now();
+            let result = (|| {
+                read.check().into_diagnostic()?;
+                if !selected.insert((reply.work_id.clone(), reply.node_id.clone())) {
+                    return Err(miette::miette!(
+                        "duplicate inspection reply for a selected node"
+                    ));
+                }
+                let (work, prepared) = loaded.works[&reply.work_id]
+                    .as_ref()
+                    .map_err(|error| miette::miette!("fresh work validation failed: {error:#}"))?;
+                match reply.response {
+                    InspectionResponse::Complete(output) => {
+                        if output.work_id != reply.work_id || output.node_id != reply.node_id {
+                            return Err(miette::miette!(
+                                "observation does not answer the selected work node"
+                            ));
+                        }
+                        work.record(session, output, &prepared.resources)
+                            .map(InspectionRecordOutcome::Recorded)
+                    }
+                    response => {
+                        let revision =
+                            super::execution::observation::contract_revision(&reply.request)?;
+                        let (mut plan, outcome) = match response {
+                            InspectionResponse::NeedsAction(reason) => (
+                                work.plan_inspection_action(
+                                    root,
+                                    &prepared.resources,
+                                    &reply.request,
+                                    &revision,
+                                    reason.clone(),
+                                )?,
+                                InspectionRecordOutcome::Deferred(reason),
+                            ),
+                            InspectionResponse::Capacity(capacity) => {
+                                let reason = capacity.to_string();
+                                (
+                                    work.plan_inspection_capacity(
+                                        root,
+                                        &prepared.resources,
+                                        &reply.request,
+                                        &revision,
+                                        capacity,
+                                    )?,
+                                    InspectionRecordOutcome::Rejected(reason),
+                                )
+                            }
+                            InspectionResponse::Complete(_) => unreachable!(),
+                        };
+                        prepared.guard_pages(&mut plan);
+                        session.apply(plan).into_diagnostic()?;
+                        Ok(outcome)
+                    }
+                }
+            })();
+            InspectionRecord {
+                result,
+                duration_ms: started.elapsed().as_millis() as u64,
+            }
+        })
+        .collect();
+    Ok(RecordedInspections {
+        records,
+        discovery_io: loaded.discovery_io,
+        revalidation_duration_ms: loaded.duration_ms,
+    })
 }
 
 #[cfg(unix)]
@@ -3048,6 +3239,25 @@ mod tests {
     use lk_core::concept::file_revision;
     use lk_vault::{MutationPlan, MutationSession};
 
+    fn record_inspection(
+        session: &lk_vault::MutationSession,
+        config: &lk_core::config::Config,
+        config_revision: &str,
+        id: &str,
+        node: &str,
+        output: WorkOutput,
+        read: &lk_vault::ReadControl,
+    ) -> miette::Result<state::WorkProgress> {
+        if output.work_id != id || output.node_id != node {
+            return Err(miette::miette!(
+                "observation does not answer the selected work node"
+            ));
+        }
+        let root = session.root();
+        let (work, prepared) = load_controlled(root, config, config_revision, id, read)?;
+        work.record(session, output, &prepared.resources)
+    }
+
     fn write(root: &Path, path: &str, raw: &str) {
         let path = root.join(path);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -3326,7 +3536,16 @@ mod tests {
             prepare_native_finalization(&root, &config, &revision, &work.plan.id, false, &read)
                 .is_err()
         );
-        assert!(prepare_inspections(&root, &config, &revision, &work.plan.id, 2, &read).is_err());
+        assert!(
+            prepare_inspections_batch(
+                &root,
+                &config,
+                &revision,
+                &[(work.plan.id.clone(), 2)],
+                &read
+            )
+            .is_err()
+        );
         let session = lk_vault::MutationSession::acquire(&root).unwrap();
         assert!(restage_finished(&session, &config, &revision, &work.plan.id, &read).is_err());
         assert_eq!(snapshot(), before);
