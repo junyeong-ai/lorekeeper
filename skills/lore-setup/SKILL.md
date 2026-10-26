@@ -4,7 +4,7 @@ description: Guides initial Lorekeeper setup or edits source configuration using
   metadata. Discovers requested source IDs, preserves existing selections, and distinguishes
   config validation, native authentication, first processing and optional scheduling.
 metadata:
-  version: 0.102.0
+  version: 0.102.1
 ---
 
 # lore-setup — Interactive config builder
