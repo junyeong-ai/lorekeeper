@@ -59,6 +59,10 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   receipts or verified publication. Cached refusals and already-complete work add no progress.
   Each checkpoint retains its incomplete outcome; a settled process campaign requires the
   final batch's full checks to pass. Defaults remain one batch and the configured per-batch calls.
+  Process classifies final review health through the shared typed reports. Reassessment
+  keeps strict completion nonzero without halting budgeted independent queue progress;
+  invalid reviews and failed reads remain fatal. Queue settlement alone cannot satisfy
+  review completion. Daily retains its strict review checkpoints before period resumption.
   Stop on fatal or unknown state, cancellation, no verified progress,
   or an empty plan. Verified selected audits can advance subsequent budgeted batches despite
   unrelated queue rejections; the campaign remains incomplete/nonzero. Batch-limit success

@@ -249,8 +249,9 @@ for tuning and resume contracts.
 
 `process --batches N` resumes queue processing for at most N batches after a call-budget
 checkpoint with retained progress. The default is 1; each batch keeps the configured call
-budget and acquires a fresh workflow lease. Failures, cancellation or no progress stop the
-campaign, and remaining work stays incomplete. `knowledge --batches N` separately caps audit
+budget and acquires a fresh workflow lease. Fatal or unknown failures, cancellation or no
+progress stop the campaign. Review reassessment keeps completion nonzero while independent
+budgeted queue progress can continue. `knowledge --batches N` separately caps audit
 batches; running them does not establish whole-corpus completion.
 
 ### Check the state you need

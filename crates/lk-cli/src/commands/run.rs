@@ -4298,6 +4298,26 @@ mod native {
             )
         }
 
+        fn check_process_reviews(&mut self) -> bool {
+            if self.result.halted || !self.inspect_review_health() {
+                return false;
+            }
+            let pending = self
+                .result
+                .review_health
+                .as_ref()
+                .expect("inspected review health")
+                .needs_reassessment;
+            if pending > 0 {
+                self.deferred(
+                    "knowledge reviews",
+                    format!("{pending} reviews require reassessment; inspect `lore wiki reviews`"),
+                )
+            } else {
+                self.record("knowledge reviews", StageState::Completed, None)
+            }
+        }
+
         async fn knowledge(&mut self) {
             self.reconcile_audit_inputs().await;
             if self.result.halted || self.result.cancelled {
@@ -4814,9 +4834,7 @@ mod native {
                 }
                 Operation::Process => {
                     runner.reconcile().await;
-                    runner
-                        .native("knowledge reviews", &["wiki", "reviews", "--check"])
-                        .await;
+                    runner.check_process_reviews();
                 }
                 Operation::Knowledge => runner.knowledge().await,
             }

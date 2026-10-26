@@ -2325,6 +2325,84 @@ fn process_campaign_resumes_retained_nodes_with_fresh_leases_and_explicit_limits
 }
 
 #[test]
+fn process_campaign_continues_budget_progress_with_review_attention_but_stops_invalid_reviews() {
+    let section = WHOLE_SECTION.replace(
+        "if request['kind']!='whole-section': raise SystemExit(100)",
+        "if request['kind'] not in ['whole-section','finalize-section']: raise SystemExit(100)",
+    );
+    let behavior = format!("{section}\n{RECORD_BOUNDED_AUDIT}");
+    for invalid in [false, true] {
+        let fixture = queue_quantum_fixture(&behavior, 1, 1, None, 1, 3000);
+        write_review_attention(&fixture, "wiki/documents/reviewed.md", invalid);
+        let reports = execution_json(&fixture, &["wiki", "reviews"]);
+        assert_eq!(
+            reports[0]["effective_state"],
+            if invalid {
+                "invalid"
+            } else {
+                "needs-reassessment"
+            }
+        );
+        let review = fixture.root().join("vault/wiki/explorations/review.md");
+        let original_review = std::fs::read(&review).unwrap();
+        let original_config = std::fs::read(&fixture.config).unwrap();
+        let output = fixture
+            .command()
+            .args(["run", "process", "--batches", "6", "--json"])
+            .output()
+            .unwrap();
+        assert!(
+            !output.status.success(),
+            "review attention keeps final completion strict"
+        );
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let runs = report["runs"].as_array().unwrap();
+        assert_eq!(
+            runs.len(),
+            if invalid { 1 } else { 4 },
+            "{report}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            report["stop_reason"],
+            if invalid { "failed" } else { "deferred" },
+            "{report}"
+        );
+        assert_eq!(
+            runs[0]["retained_progress"]["evidence_nodes"], 1,
+            "{report}"
+        );
+        for run in runs {
+            assert_eq!(run["ok"], false, "{report}");
+            assert_eq!(run["halted"], invalid, "{report}");
+            assert_eq!(
+                run["review_health"][if invalid {
+                    "invalid"
+                } else {
+                    "needs_reassessment"
+                }],
+                1,
+                "{report}"
+            );
+            assert!(run["audit"].is_null() && run["audit_progress"].is_null());
+        }
+        if !invalid {
+            assert!(
+                runs.iter()
+                    .take(3)
+                    .all(|run| run["budget_exhausted"] == true)
+            );
+            assert_eq!(runs[3]["queue_application"]["applied"], 1, "{report}");
+        }
+        let queue = screening_settlement(&fixture);
+        assert_eq!(queue["data"]["current"], usize::from(invalid), "{queue}");
+        assert_eq!(queue["data"]["pending_mutation"], false);
+        assert_eq!(std::fs::read(review).unwrap(), original_review);
+        assert_eq!(std::fs::read(&fixture.config).unwrap(), original_config);
+    }
+}
+
+#[test]
 fn process_campaign_stops_on_fatal_cancelled_or_changed_configuration_after_progress() {
     let section = WHOLE_SECTION.replace(
         "if request['kind']!='whole-section': raise SystemExit(100)",

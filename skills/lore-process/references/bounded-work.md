@@ -176,6 +176,10 @@ New action or discovery receipts are preparation progress, never semantic comple
 Unchanged cached actions spend no calls and add no progress. Every checkpoint retains
 its own incomplete outcome; the process campaign succeeds only after a settled final
 batch passes its full checks. Reaching N with remaining work stays incomplete/nonzero.
+Review reassessment also keeps strict Process completion nonzero, but does not halt
+an exhausted-budget checkpoint with new retained queue progress. Invalid review records
+and failed reads remain fatal. Once the queue settles, outstanding reassessment stops
+the campaign as deferred; Process does not resolve or approve reviews.
 This does not change `knowledge --batches` or grant a native worker a second coordinator.
 
 ## Private drafts
@@ -394,7 +398,7 @@ recording validates current resources without repeating the host call.
 `applied`, `dropped` and `rejected` counts and retains the `latest` typed report.
 Repeated rejection counts are attempts, not distinct tasks. Native report capture
 is limited to 8 MiB; invalid, oversized or abnormally terminated reports stop the job.
-`halted` distinguishes a stopped controller from known scoped deferrals; `ok` remains
+`halted` distinguishes a stopped controller from known incomplete states; `ok` remains
 false for either. A halted controller starts no further semantic or mutating stages;
 read-only final checks still report preserved state when configuration is current.
 An incomplete job can still publish independent work and verify selected audits;
