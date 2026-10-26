@@ -2129,6 +2129,195 @@ fn native_queue_quantum_completes_one_bounded_summary_before_rotating_without_ex
 }
 
 #[test]
+fn process_campaign_resumes_retained_nodes_with_fresh_leases_and_explicit_limits() {
+    let section = WHOLE_SECTION.replace(
+        "if request['kind']!='whole-section': raise SystemExit(100)",
+        "if request['kind'] not in ['whole-section','finalize-section']: raise SystemExit(100)",
+    );
+    let behavior = format!("{section}\n{RECORD_BOUNDED_AUDIT}");
+    for (batches, expected_runs, settled) in [(6, 4, true), (2, 2, false)] {
+        let fixture = queue_quantum_fixture(&behavior, 1, 1, None, 1, 3000);
+        let before = std::fs::read(&fixture.config).unwrap();
+        let output = fixture
+            .command()
+            .args([
+                "run",
+                "process",
+                "--batches",
+                &batches.to_string(),
+                "--json",
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.success(),
+            settled,
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(
+            report["stop_reason"],
+            if settled { "settled" } else { "batch-limit" },
+            "{report}"
+        );
+        let runs = report["runs"].as_array().unwrap();
+        assert_eq!(runs.len(), expected_runs, "{report}");
+        assert_eq!(
+            runs.iter()
+                .map(|run| run["semantic_calls"].as_u64().unwrap())
+                .sum::<u64>(),
+            expected_runs as u64
+        );
+        assert!(
+            runs.iter()
+                .all(|run| run["audit"].is_null() && run["audit_progress"].is_null())
+        );
+        assert_eq!(
+            runs.iter()
+                .map(|run| run["workflow_id"].as_str().unwrap())
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            expected_runs
+        );
+        for run in runs.iter().take(3.min(expected_runs)) {
+            assert_eq!(run["budget_exhausted"], true, "{report}");
+            assert_eq!(run["retained_progress"]["evidence_nodes"], 1, "{report}");
+        }
+        let calls = bounded_calls(&fixture);
+        assert_eq!(calls.len(), if settled { 3 } else { 2 });
+        assert!(
+            calls
+                .iter()
+                .all(|call| call["work_id"] == calls[0]["work_id"])
+        );
+        assert_eq!(
+            calls
+                .iter()
+                .map(|call| call["node_id"].as_str().unwrap())
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            calls.len()
+        );
+        assert_eq!(std::fs::read(&fixture.config).unwrap(), before);
+        let queue = screening_settlement(&fixture);
+        assert_eq!(queue["data"]["current"], if settled { 0 } else { 1 });
+        assert_eq!(queue["data"]["pending_mutation"], false);
+    }
+}
+
+#[test]
+fn process_campaign_stops_on_fatal_cancelled_or_changed_configuration_after_progress() {
+    let section = WHOLE_SECTION.replace(
+        "if request['kind']!='whole-section': raise SystemExit(100)",
+        "if request['kind'] not in ['whole-section','finalize-section']: raise SystemExit(100)",
+    );
+    for mode in ["failed", "cancelled", "configuration"] {
+        let behavior = RECORD_BOUNDED_AUDIT.replace(
+            "    output={'work_id':work_id",
+            &format!(
+                r#"    marker=root/'first-observation'
+    if marker.exists():
+        if '{mode}'=='failed': raise SystemExit(23)
+        if '{mode}'=='cancelled':
+            import signal,time
+            os.kill(os.getppid(),signal.SIGINT)
+            time.sleep(2)
+            raise SystemExit(24)
+        with (root/'config.yaml').open('a') as f: f.write('\n# external configuration change\n')
+    else: marker.write_text('first observation')
+    output={{'work_id':work_id"#
+            ),
+        );
+        let fixture = queue_quantum_fixture(&format!("{section}\n{behavior}"), 1, 1, None, 1, 3000);
+        let original = std::fs::read(&fixture.config).unwrap();
+        let output = fixture
+            .command()
+            .args(["run", "process", "--batches", "6", "--json"])
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let runs = report["runs"].as_array().unwrap();
+        assert_eq!(runs.len(), 2, "{mode}: {report}");
+        assert_eq!(
+            report["stop_reason"],
+            if mode == "cancelled" {
+                "cancelled"
+            } else {
+                "failed"
+            },
+            "{report}"
+        );
+        assert_eq!(runs[0]["retained_progress"]["evidence_nodes"], 1);
+        assert_eq!(runs[1]["retained_progress"]["evidence_nodes"], 0);
+        assert_eq!(
+            runs.iter()
+                .map(|run| run["semantic_calls"].as_u64().unwrap())
+                .sum::<u64>(),
+            2
+        );
+        std::fs::write(&fixture.config, &original).unwrap();
+        let work = bounded_calls(&fixture)[0]["work_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let status = execution_json(&fixture, &["work", "status", &work]);
+        assert_eq!(status["completed"], 1);
+        assert_eq!(status["complete"], false);
+        assert_eq!(
+            screening_settlement(&fixture)["data"]["pending_mutation"],
+            false
+        );
+    }
+}
+
+#[test]
+fn process_campaign_defers_unchanged_actions_without_new_calls_and_refuses_corruption() {
+    let behavior=WHOLE_SECTION.replace("response={'status':'complete','body':body,'reason':None}",
+        "response={'status':'needs-action','body':None,'reason':'An explicit scoped action is required.'}");
+    let fixture = queue_quantum_fixture(&behavior, 1, 1, None, 1, 20);
+    let run = || {
+        let output = fixture
+            .command()
+            .args(["run", "process", "--batches", "4", "--json"])
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
+    };
+    let first = run();
+    let runs = first["runs"].as_array().unwrap();
+    assert_eq!(runs.len(), 2, "{first}");
+    assert_eq!(runs[0]["semantic_calls"], 1);
+    assert_eq!(runs[0]["retained_progress"]["action_receipts"], 1);
+    assert_eq!(runs[1]["semantic_calls"], 0);
+    assert_eq!(runs[1]["retained_progress"]["action_receipts"], 0);
+    assert_eq!(first["stop_reason"], "deferred");
+    let actions = fixture
+        .root()
+        .join("vault/.lorekeeper/queue/section-actions");
+    let action = std::fs::read_dir(&actions)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let before = std::fs::read(&action).unwrap();
+    let repeated = run();
+    assert_eq!(repeated["runs"].as_array().unwrap().len(), 1);
+    assert_eq!(repeated["runs"][0]["semantic_calls"], 0);
+    assert_eq!(std::fs::read(&action).unwrap(), before);
+    std::fs::write(&action, "{}").unwrap();
+    let corrupt = run();
+    assert_eq!(corrupt["runs"].as_array().unwrap().len(), 1);
+    assert_eq!(corrupt["runs"][0]["semantic_calls"], 0);
+    assert_eq!(corrupt["runs"][0]["halted"], true);
+    assert_eq!(corrupt["stop_reason"], "failed");
+    assert_eq!(std::fs::read(&action).unwrap(), b"{}");
+}
+
+#[test]
 fn native_queue_parallel_quantum_fills_a_wave_after_one_admitted_allowance_runs_out() {
     let behavior = RECORD_BOUNDED_AUDIT
         .replace(
@@ -4153,7 +4342,7 @@ touch "$TEST_EXECUTION_ROOT/assessed-once"
         assert!(
             !fixture
                 .command()
-                .args(["run", "process", "--batches", "2"])
+                .args(["run", "daily", "--batches", "2"])
                 .status()
                 .unwrap()
                 .success()
@@ -6304,6 +6493,8 @@ if leader and mode=='malformed':
     raise SystemExit(0)
 if leader and mode=='changed':
     with (root/'vault/wiki/documents/candidate-000.md').open('a') as f: f.write('Changed assigned evidence.\n')
+if leader and mode=='unreadable':
+    with (root/'vault/wiki/documents/candidate-000.md').open('ab') as f: f.write(b'\xff')
 if leader and mode=='added':
     (root/'vault/wiki/documents/new.md').write_text('---\ntype: document\n---\nNew transactional outbox evidence.\n')
 response={'status':'complete','observation':{'summary':'The assigned source is observed; deployment is unverified.','findings':[],'source_questions':[],'unresolved':[],'resolutions':[]},'action':None}
@@ -6363,6 +6554,7 @@ fn native_evidence_wave_records_siblings_and_preserves_valid_independent_replies
         ("action", false),
         ("changed", false),
         ("added", false),
+        ("unreadable", false),
     ] {
         let fixture = evidence_wave_fixture("codex", mode);
         if siblings {
@@ -6380,7 +6572,7 @@ fn native_evidence_wave_records_siblings_and_preserves_valid_independent_replies
             .count();
         let expected = if siblings {
             2
-        } else if matches!(mode, "changed" | "added") {
+        } else if matches!(mode, "changed" | "added" | "unreadable") {
             0
         } else {
             1
@@ -6388,9 +6580,20 @@ fn native_evidence_wave_records_siblings_and_preserves_valid_independent_replies
         assert_eq!(recorded, expected, "{mode}: {report}");
         assert_eq!(
             report["halted"],
-            matches!(mode, "failed" | "malformed" | "changed" | "added"),
+            matches!(
+                mode,
+                "failed" | "malformed" | "changed" | "added" | "unreadable"
+            ),
             "{mode}: {report}"
         );
+        if mode == "unreadable" {
+            assert!(
+                steps
+                    .iter()
+                    .any(|step| step["revalidation_record_duration_ms"].is_u64()),
+                "{report}"
+            );
+        }
         if siblings {
             assert_eq!(steps[0]["work_id"], steps[1]["work_id"]);
             assert_ne!(steps[0]["node_id"], steps[1]["node_id"]);
@@ -6478,7 +6681,10 @@ root=Path(os.environ['TEST_EXECUTION_ROOT'])
 request=json.loads(Path(os.environ['TEST_READ_ONLY_INPUT']).read_text().split('\nNative request:\n',1)[1])
 screen='candidates' in request
 identity=request['selection_id'] if screen else request['work_id']
-(root/('mixed-'+identity+'.json')).write_text(json.dumps(request))
+marker=root/('mixed-'+identity+'.json')
+staged=marker.with_suffix('.tmp')
+staged.write_text(json.dumps(request))
+staged.replace(marker)
 deadline=time.monotonic()+10
 while len(list(root.glob('mixed-*.json')))<int((root/'mixed-expected').read_text()):
     if time.monotonic()>deadline: raise SystemExit('mixed read-only peers did not overlap')

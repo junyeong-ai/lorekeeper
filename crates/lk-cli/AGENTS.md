@@ -53,7 +53,13 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   send group SIGKILL once before reaping a forced foreground child.
   Knowledge --batches is an explicit initial-campaign budget. Each batch uses a fresh
   workflow lease, while configuration revision and cancellation supervision remain pinned
-  across the campaign. Stop on fatal or unknown state, cancellation, no verified progress,
+  across the campaign, including the first acquired vault's physical identity.
+  Process --batches is a separate queue-only campaign: continue only after typed call-budget
+  exhaustion with newly retained observations, screening, staged requests, discovery/action
+  receipts or verified publication. Cached refusals and already-complete work add no progress.
+  Each checkpoint retains its incomplete outcome; a settled process campaign requires the
+  final batch's full checks to pass. Defaults remain one batch and the configured per-batch calls.
+  Stop on fatal or unknown state, cancellation, no verified progress,
   or an empty plan. Verified selected audits can advance subsequent budgeted batches despite
   unrelated queue rejections; the campaign remains incomplete/nonzero. Batch-limit success
   does not establish full-corpus coverage. Existing receipts resume verified work.
@@ -228,15 +234,19 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   admitted exact queue Work or screening phase. Reserve the durable fair turn once;
   continuation requires an in-process exact phase token and freshly prepared inputs.
   Charge every attempted host including parallel peers against the same total budget.
-  Publication, phase changes, deferral and writer-wait replanning discard admission;
+  Publication, changed phase bindings, deferral and writer-wait replanning discard admission;
   restart/cancellation retain the already reserved next target.
   `execution.work.max_parallel` defaults to 1 and bounds simultaneous dependency-ready
   evidence observers and distinct-target candidate screening within remaining calls.
+  Compatible roles share a fair contiguous prefix; serial finalizers and interactive
+  work remain boundaries. Never filter past those boundaries or reserve skipped targets.
   Interactive roles, finalizers and publication remain serial. Supervise every child
   through exit and cleanup. Carry prepared screening requests only within their local
   pre-host queue checkpoint; any host call or writer wait invalidates their reuse.
-  Capture the complete current recipe/review universe once after screening hosts return,
-  then validate each task and publish receipts serially with exact page/ledger guards.
+  Capture the complete current recipe/review universe per typed view after hosts return,
+  sharing discovery across extraction Work and loading each Work once per checkpoint.
+  Reevaluate current node dependencies for every serial record; preserve each mutation's
+  durable checkpoint and exact page/ledger guards. Never retain a capture across a host.
   Preserve an independent valid response when a peer fails. Never reuse pre-host captures
   for recording. Shared capture timings belong to the first recorded step, not every peer.
   Verify target owners before batching. Defer concept synthesis while its cited origin
@@ -248,7 +258,8 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   Enumerate and validate the complete queue and physical target owners before selecting
   a fair preparation window. Section/progressive windows obey remaining-call and
   parallel bounds, capped at 64; possible interactive batches retain 64 targets even
-  when one call remains. Stop at typed capability boundaries without skipping targets;
+  when one call remains. Continue bounded preparation across task-kind groups while the
+  prepared jobs are compatible reads; stop at validated serial boundaries without skipping targets;
   actual prepared TaskWork remains authoritative, including saved plans. Small tasks also obey the input-byte
   bound. Share discovery traversal, projection and immutable raw bytes within that
   checkpoint while preserving task-local recipes, reviews, guards and identities.

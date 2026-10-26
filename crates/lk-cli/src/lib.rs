@@ -40,7 +40,7 @@ pub enum Command {
         /// Explicit execution profile; otherwise operation override then configured default
         #[arg(long)]
         profile: Option<String>,
-        /// Maximum knowledge batches; release the workflow lease between batches
+        /// Maximum process or knowledge batches; release the workflow lease between batches
         #[arg(long, default_value = "1")]
         batches: std::num::NonZeroUsize,
         /// Wait for the semantic workflow lease; default contention starts no semantic work

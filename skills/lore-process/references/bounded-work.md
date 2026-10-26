@@ -138,18 +138,34 @@ Native jobs reserve fair inspection/reduction/finalization turns and retain the 
 target across runs. `execution.work.max_consecutive_calls` defaults to 4 and bounds
 fresh calls for an admitted exact Work or screening phase before another fair turn.
 It does not increase the total call budget. Restart/cancellation retains the already
-reserved next target; phase changes, publication and writer-wait replanning end the
+reserved next target; changed phase bindings, publication and writer-wait replanning end the
 in-process admission. With `execution.work.max_parallel` above its default 1, ready
 evidence requests and distinct-target screening can run concurrently within the
-remaining call budget. Requests in a wave never depend on another request in that
-wave. Screening shares a fresh complete recipe/review capture after hosts return;
-recording checks each exact scope and publishes receipts serially. Changed evidence
+remaining call budget. Compatible screening and evidence requests share a contiguous
+fair prefix; serial finalizers and interactive work remain boundaries. Requests in a
+wave never depend on another request in that wave. Preparation and recording use
+separate fresh captures, sharing extraction discovery and loading each Work once
+within their own checkpoint. Each node record reevaluates current dependencies and
+retains its own durable journal transition. Recording checks each exact scope.
+Changed evidence
 refuses an old response. Interactive sessions and finalizers remain serial, as does
 canonical publication.
 Whole-input queue tasks are batched
 within the evidence input budget with at most one task per target; publication
 refreshes selection before another task on that page. The call budget can leave
 pending work, but a resumed large document does not always take the first turn.
+
+From the coordinating shell, `lore run process --profile NAME --batches N --json`
+explicitly permits at most N queue-only batches, each with the configured call budget
+and a fresh workflow lease. The default is one batch. Configuration bytes and the
+first acquired vault's directory identity remain pinned across the campaign.
+Continue only at a typed exhausted-budget checkpoint with newly retained progress;
+fatal/unknown failures, cancellation, ordinary deferral or no progress stop it.
+New action or discovery receipts are preparation progress, never semantic completion.
+Unchanged cached actions spend no calls and add no progress. Every checkpoint retains
+its own incomplete outcome; the process campaign succeeds only after a settled final
+batch passes its full checks. Reaching N with remaining work stays incomplete/nonzero.
+This does not change `knowledge --batches` or grant a native worker a second coordinator.
 
 ## Private drafts
 
@@ -318,6 +334,9 @@ During execution, stderr emits `lore.queue-planning` JSON events at local checkp
 start/end and `lore.work-step` events for retained steps as they finish. They use
 existing measurements without extra reads. Final stdout remains the single native
 result; progress events do not establish publication, inference time or cost.
+`lore.queue-read-wave` reports the actual request count, evidence/screening counts,
+configured parallel limit and remaining calls before an admitted queue wave starts.
+It describes dispatched requests, not observed peak live-child concurrency.
 
 | Fields | Meaning |
 | --- | --- |
@@ -325,7 +344,7 @@ result; progress events do not establish publication, inference time or cost.
 | `request_json_bytes`, `result_json_bytes` | Compact UTF-8 JSON of the prepared request and decoded response (including a native observation/action envelope but excluding Rust-supplied identity), excluding prompts and host envelopes; tool-enabled native extraction/synthesis response bytes are measured, while ordinary interactive audit response bytes remain unobserved and `null` |
 | `preparation_duration_ms`, `preparation_from_queue_plan` | Additional local preparation of the selected request or completed root; a screening request carried from the same queue checkpoint has `null` duration and `true` reuse |
 | `agent_duration_ms` | Supervised invocation attempt wall time, including a failed or cancelled attempt; never server inference time |
-| `revalidation_record_duration_ms` | Fresh input validation and recording together; these operations are not measured separately |
+| `revalidation_record_duration_ms` | Fresh input validation and recording together; role-level aggregates below separate reconstruction from serial recording |
 | `verification_duration_ms` | Finalizer completion and sealed-result verification |
 | `outcome` | `recorded`, `staged`, `restaged`, `already-complete`, `rejected`, `failed` or `cancelled` |
 
@@ -340,9 +359,9 @@ the job's stages, publication result and final checks.
 
 When one evaluation prepares several ready requests, its preparation time belongs
 to the first selected node; later nodes from that evaluation leave that field null.
-For screening waves, shared post-host capture and acquisition time belongs to the
-first recorded step; peers report only their own recording time. Failed capture time
-is retained on the first valid reply. No pre-host capture is reused after a host call.
+Within each role's wave, shared post-host capture and acquisition time belongs to the
+first participating step; peers report only their own recording time. Failed capture
+time is retained on the first valid reply. No pre-host capture is reused after a host call.
 `semantic_duration_ms` sums invocation attempt wall times, so parallel attempts can
 exceed the job's elapsed `duration_ms`. `queue_planning` reports local planning
 `attempts`, cumulative `duration_ms`, `prepared_targets`, `synthesis_subjects`,
@@ -369,6 +388,14 @@ read-only final checks still report preserved state when configuration is curren
 An incomplete job can still publish independent work and verify selected audits;
 neither field implies full-corpus semantic coverage.
 
+`budget_exhausted` records an actual call-budget refusal, rather than inferring one
+from the call count. `retained_progress` counts newly recorded `evidence_nodes`,
+`screening_packets`, `staged_requests`, `discovery_recipes` and `action_receipts` even
+after detailed step retention fills. Staged requests can contain several task results;
+actions and discovery remain incomplete. `queue_publication_observed` is a boolean
+from an applied report or exact selected-task completion check, not a publication
+count or an end-of-run inventory delta. Cached/already-complete steps add no progress.
+
 Queue planning validates the complete task inventory, target owners and typed input
 readiness, then prepares targets in fair cursor order. Section/progressive preparation
 is bounded by remaining calls and configured parallel capacity, capped at 64. Possible
@@ -383,8 +410,8 @@ the selected window, preserving each task's complete candidates and revision ide
 Shared captures are discarded before host execution; recording recaptures current
 inputs, including added candidates, aliases and scoped reviews.
 
-`queue_planning.discovery_io`, `screening_preparation_io` and
-`screening_revalidation_io` count existing reads in successful complete discovery
+`queue_planning.discovery_io`, `evidence_preparation_io`, `evidence_revalidation_io`,
+`screening_preparation_io` and `screening_revalidation_io` count existing reads in successful complete discovery
 captures. They separate concept `vocabulary`, full `knowledge` traversal and
 `matched_rereads`: `files`, logical `bytes`, enumeration/address/read/parse durations
 and maximum individual read duration, all in microseconds. Read time includes
@@ -400,7 +427,11 @@ the next check; durable journal transitions retain their recovery guarantees.
 Within a finalization checkpoint, status and preparation share one fresh capture.
 Its elapsed time belongs to preparation; sealed-result checks belong to verification.
 Host calls and writer waits still require fresh post-host input validation.
-`screening_revalidation_duration_ms` sums successful fresh input reconstruction;
+`screening_revalidation_duration_ms` sums completed fresh reconstruction checkpoints;
 `screening_record_duration_ms` sums attempted receipt validation/publication, including
 page guards, ledger checks and journal I/O. Writer acquisition remains in
 `mutation_access`; work-step combined durations overlap these measurements.
+`evidence_preparation_duration_ms` covers shared wave preparation;
+`evidence_revalidation_duration_ms` covers completed fresh Work/resource reconstruction checkpoints,
+and `evidence_record_duration_ms` covers attempted individual node/action records.
+These include dependency validation and journal I/O, not provider inference time.

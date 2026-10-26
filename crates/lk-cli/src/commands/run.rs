@@ -128,7 +128,29 @@ mod native {
     }
 
     #[derive(Default, Serialize)]
+    struct RetainedProgress {
+        evidence_nodes: usize,
+        screening_packets: usize,
+        staged_requests: usize,
+        discovery_recipes: usize,
+        action_receipts: usize,
+        queue_publication_observed: bool,
+    }
+
+    impl RetainedProgress {
+        fn has_progress(&self) -> bool {
+            self.evidence_nodes != 0
+                || self.screening_packets != 0
+                || self.staged_requests != 0
+                || self.discovery_recipes != 0
+                || self.action_receipts != 0
+                || self.queue_publication_observed
+        }
+    }
+
+    #[derive(Default, Serialize)]
     struct WorkTelemetry {
+        retained_progress: RetainedProgress,
         work_steps: Vec<WorkStepMetrics>,
         work_steps_omitted: usize,
         evidence_preparation_io: lk_vault::DiscoveryCaptureMetrics,
@@ -146,6 +168,18 @@ mod native {
         const MAX_STEPS: usize = 1024;
 
         fn record(&mut self, step: WorkStepMetrics) {
+            match (step.role, step.outcome) {
+                (WorkRole::Evidence, WorkOutcome::Recorded) => {
+                    self.retained_progress.evidence_nodes += 1
+                }
+                (WorkRole::Screening, WorkOutcome::Recorded) => {
+                    self.retained_progress.screening_packets += 1
+                }
+                (WorkRole::Finalizer, WorkOutcome::Staged) => {
+                    self.retained_progress.staged_requests += 1
+                }
+                _ => {}
+            }
             if self.work_steps.len() < Self::MAX_STEPS {
                 eprintln!(
                     "{}",
@@ -413,6 +447,7 @@ mod native {
         execution: Option<ExecutionInfo>,
         workflow_id: Option<lk_core::execution::WorkflowId>,
         semantic_calls: usize,
+        budget_exhausted: bool,
         #[serde(flatten)]
         work_telemetry: WorkTelemetry,
         queue_planning: QueuePlanningMetrics,
@@ -426,6 +461,93 @@ mod native {
         audit_deferred_count: usize,
         review_health: Option<ReviewHealth>,
         stages: Vec<StageResult>,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+    #[serde(rename_all = "kebab-case")]
+    enum CampaignStop {
+        BatchLimit,
+        Settled,
+        Blocked,
+        Deferred,
+        NoProgress,
+        Failed,
+        Cancelled,
+    }
+
+    impl JobResult {
+        fn new(operation: Operation) -> Self {
+            Self {
+                operation,
+                ok: true,
+                cancelled: false,
+                halted: false,
+                duration_ms: 0,
+                semantic_duration_ms: 0,
+                execution: None,
+                workflow_id: None,
+                semantic_calls: 0,
+                budget_exhausted: false,
+                work_telemetry: WorkTelemetry::default(),
+                queue_planning: QueuePlanningMetrics::default(),
+                mutation_access: MutationAccessMetrics::default(),
+                queue_application: QueueApplicationMetrics::default(),
+                audit: None,
+                audit_progress: None,
+                audit_blocked: Vec::new(),
+                audit_blocked_count: 0,
+                audit_deferred: Vec::new(),
+                audit_deferred_count: 0,
+                review_health: None,
+                stages: Vec::new(),
+            }
+        }
+
+        fn campaign_stop(&self) -> CampaignStop {
+            if self.cancelled {
+                return CampaignStop::Cancelled;
+            }
+            if matches!(self.operation, Operation::Process) {
+                return if self.halted {
+                    CampaignStop::Failed
+                } else if self.ok {
+                    CampaignStop::Settled
+                } else if self.budget_exhausted {
+                    if self.work_telemetry.retained_progress.has_progress() {
+                        CampaignStop::BatchLimit
+                    } else {
+                        CampaignStop::NoProgress
+                    }
+                } else {
+                    CampaignStop::Deferred
+                };
+            }
+            if self.audit.as_ref().is_some_and(Vec::is_empty) && self.audit_blocked_count > 0 {
+                CampaignStop::Blocked
+            } else if !self.ok {
+                if self.halted {
+                    CampaignStop::Failed
+                } else if self
+                    .audit
+                    .as_ref()
+                    .is_some_and(|completed| !completed.is_empty())
+                {
+                    CampaignStop::BatchLimit
+                } else {
+                    CampaignStop::Deferred
+                }
+            } else if self.audit.as_ref().is_some_and(Vec::is_empty)
+                && self
+                    .audit_progress
+                    .as_ref()
+                    .and_then(|progress| progress.after.as_ref())
+                    .is_some_and(|coverage| coverage.unreviewed == 0 && coverage.changed == 0)
+            {
+                CampaignStop::Settled
+            } else {
+                CampaignStop::BatchLimit
+            }
+        }
     }
 
     struct Runner<'a> {
@@ -708,6 +830,10 @@ mod native {
             }
             let can_continue = report.can_continue();
             self.result.queue_application.applied += report.applied;
+            self.result
+                .work_telemetry
+                .retained_progress
+                .queue_publication_observed |= report.applied != 0;
             self.result.queue_application.dropped += report.dropped;
             self.result.queue_application.rejected += report.rejected;
             let detail = format!(
@@ -901,12 +1027,8 @@ mod native {
             if self.config.llm.provider == lk_core::config::LlmProvider::Noop {
                 return self.failure(skill, "semantic execution is disabled by llm.provider");
             }
-            let budget = match self.config.execution.effective_work() {
-                Ok(budget) => budget,
-                Err(error) => return self.failure("semantic work budget", error),
-            };
-            if self.result.semantic_calls >= budget.max_calls {
-                return self.deferred("semantic call budget", "configured execution.work.max_calls exhausted; unfinished work is retained for the next run");
+            if !self.call_budget_available() {
+                return false;
             }
             if let Err(error) = self.prepare_agent().await {
                 return if self.result.cancelled {
@@ -1019,8 +1141,7 @@ mod native {
                     return None;
                 }
             };
-            if self.result.semantic_calls >= budget.max_calls {
-                self.deferred("semantic call budget", "configured execution.work.max_calls exhausted; unfinished work is retained for the next run");
+            if !self.call_budget_available() {
                 return None;
             }
             if let Err(error) = self.prepare_agent().await {
@@ -1210,7 +1331,10 @@ mod native {
         async fn record_observation_batch(
             &mut self,
             replies: Vec<crate::commands::work::InspectionReply>,
-        ) -> Option<(crate::commands::work::RecordedInspections, u64)> {
+        ) -> Option<(
+            miette::Result<crate::commands::work::RecordedInspections>,
+            u64,
+        )> {
             let started = Instant::now();
             let (session, _) = self.recording_session("bounded work receipt").await?;
             match crate::commands::work::record_inspections(
@@ -1235,12 +1359,9 @@ mod native {
                     self.result.work_telemetry.evidence_record_duration_ms += record_ms;
                     let shared_ms =
                         (started.elapsed().as_millis() as u64).saturating_sub(record_ms);
-                    Some((recorded, shared_ms))
+                    Some((Ok(recorded), shared_ms))
                 }
-                Err(error) => {
-                    self.failure("bounded work receipt", error);
-                    None
-                }
+                Err(error) => Some((Err(error), started.elapsed().as_millis() as u64)),
             }
         }
 
@@ -1280,6 +1401,7 @@ mod native {
                         }
                         InspectionRecordOutcome::Recorded(_) => unreachable!(),
                     };
+                    self.result.work_telemetry.retained_progress.action_receipts += 1;
                     self.inspection_deferred.insert(id.into(), reason.clone());
                     self.deferred(stage, &reason);
                     ObservationStep::Deferred(reason)
@@ -1309,12 +1431,19 @@ mod native {
                 request: request.clone(),
                 response,
             }];
-            let Some((mut recorded, shared_ms)) = self.record_observation_batch(replies).await
-            else {
+            let Some((recorded, shared_ms)) = self.record_observation_batch(replies).await else {
                 if self.result.cancelled {
                     metrics.outcome = WorkOutcome::Cancelled;
                 }
                 return ObservationStep::Failed;
+            };
+            let mut recorded = match recorded {
+                Ok(recorded) => recorded,
+                Err(error) => {
+                    metrics.revalidation_record_duration_ms = Some(shared_ms);
+                    self.failure("bounded work receipt", error);
+                    return ObservationStep::Failed;
+                }
             };
             let record = recorded.records.pop().expect("one selected observation");
             metrics.revalidation_record_duration_ms = Some(shared_ms + record.duration_ms);
@@ -1324,7 +1453,10 @@ mod native {
         fn call_budget_available(&mut self) -> bool {
             match self.config.execution.effective_work() {
                 Ok(budget) if self.result.semantic_calls < budget.max_calls => true,
-                Ok(_) => self.deferred("semantic call budget", "configured execution.work.max_calls exhausted; unfinished work is retained for the next run"),
+                Ok(_) => {
+                    self.result.budget_exhausted = true;
+                    self.deferred("semantic call budget", "configured execution.work.max_calls exhausted; unfinished work is retained for the next run")
+                }
                 Err(error) => self.failure("semantic work budget", error),
             }
         }
@@ -1664,7 +1796,7 @@ mod native {
             }
             if !replies.is_empty() {
                 match self.record_observation_batch(replies).await {
-                    Some((recorded, shared_ms)) => {
+                    Some((Ok(recorded), shared_ms)) => {
                         for (index, (mut turn, record)) in
                             returned.into_iter().zip(recorded.records).enumerate()
                         {
@@ -1682,6 +1814,14 @@ mod native {
                             }
                             self.record_work_step(turn.metrics);
                         }
+                    }
+                    Some((Err(error), duration_ms)) => {
+                        accepted = false;
+                        if let Some(first) = returned.first_mut() {
+                            first.metrics.revalidation_record_duration_ms = Some(duration_ms);
+                        }
+                        self.failure("bounded work receipt", error);
+                        self.record_uninvoked_observations(returned);
                     }
                     None => {
                         accepted = false;
@@ -1923,6 +2063,7 @@ mod native {
             metrics.revalidation_record_duration_ms = Some(started.elapsed().as_millis() as u64);
             match finished {
                 Ok(crate::commands::work::ResultFinish::NeedsAction(reason)) => {
+                    self.result.work_telemetry.retained_progress.action_receipts += 1;
                     self.record(
                         "native finalization action",
                         StageState::Skipped,
@@ -1940,6 +2081,10 @@ mod native {
                     WorkStep::Staged
                 }
                 Ok(crate::commands::work::ResultFinish::DiscoveryRecorded) => {
+                    self.result
+                        .work_telemetry
+                        .retained_progress
+                        .discovery_recipes += 1;
                     self.record(
                         "extraction discovery recovery",
                         StageState::Skipped,
@@ -2000,6 +2145,10 @@ mod native {
                     reply,
                 ) {
                     Ok(crate::commands::work::generation::SelectedFinish::DiscoveryRecorded) => {
+                        self.result
+                            .work_telemetry
+                            .retained_progress
+                            .discovery_recipes += 1;
                         recovered = true;
                         self.record(
                             "extraction discovery recovery",
@@ -2008,6 +2157,7 @@ mod native {
                         );
                     }
                     Ok(crate::commands::work::generation::SelectedFinish::NeedsAction(reason)) => {
+                        self.result.work_telemetry.retained_progress.action_receipts += 1;
                         deferred = true;
                         self.record("native selected action", StageState::Skipped, Some(reason));
                     }
@@ -2130,6 +2280,7 @@ mod native {
             metrics.revalidation_record_duration_ms = Some(started.elapsed().as_millis() as u64);
             match result {
                 Ok(Some(reason)) => {
+                    self.result.work_telemetry.retained_progress.action_receipts += 1;
                     self.record(
                         "whole-section action",
                         StageState::Skipped,
@@ -2215,6 +2366,7 @@ mod native {
             match finished {
                 Ok(()) => match action {
                     Some(reason) => {
+                        self.result.work_telemetry.retained_progress.action_receipts += 1;
                         self.record(
                             "bounded section action",
                             StageState::Skipped,
@@ -3062,6 +3214,8 @@ mod native {
                                 Ok(crate::commands::work::ScreeningRecordOutcome::Deferred(
                                     reason,
                                 )) => {
+                                    self.result.work_telemetry.retained_progress.action_receipts +=
+                                        1;
                                     step.outcome = WorkOutcome::Rejected;
                                     self.queue_replan = true;
                                     self.queue_admitted.clear();
@@ -3620,7 +3774,10 @@ mod native {
                                 return false;
                             }
                             match crate::commands::work::has_current_discovery(&self.root, task) {
-                                Ok(true) => continue 'planning,
+                                Ok(true) => {
+                                    self.result.work_telemetry.retained_progress.discovery_recipes += 1;
+                                    continue 'planning;
+                                }
                                 Ok(false) => return self.failure("extraction discovery receipt", "selected extraction has no current discovery recipe; unfinished work retained"),
                                 Err(error) => return self.failure("extraction discovery receipt", error),
                             }
@@ -3717,7 +3874,12 @@ mod native {
                             &self.root,
                             std::slice::from_ref(task),
                         ) {
-                            Ok(true) => {}
+                            Ok(true) => {
+                                self.result
+                                    .work_telemetry
+                                    .retained_progress
+                                    .queue_publication_observed = true
+                            }
                             Ok(false) => unfinished.push(task.clone()),
                             Err(error) => return self.failure("selected queue receipt", error),
                         }
@@ -4421,9 +4583,9 @@ mod native {
         json: bool,
     ) -> miette::Result<()> {
         let started_at = Instant::now();
-        if batches == 0 || batches != 1 && !matches!(operation, Operation::Knowledge) {
+        if batches == 0 || batches != 1 && matches!(operation, Operation::Daily) {
             return Err(miette::miette!(
-                "multiple batches are only supported for knowledge jobs"
+                "multiple batches are only supported for process and knowledge jobs"
             ));
         }
         let config_path = crate::commands::find_config(opts)?;
@@ -4462,53 +4624,30 @@ mod native {
         };
         let mut supervisor = execution::Supervisor::new()?;
         let mut outcomes = Vec::new();
-        let mut stop_reason = "batch-limit";
+        let mut stop_reason = CampaignStop::BatchLimit;
+        let mut campaign_root = None;
         for _ in 0..batches {
             let result = execute(
                 &options,
                 installation,
-                config.clone(),
-                config_revision.clone(),
+                (config.clone(), config_revision.clone()),
                 operation,
                 wait,
                 &mut supervisor,
+                &mut campaign_root,
             )
             .await;
-            stop_reason = if result.cancelled {
-                "cancelled"
-            } else if result.audit.as_ref().is_some_and(Vec::is_empty)
-                && result.audit_blocked_count > 0
-            {
-                "blocked"
-            } else if !result.ok {
-                if result.halted {
-                    "failed"
-                } else if result
-                    .audit
-                    .as_ref()
-                    .is_some_and(|completed| !completed.is_empty())
-                {
-                    "batch-limit"
-                } else {
-                    "deferred"
-                }
-            } else if result.audit.as_ref().is_some_and(Vec::is_empty)
-                && result
-                    .audit_progress
-                    .as_ref()
-                    .and_then(|progress| progress.after.as_ref())
-                    .is_some_and(|coverage| coverage.unreviewed == 0 && coverage.changed == 0)
-            {
-                "settled"
-            } else {
-                "batch-limit"
-            };
+            stop_reason = result.campaign_stop();
             outcomes.push(result);
-            if stop_reason != "batch-limit" {
+            if stop_reason != CampaignStop::BatchLimit {
                 break;
             }
         }
-        let ok = outcomes.iter().all(|result| result.ok);
+        let ok = if matches!(operation, Operation::Process) && batches > 1 {
+            stop_reason == CampaignStop::Settled
+        } else {
+            outcomes.iter().all(|result| result.ok)
+        };
         if json {
             let value = if batches == 1 {
                 serde_json::to_value(&outcomes[0])
@@ -4536,12 +4675,13 @@ mod native {
     async fn execute(
         options: &GlobalOptions,
         installation: &lk_dist::Installation,
-        config: Config,
-        config_revision: String,
+        configuration: (Config, String),
         operation: Operation,
         wait: bool,
         supervisor: &mut execution::Supervisor,
+        campaign_root: &mut Option<workflow::VaultRootPin>,
     ) -> JobResult {
+        let (config, config_revision) = configuration;
         let board = config
             .personal
             .as_ref()
@@ -4572,30 +4712,14 @@ mod native {
             queue_replan: false,
             writer_access_failed: false,
             started_at: Instant::now(),
-            result: JobResult {
-                operation,
-                ok: true,
-                cancelled: false,
-                halted: false,
-                duration_ms: 0,
-                semantic_duration_ms: 0,
-                execution: None,
-                workflow_id: None,
-                semantic_calls: 0,
-                work_telemetry: WorkTelemetry::default(),
-                queue_planning: QueuePlanningMetrics::default(),
-                mutation_access: MutationAccessMetrics::default(),
-                queue_application: QueueApplicationMetrics::default(),
-                audit: None,
-                audit_progress: None,
-                audit_blocked: Vec::new(),
-                audit_blocked_count: 0,
-                audit_deferred: Vec::new(),
-                audit_deferred_count: 0,
-                review_health: None,
-                stages: Vec::new(),
-            },
+            result: JobResult::new(operation),
         };
+        if let Some(pin) = campaign_root.as_ref()
+            && let Err(error) = pin.validate_target(&runner.root)
+        {
+            runner.failure("campaign vault", error);
+            return runner.finish();
+        }
         if !runner.configuration_is_current() {
             return runner.finish();
         }
@@ -4636,6 +4760,15 @@ mod native {
                 .await;
         }
         if !runner.result.cancelled && runner.acquire(wait).await {
+            let pin = runner.lease.as_ref().expect("acquired workflow").root_pin();
+            if let Some(expected) = campaign_root.as_ref() {
+                if let Err(error) = expected.validate_target(pin.root()) {
+                    runner.failure("campaign vault", error);
+                    return runner.finish();
+                }
+            } else {
+                *campaign_root = Some(pin.clone());
+            }
             match operation {
                 Operation::Daily => {
                     runner.drain().await;
@@ -4672,6 +4805,57 @@ mod native {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn process_campaign_requires_a_verified_budget_checkpoint() {
+            let mut result = JobResult::new(Operation::Process);
+            result.ok = false;
+            result.budget_exhausted = true;
+            assert_eq!(result.campaign_stop(), CampaignStop::NoProgress);
+            result.work_telemetry.retained_progress.action_receipts = 1;
+            assert_eq!(result.campaign_stop(), CampaignStop::BatchLimit);
+            result.halted = true;
+            assert_eq!(result.campaign_stop(), CampaignStop::Failed);
+            result.cancelled = true;
+            assert_eq!(result.campaign_stop(), CampaignStop::Cancelled);
+            result.cancelled = false;
+            result.halted = false;
+            result.budget_exhausted = false;
+            assert_eq!(result.campaign_stop(), CampaignStop::Deferred);
+            result.ok = true;
+            assert_eq!(result.campaign_stop(), CampaignStop::Settled);
+        }
+
+        #[test]
+        fn retained_progress_survives_truncated_telemetry_without_counting_cached_work() {
+            let mut telemetry = WorkTelemetry::default();
+            assert!(!telemetry.retained_progress.has_progress());
+            for _ in 0..WorkTelemetry::MAX_STEPS + 2 {
+                let mut step = WorkStepMetrics::new(WorkRole::Evidence);
+                step.outcome = WorkOutcome::Recorded;
+                telemetry.record(step);
+            }
+            for outcome in [
+                WorkOutcome::AlreadyComplete,
+                WorkOutcome::Restaged,
+                WorkOutcome::Rejected,
+                WorkOutcome::Failed,
+                WorkOutcome::Cancelled,
+            ] {
+                let mut step = WorkStepMetrics::new(WorkRole::Evidence);
+                step.outcome = outcome;
+                telemetry.record(step);
+            }
+            assert_eq!(telemetry.work_steps.len(), WorkTelemetry::MAX_STEPS);
+            assert_eq!(telemetry.work_steps_omitted, 7);
+            assert_eq!(
+                telemetry.retained_progress.evidence_nodes,
+                WorkTelemetry::MAX_STEPS + 2
+            );
+            assert_eq!(telemetry.retained_progress.screening_packets, 0);
+            assert_eq!(telemetry.retained_progress.action_receipts, 0);
+            assert!(telemetry.retained_progress.has_progress());
+        }
 
         #[test]
         fn work_telemetry_is_bounded_and_preserves_unobserved_nulls() {

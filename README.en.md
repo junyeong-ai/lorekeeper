@@ -224,7 +224,7 @@ Set these budgets under `execution.work`; a profile's `work` overrides only the 
 
 | What to adjust | Setting and meaning |
 |---|---|
-| Calls per run | `execution.work.max_calls` — default 64 |
+| Calls per batch | `execution.work.max_calls` — default 64 |
 | Concurrent ready evidence reads and distinct-target screening | `max_parallel` — default 1; recording, publication and finalization stay serial |
 | Consecutive calls for one Work or screening phase | `max_consecutive_calls` — default 4, within the same total budget and fair order |
 | Request and result size | `max_input_bytes` / `max_result_bytes` — default 262144 / 32768 JSON bytes |
@@ -247,8 +247,11 @@ for tuning and resume contracts.
 | Process collected work | `lore run process` — process the queue without new collection or semantic audits |
 | Review knowledge | `lore run knowledge` — structural preflight, one ready audit batch, then queue processing and currentness checks for the selected assessments |
 
-`knowledge --batches N` caps the number of audit batches. Check each batch's call budget and remaining work separately;
-running the requested batches does not establish whole-corpus completion.
+`process --batches N` resumes queue processing for at most N batches after a call-budget
+checkpoint with retained progress. The default is 1; each batch keeps the configured call
+budget and acquires a fresh workflow lease. Failures, cancellation or no progress stop the
+campaign, and remaining work stays incomplete. `knowledge --batches N` separately caps audit
+batches; running them does not establish whole-corpus completion.
 
 ### Check the state you need
 
