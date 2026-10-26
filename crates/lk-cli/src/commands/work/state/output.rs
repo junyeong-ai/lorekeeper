@@ -77,7 +77,8 @@ impl StoredOutput {
             reused_from,
             retained: None,
         };
-        if encoded(&stored.output)?.len() < max_result_bytes {
+        let full_bytes = encoded(&stored.output)?.len();
+        if full_bytes < max_result_bytes {
             return Ok(stored);
         }
         let inherited = inherited_questions(children)?;
@@ -109,6 +110,9 @@ impl StoredOutput {
         }
         if !retained.source_questions.is_empty() || !retained.unresolved.is_empty() {
             stored.retained = Some(retained);
+            if stored.result_bytes()? >= full_bytes {
+                stored.retained = None;
+            }
         }
         Ok(stored)
     }
@@ -386,6 +390,30 @@ mod tests {
             1,
         );
         assert!(serde_json::from_str::<StoredOutput>(&duplicate).is_err());
+    }
+
+    #[test]
+    fn exact_limit_legacy_output_is_not_expanded_by_retention_metadata() {
+        let mut child = output();
+        child.source_questions.clear();
+        child.unresolved = vec![WorkQuestion {
+            id: "q".into(),
+            question: "?".into(),
+            evidence: vec![SemanticRange {
+                resource: 0,
+                start: 0,
+                end: 1,
+            }],
+        }];
+        let mut parent = child.clone();
+        parent.node_id = "parent".into();
+        parent.summary.clear();
+        parent.summary = "s".repeat(1024 - encoded(&parent).unwrap().len());
+        assert_eq!(encoded(&parent).unwrap().len(), 1024);
+        let stored = StoredOutput::build(parent.clone(), &[&child], 1024, None).unwrap();
+        assert!(stored.result_bytes().unwrap() <= 1024);
+        assert_eq!(stored.output, parent);
+        assert!(stored.retained.is_none());
     }
 
     #[test]

@@ -2565,6 +2565,61 @@ mod tests {
     }
 
     #[test]
+    fn manual_reduction_at_the_result_limit_keeps_short_inherited_questions() {
+        let root = tempfile::tempdir().unwrap();
+        let source = resources();
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let work = Work::create(
+            &session,
+            &source,
+            "subject",
+            context("one"),
+            WorkLimits {
+                max_input_bytes: 4096,
+                max_result_bytes: 1024,
+            },
+        )
+        .unwrap();
+        assert!(work.plan.parts.len() > 1);
+        for (index, part) in work.plan.parts.iter().enumerate() {
+            let mut output = draft(&work, root.path(), &part.id, &source);
+            if index == 0 {
+                let range = &part.ranges[0];
+                output.unresolved.push(WorkQuestion {
+                    id: "legacy:q".into(),
+                    question: "Why?".into(),
+                    evidence: vec![SemanticRange {
+                        resource: range.resource,
+                        start: range.start,
+                        end: range.start + 1,
+                    }],
+                });
+            }
+            work.record(&session, output, &source).unwrap();
+        }
+        let before = work.progress(root.path(), &source).unwrap();
+        let mut output = before
+            .ready
+            .iter()
+            .map(|node| draft(&work, root.path(), node, &source))
+            .find(|output| !output.unresolved.is_empty())
+            .unwrap();
+        output.summary.clear();
+        output.summary = "s".repeat(work.plan.max_result_bytes - encoded(&output).unwrap().len());
+        assert_eq!(encoded(&output).unwrap().len(), work.plan.max_result_bytes);
+        let node = output.node_id.clone();
+        let expected = output.clone();
+        let after = work.record(&session, output, &source).unwrap();
+        assert_eq!(after.completed, before.completed + 1);
+        let raw = read_optional(root.path(), &output_path(&work.plan.id, &node).unwrap())
+            .unwrap()
+            .unwrap();
+        let stored: StoredOutput = serde_json::from_str(&raw).unwrap();
+        assert_eq!(stored.output, expected);
+        assert!(stored.retained.is_none());
+    }
+
+    #[test]
     fn reductions_preserve_or_explicitly_resolve_inherited_open_concerns() {
         let root = tempfile::tempdir().unwrap();
         let source = resources();
