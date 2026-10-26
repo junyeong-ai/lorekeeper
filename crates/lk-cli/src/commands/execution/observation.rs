@@ -759,7 +759,7 @@ mod tests {
     }
 
     fn request() -> Value {
-        json!({"kind":"inspect","work_id":"w".repeat(64),"node_id":"n".repeat(64),"selection_id":"s".repeat(64),"batch_id":"b".repeat(64),"input_revision":"r".repeat(64),"max_result_bytes":2048,"candidates":[]})
+        json!({"kind":"inspect","work_id":"w".repeat(64),"node_id":"n".repeat(64),"selection_id":"s".repeat(64),"batch_id":"b".repeat(64),"input_revision":"r".repeat(64),"max_result_bytes":2048,"max_reason_json_bytes":2048,"candidates":[]})
     }
 
     fn completion() -> Value {

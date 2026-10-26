@@ -181,9 +181,12 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   unique reference coverage before mapping decisions to canonical paths; reply order is
   irrelevant. Canonical requests retain full owner/source revisions while the native
   presentation leaves those opaque guard hashes to Rust. Reserve path expansion in the
-  reply allowance. Reference-coverage rejection journals an exact request/contract-bound
-  receipt, records no decisions and defers only that task; unchanged requests spend no
-  calls. Changed requests/contracts can be reconsidered. Malformed replies, corrupt
+  reply allowance. Reference-coverage or blank/oversized decision-reason rejection journals
+  an exact request/contract-bound receipt, records no decisions and defers only that task;
+  unchanged requests spend no calls. Reasons obey compact UTF-8 JSON string bytes,
+  including quotes/escapes, not character count. Read existing screening-rejections-v1
+  without rewriting them; new receipts use strict typed v2 dispositions. Earlier readers
+  refuse v2 rather than ignore it. Changed requests/contracts can be reconsidered. Malformed replies, corrupt
   receipts and failed fresh scope validation remain failures. Standalone full-path
   `select-record`, selection identities and existing paid decisions remain unchanged.
   Native new questions contain only semantic text/evidence; Rust supplies IDs and

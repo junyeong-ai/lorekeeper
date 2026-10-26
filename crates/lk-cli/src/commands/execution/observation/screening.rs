@@ -117,12 +117,29 @@ pub(super) fn decode(value: Value, request: &Value, limit: usize) -> miette::Res
         lk_core::rss_original::digest(&serde_json::to_vec(&value).expect("reply serializes"));
     let body: Body = serde_json::from_value(value)
         .map_err(|_| miette::miette!("worker screening does not match the native contract"))?;
+    let max_reason_json_bytes = request["max_reason_json_bytes"]
+        .as_u64()
+        .and_then(|value| usize::try_from(value).ok())
+        .filter(|limit| *limit > 0)
+        .ok_or_else(|| miette::miette!("screening request has no positive reason byte limit"))?;
     let mut assigned = candidates(request)?;
     let mut seen = BTreeSet::new();
     let mut duplicate = 0;
     let mut unknown = 0;
+    let mut blank = 0;
+    let mut oversized = 0;
+    let mut largest_oversized_json_bytes = 0;
     let mut decisions = Vec::new();
     for decision in body.decisions {
+        let reason_bytes = serde_json::to_vec(&decision.reason)
+            .expect("reason serializes")
+            .len();
+        if decision.reason.trim().is_empty() {
+            blank += 1;
+        } else if reason_bytes > max_reason_json_bytes {
+            oversized += 1;
+            largest_oversized_json_bytes = largest_oversized_json_bytes.max(reason_bytes);
+        }
         if !seen.insert(decision.candidate_ref.clone()) {
             duplicate += 1;
         } else if let Some(owner) = assigned.remove(&decision.candidate_ref) {
@@ -132,10 +149,20 @@ pub(super) fn decode(value: Value, request: &Value, limit: usize) -> miette::Res
         }
     }
     if !assigned.is_empty() || duplicate != 0 || unknown != 0 {
-        return Err(ScreeningRejection {
+        return Err(ScreeningRejection::ReferenceCoverage {
             missing: assigned.len(),
             duplicate,
             unknown,
+            response_revision,
+        }
+        .into());
+    }
+    if blank != 0 || oversized != 0 {
+        return Err(ScreeningRejection::InvalidReasons {
+            blank,
+            oversized,
+            max_reason_json_bytes,
+            largest_oversized_json_bytes,
             response_revision,
         }
         .into());
@@ -161,7 +188,7 @@ mod tests {
 
     fn request() -> Value {
         json!({"selection_id":"s".repeat(64),"batch_id":"b".repeat(64),
-            "input_revision":"i".repeat(64),"max_result_bytes":32768,
+            "input_revision":"i".repeat(64),"max_result_bytes":32768,"max_reason_json_bytes":256,
             "candidates":[
                 {"candidate_key":"wiki/documents/매니페스트는-좌표만-나른다.md","path":"wiki/documents/alias.md","file_revision":"f".repeat(64),"source_revision":"s".repeat(64)},
                 {"candidate_key":"wiki/documents/second.md"}]})
@@ -225,10 +252,15 @@ mod tests {
             let rejected = error
                 .downcast_ref::<ScreeningRejection>()
                 .expect("typed local refusal");
-            assert_eq!(
-                (rejected.missing, rejected.duplicate, rejected.unknown),
-                counts
-            );
+            match rejected {
+                ScreeningRejection::ReferenceCoverage {
+                    missing,
+                    duplicate,
+                    unknown,
+                    ..
+                } => assert_eq!((*missing, *duplicate, *unknown), counts),
+                _ => panic!("expected reference coverage rejection"),
+            }
         }
         let mut forged = reply();
         forged["decisions"][0]["candidate_key"] = json!("wiki/documents/second.md");
@@ -245,8 +277,85 @@ mod tests {
     }
 
     #[test]
-    fn reply_limit_reserves_full_escaped_owner_expansion_and_request_contract() {
+    fn complete_reference_coverage_with_invalid_reasons_is_a_typed_local_refusal() {
+        let mut request = request();
+        request["max_reason_json_bytes"] = json!(256);
+        for reason in ["근".repeat(76) + &"x".repeat(30), " \t\n".into()] {
+            let mut reply = reply();
+            reply["decisions"][0]["reason"] = json!(reason);
+            let error = decode(reply, &request, 32768).unwrap_err();
+            let Some(ScreeningRejection::InvalidReasons {
+                blank,
+                oversized,
+                max_reason_json_bytes,
+                largest_oversized_json_bytes,
+                ..
+            }) = error.downcast_ref::<ScreeningRejection>()
+            else {
+                panic!("expected reason rejection: {error}");
+            };
+            assert_eq!(*max_reason_json_bytes, 256);
+            assert_eq!(*blank + *oversized, 1);
+            assert_eq!(
+                *largest_oversized_json_bytes,
+                if *oversized == 0 { 0 } else { 260 }
+            );
+        }
+    }
+
+    #[test]
+    fn reason_bounds_count_json_utf8_bytes_without_clipping_or_relaxing_other_guards() {
         let request = request();
+        for reason in [
+            "근".repeat(75) + &"x".repeat(29),
+            "ab".to_owned() + &"\n".repeat(126),
+            "ab".to_owned() + &"\"".repeat(126),
+        ] {
+            assert_eq!(serde_json::to_vec(&reason).unwrap().len(), 256);
+            let mut response = reply();
+            response["decisions"][0]["reason"] = json!(reason);
+            let output = decode(response.clone(), &request, 32768).unwrap();
+            assert_eq!(
+                output["decisions"][0]["reason"],
+                response["decisions"][0]["reason"]
+            );
+            response["decisions"][0]["reason"] = json!(reason + "x");
+            assert!(matches!(
+                decode(response, &request, 32768)
+                    .unwrap_err()
+                    .downcast_ref::<ScreeningRejection>(),
+                Some(ScreeningRejection::InvalidReasons { oversized: 1, .. })
+            ));
+        }
+        let mut response = reply();
+        response["decisions"][0]["candidate_ref"] = json!("unknown");
+        response["decisions"][0]["reason"] = json!(" ");
+        assert!(matches!(
+            decode(response, &request, 32768)
+                .unwrap_err()
+                .downcast_ref::<ScreeningRejection>(),
+            Some(ScreeningRejection::ReferenceCoverage { .. })
+        ));
+        for (field, value) in [
+            ("reason", json!(false)),
+            ("decision", json!("unknown")),
+            ("candidate_key", json!("forged")),
+        ] {
+            let mut response = reply();
+            response["decisions"][0][field] = value;
+            assert!(
+                decode(response, &request, 32768)
+                    .unwrap_err()
+                    .downcast_ref::<ScreeningRejection>()
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn reply_limit_reserves_full_escaped_owner_expansion_and_request_contract() {
+        let mut request = request();
+        request["max_reason_json_bytes"] = json!(32768);
         let limit = reply_limit(&request, 32768).unwrap();
         let mut reply = reply();
         let size = serde_json::to_vec(&reply).unwrap().len();

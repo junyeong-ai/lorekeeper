@@ -78,9 +78,13 @@ derive a reference from response order. Rust requires complete unique coverage a
 binds each reference to its original path, plus selection, batch and input identity.
 The native presentation omits opaque file/source guard hashes; canonical requests
 and fresh scope checks retain them. The reply allowance reserves full path expansion.
-A reference-coverage rejection records no decisions and defers that task under an
-exact request/contract receipt. Unchanged native calls are suppressed; changed scope
-or contracts may be reconsidered. Corrupt receipts and unknown failures still stop.
+A reference-coverage or blank/oversized-reason rejection records no decisions and
+defers that task under an exact request/contract receipt. The reason limit counts
+UTF-8 bytes of the JSON string, including quotes and escapes, not characters.
+Unchanged native calls are suppressed; changed scope or contracts may be reconsidered.
+Existing v1 rejection receipts remain readable without rewriting; new receipts use
+`screening-rejections-v2`, which earlier readers refuse. Corrupt receipts, malformed
+reply shapes, failed fresh scope validation and unknown failures still stop.
 Standalone `work select-record` still requires its complete identity-bearing format
 from [extraction discovery](discovery.md#progressive-examination).
 

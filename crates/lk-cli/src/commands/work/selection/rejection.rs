@@ -1,21 +1,88 @@
 use super::*;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(in crate::commands) struct ScreeningRejection {
-    pub missing: usize,
-    pub duplicate: usize,
-    pub unknown: usize,
-    pub response_revision: String,
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+pub(in crate::commands) enum ScreeningRejection {
+    ReferenceCoverage {
+        missing: usize,
+        duplicate: usize,
+        unknown: usize,
+        response_revision: String,
+    },
+    InvalidReasons {
+        blank: usize,
+        oversized: usize,
+        max_reason_json_bytes: usize,
+        largest_oversized_json_bytes: usize,
+        response_revision: String,
+    },
+}
+
+impl ScreeningRejection {
+    fn response_revision(&self) -> &str {
+        match self {
+            Self::ReferenceCoverage {
+                response_revision, ..
+            }
+            | Self::InvalidReasons {
+                response_revision, ..
+            } => response_revision,
+        }
+    }
+
+    fn is_valid(&self, candidates: usize, reason_limit: usize, result_limit: usize) -> bool {
+        match self {
+            Self::ReferenceCoverage {
+                missing,
+                duplicate,
+                unknown,
+                ..
+            } => *missing <= candidates && (*missing != 0 || *duplicate != 0 || *unknown != 0),
+            Self::InvalidReasons {
+                blank,
+                oversized,
+                max_reason_json_bytes,
+                largest_oversized_json_bytes,
+                ..
+            } => {
+                blank
+                    .checked_add(*oversized)
+                    .is_some_and(|count| count > 0 && count <= candidates)
+                    && *max_reason_json_bytes == reason_limit
+                    && if *oversized == 0 {
+                        *largest_oversized_json_bytes == 0
+                    } else {
+                        *largest_oversized_json_bytes > reason_limit
+                            && *largest_oversized_json_bytes <= result_limit
+                    }
+            }
+        }
+    }
 }
 
 impl std::fmt::Display for ScreeningRejection {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            formatter,
-            "screening references do not cover the assigned candidates: {} missing, {} duplicate, {} unknown; no decisions were recorded",
-            self.missing, self.duplicate, self.unknown
-        )
+        match self {
+            Self::ReferenceCoverage {
+                missing,
+                duplicate,
+                unknown,
+                ..
+            } => write!(
+                formatter,
+                "screening references do not cover the assigned candidates: {missing} missing, {duplicate} duplicate, {unknown} unknown; no decisions were recorded"
+            ),
+            Self::InvalidReasons {
+                blank,
+                oversized,
+                max_reason_json_bytes,
+                largest_oversized_json_bytes,
+                ..
+            } => write!(
+                formatter,
+                "screening decision reasons are invalid: {blank} blank, {oversized} exceed {max_reason_json_bytes} compact UTF-8 JSON bytes (largest {largest_oversized_json_bytes}); no decisions were recorded"
+            ),
+        }
     }
 }
 
@@ -39,14 +106,74 @@ struct Rejection {
     rejection: ScreeningRejection,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyRejections {
+    schema: String,
+    selection_id: String,
+    batches: BTreeMap<String, LegacyRejection>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyRejection {
+    input_revision: String,
+    request_revision: String,
+    contract_revision: String,
+    rejection: LegacyCoverage,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyCoverage {
+    missing: usize,
+    duplicate: usize,
+    unknown: usize,
+    response_revision: String,
+}
+
 fn require_revision(revision: &str) -> miette::Result<()> {
     require_directory_identity(std::ffi::OsStr::new(revision))
 }
 
 impl Rejections {
     fn decode(raw: &str, selection: &Selection) -> miette::Result<Self> {
-        let receipt: Self = serde_json::from_str(raw).into_diagnostic()?;
-        if receipt.schema != "screening-rejections-v1"
+        let value: Value = serde_json::from_str(raw).into_diagnostic()?;
+        let receipt: Self = match value["schema"].as_str() {
+            Some("screening-rejections-v1") => {
+                let legacy: LegacyRejections = serde_json::from_value(value).into_diagnostic()?;
+                if legacy.schema != "screening-rejections-v1" {
+                    return Err(fail("invalid legacy screening rejection schema"));
+                }
+                Self {
+                    schema: "screening-rejections-v2".into(),
+                    selection_id: legacy.selection_id,
+                    batches: legacy
+                        .batches
+                        .into_iter()
+                        .map(|(batch, entry)| {
+                            (
+                                batch,
+                                Rejection {
+                                    input_revision: entry.input_revision,
+                                    request_revision: entry.request_revision,
+                                    contract_revision: entry.contract_revision,
+                                    rejection: ScreeningRejection::ReferenceCoverage {
+                                        missing: entry.rejection.missing,
+                                        duplicate: entry.rejection.duplicate,
+                                        unknown: entry.rejection.unknown,
+                                        response_revision: entry.rejection.response_revision,
+                                    },
+                                },
+                            )
+                        })
+                        .collect(),
+                }
+            }
+            Some("screening-rejections-v2") => serde_json::from_value(value).into_diagnostic()?,
+            _ => return Err(fail("invalid screening rejection schema")),
+        };
+        if receipt.schema != "screening-rejections-v2"
             || receipt.selection_id != selection.id
             || receipt.batches.is_empty()
         {
@@ -58,13 +185,14 @@ impl Rejections {
                 .ok_or_else(|| fail("screening rejection names an unknown batch"))?;
             let request = selection.request_for(&selection.manifest.batches[index], index)?;
             require_revision(&rejected.contract_revision)?;
-            require_revision(&rejected.rejection.response_revision)?;
+            require_revision(rejected.rejection.response_revision())?;
             if rejected.input_revision != request["input_revision"]
                 || rejected.request_revision != digest(&(&request, &rejected.contract_revision))?
-                || rejected.rejection.missing > selection.manifest.batches[index].len()
-                || (rejected.rejection.missing == 0
-                    && rejected.rejection.duplicate == 0
-                    && rejected.rejection.unknown == 0)
+                || !rejected.rejection.is_valid(
+                    selection.manifest.batches[index].len(),
+                    selection.manifest.max_reason_json_bytes,
+                    selection.manifest.max_result_bytes,
+                )
             {
                 return Err(fail("invalid screening rejection binding or disposition"));
             }
@@ -143,7 +271,7 @@ impl Selection {
             .map(|raw| Rejections::decode(raw, self))
             .transpose()?
             .unwrap_or_else(|| Rejections {
-                schema: "screening-rejections-v1".into(),
+                schema: "screening-rejections-v2".into(),
                 selection_id: self.id.clone(),
                 batches: BTreeMap::new(),
             });

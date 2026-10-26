@@ -696,17 +696,24 @@ impl Selection {
         }
         let mut decisions = BTreeMap::new();
         for decision in output.decisions {
-            if decision.reason.trim().is_empty()
-                || serde_json::to_vec(&decision.reason)
-                    .into_diagnostic()?
-                    .len()
-                    > self.manifest.max_reason_json_bytes
-                || decisions
-                    .insert(decision.candidate_key.clone(), decision)
-                    .is_some()
+            if decision.reason.trim().is_empty() {
+                return Err(fail("screening decision reason is blank"));
+            }
+            let bytes = serde_json::to_vec(&decision.reason)
+                .into_diagnostic()?
+                .len();
+            if bytes > self.manifest.max_reason_json_bytes {
+                return Err(fail(format!(
+                    "screening decision reason uses {bytes} compact UTF-8 JSON bytes, above {}",
+                    self.manifest.max_reason_json_bytes
+                )));
+            }
+            if decisions
+                .insert(decision.candidate_key.clone(), decision)
+                .is_some()
             {
                 return Err(fail(
-                    "decisions require distinct candidate keys and nonblank bounded reasons",
+                    "screening decisions contain a duplicate candidate key",
                 ));
             }
         }
@@ -1927,7 +1934,7 @@ mod tests {
                     &fixture.pages(),
                     &request,
                     &"c".repeat(64),
-                    ScreeningRejection {
+                    ScreeningRejection::ReferenceCoverage {
                         missing: 1,
                         duplicate: 0,
                         unknown: 1,
@@ -1993,7 +2000,7 @@ mod tests {
         let manifest = std::fs::read(fixture.root.join(selection.manifest_path())).unwrap();
         let contract = "c".repeat(64);
         let changed_contract = "e".repeat(64);
-        let rejected = ScreeningRejection {
+        let rejected = ScreeningRejection::ReferenceCoverage {
             missing: 1,
             duplicate: 0,
             unknown: 1,
@@ -2081,6 +2088,24 @@ mod tests {
             .root
             .join(selection.directory.join("rejections.json"));
         let raw = std::fs::read_to_string(&path).unwrap();
+        let mut legacy: Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(legacy["schema"], "screening-rejections-v2");
+        legacy["schema"] = json!("screening-rejections-v1");
+        legacy["batches"][request["batch_id"].as_str().unwrap()]["rejection"]
+            .as_object_mut()
+            .unwrap()
+            .remove("kind");
+        let legacy = encoded(&legacy).unwrap();
+        std::fs::write(&path, &legacy).unwrap();
+        assert!(
+            selection
+                .rejection_reason(&fixture.root, &request, &contract)
+                .unwrap()
+                .is_some()
+        );
+        selection.ledger(&fixture.root).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), legacy);
+        std::fs::write(&path, &raw).unwrap();
         for corrupt in [json!([]), json!({}), {
             let mut value: Value = serde_json::from_str(&raw).unwrap();
             value["batches"][request["batch_id"].as_str().unwrap()]["input_revision"] =
@@ -2112,6 +2137,87 @@ mod tests {
                 .record_rejection(&session, &fixture.pages(), &request, &contract, rejected)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn invalid_reason_receipts_preserve_scope_and_reject_corrupt_dispositions() {
+        let fixture = Fixture::new(2);
+        let selection = fixture.selection(8192, 8192);
+        fixture.create(&selection);
+        let request = selection.prepare(&fixture.root).unwrap().1.unwrap();
+        let contract = "c".repeat(64);
+        let session = MutationSession::acquire(&fixture.root).unwrap();
+        selection
+            .record_rejection(
+                &session,
+                &fixture.pages(),
+                &request,
+                &contract,
+                ScreeningRejection::InvalidReasons {
+                    blank: 0,
+                    oversized: 1,
+                    max_reason_json_bytes: 256,
+                    largest_oversized_json_bytes: 260,
+                    response_revision: "d".repeat(64),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            selection
+                .ledger(&fixture.root)
+                .unwrap()
+                .progress
+                .completed_batches,
+            0
+        );
+        assert!(
+            selection
+                .rejection_reason(&fixture.root, &request, &contract)
+                .unwrap()
+                .unwrap()
+                .contains("260")
+        );
+        assert!(
+            selection
+                .rejection_reason(&fixture.root, &request, &"e".repeat(64))
+                .unwrap()
+                .is_none()
+        );
+        let path = fixture
+            .root
+            .join(selection.directory.join("rejections.json"));
+        let before = std::fs::read_to_string(&path).unwrap();
+        for (field, invalid) in [
+            ("blank", json!(3)),
+            ("oversized", json!(0)),
+            ("max_reason_json_bytes", json!(257)),
+            ("largest_oversized_json_bytes", json!(256)),
+            ("largest_oversized_json_bytes", json!(8193)),
+            ("unknown", json!(0)),
+        ] {
+            let mut corrupt: Value = serde_json::from_str(&before).unwrap();
+            corrupt["batches"][request["batch_id"].as_str().unwrap()]["rejection"][field] = invalid;
+            std::fs::write(&path, encoded(&corrupt).unwrap()).unwrap();
+            assert!(
+                selection
+                    .rejection_reason(&fixture.root, &request, &contract)
+                    .is_err(),
+                "{field}"
+            );
+            assert!(prune(&session, &BTreeSet::new()).is_err());
+            assert!(fixture.root.join(selection.manifest_path()).exists());
+        }
+        std::fs::write(&path, &before).unwrap();
+        selection
+            .record(
+                &session,
+                &fixture.pages(),
+                answer(&request, ScreeningDecision::Inspect),
+                None,
+            )
+            .unwrap();
+        assert!(selection.ledger(&fixture.root).unwrap().progress.complete);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
     }
 
     #[test]
