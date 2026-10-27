@@ -1169,24 +1169,21 @@ impl Work {
         debug_assert!(limit > 0);
         let evaluated = self.evaluate(root, resources)?;
         let progress = evaluated.progress();
-        let inputs = if progress.complete {
-            Vec::new()
-        } else {
-            progress
-                .ready
-                .iter()
-                .take(limit)
-                .map(|id| {
-                    let node = evaluated
-                        .nodes
-                        .iter()
-                        .find(|node| &node.id == id)
-                        .expect("ready node belongs to the evaluated tree");
-                    self.node_input(node, &evaluated.inputs, &evaluated.current)
-                        .map_err(NodeInputError::report)
-                })
-                .collect::<miette::Result<Vec<_>>>()?
-        };
+        let mut inputs = Vec::new();
+        if !progress.complete {
+            for id in progress.ready.iter().take(limit) {
+                let node = evaluated
+                    .nodes
+                    .iter()
+                    .find(|node| &node.id == id)
+                    .expect("ready node belongs to the evaluated tree");
+                match self.node_input(node, &evaluated.inputs, &evaluated.current) {
+                    Ok(input) => inputs.push(input),
+                    Err(NodeInputError::Bound(_)) if !inputs.is_empty() => break,
+                    Err(error) => return Err(error.report()),
+                }
+            }
+        }
         Ok((progress, inputs))
     }
 
@@ -2395,6 +2392,95 @@ mod tests {
         let (complete, requests) = work.prepare_inspections(root.path(), &source, 3).unwrap();
         assert!(complete.complete);
         assert!(requests.is_empty());
+    }
+
+    #[test]
+    fn prepared_inspections_keep_fitting_prefix_before_capacity_and_refuse_corruption() {
+        let root = tempfile::tempdir().unwrap();
+        let source = evidence_pages(8, 250);
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let work = Work::create(
+            &session,
+            &source,
+            "subject",
+            context("one"),
+            WorkLimits {
+                max_input_bytes: 3000,
+                max_result_bytes: 1500,
+            },
+        )
+        .unwrap();
+        assert!(work.plan.parts.len() >= 8);
+        for part in work.plan.parts.iter().take(work.plan.parts.len() - 1) {
+            let mut output = draft(&work, root.path(), &part.id, &source);
+            output.source_questions.push(WorkQuestion {
+                id: format!("{}:source:0", part.id),
+                question: "The source does not establish effective scope. ".repeat(10),
+                evidence: vec![part.ranges[0].clone()],
+            });
+            work.record(&session, output, &source).unwrap();
+        }
+        loop {
+            let ready = work.progress(root.path(), &source).unwrap().ready;
+            let mut recorded = false;
+            for id in ready {
+                let input = match work.input(root.path(), &id, &source) {
+                    Ok(input) => input,
+                    Err(error) if error.downcast_ref::<InputCapacity>().is_some() => continue,
+                    Err(error) => panic!("{error:?}"),
+                };
+                if input["kind"] == "reduce" {
+                    work.record(&session, draft(&work, root.path(), &id, &source), &source)
+                        .unwrap();
+                    recorded = true;
+                }
+            }
+            if !recorded {
+                break;
+            }
+        }
+        let (before, single) = work.prepare_inspection(root.path(), &source).unwrap();
+        assert!(before.ready.len() >= 2);
+        let single = single.unwrap();
+        assert_eq!(single["kind"], "inspect");
+        assert!(
+            work.input(root.path(), &before.ready[1], &source)
+                .unwrap_err()
+                .downcast_ref::<InputCapacity>()
+                .is_some()
+        );
+        let (_, requests) = work.prepare_inspections(root.path(), &source, 2).unwrap();
+        assert_eq!(requests, vec![single]);
+        let path = root
+            .path()
+            .join(output_path(&work.plan.id, &work.plan.parts[0].id).unwrap());
+        let raw = std::fs::read(&path).unwrap();
+        let mut corrupt: Value = serde_json::from_slice(&raw).unwrap();
+        corrupt["output"]["summary"] = "Changed without matching checksum.".into();
+        std::fs::write(&path, encoded(&corrupt).unwrap()).unwrap();
+        let error = work
+            .prepare_inspections(root.path(), &source, 2)
+            .err()
+            .unwrap();
+        assert!(error.downcast_ref::<InputCapacity>().is_none());
+        std::fs::write(path, raw).unwrap();
+        let mut deferred = false;
+        for _ in 0..before.total {
+            match work.prepare_inspection(root.path(), &source) {
+                Ok((_, Some(request))) => {
+                    let id = request["node_id"].as_str().unwrap();
+                    work.record(&session, draft(&work, root.path(), id, &source), &source)
+                        .unwrap();
+                }
+                Ok(_) => panic!("oversized reduction must remain incomplete"),
+                Err(error) => {
+                    assert!(error.downcast_ref::<InputCapacity>().is_some());
+                    deferred = true;
+                    break;
+                }
+            }
+        }
+        assert!(deferred);
     }
 
     #[test]
