@@ -16,6 +16,9 @@ raw=sys.stdin.read()
 request=json.loads(raw.split('\nNative request:\n',1)[1])
 with (root/'calls.jsonl').open('a') as f: f.write(json.dumps(request)+'\n')
 mode=(root/'mode').read_text()
+if mode in ['host-failure','host-envelope-error']:
+    print(json.dumps({'type':'result','subtype':'error_during_execution','is_error':True,'errors':['PRIVATE_CANARY_ERROR']}))
+    raise SystemExit(1 if mode=='host-failure' else 0)
 if request.get('schema') in ['native-selected-results-v3','native-finalize-results-v2','native-finalize-frontier-v2']:
     assert '--safe-mode' not in sys.argv
     assert '--output-schema' in sys.argv or '--json-schema' in sys.argv
@@ -88,6 +91,61 @@ struct Fixture {
     directory: tempfile::TempDir,
     config: PathBuf,
     engine: String,
+}
+
+#[test]
+fn native_generation_failure_reports_only_observed_host_metadata() {
+    for (engine, mode) in [
+        ("codex", "host-failure"),
+        ("claude-code", "host-failure"),
+        ("claude-code", "host-envelope-error"),
+    ] {
+        let fixture = Fixture::new(engine);
+        let (task, _) = fixture.add("diagnostic", lk_queue::TaskKind::SynthesizeConcept, false);
+        std::fs::write(fixture.root().join("mode"), mode).unwrap();
+        let report = fixture.run();
+        assert_eq!(report["halted"], true, "{report}");
+        assert_eq!(report["semantic_calls"], 1, "{report}");
+        assert_eq!(report["queue_application"]["applied"], 0);
+        assert!(
+            !serde_json::to_string(&report)
+                .unwrap()
+                .contains("PRIVATE_CANARY")
+        );
+        let step = &report["work_steps"][0];
+        assert_eq!(step["role"], "finalizer");
+        assert!(step["result_json_bytes"].is_null());
+        let failure = &step["host_failure"];
+        assert_eq!(
+            failure["phase"],
+            if mode == "host-failure" {
+                "invocation"
+            } else {
+                "response"
+            }
+        );
+        assert_eq!(
+            failure["exit_code"],
+            if mode == "host-failure" { 1 } else { 0 }
+        );
+        if engine == "codex" {
+            assert_eq!(failure["stdout_capture"], "not-captured");
+            assert!(failure["stdout_bytes"].is_null());
+            assert!(failure["stdout_format"].is_null());
+        } else {
+            assert_eq!(failure["stdout_capture"], "complete");
+            assert_eq!(failure["subtype"]["recognized"], "error_during_execution");
+            assert_eq!(failure["errors"]["members"], 1);
+        }
+        let queue = fixture.json(&["queue", "status", "--json"]);
+        assert!(
+            queue["data"]["tasks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["task_id"] == task.task_id && row["status"] == "current")
+        );
+    }
 }
 impl Fixture {
     fn new(engine: &str) -> Self {

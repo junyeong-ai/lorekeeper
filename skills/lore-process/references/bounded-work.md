@@ -357,6 +357,19 @@ observation, assessment or publication was verified.
 engine, observed CLI version and requested model/effort; omitted native settings stay
 `null`. It does not establish the actual provider model, effective effort, tokens or
 billed cost. A same-profile generation batch may contain multiple stage names.
+Failed structured hosts include optional `host_failure` diagnostics. `phase` separates
+`version-preflight`, `invocation` and `response`; preflight never consumes a semantic
+call. The summary reports the engine, exit code and captured stdout's JSON shape.
+`stdout_capture` is `complete`, `not-captured` or `unavailable`; only complete capture
+has a known byte count and JSON format. Uncaptured output and discarded partial output
+remain unknown. Codex tool-enabled generation streams its stdout, so that field cannot
+describe its separate terminal-result file.
+Selected fields expose only fixed status tokens, types, string UTF-8 byte lengths and
+container member counts. Unknown token values, arbitrary keys, payloads, error/result
+text and session/account data are omitted. This does not sanitize existing streamed
+stderr. A diagnostic does not establish a provider failure category or permit a retry,
+fallback or adoption: nonzero exit remains failure even with a success-looking envelope.
+Failed host stdout is not a decoded semantic `result_json_bytes` value.
 The top-level `execution` describes the first prepared host; its `policy_profile` and
 `work` retain the originating job profile and aggregate budget. Optional stage selection
 is described in [execution profiles](../../lore-setup/references/config.md#optional-stage-profiles).
@@ -409,7 +422,7 @@ durations are not independent values to sum. Native waits are cancellable and re
 only typed contention. A pre-host cursor wait triggers fresh preparation; post-host
 recording validates current resources without repeating the host call.
 
-`queue_application` accumulates deterministic application `attempts`, `duration_ms`,
+`queue_application` accumulates controller-owned deterministic application `attempts`, `duration_ms`,
 `applied`, `dropped` and `rejected` counts and retains the `latest` typed report.
 Repeated rejection counts are attempts, not distinct tasks. Native report capture
 is limited to 8 MiB; invalid, oversized or abnormally terminated reports stop the job.
@@ -426,6 +439,10 @@ after detailed step retention fills. Staged requests can contain several task re
 actions and discovery remain incomplete. `queue_publication_observed` is a boolean
 from an applied report or exact selected-task completion check, not a publication
 count or an end-of-run inventory delta. Cached/already-complete steps add no progress.
+These counters do not enumerate every write performed by an interactive child CLI.
+In particular, audit discovery recipes and child-owned queue publications can be saved
+without increasing these controller counters. Use the exact native receipt or guarded
+task-identity comparison when complete cross-child publication accounting is needed.
 
 Queue planning validates the complete task inventory, target owners and typed input
 readiness, then prepares targets in fair cursor order. Section/progressive preparation

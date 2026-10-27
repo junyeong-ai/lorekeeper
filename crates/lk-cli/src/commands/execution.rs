@@ -7,6 +7,7 @@ use std::time::Instant;
 use lk_core::execution::{AgentEngine, ExecutionProfile};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+pub(super) mod diagnostic;
 pub(super) mod finalization;
 pub(super) mod observation;
 pub(super) mod result;
@@ -20,6 +21,15 @@ pub(super) struct ChildResult {
     pub cancelled: bool,
     pub detail: Option<String>,
     pub stdout: Vec<u8>,
+    pub stdout_capture: StdoutCapture,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(super) enum StdoutCapture {
+    NotCaptured,
+    Complete,
+    Unavailable,
 }
 
 #[cfg(unix)]
@@ -352,6 +362,7 @@ async fn run_child(
                     return Ok(ChildResult {
                         success: status.success(), exit_code: status.code(), cancelled: false,
                         detail: (!status.success()).then(|| format!("child {status}")), stdout,
+                        stdout_capture: if capture_limit.is_some() {StdoutCapture::Complete} else {StdoutCapture::NotCaptured},
                     });
                 },
                 Err(error) => (false, format!("child IO: {error}")),
@@ -367,6 +378,7 @@ async fn run_child(
         cancelled,
         detail: Some(detail),
         stdout: Vec::new(),
+        stdout_capture: StdoutCapture::Unavailable,
     })
 }
 
@@ -447,7 +459,7 @@ async fn run_children(
                             let mut detail = format!("supervised child task: {error}");
                             running.lock().await.stop(&mut detail).await;
                             let result = if cancelled.is_some_and(ChildCancellation::is_user_cancelled) {
-                                Ok(ChildResult {success:false,exit_code:None,cancelled:true,detail:Some(detail),stdout:Vec::new()})
+                                Ok(ChildResult {success:false,exit_code:None,cancelled:true,detail:Some(detail),stdout:Vec::new(),stdout_capture:StdoutCapture::Unavailable})
                             } else {
                                 Err(miette::miette!("{detail}"))
                             };
@@ -476,6 +488,7 @@ async fn run_children(
                     cancelled: true,
                     detail: Some(detail),
                     stdout: Vec::new(),
+                    stdout_capture: StdoutCapture::Unavailable,
                 })
             } else {
                 Err(miette::miette!("{detail}"))
@@ -1060,6 +1073,7 @@ Path(os.environ['TEST_ROOT'],'received.json').write_text(json.dumps(request,ensu
             assert!(!result.cancelled);
             assert_eq!(result.exit_code, expected);
             assert_eq!(result.stdout, b"{\"ok\":false}");
+            assert_eq!(result.stdout_capture, StdoutCapture::Complete);
         }
     }
 
@@ -1142,6 +1156,12 @@ Path(os.environ['TEST_ROOT'],'received.json').write_text(json.dumps(request,ensu
             let result = results[index].result.as_ref().unwrap();
             assert!(!result.success);
             assert!(!result.cancelled);
+        }
+        for index in [2, 3] {
+            assert_eq!(
+                results[index].result.as_ref().unwrap().stdout_capture,
+                StdoutCapture::Unavailable
+            );
         }
         assert!(
             results[2]

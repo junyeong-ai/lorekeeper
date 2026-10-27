@@ -93,6 +93,7 @@ mod native {
         role: WorkRole,
         stages: Vec<ExecutionStage>,
         execution: Option<RequestedExecution>,
+        host_failure: Option<execution::diagnostic::HostFailure>,
         work_id: Option<String>,
         node_id: Option<String>,
         node_kind: Option<NodeKind>,
@@ -119,6 +120,7 @@ mod native {
                     _ => Vec::new(),
                 },
                 execution: None,
+                host_failure: None,
                 work_id: None,
                 node_id: None,
                 node_kind: None,
@@ -1052,6 +1054,13 @@ mod native {
                 self.result.cancelled = true;
             }
             if !version.success {
+                if !version.cancelled {
+                    metrics.host_failure = Some(execution::diagnostic::HostFailure::from_child(
+                        profile.engine(),
+                        execution::diagnostic::Phase::VersionPreflight,
+                        &version,
+                    ));
+                }
                 return Err(miette::miette!(
                     "agent preflight failed: {}",
                     version
@@ -1059,7 +1068,14 @@ mod native {
                         .unwrap_or_else(|| "version unavailable".into())
                 ));
             }
-            execution::verify_version(profile.engine(), &version.stdout)?;
+            if let Err(error) = execution::verify_version(profile.engine(), &version.stdout) {
+                metrics.host_failure = Some(execution::diagnostic::HostFailure::from_child(
+                    profile.engine(),
+                    execution::diagnostic::Phase::VersionPreflight,
+                    &version,
+                ));
+                return Err(error);
+            }
             let host = RequestedExecution {
                 profile: name,
                 engine: profile.engine(),
@@ -1351,6 +1367,13 @@ mod native {
             };
             if !child.success {
                 self.result.halted |= !child.cancelled;
+                if !child.cancelled {
+                    metrics.host_failure = Some(execution::diagnostic::HostFailure::from_child(
+                        invocation.engine,
+                        execution::diagnostic::Phase::Invocation,
+                        &child,
+                    ));
+                }
                 metrics.outcome = if child.cancelled {
                     WorkOutcome::Cancelled
                 } else {
@@ -1414,6 +1437,10 @@ mod native {
                             capacity.clone(),
                         ));
                     }
+                    metrics.host_failure = Some(execution::diagnostic::HostFailure::from_response(
+                        reply.engine,
+                        &reply.bytes,
+                    ));
                     self.failure("bounded work receipt", error);
                     return None;
                 }
@@ -1877,6 +1904,12 @@ mod native {
                     Ok(child) => {
                         accepted = false;
                         self.result.halted = true;
+                        turn.metrics.host_failure =
+                            Some(execution::diagnostic::HostFailure::from_child(
+                                engine,
+                                execution::diagnostic::Phase::Invocation,
+                                &child,
+                            ));
                         turn.metrics.outcome = WorkOutcome::Failed;
                         self.record("bounded work receipt", StageState::Failed, child.detail);
                         self.record_work_step(turn.metrics);
@@ -2135,6 +2168,11 @@ mod native {
             }
             if !child.success {
                 metrics.outcome = WorkOutcome::Failed;
+                metrics.host_failure = Some(execution::diagnostic::HostFailure::from_child(
+                    self.agent_profile(metrics).engine(),
+                    execution::diagnostic::Phase::Invocation,
+                    &child,
+                ));
                 self.failure(
                     "native result host",
                     child.detail.unwrap_or_else(|| "host failed".into()),
@@ -2157,6 +2195,18 @@ mod native {
                     Some(value)
                 }
                 Err(error) => {
+                    if self.agent_profile(metrics).engine()
+                        == lk_core::execution::AgentEngine::ClaudeCode
+                        && error
+                            .downcast_ref::<crate::commands::work::state::OutputCapacity>()
+                            .is_none()
+                    {
+                        metrics.host_failure =
+                            Some(execution::diagnostic::HostFailure::from_response(
+                                lk_core::execution::AgentEngine::ClaudeCode,
+                                &child.stdout,
+                            ));
+                    }
                     self.failure("native result response", error);
                     None
                 }
@@ -3274,6 +3324,11 @@ mod native {
                                     }
                                 }
                                 Err(error) => {
+                                    if error.downcast_ref::<crate::commands::work::state::OutputCapacity>().is_none() {
+                                        step.host_failure = Some(execution::diagnostic::HostFailure::from_response(
+                                            engine, &child.stdout,
+                                        ));
+                                    }
                                     self.failure("candidate screening", error);
                                     None
                                 }
@@ -3281,6 +3336,12 @@ mod native {
                         }
                         Ok(child) => {
                             step.outcome = WorkOutcome::Failed;
+                            step.host_failure =
+                                Some(execution::diagnostic::HostFailure::from_child(
+                                    engine,
+                                    execution::diagnostic::Phase::Invocation,
+                                    &child,
+                                ));
                             self.result.halted = true;
                             self.record("candidate screening", StageState::Failed, child.detail);
                             None

@@ -3,6 +3,9 @@
 #[path = "native_execution/stage_profiles.rs"]
 mod stage_profiles;
 
+#[path = "native_execution/host_diagnostics.rs"]
+mod host_diagnostics;
+
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -7139,6 +7142,13 @@ MIXED
             let steps = report["work_steps"].as_array().unwrap();
             if failed_role.is_some() {
                 for step in steps {
+                    if step["outcome"] == "failed" {
+                        assert_eq!(step["host_failure"]["phase"], "invocation");
+                        assert_eq!(step["host_failure"]["engine"], step["execution"]["engine"]);
+                        assert_eq!(step["host_failure"]["exit_code"], 51);
+                        assert_eq!(step["host_failure"]["stdout_capture"], "complete");
+                        assert!(step["result_json_bytes"].is_null());
+                    }
                     assert_eq!(
                         step["execution"]["profile"],
                         if step["role"] == "screening" {
