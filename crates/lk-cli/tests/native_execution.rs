@@ -1433,6 +1433,66 @@ fn bounded_calls(fixture: &Fixture) -> Vec<serde_json::Value> {
 }
 
 #[test]
+fn preflight_configuration_drift_stops_audit_before_invocation_and_accounting() {
+    for engine in ["codex", "claude-code"] {
+        for bounded in [true, false] {
+            let fixture = bounded_audit_fixture(engine, 4, RECORD_BOUNDED_AUDIT);
+            if !bounded {
+                let template =
+                    include_str!("behaviour/corpus/small/vault/wiki/concepts/unlinked-note.md");
+                std::fs::write(
+                    fixture.root().join("vault/wiki/concepts/large.md"),
+                    template
+                        .replace("Unlinked note", "large")
+                        .replace("unlinked-note", "large"),
+                )
+                .unwrap();
+                record_discovery(&fixture, "wiki/concepts/large.md");
+            }
+            let executable = fixture.root().join("agent executable");
+            let host = std::fs::read_to_string(&executable).unwrap().replace(
+                "if [ \"$1\" = --version ]; then",
+                "if [ \"$1\" = --version ]; then printf '\\n# synthetic config pin edit\\n' >> \"$TEST_EXECUTION_ROOT/config.yaml\";",
+            );
+            std::fs::write(executable, host).unwrap();
+            let (output, job) = fixture.run("knowledge");
+            assert!(!output.status.success());
+            assert_eq!(job["halted"], true, "{job}");
+            assert_eq!(job["cancelled"], false, "{job}");
+            assert_eq!(job["budget_exhausted"], false, "{job}");
+            assert_eq!(job["semantic_calls"], 0, "{job}");
+            assert_eq!(job["semantic_duration_ms"], 0, "{job}");
+            assert!(!fixture.root().join("arguments").exists());
+            assert!(bounded_calls(&fixture).is_empty());
+            assert!(
+                job["work_steps"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|step| step["agent_duration_ms"].is_null())
+            );
+            assert!(
+                job["stages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|stage| stage["name"] == "configuration" && stage["state"] == "failed")
+            );
+            let state: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(
+                    fixture
+                        .root()
+                        .join("vault/.lorekeeper/knowledge-audit.json"),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            assert!(state["entries"].as_object().unwrap().is_empty());
+        }
+    }
+}
+
+#[test]
 fn selected_profile_budget_reaches_controller_and_worker_commands() {
     for engine in ["claude-code", "codex"] {
         let fixture = bounded_audit_fixture(

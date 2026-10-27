@@ -1578,6 +1578,9 @@ mod native {
         }
 
         async fn reserve_queue_turn(&mut self) -> bool {
+            if !self.configuration_is_current() {
+                return false;
+            }
             let Some(turn) = self.queue_turn.take() else {
                 return true;
             };
