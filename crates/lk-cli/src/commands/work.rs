@@ -1781,16 +1781,54 @@ pub(super) fn audit_needs_work(
     Ok(work.plan.parts.len() > 1 || work.is_planned(&root)?)
 }
 
-pub(super) fn prepare_inspection(
+#[cfg(unix)]
+pub(super) enum NativeStep {
+    Inspection {
+        progress: state::WorkProgress,
+        request: Option<Value>,
+        preparation_duration_ms: u64,
+    },
+    Finalization {
+        root_node: String,
+        checkpoint: FinalizationCheckpoint,
+    },
+}
+
+#[cfg(unix)]
+pub(super) fn prepare_native_step(
     root: &Path,
     config: &lk_core::config::Config,
     config_revision: &str,
     id: &str,
     read: &lk_vault::ReadControl,
-) -> miette::Result<(state::WorkProgress, Option<Value>)> {
+) -> miette::Result<NativeStep> {
+    let started_at = std::time::Instant::now();
     let root = root.canonicalize().into_diagnostic()?;
     let (work, prepared) = load_controlled(&root, config, config_revision, id, read)?;
-    work.prepare_inspection(&root, &prepared.resources)
+    let (progress, request) = work.prepare_inspection(&root, &prepared.resources)?;
+    let preparation_duration_ms = started_at.elapsed().as_millis() as u64;
+    read.check().into_diagnostic()?;
+    if !progress.complete {
+        return Ok(NativeStep::Inspection {
+            progress,
+            request,
+            preparation_duration_ms,
+        });
+    }
+    let mut checkpoint = prepare_native_finalization_from_capture(
+        &root,
+        config,
+        config_revision,
+        &work,
+        &prepared,
+        false,
+    )?;
+    checkpoint.preparation_duration_ms += preparation_duration_ms;
+    read.check().into_diagnostic()?;
+    Ok(NativeStep::Finalization {
+        root_node: progress.root_node,
+        checkpoint,
+    })
 }
 
 #[cfg(unix)]
@@ -3527,17 +3565,21 @@ mod tests {
         assert!(!is_finished(&root, &config, &config_revision, &work.plan.id).unwrap());
         #[cfg(unix)]
         assert!(matches!(
-            prepare_native_finalization(
+            prepare_native_step(
                 &root,
                 &config,
                 &config_revision,
                 &work.plan.id,
-                false,
                 &lk_vault::ReadControl::default()
             )
-            .unwrap()
-            .state,
-            NativeFinalization::Ready(FinalizationPreparation::Interactive)
+            .unwrap(),
+            NativeStep::Finalization {
+                checkpoint: FinalizationCheckpoint {
+                    state: NativeFinalization::Ready(FinalizationPreparation::Interactive),
+                    ..
+                },
+                ..
+            }
         ));
         assert!(verify_finished(&root, &config, &config_revision, &work.plan.id).is_err());
         {
@@ -3547,17 +3589,21 @@ mod tests {
         assert!(is_finished(&root, &config, &config_revision, &work.plan.id).unwrap());
         #[cfg(unix)]
         assert!(matches!(
-            prepare_native_finalization(
+            prepare_native_step(
                 &root,
                 &config,
                 &config_revision,
                 &work.plan.id,
-                false,
                 &lk_vault::ReadControl::default()
             )
-            .unwrap()
-            .state,
-            NativeFinalization::Finished
+            .unwrap(),
+            NativeStep::Finalization {
+                checkpoint: FinalizationCheckpoint {
+                    state: NativeFinalization::Finished,
+                    ..
+                },
+                ..
+            }
         ));
         verify_finished(&root, &config, &config_revision, &work.plan.id).unwrap();
 
@@ -3572,12 +3618,11 @@ mod tests {
         assert!(is_finished(&root, &config, &config_revision, &work.plan.id).is_err());
         #[cfg(unix)]
         assert!(
-            prepare_native_finalization(
+            prepare_native_step(
                 &root,
                 &config,
                 &config_revision,
                 &work.plan.id,
-                false,
                 &lk_vault::ReadControl::default()
             )
             .is_err()
@@ -3597,6 +3642,17 @@ mod tests {
         .unwrap();
         assert!(is_finished(&root, &config, &config_revision, &work.plan.id).is_err());
         assert!(verify_finished(&root, &config, &config_revision, &work.plan.id).is_err());
+        #[cfg(unix)]
+        assert!(
+            prepare_native_step(
+                &root,
+                &config,
+                &config_revision,
+                &work.plan.id,
+                &lk_vault::ReadControl::default()
+            )
+            .is_err()
+        );
         std::fs::write(subject_path, subject).unwrap();
         assert!(is_finished(&root, &config, &config_revision, &work.plan.id).unwrap());
         assert_eq!(std::fs::read_to_string(final_path).unwrap(), original);
@@ -3632,6 +3688,7 @@ mod tests {
             prepare_native_finalization(&root, &config, &revision, &work.plan.id, false, &read)
                 .is_err()
         );
+        assert!(prepare_native_step(&root, &config, &revision, &work.plan.id, &read).is_err());
         assert!(
             prepare_inspections_batch(
                 &root,
@@ -3676,6 +3733,31 @@ mod tests {
         assert!(!status.complete);
         assert!(status.completed < status.total);
         assert!(!status.ready.is_empty());
+        #[cfg(unix)]
+        {
+            let (config, revision) =
+                lk_core::config::Config::load_with_revision(&root.join("config.yaml")).unwrap();
+            let NativeStep::Inspection {
+                progress, request, ..
+            } = prepare_native_step(
+                &root,
+                &config,
+                &revision,
+                &work.plan.id,
+                &lk_vault::ReadControl::default(),
+            )
+            .unwrap()
+            else {
+                panic!("corrected incomplete work must not enter finalization");
+            };
+            assert_eq!(progress.completed, status.completed);
+            assert_eq!(progress.ready, status.ready);
+            assert_eq!(
+                request.unwrap(),
+                work.input(&root, &status.ready[0], &prepared.resources)
+                    .unwrap()
+            );
+        }
         assert_eq!(
             progress_value(&work, &prepared, status, 1, 0),
             progress(&work, &root, &prepared, 1, 0).unwrap(),
@@ -4248,7 +4330,7 @@ mod tests {
             let TaskWork::Partitioned { id } = prepared else {
                 panic!("fixture must require bounded work");
             };
-            let (before, input) = prepare_inspection(
+            let (work, prepared) = load_controlled(
                 &root,
                 &config,
                 &config_revision,
@@ -4256,6 +4338,7 @@ mod tests {
                 &lk_vault::ReadControl::default(),
             )
             .unwrap();
+            let (before, input) = work.prepare_inspection(&root, &prepared.resources).unwrap();
             let input = input.unwrap();
             let node = before.ready.first().unwrap();
             assert_eq!(input["node_id"].as_str(), Some(node.as_str()));

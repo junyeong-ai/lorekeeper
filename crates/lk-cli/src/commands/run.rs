@@ -212,10 +212,6 @@ mod native {
     enum ObservationStep {
         Recorded,
         Deferred(String),
-        Complete {
-            root_node: String,
-            preparation_duration_ms: u64,
-        },
         Failed,
     }
 
@@ -1996,80 +1992,52 @@ mod native {
             }
         }
 
-        async fn bounded_observation_step(&mut self, id: &str) -> ObservationStep {
+        async fn bounded_observation_step(
+            &mut self,
+            id: &str,
+            before: crate::commands::work::state::WorkProgress,
+            request: Option<serde_json::Value>,
+            preparation_duration_ms: u64,
+        ) -> ObservationStep {
             let mut metrics = WorkStepMetrics::new(WorkRole::Evidence);
             metrics.work_id = Some(id.into());
-            let started_at = Instant::now();
-            let prepared = crate::commands::work::prepare_inspection(
-                &self.root,
-                &self.config,
-                &self.config_revision,
-                id,
-                self.supervisor.read_control(),
-            );
-            let preparation_duration_ms = started_at.elapsed().as_millis() as u64;
             metrics.preparation_duration_ms = Some(preparation_duration_ms);
-            let (before, request) = match prepared {
-                Ok(status) => status,
-                Err(error)
-                    if error
-                        .downcast_ref::<crate::commands::work::state::InputCapacity>()
-                        .is_some() =>
-                {
-                    let reason = error.to_string();
-                    self.deferred("bounded work capacity", &reason);
-                    self.record_work_step(metrics);
-                    return ObservationStep::Deferred(reason);
+            let Some(node) = before.ready.first() else {
+                self.record_work_step(metrics);
+                self.failure("bounded work progress", "incomplete work has no ready node");
+                return ObservationStep::Failed;
+            };
+            metrics.node_id = Some(node.clone());
+            let Some(request) = request else {
+                self.record_work_step(metrics);
+                self.failure(
+                    "bounded work progress",
+                    "ready work has no inspection input",
+                );
+                return ObservationStep::Failed;
+            };
+            metrics.node_kind = match request["kind"].as_str() {
+                Some("inspect") => Some(NodeKind::Inspect),
+                Some("reduce") => Some(NodeKind::Reduce),
+                _ => None,
+            };
+            let result = match crate::commands::work::inspection_action(&self.root, id, &request) {
+                Ok(Some(reason)) => {
+                    self.inspection_deferred.insert(id.into(), reason.clone());
+                    self.deferred("bounded work action", &reason);
+                    ObservationStep::Deferred(reason)
+                }
+                Ok(None) => {
+                    self.observe(id, node, request, before.completed, &mut metrics)
+                        .await
                 }
                 Err(error) => {
-                    self.record_work_step(metrics);
-                    self.failure("bounded work progress", error);
-                    return ObservationStep::Failed;
+                    self.failure("bounded work action", error);
+                    ObservationStep::Failed
                 }
             };
-            if !before.complete {
-                let Some(node) = before.ready.first() else {
-                    self.record_work_step(metrics);
-                    self.failure("bounded work progress", "incomplete work has no ready node");
-                    return ObservationStep::Failed;
-                };
-                metrics.node_id = Some(node.clone());
-                let Some(request) = request else {
-                    self.record_work_step(metrics);
-                    self.failure(
-                        "bounded work progress",
-                        "ready work has no inspection input",
-                    );
-                    return ObservationStep::Failed;
-                };
-                metrics.node_kind = match request["kind"].as_str() {
-                    Some("inspect") => Some(NodeKind::Inspect),
-                    Some("reduce") => Some(NodeKind::Reduce),
-                    _ => None,
-                };
-                let result =
-                    match crate::commands::work::inspection_action(&self.root, id, &request) {
-                        Ok(Some(reason)) => {
-                            self.inspection_deferred.insert(id.into(), reason.clone());
-                            self.deferred("bounded work action", &reason);
-                            ObservationStep::Deferred(reason)
-                        }
-                        Ok(None) => {
-                            self.observe(id, node, request, before.completed, &mut metrics)
-                                .await
-                        }
-                        Err(error) => {
-                            self.failure("bounded work action", error);
-                            ObservationStep::Failed
-                        }
-                    };
-                self.record_work_step(metrics);
-                return result;
-            }
-            ObservationStep::Complete {
-                root_node: before.root_node,
-                preparation_duration_ms,
-            }
+            self.record_work_step(metrics);
+            result
         }
 
         async fn request_result(
@@ -2584,22 +2552,58 @@ mod native {
         }
 
         async fn bounded_step(&mut self, id: &str, skill: &str, stage: ExecutionStage) -> WorkStep {
-            let mut metrics = WorkStepMetrics::new(WorkRole::Finalizer);
-            metrics.stages.push(stage);
+            let mut metrics = WorkStepMetrics::new(WorkRole::Evidence);
             metrics.work_id = Some(id.into());
-            match self.bounded_observation_step(id).await {
-                ObservationStep::Recorded => return WorkStep::Pending,
-                ObservationStep::Deferred(reason) => return WorkStep::Deferred(reason),
-                ObservationStep::Failed => return WorkStep::Failed,
-                ObservationStep::Complete {
-                    root_node,
+            let started_at = Instant::now();
+            let prepared = crate::commands::work::prepare_native_step(
+                &self.root,
+                &self.config,
+                &self.config_revision,
+                id,
+                self.supervisor.read_control(),
+            );
+            let step = match prepared {
+                Ok(step) => step,
+                Err(error) => {
+                    metrics.preparation_duration_ms = Some(started_at.elapsed().as_millis() as u64);
+                    self.record_work_step(metrics);
+                    if error
+                        .downcast_ref::<crate::commands::work::state::InputCapacity>()
+                        .is_some()
+                    {
+                        let reason = error.to_string();
+                        self.deferred("bounded work capacity", &reason);
+                        return WorkStep::Deferred(reason);
+                    }
+                    self.failure("bounded work progress", error);
+                    return WorkStep::Failed;
+                }
+            };
+            match step {
+                crate::commands::work::NativeStep::Inspection {
+                    progress,
+                    request,
                     preparation_duration_ms,
+                } => match self
+                    .bounded_observation_step(id, progress, request, preparation_duration_ms)
+                    .await
+                {
+                    ObservationStep::Recorded => WorkStep::Pending,
+                    ObservationStep::Deferred(reason) => WorkStep::Deferred(reason),
+                    ObservationStep::Failed => WorkStep::Failed,
+                },
+                crate::commands::work::NativeStep::Finalization {
+                    root_node,
+                    checkpoint,
                 } => {
+                    metrics.role = WorkRole::Finalizer;
+                    metrics.stages.push(stage);
                     metrics.node_id = Some(root_node);
-                    metrics.preparation_duration_ms = Some(preparation_duration_ms);
+                    metrics.preparation_duration_ms = Some(0);
+                    self.bounded_finish_prepared(id, skill, metrics, checkpoint)
+                        .await
                 }
             }
-            self.bounded_finish(id, skill, metrics, false).await
         }
 
         async fn bounded_finish(
@@ -2629,6 +2633,17 @@ mod native {
                     return WorkStep::Failed;
                 }
             };
+            self.bounded_finish_prepared(id, skill, metrics, checkpoint)
+                .await
+        }
+
+        async fn bounded_finish_prepared(
+            &mut self,
+            id: &str,
+            skill: &str,
+            mut metrics: WorkStepMetrics,
+            checkpoint: crate::commands::work::FinalizationCheckpoint,
+        ) -> WorkStep {
             *metrics
                 .preparation_duration_ms
                 .as_mut()
