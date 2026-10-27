@@ -241,6 +241,65 @@ inherit the pinned profile through `LORE_EXECUTION_PROFILE`; standalone bounded
 commands can set that variable explicitly. Run JSON reports effective limits.
 Regenerate and reload schedules after changing paths or host/proxy environment.
 
+### Optional stage profiles
+
+Without `execution.stages`, every native stage uses the selected job profile above.
+An empty map has the same semantic policy. Override only the stages you need, using
+existing profile names; other stages keep the job profile. `--profile` selects that
+job profile and its work budget, while an explicit stage entry selects its host.
+
+```yaml
+execution:
+  default_profile: main
+  profiles:
+    main: {engine: codex, model: gpt-6.1-sol, model_reasoning_effort: low, timeout_seconds: 900}
+    reader: {engine: claude-code, model: claude-haiku-5-5, effort: high, timeout_seconds: 900}
+  stages:
+    inspect: reader
+    screening: reader
+```
+
+| Stage | Native invocation |
+|---|---|
+| `discovery` | Separately selected search-recipe discovery |
+| `screening` | Complete candidate-card packet decisions |
+| `inspect` | An assigned evidence range, including bounded audit evidence |
+| `reduce` | Combining child observations and their open questions |
+| `section` | Summary, event refinement or theme generation |
+| `extraction` | Concept extraction, including new/reuse decisions |
+| `synthesis` | Concept synthesis |
+| `audit` | Assessment or interactive audit finalization |
+
+These are actual native invocation boundaries. An interactive extraction or audit
+session can perform its own targeted search under that invocation's profile; routing
+does not create another session for each tool call. Publication and identity assembly
+remain Rust operations, with no apply model.
+
+The job keeps one call/byte/parallel/consecutive-call budget across profiles. A routed
+profile normally omits `work`; any explicit work override must agree with the job's
+effective budget. Every profile must also remain valid on its own against the global
+defaults. Host timeouts remain per profile. Independent read requests may use different
+engines in the same bounded wave; each keeps its own timeout and response decoder.
+Generation batches split when resolved profile names differ, which can increase calls.
+Rendered schedules preserve the configured engines' account-directory paths; an explicit
+Claude `config_directory` takes precedence over inherited `CLAUDE_CONFIG_DIR`.
+Unknown explicit profile/stage names and conflicting limits refuse; there is no recursive
+inheritance, automatic model choice, host fallback or transport retry.
+
+Adding profiles, including unused ones, or a nonempty stage map changes the existing
+global semantic policy. Current guards then require fresh derived Work and selections;
+old paid artifacts remain untouched, never relabeled as another model's work. This can
+require substantial new analysis. Omitted settings preserve old behavior; empty-map
+normalization preserves semantic-policy identities, but legacy byte-bound Work still
+requires its exact original configuration. Every configuration edit invalidates an
+active workflow, including a semantically empty edit.
+
+These model settings are opt-in examples, not measured quality or throughput results.
+Terra with `model_reasoning_effort: medium` is another configurable reader candidate;
+evaluate it on the same evidence before changing production policy. See official
+[OpenAI model selection](https://developers.openai.com/api/docs/guides/model-selection)
+and [Haiku effort guidance](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-haiku-5-5).
+
 ## Document preprocessing
 
 Markdown, UTF-8 text and HTML need no extra runtime. For a requested DOCX/XLSX/PDF

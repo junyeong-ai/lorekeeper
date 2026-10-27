@@ -3486,6 +3486,38 @@ mod tests {
     }
 
     #[test]
+    fn empty_stage_mapping_resumes_current_policy_work_without_rewriting_artifacts() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let (work, prepared, _) = completed_audit_work_with_configuration(&root, false);
+        let artifacts = || {
+            walkdir::WalkDir::new(root.join(".lorekeeper/work"))
+                .into_iter()
+                .map(Result::unwrap)
+                .filter(|entry| entry.file_type().is_file())
+                .map(|entry| {
+                    (
+                        entry.path().to_owned(),
+                        std::fs::read(entry.path()).unwrap(),
+                    )
+                })
+                .collect::<std::collections::BTreeMap<_, _>>()
+        };
+        let before = artifacts();
+        let result = work.result(&root, &prepared.resources).unwrap();
+        let path = root.join("config.yaml");
+        let original = std::fs::read_to_string(&path).unwrap();
+        let changed = original.replace("execution:\n", "execution:\n  stages: {}\n");
+        assert_ne!(original, changed);
+        std::fs::write(&path, changed).unwrap();
+        let (config, revision) = lk_core::config::Config::load_with_revision(&path).unwrap();
+        let (loaded, prepared) = load(&root, &config, &revision, &work.plan.id).unwrap();
+        assert_eq!(loaded, work);
+        assert_eq!(loaded.result(&root, &prepared.resources).unwrap(), result);
+        assert_eq!(artifacts(), before);
+    }
+
+    #[test]
     fn finished_status_keeps_fresh_scope_and_exact_sealed_result_checks() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().canonicalize().unwrap();

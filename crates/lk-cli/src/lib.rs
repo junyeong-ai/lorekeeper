@@ -37,7 +37,7 @@ pub enum Command {
         /// Complete daily collection, queued processing, or knowledge audit batches
         #[arg(value_enum)]
         operation: commands::run::Operation,
-        /// Explicit execution profile; otherwise operation override then configured default
+        /// Job profile and work budget; otherwise operation override then default. Stage overrides select hosts only.
         #[arg(long)]
         profile: Option<String>,
         /// Maximum process or knowledge batches; release the workflow lease between batches

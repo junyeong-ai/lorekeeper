@@ -238,18 +238,25 @@ pub async fn run(
         ),
     ] {
         if enabled {
-            let (_, profile) = config
+            let (name, _) = config
                 .execution
                 .resolve_profile(operation, None)
                 .map_err(|e| miette::miette!("scheduled semantic job: {e}"))?;
-            if !matches!(
-                profile,
-                lk_core::execution::ExecutionProfile::ClaudeCode {
-                    config_directory: Some(_),
-                    ..
+            let mut execution = config.execution.clone();
+            execution
+                .select_profile(name)
+                .map_err(|e| miette::miette!("scheduled semantic job: {e}"))?;
+            for name in std::iter::once(name).chain(execution.stages.values().map(String::as_str)) {
+                let profile = &execution.profiles[name];
+                if !matches!(
+                    profile,
+                    lk_core::execution::ExecutionProfile::ClaudeCode {
+                        config_directory: Some(_),
+                        ..
+                    }
+                ) {
+                    engines.push(profile.engine());
                 }
-            ) {
-                engines.push(profile.engine());
             }
         }
     }

@@ -1,5 +1,8 @@
 #![cfg(unix)]
 
+#[path = "native_execution/stage_profiles.rs"]
+mod stage_profiles;
+
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -7057,10 +7060,35 @@ MIXED
             let agent = fixture.root().join("agent executable");
             let script = std::fs::read_to_string(&agent).unwrap();
             std::fs::write(agent, script.replace(PARALLEL_SCREENING, behavior)).unwrap();
+            if failed_role.is_some() {
+                let other = if engine == "codex" {
+                    "claude-code"
+                } else {
+                    "codex"
+                };
+                stage_profiles::route_profiles(
+                    &fixture,
+                    engine,
+                    &[("screening", "reader")],
+                    &[("reader", other)],
+                );
+            }
             let (_, report) = fixture.run("process");
             assert_eq!(report["semantic_calls"], count, "{report}");
             assert_eq!(report["halted"], failed_role.is_some(), "{report}");
             let steps = report["work_steps"].as_array().unwrap();
+            if failed_role.is_some() {
+                for step in steps {
+                    assert_eq!(
+                        step["execution"]["profile"],
+                        if step["role"] == "screening" {
+                            "reader"
+                        } else {
+                            "primary"
+                        }
+                    );
+                }
+            }
             assert_eq!(
                 steps
                     .iter()

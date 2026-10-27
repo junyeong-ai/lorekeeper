@@ -54,7 +54,7 @@ mod native {
         CONFIG_REVISION_ENV, EXECUTION_PROFILE_ENV, GlobalOptions, execution, workflow,
     };
     use lk_core::config::Config;
-    use lk_core::execution::ExecutionProfile;
+    use lk_core::execution::{ExecutionProfile, ExecutionStage};
     use miette::IntoDiagnostic;
     use std::path::{Path, PathBuf};
     use std::time::{Duration, Instant};
@@ -65,9 +65,10 @@ mod native {
         Evidence,
         Screening,
         Finalizer,
+        Interactive,
     }
 
-    #[derive(Serialize)]
+    #[derive(Clone, Copy, Serialize)]
     #[serde(rename_all = "kebab-case")]
     enum NodeKind {
         Inspect,
@@ -84,11 +85,14 @@ mod native {
         Rejected,
         Failed,
         Cancelled,
+        Returned,
     }
 
     #[derive(Serialize)]
     struct WorkStepMetrics {
         role: WorkRole,
+        stages: Vec<ExecutionStage>,
+        execution: Option<RequestedExecution>,
         work_id: Option<String>,
         node_id: Option<String>,
         node_kind: Option<NodeKind>,
@@ -110,6 +114,11 @@ mod native {
         fn new(role: WorkRole) -> Self {
             Self {
                 role,
+                stages: match role {
+                    WorkRole::Screening => vec![ExecutionStage::Screening],
+                    _ => Vec::new(),
+                },
+                execution: None,
                 work_id: None,
                 node_id: None,
                 node_kind: None,
@@ -264,6 +273,12 @@ mod native {
                 Self::Screening(turn) => &mut turn.metrics,
             }
         }
+        fn metrics(&self) -> &WorkStepMetrics {
+            match self {
+                Self::Evidence(turn) => &turn.metrics,
+                Self::Screening(turn) => &turn.metrics,
+            }
+        }
         fn into_metrics(self) -> WorkStepMetrics {
             match self {
                 Self::Evidence(turn) => turn.metrics,
@@ -364,6 +379,16 @@ mod native {
         }
     }
 
+    fn generation_stage(kind: lk_queue::TaskKind) -> ExecutionStage {
+        match kind {
+            lk_queue::TaskKind::Summarize
+            | lk_queue::TaskKind::RefineEvents
+            | lk_queue::TaskKind::IdentifyThemes => ExecutionStage::Section,
+            lk_queue::TaskKind::ExtractConcepts => ExecutionStage::Extraction,
+            lk_queue::TaskKind::SynthesizeConcept => ExecutionStage::Synthesis,
+        }
+    }
+
     struct QueueTurn {
         keys: std::collections::BTreeSet<String>,
         targets: Vec<String>,
@@ -415,11 +440,24 @@ mod native {
 
     #[derive(Serialize)]
     struct ExecutionInfo {
+        #[serde(flatten)]
+        host: RequestedExecution,
+        policy_profile: String,
+        work: lk_core::execution::SemanticWorkConfig,
+    }
+
+    #[derive(Clone, Serialize)]
+    struct RequestedExecution {
         profile: String,
         engine: lk_core::execution::AgentEngine,
         version: String,
         requested_model: Option<String>,
-        work: lk_core::execution::SemanticWorkConfig,
+        requested_effort: Option<String>,
+    }
+
+    struct PreparedAgent {
+        profile: ExecutionProfile,
+        execution: RequestedExecution,
     }
 
     #[derive(Default, Serialize)]
@@ -559,7 +597,7 @@ mod native {
         root: PathBuf,
         supervisor: &'a mut execution::Supervisor,
         lease: Option<workflow::WorkflowLease>,
-        selected: Option<ExecutionProfile>,
+        agents: std::collections::BTreeMap<String, PreparedAgent>,
         project_protection: Option<crate::commands::installation::Protection>,
         drain_blocked: bool,
         inspection_deferred: std::collections::BTreeMap<String, String>,
@@ -951,7 +989,7 @@ mod native {
             }
         }
 
-        async fn prepare_agent(&mut self) -> miette::Result<()> {
+        async fn prepare_agent(&mut self, metrics: &mut WorkStepMetrics) -> miette::Result<()> {
             if self.project_protection.is_none() {
                 self.project_protection =
                     Some(crate::commands::installation::Protection::native_project(
@@ -960,18 +998,43 @@ mod native {
                         &self.root,
                     )?);
             }
-            if self.selected.is_some() {
-                return Ok(());
+            if metrics.stages.is_empty() {
+                metrics
+                    .stages
+                    .push(match (metrics.role, metrics.node_kind) {
+                        (WorkRole::Evidence, Some(NodeKind::Inspect)) => ExecutionStage::Inspect,
+                        (WorkRole::Evidence, Some(NodeKind::Reduce)) => ExecutionStage::Reduce,
+                        (WorkRole::Screening, _) => ExecutionStage::Screening,
+                        (WorkRole::Finalizer, _) => ExecutionStage::Section,
+                        _ => {
+                            return Err(miette::miette!(
+                                "agent invocation has no typed execution stage"
+                            ));
+                        }
+                    });
             }
             let (name, profile) = self
                 .config
                 .execution
-                .resolve_profile(
-                    self.result.operation.semantic(),
-                    self.config.execution.selected_profile(),
-                )
+                .resolve_stage_profile(metrics.stages[0])
                 .map_err(|e| miette::miette!("{e}"))?;
+            for stage in &metrics.stages[1..] {
+                let (other, _) = self
+                    .config
+                    .execution
+                    .resolve_stage_profile(*stage)
+                    .map_err(|error| miette::miette!("{error}"))?;
+                if name != other {
+                    return Err(miette::miette!(
+                        "one semantic batch requires the same execution profile"
+                    ));
+                }
+            }
             let name = name.to_owned();
+            if let Some(agent) = self.agents.get(&name) {
+                metrics.execution = Some(agent.execution.clone());
+                return Ok(());
+            }
             let mut profile = profile.clone();
             let executable = execution::executable_path(profile.executable())?;
             profile.set_executable(executable.clone());
@@ -997,7 +1060,7 @@ mod native {
                 ));
             }
             execution::verify_version(profile.engine(), &version.stdout)?;
-            self.result.execution = Some(ExecutionInfo {
+            let host = RequestedExecution {
                 profile: name,
                 engine: profile.engine(),
                 version: String::from_utf8(version.stdout)
@@ -1005,21 +1068,77 @@ mod native {
                     .trim()
                     .into(),
                 requested_model: profile.model().map(str::to_owned),
-                work: self
-                    .config
-                    .execution
-                    .effective_work()
-                    .map_err(|error| miette::miette!("{error}"))?,
-            });
-            self.selected = Some(profile);
+                requested_effort: profile.requested_effort().map(str::to_owned),
+            };
+            if self.result.execution.is_none() {
+                self.result.execution = Some(ExecutionInfo {
+                    host: host.clone(),
+                    policy_profile: self
+                        .config
+                        .execution
+                        .selected_profile()
+                        .expect("selected job profile")
+                        .into(),
+                    work: self
+                        .config
+                        .execution
+                        .effective_work()
+                        .map_err(|error| miette::miette!("{error}"))?,
+                });
+            }
+            metrics.execution = Some(host.clone());
+            self.agents.insert(
+                host.profile.clone(),
+                PreparedAgent {
+                    profile,
+                    execution: host,
+                },
+            );
             Ok(())
+        }
+
+        fn agent_profile(&self, metrics: &WorkStepMetrics) -> &ExecutionProfile {
+            &self.agents[&metrics
+                .execution
+                .as_ref()
+                .expect("prepared execution")
+                .profile]
+                .profile
+        }
+
+        fn agent_preflight_failure(&mut self, name: &str, error: impl std::fmt::Display) -> bool {
+            if self.result.cancelled {
+                self.record(name, StageState::Cancelled, Some(error.to_string()))
+            } else {
+                self.failure(name, error)
+            }
         }
 
         async fn consumer(
             &mut self,
+            stage: ExecutionStage,
             skill: &str,
             operation: &str,
             input_directory: Option<&Path>,
+        ) -> bool {
+            let mut metrics = WorkStepMetrics::new(WorkRole::Interactive);
+            metrics.stages.push(stage);
+            let completed = self
+                .consume(skill, operation, input_directory, &mut metrics)
+                .await;
+            if completed {
+                metrics.outcome = WorkOutcome::Returned;
+            }
+            self.record_work_step(metrics);
+            completed
+        }
+
+        async fn consume(
+            &mut self,
+            skill: &str,
+            operation: &str,
+            input_directory: Option<&Path>,
+            metrics: &mut WorkStepMetrics,
         ) -> bool {
             if self.result.halted || self.result.cancelled || !self.configuration_is_current() {
                 return false;
@@ -1030,14 +1149,10 @@ mod native {
             if !self.call_budget_available() {
                 return false;
             }
-            if let Err(error) = self.prepare_agent().await {
-                return if self.result.cancelled {
-                    self.record(skill, StageState::Cancelled, Some(error.to_string()))
-                } else {
-                    self.failure(skill, error)
-                };
+            if let Err(error) = self.prepare_agent(metrics).await {
+                return self.agent_preflight_failure(skill, error);
             }
-            let profile = self.selected.as_ref().expect("prepared agent");
+            let profile = self.agent_profile(metrics);
             let timeout = profile.timeout();
             let invocation = execution::agent_invocation(
                 profile,
@@ -1059,7 +1174,14 @@ mod native {
                     let completed = self
                         .child_with_input(skill, command, Some(timeout), input.as_deref())
                         .await;
-                    self.result.semantic_duration_ms += started_at.elapsed().as_millis() as u64;
+                    let duration = started_at.elapsed().as_millis() as u64;
+                    metrics.agent_duration_ms = Some(duration);
+                    if self.result.cancelled {
+                        metrics.outcome = WorkOutcome::Cancelled;
+                    } else if !completed {
+                        metrics.outcome = WorkOutcome::Failed;
+                    }
+                    self.result.semantic_duration_ms += duration;
                     completed
                 }
                 Err(error) => self.failure(skill, error),
@@ -1070,9 +1192,10 @@ mod native {
             &self,
             request: &serde_json::Value,
             role: WorkRole,
+            metrics: &WorkStepMetrics,
             budget: lk_core::execution::SemanticWorkConfig,
         ) -> miette::Result<(execution::observation::Invocation, usize)> {
-            let profile = self.selected.as_ref().expect("prepared agent");
+            let profile = self.agent_profile(metrics);
             let mut invocation = match role {
                 WorkRole::Evidence => execution::observation::build_invocation(
                     profile,
@@ -1086,23 +1209,13 @@ mod native {
                     budget.max_result_bytes,
                 ),
                 WorkRole::Finalizer => execution::finalization::build_invocation(profile, request),
+                WorkRole::Interactive => {
+                    return Err(miette::miette!(
+                        "interactive stages require their tool-enabled adapter"
+                    ));
+                }
             }?;
-            invocation
-                .command
-                .env("LORE_INSTALL_DATA_DIR", self.installation.data_dir());
-            if let Some(lease) = &self.lease {
-                lease.configure(invocation.command.as_std_mut());
-            }
-            invocation
-                .command
-                .env(CONFIG_REVISION_ENV, &self.config_revision)
-                .env(
-                    "LORE_CONFIG",
-                    self.opts.config.as_ref().expect("resolved config"),
-                );
-            if let Some(name) = self.config.execution.selected_profile() {
-                invocation.command.env(EXECUTION_PROFILE_ENV, name);
-            }
+            self.configure_child(&mut invocation.command);
             let limit = budget
                 .max_result_bytes
                 .checked_mul(3)
@@ -1144,7 +1257,7 @@ mod native {
             if !self.call_budget_available() {
                 return None;
             }
-            if let Err(error) = self.prepare_agent().await {
+            if let Err(error) = self.prepare_agent(metrics).await {
                 if self.result.cancelled {
                     metrics.outcome = WorkOutcome::Cancelled;
                     self.record(
@@ -1159,7 +1272,7 @@ mod native {
                 return None;
             }
             let (invocation, limit) =
-                match self.observation_invocation(&request, metrics.role, budget) {
+                match self.observation_invocation(&request, metrics.role, metrics, budget) {
                     Ok(invocation) => invocation,
                     Err(error) => {
                         self.failure("bounded work receipt", error);
@@ -1167,7 +1280,7 @@ mod native {
                     }
                 };
             metrics.request_json_bytes = Some(invocation.request_json_bytes);
-            let timeout = self.selected.as_ref().expect("prepared agent").timeout();
+            let timeout = self.agent_profile(metrics).timeout();
             if let Some(binding) = self
                 .queue_turn
                 .as_ref()
@@ -1190,6 +1303,9 @@ mod native {
                             .as_str()
                             .expect("prepared finalizer identity")
                     ),
+                    WorkRole::Interactive => {
+                        unreachable!("interactive stages have no observation request")
+                    }
                 };
                 if binding.identity != actual {
                     self.queue_admitted.clear();
@@ -1639,35 +1755,31 @@ mod native {
                     "semantic execution is disabled by llm.provider",
                 ));
             }
-            if let Err(error) = self.prepare_agent().await {
-                for mut turn in turns {
-                    turn.metrics.outcome = if self.result.cancelled {
-                        WorkOutcome::Cancelled
-                    } else {
-                        WorkOutcome::Failed
-                    };
-                    self.record_work_step(turn.metrics);
-                }
-                return Some(if self.result.cancelled {
-                    self.record(
-                        "bounded work receipt",
-                        StageState::Cancelled,
-                        Some(error.to_string()),
-                    )
-                } else {
-                    self.failure("bounded work receipt", error)
-                });
-            }
-            let timeout = self.selected.as_ref().expect("prepared agent").timeout();
             let mut requests = Vec::new();
             let mut directories = Vec::new();
             let mut engines = Vec::new();
             for turn in &mut turns {
-                let (invocation, capture_limit) =
-                    match self.observation_invocation(&turn.request, WorkRole::Evidence, budget) {
-                        Ok(invocation) => invocation,
-                        Err(error) => return Some(self.failure("bounded work receipt", error)),
-                    };
+                if let Err(error) = self.prepare_agent(&mut turn.metrics).await {
+                    for mut turn in turns {
+                        turn.metrics.outcome = if self.result.cancelled {
+                            WorkOutcome::Cancelled
+                        } else {
+                            WorkOutcome::Failed
+                        };
+                        self.record_work_step(turn.metrics);
+                    }
+                    return Some(self.agent_preflight_failure("bounded work receipt", error));
+                }
+                let timeout = self.agent_profile(&turn.metrics).timeout();
+                let (invocation, capture_limit) = match self.observation_invocation(
+                    &turn.request,
+                    WorkRole::Evidence,
+                    &turn.metrics,
+                    budget,
+                ) {
+                    Ok(invocation) => invocation,
+                    Err(error) => return Some(self.failure("bounded work receipt", error)),
+                };
                 turn.metrics.request_json_bytes = Some(invocation.request_json_bytes);
                 engines.push(invocation.engine);
                 let (request, directory) = invocation.into_request(timeout, capture_limit);
@@ -1962,11 +2074,11 @@ mod native {
                 );
                 return None;
             }
-            if let Err(error) = self.prepare_agent().await {
-                self.failure("native result host", error);
+            if let Err(error) = self.prepare_agent(metrics).await {
+                self.agent_preflight_failure("native result host", error);
                 return None;
             }
-            let profile = self.selected.as_ref().expect("prepared host");
+            let profile = self.agent_profile(metrics);
             let timeout = profile.timeout();
             let invocation = execution::result::build(
                 profile,
@@ -2119,8 +2231,18 @@ mod native {
             }
         }
 
-        async fn selected_result_step(&mut self, inputs: &[serde_json::Value]) -> WorkStep {
+        async fn selected_result_step(
+            &mut self,
+            tasks: &[lk_queue::QueueTask],
+            inputs: &[serde_json::Value],
+        ) -> WorkStep {
             let mut metrics = WorkStepMetrics::new(WorkRole::Finalizer);
+            metrics.stages = tasks
+                .iter()
+                .map(|task| generation_stage(task.kind))
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect();
             let started = Instant::now();
             let request =
                 match crate::commands::work::native::selected_request(&self.config, inputs) {
@@ -2408,8 +2530,9 @@ mod native {
             }
         }
 
-        async fn bounded_step(&mut self, id: &str, skill: &str) -> WorkStep {
+        async fn bounded_step(&mut self, id: &str, skill: &str, stage: ExecutionStage) -> WorkStep {
             let mut metrics = WorkStepMetrics::new(WorkRole::Finalizer);
+            metrics.stages.push(stage);
             metrics.work_id = Some(id.into());
             match self.bounded_observation_step(id).await {
                 ObservationStep::Recorded => return WorkStep::Pending,
@@ -2539,13 +2662,7 @@ mod native {
             let operation = format!(
                 "bounded finish {id}. Start at the bounded-work reference's Finalize section. Read the complete lore work result for this exact audit work using bounded continuation reads when necessary. Preserve all attributed questions and blockers. Perform only decision-relevant targeted reads or review/repair actions; changed scope requires replanning. Submit with lore work finish. Leave publication/global checks to the native controller."
             );
-            let calls_before = self.result.semantic_calls;
-            let duration_before = self.result.semantic_duration_ms;
-            let completed = self.consumer(skill, &operation, None).await;
-            if self.result.semantic_calls > calls_before {
-                metrics.agent_duration_ms =
-                    Some(self.result.semantic_duration_ms - duration_before);
-            }
+            let completed = self.consume(skill, &operation, None, &mut metrics).await;
             if !completed {
                 metrics.outcome = if self.result.cancelled {
                     WorkOutcome::Cancelled
@@ -2946,31 +3063,27 @@ mod native {
                     "semantic execution is disabled by llm.provider",
                 );
             }
-            if let Err(error) = self.prepare_agent().await {
-                self.record_uninvoked_queue_reads(turns, WorkOutcome::Failed);
-                return if self.result.cancelled {
-                    self.record(
-                        "bounded queue receipt",
-                        StageState::Cancelled,
-                        Some(error.to_string()),
-                    )
-                } else {
-                    self.failure("bounded queue receipt", error)
-                };
-            }
-            let timeout = self.selected.as_ref().expect("prepared agent").timeout();
             let mut requests = Vec::new();
             let mut directories = Vec::new();
             let mut engines = Vec::new();
             for (_, turn) in &mut turns {
-                let (invocation, limit) =
-                    match self.observation_invocation(turn.request(), turn.role(), budget) {
-                        Ok(invocation) => invocation,
-                        Err(error) => {
-                            self.record_uninvoked_queue_reads(turns, WorkOutcome::Failed);
-                            return self.failure("bounded queue receipt", error);
-                        }
-                    };
+                if let Err(error) = self.prepare_agent(turn.metrics_mut()).await {
+                    self.record_uninvoked_queue_reads(turns, WorkOutcome::Failed);
+                    return self.agent_preflight_failure("bounded queue receipt", error);
+                }
+                let timeout = self.agent_profile(turn.metrics()).timeout();
+                let (invocation, limit) = match self.observation_invocation(
+                    turn.request(),
+                    turn.role(),
+                    turn.metrics(),
+                    budget,
+                ) {
+                    Ok(invocation) => invocation,
+                    Err(error) => {
+                        self.record_uninvoked_queue_reads(turns, WorkOutcome::Failed);
+                        return self.failure("bounded queue receipt", error);
+                    }
+                };
                 turn.metrics_mut().request_json_bytes = Some(invocation.request_json_bytes);
                 engines.push(invocation.engine);
                 let (request, directory) = invocation.into_request(timeout, limit);
@@ -3501,7 +3614,22 @@ mod native {
                         crate::commands::work::TaskWork::WholeInput { native, individual } => {
                             let input =
                                 *native.expect("interactive task has a prepared native input");
-                            if individual {
+                            let compatible = if let Some((previous, _)) = batch.last() {
+                                self.config
+                                    .execution
+                                    .resolve_stage_profile(generation_stage(previous.kind))
+                                    .map_err(|error| miette::miette!("{error}"))?
+                                    .0
+                                    == self
+                                        .config
+                                        .execution
+                                        .resolve_stage_profile(generation_stage(task.kind))
+                                        .map_err(|error| miette::miette!("{error}"))?
+                                        .0
+                            } else {
+                                true
+                            };
+                            if individual || !compatible {
                                 flush(&mut batch, &mut jobs);
                             }
                             let mut inputs = batch
@@ -3787,6 +3915,7 @@ mod native {
                             };
                             if !self
                                 .consumer(
+                                    ExecutionStage::Discovery,
                                     "lore-process",
                                     &format!("discover {selection}"),
                                     Some(directory.path()),
@@ -3807,8 +3936,9 @@ mod native {
                                 Err(error) => return self.failure("extraction discovery receipt", error),
                             }
                         }
-                        QueueDispatch::Finalization { id, .. } => {
+                        QueueDispatch::Finalization { id, task } => {
                             let mut metrics = WorkStepMetrics::new(WorkRole::Finalizer);
+                            metrics.stages.push(generation_stage(task.kind));
                             metrics.work_id = Some(id.clone());
                             metrics.preparation_duration_ms = Some(0);
                             match self.bounded_finish(id, "lore-process", metrics, true).await {
@@ -3825,8 +3955,11 @@ mod native {
                                 }
                             }
                         }
-                        QueueDispatch::RootFinalization { id, .. } => {
-                            match self.bounded_step(id, "lore-process").await {
+                        QueueDispatch::RootFinalization { id, task } => {
+                            match self
+                                .bounded_step(id, "lore-process", generation_stage(task.kind))
+                                .await
+                            {
                                 WorkStep::Pending => continue,
                                 WorkStep::Deferred(reason) => {
                                     blocked.insert(id.clone(), reason);
@@ -3843,8 +3976,8 @@ mod native {
                         | QueueDispatch::Screening { .. } => {
                             unreachable!("read-only queue wave handled above")
                         }
-                        QueueDispatch::WholeInput { tasks: _, inputs } => {
-                            match self.selected_result_step(inputs).await {
+                        QueueDispatch::WholeInput { tasks, inputs } => {
+                            match self.selected_result_step(tasks, inputs).await {
                                 WorkStep::Staged => {}
                                 WorkStep::Deferred(_) => generation_deferred = true,
                                 WorkStep::Replan => {
@@ -4432,7 +4565,7 @@ mod native {
                 .collect::<Vec<_>>();
             if !missing.is_empty() {
                 let missing = serde_json::to_string(&missing).expect("string paths serialize");
-                if !self.consumer("lore-wiki", &format!("discover. Plan related-document search only for these exact audit subjects: {missing}. Read their names, scope and outline, choose explicit search queries and record each through wiki audit-discover. Do not audit, repair, synthesize or record completed assessments in this discovery session."), None).await {
+                if !self.consumer(ExecutionStage::Discovery, "lore-wiki", &format!("discover. Plan related-document search only for these exact audit subjects: {missing}. Read their names, scope and outline, choose explicit search queries and record each through wiki audit-discover. Do not audit, repair, synthesize or record completed assessments in this discovery session."), None).await {
                     return;
                 }
                 plan = match self.audit_plan(&paths) {
@@ -4552,7 +4685,10 @@ mod native {
                         }
                         continue;
                     }
-                    match self.bounded_step(work, "lore-wiki").await {
+                    match self
+                        .bounded_step(work, "lore-wiki", ExecutionStage::Audit)
+                        .await
+                    {
                         WorkStep::Pending => continue,
                         WorkStep::Deferred(reason) => {
                             self.deferred("bounded audit action", reason);
@@ -4600,7 +4736,7 @@ mod native {
                     jobs.remove(&selected);
                 }
             } else {
-                self.consumer("lore-wiki", &format!("maintain. The controller selected this exact batch: {selection}. Start with audit-plan --path for these addresses; do not select another batch. Use bounded work for any subject whose work envelope requires partitioning."), None).await;
+                self.consumer(ExecutionStage::Audit, "lore-wiki", &format!("maintain. The controller selected this exact batch: {selection}. Start with audit-plan --path for these addresses; do not select another batch. Use bounded work for any subject whose work envelope requires partitioning."), None).await;
             }
             let assessed = plan
                 .candidates
@@ -4748,7 +4884,7 @@ mod native {
             opts: options,
             supervisor,
             lease: None,
-            selected: None,
+            agents: std::collections::BTreeMap::new(),
             project_protection: None,
             drain_blocked: false,
             inspection_deferred: std::collections::BTreeMap::new(),

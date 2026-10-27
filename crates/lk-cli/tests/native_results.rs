@@ -34,6 +34,11 @@ if request.get('schema') in ['native-selected-results-v3','native-finalize-resul
     results=[]
     for item in tasks:
         task=item['task']; target=task['target']['vault_path']
+        if (root/'stage-synthesis').exists() and task['kind']=='synthesize-concept':
+            assert '--model=stage-synthesis' in sys.argv
+            assert os.environ.get('LORE_EXECUTION_PROFILE')=='primary'
+            if engine=='claude-code': assert os.environ.get('CLAUDE_CODE_EFFORT_LEVEL')=='high'
+            else: assert 'model_reasoning_effort="high"' in sys.argv
         if mode.startswith('discovery') and ('recover' in target or 'frontier' in target):
             context=item.get('context') or completed['context']
             old=context['purpose']['discovery']['queries']
@@ -116,6 +121,18 @@ impl Fixture {
     }
     fn root(&self) -> &Path {
         self.directory.path()
+    }
+    fn route_synthesis(&self) {
+        let executable = serde_json::to_string(&self.root().join("agent")).unwrap();
+        let effort = if self.engine == "codex" {
+            "model_reasoning_effort: high"
+        } else {
+            "effort: high"
+        };
+        let config=std::fs::read_to_string(&self.config).unwrap().replace("  profiles:\n",
+            &format!("  stages: {{synthesis: synthesizer}}\n  profiles:\n    synthesizer: {{engine: {}, executable: {executable}, timeout_seconds: 30, model: stage-synthesis, {effort}}}\n",self.engine));
+        std::fs::write(&self.config, config).unwrap();
+        std::fs::write(self.root().join("stage-synthesis"), "enabled").unwrap();
     }
     fn command(&self) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_lore"));
@@ -315,6 +332,9 @@ fn native_owns_extraction_and_synthesis_results_for_selected_and_bounded_work_on
         ] {
             for planned in [false, true] {
                 let fixture = Fixture::new(engine);
+                if kind == lk_queue::TaskKind::SynthesizeConcept {
+                    fixture.route_synthesis();
+                }
                 let (task, plan) = fixture.add("subject", kind, planned);
                 let report = fixture.run();
                 assert!(fixture.done(&task), "{engine}/{kind:?}/{planned}: {report}");
@@ -325,6 +345,10 @@ fn native_owns_extraction_and_synthesis_results_for_selected_and_bounded_work_on
                     .find(|step| step["role"] == "finalizer")
                     .unwrap();
                 assert_eq!(step["outcome"], "staged");
+                if kind == lk_queue::TaskKind::SynthesizeConcept {
+                    assert_eq!(step["stages"][0], "synthesis");
+                    assert_eq!(step["execution"]["profile"], "synthesizer");
+                }
                 assert!(step["result_json_bytes"].as_u64().unwrap() > 0);
                 if let Some(plan) = plan {
                     let directory = fixture
@@ -340,6 +364,36 @@ fn native_owns_extraction_and_synthesis_results_for_selected_and_bounded_work_on
                     assert_eq!(result["cache_hash"], task.cache_hash);
                 }
             }
+        }
+    }
+}
+
+#[test]
+fn generation_batches_split_only_when_resolved_profiles_differ() {
+    for routed in [false, true] {
+        let fixture = Fixture::new("codex");
+        if routed {
+            fixture.route_synthesis();
+        }
+        let (extraction, _) = fixture.add("extract", lk_queue::TaskKind::ExtractConcepts, false);
+        let (synthesis, _) =
+            fixture.add("synthesize", lk_queue::TaskKind::SynthesizeConcept, false);
+        let report = fixture.run();
+        assert!(fixture.done(&synthesis), "{report}");
+        assert_eq!(fixture.done(&extraction), routed, "{report}");
+        if !routed {
+            assert!(
+                report["queue_application"]["rejected"].as_u64().unwrap() > 0,
+                "shared read scope must be revalidated after synthesis publication: {report}"
+            );
+        }
+        let count = if routed { 2 } else { 1 };
+        assert_eq!(fixture.calls(), count, "{report}");
+        assert_eq!(report["semantic_calls"], count);
+        if !routed {
+            let raw = std::fs::read_to_string(fixture.root().join("calls.jsonl")).unwrap();
+            let request: Value = serde_json::from_str(raw.lines().next().unwrap()).unwrap();
+            assert_eq!(request["tasks"].as_array().unwrap().len(), 2);
         }
     }
 }
@@ -845,6 +899,9 @@ fn current_complete_frontier_finalizes_without_a_reduction_or_rewriting_paid_nod
             lk_queue::TaskKind::SynthesizeConcept,
         ] {
             let fixture = Fixture::new(engine);
+            if kind == lk_queue::TaskKind::SynthesizeConcept {
+                fixture.route_synthesis();
+            }
             let (task, plan, observations) = fixture.paid_frontier(kind);
             let id = plan["work_id"].as_str().unwrap();
             let directory = fixture.root().join("vault/.lorekeeper/work").join(id);
@@ -909,6 +966,7 @@ fn current_complete_frontier_finalizes_without_a_reduction_or_rewriting_paid_nod
 fn frontier_finalization_keeps_exact_action_and_fresh_scope_guards() {
     for mode in ["action", "changed-target", "changed-review"] {
         let fixture = Fixture::new("codex");
+        fixture.route_synthesis();
         let (task, plan, _) = fixture.paid_frontier(lk_queue::TaskKind::SynthesizeConcept);
         let directory = fixture
             .root()

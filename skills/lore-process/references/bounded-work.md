@@ -347,10 +347,19 @@ or malformed staging remains an error; it is not silently overwritten.
 ## Native run measurements
 
 `lore run process --json` and other native jobs include `work_steps` for evidence,
-screening and finalization. The first 1024 steps are retained per run;
-`work_steps_omitted` counts later steps. Ordinary interactive discovery/audit calls
-remain in the aggregate `semantic_calls` and `semantic_duration_ms`, so this array
-is not a complete invocation ledger.
+screening, finalization and interactive discovery/audit. The first 1024 steps are
+retained per run; `work_steps_omitted` counts later steps. Cached refusals and
+already-complete work can have no invocation, so this array is not a call ledger.
+An interactive `returned` outcome means the host exited successfully, not that an
+observation, assessment or publication was verified.
+
+`stages` names the typed invocation stages. `execution` records the selected profile,
+engine, observed CLI version and requested model/effort; omitted native settings stay
+`null`. It does not establish the actual provider model, effective effort, tokens or
+billed cost. A same-profile generation batch may contain multiple stage names.
+The top-level `execution` describes the first prepared host; its `policy_profile` and
+`work` retain the originating job profile and aggregate budget. Optional stage selection
+is described in [execution profiles](../../lore-setup/references/config.md#optional-stage-profiles).
 
 During execution, stderr emits `lore.queue-planning` JSON events at local checkpoint
 start/end and `lore.work-step` events for retained steps as they finish. They use
@@ -368,7 +377,7 @@ It describes dispatched requests, not observed peak live-child concurrency.
 | `agent_duration_ms` | Supervised invocation attempt wall time, including a failed or cancelled attempt; never server inference time |
 | `revalidation_record_duration_ms` | Fresh input validation and recording together; role-level aggregates below separate reconstruction from serial recording |
 | `verification_duration_ms` | Finalizer completion and sealed-result verification |
-| `outcome` | `recorded`, `staged`, `restaged`, `already-complete`, `rejected`, `failed` or `cancelled` |
+| `outcome` | `recorded`, `staged`, `restaged`, `already-complete`, `rejected`, `failed`, `cancelled` or interactive `returned` |
 
 Native evidence request bytes describe the native presentation after invocation
 preparation. If preflight stops earlier, they can describe the canonical prepared

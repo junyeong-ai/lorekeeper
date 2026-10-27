@@ -575,6 +575,13 @@ fn work_policy_revision(content: &str) -> Result<String, ConfigError> {
             .get_mut("execution")
             .and_then(serde_json::Value::as_object_mut)
     {
+        if execution
+            .get("stages")
+            .and_then(serde_json::Value::as_object)
+            .is_some_and(serde_json::Map::is_empty)
+        {
+            execution.remove("stages");
+        }
         strip_work(execution);
         if let Some(profiles) = execution
             .get_mut("profiles")
@@ -1776,6 +1783,23 @@ mod observation_unit_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn empty_stage_mapping_preserves_policy_and_explicit_routing_is_semantic() {
+        let base = "vault: {root: vault}\nidentity: {name: Test, email: test@example.com}\nsources: {notes: {type: manual}}\nexecution:\n  default_profile: main\n  profiles:\n    main: {engine: codex, timeout_seconds: 30}\n";
+        let original = super::work_policy_revision(base).unwrap();
+        assert_eq!(
+            original,
+            super::work_policy_revision(&format!("{base}  stages: {{}}\n")).unwrap()
+        );
+        for changed in [
+            format!("{base}  stages: {{inspect: main}}\n"),
+            base.replace("engine: codex,", "engine: codex, model: selected-model,"),
+            format!("{base}    unused: {{engine: codex, timeout_seconds: 30}}\n"),
+        ] {
+            assert_ne!(original, super::work_policy_revision(&changed).unwrap());
+        }
+    }
+
     #[test]
     fn semantic_work_configuration_preserves_policy_and_excludes_only_operational_limits() {
         let directory = tempfile::tempdir().unwrap();

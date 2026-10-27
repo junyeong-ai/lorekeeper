@@ -220,6 +220,11 @@ Selection is `--profile` → operation-specific `operations` → `default_profil
 Failure never switches hosts automatically. Optional model and effort settings belong to each host.
 Supported CLI contracts are Claude Code `>=2.1.303,<3` and Codex `>=0.163.0,<1`.
 
+[Stage profiles](skills/lore-setup/references/config.md#optional-stage-profiles) are optional.
+Without them, every stage uses the selected profile. Map only the stages you need to
+existing profiles; the job retains one call, parallel and byte budget. Model changes
+do not guarantee better throughput or quality.
+
 Set these budgets under `execution.work`; a profile's `work` overrides only the specified fields.
 
 | What to adjust | Setting and meaning |

@@ -25,6 +25,13 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   The live workflow still pins every configuration byte. Legacy byte-bound manifests
   resume only through an exact current-configuration reconstruction; never retag them
   after an operational change or guess historical settings.
+  Optional typed stage overrides choose only host profiles. Keep the originating
+  profile selected for Work policy, budgets and child LORE_EXECUTION_PROFILE.
+  Resolve the actual node/task kind before each invocation; never route from prompts
+  or paths. Independent read waves retain per-request host/timeout/decoder association;
+  generation batches require the same resolved profile name. Reuse the shared engine
+  adapters and both-engine installation claims. Interactive returned-host telemetry
+  is not retained semantic progress or publication proof.
 - `commands/workflow.rs` is a Unix foreground coordinator for long LLM consumers,
   not a vault mutation lock. It locks canonical-vault `.lorekeeper/workflow.lock`,
   clears only FD_CLOEXEC, and `exec`s literal argv. Busy defaults to nonzero with no

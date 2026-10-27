@@ -67,15 +67,56 @@ pub enum ExecutionOperation {
     Knowledge,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ExecutionStage {
+    Discovery,
+    Screening,
+    Inspect,
+    Reduce,
+    Section,
+    Extraction,
+    Synthesis,
+    Audit,
+}
+
+impl ExecutionStage {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Discovery => "discovery",
+            Self::Screening => "screening",
+            Self::Inspect => "inspect",
+            Self::Reduce => "reduce",
+            Self::Section => "section",
+            Self::Extraction => "extraction",
+            Self::Synthesis => "synthesis",
+            Self::Audit => "audit",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ExecutionConfig {
     pub default_profile: Option<String>,
     pub profiles: BTreeMap<String, ExecutionProfile>,
     pub operations: BTreeMap<ExecutionOperation, String>,
+    #[serde(default, deserialize_with = "stage_profiles")]
+    pub stages: BTreeMap<ExecutionStage, String>,
     pub work: SemanticWorkConfig,
     #[serde(skip)]
     selected_profile: Option<String>,
+}
+
+fn stage_profiles<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<BTreeMap<ExecutionStage, String>, D::Error> {
+    use serde::de::Error;
+    let value = serde_json::Value::deserialize(deserializer)?;
+    if !value.is_object() {
+        return Err(D::Error::custom("execution.stages must be a mapping"));
+    }
+    serde_json::from_value(value).map_err(D::Error::custom)
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
@@ -224,7 +265,18 @@ fn codex_executable() -> PathBuf {
 
 impl ExecutionConfig {
     pub fn select_profile(&mut self, name: &str) -> Result<(), ConfigError> {
-        self.work_for(name)?;
+        let work = self.work_for(name)?;
+        for (stage, target) in &self.stages {
+            let profile = self.profiles.get(target).ok_or_else(|| {
+                ConfigError::Validation(format!("unknown execution profile '{target}'"))
+            })?;
+            if profile.work_overrides().resolve(work) != work {
+                return Err(ConfigError::Validation(format!(
+                    "execution stage '{}' profile '{target}' has work limits conflicting with job profile '{name}'; stage profiles inherit the job's work budget",
+                    stage.as_str()
+                )));
+            }
+        }
         self.selected_profile = Some(name.to_owned());
         Ok(())
     }
@@ -237,12 +289,7 @@ impl ExecutionConfig {
         let profile = self.profiles.get(name).ok_or_else(|| {
             ConfigError::Validation(format!("unknown execution profile '{name}'"))
         })?;
-        let overrides = match profile {
-            ExecutionProfile::ClaudeCode { work, .. } | ExecutionProfile::Codex { work, .. } => {
-                work
-            }
-        };
-        let work = overrides.resolve(self.work);
+        let work = profile.work_overrides().resolve(self.work);
         work.validate()?;
         Ok(work)
     }
@@ -274,13 +321,32 @@ impl ExecutionConfig {
             .ok_or_else(|| ConfigError::Validation(format!("unknown execution profile '{name}'")))
     }
 
+    pub fn resolve_stage_profile(
+        &self,
+        stage: ExecutionStage,
+    ) -> Result<(&str, &ExecutionProfile), ConfigError> {
+        let base = self.selected_profile().ok_or_else(|| {
+            ConfigError::Validation("select the job execution profile before its stages".into())
+        })?;
+        let name = self.stages.get(&stage).map(String::as_str).unwrap_or(base);
+        self.profiles
+            .get_key_value(name)
+            .map(|(name, profile)| (name.as_str(), profile))
+            .ok_or_else(|| ConfigError::Validation(format!("unknown execution profile '{name}'")))
+    }
+
     pub(crate) fn validate(&self) -> Result<(), ConfigError> {
         self.work.validate()?;
         for name in self.profiles.keys() {
             validate_text("execution profile name", name)?;
             self.work_for(name)?;
         }
-        for name in self.default_profile.iter().chain(self.operations.values()) {
+        for name in self
+            .default_profile
+            .iter()
+            .chain(self.operations.values())
+            .chain(self.stages.values())
+        {
             if !self.profiles.contains_key(name) {
                 return Err(ConfigError::Validation(format!(
                     "unknown execution profile '{name}'"
@@ -353,6 +419,22 @@ fn validate_text(field: &str, value: &str) -> Result<(), ConfigError> {
 }
 
 impl ExecutionProfile {
+    fn work_overrides(&self) -> &SemanticWorkOverrides {
+        match self {
+            Self::ClaudeCode { work, .. } | Self::Codex { work, .. } => work,
+        }
+    }
+
+    pub fn requested_effort(&self) -> Option<&str> {
+        match self {
+            Self::ClaudeCode { effort, .. } => effort.map(ClaudeCodeEffort::as_str),
+            Self::Codex {
+                model_reasoning_effort,
+                ..
+            } => model_reasoning_effort.as_deref(),
+        }
+    }
+
     pub fn engine(&self) -> AgentEngine {
         match self {
             Self::ClaudeCode { .. } => AgentEngine::ClaudeCode,
@@ -410,6 +492,94 @@ mod tests {
 
     fn config() -> ExecutionConfig {
         crate::yaml::from_str("default_profile: main\nprofiles:\n  main: {engine: claude-code, timeout_seconds: 3600}\n  review: {engine: codex, timeout_seconds: 1800}\noperations: {knowledge: review}\n").unwrap()
+    }
+
+    #[test]
+    fn stage_profiles_inherit_the_selected_job_and_preserve_its_budget() {
+        let stages = [
+            ExecutionStage::Discovery,
+            ExecutionStage::Screening,
+            ExecutionStage::Inspect,
+            ExecutionStage::Reduce,
+            ExecutionStage::Section,
+            ExecutionStage::Extraction,
+            ExecutionStage::Synthesis,
+            ExecutionStage::Audit,
+        ];
+        for origin in ["main", "review"] {
+            let mut config = config();
+            config.validate().unwrap();
+            config.select_profile(origin).unwrap();
+            for stage in stages {
+                assert_eq!(config.resolve_stage_profile(stage).unwrap().0, origin);
+            }
+        }
+        let mut config = config();
+        config
+            .stages
+            .insert(ExecutionStage::Inspect, "review".into());
+        let ExecutionProfile::ClaudeCode { work, .. } = config.profiles.get_mut("main").unwrap()
+        else {
+            panic!()
+        };
+        work.max_calls = Some(9);
+        work.max_parallel = Some(2);
+        config.select_profile("main").unwrap();
+        assert_eq!(
+            config
+                .resolve_stage_profile(ExecutionStage::Inspect)
+                .unwrap()
+                .0,
+            "review"
+        );
+        assert_eq!(
+            config
+                .resolve_stage_profile(ExecutionStage::Reduce)
+                .unwrap()
+                .0,
+            "main"
+        );
+        assert_eq!(config.selected_profile(), Some("main"));
+        assert_eq!(config.effective_work().unwrap().max_calls, 9);
+        assert_eq!(config.effective_work().unwrap().max_parallel, 2);
+        let ExecutionProfile::Codex { work, .. } = config.profiles.get_mut("review").unwrap()
+        else {
+            panic!()
+        };
+        work.max_calls = Some(10);
+        assert!(config.select_profile("main").is_err());
+    }
+
+    #[test]
+    fn stage_configuration_is_optional_strict_and_nonrecursive() {
+        let base =
+            "default_profile: main\nprofiles:\n  main: {engine: codex, timeout_seconds: 30}\n";
+        for suffix in ["", "stages: {}\n", "stages: {inspect: main}\n"] {
+            let mut config: ExecutionConfig =
+                crate::yaml::from_str(&format!("{base}{suffix}")).unwrap();
+            config.validate().unwrap();
+            config.select_profile("main").unwrap();
+            assert_eq!(
+                config
+                    .resolve_stage_profile(ExecutionStage::Inspect)
+                    .unwrap()
+                    .0,
+                "main"
+            );
+        }
+        for suffix in [
+            "stages: null\n",
+            "stages: {inspection: main}\n",
+            "stages: {apply: main}\n",
+        ] {
+            assert!(
+                crate::yaml::from_str::<ExecutionConfig>(&format!("{base}{suffix}")).is_err(),
+                "{suffix}"
+            );
+        }
+        let missing: ExecutionConfig =
+            crate::yaml::from_str(&format!("{base}stages: {{inspect: missing}}\n")).unwrap();
+        assert!(missing.validate().is_err());
     }
 
     #[test]

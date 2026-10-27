@@ -13,6 +13,12 @@ config loading and the shared filesystem primitives intentionally perform I/O.
   excluding only execution call/parallel/consecutive-call/screening-packet limits and profile timeouts. Preserve
   the separate complete byte revision for live workflow pinning. Direct deserialization
   has no loaded policy revision; it must not fabricate one from resolved paths.
+- Optional typed `execution.stages` references existing profiles. Omission and an
+  empty mapping retain the existing semantic policy; normalize only this new empty
+  field without changing the v1 profile/model identity rules. Nonempty routing and
+  profile edits require fresh derived Work, never adoption of old paid bytes.
+  Select one origin profile for job budgets. Routed explicit work overrides must
+  agree with that origin, while every profile remains independently valid.
 - Filesystem vault roots remain `PathBuf` through resolution and runtime binding.
   YAML roots are strings; runtime binding does not recompute the loaded semantic policy.
 - `SourceType::descriptor()` is exhaustive with no fallback. `streaming` means a
