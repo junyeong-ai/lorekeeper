@@ -2397,7 +2397,7 @@ mod tests {
     #[test]
     fn prepared_inspections_keep_fitting_prefix_before_capacity_and_refuse_corruption() {
         let root = tempfile::tempdir().unwrap();
-        let source = evidence_pages(8, 250);
+        let source = evidence_pages(16, 350);
         let session = MutationSession::acquire(root.path()).unwrap();
         let work = Work::create(
             &session,
@@ -2405,17 +2405,17 @@ mod tests {
             "subject",
             context("one"),
             WorkLimits {
-                max_input_bytes: 3000,
-                max_result_bytes: 1500,
+                max_input_bytes: 4096,
+                max_result_bytes: 1024,
             },
         )
         .unwrap();
-        assert!(work.plan.parts.len() >= 8);
+        assert!(work.plan.parts.len() >= 16);
         for part in work.plan.parts.iter().take(work.plan.parts.len() - 1) {
             let mut output = draft(&work, root.path(), &part.id, &source);
             output.source_questions.push(WorkQuestion {
                 id: format!("{}:source:0", part.id),
-                question: "The source does not establish effective scope. ".repeat(10),
+                question: "The source does not establish effective scope. ".repeat(9),
                 evidence: vec![part.ranges[0].clone()],
             });
             work.record(&session, output, &source).unwrap();
