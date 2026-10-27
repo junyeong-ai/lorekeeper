@@ -32,6 +32,8 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   generation batches require the same resolved profile name. Reuse the shared engine
   adapters and both-engine installation claims. Interactive returned-host telemetry
   is not retained semantic progress or publication proof.
+  Revalidate pinned configuration/root and cancellation after awaited host-version
+  preflight, before reserving a turn or counting/invoking a semantic call.
 - `commands/workflow.rs` is a Unix foreground coordinator for long LLM consumers,
   not a vault mutation lock. It locks canonical-vault `.lorekeeper/workflow.lock`,
   clears only FD_CLOEXEC, and `exec`s literal argv. Busy defaults to nonzero with no
@@ -81,6 +83,10 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   Compact request/decoded-result bytes exclude prompts and host envelopes; tool-enabled native
   result request/response bytes are measured; ordinary interactive audit responses remain unobserved. Revalidation and recording share one measured operation.
   Parallel invocation durations are summed and can exceed elapsed job time.
+  Failed structured hosts retain only fixed diagnostic fields, JSON types/sizes and
+  recognized status tokens. Keep version preflight, invocation and response phases
+  distinct; streamed or discarded stdout has unknown size/shape. Never infer quota,
+  retry policy or semantic output from this diagnostic, or copy raw error payloads.
   Queue-planning metrics count local checkpoints and shared synthesis captures,
   separately from later revalidation and host work. `mutation_access` measures
   in-process writer acquisition, including waiting, config validation and recovery;
