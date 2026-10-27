@@ -92,6 +92,12 @@ Unchanged native calls are suppressed; changed scope or contracts may be reconsi
 Existing v1 rejection receipts remain readable without rewriting; new receipts use
 `screening-rejections-v2`, which earlier readers refuse. Corrupt receipts, malformed
 reply shapes, failed fresh scope validation and unknown failures still stop.
+
+After every packet is recorded, deferred cards keep only their target incomplete.
+Native planning preserves the validated ledger and continues independent ready work
+without repeating those calls. Earlier deferred cards do not prevent screening the
+remaining unknown packets. Reassessment still requires an explicit receipt revision;
+no decision is promoted automatically.
 Standalone `work select-record` still requires its complete identity-bearing format
 from [extraction discovery](discovery.md#progressive-examination).
 

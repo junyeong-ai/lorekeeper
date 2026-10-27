@@ -952,50 +952,71 @@ impl ScreeningPreparation {
 
 pub(super) struct ScreeningTurn {
     pub selection_id: String,
-    pub request: Option<Value>,
-    pub complete: bool,
-    pub unknown: usize,
-    pub deferred: usize,
     pub completed_batches: usize,
     pub batches: usize,
-    pub blocked_reason: Option<String>,
+    pub state: ScreeningState,
+}
+
+pub(super) enum ScreeningState {
+    Complete,
+    Ready(Value),
+    Deferred(String),
 }
 
 impl Screening {
     fn turn(&self, root: &Path) -> miette::Result<ScreeningTurn> {
         let (progress, request) = self.selection.prepare(root)?;
+        let state = match (
+            request,
+            progress.complete,
+            progress.unknown,
+            progress.deferred,
+        ) {
+            (None, true, 0, 0) => ScreeningState::Complete,
+            (Some(request), false, unknown, _) if unknown > 0 => ScreeningState::Ready(request),
+            (None, false, 0, deferred)
+                if deferred > 0 && progress.completed_batches == progress.batches =>
+            {
+                ScreeningState::Deferred(format!(
+                    "{deferred} deferred candidate decisions remain; work retained for explicit reassessment"
+                ))
+            }
+            _ => {
+                return Err(miette::miette!(
+                    "candidate screening progress has no consistent next state"
+                ));
+            }
+        };
         #[cfg(unix)]
-        let blocked_reason = request
-            .as_ref()
-            .map(|request| {
-                let native = super::execution::observation::screening_request(request)?;
+        let state = match state {
+            ScreeningState::Ready(request) => {
+                let native = super::execution::observation::screening_request(&request)?;
                 let bytes = serde_json::to_vec(&native).into_diagnostic()?.len();
-                if bytes > self.selection.max_input_bytes() {
-                    return Ok(Some(
+                let reason = if bytes > self.selection.max_input_bytes() {
+                    Some(
                         selection::ScreeningCapacity::Input {
                             required_bytes: bytes,
                             max_bytes: self.selection.max_input_bytes(),
                         }
                         .to_string(),
-                    ));
+                    )
+                } else {
+                    self.selection.rejection_reason(
+                        root,
+                        &request,
+                        &super::execution::observation::screening_contract_revision(&request)?,
+                    )?
+                };
+                match reason {
+                    Some(reason) => ScreeningState::Deferred(reason),
+                    None => ScreeningState::Ready(request),
                 }
-                self.selection.rejection_reason(
-                    root,
-                    request,
-                    &super::execution::observation::screening_contract_revision(request)?,
-                )
-            })
-            .transpose()?
-            .flatten();
-        #[cfg(not(unix))]
-        let blocked_reason = None;
+            }
+            state => state,
+        };
         Ok(ScreeningTurn {
-            blocked_reason,
+            state,
             selection_id: self.selection.id.clone(),
-            request,
-            complete: progress.complete,
-            unknown: progress.unknown,
-            deferred: progress.deferred,
             completed_batches: progress.completed_batches,
             batches: progress.batches,
         })
@@ -1604,7 +1625,7 @@ fn prepare_task_in_session(
                 let ledger = screening.selection.ledger(root)?;
                 if !ledger.progress.complete {
                     let turn = screening.turn(root)?;
-                    if let Some(reason) = &turn.blocked_reason {
+                    if let ScreeningState::Deferred(reason) = &turn.state {
                         return Ok(TaskWork::Admission {
                             reason: reason.clone(),
                         });
@@ -4055,7 +4076,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(attempts, [true, false]);
-        let request = turn.request.unwrap();
+        let ScreeningState::Ready(request) = turn.state else {
+            panic!("unrecorded screening must be ready");
+        };
         let decisions = request["candidates"].as_array().unwrap().iter().map(|candidate| {
             json!({"candidate_key":candidate["candidate_key"],
                 "decision":if candidate["candidate_key"] == selected {"inspect"} else {"not-selected"},

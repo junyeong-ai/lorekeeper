@@ -146,7 +146,11 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   Progressive extraction separates complete source observations, bounded candidate-card
   screening and admitted full-body evidence. All candidate and scoped-review guards remain
   pinned; unknown or deferred decisions block completion, and card-only rejection is not
-  a full-body assessment. Reused owners must be selected and read in full. Source work
+  a full-body assessment. Continue unrecorded packets even when earlier cards defer.
+  A fully recorded ledger with deferred cards holds only that target for explicit
+  reassessment; fresh validated state must not become a missing-request failure or
+  repeat paid screening. Corrupt ledgers remain fatal. Reused owners must be selected
+  and read in full. Source work
   never finishes extraction independently: canonical extraction publication journals its
   exact supporting-consumption receipt with the knowledge edits. Retention validates that
   receipt and preserves live queue/reuse references before removing expired source work.

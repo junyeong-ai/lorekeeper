@@ -3383,6 +3383,161 @@ fn screening_decisions(request: &serde_json::Value, defer: bool) -> serde_json::
 }
 
 #[test]
+fn terminal_screening_defer_preserves_receipts_and_allows_independent_publication() {
+    for engine in ["codex", "claude-code"] {
+        let (fixture, task) = progressive_extraction_fixture(
+            engine,
+            &format!("{WHOLE_SECTION}\nexit 97"),
+            4,
+            65536,
+            16384,
+        );
+        let config = std::fs::read_to_string(&fixture.config)
+            .unwrap()
+            .replace("max_calls: 64", "max_calls: 64, max_parallel: 2");
+        std::fs::write(&fixture.config, config).unwrap();
+        let root = fixture.root().join("vault");
+        let queue = root.join(".lorekeeper/queue");
+        let client = lk_queue::QueueLlmClient::new(queue.clone());
+        let request: lk_queue::SummarizeRequest = serde_json::from_value(serde_json::json!({
+            "text":"Independent source.","max_sentences":2,"locale":"en",
+            "target":{"vault_path":"wiki/documents/zz-independent.md",
+                "anchor":"## Summary","kind":"document-summary"},
+        }))
+        .unwrap();
+        let summary = client.build_task("summary", lk_queue::TaskKind::Summarize, request);
+        std::fs::write(
+            root.join(&summary.target.vault_path),
+            format!(
+                "---\ntype: document\ntitle: Independent\nllm_inputs:\n  summary: {}\n---\n## Summary\n",
+                summary.cache_hash
+            ),
+        )
+        .unwrap();
+        lk_queue::write_tasks_atomic(
+            &queue.join("independent.jsonl"),
+            std::slice::from_ref(&summary),
+        )
+        .unwrap();
+        let status = execution_json(&fixture, &["queue", "status", "--json"]);
+        let target = status["data"]["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["task_id"] == task.task_id)
+            .unwrap();
+        let discovery = fixture.root().join("defer-discovery.json");
+        std::fs::write(
+            &discovery,
+            serde_json::to_vec(&serde_json::json!({
+                "target_revision":target["target_revision"],
+                "queries":[{"query":"transactional outbox","phrase":true,"spacing":false}],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        execution_json(
+            &fixture,
+            &[
+                "work",
+                "discover",
+                "--task-id",
+                &task.task_id,
+                "--file",
+                discovery.to_str().unwrap(),
+            ],
+        );
+        let selection = execution_json(&fixture, &["work", "select", "--task-id", &task.task_id]);
+        assert_eq!(selection["progress"]["batches"], 1);
+        let decisions = fixture.root().join("defer-decisions.json");
+        std::fs::write(
+            &decisions,
+            serde_json::to_vec(&screening_decisions(&selection["request"], true)).unwrap(),
+        )
+        .unwrap();
+        execution_json(
+            &fixture,
+            &[
+                "work",
+                "select-record",
+                "--task-id",
+                &task.task_id,
+                "--file",
+                decisions.to_str().unwrap(),
+            ],
+        );
+        let selection_files = || {
+            walkdir::WalkDir::new(queue.join("selection"))
+                .into_iter()
+                .map(Result::unwrap)
+                .filter(|entry| entry.file_type().is_file())
+                .map(|entry| {
+                    (
+                        entry.path().to_owned(),
+                        std::fs::read(entry.path()).unwrap(),
+                    )
+                })
+                .collect::<std::collections::BTreeMap<_, _>>()
+        };
+        let retained = selection_files();
+        let source = std::fs::read(root.join(&task.target.vault_path)).unwrap();
+        let output = fixture
+            .command()
+            .args(["run", "process", "--batches", "2", "--json"])
+            .output()
+            .unwrap();
+        let campaign: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(!output.status.success(), "{campaign}");
+        assert_eq!(campaign["runs"].as_array().unwrap().len(), 1, "{campaign}");
+        assert_eq!(campaign["stop_reason"], "deferred", "{campaign}");
+        let report = &campaign["runs"][0];
+        assert_eq!(report["halted"], false, "{campaign}");
+        assert_eq!(report["budget_exhausted"], false, "{campaign}");
+        assert_eq!(report["semantic_calls"], 1, "{campaign}");
+        assert_eq!(report["queue_application"]["applied"], 1, "{campaign}");
+        assert!(report["queue_planning"]["attempts"].as_u64().unwrap() <= 4);
+        let current = execution_json(&fixture, &["work", "select", "--task-id", &task.task_id]);
+        assert_eq!(current["status"], "deferred");
+        assert_eq!(
+            current["progress"]["selection_id"],
+            selection["progress"]["selection_id"]
+        );
+        assert_eq!(current["progress"]["deferred"], 1);
+        assert_eq!(current["progress"]["unknown"], 0);
+        assert_eq!(current["progress"]["complete"], false);
+        assert!(current["request"].is_null());
+        assert_eq!(selection_files(), retained);
+        assert_eq!(
+            std::fs::read(root.join(&task.target.vault_path)).unwrap(),
+            source
+        );
+        let status = execution_json(&fixture, &["queue", "status", "--json"]);
+        for (id, expected) in [(&task.task_id, "current"), (&summary.task_id, "done")] {
+            assert!(
+                status["data"]["tasks"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|row| row["task_id"] == id.as_str() && row["status"] == expected),
+                "{status}"
+            );
+        }
+        let (output, repeated) = fixture.run("process");
+        assert!(!output.status.success());
+        assert_eq!(repeated["halted"], false, "{repeated}");
+        assert_eq!(repeated["semantic_calls"], 0, "{repeated}");
+        assert_eq!(selection_files(), retained);
+        let receipt = current["progress"]["receipts"][0]["path"].as_str().unwrap();
+        std::fs::write(root.join(receipt), b"{").unwrap();
+        let (output, corrupt) = fixture.run("process");
+        assert!(!output.status.success());
+        assert_eq!(corrupt["halted"], true, "{corrupt}");
+        assert_eq!(corrupt["semantic_calls"], 0, "{corrupt}");
+        assert_eq!(std::fs::read(root.join(receipt)).unwrap(), b"{");
+    }
+}
+
+#[test]
 fn screening_cost_is_read_only_and_capacity_defers_without_clipping_independent_work() {
     for engine in ["codex", "claude-code"] {
         let (fixture, task) = progressive_extraction_fixture(

@@ -2638,24 +2638,22 @@ mod native {
             let mut turns = Vec::new();
             for (index, (target, before)) in targets.iter().zip(prepared).enumerate() {
                 let expected = jobs[target].binding(target).expect("screening binding");
-                if expected.identity != format!("screening:{}", before.selection_id)
-                    || before.complete
-                {
+                if expected.identity != format!("screening:{}", before.selection_id) {
                     self.queue_replan = true;
                     return Ok(None);
                 }
-                if let Some(reason) = before.blocked_reason {
-                    self.queue_replan = true;
-                    self.record("candidate screening", StageState::Failed, Some(reason));
-                    return Ok(None);
-                }
-                let request = before.request.ok_or_else(|| {
-                    miette::miette!(
-                        "{} deferred and {} unknown candidate decisions remain; work retained",
-                        before.deferred,
-                        before.unknown
-                    )
-                })?;
+                let request = match before.state {
+                    crate::commands::work::ScreeningState::Complete => {
+                        self.queue_replan = true;
+                        return Ok(None);
+                    }
+                    crate::commands::work::ScreeningState::Deferred(reason) => {
+                        self.queue_replan = true;
+                        self.deferred("candidate screening", reason);
+                        return Ok(None);
+                    }
+                    crate::commands::work::ScreeningState::Ready(request) => request,
+                };
                 let task_id = match &jobs[target] {
                     QueueDispatch::Screening { task, .. } => task.task_id.clone(),
                     _ => unreachable!(),
