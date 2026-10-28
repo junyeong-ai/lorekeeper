@@ -360,8 +360,8 @@ mod tests {
         assert_eq!(literal.path, r"wiki/documents/a\b.md");
         assert_eq!(nested.path, "wiki/documents/a/b.md");
         assert_ne!(
-            citation_digest(&[literal.clone()]),
-            citation_digest(&[nested.clone()])
+            citation_digest(std::slice::from_ref(&literal)),
+            citation_digest(std::slice::from_ref(&nested))
         );
         for citation in [literal, nested] {
             let raw = serde_json::to_string(&citation).unwrap();
