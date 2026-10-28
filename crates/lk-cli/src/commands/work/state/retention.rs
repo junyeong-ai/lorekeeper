@@ -458,8 +458,8 @@ pub(crate) fn prune_published(
 
 #[cfg(test)]
 mod tests {
-    use super::super::{ReductionPolicy, encoded, validate_output};
     use super::super::tests::{context as test_context, finish, limits, resources};
+    use super::super::{ReductionPolicy, encoded, validate_output};
     use super::*;
     use lk_core::semantic::SemanticResource;
     use serde_json::json;
