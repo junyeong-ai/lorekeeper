@@ -4,7 +4,7 @@ description: Runs Lorekeeper collection and operations for configured sources or
   inboxes, including period synthesis, schedules, installation updates, backups and
   maintenance. Collection queues semantic work; lore-process completes it.
 metadata:
-  version: 0.104.0
+  version: 0.104.1
 ---
 
 # Lorekeeper collection and operations
