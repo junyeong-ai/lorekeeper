@@ -57,6 +57,10 @@ Native planning revalidates changed attempts before another host call; determini
 apply is retried even when the previous rejection is unchanged. Do not delete these
 records to bypass a refusal. Preserve rejected answers separately before explicitly
 replacing an active proposal with a newly reviewed result; never relabel its guards.
+When its task becomes `done`, `stale` or `missing-target`, the rejection no longer
+blocks semantic admission. Deterministic apply still owns reapplication or retirement;
+classification alone approves no answer and completes no replacement request.
+Unknown or unreadable state remains fatal.
 
 The native job stays incomplete/nonzero while work remains. Corrupt records,
 unmatched result identities, storage failures and unknown state stop further work.

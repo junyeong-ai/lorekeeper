@@ -738,6 +738,79 @@ fn rejected_target_preserves_its_answer_and_allows_independent_processing() {
 }
 
 #[test]
+fn superseded_rejection_after_independent_publication_does_not_halt_queue_planning() {
+    for engine in ["codex", "claude-code"] {
+        let fixture = Fixture::new(engine);
+        let config = std::fs::read_to_string(&fixture.config)
+            .unwrap()
+            .replace("max_calls: 4", "max_calls: 1");
+        std::fs::write(&fixture.config, config).unwrap();
+        let independent = fixture.add_summary("b-independent");
+        fixture.add_dependent_synthesis(&independent);
+        let rejected = std::fs::read_dir(fixture.vault().join(".lorekeeper/queue"))
+            .unwrap()
+            .map(Result::unwrap)
+            .filter(|entry| {
+                entry
+                    .path()
+                    .extension()
+                    .is_some_and(|value| value == "jsonl")
+            })
+            .flat_map(|entry| lk_queue::read_tasks(&entry.path()).unwrap().tasks)
+            .find(|task| task.kind == TaskKind::SynthesizeConcept)
+            .unwrap();
+        let result = lk_queue::SynthesisResult {
+            task_id: rejected.task_id.clone(),
+            cache_hash: rejected.cache_hash.clone(),
+            target_revision: fixture.target_revision(&rejected),
+            context_revision: "0".repeat(64),
+            synthesis: "Retained interpretation from an older semantic scope.".into(),
+            related: Some(String::new()),
+        };
+        let proposal = fixture.write(
+            ".lorekeeper/queue/results/000-rejected.synthesis.json",
+            &serde_json::to_string(&result).unwrap(),
+        );
+        let target_before =
+            std::fs::read_to_string(fixture.vault().join(&rejected.target.vault_path)).unwrap();
+        let (output, report) = fixture.run("process");
+        assert!(!output.status.success(), "{report}");
+        assert!(fixture.is_completed(&independent), "{report}");
+        assert_eq!(report["semantic_calls"], 1, "{report}");
+        assert_eq!(report["halted"], false, "{report}");
+        assert_eq!(report["cancelled"], false, "{report}");
+        assert_eq!(report["budget_exhausted"], true, "{report}");
+        assert_eq!(report["queue_application"]["applied"], 1, "{report}");
+        assert_eq!(report["queue_application"]["dropped"], 1, "{report}");
+        assert!(report["queue_application"]["rejected"].as_u64().unwrap() > 0);
+        assert!(!proposal.exists());
+        assert_eq!(fixture.calls().len(), 1);
+        assert_eq!(fixture.calls()[0]["task_id"], independent.task_id);
+        let status = fixture.json(&["queue", "status", "--json"]);
+        let rows = status["data"]["tasks"].as_array().unwrap();
+        assert!(
+            rows.iter()
+                .any(|row| { row["task_id"] == rejected.task_id && row["status"] == "stale" }),
+            "{status}"
+        );
+        assert!(
+            rows.iter().any(|row| {
+                row["task_id"] != rejected.task_id
+                    && row["vault_path"] == rejected.target.vault_path
+                    && row["status"] == "current"
+            }),
+            "{status}"
+        );
+        let target_after =
+            std::fs::read_to_string(fixture.vault().join(&rejected.target.vault_path)).unwrap();
+        assert_eq!(
+            lk_vault::section_body(&target_after, "Synthesis").unwrap(),
+            lk_vault::section_body(&target_before, "Synthesis").unwrap()
+        );
+    }
+}
+
+#[test]
 fn corrected_staged_answer_reconsiders_rejection_without_invoking_a_host() {
     let fixture = Fixture::new("codex");
     let task = fixture.add_summary("a-rejected");

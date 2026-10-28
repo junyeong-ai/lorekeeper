@@ -438,6 +438,10 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   exact rejection receipts suppress host retries, never deterministic apply or input
   readiness. Changed scope/proposals require revalidation before host admission.
   Unknown/fatal state and abnormal child termination stop; never classify error text.
+  Classify retained rejected tasks before capturing current semantic scope. Done,
+  stale and missing-target tasks receive no new host admission; deterministic apply
+  still owns reapplication or retirement. Unreadable, ambiguous, corrupt and orphaned
+  state remains fatal.
 - Synthesis owns both sections and its completion marker atomically, with exact
   source/target/queue guards. Do not split core and related publication. Explicit
   year/date conflicts with `--previous` fail before flushing work.

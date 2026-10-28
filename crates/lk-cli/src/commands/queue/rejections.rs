@@ -407,9 +407,20 @@ pub(in crate::commands) fn blocked_tasks(
             "unknown pending task targets prevent rejection inspection"
         ));
     }
+    let mut task_ids = BTreeSet::new();
+    if pending
+        .tasks
+        .values()
+        .any(|task| !task_ids.insert(&task.task_id))
+    {
+        return Err(miette::miette!(
+            "ambiguous pending task id prevents rejection inspection"
+        ));
+    }
     let active = active_proposals(&root)?;
     let validation_policy = validation_policy();
     let mut blocked = BTreeMap::new();
+    let mut revisions = BTreeMap::new();
     for (_, _, receipt) in inventory(&root)? {
         let key = (
             receipt.identity.task_id.clone(),
@@ -421,6 +432,21 @@ pub(in crate::commands) fn blocked_tasks(
         let task = pending.tasks.get(&key).ok_or_else(|| {
             miette::miette!("active rejected proposal has no trusted pending task")
         })?;
+        if super::resolve_target_path(&task.target.vault_path).is_none() {
+            return Err(miette::miette!("invalid retained task target"));
+        }
+        match super::classify_task(&root, task, &mut revisions)? {
+            super::TaskStatus::Current => {}
+            super::TaskStatus::Done
+            | super::TaskStatus::Stale
+            | super::TaskStatus::MissingTarget => continue,
+            super::TaskStatus::Unreadable => {
+                return Err(miette::miette!(
+                    "unreadable rejected task prevents rejection inspection: {}",
+                    task.task_id
+                ));
+            }
+        }
         let current = TaskIdentity::capture(&root, task)?;
         let (scope, _) = observe_scope(&root, config, config_revision, task, snapshots)?;
         let proposals = snapshots
@@ -726,6 +752,136 @@ mod tests {
                 },
             },
         )
+    }
+
+    #[test]
+    fn rejected_task_state_is_classified_before_current_scope_capture() {
+        for state in [
+            "current",
+            "done",
+            "stale",
+            "missing",
+            "unreadable",
+            "invalid-path",
+            "invalid-input",
+            "orphan",
+            "ambiguous",
+            "corrupt-receipt",
+            "corrupt-proposal",
+            "unparseable",
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let root = directory.path().canonicalize().unwrap();
+            let config_path = root.join("config.yaml");
+            std::fs::write(&config_path, "vault: {root: ., locale: en}\nidentity: {name: Test, email: test@example.com}\nsources:\n  notes: {type: manual, params: {inbox_dir: inbox}}\n").unwrap();
+            let (config, config_revision) =
+                lk_core::config::Config::load_with_revision(&config_path).unwrap();
+            let mut task = retained_summary(&root);
+            let target = PathBuf::from(&task.target.vault_path);
+            let raw = format!(
+                "---\ntype: document\nllm_inputs: {{summary: {}}}\n---\n## Summary\n\n## Content\nOriginal observations.\n",
+                task.cache_hash
+            );
+            write(&root, &target, &raw);
+            let proposal_path = Path::new(".lorekeeper/queue/results/task.section.json");
+            let proposal = lk_queue::SectionResult {
+                task_id: task.task_id.clone(),
+                cache_hash: task.cache_hash.clone(),
+                target_revision: lk_core::concept::file_revision(&raw),
+                context_revision: None,
+                body: "Saved interpretation.".into(),
+            };
+            write(
+                &root,
+                proposal_path,
+                &serde_json::to_string(&proposal).unwrap(),
+            );
+            let mut receipt = receipt();
+            receipt.identity = TaskIdentity::capture(&root, &task).unwrap();
+            receipt.validation_policy = validation_policy();
+            receipt.config_revision = config_revision.clone();
+            receipt.task_revision = digest(&task).unwrap();
+            receipt.proposals = vec![
+                super::super::application::proposal_snapshot(&root, &root.join(proposal_path))
+                    .unwrap()
+                    .proposal,
+            ];
+            let receipt_path = path(&task.task_id, &task.cache_hash).unwrap();
+            write(
+                &root,
+                &receipt_path,
+                &serde_json::to_string(&receipt).unwrap(),
+            );
+            match state {
+                "done" => write(
+                    &root,
+                    &target,
+                    &raw.replace(
+                        &format!("summary: {}", task.cache_hash),
+                        &format!(
+                            "summary: {}, summary_done: {}",
+                            task.cache_hash, task.cache_hash
+                        ),
+                    ),
+                ),
+                "stale" | "ambiguous" => write(
+                    &root,
+                    &target,
+                    &raw.replace(&task.cache_hash, &"f".repeat(32)),
+                ),
+                "missing" => std::fs::remove_file(root.join(&target)).unwrap(),
+                "unreadable" => std::fs::write(root.join(&target), [0xff]).unwrap(),
+                "invalid-path" => task.target.vault_path = "../outside.md".into(),
+                "invalid-input" => {
+                    task.input["max_sentences"] = "invalid".into();
+                }
+                "corrupt-receipt" => write(&root, &receipt_path, "{"),
+                "corrupt-proposal" => write(&root, proposal_path, "{"),
+                _ => {}
+            }
+            if matches!(
+                state,
+                "invalid-input" | "corrupt-receipt" | "corrupt-proposal" | "unparseable"
+            ) {
+                write(
+                    &root,
+                    &target,
+                    &raw.replace(&task.cache_hash, &"f".repeat(32)),
+                );
+            }
+            let pending_path = Path::new(".lorekeeper/queue/pending.jsonl");
+            let mut pending = serde_json::to_string(&task).unwrap() + "\n";
+            if state == "ambiguous" {
+                let mut other = task.clone();
+                other.input["text"] = "Another retained observation.".into();
+                other.cache_hash = lk_queue::cache_hash(&other.input);
+                pending.push_str(&serde_json::to_string(&other).unwrap());
+            }
+            if state == "unparseable" {
+                pending.push('{');
+            }
+            if state != "orphan" {
+                write(&root, pending_path, &pending);
+            }
+            let before = [proposal_path, receipt_path.as_path(), pending_path]
+                .map(|path| std::fs::read(root.join(path)).ok());
+            let blocked = blocked_tasks(&root, &config, &config_revision);
+            match state {
+                "done" | "stale" | "missing" => assert!(blocked.unwrap().is_empty(), "{state}"),
+                "current" => assert!(
+                    blocked
+                        .unwrap()
+                        .contains_key(&(task.task_id.clone(), task.cache_hash.clone(),))
+                ),
+                _ => assert!(blocked.is_err(), "{state}"),
+            }
+            assert_eq!(
+                [proposal_path, receipt_path.as_path(), pending_path]
+                    .map(|path| std::fs::read(root.join(path)).ok()),
+                before,
+                "{state}",
+            );
+        }
     }
 
     #[test]
