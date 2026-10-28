@@ -174,18 +174,12 @@ async fn install(directory: &Path, python: &Path, kind: RuntimeKind) -> miette::
             .join(directory)
     };
     // Never overwrite or adopt a directory the installer did not create.
-    std::fs::create_dir(&directory).map_err(|error| {
+    super::private_directory::create(&directory).map_err(|error| {
         miette::miette!(
             "create new runtime directory {}: {error}",
             directory.display()
         )
     })?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
-            .map_err(|error| miette::miette!("runtime permissions: {error}"))?;
-    }
     if matches!(kind, RuntimeKind::PaddleOcrVl) {
         let layout = directory.join("layout");
         let recognition = directory.join("vlm");

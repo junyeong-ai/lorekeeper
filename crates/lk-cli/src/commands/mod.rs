@@ -19,6 +19,7 @@ pub mod input;
 pub mod installation;
 pub mod maintenance;
 pub mod performance;
+mod private_directory;
 mod publication;
 pub mod queue;
 pub mod resolve;

@@ -55,10 +55,8 @@ pub(in crate::commands) fn build(
     schema: &Value,
     max_result_bytes: usize,
 ) -> miette::Result<Invocation> {
-    let directory = tempfile::Builder::new()
-        .prefix("lorekeeper-result-")
-        .tempdir()
-        .into_diagnostic()?;
+    let directory =
+        crate::commands::private_directory::temporary("lorekeeper-result-").into_diagnostic()?;
     let schema = serde_json::to_string(schema).into_diagnostic()?;
     let schema_path = directory.path().join("result.schema.json");
     std::fs::write(&schema_path, &schema).into_diagnostic()?;

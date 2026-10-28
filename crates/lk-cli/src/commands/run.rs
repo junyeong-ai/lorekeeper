@@ -3970,10 +3970,9 @@ mod native {
                             }
                         }
                         QueueDispatch::Discovery { task } => {
-                            let directory = match tempfile::Builder::new()
-                                .prefix("lorekeeper-discovery-")
-                                .tempdir()
-                            {
+                            let directory = match crate::commands::private_directory::temporary(
+                                "lorekeeper-discovery-",
+                            ) {
                                 Ok(directory) => directory,
                                 Err(error) => {
                                     return self.failure("extraction discovery selection", error);

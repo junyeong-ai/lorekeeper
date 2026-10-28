@@ -505,36 +505,13 @@ async fn update(
     Ok(())
 }
 
-/// Hold the archive to its attestation without ever handing an attacker the file that is
-/// checked.
-///
-/// Staged inside a directory this process creates exclusively, because `temp_dir()` is
-/// world-writable, the archive's name is fully predictable, and `fs::write` follows symlinks —
-/// so a pre-created link at that path had whatever it pointed at truncated and overwritten,
-/// under `sudo` anywhere on the system. Creating the directory with `create_dir` fails if it
-/// already exists, which also closes the second hole: the file `gh` verifies can no longer be
-/// swapped between the write and the check for a different, genuinely attested archive.
 fn verify_attestation_of(archive: &[u8], archive_name: &str) -> miette::Result<()> {
-    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let dir = std::env::temp_dir().join(format!(
-        "lore-verify-{}-{}",
-        std::process::id(),
-        SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    ));
-    std::fs::create_dir(&dir).map_err(|e| miette::miette!("stage {}: {e}", dir.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
-            .map_err(|e| miette::miette!("restrict {}: {e}", dir.display()))?;
-    }
-
-    let staged = dir.join(archive_name);
-    let outcome = std::fs::write(&staged, archive)
-        .map_err(|e| miette::miette!("stage {}: {e}", staged.display()))
-        .and_then(|()| lk_dist::verify_attestation(&staged).map_err(|e| miette::miette!("{e}")));
-    let _ = std::fs::remove_dir_all(&dir);
-    outcome
+    let directory = super::private_directory::temporary("lore-verify-")
+        .map_err(|error| miette::miette!("prepare attestation workspace: {error}"))?;
+    let staged = directory.path().join(archive_name);
+    std::fs::write(&staged, archive)
+        .map_err(|error| miette::miette!("stage {}: {error}", staged.display()))?;
+    lk_dist::verify_attestation(&staged).map_err(|error| miette::miette!("{error}"))
 }
 
 /// Refuse to swap the binary while the queue still holds work.

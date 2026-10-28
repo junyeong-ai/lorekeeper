@@ -290,9 +290,7 @@ pub(super) fn build(
     response_schema: Value,
     instruction: &str,
 ) -> miette::Result<Invocation> {
-    let directory = tempfile::Builder::new()
-        .prefix("lorekeeper-observation-")
-        .tempdir()
+    let directory = crate::commands::private_directory::temporary("lorekeeper-observation-")
         .map_err(|error| miette::miette!("observation workspace: {error}"))?;
     let schema = serde_json::to_string(&response_schema)
         .map_err(|error| miette::miette!("observation schema: {error}"))?;
