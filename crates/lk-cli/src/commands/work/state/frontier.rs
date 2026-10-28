@@ -134,79 +134,20 @@ impl FrontierSeal {
         Ok(seal)
     }
 
-    pub(super) fn verify_stored(&self, root: &Path, work: &Work) -> miette::Result<()> {
-        fn verify_node(
-            work: &Work,
-            root: &Path,
-            id: &str,
-            nodes: &[Node],
-            outputs: &mut BTreeMap<String, StoredOutput>,
-        ) -> miette::Result<()> {
-            if outputs.contains_key(id) {
-                return Ok(());
-            }
-            let node = nodes
-                .iter()
-                .find(|node| node.id == id)
-                .ok_or_else(|| fail("unknown frontier node"))?;
-            let raw = read_optional(root, &output_path(&work.plan.id, id)?)?
-                .ok_or_else(|| fail("frontier dependency disappeared"))?;
-            let stored: StoredOutput = serde_json::from_str(&raw).map_err(fail)?;
-            if stored.output.work_id != work.plan.id
-                || stored.output.node_id != id
-                || revision(&stored.output)? != stored.output_revision
-            {
-                return Err(fail(
-                    "invalid frontier dependency identity, checksum or bound",
-                ));
-            }
-            stored.validate_bounds(work)?;
-            require_id(&stored.output.input_revision)?;
-            let children = match &node.kind {
-                NodeKind::Inspect { .. } => Vec::new(),
-                NodeKind::Reduce { children } => {
-                    for child in children {
-                        verify_node(work, root, child, nodes, outputs)?;
-                    }
-                    children
-                        .iter()
-                        .map(|id| &outputs[id].output)
-                        .collect::<Vec<_>>()
-                }
-            };
-            validate_output(&stored.output, node, &children)?;
-            stored.validate_inheritance(&children)?;
-            if let NodeKind::Reduce { children: ids } = &node.kind {
-                let children = ids.iter().map(|id| json!({"node_id":id,"result_revision":outputs[id].output_revision,"output":outputs[id].output})).collect();
-                let request = work.reduction_request(
-                    id,
-                    children,
-                    work.evidence_guards(&children_outputs(node, outputs))?,
-                );
-                if revision(&request)? != stored.output.input_revision {
-                    return Err(fail("frontier reduction dependency changed"));
-                }
-            }
-            outputs.insert(id.into(), stored);
-            Ok(())
-        }
-        let nodes = work.nodes()?;
-        let mut outputs = BTreeMap::new();
-        for reference in &self.proof.nodes {
-            verify_node(work, root, &reference.node_id, &nodes, &mut outputs)?;
-        }
-        self.proof.verify(work, &outputs)?;
+    pub(super) fn verify_captured(
+        &self,
+        work: &Work,
+        outputs: &BTreeMap<String, StoredOutput>,
+    ) -> miette::Result<()> {
+        let required = self
+            .proof
+            .nodes
+            .iter()
+            .map(|reference| reference.node_id.clone())
+            .collect::<Vec<_>>();
+        work.verify_stored_dependencies(outputs, &required)?;
+        self.proof.verify(work, outputs)?;
         Ok(())
-    }
-}
-
-fn children_outputs<'a>(
-    node: &Node,
-    outputs: &'a BTreeMap<String, StoredOutput>,
-) -> Vec<&'a WorkOutput> {
-    match &node.kind {
-        NodeKind::Inspect { .. } => Vec::new(),
-        NodeKind::Reduce { children } => children.iter().map(|id| &outputs[id].output).collect(),
     }
 }
 

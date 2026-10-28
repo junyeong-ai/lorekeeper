@@ -155,6 +155,7 @@ fn capture_retention(root: &Path, id: &str, cutoff: i64) -> miette::Result<Reten
         known.insert(output_path(id, &node.id)?);
     }
     let mut revisions = BTreeMap::new();
+    let mut outputs = BTreeMap::new();
     let mut bytes = 0;
     let mut references = BTreeSet::new();
     let mut unknown = false;
@@ -204,11 +205,12 @@ fn capture_retention(root: &Path, id: &str, cutoff: i64) -> miette::Result<Reten
                 return Err(fail("invalid retained work observation"));
             }
             stored.validate_bounds(&work)?;
-            if let Some(reused) = stored.reused_from {
+            if let Some(reused) = &stored.reused_from {
                 require_id(&reused.work_id)?;
                 require_id(&reused.node_id)?;
-                references.insert(reused.work_id);
+                references.insert(reused.work_id.clone());
             }
+            outputs.insert(stored.output.node_id.clone(), stored);
         }
         bytes += raw.len();
         revisions.insert(path, lk_core::concept::file_revision(&raw));
@@ -232,14 +234,21 @@ fn capture_retention(root: &Path, id: &str, cutoff: i64) -> miette::Result<Reten
         let sealed_revision = match (read("seal.json")?, read("frontier-seal.json")?) {
             (Some(raw), None) => {
                 let seal: Seal = serde_json::from_str(&raw).map_err(fail)?;
-                if seal.work_id != id {
-                    return Err(fail("published work seal identity differs"));
+                let node = nodes.last().expect("nonempty work tree");
+                if seal.work_id != id || seal.root_node != node.id {
+                    return Err(fail("published work seal root identity differs"));
+                }
+                work.verify_stored_dependencies(&outputs, std::slice::from_ref(&node.id))?;
+                if seal.root_output_revision != outputs[&node.id].output_revision {
+                    return Err(fail(
+                        "published work root observation differs from its seal",
+                    ));
                 }
                 seal.final_result_revision
             }
             (None, Some(raw)) => {
                 let seal = super::frontier::FrontierSeal::decode(&raw, &work)?;
-                seal.verify_stored(root, &work)?;
+                seal.verify_captured(&work, &outputs)?;
                 seal.final_result_revision
             }
             _ => return Err(fail("published work requires exactly one completion seal")),
@@ -270,15 +279,8 @@ fn capture_retention(root: &Path, id: &str, cutoff: i64) -> miette::Result<Reten
             return Err(fail("consumed source work has no queue subject"));
         };
         let node = nodes.last().expect("nonempty work tree");
-        let root_path = output_path(id, &node.id)?;
-        let output: StoredOutput = serde_json::from_str(&read_captured(
-            root,
-            &root_path,
-            revisions
-                .get(&root_path)
-                .ok_or_else(|| fail("consumed source root observation is missing"))?,
-        )?)
-        .map_err(fail)?;
+        work.verify_stored_dependencies(&outputs, std::slice::from_ref(&node.id))?;
+        let output = &outputs[&node.id];
         if work.context["purpose"]["extraction_scope"]["policy"] != "source-proposals-v1"
             || work.context["purpose"]["task_kind"] != "extract-concepts"
             || receipt.work_id != id
@@ -456,7 +458,7 @@ pub(crate) fn prune_published(
 
 #[cfg(test)]
 mod tests {
-    use super::super::encoded;
+    use super::super::{ReductionPolicy, encoded, validate_output};
     use super::super::tests::{context as test_context, finish, limits, resources};
     use super::*;
     use lk_core::semantic::SemanticResource;
@@ -605,27 +607,134 @@ mod tests {
 
     #[test]
     fn expired_completed_action_receipts_are_cleaned_without_current_input_checks() {
-        let root = tempfile::tempdir().unwrap();
-        let session = MutationSession::acquire(root.path()).unwrap();
-        let source = resources();
-        let work =
-            Work::create(&session, &source, "subject", context("subject"), limits()).unwrap();
-        publish(&work, &session, &source);
-        record_action(&work, &session, &source);
-        let directory = root.path().join(work_path(&work.plan.id, "").unwrap());
-        let cutoff = jiff::Timestamp::now().as_second() + 1;
-        assert_eq!(
-            prune_published(root.path(), None, cutoff).unwrap().removed,
-            1
-        );
-        assert!(directory.exists());
-        assert_eq!(
-            prune_published(root.path(), Some(&session), cutoff)
-                .unwrap()
-                .removed,
-            1
-        );
-        assert!(!directory.exists());
+        for legacy in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let session = MutationSession::acquire(root.path()).unwrap();
+            let source = resources();
+            let mut work = Work::build(&source, "subject", context("subject"), limits()).unwrap();
+            if legacy {
+                work.reduction = ReductionPolicy::BinaryV1;
+            }
+            let mut plan = MutationPlan::default();
+            plan.publish_expected(
+                root.path(),
+                work_path(&work.plan.id, "plan.json").unwrap(),
+                None,
+                encoded(&work).unwrap(),
+            )
+            .unwrap();
+            session.apply(plan).unwrap();
+            publish(&work, &session, &source);
+            record_action(&work, &session, &source);
+            let directory = root.path().join(work_path(&work.plan.id, "").unwrap());
+            let cutoff = jiff::Timestamp::now().as_second() + 1;
+            assert_eq!(
+                prune_published(root.path(), None, cutoff).unwrap().removed,
+                1
+            );
+            assert!(directory.exists());
+            assert_eq!(
+                prune_published(root.path(), Some(&session), cutoff)
+                    .unwrap()
+                    .removed,
+                1
+            );
+            assert!(!directory.exists());
+        }
+    }
+
+    #[test]
+    fn incomplete_historical_root_proofs_refuse_all_cleanup() {
+        for scenario in [
+            "missing-root",
+            "root-node",
+            "root-revision",
+            "missing-child",
+            "changed-child",
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let session = MutationSession::acquire(root.path()).unwrap();
+            let source = resources();
+            let work =
+                Work::create(&session, &source, "subject", context("subject"), limits()).unwrap();
+            publish(&work, &session, &source);
+            let independent = Work::create(
+                &session,
+                &source,
+                "independent",
+                context("independent"),
+                limits(),
+            )
+            .unwrap();
+            publish(&independent, &session, &source);
+            let nodes = work.nodes().unwrap();
+            assert!(nodes.len() > 1);
+            let root_node = nodes.last().unwrap();
+            let child = &nodes[0];
+            match scenario {
+                "missing-root" | "missing-child" => {
+                    let node = if scenario == "missing-root" {
+                        root_node
+                    } else {
+                        child
+                    };
+                    std::fs::remove_file(
+                        root.path()
+                            .join(output_path(&work.plan.id, &node.id).unwrap()),
+                    )
+                    .unwrap();
+                }
+                "root-node" | "root-revision" => {
+                    let path = root
+                        .path()
+                        .join(work_path(&work.plan.id, "seal.json").unwrap());
+                    let mut seal: Value =
+                        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                    if scenario == "root-node" {
+                        seal["root_node"] = json!(child.id);
+                    } else {
+                        seal["root_output_revision"] = json!("0".repeat(64));
+                    }
+                    std::fs::write(path, encoded(&seal).unwrap()).unwrap();
+                }
+                "changed-child" => {
+                    let path = root
+                        .path()
+                        .join(output_path(&work.plan.id, &child.id).unwrap());
+                    let mut stored: StoredOutput =
+                        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                    stored.output.summary.push_str(" Changed.");
+                    stored.output_revision = revision(&stored.output).unwrap();
+                    stored.validate_bounds(&work).unwrap();
+                    validate_output(&stored.output, child, &[]).unwrap();
+                    std::fs::write(path, encoded(&stored).unwrap()).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            let snapshot = || {
+                walkdir::WalkDir::new(root.path().join(".lorekeeper/work"))
+                    .into_iter()
+                    .map(Result::unwrap)
+                    .filter(|entry| entry.file_type().is_file())
+                    .map(|entry| {
+                        (
+                            entry.path().to_owned(),
+                            std::fs::read(entry.path()).unwrap(),
+                        )
+                    })
+                    .collect::<BTreeMap<_, _>>()
+            };
+            let before = snapshot();
+            for mode in [Some(&session), None] {
+                let result = prune_published(root.path(), mode, i64::MAX);
+                assert!(
+                    result.is_err(),
+                    "{scenario}: incomplete proof allowed cleanup of {} Work directories",
+                    result.as_ref().map_or(0, |report| report.removed)
+                );
+                assert_eq!(snapshot(), before, "{scenario}");
+            }
+        }
     }
 
     #[test]
@@ -1108,6 +1217,20 @@ mod tests {
         assert!(prune_published(root.path(), Some(&session), cutoff).is_err());
         assert!(Work::load(root.path(), &work.plan.id).is_ok());
         std::fs::write(root.path().join(&receipt), &raw).unwrap();
+        let dependency = root
+            .path()
+            .join(output_path(&work.plan.id, &work.plan.parts[0].id).unwrap());
+        let dependency_raw = std::fs::read(&dependency).unwrap();
+        std::fs::remove_file(&dependency).unwrap();
+        for mode in [None, Some(&session)] {
+            assert!(prune_published(root.path(), mode, cutoff).is_err());
+            assert_eq!(
+                std::fs::read_to_string(root.path().join(&receipt)).unwrap(),
+                raw
+            );
+            assert!(Work::load(root.path(), &work.plan.id).is_ok());
+        }
+        std::fs::write(dependency, dependency_raw).unwrap();
         assert_eq!(prune_published(root.path(), None, 0).unwrap().removed, 0);
         assert_eq!(
             prune_published(root.path(), None, cutoff).unwrap().removed,

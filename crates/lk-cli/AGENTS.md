@@ -483,6 +483,9 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   Bounded-work retention captures pending requests, staged results and transitive
   reuse references under workflow→mutation→queue claims. Unrelated valid pending
   work does not block expired published work; unknown references refuse cleanup.
+  Validate the historical completion dependency closure from captured observations
+  before retirement. Root, frontier and consumed-source proofs retain their distinct
+  coverage; expired valid Work does not require current source-page freshness.
 
 ## Original query authority
 

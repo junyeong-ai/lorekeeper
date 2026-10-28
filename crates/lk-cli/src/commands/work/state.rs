@@ -891,6 +891,69 @@ impl Work {
         Ok(nodes)
     }
 
+    /// Verify captured historical observations without requiring live source freshness.
+    fn verify_stored_dependencies(
+        &self,
+        outputs: &BTreeMap<String, StoredOutput>,
+        required: &[String],
+    ) -> miette::Result<()> {
+        fn verify_node(
+            work: &Work,
+            outputs: &BTreeMap<String, StoredOutput>,
+            nodes: &[Node],
+            id: &str,
+            verified: &mut BTreeSet<String>,
+        ) -> miette::Result<()> {
+            if verified.contains(id) {
+                return Ok(());
+            }
+            let node = nodes
+                .iter()
+                .find(|node| node.id == id)
+                .ok_or_else(|| fail("unknown stored work node"))?;
+            let stored = outputs
+                .get(id)
+                .ok_or_else(|| fail("stored work dependency is missing"))?;
+            if stored.output.work_id != work.plan.id
+                || stored.output.node_id != id
+                || revision(&stored.output)? != stored.output_revision
+            {
+                return Err(fail("invalid stored work dependency identity or checksum"));
+            }
+            stored.validate_bounds(work)?;
+            require_id(&stored.output.input_revision)?;
+            let children = match &node.kind {
+                NodeKind::Inspect { .. } => Vec::new(),
+                NodeKind::Reduce { children } => {
+                    for child in children {
+                        verify_node(work, outputs, nodes, child, verified)?;
+                    }
+                    children
+                        .iter()
+                        .map(|id| &outputs[id].output)
+                        .collect::<Vec<_>>()
+                }
+            };
+            validate_output(&stored.output, node, &children)?;
+            stored.validate_inheritance(&children)?;
+            if let NodeKind::Reduce { children: ids } = &node.kind {
+                let children_json = ids.iter().map(|id| json!({"node_id":id,"result_revision":outputs[id].output_revision,"output":outputs[id].output})).collect();
+                let request =
+                    work.reduction_request(id, children_json, work.evidence_guards(&children)?);
+                if revision(&request)? != stored.output.input_revision {
+                    return Err(fail("stored work reduction dependency changed"));
+                }
+            }
+            verified.insert(id.into());
+            Ok(())
+        }
+        let nodes = self.nodes()?;
+        let mut verified = BTreeSet::new();
+        for id in required {
+            verify_node(self, outputs, &nodes, id, &mut verified)?;
+        }
+        Ok(())
+    }
     fn reduction_request(
         &self,
         node_id: &str,
@@ -2921,7 +2984,20 @@ mod tests {
                     final_result_revision: "0".repeat(64),
                 };
                 let seal = FrontierSeal::decode(&encoded(&seal).unwrap(), &work).unwrap();
-                seal.verify_stored(root.path(), &work).unwrap();
+                let outputs = work
+                    .nodes()
+                    .unwrap()
+                    .into_iter()
+                    .filter_map(|node| {
+                        let raw = read_optional(
+                            root.path(),
+                            &output_path(&work.plan.id, &node.id).unwrap(),
+                        )
+                        .unwrap()?;
+                        Some((node.id, serde_json::from_str(&raw).unwrap()))
+                    })
+                    .collect();
+                seal.verify_captured(&work, &outputs).unwrap();
                 frontier_verified = true;
             }
             for id in progress.ready {
