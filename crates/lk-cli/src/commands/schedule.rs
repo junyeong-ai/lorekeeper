@@ -366,6 +366,13 @@ fn build_jobs(config: &lk_core::config::Config, flags: &[String]) -> Vec<Job> {
     jobs
 }
 
+fn is_cron_command_environment(key: &str, value: &str) -> bool {
+    PROXY_ENV_KEYS.contains(&key)
+        || value.is_empty()
+        || value.trim_ascii() != value
+        || value.starts_with(['\'', '"'])
+}
+
 fn print_cron(
     bin: &str,
     cwd: &std::path::Path,
@@ -399,7 +406,7 @@ fn print_cron(
         out.push("# Environment for unattended jobs:".into());
         out.extend(
             env.iter()
-                .filter(|(key, _)| !PROXY_ENV_KEYS.contains(&key.as_str()))
+                .filter(|(key, value)| !is_cron_command_environment(key, value))
                 .map(|(key, value)| format!("{key}={value}")),
         );
         out.push(String::new());
@@ -409,7 +416,7 @@ fn print_cron(
         let mut command = String::new();
         for (key, value) in env
             .iter()
-            .filter(|(key, _)| PROXY_ENV_KEYS.contains(&key.as_str()))
+            .filter(|(key, value)| is_cron_command_environment(key, value))
         {
             command.push_str(&format!("{key}={} ", shell_escape(value)));
         }
@@ -728,8 +735,8 @@ fn xml_escape(s: &str) -> String {
         .replace('\t', "&#9;")
 }
 
-/// Minimal shell-escape: leaves safe identifiers untouched, otherwise wraps in single quotes.
-/// Additionally escapes `%` because cron treats it as newline-in-command even inside quotes.
+/// Quote a shell word through cron's percent/backslash preprocessing.
+/// Isolate literal backslashes so cron cannot collapse pairs before shell parsing.
 fn shell_escape(s: &str) -> String {
     let quoted = if !s.is_empty()
         && s.chars()
@@ -737,7 +744,16 @@ fn shell_escape(s: &str) -> String {
     {
         s.to_string()
     } else {
-        format!("'{}'", s.replace('\'', r"'\''"))
+        let mut quoted = String::from("'");
+        for character in s.chars() {
+            match character {
+                '\'' => quoted.push_str(r"'\''"),
+                '\\' => quoted.push_str(r"''\''"),
+                _ => quoted.push(character),
+            }
+        }
+        quoted.push('\'');
+        quoted
     };
     quoted.replace('%', r"\%")
 }
@@ -898,6 +914,45 @@ mod tests {
     fn escape_percent_for_cron() {
         assert_eq!(shell_escape("foo%bar"), r"'foo\%bar'");
         assert_eq!(shell_escape("100%"), r"'100\%'");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cron_shell_words_survive_both_backslash_preprocessors() {
+        for collapse_backslash_pairs in [false, true] {
+            for value in [
+                "/normal",
+                "/with space ",
+                "both'\"\\% ",
+                "foo\\%bar",
+                "foo\\\\bar",
+                "",
+                "100%",
+            ] {
+                let mut decoded = String::new();
+                let mut escaped = false;
+                // Cronie unescapes percent; Apple's cron also unescapes backslash pairs.
+                for character in shell_escape(value).chars() {
+                    if escaped {
+                        if character == '%' || collapse_backslash_pairs && character == '\\' {
+                            assert_eq!(decoded.pop(), Some('\\'));
+                        }
+                        decoded.push(character);
+                        escaped = false;
+                    } else {
+                        assert_ne!(character, '%', "unexpected cron stdin separator");
+                        decoded.push(character);
+                        escaped = character == '\\';
+                    }
+                }
+                let output = std::process::Command::new("/bin/sh")
+                    .args(["-c", &format!("printf '%s' {decoded}")])
+                    .output()
+                    .unwrap();
+                assert!(output.status.success(), "{decoded:?}: {output:?}");
+                assert_eq!(output.stdout, value.as_bytes());
+            }
+        }
     }
 
     #[test]

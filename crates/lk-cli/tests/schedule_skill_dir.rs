@@ -87,12 +87,51 @@ fn both_schedulers_capture_runtime_and_only_the_selected_hosts_existing_profile(
             let text = String::from_utf8(output.stdout).unwrap();
             assert!(text.contains(key));
             assert!(text.contains(profile.canonicalize().unwrap().to_str().unwrap()));
+            if format == "cron" {
+                let expected = format!("{key}={}", profile.canonicalize().unwrap().display());
+                assert!(text.lines().any(|line| line == expected));
+            }
             assert!(text.contains("LORE_INSTALL_DATA_DIR"));
             assert!(text.contains(directory.path().join("runtime data").to_str().unwrap()));
             assert!(!text.contains(other));
             assert!(!text.contains("fixture-must-not-be-exported"));
             assert!(!directory.path().join("vault").exists());
         }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn cron_routes_literal_selected_host_paths_after_the_working_directory() {
+    let directory = workspace(Some("codex"));
+    for name in ["selected ", "selected both'\"\\% "] {
+        let profile = directory.path().join(name);
+        std::fs::create_dir(&profile).unwrap();
+        let output = render(
+            directory.path(),
+            "cron",
+            &[
+                ("CODEX_HOME", profile.as_os_str()),
+                ("PATH", std::ffi::OsStr::new("/usr/bin:/bin")),
+            ],
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let text = String::from_utf8(output.stdout).unwrap();
+        assert!(!text.lines().any(|line| line.starts_with("CODEX_HOME=")));
+        let commands = text
+            .lines()
+            .filter_map(|line| line.split_once(" && ").map(|(_, command)| command))
+            .collect::<Vec<_>>();
+        assert!(!commands.is_empty());
+        assert!(
+            commands
+                .iter()
+                .all(|command| command.starts_with("CODEX_HOME="))
+        );
     }
 }
 
