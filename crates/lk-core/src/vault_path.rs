@@ -188,7 +188,9 @@ pub fn quarter_of_month(month: u8) -> u8 {
 /// two disagree about whether a synthesis answers the evidence it was written from.
 pub fn path_slug(rel: &Path) -> String {
     let no_ext = rel.with_extension("");
-    let s = no_ext.to_string_lossy().replace('\\', "/");
+    let s = no_ext
+        .to_string_lossy()
+        .replace(std::path::MAIN_SEPARATOR, "/");
     let mut segments: Vec<&str> = s.split('/').collect();
     let stem = segments.pop();
     join_segments(
@@ -204,7 +206,9 @@ pub fn path_slug(rel: &Path) -> String {
 /// segment as though it were a page's file, and a configured `daily_` would then match no page
 /// at all — it would ask for the prefix `daily`, which is not what any page under it carries.
 pub fn dir_slug(dir: &Path) -> String {
-    let s = dir.to_string_lossy().replace('\\', "/");
+    let s = dir
+        .to_string_lossy()
+        .replace(std::path::MAIN_SEPARATOR, "/");
     join_segments(s.split('/').map(crate::fs::fold_name))
 }
 
@@ -324,6 +328,18 @@ mod tests {
     fn path_slug_basic() {
         assert_eq!(path_slug(Path::new("wiki/Concept A.md")), "wiki/concept-a");
         assert_eq!(path_slug(Path::new("wiki/Bad_Name.md")), "wiki/bad-name");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn posix_backslashes_remain_inside_slug_path_components() {
+        let literal = Path::new(r"wiki/documents/a\b.md");
+        let nested = Path::new("wiki/documents/a/b.md");
+        assert_eq!(path_slug(literal), "wiki/documents/a-b");
+        assert_ne!(path_slug(literal), path_slug(nested));
+        let literal_directory = Path::new(r"wiki/a\b");
+        assert_eq!(dir_slug(literal_directory), r"wiki/a\b");
+        assert_ne!(dir_slug(literal_directory), dir_slug(Path::new("wiki/a/b")));
     }
 
     #[test]

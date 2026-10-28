@@ -296,7 +296,9 @@ fn rss_concept_citations_mode(
                 }
             }
             citations.push(Citation {
-                path: origin.to_string_lossy().replace('\\', "/"),
+                path: origin
+                    .to_string_lossy()
+                    .replace(std::path::MAIN_SEPARATOR, "/"),
                 revision: selection.revision.clone(),
                 rss_event: Some(RssEventSelector {
                     schema: RSS_EVIDENCE_SCHEMA.into(),
@@ -489,7 +491,13 @@ pub fn repoint_rss_evidence(
     for binding in &mut declarations {
         for (from, into) in replacements {
             if crate::same_existing_entry(root, Path::new(&binding.concept), from)? {
-                binding.concept = into.to_string_lossy().replace('\\', "/");
+                let destination = into
+                    .to_string_lossy()
+                    .replace(std::path::MAIN_SEPARATOR, "/");
+                if !lk_core::rss_evidence::is_page_address(&destination) {
+                    return Err(err("invalid RSS concept evidence destination"));
+                }
+                binding.concept = destination;
                 break;
             }
         }
@@ -720,6 +728,38 @@ mod tests {
                 guard_rss_evidence(&mut plan, root.path(), origin, &raw).unwrap();
                 session.apply(plan).unwrap();
             }
+        }
+        #[cfg(unix)]
+        {
+            let origin = Path::new(r"daily/rss\entry.md");
+            let raw = format!(
+                "{prefix}## Related Concepts\n- [Topic](../wiki/concepts/topic.md)\n\nAn authored [Topic](../wiki/concepts/topic.md) reference.\n"
+            );
+            let map = rss_concept_citations(root.path(), origin, &raw).unwrap();
+            let citations = &map["wiki/concepts/topic.md"];
+            assert_eq!(citations.len(), 2);
+            assert!(
+                citations
+                    .iter()
+                    .all(|citation| citation.path == origin.to_str().unwrap())
+            );
+            let from = Path::new("wiki/concepts/topic.md");
+            let into = Path::new(r"wiki/concepts/a\b.md");
+            std::fs::create_dir_all(root.path().join("wiki/concepts")).unwrap();
+            for path in [from, into] {
+                std::fs::write(
+                    root.path().join(path),
+                    "---\ntype: concept\n---\nConcept.\n",
+                )
+                .unwrap();
+            }
+            let error =
+                repoint_rss_evidence(root.path(), &raw, &[(from.into(), into.into())]).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("invalid RSS concept evidence destination")
+            );
         }
     }
 }

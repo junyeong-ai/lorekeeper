@@ -109,7 +109,9 @@ impl Citation {
 
     pub fn at_revision(path: &std::path::Path, revision: String) -> Self {
         Self {
-            path: path.to_string_lossy().replace('\\', "/"),
+            path: path
+                .to_string_lossy()
+                .replace(std::path::MAIN_SEPARATOR, "/"),
             revision,
             rss_event: None,
         }
@@ -341,6 +343,29 @@ mod tests {
             rss_event: None,
             path: path.into(),
             revision: "revision".into(),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn citations_preserve_literal_posix_backslash_addresses() {
+        let literal = Citation::at_revision(
+            std::path::Path::new(r"wiki/documents/a\b.md"),
+            "revision".into(),
+        );
+        let nested = Citation::at_revision(
+            std::path::Path::new("wiki/documents/a/b.md"),
+            "revision".into(),
+        );
+        assert_eq!(literal.path, r"wiki/documents/a\b.md");
+        assert_eq!(nested.path, "wiki/documents/a/b.md");
+        assert_ne!(
+            citation_digest(&[literal.clone()]),
+            citation_digest(&[nested.clone()])
+        );
+        for citation in [literal, nested] {
+            let raw = serde_json::to_string(&citation).unwrap();
+            assert_eq!(serde_json::from_str::<Citation>(&raw).unwrap(), citation);
         }
     }
 

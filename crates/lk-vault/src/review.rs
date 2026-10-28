@@ -1060,6 +1060,54 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn evidence_reports_preserve_literal_posix_backslash_owners() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = [
+            r"wiki/documents/a\b.md".to_owned(),
+            "wiki/documents/a/b.md".to_owned(),
+        ];
+        let raw = "---\ntype: document\ntitle: Source\n---\nExact authored evidence.\n";
+        std::fs::create_dir_all(root.path().join("wiki/documents/a")).unwrap();
+        for path in &paths {
+            std::fs::write(root.path().join(path), raw).unwrap();
+        }
+        let inspected = inspect_evidence(root.path(), &paths).unwrap();
+        let expected = paths.iter().cloned().collect::<BTreeSet<_>>();
+        assert_eq!(
+            inspected
+                .citations
+                .iter()
+                .map(|citation| citation.path.clone())
+                .collect::<BTreeSet<_>>(),
+            expected
+        );
+        assert_eq!(
+            inspected
+                .file_revisions
+                .keys()
+                .cloned()
+                .collect::<BTreeSet<_>>(),
+            expected
+        );
+        for citation in &inspected.citations {
+            assert_eq!(
+                crate::resolve_page_owner(root.path(), Path::new(&citation.path)).unwrap(),
+                PathBuf::from(&citation.path)
+            );
+        }
+        let archived = archive_evidence(root.path(), &paths).unwrap();
+        assert_eq!(archived.citations, inspected.citations);
+        assert_eq!(archived.file_revisions, inspected.file_revisions);
+        for citation in archived.citations {
+            let page = load_archived_evidence(root.path(), &citation.revision)
+                .unwrap()
+                .unwrap();
+            assert_eq!(page.original.as_deref(), Some(raw));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn evidence_reads_reject_sources_outside_the_vault_through_symlinks() {
         let root = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();

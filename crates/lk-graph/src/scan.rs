@@ -693,7 +693,8 @@ pub fn page_id(path: &Path) -> String {
 }
 
 fn address(path: &Path) -> String {
-    path.to_string_lossy().replace('\\', "/")
+    path.to_string_lossy()
+        .replace(std::path::MAIN_SEPARATOR, "/")
 }
 
 /// A vault-relative path as one comparable address: separators normalized to `/`, and the text
@@ -708,7 +709,7 @@ fn address(path: &Path) -> String {
 /// in the vault. Both sides of every comparison come through here, so they cannot disagree.
 pub fn rel_str(rel: &Path) -> String {
     use unicode_normalization::UnicodeNormalization;
-    rel.to_string_lossy().replace('\\', "/").nfc().collect()
+    address(rel).nfc().collect()
 }
 
 /// Two files whose paths slugify to ONE page id.
@@ -760,8 +761,7 @@ impl Excludes {
 
     /// Matched against the same form the scan uses: vault-relative, `/`-separated.
     pub fn matches(&self, rel: &Path) -> bool {
-        self.0
-            .is_match(rel.to_string_lossy().replace('\\', "/").as_str())
+        self.0.is_match(address(rel).as_str())
     }
 }
 
@@ -795,6 +795,46 @@ mod tests {
     }
 
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn literal_posix_backslashes_keep_distinct_graph_addresses() {
+        let root = tempfile::tempdir().unwrap();
+        let literal = r"wiki/documents/a\b.md";
+        let nested = "wiki/documents/a/b.md";
+        std::fs::create_dir_all(root.path().join("wiki/documents/a")).unwrap();
+        std::fs::write(
+            root.path().join(literal),
+            "---\ntype: document\n---\n[Nested](a/b.md)\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.path().join(nested),
+            "---\ntype: document\n---\n[Literal](../a%5Cb.md)\n",
+        )
+        .unwrap();
+        let pages = scan_vault(root.path(), false).unwrap();
+        assert_eq!(pages.len(), 2);
+        assert_ne!(page_id(Path::new(literal)), page_id(Path::new(nested)));
+        assert_eq!(page_id(Path::new(literal)), r"wiki/documents/a\b");
+        assert_eq!(rel_str(Path::new(literal)), literal);
+        assert!(address_collisions(&pages).is_empty());
+        let existence =
+            VaultExistence::build_at(root.path(), &pages, &VaultDirs::default()).unwrap();
+        assert!(existence.is_resolvable(literal));
+        assert!(existence.is_resolvable(nested));
+        assert_eq!(
+            existence.reached(&Link::to(literal)),
+            Some(r"wiki/documents/a\b")
+        );
+        assert_eq!(
+            existence.reached(&Link::to(nested)),
+            Some("wiki/documents/a/b")
+        );
+        let excludes = Excludes::compile(&["wiki/documents/a/*.md".into()]).unwrap();
+        assert!(!excludes.matches(Path::new(literal)));
+        assert!(excludes.matches(Path::new(nested)));
+    }
 
     #[test]
     fn pure_existence_never_infers_case_aliases_or_respells_exact_addresses() {
