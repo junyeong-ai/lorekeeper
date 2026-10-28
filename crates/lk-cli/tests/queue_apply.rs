@@ -1717,6 +1717,7 @@ fn synthesis_results_preserve_edits_and_apply_both_sections_only_to_current_inpu
     for scenario in [
         "current",
         "source-changed",
+        "source-missing",
         "target-changed",
         "missing-context",
         "missing-related",
@@ -1744,6 +1745,9 @@ fn synthesis_results_preserve_edits_and_apply_both_sections_only_to_current_inpu
         let mut result = serde_json::json!({"task_id":"syn-1", "cache_hash":hash, "context_revision":synthesis_context(&ws, "syn-1"), "target_revision":status["data"]["tasks"][0]["target_revision"], "synthesis":"Timeout is 30 seconds.", "related":"A sourced relationship."});
         match scenario {
             "source-changed" => ws.write("wiki/documents/spec.md", &source.replace("30", "5")),
+            "source-missing" => {
+                std::fs::remove_file(ws.vault().join("wiki/documents/spec.md")).unwrap()
+            }
             "target-changed" => ws.write(
                 "wiki/concepts/timeout.md",
                 &concept.replace("Keep this.", "New human decision."),
@@ -1774,6 +1778,37 @@ fn synthesis_results_preserve_edits_and_apply_both_sections_only_to_current_inpu
             ".lorekeeper/queue/results/syn-1.synthesis.json",
             &result.to_string(),
         );
+        if scenario == "source-missing" {
+            let proposal = ".lorekeeper/queue/results/syn-1.synthesis.json";
+            let proposal_before = ws.read(proposal);
+            let task_before = ws.read(".lorekeeper/queue/tasks.jsonl");
+            let applied = ws.run(&["queue", "apply"]);
+            assert!(
+                ws.vault().join(proposal).exists(),
+                "missing evidence retired the proposal: {}",
+                String::from_utf8_lossy(&applied.stdout)
+            );
+            assert!(!applied.status.success());
+            assert_eq!(ws.read(proposal), proposal_before);
+            assert_eq!(ws.read("wiki/concepts/timeout.md"), before);
+            let status: serde_json::Value =
+                serde_json::from_slice(&ws.run(&["queue", "status", "--json"]).stdout).unwrap();
+            assert_eq!(status["data"]["unreadable"], 1);
+            ws.run(&["queue", "prune"]);
+            assert_eq!(ws.read(".lorekeeper/queue/tasks.jsonl"), task_before);
+            assert_eq!(ws.read(proposal), proposal_before);
+            ws.write("wiki/documents/spec.md", source);
+            let applied = ws.run(&["queue", "apply"]);
+            assert!(
+                applied.status.success(),
+                "{}",
+                String::from_utf8_lossy(&applied.stderr)
+            );
+            assert!(!ws.vault().join(proposal).exists());
+            let after = ws.read("wiki/concepts/timeout.md");
+            assert!(after.contains("synthesis_done:") && after.contains("Keep this."));
+            continue;
+        }
         if matches!(scenario, "missing-link" | "existing-link") {
             let dry_run = ws.run(&["queue", "apply", "--dry-run"]);
             assert_eq!(dry_run.status.success(), scenario == "existing-link");
@@ -2327,6 +2362,27 @@ fn shortened_synthesis_citations_cannot_bypass_source_validation_or_be_pruned() 
         assert!(!ws.run(&["queue", "prune"]).status.success());
         assert!(ws.vault().join(".lorekeeper/queue/tasks.jsonl").exists());
     }
+}
+
+#[test]
+fn escaping_synthesis_evidence_remains_unreadable_and_preserves_pending_bytes() {
+    let ws = Workspace::new();
+    let citation =
+        lk_core::concept::Citation::at_revision(Path::new("../outside.md"), "a".repeat(64));
+    let hash = lk_core::concept::citation_digest(std::slice::from_ref(&citation));
+    let concept = format!(
+        "---\ntype: concept\nllm_inputs:\n  synthesis: {hash}\n---\n## Synthesis\nKeep.\n\n## Related\n\n"
+    );
+    ws.write("wiki/concepts/example.md", &concept);
+    let task = serde_json::json!({"task_id":"invalid-source", "kind":"synthesize-concept", "created_at":"2026-10-16T00:00:00Z", "cache_hash":hash,
+        "input":{"locale":"en","citations":[citation],"related_anchor":"## Related"}, "target":{"vault_path":"wiki/concepts/example.md","kind":"concept-synthesis","anchor":"## Synthesis"}}).to_string();
+    ws.write(".lorekeeper/queue/tasks.jsonl", &task);
+    let status: serde_json::Value =
+        serde_json::from_slice(&ws.run(&["queue", "status", "--json"]).stdout).unwrap();
+    assert_eq!(status["data"]["unreadable"], 1);
+    ws.run(&["queue", "prune"]);
+    assert_eq!(ws.read(".lorekeeper/queue/tasks.jsonl"), task);
+    assert_eq!(ws.read("wiki/concepts/example.md"), concept);
 }
 
 #[test]

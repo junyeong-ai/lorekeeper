@@ -2006,7 +2006,7 @@ fn classify_task(
             continue;
         }
         let Some(path) = resolve_target_path(&citation.path) else {
-            return Ok(TaskStatus::Stale);
+            return Ok(TaskStatus::Unreadable);
         };
         let revision = revisions
             .entry(path.clone())
@@ -2027,11 +2027,7 @@ fn read_page(root: &Path, relative: &Path) -> std::io::Result<String> {
 fn read_source_revision(vault_root: &Path, path: &Path) -> Result<String, TaskStatus> {
     let content = read_page(vault_root, path).map_err(|e| {
         tracing::warn!(path = %path.display(), error = %e, "cannot read synthesis source");
-        if e.kind() == std::io::ErrorKind::NotFound {
-            TaskStatus::Stale
-        } else {
-            TaskStatus::Unreadable
-        }
+        TaskStatus::Unreadable
     })?;
     let page = lk_core::frontmatter::parse_page(&content).map_err(|e| {
         tracing::warn!(path = %path.display(), error = %e, "cannot parse synthesis source");
