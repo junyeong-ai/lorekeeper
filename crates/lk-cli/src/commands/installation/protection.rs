@@ -23,6 +23,8 @@ pub(crate) struct Protection {
     schema_ready: bool,
     #[cfg(unix)]
     lease: Option<Lease>,
+    #[cfg(unix)]
+    root_pin: Option<crate::commands::workflow::VaultRootPin>,
 }
 
 struct Configuration {
@@ -84,6 +86,8 @@ impl Protection {
             schema_ready: false,
             #[cfg(unix)]
             lease: None,
+            #[cfg(unix)]
+            root_pin: None,
         };
         #[cfg(unix)]
         let mut protection = protection;
@@ -140,6 +144,7 @@ impl Protection {
             config: None,
             schema_ready: false,
             lease: None,
+            root_pin: None,
         };
         let requests = protection.requests(
             opts,
@@ -173,6 +178,8 @@ impl Protection {
             config,
             #[cfg(unix)]
             lease: None,
+            #[cfg(unix)]
+            root_pin: None,
         };
         #[cfg(unix)]
         let mut protection = protection;
@@ -216,10 +223,7 @@ impl Protection {
                 "installation selection changed while acquiring protection; retry the command"
             ));
         }
-        if let Some(config) = &self.config {
-            config.validate()?;
-        }
-        Ok(())
+        self.recheck_configuration()
     }
 
     #[cfg(unix)]
@@ -234,8 +238,45 @@ impl Protection {
         Ok(())
     }
 
-    pub(super) fn schema_ready(&self) -> bool {
-        self.schema_ready
+    pub(super) fn schema_root(&self) -> miette::Result<Option<PathBuf>> {
+        if !self.schema_ready {
+            return Ok(None);
+        }
+        self.recheck_configuration()?;
+        #[cfg(unix)]
+        {
+            let pin = self.root_pin.as_ref().ok_or_else(|| {
+                miette::miette!("schema synchronization has no protected vault root")
+            })?;
+            Ok(Some(pin.root().to_path_buf()))
+        }
+        #[cfg(not(unix))]
+        Ok(self.config.as_ref().map(|config| config.root.clone()))
+    }
+
+    pub(super) async fn synchronize_schema(&self) -> miette::Result<()> {
+        let Some(root) = self.schema_root()? else {
+            return Ok(());
+        };
+        let selected = self.config.as_ref().ok_or_else(|| {
+            miette::miette!("schema synchronization has no selected configuration")
+        })?;
+        let (config, revision) = crate::commands::load_config_with_revision(&selected.path)?;
+        if revision != selected.revision {
+            return Err(miette::miette!(
+                "configuration changed before schema synchronization"
+            ));
+        }
+        let prepared = crate::commands::RootConfig {
+            root,
+            config: Some(config),
+            pin: crate::commands::ConfigurationPin::from_loaded(
+                selected.path.clone(),
+                selected.revision.clone(),
+            ),
+        };
+        crate::commands::schema::run_prepared(prepared, false, || self.recheck_configuration())
+            .await
     }
 
     pub(super) fn claim_publication(
@@ -244,10 +285,17 @@ impl Protection {
         let Some(config) = &self.config else {
             return Ok(None);
         };
-        config.validate()?;
-        let claim = lk_vault::MutationClaim::acquire(&config.root)
+        self.recheck_configuration()?;
+        #[cfg(unix)]
+        let root = self
+            .root_pin
+            .as_ref()
+            .map_or(config.root.as_path(), |pin| pin.root());
+        #[cfg(not(unix))]
+        let root = config.root.as_path();
+        let claim = lk_vault::MutationClaim::acquire(root)
             .map_err(|error| miette::miette!("claim installation publication boundary: {error}"))?;
-        config.validate()?;
+        self.recheck_configuration()?;
         crate::commands::workflow::validate_root(claim.root())?;
         let queue = claim.root().join(".lorekeeper/queue");
         if !lk_core::fs::canonical_prefix(&queue).starts_with(claim.root()) {
@@ -261,6 +309,10 @@ impl Protection {
         if let Some(config) = &self.config {
             config.validate()?;
         }
+        #[cfg(unix)]
+        if let Some(pin) = &self.root_pin {
+            pin.validate()?;
+        }
         Ok(())
     }
 
@@ -272,6 +324,8 @@ impl Protection {
     }
 
     pub(super) fn validate_staged(&self, current: &Self) -> miette::Result<()> {
+        self.recheck_configuration()?;
+        current.recheck_configuration()?;
         let before = self
             .config
             .as_ref()
@@ -293,6 +347,7 @@ impl Protection {
     }
 
     pub(super) fn configure(&self, command: &mut std::process::Command) -> miette::Result<()> {
+        self.recheck_configuration()?;
         command.env("LORE_INSTALL_DATA_DIR", self.installation.data_dir());
         if let Some(config) = &self.config {
             command
@@ -301,6 +356,9 @@ impl Protection {
         }
         #[cfg(unix)]
         {
+            if let Some(pin) = &self.root_pin {
+                pin.configure(command);
+            }
             let lease = self.lease.as_ref().ok_or_else(|| {
                 miette::miette!("installation deployment has no exclusive protection")
             })?;
@@ -381,10 +439,24 @@ impl Protection {
         if mode == Mode::Exclusive && schema {
             if let Some(config) = &self.config {
                 match schema_state(&config.root) {
-                    Ok(state) => requests.push(Request {
-                        path: state.join("workflow.lock"),
-                        mode: Mode::Exclusive,
-                    }),
+                    Ok(state) => {
+                        let root = state.parent().expect("vault state has a parent");
+                        let pin = match crate::commands::workflow::VaultRootPin::inherited()? {
+                            Some(pin) => {
+                                pin.validate_target(root)?;
+                                pin
+                            }
+                            None => crate::commands::workflow::VaultRootPin::capture(
+                                &config.root,
+                                root,
+                            )?,
+                        };
+                        self.root_pin = Some(pin);
+                        requests.push(Request {
+                            path: state.join("workflow.lock"),
+                            mode: Mode::Exclusive,
+                        });
+                    }
                     Err(error) => {
                         self.schema_ready = false;
                         eprintln!(
@@ -525,7 +597,85 @@ mod tests {
             config: None,
             schema_ready: false,
             lease: None,
+            root_pin: None,
         }
+    }
+
+    #[test]
+    fn schema_keeps_its_claimed_root_and_refuses_selector_retargeting() {
+        use std::os::unix::fs::symlink;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path();
+        let first = root.join("first");
+        let second = root.join("second");
+        let selected = root.join("selected");
+        let equivalent = root.join("equivalent");
+        std::fs::create_dir(&first).unwrap();
+        std::fs::create_dir(&second).unwrap();
+        symlink(&first, &selected).unwrap();
+        symlink(&first, &equivalent).unwrap();
+        let config = root.join("config.yaml");
+        let body = "vault: {root: selected, locale: en}\nidentity: {name: Test, email: test@example.com}\nsources:\n  notes: {type: manual, params: {inbox_dir: inbox}}\n";
+        std::fs::write(&config, body).unwrap();
+        let options = GlobalOptions {
+            config: Some(config),
+            template_dir: None,
+        };
+        let mut original = protection(root);
+        original.config = Configuration::capture(&options);
+        assert!(original.config.is_some());
+        original.schema_ready = true;
+        let requests = original
+            .requests(
+                &options,
+                Mode::Exclusive,
+                AgentTarget::Both,
+                Some(SkillScope::None),
+                false,
+                true,
+            )
+            .unwrap();
+        original.lease = Some(Lease::acquire(&requests).unwrap());
+        assert_eq!(
+            original.schema_root().unwrap(),
+            Some(first.canonicalize().unwrap())
+        );
+        std::fs::remove_file(&selected).unwrap();
+        symlink(&equivalent, &selected).unwrap();
+        assert_eq!(
+            original.schema_root().unwrap(),
+            Some(first.canonicalize().unwrap())
+        );
+        std::fs::remove_file(&selected).unwrap();
+        symlink(&second, &selected).unwrap();
+        assert!(original.schema_root().is_err());
+        assert!(original.recheck_configuration().is_err());
+        assert!(original.claim_publication().is_err());
+        assert_eq!(
+            std::fs::read_to_string(options.config.as_ref().unwrap()).unwrap(),
+            body
+        );
+
+        let mut staged = protection(root);
+        staged.config = Configuration::capture(&options);
+        staged.schema_ready = true;
+        staged
+            .requests(
+                &options,
+                Mode::Exclusive,
+                AgentTarget::Both,
+                Some(SkillScope::None),
+                false,
+                true,
+            )
+            .unwrap();
+        assert_eq!(
+            staged.schema_root().unwrap(),
+            Some(second.canonicalize().unwrap())
+        );
+        assert!(original.validate_staged(&staged).is_err());
+        assert!(!second.join("wiki/AGENTS.md").exists());
     }
 
     #[test]

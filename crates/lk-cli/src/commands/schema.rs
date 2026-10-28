@@ -765,11 +765,22 @@ pub async fn run_with_wait(
     // Single override semantics (shared with `wiki`/`graph`): a present config drives
     // locale/dirs/personal even under `--root`; defaults apply ONLY when no config file exists;
     // a present-but-broken config fails loudly (never silently emit AGENTS.md for the wrong dirs).
+    let prepared = super::resolve_root_config(opts, root_override)?;
+    run_prepared(prepared, wait_for_vault, || Ok(())).await
+}
+
+pub(super) async fn run_prepared(
+    prepared: super::RootConfig,
+    wait_for_vault: bool,
+    mut validate: impl FnMut() -> miette::Result<()>,
+) -> miette::Result<()> {
     let super::RootConfig {
         root: vault_root,
         config,
         pin,
-    } = super::resolve_root_config(opts, root_override)?;
+    } = prepared;
+    pin.validate()?;
+    validate()?;
     super::wiki::refuse_navigation_inbox_overlap(&vault_root, config.as_ref())?;
     let (locale, dirs, personal, board) = match config {
         Some(config) => {
@@ -794,7 +805,12 @@ pub async fn run_with_wait(
     };
 
     std::fs::create_dir_all(&vault_root).map_err(|e| miette::miette!("create vault: {e}"))?;
-    let mutation = super::publication::acquire_mutation(&vault_root, wait_for_vault, &pin).await?;
+    let mutation =
+        super::publication::acquire_mutation_checked(&vault_root, wait_for_vault, || {
+            pin.validate()?;
+            validate()
+        })
+        .await?;
     let vault_root = mutation.root().to_path_buf();
 
     let content = render_agents_md(locale, &dirs, personal, board.as_deref());
@@ -809,6 +825,8 @@ pub async fn run_with_wait(
     // guessing: an operator who finds an addendum gone can at least see where it went.
     let replacing = tokio::fs::try_exists(&full).await.unwrap_or(false);
 
+    pin.validate()?;
+    validate()?;
     lk_vault::VaultWriter::new(&vault_root)
         .write_page(&agents_rel, &content)
         .await

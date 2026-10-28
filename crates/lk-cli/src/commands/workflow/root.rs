@@ -54,7 +54,7 @@ impl VaultRootPin {
         Ok(pin)
     }
 
-    pub(super) fn inherited() -> miette::Result<Option<Self>> {
+    pub(in crate::commands) fn inherited() -> miette::Result<Option<Self>> {
         let values = [ROOT_ENV, SELECTOR_ENV, IDENTITY_ENV].map(std::env::var_os);
         if values.iter().all(Option::is_none) {
             if std::env::var_os("LORE_WORKFLOW_ID").is_some()
@@ -109,7 +109,7 @@ impl VaultRootPin {
         Ok(())
     }
 
-    pub(super) fn configure(&self, command: &mut std::process::Command) {
+    pub(in crate::commands) fn configure(&self, command: &mut std::process::Command) {
         command
             .env(ROOT_ENV, &self.root)
             .env(SELECTOR_ENV, &self.selected)

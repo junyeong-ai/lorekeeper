@@ -357,12 +357,7 @@ async fn deploy(
     // command OWNS has landed, and `AGENTS.md` lives in the user's vault — a drive not mounted
     // or a vault the process cannot reach would otherwise report a failed install for one that
     // is complete, and the advised re-run would fail identically forever.
-    if protection.schema_ready()
-        && find_config(opts)
-            .and_then(|path| load_config(&path))
-            .is_ok()
-        && let Err(e) = super::schema::run(opts, None).await
-    {
+    if let Err(e) = protection.synchronize_schema().await {
         eprintln!("warning: could not regenerate AGENTS.md ({e}) — run `lore schema`");
     }
     Ok(())
