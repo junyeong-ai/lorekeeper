@@ -69,6 +69,29 @@ impl InspectionActions {
         }
         Ok(actions)
     }
+
+    fn reason(
+        &self,
+        work: &Work,
+        request: &Value,
+        contract: &str,
+    ) -> miette::Result<Option<String>> {
+        let Some(node) = request["node_id"].as_str() else {
+            return Err(fail("inspection request has no node identity"));
+        };
+        let Some(action) = self.actions.get(node) else {
+            return Ok(None);
+        };
+        if action.request_revision != request_revision(request, contract)? {
+            return Ok(None);
+        }
+        if request["work_id"] != work.plan.id
+            || request["input_revision"].as_str() != Some(action.input_revision.as_str())
+        {
+            return Err(fail("inspection action identity differs from its request"));
+        }
+        Ok(Some(action.reason.clone()))
+    }
 }
 
 fn request_revision(request: &Value, contract: &str) -> miette::Result<String> {
@@ -87,21 +110,43 @@ impl Work {
             return Ok(None);
         };
         let actions = InspectionActions::decode(&raw, self)?;
-        let Some(node) = request["node_id"].as_str() else {
-            return Err(fail("inspection request has no node identity"));
-        };
-        let Some(action) = actions.actions.get(node) else {
-            return Ok(None);
-        };
-        if action.request_revision != request_revision(request, contract)? {
-            return Ok(None);
+        actions.reason(self, request, contract)
+    }
+
+    pub fn prepare_inspection_admission(
+        &self,
+        root: &Path,
+        resources: &[SemanticResource],
+        contract: impl Fn(&Value) -> miette::Result<String>,
+    ) -> miette::Result<(WorkProgress, Option<String>)> {
+        let actions = read_optional(root, &work_path(&self.plan.id, "inspection-actions.json")?)?
+            .map(|raw| InspectionActions::decode(&raw, self))
+            .transpose()?;
+        let evaluated = self.evaluate(root, resources)?;
+        let progress = evaluated.progress();
+        for id in &progress.ready {
+            if progress.ready.first() != Some(id)
+                && !actions
+                    .as_ref()
+                    .is_some_and(|actions| actions.actions.contains_key(id))
+            {
+                continue;
+            }
+            let node = evaluated
+                .nodes
+                .iter()
+                .find(|node| &node.id == id)
+                .expect("ready node belongs to the evaluated tree");
+            let request = self
+                .node_input(node, &evaluated.inputs, &evaluated.current)
+                .map_err(NodeInputError::report)?;
+            if let Some(actions) = &actions
+                && let Some(reason) = actions.reason(self, &request, &contract(&request)?)?
+            {
+                return Ok((progress, Some(reason)));
+            }
         }
-        if request["work_id"] != self.plan.id
-            || request["input_revision"].as_str() != Some(action.input_revision.as_str())
-        {
-            return Err(fail("inspection action identity differs from its request"));
-        }
-        Ok(Some(action.reason.clone()))
+        Ok((progress, None))
     }
 
     pub fn plan_inspection_action(
@@ -207,6 +252,59 @@ impl Work {
 mod tests {
     use super::super::tests::{context, limits, resources};
     use super::*;
+
+    #[test]
+    fn admission_checks_exact_actions_on_current_ready_nodes_without_writes() {
+        let root = tempfile::tempdir().unwrap();
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let source = resources();
+        let work =
+            Work::create(&session, &source, "subject", context("subject"), limits()).unwrap();
+        let (progress, requests) = work.prepare_inspections(root.path(), &source, 2).unwrap();
+        assert_eq!(requests.len(), 2);
+        let request = &requests[1];
+        session
+            .apply(
+                work.plan_inspection_action(
+                    root.path(),
+                    &source,
+                    request,
+                    "contract-1",
+                    "Explicit action.".into(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let path = root
+            .path()
+            .join(work_path(&work.plan.id, "inspection-actions.json").unwrap());
+        let before = std::fs::read(&path).unwrap();
+        let (current, hold) = work
+            .prepare_inspection_admission(root.path(), &source, |_| Ok("contract-1".into()))
+            .unwrap();
+        assert_eq!(current.ready, progress.ready);
+        assert_eq!(current.completed, progress.completed);
+        assert_eq!(hold.as_deref(), Some("Explicit action."));
+        assert!(
+            work.prepare_inspection_admission(root.path(), &source, |_| Ok("contract-2".into()),)
+                .unwrap()
+                .1
+                .is_none()
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        std::fs::write(&path, "[]").unwrap();
+        assert!(
+            work.prepare_inspection_admission(root.path(), &source, |_| Ok("contract-1".into()),)
+                .is_err()
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "[]");
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert!(
+            work.prepare_inspection_admission(root.path(), &source, |_| Ok("contract-1".into()),)
+                .is_err()
+        );
+    }
 
     #[test]
     fn actions_bind_each_exact_ready_request_and_preserve_other_nodes() {

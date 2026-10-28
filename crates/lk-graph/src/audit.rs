@@ -1492,6 +1492,9 @@ pub fn plan_selected_available_partitioned(
 /// Reserve first-discovery order before native execution, without recording a read
 /// or advancing a class turn. The caller guards selected-subject readiness while
 /// holding any narrower claims; ordinary planning remains read-only.
+/// Execution admission examines only the available pending prefix needed to fill
+/// the configured limit. Refused subjects keep their pending position.
+#[allow(clippy::too_many_arguments)]
 pub fn admit_available_partitioned(
     session: &MutationSession,
     dirs: &VaultDirs,
@@ -1499,6 +1502,7 @@ pub fn admit_available_partitioned(
     limit: usize,
     max_input_bytes: u64,
     available: &mut dyn FnMut(&AuditCandidate) -> Result<bool, GraphError>,
+    admit: &mut dyn FnMut(&AuditCandidate) -> Result<bool, GraphError>,
     guard: impl FnOnce(&[AuditCandidate], &mut MutationPlan) -> Result<(), GraphError>,
 ) -> Result<AuditPlan, GraphError> {
     let root = session.root();
@@ -1509,7 +1513,7 @@ pub fn admit_available_partitioned(
         limit,
         &[],
         max_input_bytes,
-        Planning::Available(available),
+        Planning::Admission { available, admit },
     )?;
     let mut mutation = MutationPlan::default();
     guard(&prepared.plan.candidates, &mut mutation)?;
@@ -1532,6 +1536,10 @@ enum Planning<'a> {
     WholeInput,
     Partitioned,
     Available(&'a mut dyn FnMut(&AuditCandidate) -> Result<bool, GraphError>),
+    Admission {
+        available: &'a mut dyn FnMut(&AuditCandidate) -> Result<bool, GraphError>,
+        admit: &'a mut dyn FnMut(&AuditCandidate) -> Result<bool, GraphError>,
+    },
 }
 
 struct PreparedAudit {
@@ -1575,7 +1583,7 @@ fn plan_selected_inner(
         (!selection.is_empty()).then_some(&unique),
     )?;
     let mut unavailable = BTreeSet::new();
-    if let Planning::Available(available) = &mut planning {
+    if let Planning::Available(available) | Planning::Admission { available, .. } = &mut planning {
         for candidate in &candidates {
             if !available(candidate)? {
                 unavailable.insert(candidate.path.clone());
@@ -1622,6 +1630,11 @@ fn plan_selected_inner(
         };
         let Some(candidate) = next else { break };
         if unavailable.contains(&candidate.path) {
+            continue;
+        }
+        if let Planning::Admission { admit, .. } = &mut planning
+            && !admit(&candidate)?
+        {
             continue;
         }
         let mut prospective = resources.clone();
@@ -1931,6 +1944,7 @@ mod tests {
             &pages,
             2,
             u64::MAX,
+            &mut |_| Ok(true),
             &mut |_| Ok(true),
             |_, _| Ok(()),
         )
@@ -2314,6 +2328,7 @@ mod tests {
             1,
             u64::MAX,
             &mut |_| Ok(true),
+            &mut |_| Ok(true),
             |_, _| Ok(()),
         )
         .unwrap();
@@ -2338,6 +2353,7 @@ mod tests {
             1,
             u64::MAX,
             &mut |candidate| Ok(candidate.path == a),
+            &mut |_| Ok(true),
             |_, _| Ok(()),
         )
         .unwrap();
@@ -2350,6 +2366,61 @@ mod tests {
         assert!(matches!(receipts.next_class, AuditClass::Changed));
         let ready = plan_partitioned(root.path(), &dirs, &scan(root.path()), 1, u64::MAX).unwrap();
         assert_eq!(ready.candidates[0].path, z);
+
+        let mut checked = Vec::new();
+        let admitted = admit_available_partitioned(
+            &session,
+            &dirs,
+            &scan(root.path()),
+            1,
+            u64::MAX,
+            &mut |_| Ok(true),
+            &mut |candidate| {
+                checked.push(candidate.path.clone());
+                Ok(candidate.path != z)
+            },
+            |_, _| Ok(()),
+        )
+        .unwrap();
+        assert_eq!(admitted.candidates[0].path, zero);
+        assert_eq!(checked, [z, zero]);
+        let (before, receipts) = load(root.path()).unwrap();
+        assert_eq!(receipts.pending, [z, zero, a]);
+        assert!(receipts.entries.is_empty());
+        assert!(matches!(receipts.next_class, AuditClass::Changed));
+        let all_held = admit_available_partitioned(
+            &session,
+            &dirs,
+            &scan(root.path()),
+            1,
+            u64::MAX,
+            &mut |_| Ok(true),
+            &mut |_| Ok(false),
+            |_, _| Ok(()),
+        )
+        .unwrap();
+        assert!(all_held.candidates.is_empty());
+        assert_eq!(all_held.total, 3);
+        assert_eq!(all_held.unreviewed, 3);
+        assert_eq!(load(root.path()).unwrap().0, before);
+        let failed = admit_available_partitioned(
+            &session,
+            &dirs,
+            &scan(root.path()),
+            1,
+            u64::MAX,
+            &mut |_| Ok(true),
+            &mut |_| Err(error("unreadable processing state")),
+            |_, _| Ok(()),
+        );
+        assert!(
+            failed
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("unreadable processing state")
+        );
+        assert_eq!(load(root.path()).unwrap().0, before);
     }
 
     #[test]
@@ -2385,6 +2456,7 @@ mod tests {
                 &scan(root.path()),
                 1,
                 u64::MAX,
+                &mut |_| Ok(true),
                 &mut |_| Ok(true),
                 |_, _| {
                     let raw = std::fs::read_to_string(root.path().join(changed)).unwrap();

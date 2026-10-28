@@ -78,6 +78,10 @@ assessments or performs repairs.
    subject/evidence/context/review pages and can select later ready subjects without
    draining unrelated queue work. Newly discovered context can also block a selected
    assessment. `audit-record` rechecks these inputs under the publication locks.
+   Native admission also skips an exact current bounded-work processing hold, allowing
+   later ready subjects within the same subject limit. It preserves the held Work and
+   pending order; an all-held selection stays deferred. This execution check uses the
+   selected profile and is additional to the read-only `--ready` input preview.
    Complete authored pages need no synthetic completion markers. Do not clear an
    owned input or bypass a blocker to record a receipt; report it for later processing.
    `--ready` adds `readiness` to the ordinary plan. Automatic selection skips blocked

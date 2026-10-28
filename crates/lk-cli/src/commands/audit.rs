@@ -5,7 +5,7 @@ use serde::Serialize;
 
 use super::queue::readiness::InputReadiness;
 
-const MAX_DEFERRED_DETAILS: usize = 100;
+pub(super) const MAX_DEFERRED_DETAILS: usize = 100;
 
 #[derive(Clone, Serialize)]
 pub(super) struct DeferredAudit {

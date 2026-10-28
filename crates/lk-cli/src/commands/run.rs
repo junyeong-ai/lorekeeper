@@ -4380,6 +4380,8 @@ mod native {
             let _queue =
                 super::super::queue::claim_writer(&self.root.join(".lorekeeper/queue"), false)?;
             let mut readiness = InputAvailability::load(&self.root)?;
+            let mut processing_deferred = Vec::new();
+            let mut processing_deferred_count = 0;
             let plan = lk_graph::audit::admit_available_partitioned(
                 &session,
                 &self.config.vault.dirs,
@@ -4387,6 +4389,37 @@ mod native {
                 self.config.graph.audit.batch_size,
                 self.config.graph.audit.max_input_bytes,
                 &mut |candidate| readiness.check(candidate),
+                &mut |candidate| {
+                    self.supervisor
+                        .read_control()
+                        .check()
+                        .map_err(|error| lk_graph::GraphError::Io(error.to_string()))?;
+                    let hold = crate::commands::work::audit_processing_hold(
+                        &self.root,
+                        &self.config,
+                        &self.config_revision,
+                        candidate,
+                    )
+                    .map_err(|error| lk_graph::GraphError::Io(error.to_string()))?;
+                    self.supervisor
+                        .read_control()
+                        .check()
+                        .map_err(|error| lk_graph::GraphError::Io(error.to_string()))?;
+                    let Some(reason) = hold else {
+                        return Ok(true);
+                    };
+                    processing_deferred_count += 1;
+                    if processing_deferred.len() < super::super::audit::MAX_DEFERRED_DETAILS {
+                        processing_deferred.push(DeferredAudit {
+                            kind: candidate.kind,
+                            path: candidate.path.clone(),
+                            file_revision: candidate.file_revision.clone(),
+                            input_revision: candidate.input_revision.clone(),
+                            reasons: vec![reason],
+                        });
+                    }
+                    Ok(false)
+                },
                 |candidates, mutation| {
                     let mut selected = InputAvailability::load(&self.root)
                         .map_err(|error| lk_graph::GraphError::Io(error.to_string()))?;
@@ -4402,7 +4435,12 @@ mod native {
             )
             .map_err(|error| miette::miette!("{error}"))?;
             self.result.audit_deferred = readiness.deferred().to_vec();
-            self.result.audit_deferred_count = readiness.deferred_count();
+            self.result.audit_deferred.extend(processing_deferred);
+            self.result
+                .audit_deferred
+                .truncate(super::super::audit::MAX_DEFERRED_DETAILS);
+            self.result.audit_deferred_count =
+                readiness.deferred_count() + processing_deferred_count;
             Ok(plan)
         }
 
@@ -4613,7 +4651,7 @@ mod native {
             }
             if plan.candidates.is_empty() {
                 if !self.result.audit_deferred.is_empty() {
-                    self.deferred("audit dependencies", "pending subjects have unfinished semantic inputs; retained for later assessment");
+                    self.deferred("audit dependencies", "pending subjects have unfinished inputs or require processing action; retained for later assessment");
                     return;
                 }
                 self.result.audit = Some(Vec::new());

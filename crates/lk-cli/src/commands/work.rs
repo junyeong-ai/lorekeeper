@@ -1782,6 +1782,53 @@ pub(super) fn audit_needs_work(
 }
 
 #[cfg(unix)]
+pub(super) fn audit_processing_hold(
+    root: &Path,
+    config: &lk_core::config::Config,
+    config_revision: &str,
+    candidate: &lk_graph::audit::AuditCandidate,
+) -> miette::Result<Option<String>> {
+    if candidate.discovery.is_none() {
+        return Ok(None);
+    }
+    let prepared = resources::audit_candidate(root, config, candidate)?;
+    let work = expected(root, &prepared, config, config_revision)?;
+    if !work.is_planned(root)? {
+        return Ok(None);
+    }
+    if is_finished_prepared(root, &work, &prepared)? {
+        return Ok(None);
+    }
+    let (progress, hold) = match work.prepare_inspection_admission(
+        root,
+        &prepared.resources,
+        super::execution::observation::contract_revision,
+    ) {
+        Ok(admission) => admission,
+        Err(error) if error.downcast_ref::<state::InputCapacity>().is_some() => {
+            return Ok(Some(error.to_string()));
+        }
+        Err(error) => return Err(error),
+    };
+    if hold.is_some() || !progress.complete {
+        return Ok(hold);
+    }
+    match prepare_finalization_from_capture(root, config, config_revision, &work, &prepared)? {
+        FinalizationPreparation::Capacity {
+            request_bytes,
+            max_input_bytes,
+        } => Ok(Some(finalization_capacity_reason(
+            request_bytes,
+            max_input_bytes,
+        ))),
+        FinalizationPreparation::Interactive => Ok(None),
+        _ => Err(miette::miette!(
+            "audit admission produced a queue finalization state"
+        )),
+    }
+}
+
+#[cfg(unix)]
 pub(super) enum NativeStep {
     Inspection {
         progress: state::WorkProgress,

@@ -6262,6 +6262,90 @@ fn explicit_inspection_actions_allow_an_independent_audit_assessment() {
         assert_eq!(repeated["halted"], false, "{repeated}");
     }
 }
+#[test]
+fn held_first_audit_admits_later_ready_subject_without_changing_batch_size() {
+    let behavior = RECORD_BOUNDED_AUDIT.replace(
+        "output={'status':'complete','observation':output,'action':None}",
+        r#"output={'status':'complete','observation':output,'action':None}
+        if request['context']['subject'].get('path')=='wiki/concepts/large.md':
+            output={'status':'needs-action','observation':None,'action':{'reason':'Cannot complete the selected assigned read.'}}"#,
+    );
+    for engine in ["codex", "claude-code"] {
+        let fixture = bounded_audit_fixture(engine, 8, &behavior);
+        let (_, held) = fixture.run("knowledge");
+        assert_eq!(held["halted"], false, "{held}");
+        assert!(held["semantic_calls"].as_u64().unwrap() > 0, "{held}");
+        let work_root = fixture.root().join("vault/.lorekeeper/work");
+        let originals = walkdir::WalkDir::new(&work_root)
+            .into_iter()
+            .map(Result::unwrap)
+            .filter(|entry| entry.file_type().is_file())
+            .map(|entry| {
+                (
+                    entry.path().to_owned(),
+                    std::fs::read(entry.path()).unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            originals
+                .iter()
+                .any(|(path, _)| path.ends_with("inspection-actions.json"))
+        );
+        let config = std::fs::read(&fixture.config).unwrap();
+        write_audit_concept(&fixture, "second");
+        let second = fixture.root().join("vault/wiki/concepts/second.md");
+        let body = std::fs::read_to_string(&second).unwrap()
+            + &"\nAn independent source clause remains fully assigned.\n".repeat(180);
+        std::fs::write(second, body).unwrap();
+        record_discovery(&fixture, "wiki/concepts/second.md");
+        let (_, report) = fixture.run("knowledge");
+        assert_eq!(report["halted"], false, "{engine}: {report}");
+        assert_eq!(
+            report["audit"].as_array().map(Vec::len),
+            Some(1),
+            "{engine}: {report}"
+        );
+        assert_eq!(
+            report["audit"][0]["assessed_path"],
+            "wiki/concepts/second.md"
+        );
+        assert_eq!(std::fs::read(&fixture.config).unwrap(), config);
+        for (path, bytes) in &originals {
+            assert_eq!(&std::fs::read(path).unwrap(), bytes);
+        }
+        let (receipt, bytes) = originals
+            .iter()
+            .find(|(path, _)| path.ends_with("inspection-actions.json"))
+            .unwrap();
+        std::fs::write(receipt, "[]").unwrap();
+        let (_, corrupt) = fixture.run("knowledge");
+        assert_eq!(corrupt["halted"], true, "{corrupt}");
+        assert_eq!(corrupt["semantic_calls"], 0, "{corrupt}");
+        assert_eq!(std::fs::read_to_string(receipt).unwrap(), "[]");
+        std::fs::write(receipt, bytes).unwrap();
+        let subject = fixture.root().join("vault/wiki/concepts/large.md");
+        let changed =
+            std::fs::read_to_string(&subject).unwrap() + "\nA newly authored observation.\n";
+        std::fs::write(subject, changed).unwrap();
+        record_discovery(&fixture, "wiki/concepts/large.md");
+        let (_, changed) = fixture.run("knowledge");
+        assert_eq!(changed["halted"], false, "{changed}");
+        assert!(changed["semantic_calls"].as_u64().unwrap() > 0, "{changed}");
+        for (path, bytes) in &originals {
+            assert_eq!(&std::fs::read(path).unwrap(), bytes);
+        }
+        let calls = bounded_calls(&fixture);
+        let (_, repeated) = fixture.run("knowledge");
+        assert_eq!(repeated["semantic_calls"], 0, "{repeated}");
+        assert_eq!(repeated["halted"], false, "{repeated}");
+        assert!(!repeated["ok"].as_bool().unwrap(), "{repeated}");
+        assert_eq!(bounded_calls(&fixture), calls);
+        for (path, bytes) in &originals {
+            assert_eq!(&std::fs::read(path).unwrap(), bytes);
+        }
+    }
+}
 
 fn writer_contention_fixture(engine: &str, before_host: bool) -> Fixture {
     let fixture = Fixture::new(engine, 30, RECORD_BOUNDED_AUDIT);
