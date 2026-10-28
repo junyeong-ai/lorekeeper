@@ -753,7 +753,7 @@ impl IntentPlane {
         // Finding it is PROOF and needs no guard. Only the negative depends on the parse having
         // been complete — which is one question rather than a list of the ways it can fail, and
         // the list was what let a per-line case walk past a whole-board guard.
-        if self.board.tasks().any(|task| &task.id == id) {
+        if self.board.tasks().any(|task| &task.id == id && !task.done) {
             return Some(false);
         }
         if self.read_as.is_none() || !self.board.unplaced().is_empty() {

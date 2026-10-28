@@ -125,3 +125,54 @@ fn a_view_says_the_plane_cannot_be_held() {
         "the front door marks it"
     );
 }
+
+#[test]
+fn completed_editor_tasks_do_not_fire_reminders_before_sync() {
+    let checked = "- [x] Finish the task <!--t:7k2p since:2026-08-19-->\n";
+    let open = "- [ ] Finish the task <!--t:7k2p since:2026-08-19-->\n";
+    for (board, fires, retained) in [
+        (Some(format!("## Today\n{checked}")), false, false),
+        (Some(format!("## Today\n{open}")), true, false),
+        (Some(format!("## Today\n{checked}{open}")), true, false),
+        (
+            Some(format!(
+                "## Today\n{checked}- [ ] Unreadable stamp <!--t:3b8q since:invalid-->\n"
+            )),
+            false,
+            true,
+        ),
+        (None, false, true),
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = vault(tmp.path());
+        let board_path = tmp.path().join("vault").join(
+            lk_core::vault_path::VaultPath::task_board(
+                &lk_core::config::VaultDirs::default(),
+                "tasks.md",
+            )
+            .to_string(),
+        );
+        if let Some(raw) = &board {
+            std::fs::create_dir_all(board_path.parent().unwrap()).unwrap();
+            std::fs::write(&board_path, raw).unwrap();
+        }
+        let store = lk_task::Reminders::new(&tmp.path().join("vault"));
+        store
+            .add(lk_task::Reminder {
+                id: "3b8q".parse().unwrap(),
+                at: "2026-01-01T00:00:00Z".parse().unwrap(),
+                text: "promised task follow-up".into(),
+                task: Some("7k2p".parse().unwrap()),
+            })
+            .unwrap();
+        let result = run(&config, &["task", "remind", "due"]);
+        assert!(result.status.success(), "{}", said(&result));
+        assert_eq!(
+            String::from_utf8_lossy(&result.stdout).contains("promised task follow-up"),
+            fires,
+            "{board:?}"
+        );
+        assert_eq!(!store.read().unwrap().is_empty(), retained, "{board:?}");
+        assert_eq!(std::fs::read_to_string(board_path).ok(), board);
+    }
+}
