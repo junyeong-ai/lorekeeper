@@ -78,7 +78,7 @@ impl StoredOutput {
             retained: None,
         };
         let full_bytes = encoded(&stored.output)?.len();
-        if full_bytes < max_result_bytes {
+        if full_bytes <= max_result_bytes {
             return Ok(stored);
         }
         let inherited = inherited_questions(children)?;
@@ -394,26 +394,38 @@ mod tests {
 
     #[test]
     fn exact_limit_legacy_output_is_not_expanded_by_retention_metadata() {
-        let mut child = output();
-        child.source_questions.clear();
-        child.unresolved = vec![WorkQuestion {
-            id: "q".into(),
-            question: "?".into(),
-            evidence: vec![SemanticRange {
-                resource: 0,
-                start: 0,
-                end: 1,
-            }],
-        }];
-        let mut parent = child.clone();
-        parent.node_id = "parent".into();
-        parent.summary.clear();
-        parent.summary = "s".repeat(1024 - encoded(&parent).unwrap().len());
-        assert_eq!(encoded(&parent).unwrap().len(), 1024);
-        let stored = StoredOutput::build(parent.clone(), &[&child], 1024, None).unwrap();
-        assert!(stored.result_bytes().unwrap() <= 1024);
-        assert_eq!(stored.output, parent);
-        assert!(stored.retained.is_none());
+        for (limit, text) in [
+            (1024, "?".into()),
+            (2048, "What remains unverified? ".repeat(20)),
+        ] {
+            let mut child = output();
+            child.work_id = "a".repeat(64);
+            child.node_id = "b".repeat(64);
+            child.input_revision = "c".repeat(64);
+            child.source_questions.clear();
+            child.unresolved = vec![WorkQuestion {
+                id: format!("{}:source-question-0", "d".repeat(64)),
+                question: text,
+                evidence: vec![SemanticRange {
+                    resource: 0,
+                    start: 0,
+                    end: 1,
+                }],
+            }];
+            let mut parent = child.clone();
+            parent.node_id = "e".repeat(64);
+            parent.summary.clear();
+            parent.summary = "s".repeat(limit - encoded(&parent).unwrap().len());
+            assert_eq!(encoded(&parent).unwrap().len(), limit);
+            let stored = StoredOutput::build(parent.clone(), &[&child], limit, None).unwrap();
+            assert!(stored.result_bytes().unwrap() <= limit);
+            assert_eq!(stored.output, parent);
+            assert!(stored.retained.is_none());
+            assert_eq!(
+                serde_json::to_value(&stored).unwrap(),
+                json!({"output":parent,"output_revision":revision(&parent).unwrap()})
+            );
+        }
     }
 
     #[test]
