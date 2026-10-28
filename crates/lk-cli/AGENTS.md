@@ -509,6 +509,9 @@ schedule rendering creates no files and does not acquire installation claims.
 Mutators exclusively claim changed resources and the selected vault workflow before
 writing. Native runs retain claims across collection and batch gaps. Pin the same
 Installation and data directory in children rather than rediscovering mutable records.
+Standalone mutators also pin the physical vault. Schema synchronization carries the
+original configuration revision and root identity through acquisition and publication;
+delegation preserves that context. Selector or directory replacement invalidates it.
 Native project-skill claims use the vault CWD, not the invoking directory. Reacquire
 that scope before the first host invocation so a vault created by Daily collection
 is protected too; retain it through the rest of that run.
@@ -519,6 +522,8 @@ publication. New-binary deployment receives actual exclusive descriptors through
 Unix socket, verifies their lock-file identities and never unlocks inherited claims.
 An environment marker alone grants no ownership. `--force` never bypasses active
 claims. Bootstrap/manual replacement requires all shared users to be quiescent.
+Create Unix private workspaces without group/other access at mkdir, before payloads;
+restore owner permissions afterward when a restrictive umask removed them.
 `input install` owns the optional native decoder environment. `input install-vision`
 owns separate Paddle layout and MLX recognition environments plus verified models;
 their dependencies must not share an environment. Installation is explicit, never
