@@ -313,7 +313,10 @@ pub(in crate::commands) fn decode(
     let response: Response = serde_json::from_value(value)
         .map_err(|_| miette::miette!("invalid section finalizer response"))?;
     let output = match (response.status.as_str(), response.body, response.reason) {
-        ("complete", Some(body), None) => SectionResponse::Complete(body),
+        ("complete", Some(body), None) => match lk_core::markdown::validate_section_body(&body) {
+            Ok(()) => SectionResponse::Complete(body),
+            Err(error) => SectionResponse::NeedsAction(format!("invalid section body: {error}")),
+        },
         ("needs-action", None, Some(reason)) if !reason.trim().is_empty() => {
             SectionResponse::NeedsAction(reason)
         }
@@ -459,6 +462,39 @@ mod tests {
             .unwrap(),
             "actual\n"
         );
+    }
+
+    #[test]
+    fn decoded_section_body_errors_require_action_on_both_hosts() {
+        for engine in [AgentEngine::Codex, AgentEngine::ClaudeCode] {
+            for (body, valid) in [
+                ("## Sibling\nBody.", false),
+                ("Sibling\n------\nBody.", false),
+                ("<!-- Unclosed block", false),
+                ("```md\nUnclosed fence", false),
+                ("", true),
+                ("### Child\nBody.", true),
+                ("> ## Quoted heading\n", true),
+                ("- ## Nested heading\n", true),
+                ("```md\n## Example\n```\n", true),
+            ] {
+                let value = json!({"status":"complete","body":body,"reason":null});
+                let value = if engine == AgentEngine::ClaudeCode {
+                    json!({"type":"result","subtype":"success","is_error":false,"structured_output":value})
+                } else {
+                    value
+                };
+                let raw = serde_json::to_vec(&value).unwrap();
+                let (response, _) = decode(engine, &raw, 4096).unwrap();
+                assert_eq!(
+                    matches!(response, SectionResponse::Complete(_)),
+                    valid,
+                    "{engine:?}/{body:?}"
+                );
+                assert!(valid || matches!(response, SectionResponse::NeedsAction(_)));
+                assert!(decode(engine, &raw, 1).is_err());
+            }
+        }
     }
 
     #[test]

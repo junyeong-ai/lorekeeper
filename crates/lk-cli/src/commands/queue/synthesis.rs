@@ -286,6 +286,12 @@ pub(super) fn apply(
                 .iter()
                 .zip(std::iter::once(&result.synthesis).chain(result.related.iter()))
             {
+                lk_core::markdown::validate_section_body(body).map_err(|error| {
+                    super::application::rejection(
+                        super::application::RejectionKind::InvalidSection,
+                        error.to_string(),
+                    )
+                })?;
                 validate_links(root, &target, body)?;
                 let heading = anchor
                     .strip_prefix("## ")

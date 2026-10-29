@@ -260,9 +260,11 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   authorizes changed scope or certifies a read.
   Tool-enabled native results are decoded only from Claude terminal structured_output
   or Codex explicit final-message output; complete semantic and assembled-result bounds
-  stay separate. Fresh request/root comparison precedes sealing/staging. Native workers
-  do not run work finish/apply. Standalone record/result contracts, inherited prepared
-  finish pins and saved Work remain unchanged. Exact request-bound action receipts
+  stay separate. Fresh request/root comparison precedes sealing/staging. Native results
+  use the shared Markdown body validator before staging. Structurally invalid decoded
+  bodies retain exact request-bound actions; malformed responses remain failures.
+  Native workers do not run work finish/apply. Standalone record/result contracts,
+  inherited prepared finish pins and saved Work remain unchanged. Exact request-bound action receipts
   suppress unchanged native calls; unknown/corrupt state refuses and pending identities
   protect receipts from pruning.
 - Native queue scheduling chooses one task per target so publication cannot invalidate
@@ -436,6 +438,8 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
 - Hold the vault claim for each apply, not an entire LLM session; vault→queue is the
   lock order. Distinguish a page-local failure, quarantined malformed result, and
   fatal IO. Aggregate output honestly reports all/some/none applied.
+  Authored section-body violations are typed local rejections; target replacement,
+  corrupt state and I/O failures remain fatal. Never rewrite invalid prose to fit.
   `queue apply --json` retains typed group identities, exact proposal revisions and
   verified rejection scope. Native orchestration separates safe independent progress
   from aggregate success; retained rejections keep the final job nonzero. Queue-owned

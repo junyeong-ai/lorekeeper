@@ -6,12 +6,13 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const HOST: &str = r#"#!/usr/bin/env python3
-import json, os, sys
-from pathlib import Path
-root=Path(os.environ['TEST_RESULT_ROOT'])
+import os, sys
 engine=os.environ['TEST_RESULT_ENGINE']
 if sys.argv[1:]==['--version']:
     print('codex-cli 0.164.0' if engine=='codex' else '2.1.309 (Claude Code)'); raise SystemExit()
+import json
+from pathlib import Path
+root=Path(os.environ['TEST_RESULT_ROOT'])
 raw=sys.stdin.read()
 request=json.loads(raw.split('\nNative request:\n',1)[1])
 with (root/'calls.jsonl').open('a') as f: f.write(json.dumps(request)+'\n')
@@ -68,6 +69,8 @@ if request.get('schema') in ['native-selected-results-v3','native-finalize-resul
         else: value={'synthesis':'The source reports a proposal; its deployment remains unknown.','related':None}
         if mode=='metadata': value['task_id']='forged'
         if mode=='oversized': value={'synthesis':'x'*40000,'related':None}
+        if mode=='invalid-body' and ('blocked' in target or 'frontier' in target):
+            value={'synthesis':'## Unexpected section\nEscaped body.','related':None}
         results.append({'status':'complete','value':value,'reason':None})
     output={'results':results}
     if mode=='wrong-count': output={'results':[]}
@@ -316,6 +319,24 @@ impl Fixture {
         let plan = planned.then(|| self.json(&["work", "plan", "--task-id", &task.task_id]));
         (task, plan)
     }
+    fn record_ready_inspections(&self, plan: &Value) -> usize {
+        let id = plan["work_id"].as_str().unwrap();
+        let progress = self.json(&["work", "status", id, "--limit", "100"]);
+        let ready = progress["ready"].as_array().unwrap();
+        assert!(!ready.is_empty());
+        for node in ready {
+            let node = node.as_str().unwrap();
+            let request = self.json(&["work", "read", id, node]);
+            assert_eq!(request["kind"], "inspect");
+            let observation = json!({"work_id":id,"node_id":node,"input_revision":request["input_revision"],
+                "summary":"Exact retained evidence.","findings":[],"source_questions":[],"unresolved":[],"resolutions":[]});
+            let file = self.root().join("observation.json");
+            std::fs::write(&file, serde_json::to_vec(&observation).unwrap()).unwrap();
+            self.json(&["work", "record", "--file", file.to_str().unwrap()]);
+        }
+        ready.len()
+    }
+
     fn paid_frontier(&self, kind: lk_queue::TaskKind) -> (lk_queue::QueueTask, Value, Vec<Value>) {
         let config = std::fs::read_to_string(&self.config).unwrap();
         std::fs::write(
@@ -454,6 +475,175 @@ fn generation_batches_split_only_when_resolved_profiles_differ() {
             assert_eq!(request["tasks"].as_array().unwrap().len(), 2);
         }
     }
+}
+
+#[test]
+fn native_invalid_bodies_hold_selected_root_and_frontier_work_on_both_hosts() {
+    for engine in ["codex", "claude-code"] {
+        for topology in ["selected", "root", "frontier"] {
+            let fixture = Fixture::new(engine);
+            let (task, plan) = if topology == "frontier" {
+                let (task, plan) = fixture.add_with_text(
+                    "frontier",
+                    lk_queue::TaskKind::SynthesizeConcept,
+                    true,
+                    &"A retained protocol observation. ".repeat(3000),
+                );
+                let plan = plan.unwrap();
+                assert!(fixture.record_ready_inspections(&plan) >= 2);
+                (task, Some(plan))
+            } else {
+                fixture.add(
+                    "a-blocked",
+                    lk_queue::TaskKind::SynthesizeConcept,
+                    topology == "root",
+                )
+            };
+            let original_files = plan
+                .as_ref()
+                .map(|plan| {
+                    let directory = fixture
+                        .root()
+                        .join("vault/.lorekeeper/work")
+                        .join(plan["work_id"].as_str().unwrap());
+                    walkdir::WalkDir::new(directory)
+                        .into_iter()
+                        .map(Result::unwrap)
+                        .filter(|entry| entry.file_type().is_file())
+                        .map(|entry| {
+                            (
+                                entry.path().to_owned(),
+                                std::fs::read(entry.path()).unwrap(),
+                            )
+                        })
+                        .collect::<std::collections::BTreeMap<_, _>>()
+                })
+                .unwrap_or_default();
+            let (independent, _) =
+                fixture.add("z-ready", lk_queue::TaskKind::SynthesizeConcept, false);
+            std::fs::write(fixture.root().join("mode"), "invalid-body").unwrap();
+            let report = fixture.run();
+            assert_eq!(report["halted"], false, "{engine}/{topology}: {report}");
+            if topology == "frontier" {
+                assert!(fixture.root().join("last-frontier.json").is_file());
+            }
+            assert!(!fixture.done(&task), "{report}");
+            assert!(fixture.done(&independent), "{report}");
+            for (path, raw) in &original_files {
+                assert_eq!(&std::fs::read(path).unwrap(), raw);
+            }
+            let directory = if let Some(plan) = &plan {
+                let directory = fixture
+                    .root()
+                    .join("vault/.lorekeeper/work")
+                    .join(plan["work_id"].as_str().unwrap());
+                for name in [
+                    "final.json",
+                    "seal.json",
+                    "frontier-seal.json",
+                    "publication.json",
+                ] {
+                    assert!(!directory.join(name).exists(), "{engine}/{topology}/{name}");
+                }
+                assert!(directory.join("finalization-action.json").is_file());
+                directory
+            } else {
+                fixture
+                    .root()
+                    .join("vault/.lorekeeper/queue/result-actions")
+            };
+            let snapshot = || {
+                walkdir::WalkDir::new(&directory)
+                    .into_iter()
+                    .map(Result::unwrap)
+                    .filter(|entry| entry.file_type().is_file())
+                    .map(|entry| {
+                        (
+                            entry.path().to_owned(),
+                            std::fs::read(entry.path()).unwrap(),
+                        )
+                    })
+                    .collect::<std::collections::BTreeMap<_, _>>()
+            };
+            let before = snapshot();
+            assert!(!before.is_empty());
+            let calls = fixture.calls();
+            let again = fixture.run();
+            assert_eq!(again["halted"], false, "{engine}/{topology}: {again}");
+            assert_eq!(fixture.calls(), calls, "{again}");
+            assert_eq!(snapshot(), before);
+            assert!(!fixture.done(&task));
+            let results = fixture.root().join("vault/.lorekeeper/queue/results");
+            assert!(
+                !results.exists()
+                    || std::fs::read_dir(results).unwrap().all(|entry| entry
+                        .unwrap()
+                        .path()
+                        .extension()
+                        .is_none_or(|ext| ext != "json"))
+            );
+        }
+    }
+}
+
+#[test]
+fn sealed_invalid_synthesis_restages_without_calls_and_remains_locally_rejected() {
+    let fixture = Fixture::new("codex");
+    let (independent, _) = fixture.add("z-ready", lk_queue::TaskKind::SynthesizeConcept, false);
+    let (task, plan) = fixture.add("a-blocked", lk_queue::TaskKind::SynthesizeConcept, true);
+    let plan = plan.unwrap();
+    let id = plan["work_id"].as_str().unwrap();
+    assert_eq!(fixture.record_ready_inspections(&plan), 1);
+    let context = fixture.json(&["work", "context", "--task-id", &task.task_id]);
+    let target = fixture.root().join("vault").join(&task.target.vault_path);
+    let target_before = std::fs::read(&target).unwrap();
+    let result = json!({"task_id":task.task_id,"cache_hash":task.cache_hash,"target_revision":lk_core::concept::file_revision(std::str::from_utf8(&target_before).unwrap()),"context_revision":context["context_revision"],"synthesis":"## Unexpected sibling\nInvalid body.","related":null});
+    let file = fixture.root().join("legacy-result.json");
+    std::fs::write(&file, serde_json::to_vec(&result).unwrap()).unwrap();
+    fixture.json(&["work", "finish", id, "--file", file.to_str().unwrap()]);
+    let directory = fixture.root().join("vault/.lorekeeper/work").join(id);
+    let snapshot = || {
+        walkdir::WalkDir::new(&directory)
+            .into_iter()
+            .map(Result::unwrap)
+            .filter(|entry| entry.file_type().is_file())
+            .map(|entry| {
+                (
+                    entry.path().to_owned(),
+                    std::fs::read(entry.path()).unwrap(),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    let before = snapshot();
+    let results = fixture.root().join("vault/.lorekeeper/queue/results");
+    let proposal = std::fs::read_dir(&results)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let raw = std::fs::read(&proposal).unwrap();
+    let report = fixture.run();
+    assert_eq!(report["halted"], false, "{report}");
+    assert_eq!(report["queue_application"]["latest"]["fatal"], Value::Null);
+    assert_eq!(report["semantic_calls"], 1, "{report}");
+    assert!(fixture.done(&independent), "{report}");
+    assert!(!fixture.done(&task));
+    assert_eq!(snapshot(), before);
+    assert_eq!(std::fs::read(&proposal).unwrap(), raw);
+    std::fs::remove_file(&proposal).unwrap();
+    let calls = fixture.calls();
+    let restaged = fixture.run();
+    assert_eq!(restaged["halted"], false, "{restaged}");
+    assert_eq!(restaged["semantic_calls"], 0, "{restaged}");
+    assert_eq!(fixture.calls(), calls);
+    assert_eq!(std::fs::read(&proposal).unwrap(), raw);
+    assert_eq!(std::fs::read(&target).unwrap(), target_before);
+    assert_eq!(snapshot(), before);
+    let repeated = fixture.run();
+    assert_eq!(repeated["semantic_calls"], 0, "{repeated}");
+    assert_eq!(snapshot(), before);
 }
 
 #[test]

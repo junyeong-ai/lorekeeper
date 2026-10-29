@@ -9,13 +9,14 @@ use lk_queue::{QueueLlmClient, QueueTask, SummarizeRequest, TaskKind, ThemeReque
 use serde_json::{Value, json};
 
 const HOST: &str = r#"#!/usr/bin/env python3
-import json, os, signal, subprocess, sys, time
-from pathlib import Path
-root=Path(os.environ['TEST_SECTION_ROOT'])
+import os, sys
 engine=os.environ['TEST_SECTION_ENGINE']
 if sys.argv[1:]==['--version']:
     print('codex-cli 0.163.0' if engine=='codex' else '2.1.309 (Claude Code)')
     raise SystemExit()
+import json, signal, subprocess, time
+from pathlib import Path
+root=Path(os.environ['TEST_SECTION_ROOT'])
 assert '--output-schema' in sys.argv or '--safe-mode' in sys.argv, 'interactive fallback is forbidden'
 raw=sys.stdin.read()
 request=json.loads(raw.split('\nNative request:\n',1)[1])
@@ -691,28 +692,30 @@ fn whole_sections_use_one_tool_free_call_without_fabricated_work_on_both_hosts()
 #[test]
 fn whole_section_actions_defer_unchanged_requests_and_allow_independent_publication() {
     for engine in ["codex", "claude-code"] {
-        let fixture = Fixture::new(engine, 32768);
-        fixture.mode("needs-action");
-        let (task, _) = fixture.add_with_plan("a", TaskKind::Summarize, false);
-        let (output, report) = fixture.run();
-        assert!(!output.status.success());
-        assert_eq!(report["semantic_calls"], 1);
-        let (_, repeated) = fixture.run();
-        assert_eq!(repeated["semantic_calls"], 0);
-        fixture.mode("complete");
-        let (other, _) = fixture.add_with_plan("b", TaskKind::Summarize, false);
-        let (output, report) = fixture.run();
-        assert!(!output.status.success(), "blocked a must remain incomplete");
-        assert_eq!(report["semantic_calls"], 1);
-        let status = fixture.json(&["queue", "status", "--json"]);
-        for (id, expected) in [(task.task_id, "current"), (other.task_id, "done")] {
-            assert!(
-                status["data"]["tasks"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .any(|entry| entry["task_id"] == id && entry["status"] == expected)
-            );
+        for mode in ["needs-action", "section-boundary"] {
+            let fixture = Fixture::new(engine, 32768);
+            fixture.mode(mode);
+            let (task, _) = fixture.add_with_plan("a", TaskKind::Summarize, false);
+            let (output, report) = fixture.run();
+            assert!(!output.status.success());
+            assert_eq!(report["semantic_calls"], 1);
+            let (_, repeated) = fixture.run();
+            assert_eq!(repeated["semantic_calls"], 0);
+            fixture.mode("complete");
+            let (other, _) = fixture.add_with_plan("b", TaskKind::Summarize, false);
+            let (output, report) = fixture.run();
+            assert!(!output.status.success(), "blocked a must remain incomplete");
+            assert_eq!(report["semantic_calls"], 1);
+            let status = fixture.json(&["queue", "status", "--json"]);
+            for (id, expected) in [(task.task_id, "current"), (other.task_id, "done")] {
+                assert!(
+                    status["data"]["tasks"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|entry| entry["task_id"] == id && entry["status"] == expected)
+                );
+            }
         }
     }
 }
@@ -725,7 +728,6 @@ fn whole_sections_reject_malformed_forged_changed_and_oversized_results_on_both_
             "forged-guards",
             "changed-target",
             "oversized",
-            "section-boundary",
             "exit",
         ] {
             let fixture = Fixture::new(engine, 32768);
@@ -1120,12 +1122,20 @@ fn rejected_structured_finalizers_never_fall_back_or_mark_completion() {
             assert!(!output.status.success(), "{mode}: {report}");
             assert_eq!(report["semantic_calls"], 2, "{mode}: {report}");
             assert!(!fixture.work_path(&plan, "seal.json").exists(), "{mode}");
-            assert!(
-                !fixture
+            assert_eq!(
+                fixture
                     .work_path(&plan, "finalization-action.json")
                     .exists(),
+                mode == "section-boundary",
                 "{mode}"
             );
+            assert!(!fixture.work_path(&plan, "final.json").exists(), "{mode}");
+            if mode == "section-boundary" {
+                assert_eq!(report["halted"], false, "{report}");
+                let (_, again) = fixture.run();
+                assert_eq!(again["semantic_calls"], 0, "{again}");
+                assert_eq!(fixture.calls().len(), 2);
+            }
             assert_eq!(fixture.calls().len(), 2);
             let step = report["work_steps"]
                 .as_array()

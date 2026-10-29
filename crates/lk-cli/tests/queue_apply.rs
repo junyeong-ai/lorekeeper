@@ -2365,6 +2365,118 @@ fn shortened_synthesis_citations_cannot_bypass_source_validation_or_be_pruned() 
 }
 
 #[test]
+fn invalid_section_bodies_are_retained_while_independent_results_publish() {
+    for (synthesis, field, body) in [
+        (false, "body", "## Sibling\nNot a section body."),
+        (true, "synthesis", "Parent\n======\nNot a section body."),
+        (true, "related", "## Sibling\nNot a section body."),
+        (true, "synthesis", "<!-- Unclosed block"),
+    ] {
+        let ws = Workspace::new();
+        let source = "---\ntype: document\n---\nA retained observation.\n";
+        ws.write("wiki/documents/spec.md", source);
+        let citation = lk_core::concept::Citation::new(
+            Path::new("wiki/documents/spec.md"),
+            &lk_core::frontmatter::parse_page(source).unwrap(),
+        );
+        let input = if synthesis {
+            serde_json::json!({"locale":"en","citations":[citation],"related_anchor":"## Related"})
+        } else {
+            serde_json::json!({"locale":"en","text":"Retained source.","max_sentences":3})
+        };
+        let hash = if synthesis {
+            lk_core::concept::citation_digest(&[citation])
+        } else {
+            lk_queue::cache_hash(input.as_object().unwrap())
+        };
+        let (kind, target_kind, key, format, anchor, suffix) = if synthesis {
+            (
+                "synthesize-concept",
+                "concept-synthesis",
+                "synthesis",
+                "concept",
+                "Synthesis",
+                "synthesis",
+            )
+        } else {
+            (
+                "summarize",
+                "document-summary",
+                "summary",
+                "document",
+                "Summary",
+                "section",
+            )
+        };
+        let target = "wiki/concepts/subject.md";
+        let page = format!(
+            "---\ntype: {format}\nllm_inputs:\n  {key}: {hash}\n---\n## {anchor}\nPrevious body.\n\n## Related\nPrevious relation.\n"
+        );
+        ws.write(target, &page);
+        let task = serde_json::json!({"task_id":"invalid","kind":kind,"created_at":"2026-10-16T00:00:00Z","cache_hash":hash,"input":input,"target":{"vault_path":target,"kind":target_kind,"anchor":format!("## {anchor}")}}).to_string();
+        ws.write(".lorekeeper/queue/invalid.jsonl", &task);
+        let mut result = serde_json::json!({"task_id":"invalid","cache_hash":hash,"target_revision":lk_core::concept::file_revision(&page)});
+        if synthesis {
+            result["context_revision"] = synthesis_context(&ws, "invalid");
+            result["synthesis"] = "Retained observation.".into();
+            result["related"] = "A sourced relationship.".into();
+        }
+        result[field] = body.into();
+        let original = result.to_string();
+        let original_path = format!(".lorekeeper/queue/results/a-invalid.{suffix}.json");
+        ws.write(&original_path, &original);
+        let input =
+            serde_json::json!({"locale":"en","text":"Independent source.","max_sentences":3});
+        let hash = lk_queue::cache_hash(input.as_object().unwrap());
+        let independent = "wiki/documents/independent.md";
+        let independent_page =
+            format!("---\ntype: document\nllm_inputs:\n  summary: {hash}\n---\n## Summary\n");
+        ws.write(independent, &independent_page);
+        ws.write(".lorekeeper/queue/independent.jsonl", &serde_json::json!({"task_id":"independent","kind":"summarize","created_at":"2026-10-16T00:00:00Z","cache_hash":hash,"input":input,"target":{"vault_path":independent,"kind":"document-summary","anchor":"## Summary"}}).to_string());
+        ws.write(".lorekeeper/queue/results/z-independent.section.json", &serde_json::json!({"task_id":"independent","cache_hash":hash,"target_revision":lk_core::concept::file_revision(&independent_page),"body":"Independent answer."}).to_string());
+        for dry_run in [true, false] {
+            let output = if dry_run {
+                ws.run(&["queue", "apply", "--dry-run", "--json"])
+            } else {
+                ws.run(&["queue", "apply", "--json"])
+            };
+            let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert!(report["fatal"].is_null(), "{report}");
+            assert!(!output.status.success());
+            assert_eq!(report["rejected"], 1, "{report}");
+            assert_eq!(report["applied"], 1, "{report}");
+            assert!(
+                report["groups"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|group| group["outcome"] == "rejected"
+                        && group["kind"] == "invalid-section")
+            );
+            assert_eq!(ws.read(target), page);
+            assert_eq!(ws.read(&original_path), original);
+            assert_eq!(ws.read(".lorekeeper/queue/invalid.jsonl"), task);
+            if dry_run {
+                assert_eq!(ws.read(independent), independent_page);
+                assert!(!ws.vault().join(".lorekeeper/queue/rejections").exists());
+            } else {
+                assert!(ws.read(independent).contains("summary_done:"));
+                assert!(
+                    !ws.vault()
+                        .join(".lorekeeper/queue/results/z-independent.section.json")
+                        .exists()
+                );
+            }
+            assert!(
+                !ws.vault()
+                    .join(".lorekeeper/mutation/pending.json")
+                    .exists()
+            );
+        }
+    }
+}
+
+#[test]
 fn escaping_synthesis_evidence_remains_unreadable_and_preserves_pending_bytes() {
     let ws = Workspace::new();
     let citation =

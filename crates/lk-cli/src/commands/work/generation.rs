@@ -119,7 +119,7 @@ pub(super) fn assemble(
             "native result task differs from prepared scope"
         ));
     }
-    let result = match task.kind {
+    let (result, body_error) = match task.kind {
         TaskKind::ExtractConcepts => {
             #[derive(Deserialize)]
             #[serde(deny_unknown_fields)]
@@ -127,7 +127,12 @@ pub(super) fn assemble(
                 concepts: Vec<lk_queue::ReportedConcept>,
             }
             let value: Extraction = serde_json::from_value(semantic).into_diagnostic()?;
-            serde_json::to_value(lk_queue::TaskResult {
+            let body_error = value
+                .concepts
+                .iter()
+                .filter_map(|concept| concept.synthesis.as_deref())
+                .find_map(|body| lk_core::markdown::validate_section_body(body).err());
+            let result = serde_json::to_value(lk_queue::TaskResult {
                 concept_policy: serde_json::from_value(task.input["concept_policy"].clone())
                     .into_diagnostic()?,
                 task_id: task_id.clone(),
@@ -146,7 +151,8 @@ pub(super) fn assemble(
                 date: serde_json::from_value(task.input["date"].clone()).into_diagnostic()?,
                 concepts: value.concepts,
             })
-            .into_diagnostic()?
+            .into_diagnostic()?;
+            (result, body_error)
         }
         TaskKind::SynthesizeConcept => {
             #[derive(Deserialize)]
@@ -161,7 +167,10 @@ pub(super) fn assemble(
                 ));
             }
             let value: Synthesis = serde_json::from_value(semantic).into_diagnostic()?;
-            serde_json::to_value(lk_queue::SynthesisResult {
+            let body_error = std::iter::once(value.synthesis.as_str())
+                .chain(value.related.as_deref())
+                .find_map(|body| lk_core::markdown::validate_section_body(body).err());
+            let result = serde_json::to_value(lk_queue::SynthesisResult {
                 task_id: task_id.clone(),
                 cache_hash: cache_hash.clone(),
                 target_revision: target_revision.clone(),
@@ -169,7 +178,8 @@ pub(super) fn assemble(
                 synthesis: value.synthesis,
                 related: value.related,
             })
-            .into_diagnostic()?
+            .into_diagnostic()?;
+            (result, body_error)
         }
         _ => return Err(miette::miette!("task uses the section generation contract")),
     };
@@ -177,6 +187,11 @@ pub(super) fn assemble(
         return Err(miette::miette!(
             "assembled native result exceeds max_result_bytes"
         ));
+    }
+    if let Some(error) = body_error {
+        return Ok(Outcome::NeedsAction(format!(
+            "invalid section body: {error}"
+        )));
     }
     Ok(Outcome::Complete(result))
 }
@@ -427,6 +442,68 @@ pub(in crate::commands) fn finish_selected(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_semantic_body_guards_preserve_bounds_and_valid_markdown() {
+        for field in ["synthesis", "related", "grounding"] {
+            let kind = if field == "grounding" {
+                TaskKind::ExtractConcepts
+            } else {
+                TaskKind::SynthesizeConcept
+            };
+            let task: QueueTask = serde_json::from_value(json!({
+                "task_id":"task", "created_at":"2026-10-24T00:00:00Z", "kind":kind, "cache_hash":"a".repeat(32),
+                "target":{"vault_path":"wiki/concepts/subject.md","kind":if field == "grounding" {"document-concepts"} else {"concept-synthesis"},"anchor":"## Synthesis"},
+                "input":{"concept_policy":"supported-new","date":"2026-10-24"}
+            })).unwrap();
+            let subject = Subject::Queue {
+                task_id: task.task_id.clone(),
+                cache_hash: task.cache_hash.clone(),
+                target: task.target.vault_path.clone(),
+                target_revision: "b".repeat(64),
+            };
+            let context = json!({"purpose":{"discovery":{"queries":[]},"extraction_scope":{}}});
+            for (body, valid) in [
+                ("## Sibling\nBody.", false),
+                ("Parent\n======\nBody.", false),
+                ("<!-- Unclosed block", false),
+                ("```md\nUnclosed fence", false),
+                ("", true),
+                ("### Child\nBody.", true),
+                ("> ## Quoted heading\n", true),
+                ("- ## Nested heading\n", true),
+                ("```md\n## Example\n```\n", true),
+                ("    ## Indented example\n", true),
+            ] {
+                let mut value = json!({"synthesis":"Evidence.","related":null});
+                if field == "grounding" {
+                    value = json!({"concepts":[{"name":"Subject","aliases":[],"category":null,"admission":{"decision":"new"},"synthesis":body,"rss_evidence":[]}]});
+                } else {
+                    value[field] = json!(body);
+                }
+                let reply = json!({"status":"complete","value":value,"reason":null});
+                let result = assemble(
+                    &task,
+                    &subject,
+                    &context,
+                    &"c".repeat(64),
+                    reply.clone(),
+                    4096,
+                )
+                .unwrap();
+                assert_eq!(
+                    matches!(result, Outcome::Complete(_)),
+                    valid,
+                    "{field}/{body:?}"
+                );
+                assert!(
+                    valid || matches!(result, Outcome::NeedsAction(_)),
+                    "{field}/{body:?}"
+                );
+                assert!(assemble(&task, &subject, &context, &"c".repeat(64), reply, 1).is_err());
+            }
+        }
+    }
 
     #[test]
     fn response_allowance_reserves_native_identity_and_preserves_explicit_evidence() {
