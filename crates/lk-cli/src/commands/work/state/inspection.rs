@@ -287,6 +287,7 @@ impl Work {
         }
         actions.actions.insert(node.id.clone(), action);
         let mut plan = MutationPlan::default();
+        plan.require_absent(super::refinement::path(self)?);
         let output = output_path(&self.plan.id, &node.id)?;
         if !evaluated.raw.contains_key(&output) {
             plan.require_absent(output);
@@ -477,7 +478,9 @@ mod tests {
 
     #[test]
     fn interrupted_actions_recheck_absent_nodes_and_preserved_dependencies() {
-        for edit_receipted in [false, true] {
+        for (edit_receipted, refinement) in
+            [(false, false), (false, true), (true, false), (true, true)]
+        {
             let root = tempfile::tempdir().unwrap();
             let session = MutationSession::acquire(root.path()).unwrap();
             let source = resources();
@@ -512,13 +515,18 @@ mod tests {
                 "plan_revision":plan_revision,"completed":completed,
                 "checksum":lk_core::concept::file_revision(&format!("{plan_revision}:{completed}")),
             })).unwrap()).unwrap();
-            let node = root
-                .path()
-                .join(output_path(&work.plan.id, request["node_id"].as_str().unwrap()).unwrap());
-            std::fs::create_dir_all(node.parent().unwrap()).unwrap();
-            std::fs::write(&node, "Unexpected concurrent observation.").unwrap();
+            let changed = root.path().join(if refinement {
+                super::super::refinement::path(&work).unwrap()
+            } else {
+                output_path(&work.plan.id, request["node_id"].as_str().unwrap()).unwrap()
+            });
+            std::fs::create_dir_all(changed.parent().unwrap()).unwrap();
+            std::fs::write(&changed, "Unexpected concurrent state.").unwrap();
+            let before = std::fs::read(&path).unwrap();
             assert!(MutationSession::acquire(root.path()).is_err());
-            std::fs::remove_file(&node).unwrap();
+            assert_eq!(before, std::fs::read(&path).unwrap());
+            assert!(directory.join("pending.json").exists());
+            std::fs::remove_file(&changed).unwrap();
             let _recovered = MutationSession::acquire(root.path()).unwrap();
             assert!(!directory.join("pending.json").exists());
             assert!(

@@ -885,6 +885,72 @@ mod tests {
     }
 
     #[test]
+    fn legacy_actions_refuse_a_refinement_created_after_planning() {
+        for capacity in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let session = MutationSession::acquire(root.path()).unwrap();
+            let (work, resources) = fixture(&session);
+            let parent = &work.plan.parts[0].id;
+            let node = &work.plan.parts[1].id;
+            hold(&work, &session, &resources, parent);
+            let request = work.input(root.path(), node, &resources).unwrap();
+            let action_plan = || {
+                if capacity {
+                    work.plan_inspection_capacity(
+                        root.path(),
+                        &resources,
+                        &request,
+                        "contract",
+                        inspection::OutputCapacity {
+                            actual_bytes: work.plan.max_result_bytes + 1,
+                            max_bytes: work.plan.max_result_bytes,
+                        },
+                    )
+                } else {
+                    work.plan_inspection_action(
+                        root.path(),
+                        &resources,
+                        &request,
+                        "contract",
+                        "A second exact hold.".into(),
+                    )
+                }
+            };
+            let stale = action_plan().unwrap();
+            let (refinement, _) = work
+                .plan_refinement(root.path(), &resources, parent, 1000, |_| {
+                    Ok("contract".into())
+                })
+                .unwrap();
+            session.apply(refinement).unwrap();
+            let legacy = root
+                .path()
+                .join(work_path(&work.plan.id, "inspection-actions.json").unwrap());
+            let before = std::fs::read(&legacy).unwrap();
+            let sidecar = root.path().join(path(&work).unwrap());
+            let refinement_before = std::fs::read(&sidecar).unwrap();
+            assert!(session.apply(stale).is_err());
+            assert_eq!(before, std::fs::read(&legacy).unwrap());
+            assert_eq!(refinement_before, std::fs::read(&sidecar).unwrap());
+            assert!(
+                !root
+                    .path()
+                    .join(".lorekeeper/mutation/pending.json")
+                    .exists()
+            );
+            assert!(work.progress(root.path(), &resources).is_ok());
+            session.apply(action_plan().unwrap()).unwrap();
+            assert_eq!(before, std::fs::read(&legacy).unwrap());
+            assert!(
+                work.load_inspection_action(root.path(), &request, "contract")
+                    .unwrap()
+                    .is_some()
+            );
+            assert!(work.progress(root.path(), &resources).is_ok());
+        }
+    }
+
+    #[test]
     fn interrupted_refinement_rechecks_the_original_action_and_resumes_its_own_edit() {
         for edit_receipted in [false, true] {
             let root = tempfile::tempdir().unwrap();
