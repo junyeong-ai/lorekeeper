@@ -113,6 +113,125 @@ impl SemanticInputs<'_> {
         self.context().input(part)
     }
 
+    /// Builds a bounded exact input; the caller owns complete parent-range coverage.
+    pub fn input_for_ranges(
+        &self,
+        part_id: &str,
+        ranges: &[SemanticRange],
+    ) -> Result<SemanticPartInput> {
+        self.validate_ranges(ranges)?;
+        if part_id.trim().is_empty() {
+            return Err(error("part identity must be nonblank"));
+        }
+        if !self.context().fits(ranges)? {
+            return Err(error("serialized range input exceeds its bound"));
+        }
+        let input = self.context().input(&SemanticPart {
+            id: part_id.into(),
+            ranges: ranges.to_vec(),
+        })?;
+        if json_bytes(&input)? > self.plan.max_input_bytes {
+            return Err(error("serialized range input exceeds its bound"));
+        }
+        Ok(input)
+    }
+
+    /// Prefers Markdown boundaries and continues oversized blocks at Unicode scalar offsets.
+    pub fn refine_ranges(
+        &self,
+        ranges: &[SemanticRange],
+        max_characters: usize,
+        max_parts: usize,
+    ) -> Result<Vec<Vec<SemanticRange>>> {
+        self.validate_ranges(ranges)?;
+        if max_characters == 0 || max_parts == 0 {
+            return Err(error(
+                "positive refinement character and part bounds are required",
+            ));
+        }
+        let mut parts = Vec::new();
+        let mut active = Vec::new();
+        let mut characters = 0;
+        let flush = |parts: &mut Vec<Vec<SemanticRange>>,
+                     active: &mut Vec<SemanticRange>,
+                     characters: &mut usize|
+         -> Result<()> {
+            if !active.is_empty() {
+                if parts.len() == max_parts {
+                    return Err(error("refinement exceeds its part bound"));
+                }
+                parts.push(std::mem::take(active));
+                *characters = 0;
+            }
+            Ok(())
+        };
+        for range in ranges {
+            let mut start = range.start;
+            let ends = self.texts[range.resource]
+                .boundaries
+                .iter()
+                .copied()
+                .filter(|end| *end > range.start && *end < range.end)
+                .chain(std::iter::once(range.end));
+            for end in ends {
+                if characters > 0 && end - start > max_characters - characters {
+                    flush(&mut parts, &mut active, &mut characters)?;
+                }
+                while end - start > max_characters {
+                    active = appended(
+                        &active,
+                        SemanticRange {
+                            resource: range.resource,
+                            start,
+                            end: start + max_characters,
+                        },
+                    );
+                    characters = max_characters;
+                    start += max_characters;
+                    flush(&mut parts, &mut active, &mut characters)?;
+                }
+                active = appended(
+                    &active,
+                    SemanticRange {
+                        resource: range.resource,
+                        start,
+                        end,
+                    },
+                );
+                characters += end - start;
+                start = end;
+            }
+        }
+        flush(&mut parts, &mut active, &mut characters)?;
+        Ok(parts)
+    }
+
+    fn validate_ranges(&self, ranges: &[SemanticRange]) -> Result<()> {
+        if ranges.is_empty() {
+            return Err(error("at least one assigned range is required"));
+        }
+        let mut previous: Option<&SemanticRange> = None;
+        for range in ranges {
+            let Some(resource) = self.plan.resources.get(range.resource) else {
+                return Err(error("range names an unknown resource"));
+            };
+            if range.start > range.end
+                || range.end > resource.characters
+                || (range.start == range.end && resource.characters != 0)
+                || previous.is_some_and(|prior| {
+                    prior.resource > range.resource
+                        || (prior.resource == range.resource && prior.end > range.start)
+                })
+            {
+                return Err(error(
+                    "assigned ranges are invalid, unordered or overlapping",
+                ));
+            }
+            previous = Some(range);
+        }
+        Ok(())
+    }
+
     fn context(&self) -> InputContext<'_> {
         InputContext {
             plan_id: &self.plan.id,
@@ -709,6 +828,92 @@ mod tests {
             authority: SemanticAuthority::Page,
             text: text.into(),
         }
+    }
+
+    #[test]
+    fn refinement_preserves_exact_unicode_assignments_and_original_input() {
+        let resources = vec![
+            resource("empty", ""),
+            resource("source", "첫줄\n\n가🙂e\u{301}끝\n\n마지막"),
+        ];
+        let plan = SemanticPlan::build("subject", &resources, 4000, 400).unwrap();
+        let inputs = plan.build_inputs(&resources).unwrap();
+        let part = &plan.parts[0];
+        assert_eq!(
+            inputs.part_input(&part.id).unwrap(),
+            inputs.input_for_ranges(&part.id, &part.ranges).unwrap()
+        );
+        let assigned = vec![
+            SemanticRange {
+                resource: 0,
+                start: 0,
+                end: 0,
+            },
+            SemanticRange {
+                resource: 1,
+                start: 2,
+                end: 13,
+            },
+        ];
+        let refined = inputs.refine_ranges(&assigned, 3, 20).unwrap();
+        let mut text = String::new();
+        let mut cursor = 2;
+        for (index, ranges) in refined.iter().enumerate() {
+            assert!(
+                ranges
+                    .iter()
+                    .map(|range| range.end - range.start)
+                    .sum::<usize>()
+                    <= 3
+            );
+            let input = inputs
+                .input_for_ranges(&format!("child-{index}"), ranges)
+                .unwrap();
+            for range in input.ranges {
+                if range.range.resource == 1 {
+                    assert_eq!(range.range.start, cursor);
+                    cursor = range.range.end;
+                    text.push_str(&range.text);
+                }
+            }
+        }
+        assert_eq!(cursor, 13);
+        assert_eq!(
+            text,
+            resources[1]
+                .text
+                .chars()
+                .skip(2)
+                .take(11)
+                .collect::<String>()
+        );
+        assert!(inputs.refine_ranges(&assigned, 3, 1).is_err());
+        assert!(inputs.refine_ranges(&assigned, 0, 20).is_err());
+        let mut overlapping = assigned.clone();
+        overlapping.push(SemanticRange {
+            resource: 1,
+            start: 12,
+            end: 14,
+        });
+        assert!(inputs.refine_ranges(&overlapping, 3, 20).is_err());
+        assert!(inputs.input_for_ranges("", &assigned).is_err());
+        assert!(
+            inputs
+                .input_for_ranges(&"x".repeat(4000), &assigned)
+                .is_err()
+        );
+        assert!(
+            inputs
+                .input_for_ranges(
+                    "child",
+                    &[SemanticRange {
+                        resource: 9,
+                        start: 0,
+                        end: 1
+                    }]
+                )
+                .is_err()
+        );
     }
 
     fn reconstruct(plan: &SemanticPlan, resources: &[SemanticResource]) {
