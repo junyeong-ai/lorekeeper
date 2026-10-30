@@ -272,6 +272,14 @@ resumption.
   Never silently discard concerns to fit the output limit. If a faithful bounded
   result cannot fit, report the limit and retain pending work.
 
+A reduction composes only its supplied children, including at an intermediate
+refinement root. The global context describes the eventual task; it does not assign
+additional source reading to that node. The audit subject or other resources can
+belong to another subtree. Their absence alone does not block this composition.
+The evidence mapping lists cited resources, not every inspected resource. Preserve
+the children's findings, qualifications, uncertainty and processing blockers.
+Completing one reduction does not complete the Work or its final assessment.
+
 Follow [private draft handling](#private-drafts). Write one JSON observation and
 submit with `lore work record --file FILE`:
 

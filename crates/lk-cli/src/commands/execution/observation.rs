@@ -246,8 +246,13 @@ fn evidence_instruction(request: &Value) -> miette::Result<String> {
     } else {
         EVIDENCE_RESULT_BOUND
     };
+    let reduction = if request["kind"] == "reduce" {
+        "Compose this node's supplied child observations and evidence mappings. This is an observation reduction, not a whole-Work assessment, final semantic generation or publication. The global context describes the Work's eventual purpose; it does not assign source reading outside these children. An intermediate subtree can omit the audit subject or other resources assigned elsewhere. Their absence alone is not a processing blocker for this reduction. The evidence roster maps cited resources; it is not a manifest of every inspected resource. Preserve decision-relevant findings, qualifications and uncertainty from these children; do not assert that the whole Work or audit is complete. The existing rules for inherited questions, evidence and processing inability still apply. "
+    } else {
+        ""
+    };
     Ok(format!(
-        "{EVIDENCE_INSTRUCTION_PREFIX}{bound}{EVIDENCE_INSTRUCTION_SUFFIX}"
+        "{EVIDENCE_INSTRUCTION_PREFIX}{reduction}{bound}{EVIDENCE_INSTRUCTION_SUFFIX}"
     ))
 }
 
@@ -801,6 +806,60 @@ mod tests {
             contract_revision(&request).unwrap(),
             contract_revision(&changed).unwrap()
         );
+    }
+
+    #[test]
+    fn reduction_scope_changes_only_its_native_instruction_contract() {
+        let inspect = request();
+        let mut without_questions = reduction();
+        for child in without_questions["children"].as_array_mut().unwrap() {
+            child["output"]["source_questions"] = json!([]);
+            child["output"]["unresolved"] = json!([]);
+        }
+        for request in [inspect, without_questions, reduction()] {
+            let original = serde_json::to_vec(&request).unwrap();
+            let bound = if ActiveQuestions::from_request(&request)
+                .unwrap()
+                .has_inherited()
+            {
+                RETAINED_RESULT_BOUND
+            } else {
+                EVIDENCE_RESULT_BOUND
+            };
+            let previous_instruction =
+                format!("{EVIDENCE_INSTRUCTION_PREFIX}{bound}{EVIDENCE_INSTRUCTION_SUFFIX}");
+            let previous_contract = lk_core::rss_original::digest(
+                &serde_json::to_vec(&(
+                    schema(),
+                    &previous_instruction,
+                    native_request(&request).unwrap(),
+                ))
+                .unwrap(),
+            );
+            for engine in ["codex", "claude-code"] {
+                let profile: ExecutionProfile =
+                    lk_core::yaml::from_str(&format!("engine: {engine}\ntimeout_seconds: 1"))
+                        .unwrap();
+                let invocation = build_invocation(&profile, &request, 32768, 4096).unwrap();
+                let prompt = String::from_utf8(invocation.prompt).unwrap();
+                let (instruction, delivered) = prompt.split_once("\nNative request:\n").unwrap();
+                assert_eq!(
+                    serde_json::from_str::<Value>(delivered).unwrap(),
+                    native_request(&request).unwrap()
+                );
+                if request["kind"] == "reduce" {
+                    assert!(
+                        instruction.contains("Compose this node's supplied child observations")
+                    );
+                    assert!(instruction.contains("not a whole-Work assessment"));
+                    assert_ne!(contract_revision(&request).unwrap(), previous_contract);
+                } else {
+                    assert!(instruction.starts_with(&previous_instruction));
+                    assert_eq!(contract_revision(&request).unwrap(), previous_contract);
+                }
+            }
+            assert_eq!(serde_json::to_vec(&request).unwrap(), original);
+        }
     }
 
     #[test]

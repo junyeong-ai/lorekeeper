@@ -15,6 +15,9 @@ fn explicit_audit_refinement_resumes_native_workers_on_both_hosts_without_rewrit
                     with (root/'initial-observation').open('x') as flag: flag.write(node_id)
                 except FileExistsError:
                     output={'status':'needs-action','observation':None,'action':{'reason':'This assigned inspection requires explicit smaller units.'}}"#,
+    ).replace(
+        "request=json.loads((root/'native-request.txt').read_text().split('\\nNative request:\\n',1)[1])",
+        "delivered=(root/'native-request.txt').read_text()\n    request=json.loads(delivered.split('\\nNative request:\\n',1)[1])\n    if request['kind']=='reduce':\n        assert \"Compose this node's supplied child observations\" in delivered\n        assert 'not a whole-Work assessment' in delivered",
     ).replace("\"$TEST_EXECUTION_ROOT/native-request.txt\"", "\"$TEST_EXECUTION_ROOT/native-request-$$.txt\"")
         .replace("(root/'native-request.txt')", "(root/('native-request-'+str(os.getpid())+'.txt'))");
     assert_ne!(behavior, RECORD_BOUNDED_AUDIT);
