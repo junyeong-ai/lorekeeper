@@ -29,6 +29,10 @@ pub(super) const FINALIZATION_REQUEST_ENV: &str = "LORE_WORK_FINALIZATION_REQUES
 #[cfg(unix)]
 pub(super) const FINALIZATION_REVISION_ENV: &str = "LORE_WORK_FINALIZATION_REVISION";
 use resources::{Prepared, Subject};
+#[cfg(unix)]
+pub(in crate::commands) use selection::computation::is_computed_request as is_computed_screening_request;
+#[cfg(unix)]
+pub(in crate::commands) use selection::computation::receipt_overhead as screening_receipt_overhead;
 use state::{Work, WorkLimits, WorkOutput};
 
 use super::queue::application::{RejectionKind, rejection as publication_rejection};
@@ -889,6 +893,21 @@ fn screening_with_inventory(
         config_revision,
         &inventory.source.legacy_revision(config_revision)?,
     )?;
+    let selection = match selection.prefer_computed_receipts(root) {
+        Ok(selection) => selection,
+        Err(error) => {
+            let Some(capacity) = error
+                .downcast_ref::<selection::ScreeningCapacity>()
+                .copied()
+            else {
+                return Err(error);
+            };
+            return Ok(ScreeningPreparation::Capacity {
+                inventory: Box::new(inventory),
+                capacity,
+            });
+        }
+    };
     Ok(ScreeningPreparation::Candidates(Box::new(Screening {
         selection,
         inventory,
@@ -981,6 +1000,12 @@ impl Screening {
                     "{deferred} deferred candidate decisions remain; work retained for explicit reassessment"
                 ))
             }
+            (None, false, _, _) if progress.processing_held_batches > 0 => {
+                ScreeningState::Deferred(format!(
+                    "{} reused screening packets require explicit reassessment; authored decisions changed",
+                    progress.processing_held_batches,
+                ))
+            }
             _ => {
                 return Err(miette::miette!(
                     "candidate screening progress has no consistent next state"
@@ -992,7 +1017,9 @@ impl Screening {
             ScreeningState::Ready(request) => {
                 let native = super::execution::observation::screening_request(&request)?;
                 let bytes = serde_json::to_vec(&native).into_diagnostic()?.len();
-                let reason = if bytes > self.selection.max_input_bytes() {
+                let reason = if let Some(capacity) = self.selection.native_capacity(&request)? {
+                    Some(capacity.to_string())
+                } else if bytes > self.selection.max_input_bytes() {
                     Some(
                         selection::ScreeningCapacity::Input {
                             required_bytes: bytes,
@@ -1139,6 +1166,7 @@ pub(super) struct RecordedScreenings {
     pub revalidation_duration_ms: u64,
 }
 
+#[cfg(unix)]
 pub(super) fn record_screenings(
     session: &lk_vault::MutationSession,
     config: &lk_core::config::Config,
@@ -1146,6 +1174,7 @@ pub(super) fn record_screenings(
     replies: Vec<(&str, ScreeningResponse)>,
     read: &lk_vault::ReadControl,
 ) -> miette::Result<RecordedScreenings> {
+    let contract = selection::computation::resolved_contract(config)?;
     let task_ids = replies
         .iter()
         .map(|(task_id, _)| *task_id)
@@ -1165,11 +1194,11 @@ pub(super) fn record_screenings(
                     ScreeningResponse::Decisions(output) => Ok(ScreeningRecordOutcome::Recorded(
                         screening
                             .selection
-                            .record(
+                            .record_native(
                                 session,
                                 &screening.inventory.pages,
                                 serde_json::from_value(output).into_diagnostic()?,
-                                None,
+                                &contract,
                             )?
                             .completed_batches,
                     )),
@@ -1504,7 +1533,7 @@ pub(super) fn prepare_task(
     task_id: &str,
 ) -> miette::Result<TaskWork> {
     let task = super::queue::current_task(session.root(), task_id)?;
-    prepare_task_in_session(session, config, config_revision, &task, None, None)
+    prepare_task_in_session(session, config, config_revision, &task, None, None, None)
 }
 
 pub(super) fn prepare_tasks_with_audit(
@@ -1514,7 +1543,7 @@ pub(super) fn prepare_tasks_with_audit(
     tasks: &[lk_queue::QueueTask],
     audits: &std::collections::BTreeMap<String, lk_graph::audit::AuditCandidate>,
     read: &lk_vault::ReadControl,
-) -> miette::Result<(Vec<TaskWork>, lk_vault::DiscoveryCaptureMetrics)> {
+) -> miette::Result<(Vec<TaskWork>, lk_vault::DiscoveryCaptureMetrics, usize)> {
     read.check().into_diagnostic()?;
     let root = session.root();
     let mut recipes = Vec::new();
@@ -1543,6 +1572,15 @@ pub(super) fn prepare_tasks_with_audit(
     )
     .into_diagnostic()?;
     let mut captures = positions.into_iter().zip(captures).peekable();
+    #[cfg(unix)]
+    let native_contract = config
+        .execution
+        .selected_profile()
+        .map(|_| selection::computation::resolved_contract(config))
+        .transpose()?;
+    #[cfg(not(unix))]
+    let native_contract: Option<String> = None;
+    let mut reused = 0;
     let work = tasks
         .iter()
         .enumerate()
@@ -1568,11 +1606,14 @@ pub(super) fn prepare_tasks_with_audit(
                 &task,
                 audits.get(&task.target.vault_path),
                 inventory,
+                native_contract
+                    .as_deref()
+                    .map(|contract| (contract, &mut reused)),
             )
         })
         .collect::<miette::Result<Vec<_>>>()?;
     read.check().into_diagnostic()?;
-    Ok((work, metrics))
+    Ok((work, metrics, reused))
 }
 
 fn prepare_task_in_session(
@@ -1582,6 +1623,7 @@ fn prepare_task_in_session(
     task: &lk_queue::QueueTask,
     audit: Option<&lk_graph::audit::AuditCandidate>,
     inventory: Option<resources::SelectionInventory>,
+    native_contract: Option<(&str, &mut usize)>,
 ) -> miette::Result<TaskWork> {
     let root = session.root();
     let prepared = if task.kind == lk_queue::TaskKind::ExtractConcepts
@@ -1619,9 +1661,17 @@ fn prepare_task_in_session(
                 if let Some(reason) = screening.selection.admission_reason(config, root)? {
                     return Ok(TaskWork::Admission { reason });
                 }
-                screening
-                    .selection
-                    .create(session, &screening.inventory.pages)?;
+                if let Some((contract, reused)) = native_contract {
+                    *reused += screening.selection.create_native(
+                        session,
+                        &screening.inventory.pages,
+                        contract,
+                    )?;
+                } else {
+                    screening
+                        .selection
+                        .create(session, &screening.inventory.pages)?;
+                }
                 let ledger = screening.selection.ledger(root)?;
                 if !ledger.progress.complete {
                     let turn = screening.turn(root)?;

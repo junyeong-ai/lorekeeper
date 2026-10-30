@@ -7,6 +7,7 @@ use crate::commands::work::state::{OutputCapacity, WorkFinding, WorkOutput};
 mod questions;
 mod screening;
 use questions::{ActiveQuestions, Question, Resolution};
+pub(in crate::commands) use screening::packet_contract_revision as screening_packet_contract_revision;
 pub(in crate::commands) use screening::{screening_contract_revision, screening_request};
 
 pub(in crate::commands) struct Invocation {

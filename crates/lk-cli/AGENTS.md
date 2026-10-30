@@ -167,7 +167,15 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   A fully recorded ledger with deferred cards holds only that target for explicit
   reassessment; fresh validated state must not become a missing-request failure or
   repeat paid screening. Corrupt ledgers remain fatal. Reused owners must be selected
-  and read in full. Source work
+  and read in full. New computed selections may reuse only an entire equal semantic
+  packet under fresh complete inventory/ownership/review guards. Bind ordered cards,
+  source context, queries, limits and resolved screening contract; opaque closure
+  identities are not semantic input. Preserve saved legacy layout/receipts/contracts.
+  Reserve full direct-origin provenance inside the result bound. Validate and guard
+  direct same-owner origins at every current use; known reassessment holds dependent
+  packets without calls, while missing/corrupt/indirect origins refuse. The latest
+  computed-selection head is only a bounded lookup hint. Retention protects all proofs
+  for pending/staged owners and removes completed owners together. Source work
   never finishes extraction independently: canonical extraction publication journals its
   exact supporting-consumption receipt with the knowledge edits. Retention validates that
   receipt and preserves live queue/reuse references before removing expired source work.

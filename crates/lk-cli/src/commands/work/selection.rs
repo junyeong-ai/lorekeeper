@@ -7,6 +7,7 @@ use miette::IntoDiagnostic;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+pub(super) mod computation;
 mod rejection;
 pub(in crate::commands) use rejection::ScreeningRejection;
 
@@ -100,6 +101,8 @@ pub(super) struct ScreeningOutput {
 #[serde(deny_unknown_fields)]
 struct Manifest {
     policy: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    receipt_policy: Option<computation::ReceiptPolicy>,
     binding: SelectionBinding,
     source_context: Value,
     source_context_revision: String,
@@ -137,6 +140,8 @@ pub(super) struct SelectionProgress {
     pub card_not_selected: usize,
     pub deferred: usize,
     pub unknown: usize,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub processing_held_batches: usize,
     pub complete: bool,
     pub examination_scope: &'static str,
     pub receipts: Vec<BatchReceipt>,
@@ -160,6 +165,8 @@ pub(super) struct ScreeningCost {
     pub remaining_unrecorded_batches: usize,
     pub deferred_candidates: usize,
     pub unknown_candidates: usize,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub processing_held_batches: usize,
     pub source_context_json_bytes: usize,
     pub candidate_inventory_json_bytes: usize,
     pub remaining_request_json_bytes: usize,
@@ -192,11 +199,16 @@ impl SelectionLedger {
 struct CapturedLedger {
     ledger: SelectionLedger,
     raw: BTreeMap<PathBuf, String>,
+    dependencies: BTreeMap<PathBuf, String>,
     next: Option<usize>,
 }
 
 fn fail(message: impl std::fmt::Display) -> miette::Report {
     miette::miette!("candidate screening: {message}")
+}
+
+fn is_zero(value: &usize) -> bool {
+    *value == 0
 }
 
 fn encoded(value: &impl Serialize) -> miette::Result<String> {
@@ -342,6 +354,9 @@ impl Selection {
             unknown_candidates: progress
                 .as_ref()
                 .map_or(self.manifest.candidates.len(), |progress| progress.unknown),
+            processing_held_batches: progress
+                .as_ref()
+                .map_or(0, |progress| progress.processing_held_batches),
             source_context_json_bytes: encoded(&self.manifest.source_context)?.len(),
             candidate_inventory_json_bytes: encoded(&self.manifest.candidates)?.len(),
             remaining_request_json_bytes,
@@ -482,6 +497,7 @@ impl Selection {
             directory: PathBuf::new(),
             manifest: Manifest {
                 policy: POLICY.into(),
+                receipt_policy: None,
                 binding,
                 source_context_revision: digest(&source_context)?,
                 source_context,
@@ -500,8 +516,18 @@ impl Selection {
                 .map(|(path, raw)| (path.clone(), raw.as_ref().clone()))
                 .collect(),
         };
-        for index in 0..selection.manifest.candidates.len() {
-            let size = encoded(&selection.output_shape(&[index], ""))?.len();
+        selection.repack()?;
+        selection.refresh_identity()?;
+        Ok(selection)
+    }
+
+    fn repack(&mut self) -> miette::Result<()> {
+        let max_input_bytes = self.manifest.max_input_bytes;
+        let max_result_bytes = self.manifest.max_result_bytes;
+        self.manifest.max_reason_json_bytes = 256;
+        self.manifest.batches.clear();
+        for index in 0..self.manifest.candidates.len() {
+            let size = encoded(&self.output_shape(&[index], ""))?.len() + self.receipt_overhead();
             if size >= max_result_bytes {
                 return Err(ScreeningCapacity::Result {
                     required_bytes: size + 1,
@@ -510,30 +536,30 @@ impl Selection {
                 .into());
             }
             let available = max_result_bytes - size;
-            selection.manifest.max_reason_json_bytes =
-                selection.manifest.max_reason_json_bytes.min(available + 2);
+            self.manifest.max_reason_json_bytes =
+                self.manifest.max_reason_json_bytes.min(available + 2);
         }
         let mut batch = Vec::new();
-        for index in 0..selection.manifest.candidates.len() {
+        for index in 0..self.manifest.candidates.len() {
             let mut prospective = batch.clone();
             prospective.push(index);
-            if let Some(capacity) = selection.capacity(&prospective)? {
+            if let Some(capacity) = self.capacity(&prospective)? {
                 if batch.is_empty() {
                     return Err(capacity.into());
                 }
-                selection.manifest.batches.push(std::mem::take(&mut batch));
+                self.manifest.batches.push(std::mem::take(&mut batch));
                 prospective = vec![index];
-                if let Some(capacity) = selection.capacity(&prospective)? {
+                if let Some(capacity) = self.capacity(&prospective)? {
                     return Err(capacity.into());
                 }
             }
             batch = prospective;
         }
         if !batch.is_empty() {
-            selection.manifest.batches.push(batch);
+            self.manifest.batches.push(batch);
         }
-        if selection.manifest.candidates.is_empty() {
-            let required_bytes = encoded(&selection.request_for(&[], 0)?)?.len();
+        if self.manifest.candidates.is_empty() {
+            let required_bytes = encoded(&self.request_for(&[], 0)?)?.len();
             if required_bytes > max_input_bytes {
                 return Err(ScreeningCapacity::Input {
                     required_bytes,
@@ -542,8 +568,13 @@ impl Selection {
                 .into());
             }
         }
-        selection.refresh_identity()?;
-        Ok(selection)
+        Ok(())
+    }
+
+    fn receipt_overhead(&self) -> usize {
+        self.manifest
+            .receipt_policy
+            .map_or(0, |_| computation::receipt_overhead())
     }
 
     fn manifest_path(&self) -> PathBuf {
@@ -577,7 +608,7 @@ impl Selection {
             })
             .collect::<Vec<_>>();
         let mut request = json!({
-            "policy":POLICY,"selection_id":self.id,"batch_id":self.batch_id(batch)?,
+            "policy":computation::request_policy(self.manifest.receipt_policy),"selection_id":self.id,"batch_id":self.batch_id(batch)?,
             "binding":self.manifest.binding,
             "source_context":self.manifest.source_context,
             "source_context_revision":self.manifest.source_context_revision,
@@ -622,7 +653,8 @@ impl Selection {
             }));
         }
         let reason = "x".repeat(self.manifest.max_reason_json_bytes - 2);
-        let required_bytes = encoded(&self.output_shape(indexes, &reason))?.len();
+        let required_bytes =
+            encoded(&self.output_shape(indexes, &reason))?.len() + self.receipt_overhead();
         if required_bytes > self.manifest.max_result_bytes {
             return Ok(Some(ScreeningCapacity::Result {
                 required_bytes,
@@ -770,6 +802,7 @@ impl Selection {
             card_not_selected: 0,
             deferred: 0,
             unknown: 0,
+            processing_held_batches: 0,
             complete: false,
             examination_scope: CARD_SCOPE,
             receipts: Vec::new(),
@@ -777,6 +810,7 @@ impl Selection {
         let mut selected_owners = BTreeSet::new();
         let mut answers = Vec::new();
         let mut next = None;
+        let mut proof = computation::ProofCapture::default();
         for (batch, indexes) in self.manifest.batches.iter().enumerate() {
             let path = self.receipt_path(batch)?;
             let Some(bytes) = read_optional(root, &path)? else {
@@ -784,7 +818,20 @@ impl Selection {
                 next.get_or_insert(batch);
                 continue;
             };
-            let output = self.normalize(batch, serde_json::from_str(&bytes).into_diagnostic()?)?;
+            let output = match computation::read_output(self, root, batch, &bytes, &mut proof) {
+                Ok(output) => output,
+                Err(error)
+                    if error
+                        .downcast_ref::<computation::ChangedAuthority>()
+                        .is_some() =>
+                {
+                    progress.processing_held_batches += 1;
+                    progress.unknown += indexes.len();
+                    raw.insert(path, bytes);
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             progress.completed_batches += 1;
             for decision in &output.decisions {
                 match decision.decision {
@@ -816,6 +863,7 @@ impl Selection {
                 progress,
             },
             raw,
+            dependencies: proof.snapshots,
             next,
         })
     }
@@ -849,6 +897,28 @@ impl Selection {
         output: ScreeningOutput,
         expected_receipt_revision: Option<&str>,
     ) -> miette::Result<SelectionProgress> {
+        self.record_output(session, pages, output, expected_receipt_revision, None)
+    }
+
+    pub(super) fn record_native(
+        &self,
+        session: &MutationSession,
+        pages: &BTreeMap<PathBuf, String>,
+        output: ScreeningOutput,
+        contract_revision: &str,
+    ) -> miette::Result<SelectionProgress> {
+        let contract = self.manifest.receipt_policy.map(|_| contract_revision);
+        self.record_output(session, pages, output, None, contract)
+    }
+
+    fn record_output(
+        &self,
+        session: &MutationSession,
+        pages: &BTreeMap<PathBuf, String>,
+        output: ScreeningOutput,
+        expected_receipt_revision: Option<&str>,
+        contract_revision: Option<&str>,
+    ) -> miette::Result<SelectionProgress> {
         let batch = (0..self.manifest.batches.len())
             .find(|index| self.batch_id(*index).is_ok_and(|id| id == output.batch_id))
             .ok_or_else(|| fail("unknown screening batch"))?;
@@ -856,7 +926,10 @@ impl Selection {
         let captured = self.capture_ledger(session.root())?;
         let path = self.receipt_path(batch)?;
         let before = read_optional(session.root(), &path)?;
-        let after = encoded(&output)?;
+        let mut after = match contract_revision {
+            Some(contract) => computation::encode_output(self, batch, output.clone(), contract)?,
+            None => encoded(&output)?,
+        };
         if let Some(expected) = expected_receipt_revision {
             if before
                 .as_ref()
@@ -865,17 +938,17 @@ impl Selection {
                 return Err(fail("previous screening receipt changed or is missing"));
             }
         } else if let Some(before) = &before {
-            let previous =
-                self.normalize(batch, serde_json::from_str(before).into_diagnostic()?)?;
+            let previous = computation::read_for_reassessment(self, batch, before)?;
             if previous != output {
                 return Err(fail(
                     "conflicting screening decisions require an explicit previous receipt revision",
                 ));
             }
+            after.clone_from(before);
         }
         let mut plan = MutationPlan::default();
         self.guard_pages(session.root(), pages, &mut plan)?;
-        for (guard, bytes) in captured.raw {
+        for (guard, bytes) in captured.raw.into_iter().chain(captured.dependencies) {
             if guard != path {
                 plan.require_unchanged(guard, bytes);
             }
@@ -901,7 +974,8 @@ impl Selection {
         if !self.is_planned(root)? {
             return Ok(None);
         }
-        let captured = self.capture_ledger(root)?;
+        let mut captured = self.capture_ledger(root)?;
+        captured.raw.extend(captured.dependencies);
         Ok(Some((captured.ledger, captured.raw)))
     }
 
@@ -941,7 +1015,7 @@ impl Selection {
                 "candidate screening: selection decisions changed since drafting",
             ));
         }
-        for (path, raw) in captured.raw {
+        for (path, raw) in captured.raw.into_iter().chain(captured.dependencies) {
             plan.require_unchanged(path, raw);
         }
         Ok(captured.ledger)
@@ -1167,8 +1241,19 @@ pub(super) fn prune(
             return Err(fail("selection owner must be a direct directory"));
         }
         let owner = directory.join(entry.file_name());
+        let head = computation::capture_head(root, &owner)?;
+        if let Some(head) = &head {
+            if retained.contains(&(head.task_id.clone(), head.cache_hash.clone())) {
+                mutation.require_unchanged(head.path.clone(), head.raw.clone());
+            } else {
+                mutation.remove(head.path.clone(), head.raw.clone());
+            }
+        }
         for entry in std::fs::read_dir(entry.path()).into_diagnostic()? {
             let entry = entry.into_diagnostic()?;
+            if entry.file_name() == "current.json" && head.is_some() {
+                continue;
+            }
             require_directory_identity(&entry.file_name())?;
             if !entry.file_type().into_diagnostic()?.is_dir() {
                 return Err(fail("selection identity must be a direct directory"));
@@ -1199,7 +1284,7 @@ pub(super) fn prune(
                 selection.manifest.binding.task_id.clone(),
                 selection.manifest.binding.cache_hash.clone(),
             )) {
-                for (path, raw) in captured.raw {
+                for (path, raw) in captured.raw.into_iter().chain(captured.dependencies) {
                     mutation.require_unchanged(path, raw);
                 }
             } else {
@@ -1237,14 +1322,14 @@ pub(super) fn prune(
 mod tests {
     use super::*;
 
-    struct Fixture {
+    pub(super) struct Fixture {
         _directory: tempfile::TempDir,
-        root: PathBuf,
+        pub(super) root: PathBuf,
         source: String,
     }
 
     impl Fixture {
-        fn new(candidates: usize) -> Self {
+        pub(super) fn new(candidates: usize) -> Self {
             let directory = tempfile::tempdir().unwrap();
             let root = directory.path().canonicalize().unwrap();
             std::fs::create_dir_all(root.join("wiki/documents")).unwrap();
@@ -1277,7 +1362,7 @@ mod tests {
             .unwrap()
         }
 
-        fn selection(&self, input: usize, result: usize) -> Selection {
+        pub(super) fn selection(&self, input: usize, result: usize) -> Selection {
             let capture = self.capture();
             Selection::build(
                 self.binding(&capture),
@@ -1300,7 +1385,7 @@ mod tests {
             }
         }
 
-        fn pages(&self) -> BTreeMap<PathBuf, String> {
+        pub(super) fn pages(&self) -> BTreeMap<PathBuf, String> {
             BTreeMap::from([(
                 PathBuf::from("wiki/documents/source.md"),
                 self.source.clone(),
@@ -1323,7 +1408,7 @@ mod tests {
         }
     }
 
-    fn answer(request: &Value, decision: ScreeningDecision) -> ScreeningOutput {
+    pub(super) fn answer(request: &Value, decision: ScreeningDecision) -> ScreeningOutput {
         ScreeningOutput {
             selection_id: request["selection_id"].as_str().unwrap().into(),
             batch_id: request["batch_id"].as_str().unwrap().into(),

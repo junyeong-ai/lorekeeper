@@ -101,6 +101,32 @@ no decision is promoted automatically.
 Standalone `work select-record` still requires its complete identity-bearing format
 from [extraction discovery](discovery.md#progressive-examination).
 
+### Exact packet computation reuse
+
+New selections use `receipt_policy: computed-packets-v1` and native request policy
+`progressive-evidence-v2`. Rust may reuse a complete recorded packet from the latest
+computed selection for the same task/cache owner. The complete ordered cards, paths,
+queries, source context, policies, byte limits and resolved screening profile contract
+must match. Current selection/inventory identifiers and full-file guard revisions
+remain freshness proofs rather than semantic card input. Rust still captures the
+complete current inventory, ownership and scoped reviews; admitted bodies and
+publication scope are freshly validated. No candidate subset or full-body observation
+is inferred from a prior card decision.
+
+`screening-computed-output-v1` stores the current exact output and dependency/contract
+revisions. Reused outputs also reference the direct authored receipt and its revision;
+the complete stored envelope stays within `max_result_bytes`. These formats require
+a compatible reader. Existing saved selections retain their original packet layout,
+native contract and receipt bytes, and never seed this reuse. Standalone full-path
+records remain readable but do not become native computation authorities.
+
+A valid explicit reassessment of the origin holds its dependent packets for explicit
+reassessment; `processing_held_batches` reports these holds when nonzero. Unchanged
+holds and reused `defer` decisions spend no host call and remain incomplete. Missing,
+corrupt or indirect origins refuse. Pending/staged task references retain the head and
+all same-owner selection proofs; normal retention can remove the completed owner.
+Never edit these files to force reuse or completion.
+
 ## Plan and resume
 
 For extraction, first follow [discovery and examination](discovery.md) until ready
@@ -457,6 +483,9 @@ batch members. Discovery shares a fresh traversal and exact immutable bytes with
 the selected window, preserving each task's complete candidates and revision identity.
 Shared captures are discarded before host execution; recording recaptures current
 inputs, including added candidates, aliases and scoped reviews.
+`queue_planning.reused_screening_packets` counts newly composed packet receipts,
+separately from host calls and publications. It establishes neither measured time
+savings nor new semantic progress for campaign continuation.
 
 `queue_planning.discovery_io`, `evidence_preparation_io`, `evidence_revalidation_io`,
 `screening_preparation_io` and `screening_revalidation_io` count existing reads in successful complete discovery

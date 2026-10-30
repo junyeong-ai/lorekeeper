@@ -401,6 +401,7 @@ mod native {
         audit_captures: usize,
         prepared_targets: usize,
         discovery_captures: usize,
+        reused_screening_packets: usize,
         discovery_io: lk_vault::DiscoveryCaptureMetrics,
     }
 
@@ -3635,7 +3636,7 @@ mod native {
                     .collect()
                 };
                 self.result.queue_planning.prepared_targets += materialize.len();
-                let (prepared, captures) = crate::commands::work::prepare_tasks_with_audit(
+                let (prepared, captures, reused) = crate::commands::work::prepare_tasks_with_audit(
                     &session,
                     &self.config,
                     &self.config_revision,
@@ -3644,6 +3645,7 @@ mod native {
                     self.supervisor.read_control(),
                 )?;
                 self.result.queue_planning.discovery_captures += captures.captures;
+                self.result.queue_planning.reused_screening_packets += reused;
                 self.result.queue_planning.discovery_io.accumulate(captures);
                 let mut prepared = materialize
                     .into_iter()
@@ -3868,7 +3870,7 @@ mod native {
                     (started_at.elapsed().as_millis() as u64).saturating_sub(acquisition_ms);
                 eprintln!(
                     "{}",
-                    serde_json::json!({"type":"lore.queue-planning","state":if planned.is_ok() { "completed" } else { "failed" },"attempt":self.result.queue_planning.attempts,"duration_ms":self.result.queue_planning.duration_ms-before.duration_ms,"prepared_targets":self.result.queue_planning.prepared_targets-before.prepared_targets,"discovery_captures":self.result.queue_planning.discovery_captures-before.discovery_captures,"audit_captures":self.result.queue_planning.audit_captures-before.audit_captures,"elapsed_job_ms":self.started_at.elapsed().as_millis()})
+                    serde_json::json!({"type":"lore.queue-planning","state":if planned.is_ok() { "completed" } else { "failed" },"attempt":self.result.queue_planning.attempts,"duration_ms":self.result.queue_planning.duration_ms-before.duration_ms,"prepared_targets":self.result.queue_planning.prepared_targets-before.prepared_targets,"discovery_captures":self.result.queue_planning.discovery_captures-before.discovery_captures,"audit_captures":self.result.queue_planning.audit_captures-before.audit_captures,"reused_screening_packets":self.result.queue_planning.reused_screening_packets-before.reused_screening_packets,"elapsed_job_ms":self.started_at.elapsed().as_millis()})
                 );
                 let plan = match planned {
                     Ok(plan) => plan,

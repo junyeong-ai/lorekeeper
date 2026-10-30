@@ -6,6 +6,9 @@ mod stage_profiles;
 #[path = "native_execution/host_diagnostics.rs"]
 mod host_diagnostics;
 
+#[path = "native_execution/packet_computation.rs"]
+mod packet_computation;
+
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -3291,7 +3294,7 @@ if result_role:
 native=('--output-schema' in sys.argv and '--output-last-message' not in sys.argv) or '--safe-mode' in sys.argv
 if native:
     request=json.loads((root/'native-request.txt').read_text().split('\nNative request:\n',1)[1])
-    assert request['policy']=='progressive-evidence-v1'
+    assert request['policy'] in ['progressive-evidence-v1','progressive-evidence-v2']
     assert request['examination_scope']=='candidate-card-only'
     assert request['source_context']['role']=='complete-retained-input'
     assert request['discovery']==[{'query':'transactional outbox','phrase':True,'spacing':False}]
