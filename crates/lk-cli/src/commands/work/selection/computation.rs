@@ -193,19 +193,21 @@ impl Selection {
             let prior = retention_selection(root, &owner.join(&head.selection_id))?;
             let captured = prior.capture_ledger(root)?;
             let mut available = BTreeMap::new();
-            for receipt in &captured.ledger.progress.receipts {
-                let batch = (0..prior.manifest.batches.len())
-                    .find(|index| {
-                        prior
-                            .batch_id(*index)
-                            .is_ok_and(|id| id == receipt.batch_id)
-                    })
-                    .expect("captured packet");
-                let raw = &captured.raw[&receipt.path];
+            for batch in 0..prior.manifest.batches.len() {
+                let path = prior.receipt_path(batch)?;
+                let Some(raw) = captured.raw.get(&path) else {
+                    continue;
+                };
                 let (_, Some(value)) = decode(&prior, batch, raw)? else {
                     continue;
                 };
                 if value.contract_revision == contract_revision {
+                    let usable = captured
+                        .ledger
+                        .progress
+                        .receipts
+                        .iter()
+                        .any(|receipt| receipt.path == path);
                     let origin = value.reused_from.clone().unwrap_or_else(|| Origin {
                         selection_id: prior.id.clone(),
                         batch_id: value.output.batch_id.clone(),
@@ -213,7 +215,7 @@ impl Selection {
                         receipt_revision: lk_core::concept::file_revision(raw),
                     });
                     if available
-                        .insert(value.dependency_revision.clone(), (value, origin))
+                        .insert(value.dependency_revision.clone(), (value, origin, usable))
                         .is_some()
                     {
                         return Err(fail("ambiguous prior screening computation"));
@@ -232,7 +234,7 @@ impl Selection {
                     self.manifest.max_input_bytes,
                     contract_revision,
                 )?;
-                let Some((prior, origin)) = available.get(&key) else {
+                let Some((prior, origin, usable)) = available.get(&key) else {
                     continue;
                 };
                 let output = self.normalize(
@@ -260,7 +262,7 @@ impl Selection {
                     ));
                 }
                 plan.create(path, after);
-                reused += 1;
+                reused += usize::from(*usable);
             }
             for (path, raw) in captured.raw.into_iter().chain(captured.dependencies) {
                 plan.require_unchanged(path, raw);
@@ -704,7 +706,7 @@ mod tests {
         drop(session);
         std::fs::write(
             fixture.root.join("wiki/concepts/candidate-0.md"),
-            changed_page,
+            &changed_page,
         )
         .unwrap();
         let (progress, request) = current.prepare(&fixture.root).unwrap();
@@ -719,6 +721,28 @@ mod tests {
             request.is_none(),
             "unchanged held authority must not spend another host call"
         );
+        change_file_without_changing_projection(&fixture);
+        let next = current_selection(&fixture, 8192, 4096);
+        {
+            let session = MutationSession::acquire(&fixture.root).unwrap();
+            assert_eq!(
+                next.create_native(&session, &fixture.pages(), &contract)
+                    .unwrap(),
+                0,
+                "held receipt composition is not usable computation reuse"
+            );
+        }
+        let (held, request) = next.prepare(&fixture.root).unwrap();
+        assert_eq!(held.processing_held_batches, 1);
+        assert!(
+            request.is_none(),
+            "inventory churn must retain the explicit reassessment hold"
+        );
+        std::fs::write(
+            fixture.root.join("wiki/concepts/candidate-0.md"),
+            &changed_page,
+        )
+        .unwrap();
         let raw =
             std::fs::read_to_string(fixture.root.join(current.receipt_path(0).unwrap())).unwrap();
         let request = current.request_for(&[0], 0).unwrap();

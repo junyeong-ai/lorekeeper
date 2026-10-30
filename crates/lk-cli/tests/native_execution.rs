@@ -3575,7 +3575,16 @@ fn terminal_screening_defer_preserves_receipts_and_allows_independent_publicatio
         assert_eq!(current["progress"]["unknown"], 0);
         assert_eq!(current["progress"]["complete"], false);
         assert!(current["request"].is_null());
-        assert_eq!(selection_files(), retained);
+        let after = selection_files();
+        for (path, bytes) in &retained {
+            assert_eq!(after.get(path), Some(bytes));
+        }
+        assert!(
+            after
+                .keys()
+                .filter(|path| !retained.contains_key(*path))
+                .all(|path| path.file_name().unwrap() == "current.json")
+        );
         assert_eq!(
             std::fs::read(root.join(&task.target.vault_path)).unwrap(),
             source
@@ -3595,7 +3604,7 @@ fn terminal_screening_defer_preserves_receipts_and_allows_independent_publicatio
         assert!(!output.status.success());
         assert_eq!(repeated["halted"], false, "{repeated}");
         assert_eq!(repeated["semantic_calls"], 0, "{repeated}");
-        assert_eq!(selection_files(), retained);
+        assert_eq!(selection_files(), after);
         let receipt = current["progress"]["receipts"][0]["path"].as_str().unwrap();
         std::fs::write(root.join(receipt), b"{").unwrap();
         let (output, corrupt) = fixture.run("process");

@@ -119,6 +119,8 @@ the complete stored envelope stays within `max_result_bytes`. These formats requ
 a compatible reader. Existing saved selections retain their original packet layout,
 native contract and receipt bytes, and never seed this reuse. Standalone full-path
 records remain readable but do not become native computation authorities.
+An older reader refuses these formats when encountered; this is not a global
+downgrade lock preventing it from independently preparing a legacy selection.
 
 A valid explicit reassessment of the origin holds its dependent packets for explicit
 reassessment; `processing_held_batches` reports these holds when nonzero. Unchanged
