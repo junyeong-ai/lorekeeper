@@ -171,12 +171,13 @@ semantic equivalence, lower billed cost or complete corpus coverage.
 
 On Unix, for audit Work with an exact current inspection action, an operator can explicitly
 refine that unfinished node without changing its canonical plan or configuration.
-Use a fresh workflow with the original selected configuration and existing
-`LORE_EXECUTION_PROFILE` context; default lease contention still refuses:
+Use a fresh `lore workflow -- COMMAND` with the original selected configuration and
+existing `LORE_EXECUTION_PROFILE` context; default lease contention still refuses.
+Within that inherited workflow, run:
 
 ```sh
-lore workflow -- lore work refine WORK NODE --max-part-characters 20000 --dry-run
-lore workflow -- lore work refine WORK NODE --max-part-characters 20000
+lore work refine WORK NODE --max-part-characters 20000 --dry-run
+lore work refine WORK NODE --max-part-characters 20000
 ```
 
 The positive character bound must be smaller than the assigned range total. It is
