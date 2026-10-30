@@ -347,11 +347,11 @@ fn decode(
     let value: Value = serde_json::from_str(raw).into_diagnostic()?;
     if value.get("schema").is_none() {
         return Ok((
-            selection.normalize(batch, serde_json::from_value(value).into_diagnostic()?)?,
+            selection.normalize(batch, serde_json::from_str(raw).into_diagnostic()?)?,
             None,
         ));
     }
-    let receipt: Receipt = serde_json::from_value(value).into_diagnostic()?;
+    let receipt: Receipt = serde_json::from_str(raw).into_diagnostic()?;
     if receipt.schema != SCHEMA
         || selection.manifest.receipt_policy != Some(ReceiptPolicy::ComputedPacketsV1)
         || !is_revision(&receipt.dependency_revision)
@@ -644,6 +644,93 @@ mod tests {
     }
 
     #[test]
+    fn screening_receipts_reject_duplicate_fields_without_rewriting_them() {
+        for computed in [false, true] {
+            let fixture = Fixture::new(1);
+            let selection = if computed {
+                current_selection(&fixture, 8192, 4096)
+            } else {
+                fixture.selection(8192, 4096)
+            };
+            let contract = "c".repeat(64);
+            let session = MutationSession::acquire(&fixture.root).unwrap();
+            selection
+                .create_native(&session, &fixture.pages(), &contract)
+                .unwrap();
+            let request = selection.prepare(&fixture.root).unwrap().1.unwrap();
+            let output = answer(&request, ScreeningDecision::Defer);
+            selection
+                .record_native(&session, &fixture.pages(), output.clone(), &contract)
+                .unwrap();
+            let path = fixture.root.join(selection.receipt_path(0).unwrap());
+            let original = std::fs::read_to_string(&path).unwrap();
+            for (field, duplicate) in [
+                (
+                    "\"selection_id\":",
+                    "\"selection_id\":\"other\",\"selection_id\":",
+                ),
+                ("\"decisions\":", "\"decisions\":[],\"decisions\":"),
+                (
+                    "\"decision\":\"defer\"",
+                    "\"decision\":\"not-selected\",\"decision\":\"defer\"",
+                ),
+                ("\"reason\":", "\"reason\":\"other\",\"reason\":"),
+            ] {
+                let ambiguous = original.replacen(field, duplicate, 1);
+                assert_ne!(ambiguous, original);
+                std::fs::write(&path, &ambiguous).unwrap();
+                assert!(
+                    selection.prepare(&fixture.root).is_err(),
+                    "{computed}: {field}"
+                );
+                assert!(selection.publication_state(&fixture.root).is_err());
+                assert!(read_for_reassessment(&selection, 0, &ambiguous).is_err());
+                assert!(
+                    selection
+                        .record(&session, &fixture.pages(), output.clone(), None)
+                        .is_err()
+                );
+                assert_eq!(std::fs::read_to_string(&path).unwrap(), ambiguous);
+            }
+            std::fs::write(path, original).unwrap();
+            assert_eq!(selection.prepare(&fixture.root).unwrap().0.deferred, 1);
+        }
+    }
+
+    #[test]
+    fn legacy_receipt_whitespace_and_field_order_survive_identical_retries() {
+        let fixture = Fixture::new(1);
+        let selection = fixture.selection(8192, 4096);
+        let session = MutationSession::acquire(&fixture.root).unwrap();
+        selection.create(&session, &fixture.pages()).unwrap();
+        let request = selection.prepare(&fixture.root).unwrap().1.unwrap();
+        let output = answer(&request, ScreeningDecision::Defer);
+        selection
+            .record(&session, &fixture.pages(), output.clone(), None)
+            .unwrap();
+        let path = fixture.root.join(selection.receipt_path(0).unwrap());
+        let manifest = std::fs::read(fixture.root.join(selection.manifest_path())).unwrap();
+        let pretty =
+            serde_json::to_string_pretty(&serde_json::to_value(&output).unwrap()).unwrap() + "\r\n";
+        assert_ne!(pretty, std::fs::read_to_string(&path).unwrap());
+        std::fs::write(&path, &pretty).unwrap();
+        assert_eq!(
+            read_for_reassessment(&selection, 0, &pretty).unwrap(),
+            output
+        );
+        let progress = selection
+            .record(&session, &fixture.pages(), output, None)
+            .unwrap();
+        assert_eq!(progress.deferred, 1);
+        assert!(!progress.complete);
+        assert_eq!(std::fs::read_to_string(path).unwrap(), pretty);
+        assert_eq!(
+            std::fs::read(fixture.root.join(selection.manifest_path())).unwrap(),
+            manifest
+        );
+    }
+
+    #[test]
     fn fresh_complete_inventory_reuses_whole_computation_without_rewriting_paid_receipts() {
         let fixture = Fixture::new(1);
         let (prior, contract, before) = seed(&fixture);
@@ -779,6 +866,18 @@ mod tests {
         assert!(current.prepare(&fixture.root).is_err());
         std::fs::write(&path, "{broken}").unwrap();
         assert!(current.prepare(&fixture.root).is_err());
+        let receipt: Receipt = serde_json::from_str(&before).unwrap();
+        let legacy = encoded(&receipt.output).unwrap();
+        let ambiguous = legacy.replacen(
+            "\"selection_id\":",
+            "\"selection_id\":\"other\",\"selection_id\":",
+            1,
+        );
+        std::fs::write(&path, &ambiguous).unwrap();
+        assert!(
+            current.prepare(&fixture.root).is_err(),
+            "ambiguous origin is corrupt, not a valid reassessment hold"
+        );
         std::fs::write(path, before).unwrap();
         assert!(current.prepare(&fixture.root).unwrap().0.complete);
     }

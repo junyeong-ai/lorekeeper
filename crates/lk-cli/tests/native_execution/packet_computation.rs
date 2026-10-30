@@ -1,6 +1,129 @@
 use super::*;
 
 #[test]
+fn standalone_screening_rejects_ambiguous_input_and_receipts_without_mutation() {
+    let (fixture, task) = progressive_extraction_fixture("codex", "exit 97", 1, 65536, 16384);
+    let root = fixture.root().join("vault");
+    let raw = std::fs::read_to_string(root.join(&task.target.vault_path)).unwrap();
+    let discovery = fixture.root().join("discovery.json");
+    std::fs::write(
+        &discovery,
+        serde_json::to_vec(&serde_json::json!({
+            "target_revision":lk_core::concept::file_revision(&raw),
+            "queries":[{"query":"transactional outbox","phrase":true,"spacing":false}]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    execution_json(
+        &fixture,
+        &[
+            "work",
+            "discover",
+            "--task-id",
+            &task.task_id,
+            "--file",
+            discovery.to_str().unwrap(),
+        ],
+    );
+    let turn = execution_json(&fixture, &["work", "select", "--task-id", &task.task_id]);
+    let output = screening_decisions(&turn["request"], true);
+    let encoded = serde_json::to_string(&output).unwrap();
+    let response = fixture.root().join("response.json");
+    let selection_root = root.join(".lorekeeper/queue/selection");
+    let snapshot = || {
+        walkdir::WalkDir::new(&selection_root)
+            .into_iter()
+            .map(Result::unwrap)
+            .filter(|entry| entry.file_type().is_file())
+            .map(|entry| {
+                (
+                    entry.path().to_owned(),
+                    std::fs::read(entry.path()).unwrap(),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    let before = snapshot();
+    for (field, duplicate) in [
+        (
+            "\"selection_id\":",
+            "\"selection_id\":\"other\",\"selection_id\":",
+        ),
+        (
+            "\"decision\":\"defer\"",
+            "\"decision\":\"not-selected\",\"decision\":\"defer\"",
+        ),
+    ] {
+        let ambiguous = encoded.replacen(field, duplicate, 1);
+        assert_ne!(ambiguous, encoded);
+        std::fs::write(&response, &ambiguous).unwrap();
+        let rejected = fixture
+            .command()
+            .args([
+                "work",
+                "select-record",
+                "--task-id",
+                &task.task_id,
+                "--file",
+                response.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert!(!rejected.status.success());
+        assert!(String::from_utf8_lossy(&rejected.stderr).contains("duplicate field"));
+        assert_eq!(snapshot(), before);
+        assert_eq!(std::fs::read_to_string(&response).unwrap(), ambiguous);
+        assert!(!root.join(".lorekeeper/mutation/pending.json").exists());
+    }
+    std::fs::write(&response, serde_json::to_string_pretty(&output).unwrap()).unwrap();
+    execution_json(
+        &fixture,
+        &[
+            "work",
+            "select-record",
+            "--task-id",
+            &task.task_id,
+            "--file",
+            response.to_str().unwrap(),
+        ],
+    );
+    let recorded = execution_json(&fixture, &["work", "select", "--task-id", &task.task_id]);
+    assert_eq!(recorded["progress"]["deferred"], 1);
+    assert_eq!(recorded["progress"]["complete"], false);
+    let receipt = root.join(
+        recorded["progress"]["receipts"][0]["path"]
+            .as_str()
+            .unwrap(),
+    );
+    let raw = std::fs::read_to_string(&receipt).unwrap();
+    let ambiguous = raw.replacen(
+        "\"decision\":\"defer\"",
+        "\"decision\":\"not-selected\",\"decision\":\"defer\"",
+        1,
+    );
+    assert_ne!(ambiguous, raw);
+    std::fs::write(&receipt, &ambiguous).unwrap();
+    let rejected = fixture
+        .command()
+        .args(["work", "select", "--task-id", &task.task_id])
+        .output()
+        .unwrap();
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("duplicate field"));
+    assert_eq!(std::fs::read_to_string(&receipt).unwrap(), ambiguous);
+    std::fs::write(receipt, raw).unwrap();
+    assert_eq!(
+        execution_json(&fixture, &["work", "select", "--task-id", &task.task_id])["progress"]["deferred"],
+        1
+    );
+    assert!(
+        !fixture.root().join("arguments").exists(),
+        "no host invocation is needed"
+    );
+}
+
+#[test]
 fn exact_packet_reuse_preserves_paid_bytes_and_defers_only_its_target_on_both_hosts() {
     for engine in ["codex", "claude-code"] {
         let screening = RECORD_PROGRESSIVE_EXTRACTION.replace(

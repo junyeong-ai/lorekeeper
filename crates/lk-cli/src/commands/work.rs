@@ -1233,12 +1233,12 @@ pub(super) fn record_screenings(
     })
 }
 
-pub(super) fn record_screening(
+fn record_screening(
     session: &lk_vault::MutationSession,
     config: &lk_core::config::Config,
     config_revision: &str,
     task_id: &str,
-    output: Value,
+    output: selection::ScreeningOutput,
     previous_revision: Option<&str>,
 ) -> miette::Result<usize> {
     let root = session.root();
@@ -1248,7 +1248,7 @@ pub(super) fn record_screening(
         .record(
             session,
             &screening.inventory.pages,
-            serde_json::from_value(output).into_diagnostic()?,
+            output,
             previous_revision,
         )?
         .completed_batches)
@@ -3071,8 +3071,9 @@ pub async fn run(opts: &GlobalOptions, command: WorkCommand) -> miette::Result<(
             file,
             previous_revision,
         } => {
-            let output = serde_json::from_slice(&std::fs::read(file).into_diagnostic()?)
-                .into_diagnostic()?;
+            let output: selection::ScreeningOutput =
+                serde_json::from_slice(&std::fs::read(file).into_diagnostic()?)
+                    .into_diagnostic()?;
             let session = super::publication::acquire_mutation_now(&root)?;
             let completed = record_screening(
                 &session,
@@ -4300,10 +4301,11 @@ mod tests {
             &config,
             &config_revision,
             &task.task_id,
-            json!({
+            serde_json::from_value(json!({
                 "selection_id":request["selection_id"],"batch_id":request["batch_id"],
                 "input_revision":request["input_revision"],"decisions":decisions,
-            }),
+            }))
+            .unwrap(),
             None,
         )
         .unwrap();

@@ -92,6 +92,8 @@ Unchanged native calls are suppressed; changed scope or contracts may be reconsi
 Existing v1 rejection receipts remain readable without rewriting; new receipts use
 `screening-rejections-v2`, which earlier readers refuse. Corrupt receipts, malformed
 reply shapes, failed fresh scope validation and unknown failures still stop.
+Screening receipts and standalone `select-record` inputs require unique object fields
+at every typed nesting level. Legacy whitespace and field ordering remain valid.
 
 After every packet is recorded, deferred cards keep only their target incomplete.
 Native planning preserves the validated ledger and continues independent ready work
