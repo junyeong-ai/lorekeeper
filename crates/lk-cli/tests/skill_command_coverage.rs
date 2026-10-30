@@ -12,7 +12,6 @@
 
 use clap::CommandFactory;
 use std::path::PathBuf;
-use std::process::Command;
 
 /// Commands deliberately outside every skill's scope.
 const EXEMPT: &[(&str, &str)] = &[("help", "clap's own; not a pipeline operation")];
@@ -135,11 +134,8 @@ fn a_command_name_is_matched_whole_not_as_a_prefix() {
 /// A stale navigation invocation left in one skill must fail this contract even when
 /// other skills already use the current SQLite refresh procedure.
 ///
-/// Each invocation is put to the BINARY rather than compared against parsed help text. A first
-/// version compared only the leading subcommand, so `lore wiki rebuild` passed on the strength of
-/// `wiki` being real — which is the drift least likely to happen and the only one it could see.
-/// `--help` short-circuits clap before argument validation, so a documented invocation's
-/// placeholders and flags do not have to be satisfiable to ask whether the command path exists.
+/// Validate the binary's complete argument tree, not prefixes or rendered help.
+/// Help permits documentation placeholders without dispatching commands.
 ///
 /// Only backticked invocations count; natural-language skill descriptions are not commands.
 #[test]
@@ -152,20 +148,12 @@ fn every_command_a_skill_tells_an_agent_to_run_exists() {
         paths.len()
     );
     for path in paths {
-        let out = Command::new(env!("CARGO_BIN_EXE_lore"))
-            .env("NO_COLOR", "1")
-            .args(&path)
-            .arg("--help")
-            .output()
-            .expect("run lore");
+        let parsed = parse_invocation(&path);
         assert!(
-            out.status.success(),
+            parsed.is_ok(),
             "a skill tells an agent to run `lore {}`, which the binary rejects: {}",
             path.join(" "),
-            String::from_utf8_lossy(&out.stderr)
-                .lines()
-                .next()
-                .unwrap_or("")
+            parsed.unwrap_err()
         );
     }
 }
@@ -275,6 +263,52 @@ fn shell_words(line: &str) -> Vec<String> {
     words
 }
 
+// After `--`, an appended help flag is command data. Parsing must never dispatch it.
+fn parse_invocation(args: &[String]) -> Result<(), clap::Error> {
+    let args = std::iter::once("lore")
+        .chain(args.iter().map(String::as_str))
+        .chain(["--help"]);
+    match lore::Cli::command().try_get_matches_from(args) {
+        Ok(_) => Ok(()),
+        Err(error)
+            if matches!(
+                error.kind(),
+                clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
+            ) =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+#[test]
+fn literal_workflow_arguments_are_parsed_without_configuration_or_execution() {
+    let root = tempfile::tempdir().unwrap();
+    let missing = root.path().join("missing-config.yaml");
+    let args = [
+        "--config".into(),
+        missing.to_string_lossy().into_owned(),
+        "workflow".into(),
+        "--".into(),
+        "an-external-command-that-must-not-run".into(),
+    ];
+    assert!(parse_invocation(&args).is_ok());
+    assert!(!missing.exists());
+    assert!(
+        parse_invocation(&shell_words(
+            "work refine WORK NODE --max-part-characters 20000 --dry-run"
+        ))
+        .is_ok()
+    );
+    assert!(
+        parse_invocation(&shell_words(
+            "work refine WORK NODE --unknown-refinement-flag"
+        ))
+        .is_err()
+    );
+}
+
 /// The `[--flag]` table rows stay unchecked. Reaching them needs a table of which documentation
 /// notations to strip, and a check that cannot tell notation from a command fails the build on
 /// prose — which is the failure mode this whole file exists to avoid.
@@ -297,20 +331,12 @@ fn every_fenced_lore_invocation_parses_including_its_flags() {
                 continue;
             };
             checked += 1;
-            let out = Command::new(env!("CARGO_BIN_EXE_lore"))
-                .env("NO_COLOR", "1")
-                .args(shell_words(args))
-                .arg("--help")
-                .output()
-                .expect("run lore");
+            let parsed = parse_invocation(&shell_words(args));
             assert!(
-                out.status.success(),
+                parsed.is_ok(),
                 "{} runs `{command}` in a fenced block, which the binary rejects: {}",
                 path.display(),
-                String::from_utf8_lossy(&out.stderr)
-                    .lines()
-                    .next()
-                    .unwrap_or("")
+                parsed.unwrap_err()
             );
         }
     }

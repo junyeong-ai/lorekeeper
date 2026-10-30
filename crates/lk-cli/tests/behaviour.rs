@@ -201,7 +201,6 @@ const EXEMPT: &[(&[&str], &str)] = &[
         &["work", "read"],
         "requires a runtime work/node identity; native_execution tests bounded inspect/reduce requests and work state tests stale/bound refusals",
     ),
-    #[cfg(unix)]
     (
         &["work", "refine"],
         "requires an exact current audit inspection action; native_execution verifies both-host dry-run, idempotent refinement and paid-byte preservation, while work state tests cover full range coverage, inherited questions, stale reductions, journal recovery and retention",

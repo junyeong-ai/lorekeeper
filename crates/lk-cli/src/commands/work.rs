@@ -115,8 +115,7 @@ pub enum WorkCommand {
         /// Ready node identifier returned by status
         node_id: String,
     },
-    /// Refine a held audit inspection without changing its canonical plan or paid observations
-    #[cfg(unix)]
+    /// Refine a held audit inspection on Unix without changing its canonical plan or paid observations
     Refine {
         /// Current audit Work identifier returned by plan
         work_id: String,
@@ -3182,6 +3181,12 @@ pub async fn run(opts: &GlobalOptions, command: WorkCommand) -> miette::Result<(
             let mut value = serde_json::to_value(preview).into_diagnostic()?;
             value["dry_run"] = json!(dry_run);
             value
+        }
+        #[cfg(not(unix))]
+        WorkCommand::Refine { .. } => {
+            return Err(miette::miette!(
+                "audit inspection refinement requires Unix native execution"
+            ));
         }
         WorkCommand::Result { work_id } => {
             let (work, prepared) = load(&root, &config, &config_revision, &work_id)?;
