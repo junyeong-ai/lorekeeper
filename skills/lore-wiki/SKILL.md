@@ -5,7 +5,7 @@ description: Searches and maintains a Lorekeeper knowledge wiki. Use for grounde
   auditing knowledge and relationships. Repository-wide extraction uses lore-extract;
   ingest queue processing uses lore-process.
 metadata:
-  version: 0.106.2
+  version: 0.107.0
 ---
 
 # Lorekeeper wiki
