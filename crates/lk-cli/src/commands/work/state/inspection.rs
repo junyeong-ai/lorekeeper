@@ -1,6 +1,6 @@
 use super::*;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct OutputCapacity {
     pub actual_bytes: usize,
@@ -20,7 +20,7 @@ impl std::fmt::Display for OutputCapacity {
 impl std::error::Error for OutputCapacity {}
 impl miette::Diagnostic for OutputCapacity {}
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct InspectionActions {
     schema: String,
@@ -29,17 +29,48 @@ pub(super) struct InspectionActions {
     actions: BTreeMap<String, InspectionAction>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct InspectionAction {
-    input_revision: String,
-    request_revision: String,
-    reason: String,
+pub(super) struct InspectionAction {
+    pub input_revision: String,
+    pub request_revision: String,
+    pub reason: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    capacity: Option<OutputCapacity>,
+    pub capacity: Option<OutputCapacity>,
+}
+
+impl InspectionAction {
+    pub(super) fn validate(&self, work: &Work) -> miette::Result<()> {
+        require_id(&self.input_revision)?;
+        require_id(&self.request_revision)?;
+        nonblank(&self.reason)?;
+        if let Some(capacity) = &self.capacity
+            && (capacity.max_bytes == 0
+                || capacity.max_bytes > work.plan.max_result_bytes
+                || capacity.actual_bytes <= capacity.max_bytes)
+        {
+            return Err(fail("invalid inspection capacity rejection"));
+        }
+        Ok(())
+    }
 }
 
 impl InspectionActions {
+    #[cfg(unix)]
+    pub(super) fn matching_action(
+        &self,
+        work: &Work,
+        request: &Value,
+        contract: &str,
+    ) -> miette::Result<Option<InspectionAction>> {
+        if self.reason(work, request, contract)?.is_none() {
+            return Ok(None);
+        }
+        Ok(self
+            .actions
+            .get(request["node_id"].as_str().expect("validated node"))
+            .cloned())
+    }
     pub(super) fn decode(raw: &str, work: &Work) -> miette::Result<Self> {
         let actions: Self = crate::commands::work::receipt::decode(raw).map_err(fail)?;
         if !matches!(
@@ -94,7 +125,7 @@ impl InspectionActions {
     }
 }
 
-fn request_revision(request: &Value, contract: &str) -> miette::Result<String> {
+pub(super) fn request_revision(request: &Value, contract: &str) -> miette::Result<String> {
     revision(&json!({"request":request,"contract":contract}))
 }
 
@@ -105,6 +136,12 @@ impl Work {
         request: &Value,
         contract: &str,
     ) -> miette::Result<Option<String>> {
+        let captured = self.capture_refinements(root)?;
+        if let Some(refinements) = captured.state
+            && let Some(action) = refinements.action(self, request, contract)?
+        {
+            return Ok(Some(action.reason));
+        }
         let Some(raw) = read_optional(root, &work_path(&self.plan.id, "inspection-actions.json")?)?
         else {
             return Ok(None);
@@ -129,6 +166,10 @@ impl Work {
                 && !actions
                     .as_ref()
                     .is_some_and(|actions| actions.actions.contains_key(id))
+                && !evaluated
+                    .refinements
+                    .as_ref()
+                    .is_some_and(|state| state.has_action_for_node(id))
             {
                 continue;
             }
@@ -140,11 +181,21 @@ impl Work {
             let request = self
                 .node_input(node, &evaluated.inputs, &evaluated.current)
                 .map_err(NodeInputError::report)?;
+            if let Some(refinements) = &evaluated.refinements
+                && let Some(action) = refinements.action(self, &request, &contract(&request)?)?
+            {
+                return Ok((progress, Some(action.reason)));
+            }
             if let Some(actions) = &actions
                 && let Some(reason) = actions.reason(self, &request, &contract(&request)?)?
             {
                 return Ok((progress, Some(reason)));
             }
+        }
+        if !progress.complete
+            && let Some(refinements) = &evaluated.refinements
+        {
+            refinements.available_slots(self)?;
         }
         Ok((progress, None))
     }
@@ -209,6 +260,18 @@ impl Work {
         if &current != request {
             return Err(fail("inspection action request changed before recording"));
         }
+        let action = InspectionAction {
+            input_revision: current["input_revision"]
+                .as_str()
+                .expect("native input revision")
+                .into(),
+            request_revision: request_revision(request, contract)?,
+            reason,
+            capacity,
+        };
+        if let Some(refinements) = evaluated.refinements.clone() {
+            return refinements.plan_action(self, root, request, action, evaluated);
+        }
         let path = work_path(&self.plan.id, "inspection-actions.json")?;
         let before = read_optional(root, &path)?;
         let mut actions = match &before {
@@ -219,21 +282,10 @@ impl Work {
                 actions: BTreeMap::new(),
             },
         };
-        if capacity.is_some() {
+        if action.capacity.is_some() {
             actions.schema = "inspection-actions-v2".into();
         }
-        actions.actions.insert(
-            node.id.clone(),
-            InspectionAction {
-                input_revision: current["input_revision"]
-                    .as_str()
-                    .expect("native input revision")
-                    .into(),
-                request_revision: request_revision(request, contract)?,
-                reason,
-                capacity,
-            },
-        );
+        actions.actions.insert(node.id.clone(), action);
         let mut plan = MutationPlan::default();
         let output = output_path(&self.plan.id, &node.id)?;
         if !evaluated.raw.contains_key(&output) {

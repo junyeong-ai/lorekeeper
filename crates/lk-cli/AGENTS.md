@@ -145,6 +145,14 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   complete-input overflow defers that Work before invocation, never clips or replans it.
   Persist the policy and
   preserve missing-policy binary plans, node IDs and seals without rewriting them on resume.
+  Explicit audit inspection refinement requires a current exact processing action.
+  Keep the canonical plan, prior positive outputs and original action bytes unchanged.
+  Capture its bounded sidecar and original-action revision with the expanded tree;
+  guard that snapshot or absence through recording, completion and historical retention.
+  New records bind refinement provenance and compose with retained-question snapshots.
+  Use the existing byte-budgeted reduction owner, preserve complete original coverage,
+  and refuse refined cross-Work reuse without its complete closure. Never infer splits
+  from action prose or retry unchanged holds automatically.
   Native queue extraction/synthesis may finalize a disjoint current frontier covering
   every planned inspection when all observations, evidence and rules fit the existing
   input limit and no processing blocker remains. Its distinct frontier seal never

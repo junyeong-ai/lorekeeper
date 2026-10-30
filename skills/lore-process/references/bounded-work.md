@@ -169,6 +169,32 @@ declaration retain binary reduction and resume without rewriting their observati
 Actual request and result limits still apply. Fewer reduction calls do not establish
 semantic equivalence, lower billed cost or complete corpus coverage.
 
+For audit Work with an exact current inspection action, an operator can explicitly
+refine that unfinished node without changing its canonical plan or configuration.
+Use a fresh workflow with the original selected configuration and existing
+`LORE_EXECUTION_PROFILE` context; default lease contention still refuses:
+
+```sh
+lore workflow -- lore work refine WORK NODE --max-part-characters 20000 --dry-run
+lore workflow -- lore work refine WORK NODE --max-part-characters 20000
+```
+
+The positive character bound must be smaller than the assigned range total. It is
+an execution choice, not a model-context guarantee. The preview publishes nothing.
+Native execution then supervises the smaller inspections and a byte-budgeted
+reduction hierarchy under the existing profile and shared call/parallel/byte limits.
+Every original range remains covered; inherited questions retain their exact IDs,
+kinds, content and evidence unless explicitly resolved with support. An unfinished
+child with its own current action can be refined further. Unknown state refuses;
+remaining input/result capacity or processing holds still leave the audit incomplete.
+
+Keep `inspection-refinements.json` with the Work. It binds exact parent requests,
+complete coverage and action history while preserving the original plan, positive
+observations and `inspection-actions.json` bytes. New derived nodes use
+`work-output-refinement-v1`, including retained-question snapshots when needed;
+readers lacking that contract refuse those records. Workers never select a split
+from reason text or run this operator command themselves. Queue Work is excluded.
+
 For native queue extraction and concept synthesis, a complete current set of disjoint
 observations may finalize directly when the entire request, evidence and generation
 rules fit the input limit and no processing concern remains. This has a separate
@@ -367,6 +393,8 @@ Replan. `lore work reuse WORK NODE --from-work OLD --from-node OLD_NODE` permits
 explicitly attributed reuse of an inspection only when semantic purpose and its
 assigned exact resources/ranges match. It never claims a new read. Changed-source
 parts and reductions must be performed again; do not copy hashes into old drafts.
+Refined source or destination nodes require their complete refinement proof and
+are not accepted by this cross-Work reuse route.
 Derived work under `.lorekeeper/work/` supports resumption, not historical proof
 or a second canonical knowledge store. Preserve unfinished work.
 An explicit single-part plan is also resumable work. If a verified sealed final

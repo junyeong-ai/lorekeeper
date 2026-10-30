@@ -115,6 +115,18 @@ pub enum WorkCommand {
         /// Ready node identifier returned by status
         node_id: String,
     },
+    /// Refine a held audit inspection without changing its canonical plan or paid observations
+    #[cfg(unix)]
+    Refine {
+        work_id: String,
+        node_id: String,
+        /// Maximum Unicode scalar characters per smaller inspection assignment
+        #[arg(long)]
+        max_part_characters: usize,
+        /// Validate the exact refinement without publishing or recovering state
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Read the bounded completed root observation for final publication
     Result {
         /// Work identifier whose complete root observation is required
@@ -3132,6 +3144,42 @@ pub async fn run(opts: &GlobalOptions, command: WorkCommand) -> miette::Result<(
         WorkCommand::Read { work_id, node_id } => {
             let (work, prepared) = load(&root, &config, &config_revision, &work_id)?;
             work.input(&root, &node_id, &prepared.resources)?
+        }
+        #[cfg(unix)]
+        WorkCommand::Refine {
+            work_id,
+            node_id,
+            max_part_characters,
+            dry_run,
+        } => {
+            let prepare = |root: &Path| -> miette::Result<(
+                lk_vault::MutationPlan,
+                state::RefinementPreview,
+            )> {
+                let (work, prepared) = load(root, &config, &config_revision, &work_id)?;
+                let (mut mutation, preview) = work.plan_refinement(
+                    root,
+                    &prepared.resources,
+                    &node_id,
+                    max_part_characters,
+                    super::execution::observation::contract_revision,
+                )?;
+                prepared.guard_pages(&mut mutation);
+                Ok((mutation, preview))
+            };
+            let preview = if dry_run {
+                let (mutation, preview) = prepare(&root)?;
+                mutation.validate_addresses(&root).into_diagnostic()?;
+                preview
+            } else {
+                let session = super::publication::acquire_mutation_now(&root)?;
+                let (mutation, preview) = prepare(session.root())?;
+                session.apply(mutation).into_diagnostic()?;
+                preview
+            };
+            let mut value = serde_json::to_value(preview).into_diagnostic()?;
+            value["dry_run"] = json!(dry_run);
+            value
         }
         WorkCommand::Result { work_id } => {
             let (work, prepared) = load(&root, &config, &config_revision, &work_id)?;

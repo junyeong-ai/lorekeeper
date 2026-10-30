@@ -12,6 +12,7 @@ use serde_json::{Value, json};
 mod frontier;
 mod inspection;
 mod output;
+mod refinement;
 mod retention;
 use frontier::{FrontierProof, FrontierSeal};
 pub(crate) use inspection::OutputCapacity;
@@ -19,6 +20,8 @@ pub(crate) use inspection::OutputCapacity;
 pub(crate) use output::result_bytes as output_result_bytes;
 #[cfg(unix)]
 pub(crate) use output::retention_overhead as question_retention_overhead;
+#[cfg(unix)]
+pub(super) use refinement::RefinementPreview;
 pub(crate) use retention::prune_published;
 
 #[derive(Debug)]
@@ -160,6 +163,7 @@ struct Node {
     id: String,
     kind: NodeKind,
     ranges: Vec<SemanticRange>,
+    refinement: Option<String>,
 }
 
 #[derive(Clone)]
@@ -168,6 +172,7 @@ struct StoredOutput {
     output_revision: String,
     reused_from: Option<Reuse>,
     retained: Option<output::RetainedQuestions>,
+    refinement: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -250,6 +255,7 @@ struct Evaluation<'a> {
     current: BTreeMap<String, StoredOutput>,
     raw: BTreeMap<PathBuf, String>,
     ready: Vec<String>,
+    refinements: Option<refinement::Refinements>,
 }
 
 pub(super) struct CompletedWork {
@@ -809,6 +815,7 @@ impl Work {
                         part_id: part.id.clone(),
                     },
                     ranges: part.ranges.clone(),
+                    refinement: None,
                 });
                 return Ok(part.id.clone());
             }
@@ -825,6 +832,7 @@ impl Work {
                     .iter()
                     .flat_map(|part| part.ranges.iter().cloned())
                     .collect(),
+                refinement: None,
             });
             Ok(id)
         }
@@ -844,7 +852,7 @@ impl Work {
         if self.plan.parts.is_empty() {
             return Err(fail("work plan has no inspect parts"));
         }
-        let mut nodes = self
+        let nodes = self
             .plan
             .parts
             .iter()
@@ -854,8 +862,21 @@ impl Work {
                     part_id: part.id.clone(),
                 },
                 ranges: part.ranges.clone(),
+                refinement: None,
             })
             .collect::<Vec<_>>();
+        self.reduce_nodes(nodes, max_input_bytes, None, |children| {
+            revision(&json!(["reduce-byte-budgeted-v1", self.plan.id, children]))
+        })
+    }
+
+    fn reduce_nodes(
+        &self,
+        mut nodes: Vec<Node>,
+        max_input_bytes: usize,
+        refinement: Option<&str>,
+        identity: impl Fn(&[String]) -> miette::Result<String>,
+    ) -> miette::Result<Vec<Node>> {
         let mut level = nodes.clone();
         while level.len() > 1 {
             let mut next = Vec::new();
@@ -874,9 +895,10 @@ impl Work {
                 let group = &level[at..at + count];
                 let children = group.iter().map(|node| node.id.clone()).collect::<Vec<_>>();
                 let node = Node {
-                    id: revision(&json!(["reduce-byte-budgeted-v1", self.plan.id, children]))?,
+                    id: identity(&children)?,
                     kind: NodeKind::Reduce { children },
                     ranges: group.iter().flat_map(|node| node.ranges.clone()).collect(),
+                    refinement: refinement.map(str::to_owned),
                 };
                 nodes.push(node.clone());
                 next.push(node);
@@ -896,6 +918,7 @@ impl Work {
         &self,
         outputs: &BTreeMap<String, StoredOutput>,
         required: &[String],
+        nodes: &[Node],
     ) -> miette::Result<()> {
         fn verify_node(
             work: &Work,
@@ -917,6 +940,7 @@ impl Work {
             if stored.output.work_id != work.plan.id
                 || stored.output.node_id != id
                 || revision(&stored.output)? != stored.output_revision
+                || stored.refinement != node.refinement
             {
                 return Err(fail("invalid stored work dependency identity or checksum"));
             }
@@ -947,10 +971,9 @@ impl Work {
             verified.insert(id.into());
             Ok(())
         }
-        let nodes = self.nodes()?;
         let mut verified = BTreeSet::new();
         for id in required {
-            verify_node(self, outputs, &nodes, id, &mut verified)?;
+            verify_node(self, outputs, nodes, id, &mut verified)?;
         }
         Ok(())
     }
@@ -1014,7 +1037,13 @@ impl Work {
     ) -> Result<Value, NodeInputError> {
         let mut input = match &node.kind {
             NodeKind::Inspect { part_id } => {
-                return self.inspect_input(&node.id, inputs.part_input(part_id).map_err(fail)?);
+                let part = if node.refinement.is_some() {
+                    inputs.input_for_ranges(part_id, &node.ranges)
+                } else {
+                    inputs.part_input(part_id)
+                }
+                .map_err(fail)?;
+                return self.inspect_input(&node.id, part);
             }
             NodeKind::Reduce { children } => {
                 let outputs = children
@@ -1125,9 +1154,15 @@ impl Work {
         self.verify_context()?;
         let manifest = self.manifest(root)?;
         let inputs = self.plan.build_inputs(resources).map_err(fail)?;
-        let nodes = self.nodes()?;
+        let captured = self.capture_refinements(root)?;
+        let nodes = captured.nodes;
+        let refinements = captured.state;
+        if let Some(refinements) = &refinements {
+            refinements.validate_inputs(self, &inputs, &nodes)?;
+        }
         let mut current: BTreeMap<String, StoredOutput> = BTreeMap::new();
         let mut raw = BTreeMap::from([manifest]);
+        raw.extend(captured.files);
         let mut ready = Vec::new();
         for node in &nodes {
             let path = output_path(&self.plan.id, &node.id)?;
@@ -1141,9 +1176,10 @@ impl Work {
                 if stored.output.work_id != self.plan.id
                     || stored.output.node_id != node.id
                     || revision(&stored.output)? != stored.output_revision
+                    || stored.refinement != node.refinement
                 {
                     return Err(fail(
-                        "stored work output identity, checksum or bound is invalid",
+                        "stored work output identity, checksum, refinement or bound is invalid",
                     ));
                 }
                 stored.validate_bounds(self)?;
@@ -1187,6 +1223,7 @@ impl Work {
             current,
             raw,
             ready,
+            refinements,
         })
     }
 
@@ -1200,7 +1237,7 @@ impl Work {
 
     #[cfg(unix)]
     pub(super) fn has_root_output(&self, root: &Path) -> miette::Result<bool> {
-        let nodes = self.nodes()?;
+        let nodes = self.capture_refinements(root)?.nodes;
         let node = nodes.last().expect("nonempty work tree");
         Ok(read_optional(root, &output_path(&self.plan.id, &node.id)?)?.is_some())
     }
@@ -1234,6 +1271,10 @@ impl Work {
         let progress = evaluated.progress();
         let mut inputs = Vec::new();
         if !progress.complete {
+            let limit = match &evaluated.refinements {
+                Some(refinements) => limit.min(refinements.available_slots(self)?),
+                None => limit,
+            };
             for id in progress.ready.iter().take(limit) {
                 let node = evaluated
                     .nodes
@@ -1421,7 +1462,11 @@ impl Work {
             authority: CompletionAuthority::Root(output.output_revision.clone()),
             result,
             guards: evaluated.raw,
-            absent: BTreeSet::new(),
+            absent: if evaluated.refinements.is_none() {
+                BTreeSet::from([refinement::path(self)?])
+            } else {
+                BTreeSet::new()
+            },
         })
     }
 
@@ -1513,13 +1558,17 @@ impl Work {
                 .collect(),
         };
         validate_output(&output, node, &children)?;
-        let stored =
+        let mut stored =
             StoredOutput::build(output, &children, self.plan.max_result_bytes, reused_from)?;
+        stored.refinement = node.refinement.clone();
         stored.validate_bounds(self)?;
         stored.validate_inheritance(&children)?;
         let path = output_path(&self.plan.id, &node.id)?;
         let before = evaluated.raw.get(&path).cloned();
         let mut mutation = MutationPlan::default();
+        if evaluated.refinements.is_none() {
+            mutation.require_absent(refinement::path(self)?);
+        }
         // The node edit owns its before/after guard. A separate unchanged guard
         // would reject our own replacement when an interrupted journal resumes.
         for (dependency, raw) in evaluated.raw {
@@ -1566,6 +1615,26 @@ impl Work {
         }
         let purpose_key = encoded(&purpose_value)?;
         let evaluated = self.evaluate(session.root(), resources)?;
+        let destination = evaluated
+            .nodes
+            .iter()
+            .find(|node| node.id == new_node_id)
+            .ok_or_else(|| fail("unknown destination node"))?;
+        let prior_captured = prior.capture_refinements(session.root())?;
+        let old_node = prior_captured
+            .nodes
+            .iter()
+            .find(|node| node.id == old_node_id)
+            .ok_or_else(|| fail("unknown prior node"))?;
+        if destination.refinement.is_some()
+            || old_node.refinement.is_some()
+            || !matches!(destination.kind, NodeKind::Inspect { .. })
+            || !matches!(old_node.kind, NodeKind::Inspect { .. })
+        {
+            return Err(fail(
+                "refined observations require their complete refinement closure and cannot be reused",
+            ));
+        }
         let content_revision = self
             .plan
             .part_content_revision(new_node_id, &purpose_key)
@@ -1578,11 +1647,6 @@ impl Work {
         {
             return Err(fail("prior leaf has different assigned exact evidence"));
         }
-        let old_node = prior
-            .nodes()?
-            .into_iter()
-            .find(|node| node.id == old_node_id)
-            .ok_or_else(|| fail("unknown prior node"))?;
         let NodeKind::Inspect { part_id } = &old_node.kind else {
             return Err(fail("only local inspection observations can be reused"));
         };
@@ -1601,6 +1665,7 @@ impl Work {
         let old: StoredOutput = serde_json::from_str(&old_raw).map_err(fail)?;
         if old.output.work_id != prior.plan.id
             || old.output.node_id != old_node_id
+            || old.refinement.is_some()
             || old_input["input_revision"].as_str() != Some(old.output.input_revision.as_str())
             || revision(&old.output)? != old.output_revision
         {
@@ -1610,7 +1675,7 @@ impl Work {
         }
         old.validate_bounds(prior)?;
         old.validate_inheritance(&[])?;
-        validate_output(&old.output, &old_node, &[])?;
+        validate_output(&old.output, old_node, &[])?;
         let mut output = old.output.clone();
         output.work_id = self.plan.id.clone();
         output.node_id = new_node_id.into();
@@ -1653,7 +1718,7 @@ impl Work {
             remap(&mut question.evidence)?;
         }
         let (manifest_path, manifest_raw) = prior.manifest(session.root())?;
-        let mutation = self.plan_evaluated_record(
+        let mut mutation = self.plan_evaluated_record(
             session.root(),
             output,
             evaluated,
@@ -1665,6 +1730,12 @@ impl Work {
             }),
             vec![(manifest_path, manifest_raw), (old_path, old_raw)],
         )?;
+        if prior_captured.state.is_none() {
+            mutation.require_absent(refinement::path(prior)?);
+        }
+        for (path, raw) in prior_captured.files {
+            mutation.require_unchanged(path, raw);
+        }
         session.apply(mutation).map_err(fail)?;
         self.progress(session.root(), resources)
     }
@@ -1696,6 +1767,9 @@ impl Work {
             return self.guard_frontier_completion(mutation, root, resources, final_result, raw);
         }
         let evaluated = self.evaluate(root, resources)?;
+        if evaluated.refinements.is_none() {
+            mutation.require_absent(refinement::path(self)?);
+        }
         let node = evaluated.nodes.last().expect("nonempty tree");
         let output = evaluated
             .current
@@ -3110,6 +3184,7 @@ mod tests {
                 children: vec!["a".into(), "b".into()],
             },
             ranges: vec![range.clone()],
+            refinement: None,
         };
         let question = WorkQuestion {
             id: "a:authority".into(),

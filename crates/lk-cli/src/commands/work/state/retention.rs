@@ -146,11 +146,13 @@ fn capture_retention(root: &Path, id: &str, cutoff: i64) -> miette::Result<Reten
         "consumption.json",
         "finalization-action.json",
         "inspection-actions.json",
+        "inspection-refinements.json",
     ]
     .into_iter()
     .map(|name| work_path(id, name))
     .collect::<miette::Result<BTreeSet<_>>>()?;
-    let nodes = work.nodes()?;
+    let captured = work.capture_refinements(root)?;
+    let nodes = captured.nodes;
     for node in &nodes {
         known.insert(output_path(id, &node.id)?);
     }
@@ -177,6 +179,14 @@ fn capture_retention(root: &Path, id: &str, cutoff: i64) -> miette::Result<Reten
         }
         let raw = read_optional(root, &path)?
             .ok_or_else(|| fail("work artifact disappeared during retention capture"))?;
+        if (path == super::refinement::path(&work)? && captured.files.get(&path) != Some(&raw))
+            || captured
+                .files
+                .get(&path)
+                .is_some_and(|expected| expected != &raw)
+        {
+            return Err(fail("refinement changed during retention capture"));
+        }
         if path
             .file_name()
             .is_some_and(|name| name == "frontier-seal.json")
@@ -201,6 +211,10 @@ fn capture_retention(root: &Path, id: &str, cutoff: i64) -> miette::Result<Reten
                 || Some(stored.output.node_id.as_str())
                     != path.file_stem().and_then(|name| name.to_str())
                 || revision(&stored.output)? != stored.output_revision
+                || nodes
+                    .iter()
+                    .find(|node| node.id == stored.output.node_id)
+                    .is_none_or(|node| node.refinement != stored.refinement)
             {
                 return Err(fail("invalid retained work observation"));
             }
@@ -214,6 +228,13 @@ fn capture_retention(root: &Path, id: &str, cutoff: i64) -> miette::Result<Reten
         }
         bytes += raw.len();
         revisions.insert(path, lk_core::concept::file_revision(&raw));
+    }
+    if captured
+        .files
+        .keys()
+        .any(|path| !revisions.contains_key(path))
+    {
+        return Err(fail("refinement disappeared during retention capture"));
     }
     let read = |name| -> miette::Result<Option<String>> {
         let path = work_path(id, name)?;
@@ -238,7 +259,7 @@ fn capture_retention(root: &Path, id: &str, cutoff: i64) -> miette::Result<Reten
                 if seal.work_id != id || seal.root_node != node.id {
                     return Err(fail("published work seal root identity differs"));
                 }
-                work.verify_stored_dependencies(&outputs, std::slice::from_ref(&node.id))?;
+                work.verify_stored_dependencies(&outputs, std::slice::from_ref(&node.id), &nodes)?;
                 if seal.root_output_revision != outputs[&node.id].output_revision {
                     return Err(fail(
                         "published work root observation differs from its seal",
@@ -279,7 +300,7 @@ fn capture_retention(root: &Path, id: &str, cutoff: i64) -> miette::Result<Reten
             return Err(fail("consumed source work has no queue subject"));
         };
         let node = nodes.last().expect("nonempty work tree");
-        work.verify_stored_dependencies(&outputs, std::slice::from_ref(&node.id))?;
+        work.verify_stored_dependencies(&outputs, std::slice::from_ref(&node.id), &nodes)?;
         let output = &outputs[&node.id];
         if work.context["purpose"]["extraction_scope"]["policy"] != "source-proposals-v1"
             || work.context["purpose"]["task_kind"] != "extract-concepts"

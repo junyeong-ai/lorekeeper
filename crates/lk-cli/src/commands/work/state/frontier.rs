@@ -145,7 +145,7 @@ impl FrontierSeal {
             .iter()
             .map(|reference| reference.node_id.clone())
             .collect::<Vec<_>>();
-        work.verify_stored_dependencies(outputs, &required)?;
+        work.verify_stored_dependencies(outputs, &required, &work.nodes()?)?;
         self.proof.verify(work, outputs)?;
         Ok(())
     }

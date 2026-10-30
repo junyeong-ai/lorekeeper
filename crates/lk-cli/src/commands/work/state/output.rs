@@ -1,6 +1,7 @@
 use super::*;
 
 const SCHEMA: &str = "work-output-retained-questions-v1";
+const REFINEMENT_SCHEMA: &str = "work-output-refinement-v1";
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -56,6 +57,12 @@ struct Record {
         deserialize_with = "present"
     )]
     retained_questions: Option<RetainedQuestions>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present"
+    )]
+    refinement: Option<String>,
 }
 
 fn present<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
@@ -76,6 +83,7 @@ impl StoredOutput {
             output,
             reused_from,
             retained: None,
+            refinement: None,
         };
         let full_bytes = encoded(&stored.output)?.len();
         if full_bytes <= max_result_bytes {
@@ -149,8 +157,13 @@ impl StoredOutput {
             output,
             output_revision: self.output_revision.clone(),
             reused_from: self.reused_from.clone(),
-            schema: self.retained.as_ref().map(|_| SCHEMA.into()),
+            schema: if self.refinement.is_some() {
+                Some(REFINEMENT_SCHEMA.into())
+            } else {
+                self.retained.as_ref().map(|_| SCHEMA.into())
+            },
             retained_questions: self.retained.clone(),
+            refinement: self.refinement.clone(),
         })
     }
 
@@ -218,10 +231,19 @@ impl<'de> Deserialize<'de> for StoredOutput {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         use serde::de::Error;
         let mut record = Record::deserialize(deserializer)?;
+        if let Some(refinement) = &record.refinement {
+            require_id(refinement).map_err(D::Error::custom)?;
+            if record.schema.as_deref() != Some(REFINEMENT_SCHEMA) {
+                return Err(D::Error::custom("invalid refinement output schema"));
+            }
+        } else if record.schema.as_deref() == Some(REFINEMENT_SCHEMA) {
+            return Err(D::Error::custom("refinement output has no provenance"));
+        }
         match (&record.schema, &record.retained_questions) {
             (None, None) => {}
+            (Some(schema), None) if schema == REFINEMENT_SCHEMA => {}
             (Some(schema), Some(retained))
-                if schema == SCHEMA
+                if (schema == SCHEMA || schema == REFINEMENT_SCHEMA)
                     && (!retained.source_questions.is_empty()
                         || !retained.unresolved.is_empty()) =>
             {
@@ -271,6 +293,7 @@ impl<'de> Deserialize<'de> for StoredOutput {
             output_revision: record.output_revision,
             reused_from: record.reused_from,
             retained: record.retained_questions,
+            refinement: record.refinement,
         })
     }
 }
