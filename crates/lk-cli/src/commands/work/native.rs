@@ -388,6 +388,12 @@ mod tests {
         let count = selected["contracts"].as_array().unwrap().len();
         let request = selected_request(&config, &[selected.clone(), selected]).unwrap();
         assert_eq!(request["contracts"].as_array().unwrap().len(), count);
+        assert!(
+            request["instructions"]
+                .as_str()
+                .unwrap()
+                .contains("replace the entire current discovery query list")
+        );
         assert_eq!(
             request["tasks"][0]["contract_indices"],
             request["tasks"][1]["contract_indices"]
@@ -402,6 +408,12 @@ mod tests {
         let completed = json!({"kind":"finalize","work_id":work.plan.id,"context":context,"input_revision":"root-input","output":{"summary":"Pinned finding","source_questions":[{"id":"question"}]},"evidence":work.plan.resources});
         let request = finalization_request(&config(), &task, &work, "scope", &completed).unwrap();
         assert_eq!(request["completed"], completed);
+        assert!(
+            request["instructions"]
+                .as_str()
+                .unwrap()
+                .contains("replace the entire current discovery query list")
+        );
         assert_eq!(request["context_revision"], "scope");
         assert_eq!(request["completed"]["input_revision"], "root-input");
         assert!(

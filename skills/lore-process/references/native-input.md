@@ -54,6 +54,10 @@ a completed Work. Each entry has exactly `status`, `value` and `reason`:
 - Extraction discovery: `status: needs-discovery`, `value: {queries: [...]}` and a
   concrete nonblank reason. Each explicit lexical query has `query`, `phrase` and
   `spacing`; supply 1–16 nonblank queries. Other task kinds cannot use this state.
+  This is the complete replacement query list, not additions to the current recipe.
+  Include current queries still needed for the extraction; omitted queries are not
+  carried forward. Native validation checks the resulting scope afresh. Changing
+  queries alone does not establish that the missing semantic evidence was obtained.
 
 An extraction value is `{concepts: [...]}` using the supplied concept schema: names,
 aliases, categories, explicit new/reuse admission, grounding and RSS article selections
