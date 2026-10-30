@@ -287,12 +287,14 @@ impl Refinements {
         let reserve = encoded(&json!({placeholder.clone(): ActionRecord {
             node_id:placeholder.clone(), action:InspectionAction {
                 input_revision:placeholder.clone(), request_revision:placeholder,
-                reason:"x".repeat(work.plan.max_result_bytes),
+                reason:String::new(),
                 capacity:Some(inspection::OutputCapacity { actual_bytes:usize::MAX,
                     max_bytes:work.plan.max_result_bytes }),
             }
         }}))?
-        .len();
+        .len()
+        .checked_add(work.plan.max_result_bytes)
+        .ok_or_else(|| fail("refinement action reservation overflow"))?;
         let bytes = self.encode(work)?.len();
         let slots = work.max_input_bytes.saturating_sub(bytes) / reserve;
         if slots == 0 {
@@ -931,5 +933,38 @@ mod tests {
             assert!(work.progress(root.path(), &resources).unwrap().ready.len() > 1);
             assert_eq!(original, std::fs::read(&legacy).unwrap());
         }
+    }
+
+    #[test]
+    fn refinement_reserves_large_declared_results_without_allocating_the_allowance() {
+        let root = tempfile::tempdir().unwrap();
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let (ordinary, mut resources) = fixture(&session);
+        resources[0].text = "abc🙂def".into();
+        let work = Work::create(
+            &session,
+            &resources,
+            "wide-capacity",
+            ordinary.context,
+            WorkLimits {
+                max_input_bytes: usize::MAX,
+                max_result_bytes: usize::MAX / 8,
+            },
+        )
+        .unwrap();
+        let node = &work.plan.parts[0].id;
+        hold(&work, &session, &resources, node);
+        let (mutation, preview) = work
+            .plan_refinement(root.path(), &resources, node, 2, |_| Ok("contract".into()))
+            .unwrap();
+        assert!(preview.inspection_nodes.len() > 1);
+        session.apply(mutation).unwrap();
+        assert!(
+            work.prepare_inspections(root.path(), &resources, 4)
+                .unwrap()
+                .1
+                .len()
+                > 1
+        );
     }
 }
