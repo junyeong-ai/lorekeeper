@@ -113,5 +113,10 @@ fn exact_packet_reuse_preserves_paid_bytes_and_defers_only_its_target_on_both_ho
             std::fs::read(root.join(receipt_path)).unwrap(),
             original_receipt
         );
+        std::fs::write(root.join(receipt_path), b"{").unwrap();
+        let (_, corrupt) = fixture.run("process");
+        assert_eq!(corrupt["halted"], true, "{engine}: {corrupt}");
+        assert_eq!(corrupt["semantic_calls"], 0, "{engine}: {corrupt}");
+        assert_eq!(std::fs::read(root.join(receipt_path)).unwrap(), b"{");
     }
 }

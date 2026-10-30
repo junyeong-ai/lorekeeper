@@ -180,9 +180,14 @@ impl Selection {
         self.guard_pages(root, pages, &mut plan)?;
         if let Some(raw) = &before {
             plan.require_unchanged(path, raw.clone());
-            let captured = self.capture_ledger(root)?;
-            for (path, raw) in captured.raw.into_iter().chain(captured.dependencies) {
-                plan.require_unchanged(path, raw);
+            if head
+                .as_ref()
+                .is_none_or(|head| head.selection_id != self.id)
+            {
+                let captured = self.capture_ledger(root)?;
+                for (path, raw) in captured.raw.into_iter().chain(captured.dependencies) {
+                    plan.require_unchanged(path, raw);
+                }
             }
         } else {
             plan.create(path, after);
