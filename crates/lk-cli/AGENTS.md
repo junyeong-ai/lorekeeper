@@ -243,8 +243,9 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   requests, node input revisions and standalone record formats unchanged. New node records
   use `work-output-retained-questions-v1` only when needed: preserve exact question kinds,
   IDs, payloads and ordering, and digest the reconstructed full output. Older readers refuse
-  the new record; keep legacy bytes, seals and paid observations untouched. Only reductions
-  with active inherited questions change their native instruction contract. Reserve the
+  the new record; keep legacy bytes, seals and paid observations untouched. Retained-question
+  instructions apply only to reductions with active inherited questions. Bind node-role
+  instructions to the native contract without changing canonical input revisions. Reserve the
   native retained-position envelope before the host call; reject actual assembled overflow.
   Fresh owner/currentness validation remains authoritative. Native range/text mapping
   is already verified; workers can copy

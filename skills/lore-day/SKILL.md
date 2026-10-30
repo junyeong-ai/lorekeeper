@@ -5,7 +5,7 @@ description: Manages the Lorekeeper task board and daily knowledge brief through
   and reports source freshness. Use for this board or its brief, not unrelated questions
   or external task services.
 metadata:
-  version: 0.108.1
+  version: 0.108.2
 ---
 
 # Lorekeeper working day
