@@ -118,7 +118,9 @@ pub enum WorkCommand {
     /// Refine a held audit inspection without changing its canonical plan or paid observations
     #[cfg(unix)]
     Refine {
+        /// Current audit Work identifier returned by plan
         work_id: String,
+        /// Unfinished ready inspection node with an exact native processing action
         node_id: String,
         /// Maximum Unicode scalar characters per smaller inspection assignment
         #[arg(long)]

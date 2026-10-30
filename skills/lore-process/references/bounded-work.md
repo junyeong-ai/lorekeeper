@@ -169,7 +169,7 @@ declaration retain binary reduction and resume without rewriting their observati
 Actual request and result limits still apply. Fewer reduction calls do not establish
 semantic equivalence, lower billed cost or complete corpus coverage.
 
-For audit Work with an exact current inspection action, an operator can explicitly
+On Unix, for audit Work with an exact current inspection action, an operator can explicitly
 refine that unfinished node without changing its canonical plan or configuration.
 Use a fresh workflow with the original selected configuration and existing
 `LORE_EXECUTION_PROFILE` context; default lease contention still refuses:
