@@ -227,8 +227,6 @@ fn capture_retention(root: &Path, id: &str, cutoff: i64) -> miette::Result<Reten
             }
             stored.validate_bounds(&work)?;
             if let Some(reused) = &stored.reused_from {
-                require_id(&reused.work_id)?;
-                require_id(&reused.node_id)?;
                 references.insert(reused.work_id.clone());
             }
             outputs.insert(stored.output.node_id.clone(), stored);
@@ -1091,6 +1089,87 @@ mod tests {
         );
         assert!(Work::load(root.path(), &sealed.plan.id).is_ok());
         assert!(Work::load(root.path(), &pending.plan.id).is_ok());
+    }
+
+    #[test]
+    fn malformed_reuse_provenance_refuses_retention_without_removing_independent_work() {
+        let root = tempfile::tempdir().unwrap();
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let source = resources();
+        let old = Work::create(&session, &source, "old", context("old"), limits()).unwrap();
+        publish(&old, &session, &source);
+        let current = Work::create(&session, &source, "new", context("new"), limits()).unwrap();
+        current
+            .reuse_from(
+                &session,
+                &old,
+                &old.plan.parts[0].id,
+                &current.plan.parts[0].id,
+                &source,
+            )
+            .unwrap();
+        let independent = Work::create(
+            &session,
+            &source,
+            "independent",
+            context("independent"),
+            limits(),
+        )
+        .unwrap();
+        publish(&independent, &session, &source);
+        let cutoff = jiff::Timestamp::now().as_second() + 1;
+        let path = root
+            .path()
+            .join(output_path(&current.plan.id, &current.plan.parts[0].id).unwrap());
+        let original = std::fs::read(&path).unwrap();
+        let wire: Value = serde_json::from_slice(&original).unwrap();
+        let before = walkdir::WalkDir::new(root.path().join(".lorekeeper/work"))
+            .into_iter()
+            .map(Result::unwrap)
+            .filter(|entry| entry.file_type().is_file())
+            .map(|entry| {
+                (
+                    entry.path().to_owned(),
+                    std::fs::read(entry.path()).unwrap(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            prune_published(root.path(), None, cutoff).unwrap().removed,
+            1
+        );
+        for field in ["work_id", "node_id", "output_revision", "content_revision"] {
+            let mut corrupt = wire.clone();
+            corrupt["reused_from"][field] = "invalid-provenance".into();
+            let corrupt = serde_json::to_vec(&corrupt).unwrap();
+            std::fs::write(&path, &corrupt).unwrap();
+            assert!(
+                prune_published(root.path(), None, cutoff).is_err(),
+                "{field}"
+            );
+            assert!(
+                prune_published(root.path(), Some(&session), cutoff).is_err(),
+                "{field}"
+            );
+            for (file, bytes) in &before {
+                assert_eq!(
+                    std::fs::read(file).unwrap(),
+                    if file == &path { &corrupt } else { bytes }.as_slice()
+                );
+            }
+            assert!(
+                !root
+                    .path()
+                    .join(".lorekeeper/mutation/pending.json")
+                    .exists()
+            );
+        }
+        std::fs::write(&path, &original).unwrap();
+        let report = prune_published(root.path(), Some(&session), cutoff).unwrap();
+        assert_eq!(report.removed, 1);
+        assert_eq!(report.retained, 2);
+        assert_eq!(std::fs::read(path).unwrap(), original);
+        assert!(Work::load(root.path(), &old.plan.id).is_ok());
     }
 
     #[test]

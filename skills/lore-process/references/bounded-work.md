@@ -421,6 +421,10 @@ assigned exact resources/ranges match. It never claims a new read. Changed-sourc
 parts and reductions must be performed again; do not copy hashes into old drafts.
 Refined source or destination nodes require their complete refinement proof and
 are not accepted by this cross-Work reuse route.
+Stored `reused_from` keeps `work_id`, `node_id`, `output_revision` and
+`content_revision` as native 64-character lowercase hexadecimal identifiers.
+Malformed identifiers refuse reads and retention without rewriting observations.
+This attribution does not renew the historical result or certify current source freshness.
 Derived work under `.lorekeeper/work/` supports resumption, not historical proof
 or a second canonical knowledge store. Preserve unfinished work.
 An explicit single-part plan is also resumable work. If a verified sealed final

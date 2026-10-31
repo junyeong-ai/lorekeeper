@@ -185,6 +185,20 @@ struct Reuse {
     content_revision: String,
 }
 
+impl Reuse {
+    fn validate(&self) -> miette::Result<()> {
+        for (field, value) in [
+            ("work_id", &self.work_id),
+            ("node_id", &self.node_id),
+            ("output_revision", &self.output_revision),
+            ("content_revision", &self.content_revision),
+        ] {
+            require_id(value).map_err(|error| fail(format!("invalid reuse {field}: {error}")))?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Seal {
@@ -3354,6 +3368,50 @@ mod tests {
                     .exists()
             );
         }
+    }
+
+    #[test]
+    fn reuse_provenance_validates_reads_without_renewing_historical_source_results() {
+        let root = tempfile::tempdir().unwrap();
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let mut source = resources();
+        source[0].text = "Exact retained evidence.".into();
+        let old = Work::create(&session, &source, "old", context("old"), limits()).unwrap();
+        let old_node = &old.plan.parts[0].id;
+        let output = draft(&old, root.path(), old_node, &source);
+        let summary = output.summary.clone();
+        old.record(&session, output, &source).unwrap();
+        let current = Work::create(&session, &source, "new", context("new"), limits()).unwrap();
+        let node = &current.plan.parts[0].id;
+        current
+            .reuse_from(&session, &old, old_node, node, &source)
+            .unwrap();
+        let path = root
+            .path()
+            .join(output_path(&current.plan.id, node).unwrap());
+        let original = std::fs::read(&path).unwrap();
+        let wire: Value = serde_json::from_slice(&original).unwrap();
+        let mut changed = draft(&old, root.path(), old_node, &source);
+        changed.summary.push_str(" Later interpretation.");
+        old.record(&session, changed, &source).unwrap();
+        assert!(current.progress(root.path(), &source).unwrap().complete);
+        assert_eq!(
+            current.result(root.path(), &source).unwrap()["output"]["summary"],
+            summary
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        for field in ["work_id", "node_id", "output_revision", "content_revision"] {
+            let mut corrupt = wire.clone();
+            corrupt["reused_from"][field] = "invalid-provenance".into();
+            let corrupt = serde_json::to_vec(&corrupt).unwrap();
+            std::fs::write(&path, &corrupt).unwrap();
+            assert!(current.progress(root.path(), &source).is_err(), "{field}");
+            assert!(current.result(root.path(), &source).is_err(), "{field}");
+            assert_eq!(std::fs::read(&path).unwrap(), corrupt);
+        }
+        std::fs::write(&path, &original).unwrap();
+        assert!(current.progress(root.path(), &source).unwrap().complete);
+        assert_eq!(std::fs::read(path).unwrap(), original);
     }
 
     #[test]

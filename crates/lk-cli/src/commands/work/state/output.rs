@@ -231,6 +231,9 @@ impl<'de> Deserialize<'de> for StoredOutput {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         use serde::de::Error;
         let mut record = Record::deserialize(deserializer)?;
+        if let Some(reused) = &record.reused_from {
+            reused.validate().map_err(D::Error::custom)?;
+        }
         if let Some(refinement) = &record.refinement {
             require_id(refinement).map_err(D::Error::custom)?;
             if record.schema.as_deref() != Some(REFINEMENT_SCHEMA) {
@@ -360,6 +363,46 @@ mod tests {
             unresolved: vec![question("c")],
             resolutions: vec![],
         }
+    }
+
+    #[test]
+    fn reuse_provenance_preserves_legacy_bytes_and_refuses_invalid_identifiers() {
+        let stored = StoredOutput::build(
+            output(),
+            &[],
+            8192,
+            Some(Reuse {
+                work_id: "0".repeat(64),
+                node_id: "1".repeat(64),
+                output_revision: "a".repeat(64),
+                content_revision: "f".repeat(64),
+            }),
+        )
+        .unwrap();
+        let raw = encoded(&stored).unwrap();
+        let decoded: StoredOutput = serde_json::from_str(&raw).unwrap();
+        assert_eq!(encoded(&decoded).unwrap(), raw);
+        let wire: Value = serde_json::from_str(&raw).unwrap();
+        for field in ["work_id", "node_id", "output_revision", "content_revision"] {
+            for invalid in [
+                String::new(),
+                "a".repeat(63),
+                "G".repeat(64),
+                "A".repeat(64),
+            ] {
+                let mut corrupt = wire.clone();
+                corrupt["reused_from"][field] = invalid.into();
+                let error = serde_json::from_value::<StoredOutput>(corrupt)
+                    .err()
+                    .unwrap();
+                assert!(error.to_string().contains(field), "{field}: {error}");
+            }
+        }
+        let mut legacy = wire;
+        legacy.as_object_mut().unwrap().remove("reused_from");
+        assert!(serde_json::from_value::<StoredOutput>(legacy.clone()).is_ok());
+        legacy["reused_from"] = Value::Null;
+        assert!(serde_json::from_value::<StoredOutput>(legacy).is_ok());
     }
 
     #[test]
