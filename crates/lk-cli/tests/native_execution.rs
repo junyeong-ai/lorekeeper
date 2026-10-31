@@ -12,6 +12,9 @@ mod packet_computation;
 #[path = "native_execution/inspection_refinement.rs"]
 mod inspection_refinement;
 
+#[path = "native_execution/inspection_admission.rs"]
+mod inspection_admission;
+
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};

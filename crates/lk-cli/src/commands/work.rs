@@ -1660,13 +1660,8 @@ fn prepare_task_in_session(
             }
             ScreeningPreparation::Source { work, prepared } => {
                 persist_prepared(session, config, config_revision, &prepared)?;
-                if let Err(error) = work.prepare_inspection(root, &prepared.resources) {
-                    if error.downcast_ref::<state::InputCapacity>().is_some() {
-                        return Ok(TaskWork::Admission {
-                            reason: error.to_string(),
-                        });
-                    }
-                    return Err(error);
+                if let Some(reason) = inspection_admission(root, &work, &prepared.resources)? {
+                    return Ok(TaskWork::Admission { reason });
                 }
                 return Ok(TaskWork::Source { id: work.plan.id });
             }
@@ -1809,15 +1804,32 @@ fn prepare_task_in_session(
             return Ok(TaskWork::Finalization { id: work.plan.id });
         }
     }
-    if let Err(error) = work.prepare_inspection(root, &prepared.resources) {
-        if error.downcast_ref::<state::InputCapacity>().is_some() {
-            return Ok(TaskWork::Admission {
-                reason: error.to_string(),
-            });
-        }
-        return Err(error);
+    if let Some(reason) = inspection_admission(root, &work, &prepared.resources)? {
+        return Ok(TaskWork::Admission { reason });
     }
     Ok(TaskWork::Partitioned { id: work.plan.id })
+}
+
+fn inspection_admission(
+    root: &Path,
+    work: &Work,
+    resources: &[lk_core::semantic::SemanticResource],
+) -> miette::Result<Option<String>> {
+    let request = match work.prepare_inspection(root, resources) {
+        Ok((_, request)) => request,
+        Err(error) if error.downcast_ref::<state::InputCapacity>().is_some() => {
+            return Ok(Some(error.to_string()));
+        }
+        Err(error) => return Err(error),
+    };
+    let Some(request) = request else {
+        return Ok(None);
+    };
+    work.load_inspection_action(
+        root,
+        &request,
+        &super::execution::observation::contract_revision(&request)?,
+    )
 }
 
 pub(super) fn prepare_audit(
@@ -3517,6 +3529,90 @@ mod tests {
         let path = root.join(path);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, raw).unwrap();
+    }
+
+    #[test]
+    fn native_inspection_admission_checks_only_the_next_exact_request() {
+        for (index, current_contract) in [(0, true), (1, true), (0, false)] {
+            let root = tempfile::tempdir().unwrap();
+            let session = MutationSession::acquire(root.path()).unwrap();
+            let text = "Source-scoped evidence.\n\n".repeat(1000);
+            let resources = vec![lk_core::semantic::SemanticResource {
+                address: "wiki/documents/source.md".into(),
+                revision: file_revision(&text),
+                authority: lk_core::semantic::SemanticAuthority::Page,
+                text,
+            }];
+            let work = Work::create(
+                &session,
+                &resources,
+                "subject",
+                json!({"purpose":{"kind":"synthesis","locale":"en"}}),
+                WorkLimits {
+                    max_input_bytes: 8192,
+                    max_result_bytes: 2048,
+                },
+            )
+            .unwrap();
+            let (_, requests) = work
+                .prepare_inspections(root.path(), &resources, 2)
+                .unwrap();
+            assert_eq!(requests.len(), 2);
+            let contract = if current_contract {
+                super::super::execution::observation::contract_revision(&requests[index]).unwrap()
+            } else {
+                file_revision("older-native-contract")
+            };
+            let mutation = work
+                .plan_inspection_action(
+                    root.path(),
+                    &resources,
+                    &requests[index],
+                    &contract,
+                    "Explicit source-scoped action required.".into(),
+                )
+                .unwrap();
+            session.apply(mutation).unwrap();
+            let action = root
+                .path()
+                .join(".lorekeeper/work")
+                .join(&work.plan.id)
+                .join("inspection-actions.json");
+            let before = std::fs::read(&action).unwrap();
+            assert_eq!(
+                inspection_admission(root.path(), &work, &resources)
+                    .unwrap()
+                    .is_some(),
+                index == 0 && current_contract
+            );
+            if index == 1 {
+                work.record(
+                    &session,
+                    WorkOutput {
+                        work_id: work.plan.id.clone(),
+                        node_id: requests[0]["node_id"].as_str().unwrap().into(),
+                        input_revision: requests[0]["input_revision"].as_str().unwrap().into(),
+                        summary: "The exact assigned source evidence was read.".into(),
+                        findings: vec![],
+                        source_questions: vec![],
+                        unresolved: vec![],
+                        resolutions: vec![],
+                    },
+                    &resources,
+                )
+                .unwrap();
+                assert!(
+                    inspection_admission(root.path(), &work, &resources)
+                        .unwrap()
+                        .is_some()
+                );
+                assert_eq!(work.progress(root.path(), &resources).unwrap().completed, 1);
+            }
+            assert_eq!(std::fs::read(&action).unwrap(), before);
+            std::fs::write(&action, "{}").unwrap();
+            assert!(inspection_admission(root.path(), &work, &resources).is_err());
+            assert_eq!(std::fs::read(action).unwrap(), b"{}");
+        }
     }
 
     fn completed_audit_work(root: &Path) -> (Work, Prepared, Value) {

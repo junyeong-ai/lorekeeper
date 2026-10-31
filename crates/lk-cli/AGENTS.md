@@ -168,6 +168,10 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   Prepare ready native nodes and their progress from one captured evaluation. Refresh
   the complete scope after the host returns before recording; added discovery matches
   invalidate work too. Never retain a candidate capture across host execution.
+  Queue preparation checks the next exact evidence request's current processing action
+  in that checkpoint, after reusable root/frontier completion. A later held node cannot
+  suppress an earlier ready request. Keep the pre-host recheck for changed state; do not
+  replace complete preparation with a Work-ID hold filter.
   Progressive extraction separates complete source observations, bounded candidate-card
   screening and admitted full-body evidence. All candidate and scoped-review guards remain
   pinned; unknown or deferred decisions block completion, and card-only rejection is not
