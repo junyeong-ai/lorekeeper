@@ -301,6 +301,9 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   evidence observers and distinct-target candidate screening within remaining calls.
   Compatible roles share a fair contiguous prefix; serial finalizers and interactive
   work remain boundaries. Never filter past those boundaries or reserve skipped targets.
+  A later exact evidence action ends the queue read prefix without discarding earlier
+  eligible requests. Charge that prefix through its current admission before replanning;
+  an empty held prefix invokes no host and reserves no turn.
   Interactive roles, finalizers and publication remain serial. Supervise every child
   through exit and cleanup. Carry prepared screening requests only within their local
   pre-host queue checkpoint; any host call or writer wait invalidates their reuse.

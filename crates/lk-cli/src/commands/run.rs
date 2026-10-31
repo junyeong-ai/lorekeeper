@@ -3089,9 +3089,7 @@ mod native {
                                 self.inspection_deferred.insert(id.clone(), reason.clone());
                                 self.deferred("bounded work action", reason);
                                 self.queue_replan = true;
-                                self.queue_admitted.clear();
-                                self.record_uninvoked_queue_reads(turns, WorkOutcome::Rejected);
-                                return true;
+                                break;
                             }
                             Ok(None) => {}
                             Err(error) => return self.failure("bounded work action", error),
@@ -3120,6 +3118,9 @@ mod native {
                     _ => unreachable!("read-only queue prefix"),
                 };
                 turns.push((target, turn));
+            }
+            if turns.is_empty() {
+                return true;
             }
             if self.result.halted || self.result.cancelled || !self.configuration_is_current() {
                 self.record_uninvoked_queue_reads(turns, WorkOutcome::Rejected);
