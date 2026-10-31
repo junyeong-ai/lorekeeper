@@ -26,7 +26,7 @@ print(json.dumps(response))
 PREFIX
 "#;
 
-fn work_files(fixture: &Fixture) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+pub(super) fn work_files(fixture: &Fixture) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
     walkdir::WalkDir::new(fixture.root().join("vault/.lorekeeper/work"))
         .into_iter()
         .map(Result::unwrap)
@@ -85,7 +85,7 @@ print(json.dumps(response))
 ADMISSION
 "#;
 
-fn source_evidence_fixture(
+pub(super) fn source_evidence_fixture(
     engine: &str,
     behavior: &str,
     context: &str,

@@ -1,5 +1,9 @@
 use super::*;
 
+mod rejection;
+pub(super) use rejection::path as rejection_path;
+pub(crate) use rejection::{ObservationRejections, ObservationTextRejection};
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct OutputCapacity {
@@ -136,17 +140,24 @@ impl Work {
         request: &Value,
         contract: &str,
     ) -> miette::Result<Option<String>> {
+        let actions = read_optional(root, &work_path(&self.plan.id, "inspection-actions.json")?)?
+            .map(|raw| InspectionActions::decode(&raw, self))
+            .transpose()?;
         let captured = self.capture_refinements(root)?;
+        let rejected = ObservationRejections::load(root, self, &captured.nodes)?;
+        if let Some((_, _, rejected)) = rejected
+            && let Some(reason) = rejected.reason(self, request, contract)?
+        {
+            return Ok(Some(reason));
+        }
         if let Some(refinements) = captured.state
             && let Some(action) = refinements.action(self, request, contract)?
         {
             return Ok(Some(action.reason));
         }
-        let Some(raw) = read_optional(root, &work_path(&self.plan.id, "inspection-actions.json")?)?
-        else {
+        let Some(actions) = actions else {
             return Ok(None);
         };
-        let actions = InspectionActions::decode(&raw, self)?;
         actions.reason(self, request, contract)
     }
 
@@ -160,6 +171,11 @@ impl Work {
             .map(|raw| InspectionActions::decode(&raw, self))
             .transpose()?;
         let evaluated = self.evaluate(root, resources)?;
+        let rejected = evaluated
+            .raw
+            .get(&rejection::path(self)?)
+            .map(|raw| ObservationRejections::decode(raw, self, &evaluated.nodes))
+            .transpose()?;
         let progress = evaluated.progress();
         for id in &progress.ready {
             if progress.ready.first() != Some(id)
@@ -170,6 +186,9 @@ impl Work {
                     .refinements
                     .as_ref()
                     .is_some_and(|state| state.has_action_for_node(id))
+                && !rejected
+                    .as_ref()
+                    .is_some_and(|rejected| rejected.has_node(id))
             {
                 continue;
             }
@@ -181,6 +200,11 @@ impl Work {
             let request = self
                 .node_input(node, &evaluated.inputs, &evaluated.current)
                 .map_err(NodeInputError::report)?;
+            if let Some(rejected) = &rejected
+                && let Some(reason) = rejected.reason(self, &request, &contract(&request)?)?
+            {
+                return Ok((progress, Some(reason)));
+            }
             if let Some(refinements) = &evaluated.refinements
                 && let Some(action) = refinements.action(self, &request, &contract(&request)?)?
             {

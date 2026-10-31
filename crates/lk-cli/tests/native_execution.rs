@@ -15,6 +15,9 @@ mod inspection_refinement;
 #[path = "native_execution/inspection_admission.rs"]
 mod inspection_admission;
 
+#[path = "native_execution/observation_rejections.rs"]
+mod observation_rejections;
+
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};

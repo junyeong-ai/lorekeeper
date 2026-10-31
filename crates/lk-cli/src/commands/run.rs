@@ -1430,6 +1430,13 @@ mod native {
                         error.downcast_ref::<crate::commands::work::state::OutputCapacity>()
                     {
                         metrics.result_json_bytes = Some(capacity.actual_bytes);
+                        if let Err(error) = execution::observation::validate_evidence_response(
+                            reply.engine,
+                            &reply.bytes,
+                        ) {
+                            self.failure("bounded work receipt", error);
+                            return None;
+                        }
                         return Some(crate::commands::work::InspectionResponse::Capacity(
                             capacity.clone(),
                         ));
@@ -1447,10 +1454,36 @@ mod native {
                     .expect("decoded observation serializes")
                     .len(),
             );
-            match execution::observation::decode_observation(output, request, reply.limit) {
+            let decoded = execution::observation::decode_observation(output, request, reply.limit);
+            if (decoded.is_ok()
+                || decoded.as_ref().err().is_some_and(|error| {
+                    error
+                        .downcast_ref::<crate::commands::work::state::OutputCapacity>()
+                        .is_some()
+                }))
+                && let Err(error) =
+                    execution::observation::validate_evidence_response(reply.engine, &reply.bytes)
+            {
+                self.failure("bounded work receipt", error);
+                return None;
+            }
+            match decoded {
                 Ok(execution::observation::ObservationResponse::Complete(output)) => {
                     Some(crate::commands::work::InspectionResponse::Complete(output))
                 }
+                Ok(execution::observation::ObservationResponse::InvalidText {
+                    output,
+                    violation,
+                }) => Some(crate::commands::work::InspectionResponse::InvalidText(
+                    crate::commands::work::state::ObservationTextRejection {
+                        output,
+                        violation,
+                        response_revision: lk_core::rss_original::digest(&reply.bytes),
+                        response_json_bytes: metrics
+                            .result_json_bytes
+                            .expect("decoded observation size"),
+                    },
+                )),
                 Ok(execution::observation::ObservationResponse::NeedsAction(reason)) => Some(
                     crate::commands::work::InspectionResponse::NeedsAction(reason),
                 ),
@@ -1538,6 +1571,10 @@ mod native {
                         InspectionRecordOutcome::Rejected(reason) => {
                             metrics.outcome = WorkOutcome::Rejected;
                             ("bounded output capacity", reason)
+                        }
+                        InspectionRecordOutcome::InvalidText(reason) => {
+                            metrics.outcome = WorkOutcome::Rejected;
+                            ("bounded observation text", reason)
                         }
                         InspectionRecordOutcome::Recorded(_) => unreachable!(),
                     };

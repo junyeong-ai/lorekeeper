@@ -38,8 +38,10 @@ impl ActiveQuestions {
                 .ok_or_else(|| miette::miette!("reduction requires child observations"))?
                 .iter()
                 .map(|child| {
-                    serde_json::from_value::<WorkOutput>(child["output"].clone())
-                        .map_err(|_| miette::miette!("invalid child observation"))
+                    let output = serde_json::from_value::<WorkOutput>(child["output"].clone())
+                        .map_err(|_| miette::miette!("invalid child observation"))?;
+                    output.validate_text().map_err(miette::Report::new)?;
+                    Ok(output)
                 })
                 .collect::<miette::Result<Vec<_>>>()?,
             _ => return Err(miette::miette!("unknown evidence request kind")),

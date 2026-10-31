@@ -134,6 +134,10 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   batch. Exhaustion retains unfinished work and fails explicitly, without clipping evidence.
   Resume current explicit Work plans even when the remaining batch fits whole input;
   validate their exact manifest before using recorded observations.
+  Only freshly received unambiguous authored-text violations can create native
+  observation-rejection holds. Guard exact requests, contracts and captured responses;
+  keep evidence/inheritance, stored corruption and unknown failures strict. Preserve
+  old paid bytes, bound append-only rejection history and keep unchanged holds zero-call.
   Saved section finalizers capture fresh scoped reviews separately from source-only Work;
   guard the complete final request after the host and its context again at apply. Do not
   incorporate reviews into old Work identities or rewrite paid nodes to acquire that scope.

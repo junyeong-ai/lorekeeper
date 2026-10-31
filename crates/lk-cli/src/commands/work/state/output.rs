@@ -3,6 +3,106 @@ use super::*;
 const SCHEMA: &str = "work-output-retained-questions-v1";
 const REFINEMENT_SCHEMA: &str = "work-output-refinement-v1";
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "field", rename_all = "kebab-case", deny_unknown_fields)]
+pub(crate) enum ObservationTextError {
+    Summary,
+    FindingStatement { index: usize },
+    FindingScope { index: usize },
+    FindingEffectiveTime { index: usize },
+    FindingAttribution { index: usize },
+    SourceQuestion { index: usize },
+    Unresolved { index: usize },
+    ResolutionReason { index: usize },
+}
+
+impl ObservationTextError {
+    pub(super) fn index(&self) -> Option<usize> {
+        match self {
+            Self::Summary => None,
+            Self::FindingStatement { index }
+            | Self::FindingScope { index }
+            | Self::FindingEffectiveTime { index }
+            | Self::FindingAttribution { index }
+            | Self::SourceQuestion { index }
+            | Self::Unresolved { index }
+            | Self::ResolutionReason { index } => Some(*index),
+        }
+    }
+}
+
+impl std::fmt::Display for ObservationTextError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Summary => f.write_str("summary"),
+            Self::FindingStatement { index } => write!(f, "findings[{index}].statement"),
+            Self::FindingScope { index } => write!(f, "findings[{index}].scope"),
+            Self::FindingEffectiveTime { index } => write!(f, "findings[{index}].effective_time"),
+            Self::FindingAttribution { index } => write!(f, "findings[{index}].attribution"),
+            Self::SourceQuestion { index } => write!(f, "source_questions[{index}].question"),
+            Self::Unresolved { index } => write!(f, "unresolved[{index}].question"),
+            Self::ResolutionReason { index } => write!(f, "resolutions[{index}].reason"),
+        }?;
+        f.write_str(" requires a non-whitespace character")
+    }
+}
+
+impl std::error::Error for ObservationTextError {}
+impl miette::Diagnostic for ObservationTextError {}
+
+impl WorkOutput {
+    pub(crate) fn validate_text(&self) -> Result<(), ObservationTextError> {
+        let check = |value: &str, field| {
+            if value.trim().is_empty() {
+                Err(field)
+            } else {
+                Ok(())
+            }
+        };
+        check(&self.summary, ObservationTextError::Summary)?;
+        for (index, finding) in self.findings.iter().enumerate() {
+            check(
+                &finding.statement,
+                ObservationTextError::FindingStatement { index },
+            )?;
+            for (value, field) in [
+                (&finding.scope, ObservationTextError::FindingScope { index }),
+                (
+                    &finding.effective_time,
+                    ObservationTextError::FindingEffectiveTime { index },
+                ),
+                (
+                    &finding.attribution,
+                    ObservationTextError::FindingAttribution { index },
+                ),
+            ] {
+                if let Some(value) = value {
+                    check(value, field)?;
+                }
+            }
+        }
+        for (questions, source) in [(&self.source_questions, true), (&self.unresolved, false)] {
+            for (index, question) in questions.iter().enumerate() {
+                check(
+                    &question.question,
+                    if source {
+                        ObservationTextError::SourceQuestion { index }
+                    } else {
+                        ObservationTextError::Unresolved { index }
+                    },
+                )?;
+            }
+        }
+        for (index, resolution) in self.resolutions.iter().enumerate() {
+            check(
+                &resolution.reason,
+                ObservationTextError::ResolutionReason { index },
+            )?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct RetainedQuestions {
@@ -291,6 +391,7 @@ impl<'de> Deserialize<'de> for StoredOutput {
             }
             _ => return Err(D::Error::custom("invalid retained question record schema")),
         }
+        record.output.validate_text().map_err(D::Error::custom)?;
         Ok(Self {
             output: record.output,
             output_revision: record.output_revision,

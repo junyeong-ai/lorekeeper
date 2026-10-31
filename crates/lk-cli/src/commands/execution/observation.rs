@@ -2,7 +2,7 @@ use lk_core::execution::{AgentEngine, ExecutionProfile};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::commands::work::state::{OutputCapacity, WorkFinding, WorkOutput};
+use crate::commands::work::state::{ObservationTextError, OutputCapacity, WorkFinding, WorkOutput};
 
 mod questions;
 mod screening;
@@ -38,23 +38,26 @@ impl Invocation {
 }
 
 fn output_schema() -> Value {
+    let text =
+        json!({"type":"string","description":"Contains at least one non-whitespace character."});
+    let optional_text = json!({"type":["string","null"],"description":"Null when unknown; otherwise contains at least one non-whitespace character."});
     let range = json!({"type":"object", "additionalProperties":false,
         "properties":{"resource":{"type":"integer","minimum":0},"start":{"type":"integer","minimum":0},"end":{"type":"integer","minimum":0}},
         "required":["resource","start","end"]});
     let evidence = json!({"type":"array","minItems":1,"items":range});
     let question = json!({"type":"array","items":{"type":"object","additionalProperties":false,
-        "properties":{"question":{"type":"string"},"evidence":evidence},
+        "properties":{"question":text,"evidence":evidence},
         "required":["question","evidence"]}});
     json!({"type":"object","additionalProperties":false,
         "properties":{
-            "summary":{"type":"string"},
+            "summary":text,
             "findings":{"type":"array","items":{"type":"object","additionalProperties":false,"properties":{
-                "statement":{"type":"string"},"scope":{"type":["string","null"]},"effective_time":{"type":["string","null"]},"attribution":{"type":["string","null"]},"evidence":evidence},
+                "statement":text,"scope":optional_text,"effective_time":optional_text,"attribution":optional_text,"evidence":evidence},
                 "required":["statement","scope","effective_time","attribution","evidence"]}},
             "source_questions":question,
             "unresolved":question,
             "resolutions":{"type":"array","items":{"type":"object","additionalProperties":false,"properties":{
-                "question_key":{"type":"integer","minimum":0},"reason":{"type":"string"},"evidence":evidence},"required":["question_key","reason","evidence"]}}},
+                "question_key":{"type":"integer","minimum":0},"reason":text,"evidence":evidence},"required":["question_key","reason","evidence"]}}},
         "required":["summary","findings","source_questions","unresolved","resolutions"]})
 }
 
@@ -74,6 +77,10 @@ fn schema() -> Value {
 #[derive(Debug)]
 pub(in crate::commands) enum ObservationResponse {
     Complete(WorkOutput),
+    InvalidText {
+        output: WorkOutput,
+        violation: ObservationTextError,
+    },
     NeedsAction(String),
 }
 
@@ -252,7 +259,7 @@ fn evidence_instruction(request: &Value) -> miette::Result<String> {
         ""
     };
     Ok(format!(
-        "{EVIDENCE_INSTRUCTION_PREFIX}{reduction}{bound}{EVIDENCE_INSTRUCTION_SUFFIX}"
+        "{EVIDENCE_INSTRUCTION_PREFIX}{reduction}{bound}Summary, finding statements, present scope/time/attribution strings, new questions and resolution reasons must contain a non-whitespace character. Empty findings are valid; unknown optional metadata is null, never blank filler. {EVIDENCE_INSTRUCTION_SUFFIX}"
     ))
 }
 
@@ -381,7 +388,9 @@ fn decode(
     let size = serde_json::to_vec(&value)
         .expect("response serializes")
         .len();
-    Ok((decode_observation(value, request, limit)?, size))
+    let decoded = decode_observation(value, request, limit)?;
+    validate_evidence_response(engine, bytes)?;
+    Ok((decoded, size))
 }
 
 pub(in crate::commands) fn decode_observation(
@@ -398,6 +407,26 @@ pub(in crate::commands) fn decode_observation(
         || !["status", "observation", "action"]
             .iter()
             .all(|key| value.get(key).is_some())
+    {
+        return Err(miette::miette!(
+            "worker observation does not match the native contract"
+        ));
+    }
+    if value["observation"]["findings"]
+        .as_array()
+        .is_some_and(|findings| {
+            findings.iter().any(|finding| {
+                ![
+                    "statement",
+                    "scope",
+                    "effective_time",
+                    "attribution",
+                    "evidence",
+                ]
+                .iter()
+                .all(|field| finding.get(*field).is_some())
+            })
+        })
     {
         return Err(miette::miette!(
             "worker observation does not match the native contract"
@@ -449,7 +478,10 @@ pub(in crate::commands) fn decode_observation(
                 }
                 .into());
             }
-            Ok(ObservationResponse::Complete(output))
+            match output.validate_text() {
+                Ok(()) => Ok(ObservationResponse::Complete(output)),
+                Err(violation) => Ok(ObservationResponse::InvalidText { output, violation }),
+            }
         }
         ("needs-action", None, Some(action)) if !action.reason.trim().is_empty() => {
             Ok(ObservationResponse::NeedsAction(action.reason))
@@ -505,9 +537,146 @@ pub(in crate::commands) fn decode_response(
     Ok(output)
 }
 
+pub(in crate::commands) fn validate_evidence_response(
+    engine: AgentEngine,
+    bytes: &[u8],
+) -> miette::Result<()> {
+    #[derive(Deserialize)]
+    struct Envelope {
+        #[serde(rename = "type")]
+        kind: String,
+        subtype: String,
+        is_error: bool,
+        structured_output: Response,
+    }
+    let valid = match engine {
+        AgentEngine::Codex => serde_json::from_slice::<Response>(bytes).map(|_| ()),
+        AgentEngine::ClaudeCode => serde_json::from_slice::<Envelope>(bytes).map(|envelope| {
+            let _ = (
+                envelope.kind,
+                envelope.subtype,
+                envelope.is_error,
+                envelope.structured_output,
+            );
+        }),
+    };
+    valid.map_err(|_| miette::miette!("worker observation has duplicate, unknown or invalid fields; no observation was recorded"))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn authored_text_is_typed_without_repairing_valid_or_inherited_payloads() {
+        let evidence = json!([{"resource":0,"start":0,"end":3}]);
+        let mut valid = completion();
+        valid["observation"]["summary"] = "  Faithful summary.\n".into();
+        valid["observation"]["findings"] = json!([{"statement":" Claim. ","scope":null,"effective_time":null,"attribution":null,"evidence":evidence}]);
+        valid["observation"]["source_questions"] =
+            json!([{"question":"Open source question.","evidence":evidence}]);
+        valid["observation"]["unresolved"] =
+            json!([{"question":"Known processing concern.","evidence":evidence}]);
+        valid["observation"]["resolutions"] =
+            json!([{"question_key":0,"reason":"An established resolution.","evidence":evidence}]);
+        let cases = [
+            ("/observation/summary", ObservationTextError::Summary),
+            (
+                "/observation/findings/0/statement",
+                ObservationTextError::FindingStatement { index: 0 },
+            ),
+            (
+                "/observation/findings/0/scope",
+                ObservationTextError::FindingScope { index: 0 },
+            ),
+            (
+                "/observation/findings/0/effective_time",
+                ObservationTextError::FindingEffectiveTime { index: 0 },
+            ),
+            (
+                "/observation/findings/0/attribution",
+                ObservationTextError::FindingAttribution { index: 0 },
+            ),
+            (
+                "/observation/source_questions/0/question",
+                ObservationTextError::SourceQuestion { index: 1 },
+            ),
+            (
+                "/observation/unresolved/0/question",
+                ObservationTextError::Unresolved { index: 0 },
+            ),
+            (
+                "/observation/resolutions/0/reason",
+                ObservationTextError::ResolutionReason { index: 0 },
+            ),
+        ];
+        for engine in [AgentEngine::Codex, AgentEngine::ClaudeCode] {
+            for (path, expected) in &cases {
+                for blank in ["", " \t\n", "\u{85}\u{a0}\u{2003}\u{3000}"] {
+                    let mut invalid = valid.clone();
+                    *invalid.pointer_mut(path).unwrap() = blank.into();
+                    let raw = if engine == AgentEngine::ClaudeCode {
+                        json!({"type":"result","subtype":"success","is_error":false,"structured_output":invalid})
+                    } else {
+                        invalid
+                    };
+                    let (decoded, _) = decode(
+                        engine,
+                        &serde_json::to_vec(&raw).unwrap(),
+                        4096,
+                        &reduction(),
+                    )
+                    .unwrap();
+                    let ObservationResponse::InvalidText { output, violation } = decoded else {
+                        panic!("{path}")
+                    };
+                    assert_eq!(&violation, expected);
+                    assert_eq!(output.validate_text(), Err(violation));
+                }
+            }
+        }
+        let ObservationResponse::Complete(output) =
+            decode_observation(valid.clone(), &reduction(), 4096).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(output.summary, "  Faithful summary.\n");
+        assert_eq!(output.findings[0].statement, " Claim. ");
+        assert_eq!(output.findings[0].scope, None);
+        let mut corrupt = reduction();
+        corrupt["children"][0]["output"]["source_questions"][0]["question"] = "\u{2003}".into();
+        assert!(decode_observation(valid, &corrupt, 4096).is_err());
+        assert!(matches!(
+            decode_observation(completion(), &request(), 4096).unwrap(),
+            ObservationResponse::Complete(_)
+        ));
+    }
+
+    #[test]
+    fn incoming_text_refusals_require_unambiguous_original_response_fields() {
+        for engine in [AgentEngine::Codex, AgentEngine::ClaudeCode] {
+            let mut body = completion();
+            body["observation"]["summary"] = "".into();
+            let value = if engine == AgentEngine::ClaudeCode {
+                json!({"type":"result","subtype":"success","is_error":false,"structured_output":body})
+            } else {
+                body
+            };
+            let raw = serde_json::to_string(&value).unwrap();
+            for corrupt in [
+                raw.replace("\"summary\":\"\"", "\"summary\":\"First\",\"summary\":\"\""),
+                raw.replace("\"summary\":\"\"", "\"summary\":\"\",\"unexpected\":null"),
+                raw.replace(
+                    "\"summary\":\"\"",
+                    "\"summary\":\"\",\"work_id\":\"returned\"",
+                ),
+            ] {
+                assert_ne!(corrupt, raw);
+                assert!(decode(engine, corrupt.as_bytes(), 4096, &request()).is_err());
+            }
+        }
+    }
 
     fn reduction() -> Value {
         let evidence = json!([{"resource":0,"start":0,"end":3}]);
@@ -809,7 +978,7 @@ mod tests {
     }
 
     #[test]
-    fn reduction_scope_changes_only_its_native_instruction_contract() {
+    fn text_and_reduction_instructions_change_contract_without_rewriting_saved_requests() {
         let inspect = request();
         let mut without_questions = reduction();
         for child in without_questions["children"].as_array_mut().unwrap() {
@@ -854,8 +1023,11 @@ mod tests {
                     assert!(instruction.contains("not a whole-Work assessment"));
                     assert_ne!(contract_revision(&request).unwrap(), previous_contract);
                 } else {
-                    assert!(instruction.starts_with(&previous_instruction));
-                    assert_eq!(contract_revision(&request).unwrap(), previous_contract);
+                    assert!(
+                        instruction.starts_with(&format!("{EVIDENCE_INSTRUCTION_PREFIX}{bound}"))
+                    );
+                    assert!(instruction.contains("must contain a non-whitespace character"));
+                    assert_ne!(contract_revision(&request).unwrap(), previous_contract);
                 }
             }
             assert_eq!(serde_json::to_vec(&request).unwrap(), original);
@@ -971,7 +1143,7 @@ mod tests {
     fn reply_allowance_reserves_exact_stored_identity_and_newline() {
         let mut request = request();
         let mut reply = completion();
-        reply["observation"]["summary"] = json!("");
+        reply["observation"]["summary"] = json!("a");
         reply["observation"]["source_questions"] = json!([{"question":"Source uncertainty?","evidence":[{"resource":0,"start":0,"end":1}]}]);
         let ObservationResponse::Complete(base) =
             decode_observation(reply.clone(), &request, 2048).unwrap()
@@ -979,7 +1151,7 @@ mod tests {
             panic!()
         };
         let stored_bytes = serde_json::to_vec(&base).unwrap().len() + 1;
-        reply["observation"]["summary"] = json!("a".repeat(2048 - stored_bytes));
+        reply["observation"]["summary"] = json!("a".repeat(2048 - stored_bytes + 1));
         let limit = response_limit(
             &request,
             &EVIDENCE_IDENTITIES,

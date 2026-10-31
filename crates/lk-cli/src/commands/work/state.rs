@@ -16,7 +16,9 @@ mod output;
 mod refinement;
 mod retention;
 use frontier::{FrontierProof, FrontierSeal};
+pub(crate) use inspection::ObservationTextRejection;
 pub(crate) use inspection::OutputCapacity;
+pub(crate) use output::ObservationTextError;
 #[cfg(unix)]
 pub(crate) use output::result_bytes as output_result_bytes;
 #[cfg(unix)]
@@ -637,25 +639,21 @@ fn validate_output(
     node: &Node,
     children: &[&WorkOutput],
 ) -> miette::Result<()> {
-    nonblank(&output.summary)?;
+    output.validate_text().map_err(fail)?;
+    validate_output_structure(output, node, children)
+}
+
+fn validate_output_structure(
+    output: &WorkOutput,
+    node: &Node,
+    children: &[&WorkOutput],
+) -> miette::Result<()> {
     for finding in &output.findings {
-        nonblank(&finding.statement)?;
-        for value in [
-            &finding.scope,
-            &finding.effective_time,
-            &finding.attribution,
-        ]
-        .into_iter()
-        .flatten()
-        {
-            nonblank(value)?;
-        }
         validate_references(&finding.evidence, &node.ranges)?;
     }
     let mut open = BTreeSet::new();
     for (_, question) in output.questions() {
         nonblank(&question.id)?;
-        nonblank(&question.question)?;
         validate_references(&question.evidence, &node.ranges)?;
         if !open.insert(question.id.as_str()) {
             return Err(fail("duplicate open question id"));
@@ -664,7 +662,6 @@ fn validate_output(
     let mut resolved = BTreeSet::new();
     for resolution in &output.resolutions {
         nonblank(&resolution.id)?;
-        nonblank(&resolution.reason)?;
         validate_references(&resolution.evidence, &node.ranges)?;
         if !resolved.insert(resolution.id.as_str()) || open.contains(resolution.id.as_str()) {
             return Err(fail(
@@ -1182,6 +1179,10 @@ impl Work {
         let mut current: BTreeMap<String, StoredOutput> = BTreeMap::new();
         let mut raw = BTreeMap::from([manifest]);
         raw.extend(captured.files);
+        if let Some((path, text, _)) = inspection::ObservationRejections::load(root, self, &nodes)?
+        {
+            raw.insert(path, text);
+        }
         let mut ready = Vec::new();
         for node in &nodes {
             let path = output_path(&self.plan.id, &node.id)?;
@@ -1452,14 +1453,11 @@ impl Work {
         )
     }
 
-    fn plan_evaluated_record(
+    fn validate_output_node<'a>(
         &self,
-        root: &Path,
-        output: WorkOutput,
-        evaluated: Evaluation<'_>,
-        reused_from: Option<Reuse>,
-        additional_guards: Vec<(PathBuf, String)>,
-    ) -> miette::Result<MutationPlan> {
+        output: &WorkOutput,
+        evaluated: &'a Evaluation<'_>,
+    ) -> miette::Result<&'a Node> {
         if output.work_id != self.plan.id {
             return Err(fail("output belongs to another work"));
         }
@@ -1475,6 +1473,18 @@ impl Work {
         if input["input_revision"].as_str() != Some(output.input_revision.as_str()) {
             return Err(fail("output was written from stale or different inputs"));
         }
+        Ok(node)
+    }
+
+    fn plan_evaluated_record(
+        &self,
+        root: &Path,
+        output: WorkOutput,
+        evaluated: Evaluation<'_>,
+        reused_from: Option<Reuse>,
+        additional_guards: Vec<(PathBuf, String)>,
+    ) -> miette::Result<MutationPlan> {
+        let node = self.validate_output_node(&output, &evaluated)?;
         let children = match &node.kind {
             NodeKind::Inspect { .. } => Vec::new(),
             NodeKind::Reduce { children } => children
@@ -1491,6 +1501,10 @@ impl Work {
         let path = output_path(&self.plan.id, &node.id)?;
         let before = evaluated.raw.get(&path).cloned();
         let mut mutation = MutationPlan::default();
+        let rejected = inspection::rejection_path(self)?;
+        if !evaluated.raw.contains_key(&rejected) {
+            mutation.require_absent(rejected);
+        }
         if evaluated.refinements.is_none() {
             mutation.require_absent(refinement::path(self)?);
         }

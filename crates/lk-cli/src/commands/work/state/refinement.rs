@@ -743,6 +743,70 @@ mod tests {
     }
 
     #[test]
+    fn rejected_refined_observation_keeps_original_action_plan_and_refinement_bytes() {
+        let root = tempfile::tempdir().unwrap();
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let (work, resources) = fixture(&session);
+        let original = &work.plan.parts[0].id;
+        hold(&work, &session, &resources, original);
+        let (plan, preview) = work
+            .plan_refinement(root.path(), &resources, original, 1000, |_| {
+                Ok("contract".into())
+            })
+            .unwrap();
+        session.apply(plan).unwrap();
+        let originals = [
+            work_path(&work.plan.id, "plan.json").unwrap(),
+            work_path(&work.plan.id, "inspection-actions.json").unwrap(),
+            path(&work).unwrap(),
+        ]
+        .map(|path| {
+            let bytes = std::fs::read(root.path().join(&path)).unwrap();
+            (path, bytes)
+        });
+        let node = &preview.inspection_nodes[0];
+        let request = work.input(root.path(), node, &resources).unwrap();
+        let mut invalid = output(&work, root.path(), &resources, node);
+        invalid.summary = "\u{2003}".into();
+        let contract = "a".repeat(64);
+        let plan = work
+            .plan_observation_rejection(
+                root.path(),
+                &resources,
+                &request,
+                &contract,
+                super::super::ObservationTextRejection {
+                    output: invalid,
+                    violation: super::super::ObservationTextError::Summary,
+                    response_revision: lk_core::rss_original::digest(b"private refined response"),
+                    response_json_bytes: 300,
+                },
+            )
+            .unwrap();
+        session.apply(plan).unwrap();
+        assert!(
+            work.load_inspection_action(root.path(), &request, &contract)
+                .unwrap()
+                .is_some()
+        );
+        assert!(!work.progress(root.path(), &resources).unwrap().complete);
+        assert!(
+            !root
+                .path()
+                .join(output_path(&work.plan.id, node).unwrap())
+                .exists()
+        );
+        for (path, bytes) in &originals {
+            assert_eq!(std::fs::read(root.path().join(path)).unwrap(), *bytes);
+        }
+        std::fs::write(root.path().join(path(&work).unwrap()), "{}").unwrap();
+        assert!(
+            work.load_inspection_action(root.path(), &request, &contract)
+                .is_err()
+        );
+    }
+
+    #[test]
     fn refinement_requires_an_exact_hold_and_refuses_drift_and_invalid_coverage() {
         let root = tempfile::tempdir().unwrap();
         let session = MutationSession::acquire(root.path()).unwrap();

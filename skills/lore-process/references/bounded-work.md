@@ -77,6 +77,28 @@ native capacity rejection, not an observation. The same request defers without a
 call and independent tasks continue. The byte limit remains enforced; no oversized
 reply is trimmed or adopted. Malformed transport or corrupt state still refuses.
 
+Newly received, unambiguous native completions with blank authored text record a
+local rejection in `observation-rejections.json` (`observation-rejections-v1`).
+This is neither a model processing action nor an observation. Rust validates the
+fresh full request, native identity, evidence and inherited-question fidelity before
+recording its exact request/contract and captured-response byte digest. The typed
+field/index describes the assembled native observation, including retained question
+positions; the receipt contains no authored text. The node stays incomplete, its
+unchanged request spends no further calls, and independently admissible work can
+continue. All-held work remains Deferred and nonzero. Stored invalid observations,
+ambiguous or unknown fields, changed inputs, corrupt receipts and host/I/O failures
+remain strict failures; they do not become authored-text rejections.
+
+Rejection entries retain distinct request revisions without replacement, within the
+Work input-byte metadata bound. A full or conflicting history refuses rather than
+discarding an entry. Existing plan, observation, action and refinement bytes remain
+unchanged. Pending Work keeps this history; verified expired published Work can
+retire it with its complete dependency closure. Use a compatible reader to honor
+these holds: older binaries do not suppress requests from this new sidecar, and
+their retention treats the unrecognized file as unknown. There is no global
+downgrade lock. Old unmarked failures stay unmarked; never import an old response
+or manufacture a receipt for it.
+
 ## Native screening responses
 
 Native screening returns only `{decisions: [{candidate_ref, decision, reason}, ...]}`.
@@ -319,8 +341,11 @@ submit with `lore work record --file FILE`:
 ```
 
 Replace example ranges with exact assigned ranges supporting each observation.
-Findings may be empty; summaries and statements must be nonblank. Optional
+Findings may be empty. Summaries, finding statements, present metadata strings,
+question text and resolution reasons must contain a non-whitespace character;
+Rust checks its exact whitespace semantics without trimming or repairing values. Optional
 `effective_time`, `scope` and `attribution` are source declarations, not guesses.
+Unknown optional metadata is null in native replies, not a blank string.
 `source_questions` records questions the evidence leaves open after full inspection,
 such as competing policies without an authority, unmeasured enforcement or unproven
 source independence. Preserve them as attributed uncertainty in the final prose.

@@ -1987,6 +1987,7 @@ pub(super) fn inspection_action(
 #[cfg(unix)]
 pub(super) enum InspectionResponse {
     Complete(WorkOutput),
+    InvalidText(state::ObservationTextRejection),
     NeedsAction(String),
     Capacity(state::OutputCapacity),
 }
@@ -2004,6 +2005,7 @@ pub(super) enum InspectionRecordOutcome {
     Recorded(state::WorkProgress),
     Deferred(String),
     Rejected(String),
+    InvalidText(String),
 }
 
 #[cfg(unix)]
@@ -2223,6 +2225,27 @@ pub(super) fn record_inspections(
                                         capacity,
                                     )?,
                                     InspectionRecordOutcome::Rejected(reason),
+                                )
+                            }
+                            InspectionResponse::InvalidText(rejected) => {
+                                if rejected.output.work_id != reply.work_id
+                                    || rejected.output.node_id != reply.node_id
+                                {
+                                    return Err(miette::miette!(
+                                        "observation does not answer the selected work node"
+                                    ));
+                                }
+                                let reason =
+                                    format!("{}; no observation was recorded", rejected.violation);
+                                (
+                                    work.plan_observation_rejection(
+                                        root,
+                                        &prepared.resources,
+                                        &reply.request,
+                                        &revision,
+                                        rejected,
+                                    )?,
+                                    InspectionRecordOutcome::InvalidText(reason),
                                 )
                             }
                             InspectionResponse::Complete(_) => unreachable!(),
