@@ -1815,21 +1815,19 @@ fn inspection_admission(
     work: &Work,
     resources: &[lk_core::semantic::SemanticResource],
 ) -> miette::Result<Option<String>> {
-    let request = match work.prepare_inspection(root, resources) {
-        Ok((_, request)) => request,
+    match work.prepare_inspection(root, resources) {
+        #[cfg(unix)]
+        Ok((_, Some(request))) => work.load_inspection_action(
+            root,
+            &request,
+            &super::execution::observation::contract_revision(&request)?,
+        ),
+        Ok(_) => Ok(None),
         Err(error) if error.downcast_ref::<state::InputCapacity>().is_some() => {
-            return Ok(Some(error.to_string()));
+            Ok(Some(error.to_string()))
         }
-        Err(error) => return Err(error),
-    };
-    let Some(request) = request else {
-        return Ok(None);
-    };
-    work.load_inspection_action(
-        root,
-        &request,
-        &super::execution::observation::contract_revision(&request)?,
-    )
+        Err(error) => Err(error),
+    }
 }
 
 pub(super) fn prepare_audit(
@@ -3531,6 +3529,7 @@ mod tests {
         std::fs::write(path, raw).unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn native_inspection_admission_checks_only_the_next_exact_request() {
         for (index, current_contract) in [(0, true), (1, true), (0, false)] {
