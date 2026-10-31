@@ -2706,8 +2706,10 @@ fn short_documents_finish_between_resumed_parts_of_a_large_document() {
             .status
             .success()
     );
+    let mut reports = Vec::new();
     for _ in 0..2 {
-        let (output, _) = fixture.run("process");
+        let (output, result) = fixture.run("process");
+        reports.push(result);
         assert!(!output.status.success(), "large work remains pending");
     }
     let status = fixture
@@ -2722,7 +2724,8 @@ fn short_documents_finish_between_resumed_parts_of_a_large_document() {
             .as_str()
             .is_some_and(|path| path.contains("short"))
             && row["status"] == "done"),
-        "{status}"
+        "{status}; runs: {}",
+        serde_json::to_string(&reports).unwrap()
     );
     let calls = std::fs::read_to_string(fixture.root().join("whole-section-calls.jsonl")).unwrap();
     assert!(calls.contains("z-short.md"), "{calls}");
