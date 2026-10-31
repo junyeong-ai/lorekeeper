@@ -26,8 +26,18 @@ that an input changed. Rust validates captured revisions; do not reconstruct gua
 `completed` supplies the exact complete root, evidence mapping, source questions and
 processing concerns. Its `input_revision` is distinct from the publication
 `context_revision`. Generate from those observations without restarting preceding
-intake, discovery or full-source reading. Preserve source questions as attributed
-uncertainty; processing blockers do not become source questions or approval.
+intake, discovery or full-source reading. Native Work preserves all source questions
+and their provenance independently of the publication. Reflect task-relevant uncertainty
+with attribution; questions about unrelated captured context need not appear in this
+section or create a concept. Processing blockers do not become source questions or approval.
+
+`inspected_resources` supplies the complete planned read roster with native resource
+indices and guards. `completed.evidence` or `frontier.evidence` supplies only resources
+cited by observations. Neither roster membership nor absence from that citation mapping
+decides semantic support, owner identity or permission to reuse a concept. When a
+required identity judgment is absent from the observations, use the permitted targeted
+read or return `needs-action`. The roster contains guards, not source bodies; native
+revision fields remain opaque and domain-specific.
 
 ## Complete observation coverage
 
@@ -43,6 +53,14 @@ completion authority. The evidence mapping lists resources cited by these observ
 not all inspected resources; an omitted resource does not negate inspection coverage.
 Coverage establishes which planned inputs were inspected, not the truth of their claims.
 This does not mark the missing root node complete.
+
+A capacity-held root can remain unrecorded while this separate frontier authority
+finalizes current complete observations. Admission still requires a fitting full
+request, no processing blockers and fresh scope/configuration/completion guards.
+A changed finalizer contract can reconsider an earlier exact action; it does not
+retry or adopt the oversized root reply. The same finalizer request/action remains
+held without another call. If no current complete frontier can be admitted, the
+Work stays incomplete and independent tasks may continue.
 
 ## Semantic response
 
@@ -63,7 +81,9 @@ An extraction value is `{concepts: [...]}` using the supplied concept schema: na
 aliases, categories, explicit new/reuse admission, grounding and RSS article selections
 remain semantic judgments. A synthesis value is `{synthesis: "...", related: "..." | null}`.
 Use null or empty arrays for absent values required by the response schema. An empty
-concept list is valid. Do not add task IDs, hashes, dates, target, context, discovery,
+concept list is valid after required reads and admission judgments, including when no
+concept meets the admission policy but source questions remain open. Do not invent a concept merely to carry those questions. Do not
+hide uncertainty material to a concept you do publish. Do not add task IDs, hashes, dates, target, context, discovery,
 selection or source-question fields. Rust assembles the existing full result envelope
 from the original prepared scope, seals/stages it and publishes through guarded apply.
 Do not write result files or invoke `work finish`/`queue apply` in this native role.

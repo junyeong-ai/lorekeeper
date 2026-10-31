@@ -225,10 +225,11 @@ pub(in crate::commands) fn finalization_request(
     Ok(json!({
         "schema":"native-finalize-results-v2", "context_revision":context_revision,
         "completed":completed, "contracts":contracts,
+        "inspected_resources":work.inspection_guards()?,
         "max_input_bytes":work.max_input_bytes, "max_result_bytes":work.plan.max_result_bytes,
         "max_response_bytes":super::generation::response_limit(task, &subject, &work.context, context_revision, work.plan.max_result_bytes)?,
         "response_schema":super::generation::schema(),
-        "instructions":format!("Finalize only this exact Work from its complete guarded root observation and evidence mapping. The supplied completed object replaces work result/status setup reads; preceding discovery and full evidence observations must not restart. {}", super::generation::instruction()),
+        "instructions":format!("Finalize only this exact Work from its complete guarded root observation and evidence mapping. inspected_resources is the complete planned read roster with native resource indices and guards; completed.evidence is the cited subset. The roster is not source content or a semantic identity judgment. The supplied completed object replaces work result/status setup reads; preceding discovery and full evidence observations must not restart. {}", super::generation::instruction()),
     }))
 }
 
@@ -269,10 +270,11 @@ pub(in crate::commands) fn frontier_request(
     Ok(json!({
         "schema":"native-finalize-frontier-v2", "context_revision":work.plan.subject_revision,
         "frontier":frontier, "contracts":contracts,
+        "inspected_resources":work.inspection_guards()?,
         "max_input_bytes":work.max_input_bytes,"max_result_bytes":work.plan.max_result_bytes,
         "max_response_bytes":super::generation::response_limit(task, &subject, &work.context, &work.plan.subject_revision, work.plan.max_result_bytes)?,
         "response_schema":super::generation::schema(),
-        "instructions":format!("Finalize only this exact Work from the supplied complete current frontier. Its observations cover every planned inspection exactly once; no combined reduction or joint verdict has been recorded. Read every observation and evidence mapping. The evidence mapping lists cited resources, not every inspected resource; its omissions do not negate the verified complete inspection coverage. Compare claims only under their declared scope and effective time, and preserve every source question with attribution; an inherited resolution is not authority to resolve another open question. Processing concerns cannot be relabeled as source uncertainty. The frontier replaces work result/status setup reads; do not restart paid inspections or write a reduction output. Rust owns its distinct guarded completion proof and final publication. {}", super::generation::instruction()),
+        "instructions":format!("Finalize only this exact Work from the supplied complete current frontier. Its observations cover every planned inspection exactly once; no combined reduction or joint verdict has been recorded. Read every observation and evidence mapping. inspected_resources is the complete planned read roster with native resource indices and guards; frontier.evidence is the cited subset. The roster is not source content or a semantic identity judgment. Compare claims only under their declared scope and effective time; an inherited resolution is not authority to resolve another open question. Processing concerns cannot be relabeled as source uncertainty. The frontier replaces work result/status setup reads; do not restart paid inspections or write a reduction output. Rust owns its distinct guarded completion proof and final publication. {}", super::generation::instruction()),
     }))
 }
 
@@ -408,6 +410,14 @@ mod tests {
         let completed = json!({"kind":"finalize","work_id":work.plan.id,"context":context,"input_revision":"root-input","output":{"summary":"Pinned finding","source_questions":[{"id":"question"}]},"evidence":work.plan.resources});
         let request = finalization_request(&config(), &task, &work, "scope", &completed).unwrap();
         assert_eq!(request["completed"], completed);
+        assert_eq!(
+            request["inspected_resources"],
+            json!(work.inspection_guards().unwrap())
+        );
+        assert_eq!(
+            request["inspected_resources"][0]["guard"],
+            json!(work.plan.resources[0])
+        );
         assert!(
             request["instructions"]
                 .as_str()

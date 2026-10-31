@@ -217,7 +217,7 @@ reductions. Completed root or frontier seals retain restaging priority.
 
 When a new finalization action replaces the active `finalization-action.json`, the
 same mutation preserves its exact prior bytes in `finalization-action-history.json`
-(`work-finalization-action-history-v1`), keyed by their SHA-256. Matching checks the
+(`work-finalization-action-history-v1`), keyed by the native BLAKE3 digest of those bytes. Matching checks the
 full request and completion revision across current and historical receipts. Plans,
 observations and seals keep their identities. Keep both files with the Work; pending
 and referenced work protects them, while valid expired published work retires them

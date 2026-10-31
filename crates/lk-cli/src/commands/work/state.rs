@@ -1104,6 +1104,10 @@ impl Work {
         self.resource_guards(indices)
     }
 
+    pub(super) fn inspection_guards(&self) -> miette::Result<Vec<Value>> {
+        self.resource_guards(0..self.plan.resources.len())
+    }
+
     fn resource_guards(
         &self,
         indices: impl IntoIterator<Item = usize>,

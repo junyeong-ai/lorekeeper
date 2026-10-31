@@ -30,6 +30,16 @@ if request.get('schema') in ['native-selected-results-v3','native-finalize-resul
     else:
         assert sys.argv[sys.argv.index('--sandbox')+1]=='workspace-write'
     completed=request.get('completed') or request.get('frontier')
+    if mode=='publication-scope':
+        assert completed is not None
+        assert 'independently of published prose' in request['instructions']
+        assert 'roster membership nor omission' in request['instructions']
+        outputs=[completed['output']] if 'output' in completed else [child['output'] for child in completed['observations']]
+        assert any(output['source_questions'] for output in outputs)
+        roster=request['inspected_resources']
+        assert [entry['resource'] for entry in roster]==list(range(len(roster)))
+        if (root/'expect-uncited-owner').exists():
+            assert any(entry not in completed['evidence'] for entry in roster)
     if request['schema']=='native-finalize-frontier-v2':
         (root/'last-frontier.json').write_text(json.dumps(request))
         assert completed['observations'] and completed['proof']['nodes']
@@ -91,6 +101,8 @@ else:
             (root/'first-frontier-action.json').write_bytes(action.read_bytes())
     output={'status':'complete','observation':{'summary':'Exact supplied evidence; deployment unknown.',
         'findings':[],'source_questions':[],'unresolved':[],'resolutions':[]},'action':None}
+    if mode=='frontier-action-root-capacity' and request['node_id']==(root/'capacity-root').read_text():
+        output['observation']['summary']='x'*40000
     if mode=='frontier-action-reduce-held':
         output={'status':'needs-action','observation':None,'action':{'reason':'This exact reducer requires an explicit processing action.'}}
 if engine=='claude-code': output={'type':'result','subtype':'success','is_error':False,'structured_output':output}
@@ -327,6 +339,9 @@ impl Fixture {
         (task, plan)
     }
     fn record_ready_inspections(&self, plan: &Value) -> usize {
+        self.record_inspections(plan, false)
+    }
+    fn record_inspections(&self, plan: &Value, source_questions: bool) -> usize {
         let id = plan["work_id"].as_str().unwrap();
         let progress = self.json(&["work", "status", id, "--limit", "100"]);
         let ready = progress["ready"].as_array().unwrap();
@@ -335,8 +350,15 @@ impl Fixture {
             let node = node.as_str().unwrap();
             let request = self.json(&["work", "read", id, node]);
             assert_eq!(request["kind"], "inspect");
+            let questions = if source_questions {
+                vec![
+                    json!({"id":format!("{node}:source:0"),"question":"Was the unrelated captured deployment completed?","evidence":[request["input"]["ranges"][0]["range"]]}),
+                ]
+            } else {
+                Vec::new()
+            };
             let observation = json!({"work_id":id,"node_id":node,"input_revision":request["input_revision"],
-                "summary":"Exact retained evidence.","findings":[],"source_questions":[],"unresolved":[],"resolutions":[]});
+                "summary":"Exact retained evidence.","findings":[],"source_questions":questions,"unresolved":[],"resolutions":[]});
             let file = self.root().join("observation.json");
             std::fs::write(&file, serde_json::to_vec(&observation).unwrap()).unwrap();
             self.json(&["work", "record", "--file", file.to_str().unwrap()]);
@@ -659,6 +681,59 @@ fn sealed_invalid_synthesis_restages_without_calls_and_remains_locally_rejected(
     let repeated = fixture.run();
     assert_eq!(repeated["semantic_calls"], 0, "{repeated}");
     assert_eq!(snapshot(), before);
+}
+
+#[test]
+fn native_empty_extraction_keeps_questions_and_distinct_read_coverage_on_both_hosts() {
+    for engine in ["codex", "claude-code"] {
+        for frontier in [false, true] {
+            let fixture = Fixture::new(engine);
+            std::fs::write(fixture.root().join("expect-uncited-owner"), "expected").unwrap();
+            std::fs::write(
+                fixture.root().join("vault/wiki/concepts/existing-owner.md"),
+                "---\ntype: concept\ntitle: Existing Owner\nsource_count: 0\n---\n# Existing Owner\n\n## Synthesis\nThis protocol describes a separate identity.\n\n## Sources\n\n## Related\n",
+            ).unwrap();
+            let text = "The protocol records categories; deployment is unknown. ";
+            let (task, plan) = fixture.add_with_text(
+                "frontier",
+                lk_queue::TaskKind::ExtractConcepts,
+                true,
+                &text.repeat(if frontier { 3000 } else { 1 }),
+            );
+            let plan = plan.unwrap();
+            let count = fixture.record_inspections(&plan, true);
+            assert_eq!(count > 1, frontier);
+            let directory = fixture
+                .root()
+                .join("vault/.lorekeeper/work")
+                .join(plan["work_id"].as_str().unwrap());
+            let paid = walkdir::WalkDir::new(&directory)
+                .into_iter()
+                .map(Result::unwrap)
+                .filter(|entry| entry.file_type().is_file())
+                .map(|entry| {
+                    (
+                        entry.path().to_owned(),
+                        std::fs::read(entry.path()).unwrap(),
+                    )
+                })
+                .collect::<std::collections::BTreeMap<_, _>>();
+            std::fs::write(fixture.root().join("mode"), "publication-scope").unwrap();
+            let report = fixture.run();
+            assert_eq!(report["halted"], false, "{engine}/{frontier}: {report}");
+            assert_eq!(report["semantic_calls"], 1, "{report}");
+            assert!(fixture.done(&task), "{report}");
+            for (path, raw) in &paid {
+                assert_eq!(&std::fs::read(path).unwrap(), raw);
+            }
+            let calls = fixture.calls();
+            assert_eq!(fixture.run()["semantic_calls"], 0);
+            assert_eq!(fixture.calls(), calls);
+            for (path, raw) in &paid {
+                assert_eq!(&std::fs::read(path).unwrap(), raw);
+            }
+        }
+    }
 }
 
 #[test]
@@ -1221,6 +1296,94 @@ fn current_complete_frontier_finalizes_without_a_reduction_or_rewriting_paid_nod
                     .exists()
             );
             assert!(serde_json::to_vec(&request).unwrap().len() <= 262144);
+        }
+    }
+}
+
+#[test]
+fn changed_publication_contract_recovers_frontier_without_retrying_capacity_held_root() {
+    for engine in ["codex", "claude-code"] {
+        let fixture = Fixture::new(engine);
+        let config = std::fs::read_to_string(&fixture.config).unwrap();
+        std::fs::write(
+            &fixture.config,
+            config
+                .replace("max_calls: 6", "max_calls: 64")
+                .replace("max_input_bytes: 65536", "max_input_bytes: 131072")
+                .replace("max_result_bytes: 8192", "max_result_bytes: 16384"),
+        )
+        .unwrap();
+        let (independent, _) =
+            fixture.add("independent", lk_queue::TaskKind::SynthesizeConcept, false);
+        let (task, plan, _) =
+            fixture.paid_frontier_with_repetitions(lk_queue::TaskKind::SynthesizeConcept, 36000);
+        let id = plan["work_id"].as_str().unwrap();
+        let status = fixture.json(&["work", "status", id]);
+        let root = status["root_node"].as_str().unwrap();
+        std::fs::write(fixture.root().join("capacity-root"), root).unwrap();
+        std::fs::write(fixture.root().join("mode"), "frontier-action-root-capacity").unwrap();
+        let report = fixture.run();
+        assert_eq!(report["halted"], false, "{engine}: {report}");
+        assert!(fixture.done(&independent), "{report}");
+        assert!(!fixture.done(&task), "{report}");
+        let status = fixture.json(&["work", "status", id]);
+        assert_eq!(status["complete"], false);
+        assert!(status["total"].as_u64().unwrap() - status["parts"].as_u64().unwrap() >= 3);
+        assert_eq!(
+            status["completed"].as_u64().unwrap() + 1,
+            status["total"].as_u64().unwrap()
+        );
+        let directory = fixture.root().join("vault/.lorekeeper/work").join(id);
+        let action_file = directory.join("finalization-action.json");
+        let mut old_request: Value = serde_json::from_slice(
+            &std::fs::read(fixture.root().join("last-frontier.json")).unwrap(),
+        )
+        .unwrap();
+        old_request
+            .as_object_mut()
+            .unwrap()
+            .remove("inspected_resources");
+        old_request["instructions"] =
+            json!("Prior publication contract requiring every question in prose.");
+        let mut old_action: Value =
+            serde_json::from_slice(&std::fs::read(&action_file).unwrap()).unwrap();
+        old_action["request_revision"] = json!(lk_core::rss_original::digest(
+            &serde_json::to_vec(&old_request).unwrap()
+        ));
+        std::fs::write(&action_file, serde_json::to_vec(&old_action).unwrap()).unwrap();
+        let preserved = walkdir::WalkDir::new(&directory)
+            .into_iter()
+            .map(Result::unwrap)
+            .filter(|entry| entry.file_type().is_file())
+            .map(|entry| {
+                (
+                    entry.path().to_owned(),
+                    std::fs::read(entry.path()).unwrap(),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let calls = fixture.calls();
+        std::fs::write(fixture.root().join("mode"), "publication-scope").unwrap();
+        let recovered = fixture.run();
+        assert_eq!(recovered["halted"], false, "{engine}: {recovered}");
+        assert_eq!(fixture.calls(), calls + 1, "{recovered}");
+        assert!(fixture.done(&task), "{recovered}");
+        assert!(directory.join("frontier-seal.json").is_file());
+        assert!(!directory.join("seal.json").exists());
+        assert!(
+            !directory
+                .join("nodes")
+                .join(format!("{root}.json"))
+                .exists()
+        );
+        for (path, bytes) in &preserved {
+            assert_eq!(&std::fs::read(path).unwrap(), bytes);
+        }
+        let calls = fixture.calls();
+        assert_eq!(fixture.run()["semantic_calls"], 0);
+        assert_eq!(fixture.calls(), calls);
+        for (path, bytes) in &preserved {
+            assert_eq!(&std::fs::read(path).unwrap(), bytes);
         }
     }
 }
