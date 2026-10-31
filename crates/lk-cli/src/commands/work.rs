@@ -1796,12 +1796,13 @@ fn prepare_task_in_session(
             }
         }
         if let Some(result) = frontier_result(root, config, task, &work, &prepared)? {
-            if let Some(reason) =
-                native_finalization_action(root, task, &work, &result.request, &result.completed)?
-            {
-                return Ok(TaskWork::Admission { reason });
+            match native_finalization_hold(root, task, &work, &result.request, &result.completed)? {
+                None => return Ok(TaskWork::Finalization { id: work.plan.id }),
+                Some(FinalizationHold::DiscoveryRecovery(reason)) => {
+                    return Ok(TaskWork::Admission { reason });
+                }
+                Some(FinalizationHold::ProcessingAction(_)) => {}
             }
-            return Ok(TaskWork::Finalization { id: work.plan.id });
         }
     }
     if let Some(reason) = inspection_admission(root, &work, &prepared.resources)? {
@@ -2291,16 +2292,33 @@ fn frontier_result(
 }
 
 #[cfg(unix)]
-fn native_finalization_action(
+enum FinalizationHold {
+    ProcessingAction(String),
+    DiscoveryRecovery(String),
+}
+
+#[cfg(unix)]
+impl FinalizationHold {
+    fn reason(self) -> String {
+        match self {
+            Self::ProcessingAction(reason) | Self::DiscoveryRecovery(reason) => reason,
+        }
+    }
+}
+
+#[cfg(unix)]
+fn native_finalization_hold(
     root: &Path,
     task: &lk_queue::QueueTask,
     work: &Work,
     request: &Value,
     completed: &Value,
-) -> miette::Result<Option<String>> {
+) -> miette::Result<Option<FinalizationHold>> {
     let action = work.load_finalization_action_for(root, request, &completed["result_revision"])?;
     let recovery = discovery::recovery::blocked(root, task, request)?;
-    Ok(action.or(recovery))
+    Ok(recovery
+        .map(FinalizationHold::DiscoveryRecovery)
+        .or_else(|| action.map(FinalizationHold::ProcessingAction)))
 }
 
 #[cfg(unix)]
@@ -2317,10 +2335,10 @@ fn prepare_frontier_finalization(
     let Some(result) = frontier_result(root, config, &task, work, prepared)? else {
         return Ok(None);
     };
-    if let Some(reason) =
-        native_finalization_action(root, &task, work, &result.request, &result.completed)?
+    if let Some(hold) =
+        native_finalization_hold(root, &task, work, &result.request, &result.completed)?
     {
-        return Ok(Some(FinalizationPreparation::NeedsAction(reason)));
+        return Ok(Some(FinalizationPreparation::NeedsAction(hold.reason())));
     }
     Ok(Some(FinalizationPreparation::Result(Box::new(result))))
 }
@@ -2536,8 +2554,8 @@ fn prepare_finalization_from_capture(
                 max_input_bytes: work.max_input_bytes,
             });
         }
-        if let Some(reason) = native_finalization_action(root, &task, work, &request, &completed)? {
-            return Ok(FinalizationPreparation::NeedsAction(reason));
+        if let Some(hold) = native_finalization_hold(root, &task, work, &request, &completed)? {
+            return Ok(FinalizationPreparation::NeedsAction(hold.reason()));
         }
         if completed["output"]["unresolved"]
             .as_array()

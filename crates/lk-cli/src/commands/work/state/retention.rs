@@ -145,6 +145,7 @@ fn capture_retention(root: &Path, id: &str, cutoff: i64) -> miette::Result<Reten
         "publication.json",
         "consumption.json",
         "finalization-action.json",
+        "finalization-action-history.json",
         "inspection-actions.json",
         "inspection-refinements.json",
     ]
@@ -201,6 +202,12 @@ fn capture_retention(root: &Path, id: &str, cutoff: i64) -> miette::Result<Reten
         }
         if path
             .file_name()
+            .is_some_and(|name| name == "finalization-action-history.json")
+        {
+            super::finalization::FinalizationActionHistory::decode(&raw, &work)?;
+        }
+        if path
+            .file_name()
             .is_some_and(|name| name == "inspection-actions.json")
         {
             super::inspection::InspectionActions::decode(&raw, &work)?;
@@ -245,6 +252,11 @@ fn capture_retention(root: &Path, id: &str, cutoff: i64) -> miette::Result<Reten
     };
     let publication = read("publication.json")?;
     let consumption = read("consumption.json")?;
+    super::finalization::CapturedActions::decode(
+        read("finalization-action.json")?,
+        read("finalization-action-history.json")?,
+        &work,
+    )?;
     if publication.is_some() && consumption.is_some() {
         return Err(fail(
             "work cannot be both published and consumed source observations",
@@ -1026,6 +1038,25 @@ mod tests {
             Work::create(&session, &source, "sealed", context("sealed"), limits()).unwrap();
         let pending =
             Work::create(&session, &source, "pending", context("pending"), limits()).unwrap();
+        for work in [&published, &sealed] {
+            finish(work, &session, &source);
+            let completed = work.result(root.path(), &source).unwrap();
+            for rules in ["first", "second"] {
+                let request = json!({"work":completed,"rules":rules});
+                session
+                    .apply(
+                        work.plan_finalization_action(
+                            root.path(),
+                            &source,
+                            &completed,
+                            &request,
+                            "Exact processing hold.".into(),
+                        )
+                        .unwrap(),
+                    )
+                    .unwrap();
+            }
+        }
         finish(&sealed, &session, &source);
         sealed
             .seal(&session, &source, json!({"body":"not published"}))
@@ -1042,6 +1073,14 @@ mod tests {
                 .join(work_path(&published.plan.id, "plan.json").unwrap())
                 .exists()
         );
+        let history = root
+            .path()
+            .join(work_path(&published.plan.id, "finalization-action-history.json").unwrap());
+        let original = std::fs::read_to_string(&history).unwrap();
+        std::fs::write(&history, "{}").unwrap();
+        assert!(prune_published(root.path(), Some(&session), cutoff).is_err());
+        assert!(history.exists());
+        std::fs::write(&history, original).unwrap();
         let actual = prune_published(root.path(), Some(&session), cutoff).unwrap();
         assert_eq!(actual.bytes, preview.bytes);
         assert!(

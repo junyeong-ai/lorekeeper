@@ -208,6 +208,23 @@ finalization. Prior proposals and paid observations remain retained; standalone
 `work finish` still requires a complete current root. Corrupt or conflicting seals
 refuse; an unpublished authority transition is journaled with its prior final bytes.
 
+An exact frontier finalization action holds that finalizer request, not the remaining
+reductions. Native execution can admit the next current Reduce through its existing
+node guards and shared budget. It never retries the unchanged frontier. A reducer's
+own action or capacity hold still leaves that Work incomplete; independent targets
+may continue. Discovery-recovery holds retain their target scope and do not admit
+reductions. Completed root or frontier seals retain restaging priority.
+
+When a new finalization action replaces the active `finalization-action.json`, the
+same mutation preserves its exact prior bytes in `finalization-action-history.json`
+(`work-finalization-action-history-v1`), keyed by their SHA-256. Matching checks the
+full request and completion revision across current and historical receipts. Plans,
+observations and seals keep their identities. Keep both files with the Work; pending
+and referenced work protects them, while valid expired published work retires them
+together. Older readers understand the active v1 receipt but lack historical matching
+and conservatively retain the unknown history file. Use a compatible reader for
+archived-request suppression and cleanup; there is no global downgrade lock.
+
 Native jobs reserve fair inspection/reduction/finalization turns and retain the next
 target across runs. `execution.work.max_consecutive_calls` defaults to 4 and bounds
 fresh calls for an admitted exact Work or screening phase before another fair turn.

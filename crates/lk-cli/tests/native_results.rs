@@ -55,7 +55,7 @@ if request.get('schema') in ['native-selected-results-v3','native-finalize-resul
                 if mode=='discovery-target-drift':
                     path=root/'vault'/target; path.write_text(path.read_text()+'\nExternal change.\n')
                 results.append({'status':'needs-discovery','value':value,'reason':'Explicit fresh owner discovery is required.'}); continue
-        if mode=='frontier-action' or (mode=='action' and 'blocked' in target) or (mode=='batch-capacity' and 'blocked' in target and request['max_response_bytes'] < item['max_response_bytes']):
+        if (mode.startswith('frontier-action') and 'frontier' in target) or (mode=='action' and 'blocked' in target) or (mode=='batch-capacity' and 'blocked' in target and request['max_response_bytes'] < item['max_response_bytes']):
             results.append({'status':'needs-action','value':None,'reason':'A scoped review action is required.'}); continue
         if mode=='changed-target':
             path=root/'vault'/target; path.write_text(path.read_text()+'\nExternal change.\n')
@@ -84,8 +84,15 @@ if request.get('schema') in ['native-selected-results-v3','native-finalize-resul
 else:
     assert request['kind'] in ['inspect','reduce']
     assert mode!='frontier', 'complete paid frontier must not invoke another evidence node'
+    if mode.startswith('frontier-action'):
+        assert request['kind']=='reduce', 'paid inspections must not be repeated'
+        action=root/'vault/.lorekeeper/work'/request['work_id']/'finalization-action.json'
+        if not (root/'first-frontier-action.json').exists():
+            (root/'first-frontier-action.json').write_bytes(action.read_bytes())
     output={'status':'complete','observation':{'summary':'Exact supplied evidence; deployment unknown.',
         'findings':[],'source_questions':[],'unresolved':[],'resolutions':[]},'action':None}
+    if mode=='frontier-action-reduce-held':
+        output={'status':'needs-action','observation':None,'action':{'reason':'This exact reducer requires an explicit processing action.'}}
 if engine=='claude-code': output={'type':'result','subtype':'success','is_error':False,'structured_output':output}
 print(json.dumps(output))
 "#;
@@ -338,6 +345,14 @@ impl Fixture {
     }
 
     fn paid_frontier(&self, kind: lk_queue::TaskKind) -> (lk_queue::QueueTask, Value, Vec<Value>) {
+        self.paid_frontier_with_repetitions(kind, 36000)
+    }
+
+    fn paid_frontier_with_repetitions(
+        &self,
+        kind: lk_queue::TaskKind,
+        repetitions: usize,
+    ) -> (lk_queue::QueueTask, Value, Vec<Value>) {
         let config = std::fs::read_to_string(&self.config).unwrap();
         std::fs::write(
             &self.config,
@@ -350,7 +365,7 @@ impl Fixture {
             "frontier",
             kind,
             true,
-            &"A retained protocol observation. ".repeat(36000),
+            &"A retained protocol observation. ".repeat(repetitions),
         );
         let plan = plan.unwrap();
         let id = plan["work_id"].as_str().unwrap();
@@ -1212,7 +1227,7 @@ fn current_complete_frontier_finalizes_without_a_reduction_or_rewriting_paid_nod
 
 #[test]
 fn frontier_finalization_keeps_exact_action_and_fresh_scope_guards() {
-    for mode in ["action", "changed-target", "changed-review"] {
+    for mode in ["changed-target", "changed-review"] {
         let fixture = Fixture::new("codex");
         fixture.route_synthesis();
         let (task, plan, _) = fixture.paid_frontier(lk_queue::TaskKind::SynthesizeConcept);
@@ -1220,27 +1235,119 @@ fn frontier_finalization_keeps_exact_action_and_fresh_scope_guards() {
             .root()
             .join("vault/.lorekeeper/work")
             .join(plan["work_id"].as_str().unwrap());
+        std::fs::write(fixture.root().join("mode"), mode).unwrap();
+        let report = fixture.run();
+        assert!(!fixture.done(&task), "{mode}: {report}");
+        assert!(!directory.join("frontier-seal.json").exists());
+        assert_eq!(report["halted"], true, "{mode}: {report}");
+    }
+}
+
+#[test]
+fn held_frontier_reduces_under_native_supervision_and_preserves_paid_history() {
+    for (engine, held_reduce) in [("codex", false), ("claude-code", false), ("codex", true)] {
+        let fixture = Fixture::new(engine);
+        let config = std::fs::read_to_string(&fixture.config).unwrap();
+        std::fs::write(
+            &fixture.config,
+            config.replace("max_calls: 6", "max_calls: 64"),
+        )
+        .unwrap();
+        let (independent, _) =
+            fixture.add("independent", lk_queue::TaskKind::SynthesizeConcept, false);
+        let multilevel = engine == "codex" && !held_reduce;
+        let (task, plan, observations) = fixture.paid_frontier_with_repetitions(
+            lk_queue::TaskKind::SynthesizeConcept,
+            if multilevel { 72000 } else { 36000 },
+        );
+        let id = plan["work_id"].as_str().unwrap();
+        let directory = fixture.root().join("vault/.lorekeeper/work").join(id);
+        let original = std::fs::read(directory.join("plan.json")).unwrap();
+        let positives = std::fs::read_dir(directory.join("nodes"))
+            .unwrap()
+            .map(|entry| {
+                let path = entry.unwrap().path();
+                let raw = std::fs::read(&path).unwrap();
+                (path, raw)
+            })
+            .collect::<Vec<_>>();
         std::fs::write(
             fixture.root().join("mode"),
-            if mode == "action" {
-                "frontier-action"
+            if held_reduce {
+                "frontier-action-reduce-held"
             } else {
-                mode
+                "frontier-action"
             },
         )
         .unwrap();
         let report = fixture.run();
-        assert!(!fixture.done(&task), "{mode}: {report}");
-        assert!(!directory.join("frontier-seal.json").exists());
-        if mode == "action" {
-            assert_eq!(report["halted"], false, "{report}");
-            assert!(directory.join("finalization-action.json").is_file());
-            let count = fixture.calls();
-            let again = fixture.run();
-            assert_eq!(again["halted"], false, "{again}");
-            assert_eq!(fixture.calls(), count);
-        } else {
-            assert_eq!(report["halted"], true, "{mode}: {report}");
+        assert_eq!(report["halted"], false, "{report}");
+        assert!(!fixture.done(&task));
+        assert!(fixture.done(&independent));
+        let status = fixture.json(&["work", "status", id, "--limit", "100"]);
+        assert_eq!(status["complete"], !held_reduce, "{report}\n{status}");
+        if multilevel {
+            assert!(status["total"].as_u64().unwrap() - status["parts"].as_u64().unwrap() >= 3);
         }
+        assert_eq!(
+            std::fs::read(directory.join("plan.json")).unwrap(),
+            original
+        );
+        for (path, raw) in &positives {
+            assert_eq!(&std::fs::read(path).unwrap(), raw);
+        }
+        let active = directory.join("finalization-action.json");
+        let before = std::fs::read(&active).unwrap();
+        if held_reduce {
+            assert!(directory.join("inspection-actions.json").exists());
+            assert!(!directory.join("finalization-action-history.json").exists());
+        } else {
+            let result = fixture.json(&["work", "result", id]);
+            let questions = observations
+                .iter()
+                .flat_map(|output| output["source_questions"].as_array().unwrap().iter())
+                .cloned()
+                .collect::<Vec<_>>();
+            let returned = result["output"]["source_questions"].as_array().unwrap();
+            assert_eq!(returned.len(), questions.len());
+            for question in questions {
+                assert!(returned.contains(&question));
+            }
+            let old =
+                std::fs::read_to_string(fixture.root().join("first-frontier-action.json")).unwrap();
+            let history: Value = serde_json::from_slice(
+                &std::fs::read(directory.join("finalization-action-history.json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                history["actions"][lk_core::rss_original::digest(old.as_bytes())],
+                old
+            );
+            assert_eq!(
+                serde_json::from_slice::<Value>(&before).unwrap()["schema"],
+                "bounded-finalization-action-v1"
+            );
+        }
+        let count = fixture.calls();
+        let again = fixture.run();
+        assert_eq!(again["halted"], false, "{again}");
+        assert_eq!(
+            fixture.calls(),
+            count,
+            "unchanged held requests must spend no calls"
+        );
+        assert_eq!(std::fs::read(&active).unwrap(), before);
+        let requests = std::fs::read_to_string(fixture.root().join("calls.jsonl")).unwrap();
+        let frames = requests.lines().collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            frames.len(),
+            requests.lines().count(),
+            "same exact frame retried"
+        );
+        assert!(
+            requests
+                .lines()
+                .any(|raw| serde_json::from_str::<Value>(raw).unwrap()["kind"] == "reduce")
+        );
     }
 }

@@ -3479,10 +3479,7 @@ mod native {
             accepted
         }
 
-        async fn queue_dispatches(
-            &mut self,
-            blocked: &std::collections::BTreeMap<String, String>,
-        ) -> miette::Result<QueuePlan> {
+        async fn queue_dispatches(&mut self) -> miette::Result<QueuePlan> {
             fn flush(
                 batch: &mut Vec<(lk_queue::QueueTask, serde_json::Value)>,
                 jobs: &mut std::collections::BTreeMap<String, QueueDispatch>,
@@ -3748,10 +3745,7 @@ mod native {
                         }
                         crate::commands::work::TaskWork::Partitioned { id } => {
                             flush(&mut batch, &mut jobs);
-                            if let Some(reason) = blocked
-                                .get(&id)
-                                .or_else(|| self.inspection_deferred.get(&id))
-                            {
+                            if let Some(reason) = self.inspection_deferred.get(&id) {
                                 keys.remove(target);
                                 deferred.insert(target.clone(), vec![reason.clone()]);
                             } else {
@@ -3849,7 +3843,6 @@ mod native {
         }
 
         async fn dispatch_queue(&mut self) -> bool {
-            let mut blocked = std::collections::BTreeMap::<String, String>::new();
             'planning: loop {
                 self.queue_replan = false;
                 if self.result.halted || self.result.cancelled || !self.configuration_is_current() {
@@ -3865,7 +3858,7 @@ mod native {
                     "{}",
                     serde_json::json!({"type":"lore.queue-planning","state":"started","attempt":self.result.queue_planning.attempts,"elapsed_job_ms":self.started_at.elapsed().as_millis()})
                 );
-                let planned = self.queue_dispatches(&blocked).await;
+                let planned = self.queue_dispatches().await;
                 let acquisition_ms = self.result.mutation_access.duration_ms - acquisition_before;
                 self.result.queue_planning.duration_ms +=
                     (started_at.elapsed().as_millis() as u64).saturating_sub(acquisition_ms);
@@ -4024,10 +4017,7 @@ mod native {
                             metrics.preparation_duration_ms = Some(0);
                             match self.bounded_finish(id, "lore-process", metrics, true).await {
                                 WorkStep::Staged => {}
-                                WorkStep::Deferred(reason) => {
-                                    blocked.insert(id.clone(), reason);
-                                    continue 'planning;
-                                }
+                                WorkStep::Deferred(_) => continue 'planning,
                                 WorkStep::Replan => continue 'planning,
                                 WorkStep::Failed if self.queue_replan => continue 'planning,
                                 WorkStep::Failed => return false,
@@ -4042,10 +4032,7 @@ mod native {
                                 .await
                             {
                                 WorkStep::Pending => continue,
-                                WorkStep::Deferred(reason) => {
-                                    blocked.insert(id.clone(), reason);
-                                    continue 'planning;
-                                }
+                                WorkStep::Deferred(_) => continue 'planning,
                                 WorkStep::Replan => continue 'planning,
                                 WorkStep::Failed if self.queue_replan => continue 'planning,
                                 WorkStep::Failed => return false,

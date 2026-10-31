@@ -9,6 +9,7 @@ use lk_vault::{MutationPlan, MutationSession};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+mod finalization;
 mod frontier;
 mod inspection;
 mod output;
@@ -215,7 +216,7 @@ struct Consumption {
     consumed_at: jiff::Timestamp,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FinalizationAction {
     schema: String,
@@ -1321,100 +1322,6 @@ impl Work {
             .inspect_input(&part.id, input)
             .map_err(NodeInputError::report)?;
         Ok(encoded(&request)?.len())
-    }
-
-    pub fn load_finalization_action(
-        &self,
-        root: &Path,
-        request: &Value,
-    ) -> miette::Result<Option<String>> {
-        self.load_finalization_action_for(root, request, &request["work"]["result_revision"])
-    }
-
-    pub fn load_finalization_action_for(
-        &self,
-        root: &Path,
-        request: &Value,
-        completion_revision: &Value,
-    ) -> miette::Result<Option<String>> {
-        let Some(raw) =
-            read_optional(root, &work_path(&self.plan.id, "finalization-action.json")?)?
-        else {
-            return Ok(None);
-        };
-        let action = FinalizationAction::decode(&raw, self)?;
-        let request_revision =
-            lk_core::rss_original::digest(&serde_json::to_vec(request).map_err(fail)?);
-        if action.request_revision != request_revision {
-            return Ok(None);
-        }
-        if completion_revision.as_str() != Some(action.completion_revision.as_str()) {
-            return Err(fail(
-                "finalization action completion differs from its request",
-            ));
-        }
-        Ok(Some(action.reason))
-    }
-
-    pub fn plan_finalization_action(
-        &self,
-        root: &Path,
-        resources: &[SemanticResource],
-        expected: &Value,
-        request: &Value,
-        reason: String,
-    ) -> miette::Result<MutationPlan> {
-        self.plan_finalization_action_for(
-            root,
-            resources,
-            expected,
-            request,
-            reason,
-            CompletionKind::Root,
-        )
-    }
-
-    pub(super) fn plan_finalization_action_for(
-        &self,
-        root: &Path,
-        resources: &[SemanticResource],
-        expected: &Value,
-        request: &Value,
-        reason: String,
-        kind: CompletionKind,
-    ) -> miette::Result<MutationPlan> {
-        let completed = self.capture_native_completion(root, resources, kind)?;
-        if completed.result() != expected {
-            return Err(fail(
-                "completed observations changed before recording required finalization action",
-            ));
-        }
-        let action = FinalizationAction {
-            schema: match completed.kind() {
-                CompletionKind::Root => "bounded-finalization-action-v1",
-                CompletionKind::Frontier => "frontier-finalization-action-v1",
-            }
-            .into(),
-            work_id: self.plan.id.clone(),
-            root_node: completed.root_node.clone(),
-            completion_revision: completed.completion_revision()?,
-            request_revision: lk_core::rss_original::digest(
-                &serde_json::to_vec(request).map_err(fail)?,
-            ),
-            reason,
-        };
-        let raw = encoded(&action)?;
-        FinalizationAction::decode(&raw, self)?;
-        let path = work_path(&self.plan.id, "finalization-action.json")?;
-        let before = read_optional(root, &path)?;
-        if let Some(before) = &before {
-            FinalizationAction::decode(before, self)?;
-        }
-        let mut plan = MutationPlan::default();
-        completed.plan_read_guards(&mut plan);
-        plan.publish_expected(root, path, before, raw)
-            .map_err(fail)?;
-        Ok(plan)
     }
 
     pub fn result(&self, root: &Path, resources: &[SemanticResource]) -> miette::Result<Value> {
