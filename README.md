@@ -69,7 +69,7 @@ graph LR
 먼저 **로컬 메모 한 개**로 수집부터 검색까지 확인하세요. 이 경로는 소스 서비스의 자격증명이 필요 없습니다.
 
 - **macOS(Apple Silicon) 또는 Linux(x86_64/ARM64)**와 로그인된 **Claude Code 또는 Codex**가 필요합니다. Lorekeeper는 해당 CLI의 인증을 사용합니다.
-- **Obsidian은 선택 사항**입니다. 결과는 일반 Markdown 파일로 읽을 수 있습니다.
+- **Obsidian은 선택 사항**입니다. 결과는 일반 Markdown 파일로 읽을 수 있습니다. Obsidian에서 링크를 직접 넣는다면 Settings → Files and links에서 `Use [[Wikilinks]]`를 끄고 `New link format`을 `Relative path to file`로 바꾸세요. 그래프는 상대 경로 Markdown 링크만 따라가며, `lore validate`가 두 설정을 확인합니다.
 - Windows 설치본도 제공하지만, 네이티브 에이전트 작업과 `workflow`는 Unix에서 지원합니다.
 
 ### 1. 설치

@@ -75,7 +75,65 @@ pub async fn run(opts: &super::GlobalOptions) -> miette::Result<()> {
         );
     }
 
+    for warning in obsidian_link_warnings(&config.vault.root_path()) {
+        eprintln!("  warning: {warning}");
+    }
+
     Ok(())
+}
+
+/// Obsidian settings that make the editor write links this vault does not resolve. Pages link
+/// with relative CommonMark destinations; Obsidian's defaults insert `[[wikilinks]]` and the
+/// shortest unique path instead, and a key it has not written holds that default.
+fn obsidian_link_warnings(vault_root: &std::path::Path) -> Vec<String> {
+    let config_dir = vault_root.join(".obsidian");
+    if !config_dir.is_dir() {
+        return Vec::new();
+    }
+    let app = config_dir.join("app.json");
+    let settings = match std::fs::read_to_string(&app) {
+        Ok(text) => match serde_json::from_str::<serde_json::Value>(&text) {
+            Ok(settings) => settings,
+            Err(error) => {
+                return vec![format!(
+                    "{} is not valid JSON ({error}); Obsidian's link settings could not be checked",
+                    app.display()
+                )];
+            }
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => serde_json::Value::Null,
+        Err(error) => {
+            return vec![format!(
+                "{} could not be read ({error}); Obsidian's link settings could not be checked",
+                app.display()
+            )];
+        }
+    };
+    let mut warnings = Vec::new();
+    if settings
+        .get("useMarkdownLinks")
+        .and_then(|value| value.as_bool())
+        != Some(true)
+    {
+        warnings.push(
+            "Obsidian inserts [[wikilinks]], which the graph does not follow; turn off \
+             Settings → Files and links → Use [[Wikilinks]]"
+                .to_string(),
+        );
+    }
+    if settings
+        .get("newLinkFormat")
+        .and_then(|value| value.as_str())
+        != Some("relative")
+    {
+        warnings.push(
+            "Obsidian writes new links as a shortest or vault-absolute path, which does not \
+             resolve from the linking page; set Settings → Files and links → New link format \
+             to Relative path to file"
+                .to_string(),
+        );
+    }
+    warnings
 }
 
 /// Whether `<wiki>/AGENTS.md` differs from what `lore schema` would write now.
@@ -339,9 +397,41 @@ fn overlapping_vault_dirs(
 #[cfg(test)]
 mod tests {
     use super::{
-        RootFinding, agents_md_needs_regen, inspect_vault_dirs, overlapping_vault_dirs,
-        variant_sibling,
+        RootFinding, agents_md_needs_regen, inspect_vault_dirs, obsidian_link_warnings,
+        overlapping_vault_dirs, variant_sibling,
     };
+
+    #[test]
+    fn obsidian_link_settings_are_checked_only_where_obsidian_keeps_a_config() {
+        let vault = tempfile::tempdir().unwrap();
+        assert!(obsidian_link_warnings(vault.path()).is_empty());
+
+        let config = vault.path().join(".obsidian");
+        std::fs::create_dir(&config).unwrap();
+        assert_eq!(obsidian_link_warnings(vault.path()).len(), 2);
+
+        let app = config.join("app.json");
+        std::fs::write(
+            &app,
+            r#"{"useMarkdownLinks": true, "newLinkFormat": "shortest"}"#,
+        )
+        .unwrap();
+        let warnings = obsidian_link_warnings(vault.path());
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("New link format"));
+
+        std::fs::write(
+            &app,
+            r#"{"useMarkdownLinks": true, "newLinkFormat": "relative"}"#,
+        )
+        .unwrap();
+        assert!(obsidian_link_warnings(vault.path()).is_empty());
+
+        std::fs::write(&app, "{").unwrap();
+        let warnings = obsidian_link_warnings(vault.path());
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("could not be checked"));
+    }
 
     /// Whether this filesystem folds case. It decides WHICH branch a misspelled root takes:
     /// where case folds the name resolves and the fold branch answers, where it does not the

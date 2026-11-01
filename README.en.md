@@ -69,7 +69,7 @@ Competing claims remain reviewable rather than being settled by date or citation
 Start with **one local note** to check collection, processing and retrieval. This path needs no source-service credentials.
 
 - Use **macOS (Apple Silicon) or Linux (x86_64/ARM64)** and an authenticated **Claude Code or Codex** CLI. Lorekeeper uses that host's authentication.
-- **Obsidian is optional**. The output is ordinary Markdown.
+- **Obsidian is optional**. The output is ordinary Markdown. If you add links in Obsidian, turn off `Use [[Wikilinks]]` and set `New link format` to `Relative path to file` under Settings → Files and links; the graph follows only relative Markdown links, and `lore validate` checks both settings.
 - A Windows installer is available; native agent jobs and `workflow` are supported on Unix.
 
 ### 1. Install
