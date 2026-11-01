@@ -481,24 +481,21 @@ async fn read_captured_item(
     } else {
         String::new()
     };
+    // A page states its title in `<title>` or its own heading, which the Markdown conversion
+    // no longer carries; readability reads it while both are still visible.
+    let mut readable_title = None;
     let body = match (extension.as_deref(), projection.as_ref()) {
         (_, Some(projection)) => crate::content::render_markdown(projection)?,
-        (Some("html" | "htm"), _) => {
-            let canonical_parent = path
-                .parent()
-                .ok_or_else(|| SourceError::Parse("manual entry parent".into()))?
-                .canonicalize()
-                .map_err(|e| SourceError::Parse(e.to_string()))?;
-            let base_path = canonical_parent.join(
-                path.file_name()
-                    .ok_or_else(|| SourceError::Parse("manual entry filename".into()))?,
-            );
-            let base_url = url::Url::from_file_path(base_path).map_err(|()| {
-                SourceError::Parse("manual HTML requires an absolute entry path".into())
-            })?;
-            crate::markdown::readable_html_to_markdown(&raw, &base_url)
-                .unwrap_or_else(|| crate::markdown::html_to_markdown(&raw))
-        }
+        (Some("html" | "htm"), _) => match readable_page(&raw) {
+            Ok(article) => {
+                readable_title = article.title;
+                article.markdown
+            }
+            Err(error) => {
+                tracing::warn!(file = %path.display(), %error, "manual: converting the whole page");
+                crate::markdown::html_to_markdown(&raw)
+            }
+        },
         (Some("txt"), _) => crate::fetch::literal_markdown(&raw)?,
         _ => raw,
     };
@@ -555,7 +552,10 @@ async fn read_captured_item(
         .and_then(|v| v.as_str())
     {
         Some(stated) => (stated.trim().to_string(), body.clone()),
-        None => split_title(&body, path),
+        None => match readable_title {
+            Some(stated) => (stated, body.clone()),
+            None => split_title(&body, path),
+        },
     };
     // Full filename (with extension) so `note.md` and `note.txt` get distinct ids.
     let file_name = path
@@ -635,6 +635,25 @@ pub(super) fn split_frontmatter(
 }
 
 /// Promote a first-block root H1 to a scalar title, preserving all other source bytes.
+/// A dropped page's readable core, its references left as the page wrote them for the bundle
+/// to resolve.
+///
+/// The bundle was captured from the page, so the core is kept only while it references nothing
+/// the page does not: readability promotes lazy-image attributes into sources.
+fn readable_page(raw: &str) -> Result<crate::fetch::ReadableArticle, SourceError> {
+    crate::markdown::readable_article(raw, None, |core| {
+        let (page, _) = crate::manual_bundle::html_references(raw);
+        let (derived, _) = crate::manual_bundle::html_references(core);
+        match derived
+            .into_iter()
+            .find(|reference| !page.contains(reference))
+        {
+            Some(reference) => Err(crate::fetch::NoArticle::IntroducedReference(reference).into()),
+            None => Ok(crate::markdown::html_to_markdown(core)),
+        }
+    })
+}
+
 fn split_title(body: &str, path: &Path) -> (String, String) {
     use pulldown_cmark::{Event, HeadingLevel, Tag, TagEnd};
 
@@ -2239,6 +2258,48 @@ mod tests {
         assert_eq!(upper.body, lower.body);
         assert!(upper.body.contains("Retained paragraph."));
         assert!(!upper.body.contains("<html>"));
+    }
+
+    fn saved_page(article_extra: &str) -> String {
+        let paragraph = "Retries back off with jitter so callers do not synchronize. ".repeat(12);
+        format!(
+            "<html><head><title>Retry budgets in practice</title></head><body>\
+             <nav><a href=\"https://example.com/\">Site navigation</a></nav><article>\
+             <h1>Retry budgets in practice</h1><p>{paragraph}</p>{article_extra}</article>\
+             </body></html>"
+        )
+    }
+
+    /// A saved web page names itself in `<title>`, which the Markdown conversion drops; the
+    /// filename is only what the browser chose to save it as. Its local references stay
+    /// relative for the bundle to resolve.
+    #[tokio::test]
+    async fn an_html_entry_takes_its_readable_core_and_the_title_its_page_states() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("saved_page_123.html");
+        write(
+            &path,
+            &saved_page("<p><img src=\"saved_files/chart.png\" alt=\"chart\"></p>"),
+        );
+        std::fs::create_dir(tmp.path().join("saved_files")).unwrap();
+        std::fs::write(tmp.path().join("saved_files/chart.png"), b"png").unwrap();
+        let item = read_item(&path).await.unwrap();
+        assert_eq!(item.title, "Retry budgets in practice");
+        assert!(item.body.contains("Retries back off with jitter"));
+        assert!(item.body.contains("saved_files/chart.png"));
+        assert!(!item.body.contains("Site navigation"));
+    }
+
+    #[test]
+    fn a_readable_core_that_references_what_the_page_does_not_is_refused() {
+        let promoted = saved_page("<p><img data-src=\"/images/lazy.png\" alt=\"lazy\"></p>");
+        assert!(matches!(
+            readable_page(&promoted),
+            Err(SourceError::NoArticle(
+                crate::fetch::NoArticle::IntroducedReference(reference)
+            )) if reference == "/images/lazy.png"
+        ));
+        assert!(readable_page(&saved_page("")).is_ok());
     }
 
     /// What a file states about itself belongs in the fields the page is built from, not in

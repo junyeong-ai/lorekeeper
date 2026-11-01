@@ -23,13 +23,13 @@ pub async fn run(opts: &GlobalOptions, url: &str, source: Option<String>) -> mie
     let http = lk_source::build_http_client().map_err(|e| miette::miette!("{e}"))?;
     let article = lk_source::fetch::readable(&http, url)
         .await
-        .map_err(|e| miette::miette!("{e}"))?
-        .ok_or_else(|| {
-            miette::miette!(
-                "no readable body could be read from {url}. For browser-rendered pages, \
-                 save the page as HTML and drop it in {} instead.",
+        .map_err(|e| match e {
+            lk_source::SourceError::NoArticle(why) => miette::miette!(
+                "no readable body could be read from {url} ({why}). For browser-rendered \
+                 pages, save the page as HTML and drop it in {} instead.",
                 inbox.display()
-            )
+            ),
+            other => miette::miette!("{other}"),
         })?;
 
     let title = article.title.unwrap_or_else(|| url.to_string());

@@ -55,6 +55,17 @@ pub struct ReadableArticle {
     pub markdown: String,
 }
 
+/// Why a page yields no readable core.
+#[derive(Debug, thiserror::Error)]
+pub enum NoArticle {
+    #[error("the page has no readable text")]
+    Empty,
+    #[error(transparent)]
+    Readability(#[from] dom_smoothie::ReadabilityError),
+    #[error("readability introduced a reference the page does not make: {0}")]
+    IntroducedReference(String),
+}
+
 enum DocumentFormat {
     Html,
     Markdown,
@@ -157,12 +168,9 @@ pub(crate) fn literal_markdown(text: &str) -> Result<String, SourceError> {
 
 /// Fetch a declared HTML, Markdown or plain-text document as Markdown.
 ///
-/// Empty text or an HTML page without a readable article returns `None`.
-/// Unsupported media is an error; RSS callers retain their feed summary.
-pub async fn readable(
-    http: &reqwest::Client,
-    url: &str,
-) -> Result<Option<ReadableArticle>, SourceError> {
+/// Empty text or an HTML page without a readable article is [`SourceError::NoArticle`];
+/// unsupported media is an error. RSS callers retain their feed summary on either.
+pub async fn readable(http: &reqwest::Client, url: &str) -> Result<ReadableArticle, SourceError> {
     let response = http
         .get(url)
         .header(reqwest::header::USER_AGENT, USER_AGENT)
@@ -179,15 +187,17 @@ pub async fn readable(
     let format = DocumentFormat::from_response(response.headers(), &base)?;
     let text = read_capped(response, url).await?;
     if text.trim().is_empty() {
-        return Ok(None);
+        return Err(NoArticle::Empty.into());
     }
     match format {
-        DocumentFormat::Html => Ok(crate::markdown::readable_article(&text, &base)),
-        DocumentFormat::Markdown => remote_markdown(&text, &base).map(Some),
-        DocumentFormat::Text => Ok(Some(ReadableArticle {
+        DocumentFormat::Html => crate::markdown::readable_article(&text, Some(&base), |core| {
+            crate::remote_text::html(core, Some(&base))
+        }),
+        DocumentFormat::Markdown => remote_markdown(&text, &base),
+        DocumentFormat::Text => Ok(ReadableArticle {
             title: None,
             markdown: literal_markdown(&text)?,
-        })),
+        }),
     }
 }
 
@@ -348,7 +358,7 @@ mod tests {
         let body = "---\norigin: provider\n---\n\n# **Guide**\n\n```rust\nlet x = 1 < 2;\n```\n\n[topic][ref]\n\n[ref]: ../topic.md?q=1#part\n\n![chart](images/a.png)\n\n| A | B |\n|---|---|\n| one | two |\n\n- [x] done\n\nNote[^a]\n\n[^a]: retained footnote\n\n<div>retained raw HTML</div>\n";
         let url = serve(Some("text/plain; charset=utf-8"), body, true);
         let http = reqwest::Client::builder().no_proxy().build().unwrap();
-        let article = readable(&http, &url).await.unwrap().unwrap();
+        let article = readable(&http, &url).await.unwrap();
         assert_eq!(article.title.as_deref(), Some("Guide"));
         assert!(article.markdown.contains("let x = 1 < 2;"));
         let events: Vec<_> = Parser::new_ext(&article.markdown, Options::all()).collect();
@@ -395,7 +405,7 @@ mod tests {
         for media in ["text/markdown; charset=utf-8", "text/x-markdown"] {
             let url = serve(Some(media), body, false);
             let http = reqwest::Client::builder().no_proxy().build().unwrap();
-            let article = readable(&http, &url).await.unwrap().unwrap();
+            let article = readable(&http, &url).await.unwrap();
             assert_eq!(article.title.as_deref(), Some("Title"));
             assert_eq!(article.markdown, body);
         }
@@ -406,7 +416,7 @@ mod tests {
         let body = "# literal\n\n<script>keep</script>\n*not emphasis*\n[not a link](target)\n";
         let url = serve(Some("text/plain"), body, false);
         let http = reqwest::Client::builder().no_proxy().build().unwrap();
-        let article = readable(&http, &url).await.unwrap().unwrap();
+        let article = readable(&http, &url).await.unwrap();
         assert!(article.title.is_none());
         let mut visible = String::new();
         for event in Parser::new(&article.markdown) {
@@ -443,18 +453,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn html_media_wins_over_a_markdown_url_and_empty_text_is_absent() {
+    async fn html_media_wins_over_a_markdown_url_and_empty_text_has_no_article() {
         let http = reqwest::Client::builder().no_proxy().build().unwrap();
         let html = format!(
             "<html><head><title>Article</title></head><body><article><h1>Article</h1><p>{}</p><a href='more'>Read more</a></article></body></html>",
             "A substantive article about a real subject. ".repeat(40)
         );
         let url = serve(Some("text/html"), &html, true);
-        let article = readable(&http, &url).await.unwrap().unwrap();
+        let article = readable(&http, &url).await.unwrap();
         assert_eq!(article.title.as_deref(), Some("Article"));
         assert!(article.markdown.contains("/docs/more"));
         let url = serve(Some("text/markdown"), " \n\t", false);
-        assert!(readable(&http, &url).await.unwrap().is_none());
+        assert!(matches!(
+            readable(&http, &url).await,
+            Err(SourceError::NoArticle(NoArticle::Empty))
+        ));
     }
 
     #[tokio::test]
@@ -462,7 +475,7 @@ mod tests {
         let http = reqwest::Client::builder().no_proxy().build().unwrap();
         let (korean, _, _) = encoding_rs::EUC_KR.encode("# 한글 제목\n\n한글 본문");
         let url = serve(Some("text/markdown; charset=EUC-KR"), korean, false);
-        let article = readable(&http, &url).await.unwrap().unwrap();
+        let article = readable(&http, &url).await.unwrap();
         assert_eq!(article.title.as_deref(), Some("한글 제목"));
         assert!(article.markdown.contains("한글 본문"));
         for (media, body) in [

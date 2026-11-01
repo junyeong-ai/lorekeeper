@@ -79,6 +79,8 @@ pub enum SourceError {
     Api { status: u16, message: String },
     #[error("parse: {0}")]
     Parse(String),
+    #[error("no readable article: {0}")]
+    NoArticle(#[from] crate::fetch::NoArticle),
     #[error("nothing observed: no {unit} could be read (of {attempted} tried); see warnings above")]
     NothingObserved {
         unit: &'static str,

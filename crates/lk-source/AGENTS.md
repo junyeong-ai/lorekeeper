@@ -195,6 +195,9 @@ Use parser/token-state behavior, not regex replacement of arbitrary markup.
   than rewrite against a wrong base. HTML URL surfaces not fully supported, external
   CSS/SVG dependency closure, and similar unsupported constructs yield partial
   coverage/no retirement. Preserving their bytes is not proving full closure.
+- A dropped HTML page's readability core keeps the page's references as written for the
+  bundle to resolve; remote reference authority does not apply. Use the core only while it
+  references nothing the page does not, otherwise convert the whole page.
 - `ingest.originals` defaults to 32 MiB entry, 64 MiB member and 256 MiB per source;
   configured entry/member budgets fit the source budget, at most512 MiB. Keep the
   2 MiB manifest, depth32/2048 bundle members, at most2048 new/retry admissions per batch,

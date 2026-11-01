@@ -103,12 +103,12 @@ impl RssSource {
 
     /// The article behind a feed entry, as Markdown.
     ///
-    /// `None` when readability finds no article core: the caller then keeps the known-clean
-    /// feed summary rather than adopting the page's boilerplate.
-    async fn fetch_article(&self, article_url: &str) -> Result<Option<String>, SourceError> {
-        Ok(crate::fetch::readable(&self.http, article_url)
-            .await?
-            .map(|a| a.markdown))
+    /// A page without a readable core is an error, so the caller keeps the known-clean feed
+    /// summary rather than adopting the page's boilerplate.
+    async fn fetch_article(&self, article_url: &str) -> Result<String, SourceError> {
+        crate::fetch::readable(&self.http, article_url)
+            .await
+            .map(|a| a.markdown)
     }
 
     async fn fetch_feed(
@@ -261,22 +261,15 @@ impl Source for RssSource {
                         // at least as substantial. Readability can mis-extract a short
                         // wrong node from the article page, and the feed summary is
                         // known-clean content we'd otherwise lose.
-                        Ok(Some(full)) if full.trim().len() >= item.body.trim().len() => {
+                        Ok(full) if full.trim().len() >= item.body.trim().len() => {
                             item.body = full;
                             article_recovered_body = true;
                         }
-                        Ok(Some(_)) => {
+                        Ok(_) => {
                             tracing::warn!(
                                 feed = %feed_cfg.id,
                                 url = %article_url,
                                 "rss: full-text extraction shorter than feed summary; keeping summary"
-                            );
-                        }
-                        Ok(None) => {
-                            tracing::warn!(
-                                feed = %feed_cfg.id,
-                                url = %article_url,
-                                "rss: readability found no article core; keeping feed summary"
                             );
                         }
                         Err(e) => {
@@ -284,7 +277,7 @@ impl Source for RssSource {
                                 feed = %feed_cfg.id,
                                 url = %article_url,
                                 error = %e,
-                                "rss: full-text fetch failed, keeping feed content"
+                                "rss: full text unavailable; keeping feed content"
                             );
                         }
                     }
