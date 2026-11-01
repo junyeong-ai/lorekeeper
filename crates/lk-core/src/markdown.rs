@@ -2,6 +2,7 @@
 
 use std::borrow::Cow;
 use std::ops::Range;
+use std::sync::LazyLock;
 
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag};
 
@@ -643,24 +644,38 @@ struct PrefixRule {
 /// Every prefix any grammar declares, LONGEST first. Length order is what makes a nested
 /// form read as itself: `xoxe.xoxb-…` contains `xoxb-`, and taking the shorter prefix would
 /// both mislabel it and leave the outer form unmatched.
-fn prefix_rules() -> Vec<PrefixRule> {
-    let mut rules: Vec<PrefixRule> = credential_grammars()
-        .into_iter()
-        .flat_map(|grammar| {
-            grammar.prefixes.iter().map(move |prefix| PrefixRule {
-                prefix,
-                form: grammar.form,
-                body: grammar.body,
-                body_len: grammar.body_len.clone(),
-                min_fields: grammar.min_fields,
-                numeric_fields: grammar.numeric_fields,
-                numeric_field_digits: grammar.numeric_field_digits,
-                min_unbroken_run: grammar.min_unbroken_run,
+struct PrefixRules {
+    rules: Vec<PrefixRule>,
+    /// Where any prefix begins. No rule can match anywhere else, so the scan moves from one
+    /// such position to the next instead of through every character.
+    starts: aho_corasick::AhoCorasick,
+}
+
+fn prefix_rules() -> &'static PrefixRules {
+    static RULES: LazyLock<PrefixRules> = LazyLock::new(|| {
+        let mut rules: Vec<PrefixRule> = credential_grammars()
+            .into_iter()
+            .flat_map(|grammar| {
+                grammar.prefixes.iter().map(move |prefix| PrefixRule {
+                    prefix,
+                    form: grammar.form,
+                    body: grammar.body,
+                    body_len: grammar.body_len.clone(),
+                    min_fields: grammar.min_fields,
+                    numeric_fields: grammar.numeric_fields,
+                    numeric_field_digits: grammar.numeric_field_digits,
+                    min_unbroken_run: grammar.min_unbroken_run,
+                })
             })
-        })
-        .collect();
-    rules.sort_by_key(|rule| std::cmp::Reverse(rule.prefix.len()));
-    rules
+            .collect();
+        rules.sort_by_key(|rule| std::cmp::Reverse(rule.prefix.len()));
+        let starts = aho_corasick::AhoCorasick::builder()
+            .match_kind(aho_corasick::MatchKind::LeftmostFirst)
+            .build(rules.iter().map(|rule| rule.prefix))
+            .expect("credential prefixes are a small literal set");
+        PrefixRules { rules, starts }
+    });
+    &RULES
 }
 
 /// The `-----BEGIN …-----` labels that name private key material, as their specifications
@@ -699,7 +714,7 @@ pub fn scan_credentials(text: &str) -> Vec<(usize, CredentialForm)> {
         if is_private_key_header(line) {
             found.push((line_no, CredentialForm::PrivateKeyBlock));
         }
-        found.extend(scan_line(line, &rules).map(|form| (line_no, form)));
+        found.extend(scan_line(line, rules).map(|form| (line_no, form)));
     }
     found
 }
@@ -709,11 +724,15 @@ pub fn scan_credentials(text: &str) -> Vec<(usize, CredentialForm)> {
 /// also read as the shorter one inside it.
 fn scan_line<'a>(
     line: &'a str,
-    rules: &'a [PrefixRule],
+    prefixes: &'a PrefixRules,
 ) -> impl Iterator<Item = CredentialForm> + 'a {
     let mut cursor = 0;
     std::iter::from_fn(move || {
-        while cursor < line.len() {
+        while let Some(start) = prefixes
+            .starts
+            .find(aho_corasick::Input::new(line).span(cursor..line.len()))
+        {
+            cursor = start.start();
             // A prefix reached over alphanumerics is the tail of a longer word, not a prefix.
             // The test is alphanumeric rather than the grammar's own alphabet: several
             // alphabets admit `_` and `-`, and treating those as a left boundary would hide
@@ -724,7 +743,7 @@ fn scan_line<'a>(
                 .is_some_and(|c| c.is_ascii_alphanumeric());
             let rest = &line[cursor..];
             let matched = (!after_word).then(|| {
-                rules.iter().find_map(|rule| {
+                prefixes.rules.iter().find_map(|rule| {
                     let tail = rest.strip_prefix(rule.prefix)?;
                     // A form the issuer mints with a numeric first field opens with a digit.
                     // English hyphenates, so for a grammar whose alphabet admits `-` this is

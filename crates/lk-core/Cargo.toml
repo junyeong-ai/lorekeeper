@@ -17,6 +17,7 @@ jiff = { workspace = true }
 blake3 = { workspace = true }
 thiserror = { workspace = true }
 unicode-normalization = { workspace = true }
+aho-corasick = { workspace = true }
 regex = { workspace = true }
 strum = { workspace = true }
 same-file = { workspace = true }
