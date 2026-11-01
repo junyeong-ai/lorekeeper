@@ -38,7 +38,8 @@ user's motives or invent a priority. Avoid flooding the user with every item.
 
 Run `lore brief --date yesterday --json` for the morning or a requested brief.
 `learned` contains new concepts with an opening line; `revisited` deliberately
-contains names only. Select relevant groups against the agenda and expand on request.
+contains names only. Each entry's `named_by` lists the day's pages that cite it, which
+answer where the day met it. Select relevant groups against the agenda and expand on request.
 The brief selects daily pages by their address date and documents/explorations by
 declared `created`. A cited concept's `created` separates learned from revisited.
 This is not an ingestion or modification changefeed; uncited concepts are outside it.

@@ -15,7 +15,7 @@
 //! and, no longer new on Wednesday, missing from every day. The pages a day wrote are the
 //! evidence of what that day named, and they do not move.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use lk_core::config::VaultDirs;
@@ -38,6 +38,8 @@ pub struct BriefEntry {
     /// one named again, which the reader already knows.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub statement: Option<String>,
+    /// The day's own pages that cite it, vault-relative: where this day met it.
+    pub named_by: Vec<String>,
 }
 
 /// A day's knowledge, split by whether the vault already held it.
@@ -61,7 +63,7 @@ pub fn build_brief(
     let mut learned = Vec::new();
     let mut revisited = Vec::new();
 
-    for rel in named_on(vault_root, dirs, date)? {
+    for (rel, named_by) in named_on(vault_root, dirs, date)? {
         let stem = rel.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
         let address = rel
             .strip_prefix(concepts_dir(dirs))
@@ -114,6 +116,10 @@ pub fn build_brief(
                     .unwrap_or_default()
             }),
             id,
+            named_by: named_by
+                .iter()
+                .map(|page| page.to_string_lossy().into_owned())
+                .collect(),
         };
         if introduced {
             &mut learned
@@ -138,7 +144,7 @@ pub fn build_brief(
     })
 }
 
-/// Every concept the day's own pages cite, by page id.
+/// Every concept the day's own pages cite, with the pages that cite it.
 ///
 /// A day writes three kinds of page: one per source under `<daily>/{source}/{date}.md`, a
 /// document page for each file handed to the vault, and an exploration for each question
@@ -152,13 +158,13 @@ fn named_on(
     vault_root: &Path,
     dirs: &VaultDirs,
     date: jiff::civil::Date,
-) -> Result<BTreeSet<PathBuf>, VaultError> {
+) -> Result<BTreeMap<PathBuf, BTreeSet<PathBuf>>, VaultError> {
     let concepts_rel = concepts_dir(dirs);
     let paths = crate::search::markdown_files(vault_root, &vault_root.join(&concepts_rel))?
         .into_iter()
         .filter_map(|path| path.strip_prefix(vault_root).ok().map(Path::to_path_buf));
     let mut resolver = crate::ExistingPageResolver::new(vault_root, paths)?;
-    let mut named = BTreeSet::new();
+    let mut named = BTreeMap::<PathBuf, BTreeSet<PathBuf>>::new();
     for rel in pages_of(vault_root, dirs, date)? {
         let body = crate::store::read_page(vault_root, &vault_root.join(&rel))?.body;
         for dest in link::extract_dests(&body) {
@@ -169,7 +175,7 @@ fn named_on(
                 && let Some(actual) = resolver.resolve(&resolved)?
                 && actual.starts_with(&concepts_rel)
             {
-                named.insert(actual);
+                named.entry(actual).or_default().insert(rel.clone());
             }
         }
     }
@@ -473,6 +479,17 @@ mod tests {
                 .map(|e| e.id.as_str())
                 .collect::<Vec<_>>(),
             ["datasette", "nl2sql"]
+        );
+        assert_eq!(
+            brief
+                .learned
+                .iter()
+                .map(|e| e.named_by.as_slice())
+                .collect::<Vec<_>>(),
+            [
+                ["wiki/documents/an-article.md"],
+                ["wiki/explorations/a-question.md"]
+            ]
         );
     }
 }
