@@ -420,6 +420,34 @@ impl ReviewEffectiveState {
     }
 }
 
+/// Review records counted by effective state.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct ReviewHealth {
+    pub open: usize,
+    pub resolved: usize,
+    pub needs_reassessment: usize,
+    pub invalid: usize,
+}
+
+impl ReviewHealth {
+    pub fn from_reports(reports: &[ReviewReport]) -> Self {
+        let mut health = Self::default();
+        for report in reports {
+            match report.effective_state {
+                ReviewEffectiveState::Open => health.open += 1,
+                ReviewEffectiveState::Resolved => health.resolved += 1,
+                ReviewEffectiveState::NeedsReassessment => health.needs_reassessment += 1,
+                ReviewEffectiveState::Invalid => health.invalid += 1,
+            }
+        }
+        health
+    }
+
+    pub fn requires_attention(&self) -> bool {
+        self.needs_reassessment > 0 || self.invalid > 0
+    }
+}
+
 #[derive(Default, Clone)]
 struct ReviewScope {
     subjects: Vec<String>,

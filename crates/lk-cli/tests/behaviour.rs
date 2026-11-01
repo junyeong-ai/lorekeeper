@@ -64,6 +64,7 @@ const SWEEP: &[&[&str]] = &[
     &["config", "board-path"],
     &["config", "propose-from"],
     &["status"],
+    &["status", "--json"],
     &["health"],
     &["doctor"],
     &["performance"],

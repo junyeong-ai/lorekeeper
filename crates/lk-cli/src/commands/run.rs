@@ -459,14 +459,6 @@ mod native {
         execution: RequestedExecution,
     }
 
-    #[derive(Default, Serialize)]
-    struct ReviewHealth {
-        open: usize,
-        resolved: usize,
-        needs_reassessment: usize,
-        invalid: usize,
-    }
-
     #[derive(Serialize)]
     struct AuditProgress {
         before: lk_graph::audit::AuditCoverage,
@@ -496,7 +488,7 @@ mod native {
         audit_blocked_count: usize,
         audit_deferred: Vec<DeferredAudit>,
         audit_deferred_count: usize,
-        review_health: Option<ReviewHealth>,
+        review_health: Option<lk_vault::ReviewHealth>,
         stages: Vec<StageResult>,
     }
 
@@ -4543,17 +4535,7 @@ mod native {
             if !self.configuration_is_current() {
                 return false;
             }
-            let mut health = ReviewHealth::default();
-            for report in reports {
-                match report.effective_state {
-                    lk_vault::ReviewEffectiveState::Open => health.open += 1,
-                    lk_vault::ReviewEffectiveState::Resolved => health.resolved += 1,
-                    lk_vault::ReviewEffectiveState::NeedsReassessment => {
-                        health.needs_reassessment += 1;
-                    }
-                    lk_vault::ReviewEffectiveState::Invalid => health.invalid += 1,
-                }
-            }
+            let health = lk_vault::ReviewHealth::from_reports(&reports);
             let detail = format!(
                 "open={}, resolved={}, needs_reassessment={}, invalid={}; inspect `lore wiki reviews` for details",
                 health.open, health.resolved, health.needs_reassessment, health.invalid,

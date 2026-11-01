@@ -1,0 +1,52 @@
+---
+source: crates/lk-cli/tests/behaviour.rs
+expression: "observe(staged.path(), argv)"
+---
+exit: 0
+--- stdout ---
+{
+  "data": {
+    "subsystems": [
+      {
+        "name": "install",
+        "next": "lore schema",
+        "ok": false,
+        "state": "1 deployed copy differs"
+      },
+      {
+        "name": "board",
+        "next": "lore agenda",
+        "ok": true,
+        "state": "1 committed · 1 carried too long"
+      },
+      {
+        "name": "sources",
+        "next": "lore health",
+        "ok": true,
+        "state": "0 fresh"
+      },
+      {
+        "name": "queue",
+        "next": "/lore-process",
+        "ok": true,
+        "state": "drained"
+      },
+      {
+        "name": "pages",
+        "next": "lore doctor",
+        "ok": true,
+        "state": "5 clean"
+      },
+      {
+        "name": "graph",
+        "next": "lore graph lint",
+        "ok": false,
+        "state": "1 violation(s)"
+      }
+    ],
+    "vault": "<staged>/corpus/vault",
+    "version": "<version>"
+  },
+  "ok": true
+}
+--- stderr ---

@@ -128,9 +128,14 @@ pub enum Command {
         #[command(subcommand)]
         period: commands::synthesis::Period,
     },
-    /// One line per subsystem: the installation, source currency, the LLM queue, page
-    /// contracts and the link graph — each naming the command that owns it
-    Status,
+    /// One line per subsystem: the installation, task board, source currency, extraction, the
+    /// LLM queue, page contracts, the link graph and knowledge reviews — each naming the
+    /// command that owns it
+    Status {
+        /// Emit the rows as JSON — the contract a skill reads
+        #[arg(long)]
+        json: bool,
+    },
     /// Check pipeline health (warn if a source is overdue vs ingest.schedule; 48h fallback when unscheduled)
     Health {
         /// Treat first-install (all "never") as failure as well
@@ -328,7 +333,7 @@ pub async fn run() -> miette::Result<()> {
             root,
             wait_for_vault,
         } => commands::schema::run_with_wait(&opts, root, wait_for_vault).await,
-        Command::Status => commands::status::run(&opts).await,
+        Command::Status { json } => commands::status::run(&opts, json).await,
         Command::Ingest {
             source,
             date,

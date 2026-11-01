@@ -49,7 +49,7 @@ manual/nodex/RSS/Drive cannot acquire authorship from mentions or inclusion alon
 
 ## Operational boundaries
 
-- Use `lore validate` for config and `lore status` for subsystem routing.
+- Use `lore validate` for config and `lore status --json` for subsystem routing.
   `lore health` measures collection freshness, not semantic quality. It can exit
   nonzero for overdue sources; `--strict` also reports never-collected sources.
 - `lore doctor` reports defects/unreadable pages and credentials in known issuer

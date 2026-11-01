@@ -34,7 +34,7 @@
 | `lore resolve <name>` | Which concept page a name addresses, by the rule ingest routes an extraction by. Exit 0 owned, 1 absent, 2 more than one page answers to it |
 | `lore wiki snapshot` | Read the prepared capture and its creation/verification times without refreshing source files; `lore wiki prepare` performs full current capture |
 | `lore wiki context <path> --snapshot ID [--limit N] [--offset N]` | Browse captured links, evidence, declared source relations and scoped reviews together; each group retains its authority, total and pagination |
-| `lore status` | One line per subsystem — the installation, source currency, the LLM queue, page contracts, the link graph — each naming the command that owns it. Reports without gating; the per-source timestamps are `lore health` |
+| `lore status [--json]` | One row per subsystem — installation, task board, source currency, extraction, the LLM queue, page contracts, the link graph and knowledge reviews — each naming the command that owns it. Reports without gating; the per-source timestamps are `lore health` |
 | `lore health [--strict]` | Warn if any source is overdue vs `ingest.schedule` (2 missed fires; 48h fallback). `--strict` also fails when a source has NEVER ingested, which a first install has and a broken one looks identical to |
 | `lore performance` | Performance category distribution |
 | `lore doctor` | Audit materialized pages against the contracts they must satisfy — text cleanliness, a section whose input was recorded and never answered, and credentials in issuer-published forms. Non-zero on a defect or an unreadable page; a credential is REPORTED and does not gate, because its repair is at the issuer and editing the page would not undo the leak |

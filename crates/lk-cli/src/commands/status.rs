@@ -1,29 +1,29 @@
 //! `lore status` — the one command that answers "is anything wrong, and what do I run".
 //!
-//! Five subsystems each had a command that answered for it and nothing that answered for all
-//! of them, so knowing the state of a vault meant knowing which of five to type. This composes
-//! them: one line per subsystem, each verdict computed by the very code its own command exits
-//! on, each naming what to run next.
-//!
-//! It reports and does not gate. A summary that failed the shell would be a sixth gate rather
-//! than a front door, and the command that owns a subsystem is the one whose exit code answers
-//! for it — `lore health` for currency, `lore doctor` for the pages, `lore graph lint` for the
-//! structure, `lore self status` for the installation.
+//! One row per subsystem, each verdict computed by the code its owning command exits on, each
+//! naming that command. It reports and does not gate: the owning command's exit code is the
+//! verdict a caller acts on, so a summary that also failed the shell would be one more gate
+//! rather than a front door.
 
 use std::fmt::Write as _;
 
+use serde::Serialize;
+
 use super::{find_config, load_config};
 
-pub async fn run(opts: &super::GlobalOptions) -> miette::Result<()> {
+#[derive(Serialize)]
+struct Subsystem {
+    name: &'static str,
+    ok: bool,
+    state: String,
+    next: &'static str,
+}
+
+pub async fn run(opts: &super::GlobalOptions, json: bool) -> miette::Result<()> {
     let config = load_config(&find_config(opts)?)?;
     let vault_root = config.vault.root_path();
     let now = jiff::Timestamp::now();
-
-    eprintln!(
-        "lore {}  {}",
-        env!("CARGO_PKG_VERSION"),
-        vault_root.display()
-    );
+    let mut subsystems = Vec::new();
 
     let installation = lk_dist::Installation::detect().map_err(|e| miette::miette!("{e}"))?;
     let agents = vault_root
@@ -31,28 +31,27 @@ pub async fn run(opts: &super::GlobalOptions) -> miette::Result<()> {
         .join(lk_core::vault_path::SCHEMA_FILE);
     let schema = lk_dist::SchemaState::read(&agents, &super::schema::generator());
     let install = lk_dist::InstallationReport::build(&installation, schema);
-    line(
-        "install",
-        match install.stale() {
+    subsystems.push(Subsystem {
+        name: "install",
+        ok: install.stale() == 0,
+        state: match install.stale() {
             0 => "current".to_string(),
             1 => "1 deployed copy differs".to_string(),
             n => format!("{n} deployed copies differ"),
         },
-        install.stale() == 0,
-        install.repair(),
-    );
+        next: install.repair(),
+    });
 
-    // The intent plane, where it is turned on. It is a subsystem with state a person acts on —
-    // proposals waiting for an answer, a task carried past the point of being a plan, an edit
-    // an editor made that nothing has recorded — and leaving it out meant the one command that
-    // answers "is anything wrong" could not see the half of the vault a person touches daily.
-    //
-    // The mark says a person has something to do here, which for every other row happens to be
-    // the same thing as the owning command's exit code. It is not for this one: `lore agenda` is
-    // a VIEW and always succeeds, so a page a write cannot land on and a page holding tasks no
-    // rule can reach both have to raise the mark on their own.
+    // `lore agenda` is a view that always succeeds, so this row's mark is the board's own
+    // judgment that a person has something to do: a page a write cannot land on, or tasks no
+    // rule can reach.
     if let Some(board) = super::task::IntentPlane::survey(opts) {
-        line("board", board.state, board.ok, "lore agenda");
+        subsystems.push(Subsystem {
+            name: "board",
+            ok: board.ok,
+            state: board.state,
+            next: "lore agenda",
+        });
     }
 
     let freshness = super::health::freshness(&config, &vault_root, now).await?;
@@ -64,33 +63,35 @@ pub async fn run(opts: &super::GlobalOptions) -> miette::Result<()> {
     if never > 0 {
         let _ = write!(currency, " · {never} never ingested");
     }
-    line("sources", currency, stale == 0, "lore health");
+    subsystems.push(Subsystem {
+        name: "sources",
+        ok: stale == 0,
+        state: currency,
+        next: "lore health",
+    });
 
-    // Project knowledge, where any has been extracted. The manifests already declare the
-    // commit each scan was taken against; until this row existed nothing read that back, so an
-    // extraction could fall a quarter and a thousand documents behind with every other row
-    // green. What is reported is the deterministic half — has the repository moved under the
-    // paths the scan declared — because the other half needs a reader and `/lore-extract audit`
-    // is where it lives.
+    // The deterministic half of extraction currency: whether the repository moved under the
+    // paths each manifest declared. Judging the extracted knowledge needs `/lore-extract audit`.
     let extracts =
         super::extract::survey(&vault_root, now.to_zoned(config.vault.timezone()).date())?;
     if !extracts.is_empty() {
-        // A project whose staleness could not be measured is counted apart from a current
-        // one, the way a source that never ingested is counted apart from a fresh one. The
-        // phrase is the command's own, so this row and that command's terminal cannot
-        // partition the same projects two ways.
-        let t = super::extract::tally(&extracts);
-        line(
-            "extract",
-            super::extract::coverage(&t),
-            t.behind == 0,
-            "lore extract status",
-        );
+        let tally = super::extract::tally(&extracts);
+        subsystems.push(Subsystem {
+            name: "extract",
+            ok: tally.behind == 0,
+            state: super::extract::coverage(&tally),
+            next: "lore extract status",
+        });
     }
 
     let queue = super::queue::check::inspect(&vault_root)?;
     let (state, next) = queue_row(&queue);
-    line("queue", state, queue.is_settled(), next);
+    subsystems.push(Subsystem {
+        name: "queue",
+        ok: queue.is_settled(),
+        state,
+        next,
+    });
 
     let in_flight = super::queue::work_in_flight(&vault_root);
     let audit = super::doctor::audit(
@@ -108,43 +109,77 @@ pub async fn run(opts: &super::GlobalOptions) -> miette::Result<()> {
     if audit.credentials() > 0 {
         let _ = write!(pages, " · {} credential form(s)", audit.credentials());
     }
-    line(
-        "pages",
-        pages,
-        audit.defects() == 0 && audit.errors() == 0,
-        "lore doctor",
-    );
+    subsystems.push(Subsystem {
+        name: "pages",
+        ok: audit.defects() == 0 && audit.errors() == 0,
+        state: pages,
+        next: "lore doctor",
+    });
 
-    // The graph is resolved separately from the config above because `lore graph` carries its
-    // own root and scope resolution, and reading it twice is what keeps this line the same
-    // verdict `lore graph lint` exits on rather than a second derivation of it.
-    match super::graph::lint(opts, None) {
-        Ok(report) if !report.errors.is_empty() => line(
-            "graph",
-            format!("incomplete: {}", report.errors.join("; ")),
-            false,
-            "lore graph lint",
-        ),
-        Ok(report) => {
-            let violations = report.violations.count();
-            line(
-                "graph",
-                match violations {
-                    0 => format!("sound · {} pages, {} links", report.pages, report.links),
-                    n => format!("{n} violation(s)"),
-                },
-                violations == 0,
-                "lore graph lint",
-            );
+    // `lore graph` resolves its own root and scope, so the row reuses that resolution and
+    // stays the verdict `lore graph lint` exits on.
+    let (ok, state) = match super::graph::lint(opts, None) {
+        Ok(report) if !report.errors.is_empty() => {
+            (false, format!("incomplete: {}", report.errors.join("; ")))
         }
-        Err(e) => line(
-            "graph",
-            format!("unreadable: {e}"),
-            false,
-            "lore graph lint",
-        ),
+        Ok(report) => match report.violations.count() {
+            0 => (
+                true,
+                format!("sound · {} pages, {} links", report.pages, report.links),
+            ),
+            n => (false, format!("{n} violation(s)")),
+        },
+        Err(e) => (false, format!("unreadable: {e}")),
+    };
+    subsystems.push(Subsystem {
+        name: "graph",
+        ok,
+        state,
+        next: "lore graph lint",
+    });
+
+    match lk_vault::list_reviews(&vault_root, &config.vault.dirs) {
+        Ok(reports) if reports.is_empty() => {}
+        Ok(reports) => {
+            let health = lk_vault::ReviewHealth::from_reports(&reports);
+            subsystems.push(Subsystem {
+                name: "reviews",
+                ok: !health.requires_attention(),
+                state: review_state(&health),
+                next: "lore wiki reviews --check",
+            });
+        }
+        Err(e) => subsystems.push(Subsystem {
+            name: "reviews",
+            ok: false,
+            state: format!("unreadable: {e}"),
+            next: "lore wiki reviews --check",
+        }),
     }
 
+    if json {
+        let envelope = serde_json::json!({
+            "ok": true,
+            "data": {
+                "version": env!("CARGO_PKG_VERSION"),
+                "vault": vault_root.display().to_string(),
+                "subsystems": subsystems,
+            }
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&envelope).map_err(|e| miette::miette!("{e}"))?
+        );
+    } else {
+        eprintln!(
+            "lore {}  {}",
+            env!("CARGO_PKG_VERSION"),
+            vault_root.display()
+        );
+        for subsystem in &subsystems {
+            line(subsystem);
+        }
+    }
     Ok(())
 }
 
@@ -186,21 +221,35 @@ fn queue_row(queue: &super::queue::check::QueueSettlement) -> (String, &'static 
     (parts.join(" · "), next)
 }
 
-/// One subsystem's row. The gap before the command is added rather than padded into, so a
-/// state long enough to fill the column — an error naming a path, say — never runs into the
-/// command name and produces a line that reads as one word.
-fn line(label: &str, state: String, ok: bool, next: &str) {
-    let mark = if ok { '·' } else { '!' };
+fn review_state(health: &lk_vault::ReviewHealth) -> String {
+    [
+        (health.needs_reassessment, "need reassessment"),
+        (health.invalid, "invalid"),
+        (health.open, "open"),
+        (health.resolved, "resolved"),
+    ]
+    .into_iter()
+    .filter(|(count, _)| *count > 0)
+    .map(|(count, label)| format!("{count} {label}"))
+    .collect::<Vec<_>>()
+    .join(" · ")
+}
+
+/// The gap before the command is added rather than padded into, so a state long enough to fill
+/// the column never runs into the command name.
+fn line(subsystem: &Subsystem) {
+    let mark = if subsystem.ok { '·' } else { '!' };
     eprintln!(
-        "  {mark} {}{}  {next}",
-        super::pad(label, 9),
-        super::pad(&state, 42)
+        "  {mark} {}{}  {}",
+        super::pad(subsystem.name, 9),
+        super::pad(&subsystem.state, 42),
+        subsystem.next
     );
 }
 
 #[cfg(test)]
 mod tests {
-    use super::queue_row;
+    use super::{queue_row, review_state};
     use crate::commands::queue::check::QueueSettlement;
 
     fn settled() -> QueueSettlement {
@@ -253,6 +302,21 @@ mod tests {
                     .to_string(),
                 "lore queue check"
             )
+        );
+    }
+
+    #[test]
+    fn reviews_needing_attention_lead_and_empty_states_are_omitted() {
+        let health = lk_vault::ReviewHealth {
+            open: 2,
+            resolved: 5,
+            needs_reassessment: 1,
+            invalid: 0,
+        };
+        assert!(health.requires_attention());
+        assert_eq!(
+            review_state(&health),
+            "1 need reassessment · 2 open · 5 resolved"
         );
     }
 }
