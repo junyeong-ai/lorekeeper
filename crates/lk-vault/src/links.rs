@@ -71,7 +71,7 @@ pub fn inspect_links(
         .is_some_and(|expected| expected != revision)
     {
         return Err(VaultError::Io(std::io::Error::other(
-            "source revision changed; restart link pagination",
+            "file revision changed; restart link pagination",
         )));
     }
     let page = parse_page(&raw).map_err(VaultError::Frontmatter)?;

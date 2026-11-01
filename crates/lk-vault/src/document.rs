@@ -81,7 +81,7 @@ pub fn inspect_document(
         .is_some_and(|expected| expected != revision)
     {
         return Err(invalid(
-            "source revision changed; restart document navigation",
+            "file revision changed; restart document navigation",
         ));
     }
     let page = parse_page(&raw).map_err(VaultError::Frontmatter)?;

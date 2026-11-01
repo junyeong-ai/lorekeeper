@@ -98,6 +98,8 @@ This graph-derived set differs from ordinary explicit link occurrences. RSS entr
 retain exact event selectors and payload revisions; `total` counts entries while
 `source_count` counts origin pages. A captured citation is not proof of current bytes;
 verify selected live pages or immutable originals through their respective contracts.
+A citation's `revision` is the source's authored revision, not the `file_revision` that
+`wiki read --revision` guards; read the source first and page with the revision it returns.
 Normal discovery shows active knowledge. `knowledge_status: retired` preserves a page
 and its history but excludes it; use `--knowledge-status retired|all` explicitly to inspect
 its `knowledge_review` and scoped `reviews` previews. A single source does not imply poor
