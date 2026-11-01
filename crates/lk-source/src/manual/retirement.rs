@@ -32,8 +32,15 @@ pub fn archive_verified_manual_originals(
     if !inventory.is_for_root(&root) {
         return Err(error("dependency inventory belongs to another inbox"));
     }
-    if !inventory.diagnostics().is_empty() {
-        tracing::warn!("manual: dependency coverage is incomplete; retaining inbox originals");
+    let diagnostics = inventory.diagnostics();
+    if !diagnostics.is_empty() {
+        tracing::warn!(
+            retained = manifests.len(),
+            gaps = diagnostics.len(),
+            first = ?&diagnostics[..diagnostics.len().min(5)],
+            "manual: the inbox's dependency coverage is incomplete, so no original retires \
+             until every listed gap is resolved"
+        );
         return Ok(());
     }
     let mut entries = BTreeSet::new();
