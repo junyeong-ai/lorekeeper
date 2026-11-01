@@ -271,32 +271,47 @@ pub(crate) fn survey(
     today: jiff::civil::Date,
 ) -> miette::Result<Vec<ProjectState>> {
     let dir = vault_root.join(".lorekeeper").join("extracts");
-    let mut out = Vec::new();
     let entries = match std::fs::read_dir(&dir) {
         Ok(entries) => entries,
         // An install that has never extracted has no directory. Any other failure is a read
         // that did not happen, and reporting it as "no manifests" would be the same defect
         // this command exists to report.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(miette::miette!("{}: {e}", dir.display())),
     };
-    for entry in entries.flatten() {
-        let path = entry.path().join("manifest.yaml");
-        let name = entry.file_name().to_string_lossy().into_owned();
-        // A directory under `extracts/` holding no manifest is not a project — the only
-        // absence this treats as an absence, because the file system answered it.
-        let detail = match std::fs::read_to_string(&path) {
-            Ok(text) => match lk_core::yaml::from_str::<Manifest>(&text) {
-                Ok(manifest) => Detail::Read(build_facts(manifest, today)),
-                Err(e) => Detail::Unreadable(e.to_string()),
-            },
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => Detail::Unreadable(e.to_string()),
-        };
-        out.push(ProjectState { name, detail });
-    }
+    // Each project's verdict waits on its own git processes, so the projects are asked together.
+    let mut out: Vec<ProjectState> = std::thread::scope(|scope| {
+        let projects: Vec<_> = entries
+            .flatten()
+            .map(|entry| scope.spawn(move || survey_project(&entry, today)))
+            .collect();
+        projects
+            .into_iter()
+            .filter_map(|project| {
+                project
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+            })
+            .collect()
+    });
     out.sort_by(|a, b| a.sort_key().cmp(&b.sort_key()));
     Ok(out)
+}
+
+fn survey_project(entry: &std::fs::DirEntry, today: jiff::civil::Date) -> Option<ProjectState> {
+    let path = entry.path().join("manifest.yaml");
+    let name = entry.file_name().to_string_lossy().into_owned();
+    // A directory under `extracts/` holding no manifest is not a project — the only
+    // absence this treats as an absence, because the file system answered it.
+    let detail = match std::fs::read_to_string(&path) {
+        Ok(text) => match lk_core::yaml::from_str::<Manifest>(&text) {
+            Ok(manifest) => Detail::Read(build_facts(manifest, today)),
+            Err(e) => Detail::Unreadable(e.to_string()),
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => Detail::Unreadable(e.to_string()),
+    };
+    Some(ProjectState { name, detail })
 }
 
 impl ProjectState {
