@@ -24,6 +24,7 @@ use lk_core::config::VaultDirs;
 use lk_core::markdown::{CredentialForm, TextDefect, scan_credentials, scan_defects};
 use walkdir::WalkDir;
 
+use super::queue::readiness::Unfinished;
 use super::{find_config, load_config};
 
 pub async fn run(opts: &super::GlobalOptions) -> miette::Result<()> {
@@ -45,8 +46,15 @@ pub async fn run(opts: &super::GlobalOptions) -> miette::Result<()> {
         for (line, defect) in &page.defects {
             eprintln!("    L{line}: {}", defect.description());
         }
-        for section in &page.unanswered {
-            eprintln!("    `{section}` has an unfinished semantic input");
+        for (section, reason) in &page.unanswered {
+            match reason {
+                Unfinished::Unanswered => {
+                    eprintln!("    `{section}` has an unfinished semantic input");
+                }
+                Unfinished::MissingSection => eprintln!(
+                    "    `{section}` records an input, but the page carries no section for its answer"
+                ),
+            }
         }
         for (line, credential) in &page.credentials {
             eprintln!(
@@ -222,8 +230,8 @@ pub(crate) fn managed_roots(vault_root: &Path, dirs: &VaultDirs) -> Vec<PathBuf>
 struct PageDefects {
     path: PathBuf,
     defects: Vec<(usize, TextDefect)>,
-    /// `llm_inputs` keys the page records an input hash for and no answer to.
-    unanswered: Vec<&'static str>,
+    /// `llm_inputs` keys the page records an input hash for and no answer to, and why.
+    unanswered: Vec<(&'static str, Unfinished)>,
     /// Credentials the page carries verbatim. Separate from `defects` because the repair is
     /// not this tool's: a rendering defect is fixed by re-rendering, while a live key is
     /// fixed at its issuer and nowhere else.
@@ -316,11 +324,15 @@ pub(crate) fn audit(
             let unanswered = match lk_core::frontmatter::parse_page(&text) {
                 Ok(page) => match super::queue::readiness::unfinished_inputs(&page) {
                     Ok(keys) => {
+                        // Queued work answers an unanswered section; it cannot land in a
+                        // missing one, so that stays a defect whatever the queue holds.
                         let rel = path.strip_prefix(vault_root).unwrap_or(path).to_path_buf();
-                        let (queued, outstanding): (Vec<_>, Vec<_>) = keys
-                            .into_iter()
-                            .partition(|key| in_flight_keys.contains(&(rel.clone(), *key)));
-                        in_flight.extend(queued.into_iter().map(|key| (rel.clone(), key)));
+                        let (queued, outstanding): (Vec<_>, Vec<_>) =
+                            keys.into_iter().partition(|(key, reason)| {
+                                *reason == Unfinished::Unanswered
+                                    && in_flight_keys.contains(&(rel.clone(), *key))
+                            });
+                        in_flight.extend(queued.into_iter().map(|(key, _)| (rel.clone(), key)));
                         outstanding
                     }
                     Err(error) => {
@@ -437,32 +449,47 @@ mod tests {
             &lk_core::frontmatter::parse_page(text).expect("frontmatter"),
         )
         .expect("valid semantic inputs")
+        .into_iter()
+        .map(|(key, _)| key)
+        .collect()
     }
 
     #[test]
     fn audit_distinguishes_untracked_completed_and_invalid_semantic_inputs() {
+        use Unfinished::{MissingSection, Unanswered};
         for (inputs, body, outstanding, errors) in [
-            ("", "Source.", false, 0),
-            ("llm_inputs: null\n", "Source.", false, 0),
-            ("llm_inputs: {summary: null}\n", "Source.", false, 0),
-            ("llm_inputs: unstructured\n", "Source.", false, 1),
-            ("llm_inputs: {summary: current}\n", "## Summary\n", true, 0),
+            ("", "Source.", None, 0),
+            ("llm_inputs: null\n", "Source.", None, 0),
+            ("llm_inputs: {summary: null}\n", "Source.", None, 0),
+            ("llm_inputs: unstructured\n", "Source.", None, 1),
+            (
+                "llm_inputs: {summary: current}\n",
+                "## Summary\n",
+                Some(Unanswered),
+                0,
+            ),
+            (
+                "llm_inputs: {summary: current}\n",
+                "Source.",
+                Some(MissingSection),
+                0,
+            ),
             (
                 "llm_inputs: {summary: current, summary_done: current}\n",
                 "## Summary\n",
-                false,
+                None,
                 0,
             ),
             (
                 "llm_inputs: {summary: current, summary_done: current}\n",
                 "Source.",
-                true,
+                Some(MissingSection),
                 0,
             ),
             (
                 "llm_inputs: {summary: '', summary_done: ''}\n",
                 "## Summary\n",
-                true,
+                Some(Unanswered),
                 0,
             ),
         ] {
@@ -475,10 +502,36 @@ mod tests {
             let report = audit_with_empty_queue(&[root.path().to_owned()]);
             assert_eq!(report.scanned, 1, "{inputs}");
             assert_eq!(report.errors, errors, "{inputs}");
-            assert_eq!(report.pages.len(), usize::from(outstanding), "{inputs}");
-            if outstanding {
-                assert_eq!(report.pages[0].unanswered, ["summary"], "{inputs}");
+            assert_eq!(
+                report.pages.len(),
+                usize::from(outstanding.is_some()),
+                "{inputs}"
+            );
+            if let Some(reason) = outstanding {
+                assert_eq!(
+                    report.pages[0].unanswered,
+                    [("summary", reason)],
+                    "{inputs}"
+                );
             }
+        }
+    }
+
+    /// A queued task answers a section the page still carries. One whose section is gone cannot
+    /// land, so the page is a defect even while the task waits.
+    #[test]
+    fn queued_work_excuses_an_unanswered_section_but_not_a_missing_one() {
+        let in_flight = std::collections::HashSet::from([(PathBuf::from("subject.md"), "summary")]);
+        for (body, defect) in [("## Summary\n", false), ("Source.", true)] {
+            let root = tempfile::tempdir().unwrap();
+            fs::write(
+                root.path().join("subject.md"),
+                format!("---\ntype: document\nllm_inputs: {{summary: current}}\n---\n{body}\n"),
+            )
+            .unwrap();
+            let report = audit(&[root.path().to_owned()], root.path(), &in_flight);
+            assert_eq!(report.pages.len(), usize::from(defect), "{body}");
+            assert_eq!(report.in_flight.len(), usize::from(!defect), "{body}");
         }
     }
 
@@ -514,7 +567,10 @@ mod tests {
                         "{page_type}: {heading}"
                     );
                     if !expected_complete {
-                        assert_eq!(report.pages[0].unanswered, vec!["narrative"]);
+                        assert_eq!(
+                            report.pages[0].unanswered,
+                            [("narrative", Unfinished::MissingSection)]
+                        );
                     }
                 }
             }
@@ -554,7 +610,10 @@ mod tests {
             1,
             "only the unanswered page is reported"
         );
-        assert_eq!(report.pages[0].unanswered, vec!["summary"]);
+        assert_eq!(
+            report.pages[0].unanswered,
+            [("summary", Unfinished::Unanswered)]
+        );
         assert!(
             report.pages[0].defects.is_empty(),
             "an unanswered section is not a text defect"

@@ -42,6 +42,13 @@ pub fn completed_input(page: &VaultPage, kind: TargetKind) -> Option<&str> {
     if input.is_empty() || inputs.get(&kind.completion_key())?.as_str()? != input {
         return None;
     }
+    owned_section(page, kind)?;
+    Some(input)
+}
+
+/// The section `kind` answers into, under any locale's spelling. A daily page's refined items sit
+/// under its source type's heading, events or messages.
+pub fn owned_section(page: &VaultPage, kind: TargetKind) -> Option<lk_vault::PageSection<'_>> {
     let section = lk_vault::resolve_section(&page.body, move |s: &'static Strings| match kind {
         TargetKind::DailySummary | TargetKind::DocumentSummary => s.summary,
         TargetKind::DailyConcepts | TargetKind::DocumentConcepts => s.related_concepts,
@@ -54,14 +61,12 @@ pub fn completed_input(page: &VaultPage, kind: TargetKind) -> Option<&str> {
         TargetKind::WorkLogSynthesis => s.topic_summary,
         TargetKind::ConceptSynthesis => s.concept_synthesis,
     });
-    if section.is_none()
-        && !(kind == TargetKind::DailyRefineEvents
-            && lk_vault::resolve_section(&page.body, |s: &'static Strings| s.key_messages)
-                .is_some())
-    {
-        return None;
+    match kind {
+        TargetKind::DailyRefineEvents => section.or_else(|| {
+            lk_vault::resolve_section(&page.body, |s: &'static Strings| s.key_messages)
+        }),
+        _ => section,
     }
-    Some(input)
 }
 
 /// Outcome of resolving a synthesis page's LLM-owned section.

@@ -17,7 +17,27 @@ struct ApprovedPage {
     reasons: Vec<String>,
 }
 
-pub(crate) fn unfinished_inputs(page: &lk_vault::VaultPage) -> Result<Vec<&'static str>, String> {
+/// Why a recorded semantic input is not finished. The repairs differ: an unanswered section is
+/// work for a drain, and a missing one must be restored before any answer can land.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Unfinished {
+    Unanswered,
+    /// The page records the input but no longer carries the section its answer goes in.
+    MissingSection,
+}
+
+impl Unfinished {
+    pub(crate) fn describe(self, key: &str) -> String {
+        match self {
+            Self::Unanswered => format!("unfinished {key}"),
+            Self::MissingSection => format!("{key} section missing"),
+        }
+    }
+}
+
+pub(crate) fn unfinished_inputs(
+    page: &lk_vault::VaultPage,
+) -> Result<Vec<(&'static str, Unfinished)>, String> {
     let Some(inputs) = page
         .frontmatter
         .get(lk_core::frontmatter::field::LLM_INPUTS)
@@ -28,6 +48,10 @@ pub(crate) fn unfinished_inputs(page: &lk_vault::VaultPage) -> Result<Vec<&'stat
     let inputs = inputs
         .as_object()
         .ok_or_else(|| "llm_inputs must be an object or null".to_owned())?;
+    let format = page
+        .frontmatter
+        .get("type")
+        .and_then(|value| value.as_str());
     let keys = lk_queue::TargetKind::iter()
         .map(|kind| kind.llm_inputs_key())
         .collect::<BTreeSet<_>>();
@@ -38,6 +62,17 @@ pub(crate) fn unfinished_inputs(page: &lk_vault::VaultPage) -> Result<Vec<&'stat
                 && !lk_queue::TargetKind::iter()
                     .filter(|kind| kind.llm_inputs_key() == *key)
                     .any(|kind| lk_pipeline::completed_input(page, kind).is_some())
+        })
+        .map(|key| {
+            let missing = lk_queue::TargetKind::iter()
+                .find(|kind| kind.llm_inputs_key() == key && Some(kind.page_format()) == format)
+                .is_some_and(|kind| lk_pipeline::owned_section(page, kind).is_none());
+            let reason = if missing {
+                Unfinished::MissingSection
+            } else {
+                Unfinished::Unanswered
+            };
+            (key, reason)
         })
         .collect())
 }
@@ -137,8 +172,10 @@ impl InputReadiness {
         let page =
             lk_vault::parse_page(&raw).map_err(|error| miette::miette!("{path}: {error}"))?;
         let mut reasons = BTreeSet::new();
-        for key in unfinished_inputs(&page).map_err(|error| miette::miette!("{path}: {error}"))? {
-            reasons.insert(format!("{path}: unfinished {key}"));
+        for (key, reason) in
+            unfinished_inputs(&page).map_err(|error| miette::miette!("{path}: {error}"))?
+        {
+            reasons.insert(format!("{path}: {}", reason.describe(key)));
         }
         for task in self.tasks.get(&owner).into_iter().flatten() {
             let status = classify_task(root, task, &mut self.revisions)?;
