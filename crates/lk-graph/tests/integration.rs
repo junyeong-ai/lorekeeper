@@ -251,6 +251,7 @@ fn lint_combined_report() {
             address_collisions: Vec::new(),
             unnormalized: Vec::new(),
             respelled_links: Vec::new(),
+            missing_sections: Vec::new(),
         },
         observations: output::Observations {
             hubs,

@@ -22,15 +22,14 @@ fn explicit_concept_link_repair_restores_exact_bodies_without_semantic_republica
             .unwrap()
     };
     let target = "wiki/concepts/openrouter.md";
-    let target_raw =
-        "---\ntype: concept\ntitle: OpenRouter\n---\n# OpenRouter\n\nExisting owner.\n";
+    let target_raw = "---\ntype: concept\ntitle: OpenRouter\n---\n# OpenRouter\n\nExisting owner.\n\n## Sources\n";
     std::fs::write(root.join(target), target_raw).unwrap();
     let to_revision = lk_core::concept::file_revision(target_raw);
     let mut pages = Vec::new();
     for slug in ["deepseek-v4-pro", "openrouter-fusion-api", "stripe"] {
         let address = format!("wiki/concepts/{slug}.md");
         let expected = format!(
-            "---\ntype: concept\ntitle: {slug}\nllm_inputs: {{synthesis: paid, synthesis_done: paid}}\n---\n# {slug}\n\n기존 설명과 완료 마커를 유지한다.\n\n## Related\n\n[OpenRouter](openrouter.md)\n"
+            "---\ntype: concept\ntitle: {slug}\nllm_inputs: {{synthesis: paid, synthesis_done: paid}}\n---\n# {slug}\n\n기존 설명과 완료 마커를 유지한다.\n\n## Sources\n\n## Related\n\n[OpenRouter](openrouter.md)\n"
         );
         let before = expected.replace("](openrouter.md)", "](wiki/concepts/openrouter.md)");
         assert_eq!(before.len(), expected.len() + 14);

@@ -256,6 +256,7 @@ fn lint_report(
                 &views.existence,
                 &rc.vault_dirs,
             ),
+            missing_sections: concept_lint::find_missing_sections(concept_pages, rc.locale),
         },
         observations: output::Observations {
             hubs: g.hubs(10, rc.graph.metrics.min_hub_degree),

@@ -16,10 +16,13 @@ resolve section headings before inspecting pages.
    violations are reported. The same pass returns `violations` (`broken`,
    `respelled_links`, `invalid_categories`, `duplicate_concepts`,
    `address_collisions` — distinct addresses that would collide under slug normalization —
-   and `unnormalized` — a filename that is not its own slug) and `observations`
+   `unnormalized` — a filename that is not its own slug — and `missing_sections` — a concept
+   page without a heading backlink reconciliation writes) and `observations`
    (`orphans`, `hubs`, `unresolved_conflicts`, `uncited_concepts`, `non_concept_pages`).
    Surface every non-empty list from both. For a `broken` entry,
    `lore wiki links <source> --target <target>` returns the line, label and context to repair.
+   A `missing_sections` entry names the headings to restore; add each with an empty body,
+   then run `lore graph backlinks-sync`.
    An uncited concept has no evidence page; link a
    supporting source or curate it. A non-concept page in the concepts collection is invisible
    to name resolution, so a new extraction can mint a duplicate beside it.

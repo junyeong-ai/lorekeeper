@@ -3,7 +3,7 @@ use serde::Serialize;
 use crate::backlinks::{BacklinksSyncResult, ConceptUpdate};
 use crate::cluster::{ClusterResult, LinkSuggestion};
 use crate::concept_lint::{
-    DuplicateConcept, InvalidCategoryConcept, NonConceptPage, UnresolvedConflict,
+    DuplicateConcept, InvalidCategoryConcept, MissingSections, NonConceptPage, UnresolvedConflict,
 };
 use crate::export::GraphExport;
 use crate::graph::{BrokenLink, HubPageReference};
@@ -61,6 +61,9 @@ pub struct Violations {
     /// Links that resolve only because the filesystem folds case. Dead on one that does not,
     /// which is where a synced vault ends up.
     pub respelled_links: Vec<crate::graph::RespelledLink>,
+    /// Concept pages missing a heading backlink reconciliation writes under, which
+    /// `backlinks-sync` refuses or cannot owe a synthesis to until it is restored.
+    pub missing_sections: Vec<MissingSections>,
 }
 
 /// True statements about a vault in good standing, reported because they guide a human's next
@@ -104,6 +107,7 @@ impl Violations {
             address_collisions,
             unnormalized,
             respelled_links,
+            missing_sections,
         } = self;
         broken.len()
             + invalid_categories.len()
@@ -111,6 +115,7 @@ impl Violations {
             + address_collisions.len()
             + unnormalized.len()
             + respelled_links.len()
+            + missing_sections.len()
     }
 }
 
@@ -276,6 +281,7 @@ fn print_violations(v: &Violations) {
         address_collisions,
         unnormalized,
         respelled_links,
+        missing_sections,
     } = v;
     if v.count() == 0 {
         return;
@@ -332,6 +338,19 @@ fn print_violations(v: &Violations) {
         println!(
             "  repair: rewrite each destination as the file spells it — this resolves only on a \
              filesystem that folds case, and is dead on one that does not"
+        );
+    }
+
+    if !missing_sections.is_empty() {
+        println!(
+            "\nConcept pages missing a reconciled section ({}):",
+            missing_sections.len()
+        );
+        for page in missing_sections {
+            println!("  {}  {}", page.path.display(), page.headings.join(", "));
+        }
+        println!(
+            "  repair: add each heading back with an empty body, then run `lore graph backlinks-sync`"
         );
     }
 
@@ -730,6 +749,7 @@ mod tests {
             address_collisions: Vec::new(),
             unnormalized: Vec::new(),
             respelled_links: Vec::new(),
+            missing_sections: Vec::new(),
         };
         let value = serde_json::to_value(&violations).unwrap();
         assert!(value.get("index").is_none());
@@ -763,6 +783,10 @@ mod tests {
                 b: "g".into(),
                 a_name: "F".into(),
                 b_name: "F".into(),
+            }],
+            missing_sections: vec![MissingSections {
+                path: "wiki/concepts/h.md".into(),
+                headings: vec!["## Sources".into(), "## Synthesis".into()],
             }],
         };
         assert_eq!(v.count(), listed(&serde_json::to_value(&v).unwrap()));

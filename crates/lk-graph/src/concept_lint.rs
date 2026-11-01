@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use lk_core::concept::identity_key;
 use lk_core::config::ConceptCategory;
 use lk_core::frontmatter;
+use lk_core::i18n::Locale;
 use lk_core::markdown::FenceState;
 use serde::Serialize;
 
@@ -48,8 +49,9 @@ pub struct ConceptPage {
     /// Declared title and aliases, with the file stem as the title fallback.
     /// An address does not itself claim a name. Malformed frontmatter declares none.
     pub names: Vec<String>,
-    /// Page body (frontmatter stripped), for conflict-callout scanning.
-    pub body: String,
+    /// Page body (frontmatter stripped), for callout and section checks. `None` where the
+    /// frontmatter does not parse, so neither check makes a claim about a page it cannot read.
+    pub body: Option<String>,
     /// Citing origin pages as backlink reconciliation last recorded them; `None` where the
     /// page records no count.
     pub source_count: Option<u64>,
@@ -137,9 +139,9 @@ pub fn scan_concept_collection(
                     .frontmatter
                     .get("source_count")
                     .and_then(serde_json::Value::as_u64);
-                (category, page.body, source_count)
+                (category, Some(page.body), source_count)
             }
-            Err(_) => (None, String::new(), None),
+            Err(_) => (None, None, None),
         };
         pages.push(ConceptPage {
             slug,
@@ -155,6 +157,41 @@ pub fn scan_concept_collection(
         concepts: pages,
         non_concept,
     })
+}
+
+/// A concept page without a heading backlink reconciliation writes under.
+#[derive(Debug, Clone, Serialize)]
+pub struct MissingSections {
+    pub path: PathBuf,
+    /// The headings to restore, as the configured locale spells them.
+    pub headings: Vec<String>,
+}
+
+/// Concept pages `lore graph backlinks-sync` cannot reconcile for want of a heading. Every concept
+/// carries its Sources section, and a cited one the Synthesis section its evidence is owed in;
+/// cited is the count reconciliation last recorded. Headings match in any locale's spelling, as
+/// reconciliation reads them.
+pub fn find_missing_sections(pages: &[ConceptPage], locale: Locale) -> Vec<MissingSections> {
+    let strings = locale.strings();
+    pages
+        .iter()
+        .filter_map(|page| {
+            let body = page.body.as_deref()?;
+            let mut headings = Vec::new();
+            if lk_vault::resolve_section(body, |s| s.concept_sources).is_none() {
+                headings.push(format!("## {}", strings.concept_sources));
+            }
+            if page.source_count.is_some_and(|count| count > 0)
+                && lk_vault::resolve_section(body, |s| s.concept_synthesis).is_none()
+            {
+                headings.push(format!("## {}", strings.concept_synthesis));
+            }
+            (!headings.is_empty()).then(|| MissingSections {
+                path: page.path.clone(),
+                headings,
+            })
+        })
+        .collect()
 }
 
 /// Concept pages whose recorded `source_count` is zero: no document, daily, synthesis or
@@ -421,7 +458,7 @@ pub fn find_unresolved_conflicts(pages: &[ConceptPage]) -> Vec<UnresolvedConflic
     pages
         .iter()
         .filter_map(|page| {
-            let lines: Vec<&str> = lk_core::markdown::lines_with_endings(&page.body)
+            let lines: Vec<&str> = lk_core::markdown::lines_with_endings(page.body.as_deref()?)
                 .map(|line| line.trim_end_matches(['\r', '\n']))
                 .collect();
             let mut fence = FenceState::new();
@@ -536,7 +573,7 @@ mod tests {
             vec!["RAG", "RAG", "Retrieval-Augmented Generation"],
             "the name set is title + every alias, verbatim"
         );
-        assert!(pages[0].body.contains("# rag"));
+        assert!(pages[0].body.as_deref().unwrap().contains("# rag"));
     }
 
     #[test]
@@ -559,7 +596,7 @@ mod tests {
         assert_eq!(pages[0].slug, "broken");
         assert!(pages[0].category.is_none());
         assert_eq!(pages[0].names, Vec::<String>::new());
-        assert!(pages[0].body.is_empty());
+        assert!(pages[0].body.is_none());
     }
 
     #[test]
@@ -1184,8 +1221,10 @@ mod tests {
                 category: None,
                 names: vec!["Topic".into()],
                 source_count: None,
-                body: "# Topic\n\n```md\n> [!conflict] literal example\n```\n\n> [!note] annotation\n\n> [!CONFLICT]-\n> Sources disagree.\n"
-                    .replace('\n', ending),
+                body: Some(
+                    "# Topic\n\n```md\n> [!conflict] literal example\n```\n\n> [!note] annotation\n\n> [!CONFLICT]-\n> Sources disagree.\n"
+                        .replace('\n', ending),
+                ),
             };
             let result = find_unresolved_conflicts(&[page]);
             assert_eq!(result.len(), 1, "{ending:?}: {result:?}");
@@ -1233,5 +1272,60 @@ mod tests {
     fn missing_concepts_dir_yields_no_duplicates() {
         let empty = TempDir::new().unwrap();
         assert!(find_duplicate_concepts(&scan(empty.path())).is_empty());
+    }
+
+    /// Reconciliation needs Sources on every concept and Synthesis on a cited one. An uncited
+    /// concept owes no synthesis yet, a heading in another locale still counts, and a page whose
+    /// frontmatter does not parse is not judged by its unreadable body.
+    #[test]
+    fn missing_sections_name_the_headings_reconciliation_writes() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp
+            .path()
+            .join("wiki")
+            .join(lk_core::vault_path::CONCEPTS_SUBDIR);
+        std::fs::create_dir_all(&dir).unwrap();
+        for (slug, content) in [
+            (
+                "complete",
+                "---\ntype: concept\nsource_count: 2\n---\n## Synthesis\n\n## Sources\n",
+            ),
+            (
+                "uncited",
+                "---\ntype: concept\nsource_count: 0\n---\n## Sources\n",
+            ),
+            (
+                "korean",
+                "---\ntype: concept\nsource_count: 1\n---\n## 핵심\n\n## 출처\n",
+            ),
+            ("broken", "---\ntype: concept\nno closing delimiter\n"),
+            (
+                "sourceless",
+                "---\ntype: concept\nsource_count: 0\n---\n## Synthesis\n",
+            ),
+            (
+                "headless",
+                "---\ntype: concept\nsource_count: 3\n---\n## Sources\n",
+            ),
+        ] {
+            std::fs::write(dir.join(format!("{slug}.md")), content).unwrap();
+        }
+        let missing = find_missing_sections(&scan(tmp.path()), Locale::Ko)
+            .into_iter()
+            .map(|page| (page.path, page.headings))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            missing,
+            [
+                (
+                    PathBuf::from("wiki/concepts/headless.md"),
+                    vec!["## 핵심".to_owned()]
+                ),
+                (
+                    PathBuf::from("wiki/concepts/sourceless.md"),
+                    vec!["## 출처".to_owned()]
+                ),
+            ]
+        );
     }
 }
