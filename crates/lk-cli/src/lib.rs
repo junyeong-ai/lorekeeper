@@ -207,11 +207,11 @@ pub enum Command {
     /// Link graph analysis for the vault
     Graph {
         /// Root directory of the vault (overrides config.yaml vault.root)
-        #[arg(long)]
+        #[arg(long, global = true)]
         root: Option<PathBuf>,
         /// Output in JSON format. `ok` matches this command's structural verdict,
         /// not a semantic review of source claims
-        #[arg(long)]
+        #[arg(long, global = true)]
         json: bool,
         #[command(subcommand)]
         command: commands::graph::GraphCommand,

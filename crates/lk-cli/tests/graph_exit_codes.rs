@@ -1544,3 +1544,23 @@ fn a_link_that_only_resolves_under_folding_is_a_violation_of_its_own() {
     assert_eq!(parsed["ok"].as_bool(), Some(false), "{raw}");
     assert_eq!(ws.code(&["graph", "lint"]), 1);
 }
+
+/// `--json` and `--root` are accepted after the subcommand, where every other command takes
+/// them, as well as before it.
+#[test]
+fn graph_flags_are_accepted_on_either_side_of_the_subcommand() {
+    use clap::CommandFactory;
+    for argv in [
+        ["lore", "graph", "--json", "--root", "v", "lint"],
+        ["lore", "graph", "lint", "--json", "--root", "v"],
+    ] {
+        let matches = lore::Cli::command().try_get_matches_from(argv).unwrap();
+        let graph = matches.subcommand_matches("graph").unwrap();
+        assert!(graph.get_flag("json"), "{argv:?}");
+        assert_eq!(
+            graph.get_one::<std::path::PathBuf>("root"),
+            Some(&std::path::PathBuf::from("v")),
+            "{argv:?}"
+        );
+    }
+}
