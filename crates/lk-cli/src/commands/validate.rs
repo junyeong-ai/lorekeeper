@@ -75,6 +75,10 @@ pub async fn run(opts: &super::GlobalOptions) -> miette::Result<()> {
         );
     }
 
+    if config.enabled_sources().next().is_none() {
+        eprintln!("  warning: no source is enabled; ingest will have nothing to collect");
+    }
+
     for warning in obsidian_link_warnings(&config.vault.root_path()) {
         eprintln!("  warning: {warning}");
     }

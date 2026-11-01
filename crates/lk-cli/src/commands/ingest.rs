@@ -218,6 +218,9 @@ async fn run_with_identity(
     if dry_run {
         eprintln!("[dry-run] no vault writes will be performed");
     }
+    if sources.is_empty() {
+        eprintln!("  ! no source is enabled; there is nothing to collect");
+    }
     if let Some(td) = target_date {
         eprintln!(
             "[date] event windows are anchored to {td}; document snapshots preserve authored dates"
@@ -513,25 +516,13 @@ async fn run_with_identity(
     //     warning, since draining means switching back to queue.
     let pending = pending_queue_count(&vault_root)?;
     if pending > 0 {
-        let queue_dir = vault_root.join(".lorekeeper").join("queue");
         if config.llm.provider == lk_core::config::LlmProvider::Queue {
-            tracing::warn!(
-                pending,
-                queue_dir = %queue_dir.display(),
-                "pending queue files exist; run /lore-process to complete semantic work",
-            );
             eprintln!(
                 "! {pending} pending queue file(s) under {}/.lorekeeper/queue/. Run \
                  /lore-process to complete semantic work; identical pending requests are reused.",
                 vault_root.display(),
             );
         } else {
-            tracing::warn!(
-                pending,
-                provider = ?config.llm.provider,
-                queue_dir = %queue_dir.display(),
-                "pending queue files exist but provider is not `queue`; their tasks will be stranded",
-            );
             eprintln!(
                 "! {pending} pending queue file(s) under {}/.lorekeeper/queue/ will be STRANDED: \
                  provider is not `queue`, so this run creates no tasks to fill their target pages. \
@@ -587,7 +578,7 @@ async fn run_with_identity(
         let observation_outcome = observation.outcome;
         if observation_outcome == lk_source::ObservationOutcome::Partial {
             eprintln!(
-                "  ! partial observation: source reach is incomplete; rerun the same ingest command with RUST_LOG=warn and --dry-run for provider diagnostics"
+                "  ! partial observation: source reach is incomplete; the warnings above name what was not observed"
             );
             had_failure = true;
             let descriptor = sc.source_type.descriptor();

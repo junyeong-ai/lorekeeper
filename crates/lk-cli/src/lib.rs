@@ -270,8 +270,17 @@ pub enum InitTarget {
 
 /// Parse the process arguments and run the selected command.
 pub async fn run() -> miette::Result<()> {
+    // Warnings carry incompleteness a run must disclose — a capped listing, an unresolved
+    // dependency, a skipped item — so they print unless RUST_LOG asks for something else.
+    // Diagnostics go to stderr: stdout is the JSON and bare-value contract.
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_writer(std::io::stderr)
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::builder()
+                .with_default_directive(tracing_subscriber::filter::LevelFilter::WARN.into())
+                .from_env_lossy(),
+        )
         .init();
 
     let cli = Cli::parse();

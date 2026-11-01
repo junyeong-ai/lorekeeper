@@ -313,10 +313,6 @@ impl Config {
             }
         }
 
-        if self.sources.values().all(|sc| !sc.enabled) {
-            tracing::warn!("all sources are disabled; ingest will have nothing to do");
-        }
-
         if self.identity.name.trim().is_empty() {
             return Err(ConfigError::Validation(
                 "identity.name must not be empty".into(),
