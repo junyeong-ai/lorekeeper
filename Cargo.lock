@@ -1551,7 +1551,7 @@ checksum = "47d9d19d1d6efa0109d2f65ff4c85cddd50bd572e5a00127ab10987290bcefae"
 
 [[package]]
 name = "lk-core"
-version = "0.111.0"
+version = "0.112.0"
 dependencies = [
  "blake3",
  "jiff",
@@ -1570,7 +1570,7 @@ dependencies = [
 
 [[package]]
 name = "lk-dist"
-version = "0.111.0"
+version = "0.112.0"
 dependencies = [
  "flate2",
  "lk-core",
@@ -1588,7 +1588,7 @@ dependencies = [
 
 [[package]]
 name = "lk-graph"
-version = "0.111.0"
+version = "0.112.0"
 dependencies = [
  "globset",
  "lk-core",
@@ -1607,7 +1607,7 @@ dependencies = [
 
 [[package]]
 name = "lk-pipeline"
-version = "0.111.0"
+version = "0.112.0"
 dependencies = [
  "async-trait",
  "jiff",
@@ -1626,7 +1626,7 @@ dependencies = [
 
 [[package]]
 name = "lk-queue"
-version = "0.111.0"
+version = "0.112.0"
 dependencies = [
  "async-trait",
  "blake3",
@@ -1643,7 +1643,7 @@ dependencies = [
 
 [[package]]
 name = "lk-source"
-version = "0.111.0"
+version = "0.112.0"
 dependencies = [
  "async-trait",
  "base64",
@@ -1680,7 +1680,7 @@ dependencies = [
 
 [[package]]
 name = "lk-task"
-version = "0.111.0"
+version = "0.112.0"
 dependencies = [
  "blake3",
  "jiff",
@@ -1693,7 +1693,7 @@ dependencies = [
 
 [[package]]
 name = "lk-vault"
-version = "0.111.0"
+version = "0.112.0"
 dependencies = [
  "async-trait",
  "blake3",
@@ -1735,7 +1735,7 @@ checksum = "5d15f86d12da44cd8d4ec3c73984537eb7f4cadcb9776a575a0a8a05ca11005c"
 
 [[package]]
 name = "lore"
-version = "0.111.0"
+version = "0.112.0"
 dependencies = [
  "assert_cmd",
  "blake3",
