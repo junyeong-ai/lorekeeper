@@ -80,7 +80,7 @@ one source to infer that distinction.
   work. This validation context never grants lease ownership or reentrancy.
 - **Preserve observations.** Dates use configured vault timezone. Future events do
   not materialize. Each adapter decides ownership from its structured identity rules, not
-  free-text mentions; Calendar includes matching organizers or attendees. Optional `personal` gates personal pages, not weekly knowledge
+  free-text mentions. Optional `personal` gates personal pages, not weekly knowledge
   synthesis. Failed-all fetches are errors; a genuinely empty observation is success.
 - **Retain state, not just history.** Maintenance keeps each source's latest
   collected log entry even beyond retention. Manual inputs retire only after all
