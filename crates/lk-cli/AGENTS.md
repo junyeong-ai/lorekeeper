@@ -6,104 +6,111 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
 
 ## Configuration and workflow sessions
 
-- `commands/mod.rs` resolves flag/environment config, working-directory config,
-  then XDG config; never silently use config.example.yaml. Resolve the selected
-  config absolutely; relative vault roots are relative to that config.
+- `commands/mod.rs` resolves flag/environment config, working-directory config, then XDG
+  config; never silently use config.example.yaml. Resolve the selected config
+  absolutely; relative vault roots are relative to that config.
 - A mutation session's canonical root owns every page and queue path derived for
   publication. Ingestion pins its physical root before building acquisition clients.
-- Workflow configuration is loaded and revisioned from one read. Pass its selected
-  path and `LORE_CONFIG_REVISION` to children; every CLI config load rejects changed
-  bytes or another path. A workflow also pins its original root selector, working
-  path and directory identity. Bind parent and child I/O to that working path;
-  validate selection before and after waiting/recovery and before host/publication.
-  Same-directory aliases remain valid; another directory or incomplete inherited
-  context refuses. Root context validates scope, never lease ownership or reentrancy.
-  Native jobs stop after drift and retain unfinished work.
-  New semantic Work and selection identities exclude only execution call/parallel/consecutive-call/
-  screening-packet limits and profile session timeouts. Input/result byte limits,
-  extraction policy, model/effort and all other configuration remain semantic inputs.
-  The live workflow still pins every configuration byte. Legacy byte-bound manifests
-  resume only through an exact current-configuration reconstruction; never retag them
-  after an operational change or guess historical settings.
-  Optional typed stage overrides choose only host profiles. Keep the originating
-  profile selected for Work policy, budgets and child LORE_EXECUTION_PROFILE.
-  Resolve the actual node/task kind before each invocation; never route from prompts
-  or paths. Independent read waves retain per-request host/timeout/decoder association;
-  generation batches require the same resolved profile name. Reuse the shared engine
-  adapters and both-engine installation claims. Interactive returned-host telemetry
-  is not retained semantic progress or publication proof.
-  Revalidate pinned configuration/root and cancellation after awaited host-version
+- Workflow configuration is loaded and revisioned from one read. Pass its selected path
+  and `LORE_CONFIG_REVISION` to children; every CLI config load rejects changed bytes or
+  another path. A workflow also pins its original root selector, working path and
+  directory identity. Bind parent and child I/O to that working path; validate selection
+  before and after waiting/recovery and before host/publication. Same-directory aliases
+  remain valid; another directory or incomplete inherited context refuses. Root context
+  validates scope, never lease ownership or reentrancy. Native jobs stop after drift and
+  retain unfinished work.
+- New semantic Work and selection identities exclude only execution
+  call/parallel/consecutive-call/ screening-packet limits and profile session timeouts.
+  Input/result byte limits, extraction policy, model/effort and all other configuration
+  remain semantic inputs. The live workflow still pins every configuration byte. Legacy
+  byte-bound manifests resume only through an exact current-configuration
+  reconstruction; never retag them after an operational change or guess historical
+  settings.
+- Optional typed stage overrides choose only host profiles. Keep the originating profile
+  selected for Work policy, budgets and child LORE_EXECUTION_PROFILE. Resolve the actual
+  node/task kind before each invocation; never route from prompts or paths. Independent
+  read waves retain per-request host/timeout/decoder association; generation batches
+  require the same resolved profile name. Reuse the shared engine adapters and
+  both-engine installation claims. Interactive returned-host telemetry is not retained
+  semantic progress or publication proof.
+- Revalidate pinned configuration/root and cancellation after awaited host-version
   preflight, before reserving a turn or counting/invoking a semantic call.
-- `commands/workflow.rs` is a Unix foreground coordinator for long LLM consumers,
-  not a vault mutation lock. It locks canonical-vault `.lorekeeper/workflow.lock`,
-  clears only FD_CLOEXEC, and `exec`s literal argv. Busy defaults to nonzero with no
-  child; `--wait` explicitly waits. Pass selected absolute LORE_CONFIG and optional
-  LORE_TEMPLATE_DIR to the child via Command.env, not global environment mutation.
-- The lease lasts only while a participating process retains the descriptor.
-  Detached programs or programs closing inherited descriptors are outside that
-  guarantee. No PID/TTL cleanup, env-bool bypass, or reentrancy guess. Windows is
-  explicitly unsupported. Ordinary short CLI writers do not reacquire the lease;
-  they retain their own locks/revision guards. Workflow does not recover journals.
-- Child PATH starts with the selected executable's directory and LORE_BIN names
-  that executable. Its canonical `lore` sibling must identify the same file; a
-  renamed binary cannot silently delegate skill commands to another installation.
-  Claude grants exact quoted executable spellings and, only for plain ASCII shell
-  path characters, the same unquoted path. Never use a wildcard executable prefix,
-  wrapper permission or unrestricted Bash to accommodate another spelling.
+- `commands/workflow.rs` is a Unix foreground coordinator for long LLM consumers, not a
+  vault mutation lock. It locks canonical-vault `.lorekeeper/workflow.lock`, clears only
+  FD_CLOEXEC, and `exec`s literal argv. Busy defaults to nonzero with no child; `--wait`
+  explicitly waits. Pass selected absolute LORE_CONFIG and optional LORE_TEMPLATE_DIR to
+  the child via Command.env, not global environment mutation.
+- The lease lasts only while a participating process retains the descriptor. Detached
+  programs or programs closing inherited descriptors are outside that guarantee. No
+  PID/TTL cleanup, env-bool bypass, or reentrancy guess. Windows is explicitly
+  unsupported. Ordinary short CLI writers do not reacquire the lease; they retain their
+  own locks/revision guards. Workflow does not recover journals.
+- Child PATH starts with the selected executable's directory and LORE_BIN names that
+  executable. Its canonical `lore` sibling must identify the same file; a renamed binary
+  cannot silently delegate skill commands to another installation. Claude grants exact
+  quoted executable spellings and, only for plain ASCII shell path characters, the same
+  unquoted path. Never use a wildcard executable prefix, wrapper permission or
+  unrestricted Bash to accommodate another spelling.
+
+## Native runs (`commands/run.rs`, `execution.rs`)
+
 - `commands/run.rs` owns daily/process/knowledge sequencing; `execution.rs` owns
-  host-specific invocation and supervised Unix process groups. The shared
-  WorkflowLease covers semantic reads through final publication. Native daily
-  acquisition precedes a separate publication-only lease; `--wait` selects waiting
-  rather than refusal at that boundary. Release it before the parent semantic lease.
-  Never hold a writer claim across collection or workflow waiting. Independent
-  recovery stages continue after source failure, while
-  dependent period stages stop on failure. Cancellation stops further stages.
-  Preserve observed cancellation through cleanup errors and report those errors;
-  send group SIGKILL once before reaping a forced foreground child.
-  Knowledge --batches is an explicit initial-campaign budget. Each batch uses a fresh
-  workflow lease, while configuration revision and cancellation supervision remain pinned
-  across the campaign, including the first acquired vault's physical identity.
-  Process --batches is a separate queue-only campaign: continue only after typed call-budget
-  exhaustion with newly retained observations, screening, staged requests, discovery/action
-  receipts or verified publication. Cached refusals and already-complete work add no progress.
-  Each checkpoint retains its incomplete outcome; a settled process campaign requires the
-  final batch's full checks to pass. Defaults remain one batch and the configured per-batch calls.
-  Process classifies final review health through the shared typed reports. Reassessment
+  host-specific invocation and supervised Unix process groups. The shared WorkflowLease
+  covers semantic reads through final publication. Native daily acquisition precedes a
+  separate publication-only lease; `--wait` selects waiting rather than refusal at that
+  boundary. Release it before the parent semantic lease. Never hold a writer claim
+  across collection or workflow waiting.
+- Independent recovery stages continue after source failure, while dependent period
+  stages stop on failure. Cancellation stops further stages. Preserve observed
+  cancellation through cleanup errors and report those errors; send group SIGKILL once
+  before reaping a forced foreground child.
+- Knowledge --batches is an explicit initial-campaign budget. Each batch uses a fresh
+  workflow lease, while configuration revision and cancellation supervision remain
+  pinned across the campaign, including the first acquired vault's physical identity.
+  Process --batches is a separate queue-only campaign: continue only after typed
+  call-budget exhaustion with newly retained observations, screening, staged requests,
+  discovery/action receipts or verified publication. Cached refusals and
+  already-complete work add no progress. Each checkpoint retains its incomplete outcome;
+  a settled process campaign requires the final batch's full checks to pass. Defaults
+  remain one batch and the configured per-batch calls.
+- Process classifies final review health through the shared typed reports. Reassessment
   keeps strict completion nonzero without halting budgeted independent queue progress;
   invalid reviews and failed reads remain fatal. Queue settlement alone cannot satisfy
-  review completion. Daily retains its strict review checkpoints before period resumption.
-  Stop on fatal or unknown state, cancellation, no verified progress,
-  or an empty plan. Verified selected audits can advance subsequent budgeted batches despite
-  unrelated queue rejections; the campaign remains incomplete/nonzero. Batch-limit success
-  does not establish full-corpus coverage. Existing receipts resume verified work.
-  Report elapsed job time and agent-invocation time separately, including failures
-  and cancellation. Invocation counts and wall time are not tokens or billed cost.
-  Native work telemetry retains at most 1024 evidence/screening/finalizer steps and counts
+  review completion. Daily retains its strict review checkpoints before period
+  resumption.
+- Stop on fatal or unknown state, cancellation, no verified progress, or an empty plan.
+  Verified selected audits can advance subsequent budgeted batches despite unrelated
+  queue rejections; the campaign remains incomplete/nonzero. Batch-limit success does
+  not establish full-corpus coverage. Existing receipts resume verified work.
+- Report elapsed job time and agent-invocation time separately, including failures and
+  cancellation. Invocation counts and wall time are not tokens or billed cost. Native
+  work telemetry retains at most 1024 evidence/screening/finalizer steps and counts
   omissions. Measure existing operations only; unknown/inapplicable fields are null.
-  Compact request/decoded-result bytes exclude prompts and host envelopes; tool-enabled native
-  result request/response bytes are measured; ordinary interactive audit responses remain unobserved. Revalidation and recording share one measured operation.
-  Parallel invocation durations are summed and can exceed elapsed job time.
-  Failed structured hosts retain only fixed diagnostic fields, JSON types/sizes and
-  recognized status tokens. Keep version preflight, invocation and response phases
-  distinct; streamed or discarded stdout has unknown size/shape. Never infer quota,
-  retry policy or semantic output from this diagnostic, or copy raw error payloads.
-  Queue-planning metrics count local checkpoints and shared synthesis captures,
-  separately from later revalidation and host work. `mutation_access` measures
-  in-process writer acquisition, including waiting, config validation and recovery;
-  queue-planning duration excludes it. Child-command waits are not in that metric.
-  Native writer waiting is cancellable, retries only typed contention and validates
-  the same-read config pin before recovery. A pre-host cursor wait discards prepared
+  Compact request/decoded-result bytes exclude prompts and host envelopes; tool-enabled
+  native result request/response bytes are measured; ordinary interactive audit
+  responses remain unobserved. Revalidation and recording share one measured operation.
+  Parallel invocation durations are summed and can exceed elapsed job time. Failed
+  structured hosts retain only fixed diagnostic fields, JSON types/sizes and recognized
+  status tokens. Keep version preflight, invocation and response phases distinct;
+  streamed or discarded stdout has unknown size/shape. Never infer quota, retry policy
+  or semantic output from this diagnostic, or copy raw error payloads. Queue-planning
+  metrics count local checkpoints and shared synthesis captures, separately from later
+  revalidation and host work. `mutation_access` measures in-process writer acquisition,
+  including waiting, config validation and recovery; queue-planning duration excludes
+  it. Child-command waits are not in that metric.
+- Native writer waiting is cancellable, retries only typed contention and validates the
+  same-read config pin before recovery. A pre-host cursor wait discards prepared
   requests and replans before invocation; post-host recording reloads fresh inputs.
   Native discovery reads also check the supervised signal flag between enumeration,
-  header lines and body chunks. Cancellation discards incomplete captures; it does
-  not interrupt an active kernel I/O call or abandon a journal transition.
-  Finalization shares one fresh capture for status and preparation in the same local
+  header lines and body chunks. Cancellation discards incomplete captures; it does not
+  interrupt an active kernel I/O call or abandon a journal transition.
+- Finalization shares one fresh capture for status and preparation in the same local
   checkpoint. Preparation includes that capture; verification measures sealed-result
   checks separately. Never reuse this capture after a host call or writer wait.
-  Native consumers own selected semantic reads and guarded publication; the controller
+- Native consumers own selected semantic reads and guarded publication; the controller
   owns final global reconciliation/checks. Keep this boundary explicit in the host
   instruction and shared skills; standalone skills still perform their own final checks.
-  Knowledge jobs give ready audit subjects a turn before global queue draining. Scope
+- Knowledge jobs give ready audit subjects a turn before global queue draining. Scope
   readiness to the actual subject/evidence/context/review pages, verified physical
   owners, typed unfinished work and staged results. Unknown task/result targets cannot
   be assumed unrelated. Reserve pending first-discovery order under vault→queue claims
@@ -112,247 +119,276 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   During automatic admission, check exact current Work holds only along the available
   pending prefix needed to fill the configured batch. Preserve held order and paid
   bytes; all-held is deferred, while corrupt or unreadable state is fatal. No Work-ID
-  shortcut, persistent hold index or capture reuse across a host/wait boundary.
-  Recheck readiness under those claims before recording,
-  and verify selected receipts after final reconciliation even when unrelated backlog
-  leaves the overall job incomplete. Authored pages require no invented done markers.
-  Recheck discovered dependencies within the originally selected batch. Known blockers
-  defer only their subjects; recompute the ready input union and final host selection.
-  Preserve pending order and report the latest checked scope without claiming completion.
-  `wiki audit-plan --ready` uses the same readiness owner without reserving work;
-  automatic plans skip blockers, while exact selections retain them with bounded
-  diagnostics and a complete count for that checked scope.
-  Grant each temporary selection manifest's directory explicitly to the selected host;
+  shortcut, persistent hold index or capture reuse across a host/wait boundary. Recheck
+  readiness under those claims before recording, and verify selected receipts after
+  final reconciliation even when unrelated backlog leaves the overall job incomplete.
+  Authored pages require no invented done markers. Recheck discovered dependencies
+  within the originally selected batch. Known blockers defer only their subjects;
+  recompute the ready input union and final host selection. Preserve pending order and
+  report the latest checked scope without claiming completion. `wiki audit-plan --ready`
+  uses the same readiness owner without reserving work; automatic plans skip blockers,
+  while exact selections retain them with bounded diagnostics and a complete count for
+  that checked scope.
+- Grant each temporary selection manifest's directory explicitly to the selected host;
   keep it alive through the foreground consumer and remove it afterward.
-  `commands/work.rs` binds retained input and audit dependencies to resumable derived
-  work. Oversized requests use a fresh configured agent per inspection/reduction and
-  a bounded finalizer. Unplanned whole-input summarize/refine/themes use one tool-free
+
+## Resumable semantic Work (`commands/work.rs`)
+
+- `commands/work.rs` binds retained input and audit dependencies to resumable derived
+  work. Oversized requests use a fresh configured agent per inspection/reduction and a
+  bounded finalizer. Unplanned whole-input summarize/refine/themes use one tool-free
   section request, including scoped reviews and generation rules; other small requests
-  retain ordinary batching. Complete-envelope capacity defers only that target without
-  clipping or rewriting paid Work. `execution.work` limits
-  serialized request/result bytes and agent calls per native run, resetting per knowledge
-  batch. Exhaustion retains unfinished work and fails explicitly, without clipping evidence.
-  Resume current explicit Work plans even when the remaining batch fits whole input;
+  retain ordinary batching.
+- Complete-envelope capacity defers only that target without clipping or rewriting paid
+  Work. `execution.work` limits serialized request/result bytes and agent calls per
+  native run, resetting per knowledge batch. Exhaustion retains unfinished work and
+  fails explicitly, without clipping evidence.
+- Resume current explicit Work plans even when the remaining batch fits whole input;
   validate their exact manifest before using recorded observations.
-  Only freshly received unambiguous authored-text violations can create native
+- Only freshly received unambiguous authored-text violations can create native
   observation-rejection holds. Guard exact requests, contracts and captured responses;
-  keep evidence/inheritance, stored corruption and unknown failures strict. Preserve
-  old paid bytes, bound append-only rejection history and keep unchanged holds zero-call.
-  Saved section finalizers capture fresh scoped reviews separately from source-only Work;
-  guard the complete final request after the host and its context again at apply. Do not
-  incorporate reviews into old Work identities or rewrite paid nodes to acquire that scope.
-  New work fixes reduction topology from the exact envelope plus each child's authored result
-  allowance; every child and its evidence mapping participates. A reduction can retain
-  unchanged inherited questions in a self-contained versioned node snapshot. Its authored
-  result and position metadata obey the result bound; the snapshot obeys the input bound.
-  Full reconstructed questions participate in every parent and finalizer input. Actual
-  complete-input overflow defers that Work before invocation, never clips or replans it.
-  Persist the policy and
-  preserve missing-policy binary plans, node IDs and seals without rewriting them on resume.
-  Explicit audit inspection refinement requires a current exact processing action.
-  Keep the canonical plan, prior positive outputs and original action bytes unchanged.
-  Capture its bounded sidecar and original-action revision with the expanded tree;
-  guard that snapshot or absence through recording, completion and historical retention.
-  New records bind refinement provenance and compose with retained-question snapshots.
-  Use the existing byte-budgeted reduction owner, preserve complete original coverage,
-  and refuse refined cross-Work reuse without its complete closure. Never infer splits
-  from action prose or retry unchanged holds automatically.
-  Native queue extraction/synthesis may finalize a disjoint current frontier covering
+  keep evidence/inheritance, stored corruption and unknown failures strict. Preserve old
+  paid bytes, bound append-only rejection history and keep unchanged holds zero-call.
+- Saved section finalizers capture fresh scoped reviews separately from source-only
+  Work; guard the complete final request after the host and its context again at apply.
+  Do not incorporate reviews into old Work identities or rewrite paid nodes to acquire
+  that scope.
+- New work fixes reduction topology from the exact envelope plus each child's authored
+  result allowance; every child and its evidence mapping participates. A reduction can
+  retain unchanged inherited questions in a self-contained versioned node snapshot. Its
+  authored result and position metadata obey the result bound; the snapshot obeys the
+  input bound. Full reconstructed questions participate in every parent and finalizer
+  input. Actual complete-input overflow defers that Work before invocation, never clips
+  or replans it. Persist the policy and preserve missing-policy binary plans, node IDs
+  and seals without rewriting them on resume.
+- Explicit audit inspection refinement requires a current exact processing action. Keep
+  the canonical plan, prior positive outputs and original action bytes unchanged.
+  Capture its bounded sidecar and original-action revision with the expanded tree; guard
+  that snapshot or absence through recording, completion and historical retention. New
+  records bind refinement provenance and compose with retained-question snapshots. Use
+  the existing byte-budgeted reduction owner, preserve complete original coverage, and
+  refuse refined cross-Work reuse without its complete closure. Never infer splits from
+  action prose or retry unchanged holds automatically.
+- Native queue extraction/synthesis may finalize a disjoint current frontier covering
   every planned inspection when all observations, evidence and rules fit the existing
-  input limit and no processing blocker remains. Its distinct frontier seal never
-  marks a missing root complete or rewrites paid nodes. Missing/stale/oversized/blocked
+  input limit and no processing blocker remains. Its distinct frontier seal never marks
+  a missing root complete or rewrites paid nodes. Missing/stale/oversized/blocked
   coverage retains normal reduction; source-only work, sections and audits are excluded.
   An exact frontier-finalizer hold also retains normal Reduce admission; do not block
   its whole Work by identity. Keep the next node's own exact hold and capacity checks.
   Distinguish discovery recovery: its current hold still defers the whole target.
-  Replacing an active finalization action journals its exact old bytes in the validated
+- Replacing an active finalization action journals its exact old bytes in the validated
   history sidecar. Preserve historical matching and reference-aware retention together.
-  Revalidate the exact full request and completion proof after host execution and at apply.
-  Corrected observations require a newly generated result; preserve old proposals.
-  Authority replacement refuses corruption/dual seals and published work; journal its
-  prior final bytes and publication absence in the same mutation.
-  Completion requires exact sealed typed results and source/work guards in the canonical
+  Revalidate the exact full request and completion proof after host execution and at
+  apply. Corrected observations require a newly generated result; preserve old
+  proposals. Authority replacement refuses corruption/dual seals and published work;
+  journal its prior final bytes and publication absence in the same mutation.
+- Completion requires exact sealed typed results and source/work guards in the canonical
   publication journal. Keep the queue target's guard in its publication edit: a separate
   unchanged guard for the same target would reject the journal's own recovery.
-  Prepare ready native nodes and their progress from one captured evaluation. Refresh
+- Prepare ready native nodes and their progress from one captured evaluation. Refresh
   the complete scope after the host returns before recording; added discovery matches
   invalidate work too. Never retain a candidate capture across host execution.
-  Queue preparation checks the next exact evidence request's current processing action
+- Queue preparation checks the next exact evidence request's current processing action
   in that checkpoint, after reusable root/frontier completion. A later held node cannot
   suppress an earlier ready request. Keep the pre-host recheck for changed state; do not
   replace complete preparation with a Work-ID hold filter.
-  Progressive extraction separates complete source observations, bounded candidate-card
-  screening and admitted full-body evidence. All candidate and scoped-review guards remain
-  pinned; unknown or deferred decisions block completion, and card-only rejection is not
-  a full-body assessment. Continue unrecorded packets even when earlier cards defer.
-  A fully recorded ledger with deferred cards holds only that target for explicit
+
+## Progressive extraction and work cost
+
+- Progressive extraction separates complete source observations, bounded candidate-card
+  screening and admitted full-body evidence. All candidate and scoped-review guards
+  remain pinned; unknown or deferred decisions block completion, and card-only rejection
+  is not a full-body assessment. Continue unrecorded packets even when earlier cards
+  defer.
+- A fully recorded ledger with deferred cards holds only that target for explicit
   reassessment; fresh validated state must not become a missing-request failure or
   repeat paid screening. Corrupt ledgers remain fatal. Reused owners must be selected
   and read in full. New computed selections may reuse only an entire equal semantic
   packet under fresh complete inventory/ownership/review guards. Bind ordered cards,
   source context, queries, limits and resolved screening contract; opaque closure
   identities are not semantic input. Preserve saved legacy layout/receipts/contracts.
-  Reserve full direct-origin provenance inside the result bound. Validate and guard
+- Reserve full direct-origin provenance inside the result bound. Validate and guard
   direct same-owner origins at every current use; known reassessment holds dependent
   packets without calls, while missing/corrupt/indirect origins refuse. The latest
   computed-selection head is only a bounded lookup hint. Retention protects all proofs
-  for pending/staged owners and removes completed owners together. Source work
-  never finishes extraction independently: canonical extraction publication journals its
-  exact supporting-consumption receipt with the knowledge edits. Retention validates that
-  receipt and preserves live queue/reuse references before removing expired source work.
-  `work cost` reports complete candidate/packet counts and compact JSON bytes without
+  for pending/staged owners and removes completed owners together.
+- Source work never finishes extraction independently: canonical extraction publication
+  journals its exact supporting-consumption receipt with the knowledge edits. Retention
+  validates that receipt and preserves live queue/reuse references before removing
+  expired source work.
+- `work cost` reports complete candidate/packet counts and compact JSON bytes without
   persisting plans or reading candidate bodies through a host. Optional positive
-  `max_screening_batches` defers oversized incomplete ledgers before new screening calls;
-  complete ledgers remain usable. No clipping, implicit recipe rewrite, token/price claim
-  or completion from capacity admission. Unknown packet costs await source observations.
-  An indivisible packet's typed byte-capacity failure defers only its target; malformed
-  inputs and corrupt saved manifests remain integrity failures.
-  Capture capacity and typed source-observation blockers with their complete inventory and
-  source guards for staged proposal rejection too; known incomplete scope defers only its work.
+  `max_screening_batches` defers oversized incomplete ledgers before new screening
+  calls; complete ledgers remain usable. No clipping, implicit recipe rewrite,
+  token/price claim or completion from capacity admission. Unknown packet costs await
+  source observations. An indivisible packet's typed byte-capacity failure defers only
+  its target; malformed inputs and corrupt saved manifests remain integrity failures.
+- Capture capacity and typed source-observation blockers with their complete inventory
+  and source guards for staged proposal rejection too; known incomplete scope defers
+  only its work.
+
+## Native inference roles (`execution/observation.rs`, `execution/finalization.rs`)
+
 - Native inspection/reduction and screening are structured inference roles
   (`execution/observation.rs`); bounded single-section finalization uses
   `execution/finalization.rs`. Rust selects applicable shared generation rules through
   typed task/target kinds. Extraction/synthesis use tool-enabled final-schema responses;
-  audits retain interactive finalization. Native Rust assembles TaskResult/SynthesisResult
-  metadata from the exact prepared scope, reserves envelope bytes and owns finish/staging.
-  Models return semantic values, needs-action, or extraction-only needs-discovery
-  with explicit DiscoveryQuery values. Discovery recovery journals the legacy recipe
-  and native request-bound sidecar together under vault→queue claims. Preserve exact
-  current Source Work; changed knowledge scope replans without retagging paid nodes.
-  Recovery is incomplete; exact repeated requests/cycles defer before another host.
-  Retention protects pending task identities and validates recovery sidecars before
-  removing them. Never interpret old reason text as a recovery query.
-  Do not couple output schema to
-  tool prohibition, scrape events/prose or mutate saved Work to adopt a reply.
-  Selected action receipts bind the actual batch request. Reconsider action-bearing
+  audits retain interactive finalization. Native Rust assembles
+  TaskResult/SynthesisResult metadata from the exact prepared scope, reserves envelope
+  bytes and owns finish/staging. Models return semantic values, needs-action, or
+  extraction-only needs-discovery with explicit DiscoveryQuery values.
+- Discovery recovery journals the legacy recipe and native request-bound sidecar
+  together under vault→queue claims. Preserve exact current Source Work; changed
+  knowledge scope replans without retagging paid nodes. Recovery is incomplete; exact
+  repeated requests/cycles defer before another host. Retention protects pending task
+  identities and validates recovery sidecars before removing them. Never interpret old
+  reason text as a recovery query. Do not couple output schema to tool prohibition,
+  scrape events/prose or mutate saved Work to adopt a reply.
+- Selected action receipts bind the actual batch request. Reconsider action-bearing
   tasks individually after request changes, then suppress unchanged singleton actions;
   never substitute a reconstructed singleton for the original batch's identity.
-  Tool-free observation, screening and section roles carry the bounded request through
-  stdin and decode bounded stdout. Rust records the selected observation or creates
-  the guarded section result. In those roles Claude disables tools/customizations;
-  Codex uses a read-only sandbox.
-  Never fall back to parsing prose/Markdown when structured output is missing or invalid.
-  Evidence observers return only a typed observation body or processing-action reason.
+- Tool-free observation, screening and section roles carry the bounded request through
+  stdin and decode bounded stdout. Rust records the selected observation or creates the
+  guarded section result. In those roles Claude disables tools/customizations; Codex
+  uses a read-only sandbox. Never fall back to parsing prose/Markdown when structured
+  output is missing or invalid.
+- Evidence observers return only a typed observation body or processing-action reason.
   Rust binds native work/node/input and screening selection/batch/input identities from
   the supervised invocation; reject model-supplied identity fields without adopting or
-  repairing them. Fixed schemas and exact reply allowances reserve stored identity bytes.
-  Native screening assigns a short `candidate_ref` to each exact card. Validate complete,
-  unique reference coverage before mapping decisions to canonical paths; reply order is
-  irrelevant. Canonical requests retain full owner/source revisions while the native
-  presentation leaves those opaque guard hashes to Rust. Reserve path expansion in the
-  reply allowance. Reference-coverage or blank/oversized decision-reason rejection journals
-  an exact request/contract-bound receipt, records no decisions and defers only that task;
-  unchanged requests spend no calls. Reasons obey compact UTF-8 JSON string bytes,
-  including quotes/escapes, not character count. Read existing screening-rejections-v1
-  without rewriting them; new receipts use strict typed v2 dispositions. Earlier readers
-  refuse v2 rather than ignore it. Changed requests/contracts can be reconsidered. Malformed replies, corrupt
-  receipts and failed fresh scope validation remain failures. Standalone full-path
-  `select-record`, selection identities and existing paid decisions remain unchanged.
-  Native new questions contain only semantic text/evidence; Rust supplies IDs and
+  repairing them. Fixed schemas and exact reply allowances reserve stored identity
+  bytes.
+- Native screening assigns a short `candidate_ref` to each exact card. Validate
+  complete, unique reference coverage before mapping decisions to canonical paths; reply
+  order is irrelevant. Canonical requests retain full owner/source revisions while the
+  native presentation leaves those opaque guard hashes to Rust. Reserve path expansion
+  in the reply allowance. Reference-coverage or blank/oversized decision-reason
+  rejection journals an exact request/contract-bound receipt, records no decisions and
+  defers only that task; unchanged requests spend no calls. Reasons obey compact UTF-8
+  JSON string bytes, including quotes/escapes, not character count. Read existing
+  screening-rejections-v1 without rewriting them; new receipts use strict typed v2
+  dispositions. Earlier readers refuse v2 rather than ignore it. Changed
+  requests/contracts can be reconsidered. Malformed replies, corrupt receipts and failed
+  fresh scope validation remain failures. Standalone full-path `select-record`,
+  selection identities and existing paid decisions remain unchanged.
+- Native new questions contain only semantic text/evidence; Rust supplies IDs and
   retains inherited active questions unchanged unless an exact local question key is
   explicitly resolved. Native child question tuples separate active keys from closed
   resolution history without expanding canonical inputs. Bind action receipts to the
   exact delivered presentation as well as schema/instructions. Keep canonical Work
-  requests, node input revisions and standalone record formats unchanged. New node records
-  use `work-output-retained-questions-v1` only when needed: preserve exact question kinds,
-  IDs, payloads and ordering, and digest the reconstructed full output. Older readers refuse
-  the new record; keep legacy bytes, seals and paid observations untouched. Retained-question
-  instructions apply only to reductions with active inherited questions. Bind node-role
-  instructions to the native contract without changing canonical input revisions. Reserve the
-  native retained-position envelope before the host call; reject actual assembled overflow.
-  Fresh owner/currentness validation remains authoritative. Native range/text mapping
-  is already verified; workers can copy
-  assigned ranges without inventing finer offsets. Every observation concern still needs
-  evidence. Actions record no observation, discharge no concerns and defer only their
-  Work. Bind the receipt to the complete request and response/instruction contract; skip
-  unchanged calls, revalidate before recording and preserve independent parallel results.
-  A valid decoded evidence output above its allowance records a typed exact capacity
-  rejection through the same fresh Work/node guards. It supplies no observation,
-  prevents unchanged paid retries and preserves independent progress. Transport errors,
-  malformed responses and corrupt state remain failures; never truncate the reply.
-  Deferred audit subjects remain unassessed; verify receipts only for the other selected
-  subjects and retain an incomplete overall result. Corrupt or unknown-scope state stops.
-  A section `needs-action` response records an exact request-bound action receipt;
+  requests, node input revisions and standalone record formats unchanged. New node
+  records use `work-output-retained-questions-v1` only when needed: preserve exact
+  question kinds, IDs, payloads and ordering, and digest the reconstructed full output.
+  Older readers refuse the new record; keep legacy bytes, seals and paid observations
+  untouched. Retained-question instructions apply only to reductions with active
+  inherited questions. Bind node-role instructions to the native contract without
+  changing canonical input revisions. Reserve the native retained-position envelope
+  before the host call; reject actual assembled overflow.
+- Fresh owner/currentness validation remains authoritative. Native range/text mapping is
+  already verified; workers can copy assigned ranges without inventing finer offsets.
+  Every observation concern still needs evidence. Actions record no observation,
+  discharge no concerns and defer only their Work. Bind the receipt to the complete
+  request and response/instruction contract; skip unchanged calls, revalidate before
+  recording and preserve independent parallel results. A valid decoded evidence output
+  above its allowance records a typed exact capacity rejection through the same fresh
+  Work/node guards. It supplies no observation, prevents unchanged paid retries and
+  preserves independent progress. Transport errors, malformed responses and corrupt
+  state remain failures; never truncate the reply.
+- Deferred audit subjects remain unassessed; verify receipts only for the other selected
+  subjects and retain an incomplete overall result. Corrupt or unknown-scope state
+  stops.
+- A section `needs-action` response records an exact request-bound action receipt;
   unchanged requests defer before invocation, while independent work continues. Changed
-  requests can be reconsidered; valid sealed results restage before checking the receipt.
-  Corrupt receipts refuse. Retention validates stored receipt identity without requiring
-  historical generation rules to match current ones. Interactive finalizers retain their
-  explicit repair and guarded submission capabilities.
-  Whole-section action receipts bind exact task/input, captured scope and complete request;
-  unchanged actions defer before invocation. Scoped SectionResult values retain an optional
-  context revision, revalidated against current reviews at apply. Omission preserves the
-  legacy section wire contract. Pending identities protect actions during queue pruning.
-- Prepared native selections/finalizers supply exact metadata, admitted evidence/root and
-  complete shared contracts through supervised stdin, within the complete serialized
+  requests can be reconsidered; valid sealed results restage before checking the
+  receipt. Corrupt receipts refuse. Retention validates stored receipt identity without
+  requiring historical generation rules to match current ones. Interactive finalizers
+  retain their explicit repair and guarded submission capabilities.
+- Whole-section action receipts bind exact task/input, captured scope and complete
+  request; unchanged actions defer before invocation. Scoped SectionResult values retain
+  an optional context revision, revalidated against current reviews at apply. Omission
+  preserves the legacy section wire contract. Pending identities protect actions during
+  queue pruning.
+- Prepared native selections/finalizers supply exact metadata, admitted evidence/root
+  and complete shared contracts through supervised stdin, within the complete serialized
   JSON input bound. Ordinary interactive roles retain their argument prompt. Legacy
   prepared requests and standalone consumers may use private files with bounded
   continuation reads; one tool display is not a complete-read requirement. No transport
-  authorizes changed scope or certifies a read.
-  Tool-enabled native results are decoded only from Claude terminal structured_output
-  or Codex explicit final-message output; complete semantic and assembled-result bounds
-  stay separate. Fresh request/root comparison precedes sealing/staging. Native results
-  use the shared Markdown body validator before staging. Structurally invalid decoded
-  bodies retain exact request-bound actions; malformed responses remain failures.
-  Native workers do not run work finish/apply. Standalone record/result contracts,
-  inherited prepared finish pins and saved Work remain unchanged. Exact request-bound action receipts
-  suppress unchanged native calls; unknown/corrupt state refuses and pending identities
-  protect receipts from pruning.
+  authorizes changed scope or certifies a read. Tool-enabled native results are decoded
+  only from Claude terminal structured_output or Codex explicit final-message output;
+  complete semantic and assembled-result bounds stay separate. Fresh request/root
+  comparison precedes sealing/staging. Native results use the shared Markdown body
+  validator before staging. Structurally invalid decoded bodies retain exact
+  request-bound actions; malformed responses remain failures. Native workers do not run
+  work finish/apply. Standalone record/result contracts, inherited prepared finish pins
+  and saved Work remain unchanged. Exact request-bound action receipts suppress
+  unchanged native calls; unknown/corrupt state refuses and pending identities protect
+  receipts from pruning.
+
+## Native queue scheduling
+
 - Native queue scheduling chooses one task per target so publication cannot invalidate
-  another simultaneous task on the same page. Whole-input tasks share an evidence-bounded
-  batch; oversized work reserves fair inspection/reduction/finalization turns.
-  `execution.work.max_consecutive_calls` defaults to 4 and bounds host attempts for an
+  another simultaneous task on the same page. Whole-input tasks share an
+  evidence-bounded batch; oversized work reserves fair inspection/reduction/finalization
+  turns.
+- `execution.work.max_consecutive_calls` defaults to 4 and bounds host attempts for an
   admitted exact queue Work or screening phase. Reserve the durable fair turn once;
   continuation requires an in-process exact phase token and freshly prepared inputs.
   Charge every attempted host including parallel peers against the same total budget.
-  Publication, changed phase bindings, deferral and writer-wait replanning discard admission;
-  restart/cancellation retain the already reserved next target.
-  `execution.work.max_parallel` defaults to 1 and bounds simultaneous dependency-ready
+  Publication, changed phase bindings, deferral and writer-wait replanning discard
+  admission; restart/cancellation retain the already reserved next target.
+- `execution.work.max_parallel` defaults to 1 and bounds simultaneous dependency-ready
   evidence observers and distinct-target candidate screening within remaining calls.
   Compatible roles share a fair contiguous prefix; serial finalizers and interactive
   work remain boundaries. Never filter past those boundaries or reserve skipped targets.
   A later exact evidence action ends the queue read prefix without discarding earlier
   eligible requests. Charge that prefix through its current admission before replanning;
   an empty held prefix invokes no host and reserves no turn.
-  Interactive roles, finalizers and publication remain serial. Supervise every child
+- Interactive roles, finalizers and publication remain serial. Supervise every child
   through exit and cleanup. Carry prepared screening requests only within their local
   pre-host queue checkpoint; any host call or writer wait invalidates their reuse.
   Capture the complete current recipe/review universe per typed view after hosts return,
   sharing discovery across extraction Work and loading each Work once per checkpoint.
   Reevaluate current node dependencies for every serial record; preserve each mutation's
   durable checkpoint and exact page/ledger guards. Never retain a capture across a host.
-  Preserve an independent valid response when a peer fails. Never reuse pre-host captures
-  for recording. Shared capture timings belong to the first recorded step, not every peer.
-  Verify target owners before batching. Defer concept synthesis while its cited origin
-  pages have unfinished inputs or publishable pending work; unrelated context is not
-  a dependency barrier. Reconcile backlinks after a source publication wave and replan
+  Preserve an independent valid response when a peer fails. Never reuse pre-host
+  captures for recording. Shared capture timings belong to the first recorded step, not
+  every peer.
+- Verify target owners before batching. Defer concept synthesis while its cited origin
+  pages have unfinished inputs or publishable pending work; unrelated context is not a
+  dependency barrier. Reconcile backlinks after a source publication wave and replan
   before selecting another task. A dependency-only queue remains explicitly incomplete.
-  One queue-planning checkpoint captures all ready synthesis inputs against the
-  complete graph universe for its selected window; discard that view before host execution.
-  Enumerate and validate the complete queue and physical target owners before selecting
+  One queue-planning checkpoint captures all ready synthesis inputs against the complete
+  graph universe for its selected window; discard that view before host execution.
+- Enumerate and validate the complete queue and physical target owners before selecting
   a fair preparation window. Section/progressive windows obey remaining-call and
   parallel bounds, capped at 64; possible interactive batches retain 64 targets even
   when one call remains. Continue bounded preparation across task-kind groups while the
-  prepared jobs are compatible reads; stop at validated serial boundaries without skipping targets;
-  actual prepared TaskWork remains authoritative, including saved plans. Small tasks also obey the input-byte
-  bound. Share discovery traversal, projection and immutable raw bytes within that
-  checkpoint while preserving task-local recipes, reviews, guards and identities.
-  Unprepared targets remain pending. Empty or deferred windows never prove settlement.
-  Planning does not consume cursor turns; reserve actual invocation targets together
+  prepared jobs are compatible reads; stop at validated serial boundaries without
+  skipping targets; actual prepared TaskWork remains authoritative, including saved
+  plans. Small tasks also obey the input-byte bound. Share discovery traversal,
+  projection and immutable raw bytes within that checkpoint while preserving task-local
+  recipes, reviews, guards and identities. Unprepared targets remain pending. Empty or
+  deferred windows never prove settlement.
+- Planning does not consume cursor turns; reserve actual invocation targets together
   immediately before execution, including every member of a whole-input batch.
   `.lorekeeper/execution-cursor.json` stores the next queue/audit target under a guarded
   short mutation, preserving turns across budget-limited runs. Reserve before external
-  execution, never infer priority or semantic quality from size/progress/citation counts.
+  execution, never infer priority or semantic quality from size/progress/citation
+  counts.
+
+## Job definitions (`commands/schedule.rs`)
+
 - `commands/schedule.rs` renders native jobs with stable scheduling-slot labels.
-  Queue-mode semantic jobs need explicit execution profiles. Capture selected
-  absolute config/data paths, anchored PATH and relevant existing host directories;
-  never capture credentials. Rendering never authenticates or registers jobs.
+  Queue-mode semantic jobs need explicit execution profiles. Capture selected absolute
+  config/data paths, anchored PATH and relevant existing host directories; never capture
+  credentials. Rendering never authenticates or registers jobs.
 - Launchd `--namespace` constructs labels and plist names (default `com.lorekeeper`);
-  custom namespaces use separate default logs. `--log-dir` is an explicit absolute
-  path. These options only render definitions: never register jobs or create log
-  directories here. Reject unsafe namespaces before any output.
+  custom namespaces use separate default logs. `--log-dir` is an explicit absolute path.
+  These options only render definitions: never register jobs or create log directories
+  here. Reject unsafe namespaces before any output.
 - Preserve explicitly set standard proxy variables in both formats and direct jobs,
-  including casing and empty values. Refuse credential-bearing proxy endpoints
-  without printing their values; do not capture arbitrary environment variables.
+  including casing and empty values. Refuse credential-bearing proxy endpoints without
+  printing their values; do not capture arbitrary environment variables.
 
 ## Ingest and originals (`commands/ingest.rs`)
 
