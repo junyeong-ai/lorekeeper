@@ -88,19 +88,15 @@ jobs:
         include:
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
-            cross: true
             archive: tar.gz
           - target: aarch64-unknown-linux-musl
-            os: ubuntu-latest
-            cross: true
+            os: ubuntu-24.04-arm
             archive: tar.gz
           - target: aarch64-apple-darwin
             os: macos-latest
-            cross: false
             archive: tar.gz
           - target: x86_64-pc-windows-msvc
             os: windows-latest
-            cross: false
             archive: zip
 
     steps:
@@ -121,21 +117,18 @@ jobs:
           toolchain: ${{ steps.toolchain.outputs.channel }}
           targets: ${{ matrix.target }}
 
+      - name: Install musl tools
+        if: endsWith(matrix.target, '-musl')
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends musl-tools
+
       # No build cache: these are the bytes a user installs, so they are compiled from the
-      # checkout rather than restored from a store some other run wrote.
-      - name: Install cross
-        if: matrix.cross
-        uses: taiki-e/install-action@68a389c788b2cd04016ce8c80ee23b80d2ab3d68 # v2.88.1
-        with:
-          tool: cross@0.2.5
-
-      - name: Build (cross)
-        if: matrix.cross
-        run: cross build --release --locked --target ${{ matrix.target }} -p lore
-
-      - name: Build (native)
-        if: '!matrix.cross'
+      # checkout rather than restored from a store some other run wrote. Each target builds on
+      # its own architecture, as CI's `build` job does; musl's headers serve the C dependencies.
+      - name: Build
         run: cargo build --release --locked --target ${{ matrix.target }} -p lore
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          CC_aarch64_unknown_linux_musl: musl-gcc
 
       - name: Resolve version
         id: version

@@ -140,6 +140,29 @@ fn every_target_an_installer_asks_for_is_one_the_release_builds() {
     }
 }
 
+/// A tag must not be the first compile of a published binary. CI's `build` job builds every
+/// target the release ships but Windows, which its `windows` job compiles.
+#[test]
+fn ci_builds_every_target_the_release_ships() {
+    let targets = |workflow: &str| {
+        let mut targets: Vec<String> = read(&repo_root().join(workflow))
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("- target: "))
+            .map(|target| target.trim().to_owned())
+            .collect();
+        targets.sort_unstable();
+        targets
+    };
+    let ci = read(&repo_root().join(".github/workflows/ci.yml"));
+    assert!(
+        ci.contains("\n  windows:\n"),
+        "ci.yml no longer compiles Windows"
+    );
+    let mut released = targets(".github/workflows/release.yml");
+    released.retain(|target| target != "x86_64-pc-windows-msvc");
+    assert_eq!(targets(".github/workflows/ci.yml"), released);
+}
+
 /// The leading word of every command a fenced `bash` block spells, in order.
 ///
 /// Exact over the shell these documents use — quoted strings, comment tails, redirections, line
