@@ -349,6 +349,13 @@ fn rss_evidence(
     dirs: &VaultDirs,
     target_owners: &BTreeMap<&str, PathBuf>,
 ) -> Result<BTreeMap<String, BTreeMap<PathBuf, Vec<Citation>>>, GraphError> {
+    let concept_owners: BTreeSet<&PathBuf> = pages
+        .iter()
+        .filter(|page| {
+            is_concept_page(&page.path, dirs) && page.format.as_deref() == Some("concept")
+        })
+        .map(|page| &target_owners[page.id.as_str()])
+        .collect();
     let mut result = BTreeMap::new();
     for source in sources
         .iter()
@@ -369,11 +376,7 @@ fn rss_evidence(
         for (concept, citations) in evidence {
             let owner = lk_vault::resolve_page_owner(root, Path::new(&concept))
                 .map_err(|error| GraphError::Io(error.to_string()))?;
-            if !pages.iter().any(|page| {
-                is_concept_page(&page.path, dirs)
-                    && page.format.as_deref() == Some("concept")
-                    && target_owners[page.id.as_str()] == owner
-            }) {
+            if !concept_owners.contains(&owner) {
                 return Err(GraphError::Io(
                     "RSS evidence concept is not a concept page".into(),
                 ));
