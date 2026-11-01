@@ -30,6 +30,9 @@ pub enum QueueCommand {
         /// Vault root override (default: vault.root from config)
         #[arg(long)]
         root: Option<PathBuf>,
+        /// List only tasks with this classification; the counts still cover the whole queue
+        #[arg(long, value_enum)]
+        status: Option<TaskStatus>,
         /// Output in JSON format. `ok` is always true: classifying a queue is not a verdict
         /// on it, and this exits 0 over any queue it can describe
         #[arg(long)]
@@ -123,7 +126,7 @@ pub enum QueueCommand {
 /// the work already been done (completion marker). Only a task that passes the first and
 /// fails the second is work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TaskStatus {
+pub enum TaskStatus {
     /// The page declares the expected format, its input equals the task's hash, and no completion
     /// marker matches it — process it.
     Current,
@@ -193,9 +196,28 @@ impl TaskStatus {
     }
 }
 
+// Spelled by `TaskStatus::as_str`, the same name the JSON reports, without the variant
+// rationale a derive would print as option help.
+impl clap::ValueEnum for TaskStatus {
+    fn value_variants<'a>() -> &'a [Self] {
+        &[
+            Self::Current,
+            Self::Done,
+            Self::Stale,
+            Self::MissingTarget,
+            Self::Unreadable,
+        ]
+    }
+
+    fn to_possible_value(&self) -> Option<clap::builder::PossibleValue> {
+        Some(clap::builder::PossibleValue::new(self.as_str()))
+    }
+}
+
 struct TaskReport {
     task_id: String,
     kind: String,
+    created_at: jiff::Timestamp,
     vault_path: String,
     status: TaskStatus,
     target_revision: Option<String>,
@@ -215,7 +237,11 @@ pub async fn run(opts: &super::GlobalOptions, cmd: QueueCommand) -> miette::Resu
             root,
             include_content,
         } => packet::run(opts, root, task_ids, include_content),
-        QueueCommand::Status { root, json } => status(opts, root, json).await,
+        QueueCommand::Status { root, status, json } => {
+            let vault_root = resolve_vault_root(opts, root)?;
+            print_status(&queue_status(&vault_root, status)?, json);
+            Ok(())
+        }
         QueueCommand::Count { root } => count(opts, root).await,
         QueueCommand::Apply {
             root,
@@ -1421,26 +1447,32 @@ async fn count(opts: &super::GlobalOptions, root: Option<PathBuf>) -> miette::Re
     Ok(())
 }
 
-async fn status(
-    opts: &super::GlobalOptions,
-    root: Option<PathBuf>,
-    json: bool,
-) -> miette::Result<()> {
-    let mut revisions = BTreeMap::new();
-    let vault_root = resolve_vault_root(opts, root)?;
-    let queue_dir = vault_root.join(".lorekeeper").join("queue");
+/// Every pending task, classified, with the listing narrowed to `selected` when given.
+struct QueueStatus {
+    classified: Vec<TaskStatus>,
+    unparseable: usize,
+    tasks: Vec<TaskReport>,
+}
 
-    let mut reports = Vec::new();
-    let mut unparseable = 0usize;
+fn queue_status(vault_root: &Path, selected: Option<TaskStatus>) -> miette::Result<QueueStatus> {
+    let mut revisions = BTreeMap::new();
+    let queue_dir = vault_root.join(".lorekeeper").join("queue");
+    let mut classified = Vec::new();
+    let mut unparseable = 0;
+    let mut tasks = Vec::new();
     for file in pending_queue_files(&queue_dir)? {
         let read = read_tasks(&file)?;
         unparseable += read.unparseable;
         for task in read.tasks {
-            let status = classify_task(&vault_root, &task, &mut revisions)?;
+            let status = classify_task(vault_root, &task, &mut revisions)?;
+            classified.push(status);
+            if selected.is_some_and(|selected| selected != status) {
+                continue;
+            }
             let target_revision = resolve_target_path(&task.target.vault_path)
-                .and_then(|path| read_page(&vault_root, &path).ok())
+                .and_then(|path| read_page(vault_root, &path).ok())
                 .map(|content| synthesis::revision(&content));
-            reports.push(TaskReport {
+            tasks.push(TaskReport {
                 generation_policy: task
                     .input
                     .get("generation_policy")
@@ -1449,26 +1481,37 @@ async fn status(
                 target_revision,
                 task_id: task.task_id,
                 kind: task.kind.as_str().to_string(),
+                created_at: task.created_at,
                 vault_path: task.target.vault_path,
                 status,
             });
         }
     }
+    Ok(QueueStatus {
+        classified,
+        unparseable,
+        tasks,
+    })
+}
 
-    let tally = |want: TaskStatus| reports.iter().filter(|r| r.status == want).count();
-    let current = tally(TaskStatus::Current);
-    let done = tally(TaskStatus::Done);
-    let stale = tally(TaskStatus::Stale);
-    let missing = tally(TaskStatus::MissingTarget);
-    let unreadable = tally(TaskStatus::Unreadable);
-
+fn print_status(report: &QueueStatus, json: bool) {
+    let count = |status: TaskStatus| report.classified.iter().filter(|&&c| c == status).count();
+    let (current, done, stale, missing, unreadable) = (
+        count(TaskStatus::Current),
+        count(TaskStatus::Done),
+        count(TaskStatus::Stale),
+        count(TaskStatus::MissingTarget),
+        count(TaskStatus::Unreadable),
+    );
     if json {
-        let tasks: Vec<serde_json::Value> = reports
+        let tasks: Vec<serde_json::Value> = report
+            .tasks
             .iter()
             .map(|r| {
                 serde_json::json!({
                     "task_id": r.task_id,
                     "kind": r.kind,
+                    "created_at": r.created_at,
                     "vault_path": r.vault_path,
                     "status": r.status.as_str(),
                     "target_revision": r.target_revision,
@@ -1486,13 +1529,13 @@ async fn status(
                 "stale": stale,
                 "missing_target": missing,
                 "unreadable": unreadable,
-                "unparseable_lines": unparseable,
+                "unparseable_lines": report.unparseable,
                 "tasks": tasks,
             }
         });
         println!("{}", serde_json::to_string_pretty(&envelope).unwrap());
     } else {
-        for r in &reports {
+        for r in &report.tasks {
             eprintln!(
                 "  [{}] {} ({}) → {}",
                 r.status.as_str(),
@@ -1504,15 +1547,14 @@ async fn status(
         eprintln!(
             "queue: {current} current, {done} done, {stale} stale, {missing} missing-target, \
              {unreadable} unreadable across {} task(s){}",
-            reports.len(),
-            if unparseable > 0 {
-                format!("; {unparseable} line(s) could not be parsed")
+            report.classified.len(),
+            if report.unparseable > 0 {
+                format!("; {} line(s) could not be parsed", report.unparseable)
             } else {
                 String::new()
             }
         );
     }
-    Ok(())
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -2693,6 +2735,43 @@ mod tests {
             .collect();
         std::fs::write(&path, lines).unwrap();
         path
+    }
+
+    /// A drain reads only its work, while the counts still describe the whole queue.
+    #[test]
+    fn a_status_filter_narrows_the_listing_and_keeps_the_whole_tally() {
+        let dir = TempDir::new().unwrap();
+        let queue_dir = dir.path().join(".lorekeeper").join("queue");
+        write_page(
+            dir.path(),
+            "daily/s/2026-05-23.md",
+            &format!("id: x\nllm_inputs:\n  summary: {}\n", summary_hash("live")),
+        );
+        write_queue_file(
+            &queue_dir,
+            "run-1.jsonl",
+            &[
+                task("daily/s/2026-05-23.md", "live"),
+                task("daily/s/2026-05-23.md", "oldhash"),
+                task("daily/s/2026-05-24.md", "live"),
+            ],
+        );
+        let report = queue_status(dir.path(), Some(TaskStatus::Current)).unwrap();
+        assert_eq!(
+            report.classified,
+            [
+                TaskStatus::Current,
+                TaskStatus::Stale,
+                TaskStatus::MissingTarget
+            ]
+        );
+        assert_eq!(report.tasks.len(), 1);
+        assert_eq!(report.tasks[0].status, TaskStatus::Current);
+        assert_eq!(
+            report.tasks[0].created_at,
+            "2026-05-23T10:00:00Z".parse::<jiff::Timestamp>().unwrap()
+        );
+        assert_eq!(queue_status(dir.path(), None).unwrap().tasks.len(), 3);
     }
 
     #[test]

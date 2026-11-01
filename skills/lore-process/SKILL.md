@@ -60,8 +60,9 @@ schema generation replaces that file wholesale.
 
 ## Publication boundaries
 
-- Process only `current` tasks from `lore queue status --json`. Skip `done`, `stale`
-  and `missing-target`; report `unreadable` or unparseable work and retain its file.
+- Process only `current` tasks, listed by `lore queue status --status current --json`;
+  its counts still cover the whole queue. Skip `done`, `stale` and `missing-target`;
+  report `unreadable` or unparseable work and retain its file.
 - Capture `target_revision` before reading and drafting. Use only the task's exact
   `target.anchor` and optional `input.related_anchor`, including their recorded language.
 - Workers stage results; only apply writes queued pages and completion markers.
