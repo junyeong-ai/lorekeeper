@@ -1657,10 +1657,43 @@ pub(super) fn excerpt_details(
             .map(|section| section.id)
     });
     SearchExcerpt {
-        text: crate::summary::truncate_summary(&block.text),
+        text: crate::summary::truncate_around(
+            &block.text,
+            first_match_end(&block.text, terms, spellings, spacing),
+        ),
         kind,
         section,
     }
+}
+
+/// Where the first query term in `block` ends: the end of the shortest whitespace-delimited
+/// prefix whose fold holds one, judged by the containment that selected the block. Zero when no
+/// prefix does, which leaves the block's opening.
+fn first_match_end(block: &str, terms: &[String], spellings: &[String], spacing: bool) -> usize {
+    let needles = if spellings.is_empty() {
+        terms
+    } else {
+        spellings
+    };
+    let holds = |prefix: &str| {
+        let text = fold(prefix);
+        needles.iter().any(|needle| {
+            contains_term(&text, needle) || spacing && contains_spacing_term(&text, needle)
+        })
+    };
+    let mut ends = Vec::new();
+    let mut in_word = false;
+    for (at, character) in block.char_indices() {
+        if character.is_whitespace() && in_word {
+            ends.push(at);
+        }
+        in_word = !character.is_whitespace();
+    }
+    if in_word {
+        ends.push(block.len());
+    }
+    let index = ends.partition_point(|&end| !holds(&block[..end]));
+    ends.get(index).copied().unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -3395,5 +3428,22 @@ mod tests {
         let tmp = vault();
         let hits = search(tmp.path(), &VaultDirs::default(), "에이전트 없는단어", 10).unwrap();
         assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn a_match_deep_in_a_long_block_is_what_its_excerpt_shows() {
+        let body = format!(
+            "## Summary\nOpening.\n\n## Notes\n{}The Helios retention window is 30 days.\n",
+            "Unrelated context sentence. ".repeat(12)
+        );
+        let terms = ["helios".to_string()];
+        let excerpt = excerpt_details(&body, MatchField::Text, &terms, &[], false);
+        assert_eq!(excerpt.kind, ExcerptKind::MatchedBlock);
+        assert!(excerpt.text.starts_with('…'), "{}", excerpt.text);
+        assert!(
+            excerpt.text.contains("Helios retention"),
+            "{}",
+            excerpt.text
+        );
     }
 }

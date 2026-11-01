@@ -65,8 +65,8 @@ spacing matches, while named subjects retain priority. Ask for the full
 registered name to reach its alternate spellings in either language. Open each
 selected page with `lore wiki read <path> --revision <file_revision from the hit>`.
 For a body hit, `excerpt_kind` distinguishes a matching block from a `partial-match`
-whose terms occur in separate locations. The bounded excerpt may clip that block;
-use its `excerpt_section` with revision-pinned `wiki read --section` to inspect it.
+whose terms occur in separate locations. The bounded excerpt shows that block around its
+first match, `…` marking each clipped side; use its `excerpt_section` with revision-pinned `wiki read --section` to inspect it.
 An opening preview introduces a named page; it is not automatically claim evidence.
 When the whole-document HTML projection has no verified source range, the section
 locator is null; inspect the outline instead of inferring an occurrence from equal text.
