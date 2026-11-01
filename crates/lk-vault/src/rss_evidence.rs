@@ -53,6 +53,7 @@ pub fn rss_link_previews(
         offsets.push((offset, line.trim_end_matches(['\r', '\n'])));
         offset += line.len();
     }
+    let mut entries = crate::ExistingEntryResolver::new(root);
     for occurrence in page_link_occurrences(raw)? {
         let (offset, line) = offsets[occurrence.line - 1];
         if offset < start
@@ -66,7 +67,7 @@ pub fn rss_link_previews(
         };
         let mut events = Vec::new();
         for (declared, selected) in &selections {
-            if is_same_concept_address(root, declared, &target)? {
+            if is_same_concept_address(&mut entries, declared, &target)? {
                 events.extend(selected.iter().cloned());
             }
         }
@@ -110,22 +111,22 @@ fn is_generated_link(line: &str, link: &lk_core::link::PageLink) -> bool {
 }
 
 fn is_same_concept_address(
-    root: &Path,
+    entries: &mut crate::ExistingEntryResolver,
     declared: &str,
     concept: &Path,
 ) -> Result<bool, VaultError> {
     Ok(Path::new(declared) == concept
-        || crate::same_existing_entry(root, Path::new(declared), concept)?)
+        || entries.same_existing_entry(Path::new(declared), concept)?)
 }
 
 fn has_selected_membership(
-    root: &Path,
+    entries: &mut crate::ExistingEntryResolver,
     map: &BTreeMap<String, Vec<Citation>>,
     concept: &Path,
     citation: &Citation,
 ) -> Result<bool, VaultError> {
     for (declared, set) in map {
-        if set.contains(citation) && is_same_concept_address(root, declared, concept)? {
+        if set.contains(citation) && is_same_concept_address(entries, declared, concept)? {
             return Ok(true);
         }
     }
@@ -133,14 +134,14 @@ fn has_selected_membership(
 }
 
 fn find_binding(
-    root: &Path,
+    entries: &mut crate::ExistingEntryResolver,
     page: &crate::VaultPage,
     concept: &Path,
     selection: &RssEventSelection,
 ) -> Result<ConceptEvidence, VaultError> {
     for binding in bindings(page).map_err(err)? {
         if binding.events.contains(selection)
-            && is_same_concept_address(root, &binding.concept, concept)?
+            && is_same_concept_address(entries, &binding.concept, concept)?
         {
             return Ok(binding);
         }
@@ -206,11 +207,13 @@ pub fn rss_concept_citations(
     origin: &Path,
     raw: &str,
 ) -> Result<BTreeMap<String, Vec<Citation>>, VaultError> {
-    rss_concept_citations_mode(root, origin, raw, true)
+    let mut entries = crate::ExistingEntryResolver::new(root);
+    rss_concept_citations_mode(root, &mut entries, origin, raw, true)
 }
 
 fn rss_concept_citations_mode(
     root: &Path,
+    entries: &mut crate::ExistingEntryResolver,
     origin: &Path,
     raw: &str,
     payloads: bool,
@@ -271,7 +274,7 @@ fn rss_concept_citations_mode(
         let mut generated = 0;
         let mut other = false;
         for (target, (count, extra)) in &occurrences {
-            if is_same_concept_address(root, &binding.concept, target)? {
+            if is_same_concept_address(entries, &binding.concept, target)? {
                 generated += *count;
                 other |= *extra;
             }
@@ -341,15 +344,16 @@ pub fn has_rss_citation(
     selector.validate(&citation.revision).map_err(err)?;
     let origin = Path::new(&citation.path);
     let raw = std::fs::read_to_string(crate::page_path(root, origin)?)?;
-    let map = rss_concept_citations_mode(root, origin, &raw, false)?;
-    let found = has_selected_membership(root, &map, concept, citation)?;
+    let mut entries = crate::ExistingEntryResolver::new(root);
+    let map = rss_concept_citations_mode(root, &mut entries, origin, &raw, false)?;
+    let found = has_selected_membership(&mut entries, &map, concept, citation)?;
     if found {
         let page = crate::parse_page(&raw).map_err(err)?;
         let selection = RssEventSelection {
             event_id: selector.event_id.clone(),
             revision: citation.revision.clone(),
         };
-        let declaration = find_binding(root, &page, concept, &selection)?;
+        let declaration = find_binding(&mut entries, &page, concept, &selection)?;
         load_rss_selected_payload(
             root,
             &load_rss_manifest(root, &declaration.manifest)?,
@@ -372,8 +376,10 @@ pub fn inspect_rss_citation(
     }
     validate_rss_citation(root, concept, citation)?;
     let raw = std::fs::read_to_string(crate::page_path(root, Path::new(&citation.path))?)?;
-    let map = rss_concept_citations_mode(root, Path::new(&citation.path), &raw, false)?;
-    if !has_selected_membership(root, &map, concept, citation)? {
+    let mut entries = crate::ExistingEntryResolver::new(root);
+    let map =
+        rss_concept_citations_mode(root, &mut entries, Path::new(&citation.path), &raw, false)?;
+    if !has_selected_membership(&mut entries, &map, concept, citation)? {
         return Err(err("RSS membership changed during read"));
     }
     let page = crate::parse_page(&raw).map_err(err)?;
@@ -382,7 +388,7 @@ pub fn inspect_rss_citation(
         event_id: event.event_id.clone(),
         revision: citation.revision.clone(),
     };
-    let binding = find_binding(root, &page, concept, &selection)?;
+    let binding = find_binding(&mut entries, &page, concept, &selection)?;
     let manifest = load_rss_manifest(root, &binding.manifest)?;
     let payload = load_rss_selected_payload(root, &manifest, &selection)?;
     let normalized = format!("{}\n\n{}", payload.title, payload.body);
@@ -420,6 +426,7 @@ pub fn accumulate_rss_evidence(
 ) -> Result<String, VaultError> {
     let page = crate::parse_page(raw).map_err(err)?;
     let mut declarations = bindings(&page).map_err(err)?;
+    let mut entries = crate::ExistingEntryResolver::new(root);
     for (concept, events) in selections.iter().filter(|(_, events)| !events.is_empty()) {
         let provided =
             manifest.ok_or_else(|| err("RSS selections require versioned task manifest"))?;
@@ -434,7 +441,7 @@ pub fn accumulate_rss_evidence(
         events.sort();
         events.dedup();
         for existing in &declarations {
-            if is_same_concept_address(root, &existing.concept, Path::new(concept))? {
+            if is_same_concept_address(&mut entries, &existing.concept, Path::new(concept))? {
                 events.retain(|e| !existing.events.contains(e));
             }
         }
@@ -559,8 +566,9 @@ pub fn guard_rss_citation(
     validate_rss_citation(root, concept, citation)?;
     let origin = Path::new(&citation.path);
     let raw = std::fs::read_to_string(crate::page_path(root, origin)?)?;
-    let map = rss_concept_citations_mode(root, origin, &raw, false)?;
-    if !has_selected_membership(root, &map, concept, citation)? {
+    let mut entries = crate::ExistingEntryResolver::new(root);
+    let map = rss_concept_citations_mode(root, &mut entries, origin, &raw, false)?;
+    if !has_selected_membership(&mut entries, &map, concept, citation)? {
         return Err(err("RSS membership changed before publication"));
     }
     let page = crate::parse_page(&raw).map_err(err)?;
@@ -569,7 +577,7 @@ pub fn guard_rss_citation(
         event_id: selector.event_id.clone(),
         revision: citation.revision.clone(),
     };
-    let binding = find_binding(root, &page, concept, &selection)?;
+    let binding = find_binding(&mut entries, &page, concept, &selection)?;
     let manifest = load_rss_manifest(root, &binding.manifest)?;
     let payload = load_rss_selected_payload(root, &manifest, &selection)?;
     let current: RssOriginalReference = serde_json::from_value(
@@ -622,10 +630,11 @@ pub fn inspect_rss_evidence_inventory(
         return Err(err("RSS evidence limit must be 1..100"));
     }
     let raw = std::fs::read_to_string(crate::page_path(root, origin)?)?;
-    let map = rss_concept_citations_mode(root, origin, &raw, false)?;
+    let mut entries = crate::ExistingEntryResolver::new(root);
+    let map = rss_concept_citations_mode(root, &mut entries, origin, &raw, false)?;
     let mut citations = Vec::new();
     for (declared, set) in &map {
-        if is_same_concept_address(root, declared, concept)? {
+        if is_same_concept_address(&mut entries, declared, concept)? {
             citations.extend(set);
         }
     }

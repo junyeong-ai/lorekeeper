@@ -34,8 +34,8 @@ mod writer;
 pub use lk_core::frontmatter::{Frontmatter, VaultPage, parse_page};
 
 pub use self::address::{
-    ExistingPageResolver, find_page_owner, page_path, resolve_page_owner, same_existing_entry,
-    writable_page_path,
+    ExistingEntryResolver, ExistingPageResolver, find_page_owner, page_path, resolve_page_owner,
+    same_existing_entry, writable_page_path,
 };
 pub use self::body_search::{
     BodyContextLine, BodySearchHit, BodySearchOptions, BodySearchResult, search_body,

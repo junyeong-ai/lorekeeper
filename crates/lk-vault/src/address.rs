@@ -7,6 +7,12 @@ use crate::VaultError;
 /// Resolve a vault-relative page address, including existing symlink ancestors.
 /// Missing descendants are allowed; unreadable and dangling ancestors are errors.
 pub fn page_path(root: &Path, relative: &Path) -> std::io::Result<PathBuf> {
+    page_destination(root, relative)?;
+    Ok(root.join(relative))
+}
+
+/// The canonical root and the address's destination beneath it.
+fn page_destination(root: &Path, relative: &Path) -> std::io::Result<(PathBuf, PathBuf)> {
     use std::path::Component;
     if relative.as_os_str().is_empty()
         || relative
@@ -16,14 +22,14 @@ pub fn page_path(root: &Path, relative: &Path) -> std::io::Result<PathBuf> {
         return Err(std::io::Error::other("page address must be vault-relative"));
     }
     let canonical_root = destination(root)?;
-    let full = root.join(relative);
-    if !destination(&full)?.starts_with(&canonical_root) {
+    let resolved = destination(&root.join(relative))?;
+    if !resolved.starts_with(&canonical_root) {
         return Err(std::io::Error::other(format!(
             "page address escapes vault: {}",
             relative.display()
         )));
     }
-    Ok(full)
+    Ok((canonical_root, resolved))
 }
 
 /// Page publication must not replace a symlink with a different directory entry.
@@ -42,20 +48,51 @@ pub fn writable_page_path(root: &Path, relative: &Path) -> std::io::Result<PathB
 /// Compare directory entries after resolving actual filesystem aliases. Hard
 /// links retain distinct addresses; missing entries do not establish identity.
 pub fn same_existing_entry(root: &Path, a: &Path, b: &Path) -> Result<bool, VaultError> {
-    let canonical = |path: &Path| match page_path(root, path)?.canonicalize() {
-        Ok(path) => Ok(Some(path)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error),
-    };
-    Ok(matches!((canonical(a)?, canonical(b)?), (Some(a), Some(b)) if a == b))
+    ExistingEntryResolver::new(root).same_existing_entry(a, b)
+}
+
+/// [`same_existing_entry`] for one operation's many comparisons: each address
+/// resolves once, however many pairs name it. Results, including absence, are
+/// cached for that operation only.
+pub struct ExistingEntryResolver {
+    root: PathBuf,
+    entries: BTreeMap<PathBuf, Option<PathBuf>>,
+}
+
+impl ExistingEntryResolver {
+    pub fn new(root: &Path) -> Self {
+        Self {
+            root: root.to_path_buf(),
+            entries: BTreeMap::new(),
+        }
+    }
+
+    pub fn same_existing_entry(&mut self, a: &Path, b: &Path) -> Result<bool, VaultError> {
+        let a = self.resolve(a)?;
+        let b = self.resolve(b)?;
+        Ok(matches!((a, b), (Some(a), Some(b)) if a == b))
+    }
+
+    fn resolve(&mut self, path: &Path) -> Result<Option<PathBuf>, VaultError> {
+        if let Some(entry) = self.entries.get(path) {
+            return Ok(entry.clone());
+        }
+        let entry = match page_path(&self.root, path)?.canonicalize() {
+            Ok(entry) => Some(entry),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
+        self.entries.insert(path.to_path_buf(), entry.clone());
+        Ok(entry)
+    }
 }
 
 /// Resolve a page's direct owner without conflating distinct hard-link entries.
 /// Missing descendants retain their exact address; invalid/dangling ancestors fail.
 pub fn resolve_page_owner(root: &Path, path: &Path) -> Result<PathBuf, VaultError> {
-    let full = page_path(root, path)?;
-    destination(&full)?
-        .strip_prefix(destination(root)?)
+    let (canonical_root, resolved) = page_destination(root, path)?;
+    resolved
+        .strip_prefix(canonical_root)
         .map(Path::to_path_buf)
         .map_err(|error| VaultError::Io(std::io::Error::other(error.to_string())))
 }
@@ -339,6 +376,20 @@ mod tests {
         assert!(
             !same_existing_entry(root.path(), Path::new("owner.md"), Path::new("hard.md")).unwrap()
         );
+        let mut entries = ExistingEntryResolver::new(root.path());
+        for (other, same) in [
+            ("alias.md", true),
+            ("hard.md", false),
+            ("missing.md", false),
+        ] {
+            assert_eq!(
+                entries
+                    .same_existing_entry(Path::new("owner.md"), Path::new(other))
+                    .unwrap(),
+                same,
+                "{other}"
+            );
+        }
         assert!(
             !same_existing_entry(
                 root.path(),

@@ -271,15 +271,16 @@ fn plan_merge(
     };
     let mut into_updated = None;
     let mut rewritten = Vec::new();
+    let mut entries = lk_vault::ExistingEntryResolver::new(vault_root);
     for page in pages {
         if page.path == from_rel {
             continue;
         }
         let mut cites_from = false;
         for link in &page.outgoing {
-            cites_from |=
-                lk_vault::same_existing_entry(vault_root, Path::new(&link.dest), &from_rel)
-                    .map_err(|error| GraphError::Io(error.to_string()))?;
+            cites_from |= entries
+                .same_existing_entry(Path::new(&link.dest), &from_rel)
+                .map_err(|error| GraphError::Io(error.to_string()))?;
         }
         if !cites_from && !review_updates.contains_key(&page.path) {
             continue;
@@ -298,10 +299,10 @@ fn plan_merge(
             tracing::warn!(path = %page.path.display(), "unclosed frontmatter: preview counts diagnostic body links; publication requires repair");
             let diagnostic = lk_core::frontmatter::split_page(&typed).body;
             let (_, count) =
-                rewrite_links(&diagnostic, &page.path, &from_rel, &into_rel, vault_root)?;
+                rewrite_links(&diagnostic, &page.path, &from_rel, &into_rel, &mut entries)?;
             (typed.clone(), count)
         } else {
-            rewrite_links(&typed, &page.path, &from_rel, &into_rel, vault_root)?
+            rewrite_links(&typed, &page.path, &from_rel, &into_rel, &mut entries)?
         };
         if count > 0 && page.rss_evidence {
             lk_vault::rss_concept_citations(vault_root, &page.path, &content)
@@ -435,7 +436,7 @@ fn rewrite_links(
     page_path: &Path,
     from_rel: &Path,
     into_rel: &Path,
-    root: &Path,
+    entries: &mut lk_vault::ExistingEntryResolver,
 ) -> Result<(String, usize), GraphError> {
     let mut count = 0;
     let mut failure = None;
@@ -457,7 +458,7 @@ fn rewrite_links(
             return None;
         }
         let resolved = link::resolve_dest(page_path, &decoded)?;
-        match lk_vault::same_existing_entry(root, &resolved, from_rel) {
+        match entries.same_existing_entry(&resolved, from_rel) {
             Ok(true) => {}
             Ok(false) => return None,
             Err(error) => {
@@ -1358,7 +1359,7 @@ mod tests {
                 Path::new("wiki/documents/source.md"),
                 Path::new("wiki/concepts/old.md"),
                 Path::new("wiki/concepts/new.md"),
-                root,
+                &mut lk_vault::ExistingEntryResolver::new(root),
             )
             .is_err()
         );
@@ -1593,7 +1594,14 @@ mod tests {
                 source.outgoing,
                 [crate::scan::Link::to(from.to_str().unwrap())]
             );
-            let (updated, count) = rewrite_links(&content, page, &from, into, root).unwrap();
+            let (updated, count) = rewrite_links(
+                &content,
+                page,
+                &from,
+                into,
+                &mut lk_vault::ExistingEntryResolver::new(root),
+            )
+            .unwrap();
             assert_eq!(count, 1, "{content}");
             assert_eq!(
                 updated,
