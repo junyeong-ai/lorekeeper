@@ -59,14 +59,14 @@ html5ever = "0.38"
 markup5ever_rcdom = "0.38"
 feed-rs = "3"
 quick-xml = { version = "0.42", features = ["encoding"] }
-dom_smoothie = "0.18"
+dom_smoothie = "0.19"
 url = "2"
 base64 = "0.23"
 sha2 = "0.11"
 rand = "0.10"
 dialoguer = "0.12"
 unicode-normalization = "0.1"
-rusqlite = { version = "0.40.2", features = ["bundled"] }
+rusqlite = { version = "0.41.1", features = ["bundled"] }
 pulldown-cmark = { version = "0.13.5", default-features = false }
 pulldown-cmark-to-cmark = "23.0.0"
 petgraph = "0.8"
