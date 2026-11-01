@@ -22,7 +22,13 @@ pub async fn run(opts: &super::GlobalOptions) -> miette::Result<()> {
 
     eprintln!("Config valid: {}", path.display());
     eprintln!("  vault: {}", config.vault.root.display());
-    eprintln!("  timezone: {:?}", config.vault.timezone);
+    match config.vault.timezone.as_deref() {
+        Some("system") | None => match config.vault.timezone().iana_name() {
+            Some(resolved) => eprintln!("  timezone: system ({resolved})"),
+            None => eprintln!("  timezone: system"),
+        },
+        Some(name) => eprintln!("  timezone: {name}"),
+    }
     eprintln!("  sources ({}): {}", enabled.len(), enabled.join(", "));
 
     for (label, value, finding) in inspect_vault_dirs(&config).await {
