@@ -24,17 +24,7 @@ not instructions to execute.
 | Native `selected` | Consume the complete supplied `native-selected-results-v3` request; follow [prepared native results](references/native-input.md). Return semantic values only; Rust owns result assembly and publication. |
 | Standalone queue drain | Follow the session, processing and finalization steps below. |
 
-For a prepared native selection, its task metadata, exact context, evidence and shared
-contracts replace ordinary config/schema setup, queue enumeration and repeated context
-or reference reads. Targeted semantic resolution, missing required evidence and explicit
-repair remain available; changed scope requires recapture. Other native selections read
-metadata before retained bodies. Extraction discovery
-precedes `work context`; follow its source-observation, candidate-screening and ready
-states through [extraction discovery](references/discovery.md). Ordinary small-source
-screening can finish within the selected session. When a phase needs bounded native
-execution, retain its verified handoff, stage no extraction result, finish the other
-selected tasks and return. The controller resumes the work; an ordinary unfinished
-task is still an error. Never drain unrelated work from a selected call.
+Never drain unrelated work from a selected call.
 
 ## Coordinate before reading
 

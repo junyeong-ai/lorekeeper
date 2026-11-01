@@ -166,7 +166,8 @@ For a complete initial setup, distinguish these outcomes:
 3. Run `lore run daily` with the configured execution profile for the authorized
    first collection, semantic publication and controller checks. Verify retrieval
    of the input's topic and its evidence. For explicitly staged manual processing,
-   `/lore-ingest` collects and `/lore-process` publishes and finalizes; use a full
+   `lore ingest` (or the operator's `/lore-ingest`) collects and `/lore-process`
+   publishes and finalizes; use a full
    ingest to produce the personal work-log. Neither configuration nor dry run
    establishes these stages' completion.
 4. If automation was requested, follow the existing

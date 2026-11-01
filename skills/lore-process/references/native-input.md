@@ -1,8 +1,17 @@
 # Prepared native results
 
+Contents: selected tasks; revision ownership; completed Work; complete observation
+coverage; semantic response.
+
 Use only when the native controller supplies `native-selected-results-v3`,
 `native-finalize-results-v2` or `native-finalize-frontier-v2`. The complete request arrives through supervised stdin.
 It is neither semantic completion nor permission to process unrelated work.
+
+Its task metadata, exact context, evidence and shared contracts replace ordinary
+config/schema setup, queue enumeration and repeated context or reference reads. Targeted
+semantic resolution, missing required evidence and explicit repair remain available;
+changed scope requires recapture. Other native selections read metadata before retained
+bodies.
 
 ## Selected tasks
 

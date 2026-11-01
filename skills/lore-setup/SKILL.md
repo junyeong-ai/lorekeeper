@@ -2,7 +2,9 @@
 name: lore-setup
 description: Guides initial Lorekeeper setup or edits source configuration using workspace
   metadata. Discovers requested source IDs, preserves existing selections, and distinguishes
-  config validation, native authentication, first processing and optional scheduling.
+  config validation, native authentication, first processing and optional scheduling. Use
+  when adding or changing a Slack, Jira, Confluence, Gmail, Google Drive, Google Calendar,
+  RSS, inbox or repository source in config.yaml.
 metadata:
   version: 0.111.0
 ---

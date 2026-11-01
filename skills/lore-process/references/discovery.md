@@ -10,6 +10,11 @@ Use before concept extraction needs related-knowledge context. Discovery finds c
 lexical candidates; screening chooses which bodies to inspect. Neither establishes
 identity, support, contradiction or a completed source read.
 
+In a native selection, discovery precedes `work context`. Ordinary small-source screening
+can finish within the selected session. When a phase needs bounded native execution,
+retain its verified handoff, stage no extraction result, finish the other selected tasks
+and return. The controller resumes the work; an ordinary unfinished task is still an error.
+
 ## Choose and record recipes
 
 Read the exact selected task-ID array, then `lore queue status --json`. Process only

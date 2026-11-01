@@ -193,9 +193,10 @@ absence in a bounded result set does not establish absence from the vault.
 
 ## Answer and retain useful findings
 
-1. Synthesize an answer grounded in vault content. Link each material claim to its
-   source using Markdown, for example `[Retry policy](wiki/documents/retry-policy.md)`
-   with the actual vault-relative path (AGENTS.md § Links). Include the relevant
+1. Synthesize an answer grounded in vault content. In the chat answer, link each
+   material claim to its source by its vault-relative path, for example
+   `[Retry policy](wiki/documents/retry-policy.md)`; a page written into the vault uses
+   page-relative destinations instead (AGENTS.md § Links). Include the relevant
    section or source lines in the surrounding text when useful.
 2. **Concept enrichment.** If the answer reveals connections between concepts
    that aren't currently linked in their Related sections (heading from
