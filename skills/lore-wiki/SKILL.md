@@ -61,8 +61,11 @@ by an individual new source.
 Direct authoring must not overlap a synthesis worker wave. Start a long manual
 session under `lore --config /absolute/config.yaml workflow -- claude` or `lore --config /absolute/config.yaml workflow -- codex` before
 reading its evidence; scheduled skill sessions already hold this cooperative
-Unix lease. Do not reacquire it inside a guarded session. External editors and
-programs that detach or close inherited descriptors remain outside its guarantee.
+Unix lease. Do not reacquire it inside a guarded session. An agent cannot place
+itself under the lease: in a session the operator did not start that way, ask before
+authoring whether to restart under `workflow` or to stop scheduled writers first.
+External editors and programs that detach or close inherited descriptors remain
+outside its guarantee.
 
 Judge disagreements under the same subject, definitions, environment and effective
 time. A newer document, repeated source or larger citation count does not settle

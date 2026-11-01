@@ -26,8 +26,10 @@ freshness checks separate, inspectable operations.
   Read the generated AGENTS.md before page writes; run `lore schema` if missing.
   It owns formats, headings, vocabulary, link syntax and locale. Never guess `wiki/`.
 - Start a foreground publishing session under `lore workflow -- claude` or `lore workflow -- codex` before
-  reading evidence. Do not nest it in an already guarded pipeline/session. Pause
-  other concept/source writers during a wave; external editors do not share this lease.
+  reading evidence. Do not nest it in an already guarded pipeline/session. An agent
+  cannot place itself under the lease: in a session the operator did not start that way,
+  ask before the run whether to restart under `workflow` or to stop scheduled writers.
+  Pause other concept/source writers during a wave; external editors do not share this lease.
 - These are directly authored COMPLETE pages: fill their owned sections, omit
   pipeline `llm_inputs`, preserve existing addresses and `created`. The manifest
   records per-document progress; rerunning must not delete existing knowledge.
