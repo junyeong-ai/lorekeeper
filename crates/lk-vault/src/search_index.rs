@@ -9,7 +9,7 @@ use crate::search::{MatchProjection, Page, SearchOptions, SearchResult, fold_nam
 use crate::{MutationSession, VaultError, VerifiedFileRevision};
 
 pub(super) const INDEX_PATH: &str = ".lorekeeper/search.sqlite";
-const VERSION: i32 = 29;
+const VERSION: i32 = 30;
 
 #[derive(Serialize)]
 pub struct SearchSnapshot {
@@ -195,6 +195,7 @@ fn prepare_search_inner(
     if !compatible {
         transaction.execute_batch("DROP TABLE IF EXISTS links;
         DROP TABLE IF EXISTS terms;
+        DROP TABLE IF EXISTS stems;
         DROP TABLE IF EXISTS names;
         DROP TABLE IF EXISTS tags;
         DROP TABLE IF EXISTS browse_facets;
@@ -217,6 +218,7 @@ fn prepare_search_inner(
         CREATE INDEX browse_all_title ON pages(title, path_rank);
         CREATE INDEX browse_all_created ON pages(created_date DESC, path_rank);
         CREATE VIRTUAL TABLE terms USING fts5(name_text, text, spacing_name_text, spacing_text, content='pages', content_rowid='id', tokenize='trigram case_sensitive 1');
+        CREATE VIRTUAL TABLE stems USING fts5(stem, content='', contentless_delete=1, tokenize='ascii');
         CREATE TABLE names (page_id INTEGER NOT NULL, name TEXT NOT NULL, identity_key TEXT NOT NULL, key TEXT NOT NULL, spacing_key TEXT NOT NULL, PRIMARY KEY(page_id, name));
         CREATE INDEX names_identity ON names(identity_key, page_id);
         CREATE INDEX names_key ON names(key, page_id);
@@ -270,6 +272,8 @@ fn prepare_search_inner(
         )?;
         let mut insert_terms =
             transaction.prepare("INSERT INTO terms(rowid, name_text, text, spacing_name_text, spacing_text) VALUES (?1, ?2, ?3, ?4, ?5)")?;
+        let mut insert_stems =
+            transaction.prepare("INSERT INTO stems(rowid, stem) VALUES (?1, ?2)")?;
         let mut insert_link = transaction
             .prepare("INSERT INTO links VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)")?;
         let mut insert_name =
@@ -427,6 +431,11 @@ fn prepare_search_inner(
                 spacing_name_text,
                 spacing_text
             ])?;
+            let stems = super::search::ascii_words(&name_text)
+                .chain(super::search::ascii_words(&projection.text))
+                .filter_map(super::search::stem)
+                .collect::<std::collections::BTreeSet<_>>();
+            insert_stems.execute(params![id, stems.into_iter().collect::<Vec<_>>().join(" ")])?;
             for (ordinal, review) in page.reviews.iter().enumerate() {
                 let payload = serde_json::to_string(review)
                     .map_err(|error| VaultError::Serialization(error.to_string()))?;
@@ -523,6 +532,7 @@ fn remove_page(connection: &Connection, id: i64, path: &str) -> Result<(), Vault
          SELECT 'delete', id, name_text, text, spacing_name_text, spacing_text FROM pages WHERE id=?1",
         [id],
     )?;
+    connection.execute("DELETE FROM stems WHERE rowid=?1", [id])?;
     connection.execute("DELETE FROM names WHERE page_id=?1", [id])?;
     connection.execute("DELETE FROM tags WHERE page_id=?1", [id])?;
     connection.execute("DELETE FROM links WHERE source=?1", [path])?;
@@ -802,6 +812,13 @@ fn build_candidate_query(
                     arguments.len()
                 ));
             }
+        }
+        if let Some(stem) = super::search::stem(needle) {
+            arguments.push(format!("\"{stem}\""));
+            variants.push(format!(
+                "id IN (SELECT rowid FROM stems WHERE stems MATCH ?{})",
+                arguments.len()
+            ));
         }
         predicates.push(format!("({})", variants.join(" OR ")));
     }
@@ -3361,10 +3378,24 @@ mod tests {
                 [],
             )
             .unwrap();
+        let fresh_connection = Connection::open(fresh.path().join(INDEX_PATH)).unwrap();
+        for stem in ["oldneedl", "newneedl", "evid"] {
+            let pages = |connection: &Connection| -> i64 {
+                connection
+                    .query_row(
+                        "SELECT count(*) FROM stems WHERE stems MATCH ?1",
+                        [stem],
+                        |row| row.get(0),
+                    )
+                    .unwrap()
+            };
+            assert_eq!(pages(&connection), pages(&fresh_connection), "{stem}");
+        }
         for query in [
             None,
             Some("Oldneedle"),
             Some("Newneedle"),
+            Some("Newneedles"),
             Some("Old Alias"),
             Some("New Alias"),
             Some("evidence"),

@@ -53,7 +53,11 @@ question reaches and, in `matched`, whether it names the subject (`identity`/`na
 by stating it (`summary`), or merely mentions it (`text`). A whole declared name with
 different spacing is `name-variant`: a retrieval candidate, not exact registry ownership. Query the question's terms
 separately when it spans several. A query naming one concept matches its declared
-names and aliases as phrases; other queries require every term. Markdown formatting
+names and aliases as phrases; other queries require every term. An English term matches
+whole words and their inflections (`retry` reaches `retries`); a Korean term matches inside
+a word, so query the noun without its particle (`브레이커`, not `브레이커를`). Matching is
+lexical within each language: when pages may state the subject in either, query each
+language's term separately. Markdown formatting
 and soft line breaks preserve a phrase; parsed HTML text is searchable too, with
 table cells and blocks kept separate. Markup, destinations, scripts and styles
 do not contribute text. Separate blocks and separate aliases do not

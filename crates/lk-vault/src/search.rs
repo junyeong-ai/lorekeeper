@@ -1555,9 +1555,39 @@ fn match_fields_by(
 /// The limit is the other scripts that DO separate words — Cyrillic, Greek, an accented Latin
 /// word — which keep plain containment: unconstrained rather than wrongly constrained, which
 /// is the state this started from.
+///
+/// A boundary alone would also refuse English inflection: `retry` would never reach a page
+/// that only says `retries`. A term that is one ASCII word therefore also matches any ASCII
+/// word with its Snowball stem — the standard English lexical-search trade-off, which can join
+/// words a reader keeps apart (`organ`, `organization`).
 fn contains_term(text: &str, term: &str) -> bool {
     text.match_indices(term)
         .any(|(at, _)| has_term_boundaries(text, term, at, at + term.len()))
+        || stem(term).is_some_and(|stem| {
+            let stemmer = english();
+            ascii_words(text).any(|word| is_stemmable(word) && stemmer.stem(word) == stem)
+        })
+}
+
+fn english() -> rust_stemmers::Stemmer {
+    rust_stemmers::Stemmer::create(rust_stemmers::Algorithm::English)
+}
+
+/// The English Snowball stem of a folded word made only of ASCII letters; `None` for any other
+/// spelling, which matches only as written.
+pub(super) fn stem(word: &str) -> Option<String> {
+    is_stemmable(word).then(|| english().stem(word).into_owned())
+}
+
+fn is_stemmable(word: &str) -> bool {
+    !word.is_empty() && word.bytes().all(|byte| byte.is_ascii_lowercase())
+}
+
+/// The maximal ASCII letter-and-digit runs of `text`: the words [`has_term_boundaries`] keeps
+/// apart.
+pub(super) fn ascii_words(text: &str) -> impl Iterator<Item = &str> {
+    text.split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|word| !word.is_empty())
 }
 
 fn has_term_boundaries(text: &str, term: &str, start: usize, end: usize) -> bool {
@@ -3411,6 +3441,19 @@ mod tests {
             !contains_term("claude-35", "5"),
             "a numeral inside a number is not the number"
         );
+    }
+
+    /// The stem widens a word to its inflections without reopening the middle of a longer word.
+    #[test]
+    fn an_english_term_matches_its_inflections_as_whole_words() {
+        assert!(contains_term("automatic retries are capped", "retry"));
+        assert!(contains_term("it retried twice", "retry"));
+        assert!(contains_term("api tokens expire", "token"));
+        assert!(contains_term("idempotency keys", "key"));
+        assert!(contains_term("retries를 줄인다", "retry"));
+        assert!(!contains_term("the keyboard layout", "key"));
+        assert!(!contains_term("md-wisely-daily-scrum", "ai"));
+        assert!(!contains_term("retries", "retry policy"));
     }
 
     /// The other half of the same rule: Korean writes a noun and its particle as one word, so

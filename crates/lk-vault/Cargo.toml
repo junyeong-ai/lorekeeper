@@ -21,6 +21,7 @@ minijinja = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 unicode-normalization = { workspace = true }
+rust-stemmers = { workspace = true }
 rusqlite = { workspace = true }
 pulldown-cmark = { workspace = true, features = ["html"] }
 html5ever = { workspace = true }
