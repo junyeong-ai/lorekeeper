@@ -1,5 +1,8 @@
 # Add sources and migrate imported identity
 
+Contents: capture a file, folder or URL; author pasted text or an explicitly requested
+document; imported document identity migration.
+
 ## Capture a file, folder or URL
 
 Use native collection for existing source files so original preservation, decoding,
@@ -77,13 +80,18 @@ original-file capture; do not claim `wiki original` coverage for it.
    is what `backlinks-sync` counts as the citation. A concept whose evidence later
    moves is rewritten by the queue, not here — `lore graph backlinks-sync` queues
    it once the citation lands.
-5. **Finalize**: `lore graph backlinks-sync`, then `lore wiki refresh` (refresh SQLite navigation and the entry guide), then
+5. **Publish** the document pages, new concepts and alias updates as one
+   [curation](curation.md) plan: drafts are `pages` entries with `revision: null`, alias
+   updates are revision-guarded `concepts` entries with each concept page read in
+   `evidence`. Validate with `--dry-run`, then publish; a refusal names the owned name or
+   occupied address to resolve before redrafting.
+6. **Finalize**: `lore graph backlinks-sync`, then `lore wiki refresh` (refresh SQLite navigation and the entry guide), then
    `lore graph lint`. A non-zero exit is the vault contradicting itself somewhere, which
    does not establish whether this add caused it. Resolve every violation naming a page this add
    wrote — especially a `duplicate_concepts` entry, which means a new page claims a name
    another page already answers to — and REPORT the rest rather than fixing them silently.
    Observations (orphans, open conflicts) are reported without gating.
-6. Run `lore queue status --json` and report what was created/updated, grouped by
+7. Run `lore queue status --json` and report what was created/updated, grouped by
    source file, with any newly queued synthesis still pending. Drain it through
    `/lore-process` when semantic completion is part of the request. Authored pages
    and pending concept rewrites are separate completion claims; unrelated queue

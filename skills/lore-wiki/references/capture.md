@@ -52,16 +52,15 @@ consistent with batch extractions from `/lore-extract`.
 | T3 | Pattern/methodology | document + reusable concepts |
 | T4 | Project-specific only | **skip** — suggest project-local docs instead |
 
-### 4. Write document
+### 4. Draft document
 
-Write to the document path pattern from AGENTS.md. Use the vault's
+Draft the page for the document path pattern from AGENTS.md. Use the vault's
 configured locale for section headings and prose; preserve the schema's exact frontmatter keys —
 AGENTS.md is the authoritative source for both.
 
-This skill writes a COMPLETE page directly — no ingest pipeline runs
-afterward, so the directly-authored rule in AGENTS.md's ownership legend applies:
-you fill every section yourself, and `backlinks-sync` owns the concept sources
-section + `source_count` in step 6.
+This skill authors a COMPLETE page — no ingest pipeline runs afterward, so the
+directly-authored rule in AGENTS.md's ownership legend applies: you fill every section
+yourself, and `backlinks-sync` owns the concept sources section + `source_count` in step 7.
 Omit the `llm_inputs` frontmatter block entirely — it belongs to the
 pipeline cache, not to directly-authored pages. An in-the-moment capture has
 no originating file or URL, so omit `source_file`/`source_url` too (set them
@@ -69,21 +68,21 @@ only when the insight came from a concrete file or link you can cite).
 
 Link the relevant concepts as relative markdown links (AGENTS.md § Links) in the document's
 related-concepts section (heading from AGENTS.md) — these forward links are
-what `backlinks-sync` reads to derive each concept's sources section in step 6.
+what `backlinks-sync` reads to derive each concept's sources section in step 7.
 
 `document_type` is a FORMAT value, and AGENTS.md lists the vocabulary and what
 each value means — read it there rather than from memory —
 the insight's nature (troubleshooting, constraint, pattern) belongs in
 `tags`, never in `document_type`.
 
-### 5. Create or reuse concepts
+### 5. Draft or reuse concepts
 
 For each technology, pattern, or constraint, follow the **Concept convergence**
 section of the vault's `AGENTS.md` — matching
-against what step 2 resolved and searched, with the concepts you already created
+against what step 2 resolved and searched, with the concepts you already drafted
 in this capture as the created-this-run set. Then:
 
-1. New → create with a 1-2 sentence synthesis in the Synthesis section
+1. New → draft it with a 1-2 sentence synthesis in the Synthesis section
    (heading from AGENTS.md).
 2. Existing → reuse the page and register equivalent aliases; put new evidence in
    the document and its forward link. Let queued synthesis integrate that evidence.
@@ -93,10 +92,20 @@ in this capture as the created-this-run set. Then:
    the field rather than forcing one.
 
 The sources section / `source_count` stay machine-owned (AGENTS.md § Concept convergence) —
-`backlinks-sync` re-derives both in step 6 from the document's forward link
+`backlinks-sync` re-derives both in step 7 from the document's forward link
 (step 4), the source of truth.
 
-### 6. Finalize
+### 6. Publish
+
+Publish the document, new concepts and alias updates as one [curation](curation.md)
+plan: the drafts are `pages` entries with `revision: null`, and each alias update is a
+`concepts` entry guarded by the revision you read, with that concept page in `evidence`.
+Run `lore wiki curate --file PLAN.json --dry-run`, then omit `--dry-run`. The plan
+publishes everything or nothing. A refusal names its conflict — a name another concept
+owns, an occupied address, a filename that is not its slug — so resolve that and redraft;
+never write the pages directly instead.
+
+### 7. Finalize
 
 Reconcile the graph so machine-owned fields are authoritative and health
 checks pass:
@@ -107,7 +116,7 @@ lore wiki refresh           # refresh SQLite navigation and the entry guide
 lore graph lint             # repair violations in pages this capture wrote; report unrelated findings separately. Orphans/open conflicts are observations, not failures
 ```
 
-### 7. Report
+### 8. Report
 
 Show created/reused paths, concept count, and transferability level. Run
 `lore queue status --json` and report synthesis queued by Finalize as pending;

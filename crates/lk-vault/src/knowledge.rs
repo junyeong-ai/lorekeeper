@@ -2,7 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use lk_core::concept::{
-    ConceptIdentity, ConceptRegistry, Resolution, file_revision, identity_key, source_revision,
+    ConceptIdentity, ConceptRegistry, Resolution, file_revision, identity_key, slugify,
+    source_revision,
 };
 use lk_core::config::{ConceptCategory, VaultDirs};
 use lk_core::frontmatter::KnowledgeStatus;
@@ -13,11 +14,14 @@ use crate::{KnowledgeReview, MutationPlan, MutationSession, VaultError, resolve_
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CurationPlan {
+    #[serde(default)]
     pub evidence: Vec<PageRevision>,
     #[serde(default)]
     pub concepts: Vec<ConceptCuration>,
     #[serde(default)]
     pub reviews: Vec<ReviewCuration>,
+    #[serde(default)]
+    pub pages: Vec<AuthoredPage>,
 }
 
 #[derive(Deserialize)]
@@ -59,10 +63,21 @@ pub struct ReviewCuration {
     pub content: String,
 }
 
+/// A complete directly authored document, exploration or concept: created where its address
+/// is absent (`revision: null`) or replacing the authored page at that exact revision.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthoredPage {
+    pub path: String,
+    pub revision: Option<String>,
+    pub content: String,
+}
+
 #[derive(Serialize)]
 pub struct CurationResult {
     pub concepts: Vec<String>,
     pub reviews: Vec<String>,
+    pub pages: Vec<String>,
     pub evidence: usize,
 }
 
@@ -223,9 +238,15 @@ fn build_curation(
     categories: &[ConceptCategory],
     request: CurationPlan,
 ) -> Result<(MutationPlan, CurationResult), VaultError> {
-    if request.evidence.is_empty() || request.concepts.is_empty() && request.reviews.is_empty() {
+    let assesses = !request.concepts.is_empty() || !request.reviews.is_empty();
+    if !assesses && request.pages.is_empty() {
         return Err(invalid(
-            "curation requires evidence and at least one concept or review",
+            "curation requires at least one page, concept or review",
+        ));
+    }
+    if assesses && request.evidence.is_empty() {
+        return Err(invalid(
+            "concept and review curation requires the evidence it assessed",
         ));
     }
     let mut plan = MutationPlan::default();
@@ -344,6 +365,64 @@ fn build_curation(
             return Err(invalid("duplicate curation target"));
         }
     }
+    let collections = [
+        (lk_core::vault_path::documents_dir(dirs), "document"),
+        (explorations_dir.clone(), "exploration"),
+        (concepts_dir.clone(), "concept"),
+    ];
+    for authored in &request.pages {
+        let path = address(&authored.path, None)?;
+        let format = collections
+            .iter()
+            .find(|(directory, _)| path.starts_with(directory))
+            .map(|(_, format)| *format)
+            .ok_or_else(|| {
+                invalid(format!(
+                    "authored pages belong to the document, exploration or concept collection: {}",
+                    authored.path
+                ))
+            })?;
+        let directly_authored = |page: &crate::VaultPage| {
+            page.frontmatter
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                == Some(format)
+                && page.frontmatter.get("llm_inputs").is_none()
+                && page.frontmatter.get("review").is_none()
+        };
+        let before = read(root, &path, authored.revision.as_deref())?;
+        if before.is_none()
+            && let Some(stem) = path.file_stem().and_then(|stem| stem.to_str())
+            && let Some(slug) = slugify(stem).filter(|slug| slug != stem)
+        {
+            return Err(invalid(format!(
+                "a new page's filename must be its slug: {slug}.md, not {stem}.md"
+            )));
+        }
+        if let Some(raw) = &before
+            && !directly_authored(&crate::parse_page(raw).map_err(invalid)?)
+        {
+            return Err(invalid(
+                "curation can replace only an existing directly authored page",
+            ));
+        }
+        let page = crate::parse_page(&authored.content).map_err(invalid)?;
+        if page.frontmatter.get("review").is_some() {
+            return Err(invalid("publish a knowledge review through `reviews`"));
+        }
+        if !directly_authored(&page) {
+            return Err(invalid(format!(
+                "an authored page must declare `type: {format}` and carry no llm_inputs: {}",
+                authored.path
+            )));
+        }
+        if staged
+            .insert(path, (before, authored.content.clone()))
+            .is_some()
+        {
+            return Err(invalid("duplicate curation target"));
+        }
+    }
     let mut owners = BTreeMap::new();
     for path in staged.keys() {
         crate::writable_page_path(root, path)?;
@@ -375,14 +454,15 @@ fn build_curation(
             identities.push((identity, aliases));
         }
     }
-    for change in &request.concepts {
-        let path = address(&change.path, Some(&concepts_dir))?;
-        if !registered.insert(resolve_page_owner(root, &path)?) {
+    for (path, (_, after)) in staged
+        .iter()
+        .filter(|(path, _)| path.starts_with(&concepts_dir))
+    {
+        if !registered.insert(resolve_page_owner(root, path)?) {
             continue;
         }
-        let (_, after) = &staged[&path];
         let page = crate::parse_page(after).map_err(invalid)?;
-        let (identity, aliases) = build_concept_names(&path, &concepts_dir, &page)?;
+        let (identity, aliases) = build_concept_names(path, &concepts_dir, &page)?;
         registry.register(identity.clone(), &aliases);
         identities.push((identity, aliases));
     }
@@ -540,6 +620,7 @@ fn build_curation(
                 .into_iter()
                 .map(|review| review.path)
                 .collect(),
+            pages: request.pages.into_iter().map(|page| page.path).collect(),
             evidence: request.evidence.len(),
         },
     ))
@@ -683,6 +764,7 @@ mod tests {
             }],
             concepts: vec![],
             reviews: ["Review.md", "review.md"].map(review).into(),
+            pages: vec![],
         };
         assert_eq!(
             preview_curation(root.path(), &VaultDirs::default(), &[], request()).is_ok(),
@@ -1344,5 +1426,93 @@ mod tests {
         assert!(after.contains("# Renamed\n"));
         assert!(after.contains("First meaning."));
         assert!(!root.path().join("wiki/concepts/renamed.md").exists());
+    }
+
+    #[test]
+    fn authored_pages_publish_together_and_refuse_names_owned_elsewhere() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let existing = "---\ntype: concept\ntitle: Retry policy\naliases: [Backoff]\n---\n## Synthesis\nBounded retries.\n";
+        crate::VaultWriter::new(root.path())
+            .write_page_sync(Path::new("wiki/concepts/retry-policy.md"), existing)
+            .unwrap();
+        let document = "---\ntype: document\ntitle: Capture\n---\n## Summary\nJitter spreads retries.\n\n## Related\n- [Jitter](../concepts/jitter.md)\n";
+        let plan = |alias: &str| {
+            let concept = format!(
+                "---\ntype: concept\ntitle: Jitter\naliases: [{alias}]\n---\n## Synthesis\nRandomized delay.\n"
+            );
+            serde_json::from_value::<CurationPlan>(json!({"pages":[
+                {"path":"wiki/documents/capture.md","revision":null,"content":document},
+                {"path":"wiki/concepts/jitter.md","revision":null,"content":concept}]}))
+            .unwrap()
+        };
+        let error = curate(&session, &dirs, &[], plan("Backoff"))
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(error.contains("ambiguous concept name: Backoff"), "{error}");
+        assert!(!root.path().join("wiki/documents/capture.md").exists());
+
+        let result = curate(&session, &dirs, &[], plan("Random delay")).unwrap();
+        assert_eq!(
+            result.pages,
+            ["wiki/documents/capture.md", "wiki/concepts/jitter.md"]
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("wiki/documents/capture.md")).unwrap(),
+            document
+        );
+        assert!(
+            curate(&session, &dirs, &[], plan("Random delay")).is_err(),
+            "a created page is no longer absent"
+        );
+    }
+
+    #[test]
+    fn authored_pages_refuse_generated_targets_reviews_and_unowned_addresses() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let generated = "---\ntype: document\ntitle: Ingested\nllm_inputs: {summary: abc}\n---\n## Summary\nGenerated.\n";
+        crate::VaultWriter::new(root.path())
+            .write_page_sync(Path::new("wiki/documents/ingested.md"), generated)
+            .unwrap();
+        let authored = "---\ntype: document\ntitle: Mine\n---\nBody.\n";
+        for (path, revision, content, refusal) in [
+            (
+                "wiki/documents/ingested.md",
+                Some(file_revision(generated)),
+                authored,
+                "directly authored page",
+            ),
+            ("wiki/documents/Mine.md", None, authored, "mine.md"),
+            (
+                "wiki/explorations/answer.md",
+                None,
+                "---\ntype: exploration\ntitle: A\nreview: {}\n---\nBody.\n",
+                "through `reviews`",
+            ),
+            (
+                "wiki/explorations/answer.md",
+                None,
+                authored,
+                "type: exploration",
+            ),
+            ("daily/note.md", None, authored, "collection"),
+        ] {
+            let plan = serde_json::from_value::<CurationPlan>(
+                json!({"pages":[{"path":path,"revision":revision,"content":content}]}),
+            )
+            .unwrap();
+            let error = preview_curation(root.path(), &dirs, &[], plan)
+                .err()
+                .unwrap()
+                .to_string();
+            assert!(error.contains(refusal), "{path}: {error}");
+        }
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("wiki/documents/ingested.md")).unwrap(),
+            generated
+        );
     }
 }

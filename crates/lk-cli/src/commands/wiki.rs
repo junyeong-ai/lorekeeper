@@ -151,9 +151,9 @@ pub enum WikiCommand {
         #[arg(long)]
         wait_for_vault: bool,
     },
-    /// Publish reviewed concept metadata and durable reviews with exact evidence guards
+    /// Publish authored pages, reviewed concept metadata and durable reviews with exact guards
     Curate {
-        /// Validate evidence, names and reviews without publishing or journal recovery
+        /// Validate evidence, names, pages and reviews without publishing or journal recovery
         #[arg(long)]
         dry_run: bool,
         /// JSON curation plan; see lore-wiki's curation reference for the contract

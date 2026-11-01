@@ -6,9 +6,10 @@
 - [Repair a broken concept address](#repair-a-broken-concept-address)
 - [Merge equivalent concepts](#merge-equivalent-concepts)
 
-Use this operation for authorized repairs identified by an audit. Read the relevant
-concept, complete supporting context and any existing review under the workflow
-lease before drafting changes. Counts and lexical similarity do not decide meaning.
+Use this operation to publish directly authored pages and for authorized repairs
+identified by an audit. Read the relevant concept, complete supporting context and any
+existing review under the workflow lease before drafting changes. Counts and lexical
+similarity do not decide meaning.
 
 - Keep a durable subject when it answers a useful future question. A single source
   can support a scoped definition; repeated pages do not prove independent confirmation.
@@ -49,11 +50,17 @@ The JSON contract is:
     "path": "wiki/explorations/subject-review.md",
     "revision": null,
     "content": "COMPLETE_AUTHORED_EXPLORATION_WITH_REVIEW_METADATA"
+  }],
+  "pages": [{
+    "path": "wiki/documents/captured-insight.md",
+    "revision": null,
+    "content": "COMPLETE_DIRECTLY_AUTHORED_PAGE"
   }]
 }
 ```
 
-`evidence` is nonempty and guards the exact files read (`wiki read.file_revision`).
+`evidence` guards the exact files read (`wiki read.file_revision`); it is required when
+the plan changes concepts or reviews.
 Concept fields other than path/revision are optional; aliases replace the complete
 list, so retain existing forms unless read evidence establishes a wrong or ambiguous
 identity. Absence from selected citations is not such evidence; record the uncertainty
@@ -77,6 +84,15 @@ guards. Prefer unchanged primary source evidence and explicit subjects when that
 accurately expresses the assessment.
 Do not retag old reasoning to a new revision. Archive an existing review and reference
 its prior archive in a dated reassessment; curation preserves its bytes automatically.
+
+`pages` publishes complete directly authored documents, explorations and concepts — a
+capture, an answer worth keeping, a new concept. Each declares the `type` of its collection
+and carries no `llm_inputs` or `review` metadata; a knowledge review goes through `reviews`.
+`revision: null` creates the page where its address is absent, and a new filename must be
+its own slug. A current full file hash replaces a page only if it is already directly
+authored. A new or replaced concept joins the name check, so a title or alias another
+concept owns refuses the whole plan. Pages and alias updates in one plan publish together
+or not at all. Backlinks still own every concept's sources section and `source_count`.
 
 Curation changes metadata and an optional leading title, never synthesis/related/source
 sections or queue completion markers. Use `graph resynthesize` and `/lore-process` for

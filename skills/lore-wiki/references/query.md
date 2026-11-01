@@ -211,6 +211,8 @@ absence in a bounded result set does not establish absence from the vault.
      Before publishing, repeat the original question against the proposed change and
      check whether the cited evidence supports it. Do not treat structural lint as
      evidence that the answer is correct.
+     Publish the page as a `pages` entry of a [curation](curation.md) plan, with the
+     pages it cites in `evidence`, rather than writing the file directly.
      Then **finalize** so the new page leaves the graph clean:
      `lore graph backlinks-sync` (its Grounding links are real citations that
      raise each grounded concept's `source_count`), then `lore wiki refresh` (so SQLite discovery captures the exploration). Run `lore queue status --json` and report any

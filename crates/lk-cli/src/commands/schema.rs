@@ -583,7 +583,9 @@ pub fn render_agents_md(
          has no pipeline behind it, so you fill EVERY section yourself, `machine` ones \
          included — except a concept's `## {}` section and its `{}`, which `lore graph \
          backlinks-sync` re-derives wholesale from the forward links on citing pages every \
-         time it runs, so leave those empty and let it.\n\nA concept's `## {}` is yours to \
+         time it runs, so leave those empty and let it. Publish such pages as `pages` entries \
+         of a `lore wiki curate` plan, which refuses an occupied address, a name another \
+         concept owns and a filename that is not its slug.\n\nA concept's `## {}` is yours to \
          write when you create the page and is NOT yours after that. It is owed against the \
          set of pages citing the concept, so once that set moves, `lore graph backlinks-sync` \
          queues a rewrite and a drain writes the section from the sources themselves. Write \
