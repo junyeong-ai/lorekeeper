@@ -769,20 +769,23 @@ mod tests {
         let mut invalid = output(&work, root.path(), &resources, node);
         invalid.summary = "\u{2003}".into();
         let contract = "a".repeat(64);
-        let plan = work
-            .plan_observation_rejection(
+        let super::super::ObservationRecordPlan::Rejected { mutation: plan, .. } = work
+            .plan_native_observation(
                 root.path(),
                 &resources,
                 &request,
                 &contract,
-                super::super::ObservationTextRejection {
+                super::super::ObservationCandidate {
                     output: invalid,
-                    violation: super::super::ObservationTextError::Summary,
+                    text_violation: Some(super::super::ObservationTextError::Summary),
                     response_revision: lk_core::rss_original::digest(b"private refined response"),
                     response_json_bytes: 300,
                 },
             )
-            .unwrap();
+            .unwrap()
+        else {
+            panic!("expected an authored text rejection")
+        };
         session.apply(plan).unwrap();
         assert!(
             work.load_inspection_action(root.path(), &request, &contract)

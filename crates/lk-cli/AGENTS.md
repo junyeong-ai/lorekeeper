@@ -145,10 +145,14 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   fails explicitly, without clipping evidence.
 - Resume current explicit Work plans even when the remaining batch fits whole input;
   validate their exact manifest before using recorded observations.
-- Only freshly received unambiguous authored-text violations can create native
-  observation-rejection holds. Guard exact requests, contracts and captured responses;
-  keep evidence/inheritance, stored corruption and unknown failures strict. Preserve old
-  paid bytes, bound append-only rejection history and keep unchanged holds zero-call.
+- Only freshly received unambiguous authored-text or evidence-reference violations can
+  create native observation-rejection holds. Validate stored state, current identity
+  and question inheritance first; canonical node ranges own evidence membership, not
+  the displayed citation roster. Use one fresh evaluation to choose recording or
+  rejection. Guard exact requests, contracts and captured responses; stored corruption
+  and unknown failures remain strict. Preserve old paid bytes and exact v1 receipt
+  snapshots when adding v2 evidence entries. Bound append-only history and keep
+  unchanged holds zero-call.
 - Saved section finalizers capture fresh scoped reviews separately from source-only
   Work; guard the complete final request after the host and its context again at apply.
   Do not incorporate reviews into old Work identities or rewrite paid nodes to acquire

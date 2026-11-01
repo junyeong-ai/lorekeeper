@@ -1329,8 +1329,29 @@ fn inspection_actions_and_evidence_reject_forged_stale_empty_and_corrupt_states(
             let (_, plan) = fixture.add("source", TaskKind::Summarize);
             fixture.mode(mode);
             let (_, report) = fixture.run();
-            assert_eq!(report["halted"], true, "{engine}/{mode}: {report}");
+            let authored = mode == "empty-inspection-evidence";
+            assert_eq!(report["halted"], !authored, "{engine}/{mode}: {report}");
             assert!(!fixture.work_path(&plan, "inspection-actions.json").exists());
+            let rejection = fixture.work_path(&plan, "observation-rejections.json");
+            if authored {
+                let raw = std::fs::read(&rejection).unwrap();
+                let value: Value = serde_json::from_slice(&raw).unwrap();
+                assert_eq!(value["schema"], "observation-rejections-v2");
+                assert!(
+                    value["entries"]
+                        .as_object()
+                        .unwrap()
+                        .values()
+                        .any(|entry| entry["violation"]["kind"] == "empty")
+                );
+                let (_, held) = fixture.run();
+                assert_eq!(held["halted"], false, "{held}");
+                assert_eq!(held["semantic_calls"], 0);
+                assert_eq!(held["retained_progress"]["action_receipts"], 0);
+                assert_eq!(std::fs::read(&rejection).unwrap(), raw);
+            } else {
+                assert!(!rejection.exists());
+            }
             if mode != "inspection-action-drift" {
                 let status = fixture.json(&["work", "status", plan["work_id"].as_str().unwrap()]);
                 assert_eq!(status["completed"], 0);

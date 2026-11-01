@@ -77,27 +77,36 @@ native capacity rejection, not an observation. The same request defers without a
 call and independent tasks continue. The byte limit remains enforced; no oversized
 reply is trimmed or adopted. Malformed transport or corrupt state still refuses.
 
-Newly received, unambiguous native completions with blank authored text record a
-local rejection in `observation-rejections.json` (`observation-rejections-v1`).
-This is neither a model processing action nor an observation. Rust validates the
-fresh full request, native identity, evidence and inherited-question fidelity before
-recording its exact request/contract and captured-response byte digest. The typed
-field/index describes the assembled native observation, including retained question
-positions; the receipt contains no authored text. The node stays incomplete, its
-unchanged request spends no further calls, and independently admissible work can
-continue. All-held work remains Deferred and nonzero. Stored invalid observations,
-ambiguous or unknown fields, changed inputs, corrupt receipts and host/I/O failures
-remain strict failures; they do not become authored-text rejections.
+Newly received, unambiguous native completions with blank authored text or invalid
+assigned evidence references record a local rejection in
+`observation-rejections.json`. Rust first validates stored observations, the fresh
+full request, native identity and inherited-question fidelity. An invalid historical
+observation or changed inherited question remains a strict failure. Evidence is
+checked against the canonical node's exact assigned ranges, preserving resource
+identities and gaps; the displayed citation roster is not that coverage authority.
+No reference is expanded, renumbered or repaired.
+
+The rejection binds the exact request/contract and captured-response byte digest.
+Its typed field/index describes the assembled native observation, including retained
+question positions; evidence violations also identify the reference index, numeric
+range and violation kind. The receipt contains no authored prose. It is neither a
+model processing action nor an observation. The node stays incomplete, its unchanged
+request spends no further calls, and independently admissible work can continue.
+All-held work remains Deferred and nonzero. Ambiguous or unknown fields, changed
+inputs, corrupt receipts and host/I/O failures remain strict failures.
 
 Rejection entries retain distinct request revisions without replacement, within the
 Work input-byte metadata bound. A full or conflicting history refuses rather than
-discarding an entry. Existing plan, observation, action and refinement bytes remain
-unchanged. Pending Work keeps this history; verified expired published Work can
-retire it with its complete dependency closure. Use a compatible reader to honor
-these holds: older binaries do not suppress requests from this new sidecar, and
-their retention treats the unrecognized file as unknown. There is no global
-downgrade lock. Old unmarked failures stay unmarked; never import an old response
-or manufacture a receipt for it.
+discarding an entry. Text-only `observation-rejections-v1` records remain readable
+without conversion. Adding an evidence violation uses `observation-rejections-v2`;
+an existing v1 file is retained byte-for-byte in its digest-checked legacy snapshot.
+The observation schema and host instructions stay unchanged, preserving existing
+exact-contract holds. Existing plan, observation, action and refinement bytes remain
+unchanged. Pending Work protects this history; verified expired published Work can
+retire it with its complete dependency closure. A v1 reader refuses v2 when it reads
+the file. Still older binaries that do not know this sidecar cannot honor its holds;
+there is no global downgrade lock. Old unmarked failures stay unmarked; never import
+an old response or manufacture a receipt for it.
 
 ## Native screening responses
 

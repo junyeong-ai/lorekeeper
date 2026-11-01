@@ -1986,8 +1986,7 @@ pub(super) fn inspection_action(
 
 #[cfg(unix)]
 pub(super) enum InspectionResponse {
-    Complete(WorkOutput),
-    InvalidText(state::ObservationTextRejection),
+    Complete(Box<state::ObservationCandidate>),
     NeedsAction(String),
     Capacity(state::OutputCapacity),
 }
@@ -2006,6 +2005,7 @@ pub(super) enum InspectionRecordOutcome {
     Deferred(String),
     Rejected(String),
     InvalidText(String),
+    InvalidEvidence(String),
 }
 
 #[cfg(unix)]
@@ -2191,14 +2191,45 @@ pub(super) fn record_inspections(
                     .as_ref()
                     .map_err(|error| miette::miette!("fresh work validation failed: {error:#}"))?;
                 match reply.response {
-                    InspectionResponse::Complete(output) => {
-                        if output.work_id != reply.work_id || output.node_id != reply.node_id {
+                    InspectionResponse::Complete(candidate) => {
+                        if candidate.output.work_id != reply.work_id
+                            || candidate.output.node_id != reply.node_id
+                        {
                             return Err(miette::miette!(
                                 "observation does not answer the selected work node"
                             ));
                         }
-                        work.record(session, output, &prepared.resources)
-                            .map(InspectionRecordOutcome::Recorded)
+                        let contract =
+                            super::execution::observation::contract_revision(&reply.request)?;
+                        match work.plan_native_observation(
+                            root,
+                            &prepared.resources,
+                            &reply.request,
+                            &contract,
+                            *candidate,
+                        )? {
+                            state::ObservationRecordPlan::Accepted(mutation) => {
+                                session.apply(mutation).into_diagnostic()?;
+                                work.progress(root, &prepared.resources)
+                                    .map(InspectionRecordOutcome::Recorded)
+                            }
+                            state::ObservationRecordPlan::Rejected {
+                                mut mutation,
+                                violation,
+                            } => {
+                                let reason = format!("{violation}; no observation was recorded");
+                                prepared.guard_pages(&mut mutation);
+                                session.apply(mutation).into_diagnostic()?;
+                                Ok(match violation {
+                                    state::ObservationViolation::Text(_) => {
+                                        InspectionRecordOutcome::InvalidText(reason)
+                                    }
+                                    state::ObservationViolation::Evidence(_) => {
+                                        InspectionRecordOutcome::InvalidEvidence(reason)
+                                    }
+                                })
+                            }
+                        }
                     }
                     response => {
                         let revision =
@@ -2225,27 +2256,6 @@ pub(super) fn record_inspections(
                                         capacity,
                                     )?,
                                     InspectionRecordOutcome::Rejected(reason),
-                                )
-                            }
-                            InspectionResponse::InvalidText(rejected) => {
-                                if rejected.output.work_id != reply.work_id
-                                    || rejected.output.node_id != reply.node_id
-                                {
-                                    return Err(miette::miette!(
-                                        "observation does not answer the selected work node"
-                                    ));
-                                }
-                                let reason =
-                                    format!("{}; no observation was recorded", rejected.violation);
-                                (
-                                    work.plan_observation_rejection(
-                                        root,
-                                        &prepared.resources,
-                                        &reply.request,
-                                        &revision,
-                                        rejected,
-                                    )?,
-                                    InspectionRecordOutcome::InvalidText(reason),
                                 )
                             }
                             InspectionResponse::Complete(_) => unreachable!(),

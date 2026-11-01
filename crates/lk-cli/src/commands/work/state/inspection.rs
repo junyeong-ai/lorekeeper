@@ -2,7 +2,9 @@ use super::*;
 
 mod rejection;
 pub(super) use rejection::path as rejection_path;
-pub(crate) use rejection::{ObservationRejections, ObservationTextRejection};
+pub(crate) use rejection::{
+    ObservationCandidate, ObservationRecordPlan, ObservationRejections, ObservationViolation,
+};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

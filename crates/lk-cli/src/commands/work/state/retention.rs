@@ -1181,78 +1181,90 @@ mod tests {
 
     #[test]
     fn observation_rejection_history_protects_pending_work_and_retires_with_valid_published_work() {
-        let root = tempfile::tempdir().unwrap();
-        let session = MutationSession::acquire(root.path()).unwrap();
-        let source = resources();
-        let held = Work::create(&session, &source, "held", context("held"), limits()).unwrap();
-        let (_, requests) = held.prepare_inspections(root.path(), &source, 1).unwrap();
-        let request = &requests[0];
-        let rejected = super::super::ObservationTextRejection {
-            output: super::super::WorkOutput {
-                work_id: held.plan.id.clone(),
-                node_id: request["node_id"].as_str().unwrap().into(),
-                input_revision: request["input_revision"].as_str().unwrap().into(),
-                summary: String::new(),
-                findings: Vec::new(),
-                source_questions: Vec::new(),
-                unresolved: Vec::new(),
-                resolutions: Vec::new(),
-            },
-            violation: super::super::ObservationTextError::Summary,
-            response_revision: lk_core::rss_original::digest(b"private rejected response"),
-            response_json_bytes: 300,
-        };
-        session
-            .apply(
-                held.plan_observation_rejection(
-                    root.path(),
-                    &source,
-                    request,
-                    &"a".repeat(64),
-                    rejected,
-                )
-                .unwrap(),
+        for evidence in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let session = MutationSession::acquire(root.path()).unwrap();
+            let source = resources();
+            let held = Work::create(&session, &source, "held", context("held"), limits()).unwrap();
+            let (_, requests) = held.prepare_inspections(root.path(), &source, 1).unwrap();
+            let request = &requests[0];
+            let mut rejected = super::super::ObservationCandidate {
+                output: super::super::WorkOutput {
+                    work_id: held.plan.id.clone(),
+                    node_id: request["node_id"].as_str().unwrap().into(),
+                    input_revision: request["input_revision"].as_str().unwrap().into(),
+                    summary: String::new(),
+                    findings: Vec::new(),
+                    source_questions: Vec::new(),
+                    unresolved: Vec::new(),
+                    resolutions: Vec::new(),
+                },
+                text_violation: Some(super::super::ObservationTextError::Summary),
+                response_revision: lk_core::rss_original::digest(b"private rejected response"),
+                response_json_bytes: 300,
+            };
+            if evidence {
+                rejected.output.summary = "Read all assigned evidence.".into();
+                rejected.text_violation = None;
+                rejected.output.findings.push(super::super::WorkFinding {
+                    statement: "Unsupported reference.".into(),
+                    scope: None,
+                    effective_time: None,
+                    attribution: None,
+                    evidence: vec![lk_core::semantic::SemanticRange {
+                        resource: 99,
+                        start: 0,
+                        end: 1,
+                    }],
+                });
+            }
+            let super::super::ObservationRecordPlan::Rejected { mutation, .. } = held
+                .plan_native_observation(root.path(), &source, request, &"a".repeat(64), rejected)
+                .unwrap()
+            else {
+                panic!("expected an authored text rejection")
+            };
+            session.apply(mutation).unwrap();
+            let path = root
+                .path()
+                .join(work_path(&held.plan.id, "observation-rejections.json").unwrap());
+            let original = std::fs::read(&path).unwrap();
+            let independent = Work::create(
+                &session,
+                &source,
+                "independent",
+                context("independent"),
+                limits(),
             )
             .unwrap();
-        let path = root
-            .path()
-            .join(work_path(&held.plan.id, "observation-rejections.json").unwrap());
-        let original = std::fs::read(&path).unwrap();
-        let independent = Work::create(
-            &session,
-            &source,
-            "independent",
-            context("independent"),
-            limits(),
-        )
-        .unwrap();
-        publish(&independent, &session, &source);
-        let cutoff = jiff::Timestamp::now().as_second() + 1;
-        assert_eq!(
-            prune_published(root.path(), None, cutoff).unwrap().removed,
-            1
-        );
-        std::fs::write(&path, "{}").unwrap();
-        for selected in [None, Some(&session)] {
-            assert!(prune_published(root.path(), selected, cutoff).is_err());
-            assert!(Work::load(root.path(), &independent.plan.id).is_ok());
-            assert_eq!(std::fs::read(&path).unwrap(), b"{}");
+            publish(&independent, &session, &source);
+            let cutoff = jiff::Timestamp::now().as_second() + 1;
+            assert_eq!(
+                prune_published(root.path(), None, cutoff).unwrap().removed,
+                1
+            );
+            std::fs::write(&path, "{}").unwrap();
+            for selected in [None, Some(&session)] {
+                assert!(prune_published(root.path(), selected, cutoff).is_err());
+                assert!(Work::load(root.path(), &independent.plan.id).is_ok());
+                assert_eq!(std::fs::read(&path).unwrap(), b"{}");
+            }
+            std::fs::write(&path, &original).unwrap();
+            let removed = prune_published(root.path(), Some(&session), cutoff).unwrap();
+            assert_eq!(removed.removed, 1);
+            assert!(Work::load(root.path(), &held.plan.id).is_ok());
+            assert_eq!(std::fs::read(&path).unwrap(), original);
+            publish(&held, &session, &source);
+            assert_eq!(std::fs::read(&path).unwrap(), original);
+            let removed = prune_published(
+                root.path(),
+                Some(&session),
+                jiff::Timestamp::now().as_second() + 1,
+            )
+            .unwrap();
+            assert_eq!(removed.removed, 1);
+            assert!(!path.exists());
         }
-        std::fs::write(&path, &original).unwrap();
-        let removed = prune_published(root.path(), Some(&session), cutoff).unwrap();
-        assert_eq!(removed.removed, 1);
-        assert!(Work::load(root.path(), &held.plan.id).is_ok());
-        assert_eq!(std::fs::read(&path).unwrap(), original);
-        publish(&held, &session, &source);
-        assert_eq!(std::fs::read(&path).unwrap(), original);
-        let removed = prune_published(
-            root.path(),
-            Some(&session),
-            jiff::Timestamp::now().as_second() + 1,
-        )
-        .unwrap();
-        assert_eq!(removed.removed, 1);
-        assert!(!path.exists());
     }
 
     #[test]

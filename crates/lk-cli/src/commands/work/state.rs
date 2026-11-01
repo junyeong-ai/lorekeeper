@@ -9,15 +9,18 @@ use lk_vault::{MutationPlan, MutationSession};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+mod evidence;
 mod finalization;
 mod frontier;
 mod inspection;
 mod output;
 mod refinement;
 mod retention;
+pub(crate) use evidence::ObservationEvidenceError;
+use evidence::validate_output_evidence;
 use frontier::{FrontierProof, FrontierSeal};
-pub(crate) use inspection::ObservationTextRejection;
 pub(crate) use inspection::OutputCapacity;
+pub(crate) use inspection::{ObservationCandidate, ObservationRecordPlan, ObservationViolation};
 pub(crate) use output::ObservationTextError;
 #[cfg(unix)]
 pub(crate) use output::result_bytes as output_result_bytes;
@@ -577,45 +580,6 @@ fn context_overhead(context: &Value) -> miette::Result<usize> {
         - 4)
 }
 
-fn validate_references(
-    references: &[SemanticRange],
-    coverage: &[SemanticRange],
-) -> miette::Result<()> {
-    if references.is_empty() {
-        return Err(fail(
-            "a finding, concern or resolution requires exact evidence references",
-        ));
-    }
-    let mut ordered = coverage.to_vec();
-    ordered.sort_by_key(|range| (range.resource, range.start, range.end));
-    let mut covered: Vec<SemanticRange> = Vec::new();
-    for range in ordered {
-        if let Some(last) = covered.last_mut()
-            && last.resource == range.resource
-            && last.end >= range.start
-        {
-            last.end = last.end.max(range.end);
-        } else {
-            covered.push(range);
-        }
-    }
-    for reference in references {
-        if reference.start > reference.end
-            || !covered.iter().any(|range| {
-                range.resource == reference.resource
-                    && range.start <= reference.start
-                    && range.end >= reference.end
-                    && (reference.start < reference.end || range.start == range.end)
-            })
-        {
-            return Err(fail(
-                "observation evidence is outside the node's assigned ranges",
-            ));
-        }
-    }
-    Ok(())
-}
-
 pub(crate) fn inherited_questions<'a>(
     children: &[&'a WorkOutput],
 ) -> miette::Result<BTreeMap<&'a str, (QuestionKind, &'a WorkQuestion)>> {
@@ -648,13 +612,14 @@ fn validate_output_structure(
     node: &Node,
     children: &[&WorkOutput],
 ) -> miette::Result<()> {
-    for finding in &output.findings {
-        validate_references(&finding.evidence, &node.ranges)?;
-    }
+    validate_output_questions(output, children)?;
+    validate_output_evidence(output, node).map_err(fail)
+}
+
+fn validate_output_questions(output: &WorkOutput, children: &[&WorkOutput]) -> miette::Result<()> {
     let mut open = BTreeSet::new();
     for (_, question) in output.questions() {
         nonblank(&question.id)?;
-        validate_references(&question.evidence, &node.ranges)?;
         if !open.insert(question.id.as_str()) {
             return Err(fail("duplicate open question id"));
         }
@@ -662,7 +627,6 @@ fn validate_output_structure(
     let mut resolved = BTreeSet::new();
     for resolution in &output.resolutions {
         nonblank(&resolution.id)?;
-        validate_references(&resolution.evidence, &node.ranges)?;
         if !resolved.insert(resolution.id.as_str()) || open.contains(resolution.id.as_str()) {
             return Err(fail(
                 "question ids must have one open or resolved disposition",

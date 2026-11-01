@@ -1459,23 +1459,26 @@ mod native {
                 self.failure("bounded work receipt", error);
                 return None;
             }
-            match decoded {
-                Ok(execution::observation::ObservationResponse::Complete(output)) => {
-                    Some(crate::commands::work::InspectionResponse::Complete(output))
-                }
-                Ok(execution::observation::ObservationResponse::InvalidText {
-                    output,
-                    violation,
-                }) => Some(crate::commands::work::InspectionResponse::InvalidText(
-                    crate::commands::work::state::ObservationTextRejection {
+            let candidate = |output, text_violation| {
+                Some(crate::commands::work::InspectionResponse::Complete(
+                    Box::new(crate::commands::work::state::ObservationCandidate {
                         output,
-                        violation,
+                        text_violation,
                         response_revision: lk_core::rss_original::digest(&reply.bytes),
                         response_json_bytes: metrics
                             .result_json_bytes
                             .expect("decoded observation size"),
-                    },
-                )),
+                    }),
+                ))
+            };
+            match decoded {
+                Ok(execution::observation::ObservationResponse::Complete(output)) => {
+                    candidate(output, None)
+                }
+                Ok(execution::observation::ObservationResponse::InvalidText {
+                    output,
+                    violation,
+                }) => candidate(output, Some(violation)),
                 Ok(execution::observation::ObservationResponse::NeedsAction(reason)) => Some(
                     crate::commands::work::InspectionResponse::NeedsAction(reason),
                 ),
@@ -1567,6 +1570,10 @@ mod native {
                         InspectionRecordOutcome::InvalidText(reason) => {
                             metrics.outcome = WorkOutcome::Rejected;
                             ("bounded observation text", reason)
+                        }
+                        InspectionRecordOutcome::InvalidEvidence(reason) => {
+                            metrics.outcome = WorkOutcome::Rejected;
+                            ("bounded observation evidence", reason)
                         }
                         InspectionRecordOutcome::Recorded(_) => unreachable!(),
                     };
