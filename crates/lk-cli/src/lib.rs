@@ -18,7 +18,7 @@ use clap::Parser;
     about = "Knowledge ingestion pipeline for Obsidian"
 )]
 pub struct Cli {
-    /// Path to config file (default: ./config.yaml or ~/.config/lorekeeper/config.yaml)
+    /// Path to config file (default: ./config.yaml or ${XDG_CONFIG_HOME:-$HOME/.config}/lorekeeper/config.yaml)
     #[arg(long, global = true, env = "LORE_CONFIG")]
     config: Option<PathBuf>,
 

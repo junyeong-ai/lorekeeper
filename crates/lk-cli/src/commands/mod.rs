@@ -73,8 +73,12 @@ impl ConfigurationPin {
 
 pub fn find_config(opts: &GlobalOptions) -> miette::Result<PathBuf> {
     find_optional_config(opts)?.ok_or_else(|| {
+        let create = match xdg_config_path() {
+            Some(user) => format!("./config.yaml or {}", user.display()),
+            None => "./config.yaml".to_string(),
+        };
         miette::miette!(
-            "No config found. Create ./config.yaml or ~/.config/lorekeeper/config.yaml \
+            "No config found. Create {create} \
              (copy config.starter.yaml; config.example.yaml lists optional sources), \
              or pass --config / set LORE_CONFIG."
         )

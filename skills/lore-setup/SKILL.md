@@ -35,7 +35,7 @@ reconfigure the rest of an existing vault.
    enable selected sources after filling their real scope. Use `references/config.md`
    for surrounding modules; omit personal tracking unless requested. Ask only for
    missing choices that change that scope. Location:
-   `./config.yaml` (repo) or `~/.config/lorekeeper/config.yaml`
+   `./config.yaml` (repo) or `${XDG_CONFIG_HOME:-$HOME/.config}/lorekeeper/config.yaml`
    (binary install). If a file already exists, merge the source block
    only — never overwrite.
 4. **Validate** — run `lore validate` for local config/params checks. For a config-only

@@ -21,7 +21,7 @@ for current flags; read only the relevant reference:
 
 For morning brief/task-board requests, use `/lore-day`; for wiki evidence lookup,
 use `/lore-wiki`. Configuration discovery is `--config`/`LORE_CONFIG`, then
-`./config.yaml`, then `~/.config/lorekeeper/config.yaml`. Relative `vault.root`
+`./config.yaml`, then `${XDG_CONFIG_HOME:-$HOME/.config}/lorekeeper/config.yaml`. Relative `vault.root`
 resolves against the config file's directory. Templates are embedded unless
 `--template-dir` selects an override.
 

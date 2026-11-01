@@ -108,5 +108,5 @@ one source to infer that distinction.
 - `*Result` is a domain outcome. Add `*Report` only when presentation adds structure;
   do not wrap an already display-ready result. Wire enum names use kebab-case.
 
-Config discovery is `./config.yaml` then `~/.config/lorekeeper/config.yaml`;
+Config discovery is `./config.yaml` then `${XDG_CONFIG_HOME:-$HOME/.config}/lorekeeper/config.yaml`;
 relative `vault.root` is relative to that config file, not the working directory.

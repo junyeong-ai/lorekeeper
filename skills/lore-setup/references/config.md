@@ -178,7 +178,7 @@ Report completed, failed and untested stages separately. `health` is collection
 freshness; `self status` is installation coherence. Neither proves semantic quality.
 
 ## Location and validation
-- `./config.yaml` (repo) or `~/.config/lorekeeper/config.yaml` (binary install). Also
+- `./config.yaml` (repo) or `${XDG_CONFIG_HOME:-$HOME/.config}/lorekeeper/config.yaml` (binary install). Also
   selectable via `--config` / `LORE_CONFIG`. Other locations require that explicit selection;
   `vault.root` resolves against the selected config file, not the working directory.
 - After writing, run `lore validate`. Run source dry-runs when access verification
