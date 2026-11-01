@@ -88,16 +88,9 @@ pub async fn run(opts: &super::GlobalOptions) -> miette::Result<()> {
         );
     }
 
-    let queue = super::queue::queue_load(&vault_root)?;
-    line(
-        "queue",
-        match queue.work {
-            0 => "drained".to_string(),
-            n => format!("{n} task(s) waiting for an LLM session"),
-        },
-        queue.work == 0,
-        "/lore-process",
-    );
+    let queue = super::queue::check::inspect(&vault_root)?;
+    let (state, next) = queue_row(&queue);
+    line("queue", state, queue.is_settled(), next);
 
     let in_flight = super::queue::work_in_flight(&vault_root);
     let audit = super::doctor::audit(
@@ -138,7 +131,7 @@ pub async fn run(opts: &super::GlobalOptions) -> miette::Result<()> {
                 "graph",
                 match violations {
                     0 => format!("sound · {} pages, {} links", report.pages, report.links),
-                    n => format!("{n} contradiction(s)"),
+                    n => format!("{n} violation(s)"),
                 },
                 violations == 0,
                 "lore graph lint",
@@ -155,6 +148,44 @@ pub async fn run(opts: &super::GlobalOptions) -> miette::Result<()> {
     Ok(())
 }
 
+/// The verdict `lore queue check` exits on. An interrupted publication, a staged result or an
+/// unreadable task is unsettled without being work a drain picks up, so those states route to
+/// `queue check`; only waiting work routes to the drain.
+fn queue_row(queue: &super::queue::check::QueueSettlement) -> (String, &'static str) {
+    let mut parts = Vec::new();
+    if queue.current > 0 {
+        parts.push(format!(
+            "{} task(s) waiting for an LLM session",
+            queue.current
+        ));
+    }
+    if queue.unreadable > 0 {
+        parts.push(format!("{} unreadable", queue.unreadable));
+    }
+    if queue.unparseable_lines > 0 {
+        parts.push(format!("{} unparseable line(s)", queue.unparseable_lines));
+    }
+    if !queue.staged_results.is_empty() {
+        parts.push(format!("{} staged result(s)", queue.staged_results.len()));
+    }
+    if queue.pending_mutation {
+        parts.push("interrupted publication".to_string());
+    }
+    if parts.is_empty() {
+        return ("drained".to_string(), "/lore-process");
+    }
+    let only_waiting = queue.unreadable == 0
+        && queue.unparseable_lines == 0
+        && queue.staged_results.is_empty()
+        && !queue.pending_mutation;
+    let next = if only_waiting {
+        "/lore-process"
+    } else {
+        "lore queue check"
+    };
+    (parts.join(" · "), next)
+}
+
 /// One subsystem's row. The gap before the command is added rather than padded into, so a
 /// state long enough to fill the column — an error naming a path, say — never runs into the
 /// command name and produces a line that reads as one word.
@@ -165,4 +196,63 @@ fn line(label: &str, state: String, ok: bool, next: &str) {
         super::pad(label, 9),
         super::pad(&state, 42)
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::queue_row;
+    use crate::commands::queue::check::QueueSettlement;
+
+    fn settled() -> QueueSettlement {
+        QueueSettlement {
+            current: 0,
+            unreadable: 0,
+            unparseable_lines: 0,
+            staged_results: Vec::new(),
+            pending_mutation: false,
+        }
+    }
+
+    #[test]
+    fn a_settled_queue_is_drained() {
+        let queue = settled();
+        assert!(queue.is_settled());
+        assert_eq!(queue_row(&queue), ("drained".to_string(), "/lore-process"));
+    }
+
+    #[test]
+    fn waiting_work_alone_names_the_drain() {
+        let queue = QueueSettlement {
+            current: 3,
+            ..settled()
+        };
+        assert!(!queue.is_settled());
+        assert_eq!(
+            queue_row(&queue),
+            (
+                "3 task(s) waiting for an LLM session".to_string(),
+                "/lore-process"
+            )
+        );
+    }
+
+    #[test]
+    fn every_unsettled_state_is_named_and_routes_to_queue_check() {
+        let queue = QueueSettlement {
+            current: 1,
+            unreadable: 2,
+            unparseable_lines: 3,
+            staged_results: vec!["result.json".to_string()],
+            pending_mutation: true,
+        };
+        assert_eq!(
+            queue_row(&queue),
+            (
+                "1 task(s) waiting for an LLM session · 2 unreadable · 3 unparseable line(s) \
+                 · 1 staged result(s) · interrupted publication"
+                    .to_string(),
+                "lore queue check"
+            )
+        );
+    }
 }

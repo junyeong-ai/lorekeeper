@@ -572,6 +572,26 @@ fn normalise(body: &str, dir: &Path) -> String {
     out
 }
 
+/// An interrupted publication leaves no task for a drain and is still not settled.
+#[test]
+fn status_reports_an_interrupted_publication_rather_than_a_drained_queue() {
+    let staged = stage();
+    let mutation = staged.path().join("corpus/vault/.lorekeeper/mutation");
+    std::fs::create_dir_all(&mutation).expect("create mutation dir");
+    std::fs::write(mutation.join("pending.json"), "{}").expect("write pending journal");
+    let out = observe(staged.path(), &["status"]);
+    let row = out
+        .lines()
+        .find(|line| {
+            line.trim_start_matches([' ', '!', '·'])
+                .starts_with("queue")
+        })
+        .unwrap_or_else(|| panic!("status prints a queue row\n{out}"));
+    assert!(row.starts_with("  ! queue"), "{row}");
+    assert!(row.contains("interrupted publication"), "{row}");
+    assert!(row.ends_with("lore queue check"), "{row}");
+}
+
 /// Every file the fixture is made of must be in the REPOSITORY.
 ///
 /// The sweep compares against snapshots recorded from whatever is on the author's disk, so a
