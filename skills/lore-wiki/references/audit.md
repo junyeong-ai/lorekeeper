@@ -17,7 +17,10 @@ resolve section headings before inspecting pages.
    `respelled_links`, `invalid_categories`, `duplicate_concepts`,
    `address_collisions` — distinct addresses that would collide under slug normalization —
    and `unnormalized` — a filename that is not its own slug) and `observations`
-   (`orphans`, `hubs`, `unresolved_conflicts`). Surface every non-empty list from both.
+   (`orphans`, `hubs`, `unresolved_conflicts`, `uncited_concepts`, `non_concept_pages`).
+   Surface every non-empty list from both. An uncited concept has no evidence page; link a
+   supporting source or curate it. A non-concept page in the concepts collection is invisible
+   to name resolution, so a new extraction can mint a duplicate beside it.
    Violations identify structural contract failures, not false knowledge. Observations
    may be valid in a healthy vault. Empty `violations` says nothing about semantic
    completeness. An empty related-concepts section can be appropriate when no useful

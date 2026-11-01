@@ -50,22 +50,41 @@ pub struct ConceptPage {
     pub names: Vec<String>,
     /// Page body (frontmatter stripped), for conflict-callout scanning.
     pub body: String,
+    /// Citing origin pages as backlink reconciliation last recorded them; `None` where the
+    /// page records no count.
+    pub source_count: Option<u64>,
+}
+
+/// A page in the concepts collection that declares another page format, so name resolution,
+/// the concept lints and audits pass over it.
+#[derive(Debug, Clone, Serialize)]
+pub struct NonConceptPage {
+    pub path: PathBuf,
+    /// The declared `type`, as found on disk.
+    pub format: serde_json::Value,
+}
+
+/// The concepts collection, read once for every concept lint.
+pub struct ConceptCollection {
+    pub concepts: Vec<ConceptPage>,
+    pub non_concept: Vec<NonConceptPage>,
 }
 
 /// Read Markdown owners beneath `{wiki}/concepts/` into [`ConceptPage`]s, sorted by slug (so every
-/// lint's output is deterministic without re-sorting). The single disk pass behind
-/// the concept lints uses the same validated inventory as name routing. A page with
-/// malformed frontmatter retains its address, with no category, names or body.
-/// A missing concepts dir is not an error.
-pub fn scan_concept_pages(
+/// lint's output is deterministic without re-sorting), and the pages there that declare another
+/// format. The single disk pass behind the concept lints uses the same validated inventory as
+/// name routing. A page with malformed frontmatter retains its address, with no category, names
+/// or body. A missing concepts dir is not an error.
+pub fn scan_concept_collection(
     vault_root: &Path,
     wiki_dir: &str,
-) -> Result<Vec<ConceptPage>, GraphError> {
+) -> Result<ConceptCollection, GraphError> {
     let concepts_dir = Path::new(wiki_dir).join(lk_core::vault_path::CONCEPTS_SUBDIR);
     let inventory = lk_vault::load_markdown_inventory(vault_root, &concepts_dir)
         .map_err(|error| GraphError::Io(format!("walk concepts: {error}")))?;
 
     let mut pages = Vec::new();
+    let mut non_concept = Vec::new();
     for rel_path in inventory.owners {
         let path = lk_vault::page_path(vault_root, &rel_path)
             .map_err(|error| GraphError::Io(format!("read concept: {error}")))?;
@@ -86,9 +105,15 @@ pub fn scan_concept_pages(
             .ok_or_else(|| GraphError::Io("concept address is not UTF-8".into()))?
             .replace(std::path::MAIN_SEPARATOR, "/");
         let mut names = Vec::new();
-        let (category, body) = match frontmatter::parse_page(&raw) {
+        let (category, body, source_count) = match frontmatter::parse_page(&raw) {
             Ok(page) => {
-                if !page.frontmatter.is_concept_or_legacy() {
+                if let Some(format) = page.frontmatter.get("type")
+                    && !page.frontmatter.is_declared_concept()
+                {
+                    non_concept.push(NonConceptPage {
+                        path: rel_path,
+                        format: format.clone(),
+                    });
                     continue;
                 }
                 let category = page.frontmatter.get("category").cloned();
@@ -108,9 +133,13 @@ pub fn scan_concept_pages(
                         .filter_map(|v| v.as_str())
                         .map(str::to_owned),
                 );
-                (category, page.body)
+                let source_count = page
+                    .frontmatter
+                    .get("source_count")
+                    .and_then(serde_json::Value::as_u64);
+                (category, page.body, source_count)
             }
-            Err(_) => (None, String::new()),
+            Err(_) => (None, String::new(), None),
         };
         pages.push(ConceptPage {
             slug,
@@ -118,10 +147,24 @@ pub fn scan_concept_pages(
             category,
             names,
             body,
+            source_count,
         });
     }
     pages.sort_by(|a, b| a.slug.cmp(&b.slug));
-    Ok(pages)
+    Ok(ConceptCollection {
+        concepts: pages,
+        non_concept,
+    })
+}
+
+/// Concept pages whose recorded `source_count` is zero: no document, daily, synthesis or
+/// exploration page cites them.
+pub fn find_uncited_concepts(pages: &[ConceptPage]) -> Vec<PathBuf> {
+    pages
+        .iter()
+        .filter(|page| page.source_count == Some(0))
+        .map(|page| page.path.clone())
+        .collect()
 }
 
 /// Concept pages whose `category` frontmatter is set to a value not in `configured`.
@@ -473,7 +516,7 @@ mod tests {
 
     /// Read the concept pages the way the CLI does — once, before the lints run.
     fn scan(root: &Path) -> Vec<ConceptPage> {
-        scan_concept_pages(root, "wiki").unwrap()
+        scan_concept_collection(root, "wiki").unwrap().concepts
     }
 
     #[test]
@@ -618,7 +661,7 @@ mod tests {
             tmp.path().join("wiki/concepts/nested/dangling.md"),
         )
         .unwrap();
-        assert!(scan_concept_pages(tmp.path(), "wiki").is_err());
+        assert!(scan_concept_collection(tmp.path(), "wiki").is_err());
     }
 
     #[test]
@@ -1140,6 +1183,7 @@ mod tests {
                 path: "wiki/concepts/topic.md".into(),
                 category: None,
                 names: vec!["Topic".into()],
+                source_count: None,
                 body: "# Topic\n\n```md\n> [!conflict] literal example\n```\n\n> [!note] annotation\n\n> [!CONFLICT]-\n> Sources disagree.\n"
                     .replace('\n', ending),
             };

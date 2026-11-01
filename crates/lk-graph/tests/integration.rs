@@ -256,6 +256,8 @@ fn lint_combined_report() {
             hubs,
             orphans,
             unresolved_conflicts: Vec::new(),
+            uncited_concepts: Vec::new(),
+            non_concept_pages: Vec::new(),
         },
     };
 

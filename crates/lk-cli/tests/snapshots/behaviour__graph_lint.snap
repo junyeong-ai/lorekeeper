@@ -17,5 +17,8 @@ Broken links (1):
 Orphans (1):
   wiki/concepts/unlinked-note
 
-1 violation(s), 1 observation(s)
+Concepts no source page cites (1):
+  wiki/concepts/unlinked-note.md
+
+1 violation(s), 2 observation(s)
 --- stderr ---

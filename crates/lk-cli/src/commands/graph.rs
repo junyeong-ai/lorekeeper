@@ -231,10 +231,11 @@ fn lint_report(
     g: &graph::WikiGraph,
     views: &scan::VaultViews,
 ) -> Result<output::LintReport, String> {
-    // Read the concept pages once; the three concept lints are pure functions over the result
+    // Read the concepts collection once; the concept lints are pure functions over the result
     // rather than each re-walking `{wiki}/concepts/`.
-    let concept_pages = concept_lint::scan_concept_pages(&rc.root, &rc.vault_dirs.wiki)
+    let collection = concept_lint::scan_concept_collection(&rc.root, &rc.vault_dirs.wiki)
         .map_err(|e| format!("{e}"))?;
+    let concept_pages = &collection.concepts;
 
     Ok(output::LintReport {
         errors: content_errors(&views.scanned, &views.existence),
@@ -244,10 +245,10 @@ fn lint_report(
         violations: output::Violations {
             broken: graph::broken_links(&views.link_sources, &views.existence, &rc.vault_dirs),
             invalid_categories: concept_lint::find_invalid_categories(
-                &concept_pages,
+                concept_pages,
                 &rc.concept_categories,
             ),
-            duplicate_concepts: concept_lint::find_duplicate_concepts(&concept_pages),
+            duplicate_concepts: concept_lint::find_duplicate_concepts(concept_pages),
             address_collisions: scan::address_collisions(&views.link_sources),
             unnormalized: rename_suggestions(&normalize::scan(&views.pages)),
             respelled_links: graph::respelled_links(
@@ -259,7 +260,9 @@ fn lint_report(
         observations: output::Observations {
             hubs: g.hubs(10, rc.graph.metrics.min_hub_degree),
             orphans: g.orphans(&rc.graph.metrics.orphan_exclude),
-            unresolved_conflicts: concept_lint::find_unresolved_conflicts(&concept_pages),
+            unresolved_conflicts: concept_lint::find_unresolved_conflicts(concept_pages),
+            uncited_concepts: concept_lint::find_uncited_concepts(concept_pages),
+            non_concept_pages: collection.non_concept,
         },
     })
 }

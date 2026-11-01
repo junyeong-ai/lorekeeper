@@ -2,7 +2,9 @@ use serde::Serialize;
 
 use crate::backlinks::{BacklinksSyncResult, ConceptUpdate};
 use crate::cluster::{ClusterResult, LinkSuggestion};
-use crate::concept_lint::{DuplicateConcept, InvalidCategoryConcept, UnresolvedConflict};
+use crate::concept_lint::{
+    DuplicateConcept, InvalidCategoryConcept, NonConceptPage, UnresolvedConflict,
+};
 use crate::export::GraphExport;
 use crate::graph::{BrokenLink, HubPageReference};
 use crate::merge::MergeResult;
@@ -73,6 +75,8 @@ pub struct Observations {
     pub hubs: Vec<HubPageReference>,
     pub orphans: Vec<String>,
     pub unresolved_conflicts: Vec<UnresolvedConflict>,
+    pub uncited_concepts: Vec<std::path::PathBuf>,
+    pub non_concept_pages: Vec<NonConceptPage>,
 }
 
 #[derive(Debug, Serialize)]
@@ -117,8 +121,14 @@ impl Observations {
             hubs,
             orphans,
             unresolved_conflicts,
+            uncited_concepts,
+            non_concept_pages,
         } = self;
-        hubs.len() + orphans.len() + unresolved_conflicts.len()
+        hubs.len()
+            + orphans.len()
+            + unresolved_conflicts.len()
+            + uncited_concepts.len()
+            + non_concept_pages.len()
     }
 }
 
@@ -341,6 +351,8 @@ fn print_observations(o: &Observations) {
         hubs,
         orphans,
         unresolved_conflicts,
+        uncited_concepts,
+        non_concept_pages,
     } = o;
     if o.count() == 0 {
         return;
@@ -372,6 +384,26 @@ fn print_observations(o: &Observations) {
             } else {
                 println!("  {}  {}  ({})", c.slug, c.note, c.path.display());
             }
+        }
+    }
+
+    if !uncited_concepts.is_empty() {
+        println!(
+            "\nConcepts no source page cites ({}):",
+            uncited_concepts.len()
+        );
+        for path in uncited_concepts {
+            println!("  {}", path.display());
+        }
+    }
+
+    if !non_concept_pages.is_empty() {
+        println!(
+            "\nPages in the concepts collection declaring another format ({}):",
+            non_concept_pages.len()
+        );
+        for page in non_concept_pages {
+            println!("  {}  (type: {})", page.path.display(), page.format);
         }
     }
 }
@@ -751,6 +783,11 @@ mod tests {
                 path: "wiki/concepts/c.md".into(),
                 slug: "c".into(),
                 note: "sources disagree".into(),
+            }],
+            uncited_concepts: vec!["wiki/concepts/d.md".into()],
+            non_concept_pages: vec![NonConceptPage {
+                path: "wiki/concepts/e.md".into(),
+                format: "daily".into(),
             }],
         };
         assert_eq!(o.count(), listed(&serde_json::to_value(&o).unwrap()));
