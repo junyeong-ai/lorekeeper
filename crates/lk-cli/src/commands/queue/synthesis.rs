@@ -189,22 +189,13 @@ pub(super) fn apply(
             {
                 return Err(miette::miette!("result requires a concept synthesis task"));
             }
-            let state = classify_task(root, task, &mut BTreeMap::new())?;
+            let classification = super::classification::capture(root, task, &mut BTreeMap::new())?;
+            let state = classification.status();
             if matches!(
                 state,
                 TaskStatus::Done | TaskStatus::Stale | TaskStatus::MissingTarget
             ) {
-                if !dry_run {
-                    let mut plan = lk_vault::MutationPlan::default();
-                    super::rejections::remove_matching(root, task, &mut plan)?;
-                    for snapshot in &snapshots {
-                        plan.remove(&snapshot.proposal.path, snapshot.raw.clone());
-                    }
-                    session
-                        .ok_or_else(|| miette::miette!("retirement requires mutation session"))?
-                        .apply(plan)
-                        .map_err(|error| miette::miette!("{error}"))?;
-                }
+                super::application::retire_group(root, task, &snapshots, classification, session)?;
                 return Ok(false);
             }
             if state != TaskStatus::Current {

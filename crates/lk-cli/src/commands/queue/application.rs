@@ -443,22 +443,358 @@ pub(super) fn retire_group(
     root: &Path,
     task: &lk_queue::QueueTask,
     snapshots: &[ProposalSnapshot],
+    classification: super::classification::CapturedClassification,
     session: Option<&lk_vault::MutationSession>,
 ) -> miette::Result<()> {
+    let plan = plan_retirement(root, task, snapshots, classification)?;
     if let Some(session) = session {
-        let mut plan = lk_vault::MutationPlan::default();
-        super::rejections::remove_matching(root, task, &mut plan)?;
-        for snapshot in snapshots {
-            plan.remove(&snapshot.proposal.path, snapshot.raw.clone());
-        }
         session.apply(plan).into_diagnostic()?;
+    } else {
+        plan.validate_addresses(root).into_diagnostic()?;
     }
     Ok(())
+}
+
+fn plan_retirement(
+    root: &Path,
+    task: &lk_queue::QueueTask,
+    snapshots: &[ProposalSnapshot],
+    classification: super::classification::CapturedClassification,
+) -> miette::Result<lk_vault::MutationPlan> {
+    let mut plan = classification.retirement_plan()?;
+    super::rejections::remove_matching(root, task, &mut plan)?;
+    for snapshot in snapshots {
+        plan.remove(&snapshot.proposal.path, snapshot.raw.clone());
+    }
+    Ok(plan)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    struct RetirementFixture {
+        _directory: tempfile::TempDir,
+        root: PathBuf,
+        task: lk_queue::QueueTask,
+        target: PathBuf,
+        current: String,
+        snapshots: Vec<ProposalSnapshot>,
+        receipt: PathBuf,
+        receipt_raw: String,
+    }
+
+    impl RetirementFixture {
+        fn new(synthesis: bool) -> Self {
+            let directory = tempfile::tempdir().unwrap();
+            let root = directory.path().canonicalize().unwrap();
+            let queue = lk_queue::QueueLlmClient::new(root.join(".lorekeeper/queue"));
+            let task = if synthesis {
+                let raw = "---\ntype: document\n---\nOriginal evidence.\n";
+                std::fs::write(root.join("evidence.md"), raw).unwrap();
+                queue.build_task(
+                    "retirement",
+                    lk_queue::TaskKind::SynthesizeConcept,
+                    lk_queue::ConceptSynthesisRequest {
+                        citations: vec![lk_core::concept::Citation::new(
+                            Path::new("evidence.md"),
+                            &lk_vault::parse_page(raw).unwrap(),
+                        )],
+                        locale: lk_core::i18n::Locale::En,
+                        related_anchor: Some("## Related Concepts".into()),
+                        target: lk_queue::TaskTarget {
+                            vault_path: "target.md".into(),
+                            kind: lk_queue::TargetKind::ConceptSynthesis,
+                            anchor: "## Synthesis".into(),
+                        },
+                    },
+                )
+            } else {
+                queue.build_task(
+                    "retirement",
+                    lk_queue::TaskKind::Summarize,
+                    lk_queue::SummarizeRequest {
+                        text: "Retained source.".into(),
+                        max_sentences: 3,
+                        focus: None,
+                        locale: lk_core::i18n::Locale::En,
+                        source_type: None,
+                        target: lk_queue::TaskTarget {
+                            vault_path: "target.md".into(),
+                            kind: lk_queue::TargetKind::DocumentSummary,
+                            anchor: "## Summary".into(),
+                        },
+                    },
+                )
+            };
+            let current = format!(
+                "---\ntype: {}\nllm_inputs:\n  {}: {}\n---\n{}\n\n## Related Concepts\n",
+                task.target.kind.page_format(),
+                task.target.kind.llm_inputs_key(),
+                task.cache_hash,
+                task.target.anchor
+            );
+            let target = PathBuf::from(&task.target.vault_path);
+            std::fs::write(root.join(&target), &current).unwrap();
+            let relative = PathBuf::from(if synthesis {
+                ".lorekeeper/queue/results/answer.synthesis.json"
+            } else {
+                ".lorekeeper/queue/results/answer.section.json"
+            });
+            std::fs::create_dir_all(root.join(relative.parent().unwrap())).unwrap();
+            let result = if synthesis {
+                serde_json::to_string(&lk_queue::SynthesisResult {
+                    task_id: task.task_id.clone(),
+                    cache_hash: task.cache_hash.clone(),
+                    target_revision: lk_core::concept::file_revision(&current),
+                    context_revision: "a".repeat(64),
+                    synthesis: "Authored answer.\n".into(),
+                    related: Some("Related evidence.\n".into()),
+                })
+                .unwrap()
+            } else {
+                serde_json::to_string(&lk_queue::SectionResult {
+                    task_id: task.task_id.clone(),
+                    cache_hash: task.cache_hash.clone(),
+                    target_revision: lk_core::concept::file_revision(&current),
+                    context_revision: Some("a".repeat(64)),
+                    body: "Authored answer.\n".into(),
+                })
+                .unwrap()
+            };
+            std::fs::write(root.join(&relative), result).unwrap();
+            let snapshots = vec![proposal_snapshot(&root, &root.join(&relative)).unwrap()];
+            let digest =
+                blake3::hash(&serde_json::to_vec(&(&task.task_id, &task.cache_hash)).unwrap())
+                    .to_hex()
+                    .to_string();
+            let receipt = PathBuf::from(format!(".lorekeeper/queue/rejections/{digest}.json"));
+            std::fs::create_dir_all(root.join(receipt.parent().unwrap())).unwrap();
+            let receipt_raw = json!({"schema":"queue-application-rejection-v1","validation_policy":"1".repeat(64),"config_revision":"2".repeat(64),"task_revision":"3".repeat(64),"identity":TaskIdentity::capture(&root,&task).unwrap(),"proposals":[snapshots[0].proposal],"scope":{"revision":"4".repeat(64),"owners":[task.target.vault_path]},"kind":"target-changed","reason":"Retained refusal."}).to_string();
+            std::fs::write(root.join(&receipt), &receipt_raw).unwrap();
+            std::fs::create_dir_all(root.join(".lorekeeper/work/paid")).unwrap();
+            std::fs::write(
+                root.join(".lorekeeper/work/paid/node.json"),
+                "original paid bytes\n",
+            )
+            .unwrap();
+            Self {
+                _directory: directory,
+                root,
+                task,
+                target,
+                current,
+                snapshots,
+                receipt,
+                receipt_raw,
+            }
+        }
+
+        fn plan(&self) -> lk_vault::MutationPlan {
+            let classification = super::super::classification::capture(
+                &self.root,
+                &self.task,
+                &mut Default::default(),
+            )
+            .unwrap();
+            let status = classification.status();
+            assert!(matches!(
+                status,
+                super::super::TaskStatus::Done
+                    | super::super::TaskStatus::Stale
+                    | super::super::TaskStatus::MissingTarget
+            ));
+            plan_retirement(&self.root, &self.task, &self.snapshots, classification).unwrap()
+        }
+
+        fn preserve(&self) {
+            for snapshot in &self.snapshots {
+                assert_eq!(
+                    std::fs::read_to_string(self.root.join(&snapshot.proposal.path)).unwrap(),
+                    snapshot.raw
+                );
+            }
+            assert_eq!(
+                std::fs::read_to_string(self.root.join(&self.receipt)).unwrap(),
+                self.receipt_raw
+            );
+            assert_eq!(
+                std::fs::read_to_string(self.root.join(".lorekeeper/work/paid/node.json")).unwrap(),
+                "original paid bytes\n"
+            );
+        }
+
+        fn refuse_after_restore(&self, plan: lk_vault::MutationPlan, recover: bool) {
+            if recover {
+                let journal = json!({"version":1,"plan":plan}).to_string();
+                let path = self.root.join(".lorekeeper/mutation/pending.json");
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(&path, &journal).unwrap();
+                assert!(lk_vault::MutationSession::acquire(&self.root).is_err());
+                assert_eq!(std::fs::read_to_string(path).unwrap(), journal);
+            } else {
+                let session = lk_vault::MutationSession::acquire(&self.root).unwrap();
+                assert!(session.apply(plan).is_err());
+                assert!(!self.root.join(".lorekeeper/mutation/pending.json").exists());
+            }
+            self.preserve();
+        }
+    }
+
+    #[test]
+    fn result_retirement_guards_target_decisions_before_apply_and_recovery() {
+        for decision in ["done", "stale", "policy", "missing-section", "missing-file"] {
+            for recover in [false, true] {
+                let fixture = RetirementFixture::new(false);
+                let changed = match decision {
+                    "done" => fixture.current.replace("---\n##",&format!("  summary_done: {}\n---\n##",fixture.task.cache_hash)),
+                    "stale" => fixture.current.replace(&fixture.task.cache_hash,"other"),
+                    "policy" => fixture.current.replace("---\n##",&format!("  summary_policy_requested_input: {}\n  summary_policy_requested: future\n---\n##",fixture.task.cache_hash)),
+                    "missing-section" => fixture.current.replace("## Summary","## Other"),
+                    "missing-file" => String::new(),
+                    _ => unreachable!(),
+                };
+                if decision == "missing-file" {
+                    std::fs::remove_file(fixture.root.join(&fixture.target)).unwrap();
+                } else {
+                    std::fs::write(fixture.root.join(&fixture.target), changed).unwrap();
+                }
+                let plan = fixture.plan();
+                std::fs::write(fixture.root.join(&fixture.target), &fixture.current).unwrap();
+                fixture.refuse_after_restore(plan, recover);
+            }
+        }
+    }
+
+    #[test]
+    fn result_retirement_guards_stale_sources_before_apply_and_recovery() {
+        for recover in [false, true] {
+            let fixture = RetirementFixture::new(true);
+            let source = fixture.root.join("evidence.md");
+            let original = std::fs::read_to_string(&source).unwrap();
+            std::fs::write(&source, original.replace("Original", "Changed")).unwrap();
+            let plan = fixture.plan();
+            std::fs::write(source, original).unwrap();
+            fixture.refuse_after_restore(plan, recover);
+        }
+    }
+
+    #[test]
+    fn guarded_result_retirement_recovers_every_unchanged_prefix() {
+        let seed = RetirementFixture::new(false);
+        std::fs::remove_file(seed.root.join(&seed.target)).unwrap();
+        let count = serde_json::to_value(seed.plan()).unwrap()["steps"]
+            .as_array()
+            .unwrap()
+            .len();
+        for prefix in 0..=count {
+            let fixture = RetirementFixture::new(false);
+            std::fs::remove_file(fixture.root.join(&fixture.target)).unwrap();
+            let plan = fixture.plan();
+            let value = serde_json::to_value(plan).unwrap();
+            let state = fixture.root.join(".lorekeeper/mutation");
+            std::fs::create_dir_all(&state).unwrap();
+            std::fs::write(
+                state.join("pending.json"),
+                json!({"version":1,"plan":value}).to_string(),
+            )
+            .unwrap();
+            for step in &value["steps"].as_array().unwrap()[..prefix] {
+                if step["kind"] == "remove" {
+                    std::fs::remove_file(fixture.root.join(step["path"].as_str().unwrap()))
+                        .unwrap();
+                }
+            }
+            let _session = lk_vault::MutationSession::acquire(&fixture.root).unwrap();
+            assert!(!fixture.root.join(&fixture.receipt).exists());
+            assert!(
+                fixture
+                    .snapshots
+                    .iter()
+                    .all(|snapshot| !fixture.root.join(&snapshot.proposal.path).exists())
+            );
+            assert!(!state.join("pending.json").exists());
+            assert_eq!(
+                std::fs::read_to_string(fixture.root.join(".lorekeeper/work/paid/node.json"))
+                    .unwrap(),
+                "original paid bytes\n"
+            );
+        }
+    }
+
+    #[test]
+    fn result_retirement_refusal_preserves_prior_independent_publication() {
+        let fixture = RetirementFixture::new(false);
+        std::fs::write(fixture.root.join("independent.md"), "before").unwrap();
+        let session = lk_vault::MutationSession::acquire(&fixture.root).unwrap();
+        let mut publication = lk_vault::MutationPlan::default();
+        publication.edit(
+            "independent.md",
+            "before".into(),
+            "published answer and completion\n".into(),
+        );
+        session.apply(publication).unwrap();
+        std::fs::remove_file(fixture.root.join(&fixture.target)).unwrap();
+        let plan = fixture.plan();
+        std::fs::write(fixture.root.join(&fixture.target), &fixture.current).unwrap();
+        assert!(session.apply(plan).is_err());
+        assert_eq!(
+            std::fs::read_to_string(fixture.root.join("independent.md")).unwrap(),
+            "published answer and completion\n"
+        );
+        fixture.preserve();
+    }
+
+    #[test]
+    fn result_admission_and_completed_task_retirement_share_one_capture() {
+        let fixture = RetirementFixture::new(false);
+        let completed = fixture.current.replace(
+            "---\n##",
+            &format!("  summary_done: {}\n---\n##", fixture.task.cache_hash),
+        );
+        std::fs::write(fixture.root.join(&fixture.target), completed).unwrap();
+        let captured =
+            super::super::classification::capture_result(&fixture.root, &fixture.task).unwrap();
+        assert_eq!(captured.status(), super::super::TaskStatus::Current);
+        assert_eq!(captured.task_status(), super::super::TaskStatus::Done);
+        std::fs::write(fixture.root.join(&fixture.target), &fixture.current).unwrap();
+        let plan = plan_retirement(
+            &fixture.root,
+            &fixture.task,
+            &fixture.snapshots,
+            captured.into_completed_task().unwrap(),
+        )
+        .unwrap();
+        fixture.refuse_after_restore(plan, false);
+    }
+
+    #[test]
+    fn result_retirement_refuses_unknown_receipts_before_deletion() {
+        for raw in ["{broken", "{\"schema\":\"future\"}"] {
+            let mut fixture = RetirementFixture::new(false);
+            std::fs::remove_file(fixture.root.join(&fixture.target)).unwrap();
+            fixture.receipt_raw = raw.into();
+            std::fs::write(fixture.root.join(&fixture.receipt), raw).unwrap();
+            let captured = super::super::classification::capture(
+                &fixture.root,
+                &fixture.task,
+                &mut Default::default(),
+            )
+            .unwrap();
+            assert!(
+                plan_retirement(&fixture.root, &fixture.task, &fixture.snapshots, captured)
+                    .is_err()
+            );
+            fixture.preserve();
+            assert!(
+                !fixture
+                    .root
+                    .join(".lorekeeper/mutation/pending.json")
+                    .exists()
+            );
+        }
+    }
 
     fn identity() -> TaskIdentity {
         TaskIdentity {

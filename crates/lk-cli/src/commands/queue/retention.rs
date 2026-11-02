@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use lk_vault::{MutationPlan, MutationSession};
 use miette::IntoDiagnostic;
 
+use super::classification::{CapturedClassification, capture as classify_for_retirement};
 use super::{PruneSummary, TaskStatus};
 
 pub(super) struct PreparedPrune {
@@ -120,17 +121,13 @@ fn prepare_with_classifier(
         let mut done_pages = Ok(BTreeMap::new());
         let (mut dropped, mut work_left) = (0, 0);
         for task in read.tasks {
-            let valid = task.generation_policy().is_ok() && task.validate_retained_input().is_ok();
-            let classification = if valid {
-                classify(&task, &mut revisions)?
-            } else {
+            if task.generation_policy().is_err() || task.validate_retained_input().is_err() {
                 complete = false;
-                CapturedClassification {
-                    status: super::classify_task(root, &task, &mut revisions)?,
-                    pages: BTreeMap::new(),
-                }
-            };
-            match classification.status {
+            }
+            let classification = classify(&task, &mut revisions)?;
+            let status = classification.status();
+            let captured_pages = classification.into_pages();
+            match status {
                 TaskStatus::Current => {
                     work_left += 1;
                     summary.kept_current += 1;
@@ -138,21 +135,19 @@ fn prepare_with_classifier(
                 }
                 TaskStatus::Done => {
                     done_pages = done_pages.and_then(|mut pages| {
-                        retain_snapshots(&mut pages, classification.pages)?;
+                        retain_snapshots(&mut pages, captured_pages)?;
                         Ok(pages)
                     });
                     summary.retired_done += 1;
                     tasks.push(task);
                 }
                 TaskStatus::Stale => {
-                    retain_snapshots(&mut pages, classification.pages)
-                        .map_err(classification_drift)?;
+                    retain_snapshots(&mut pages, captured_pages).map_err(classification_drift)?;
                     summary.pruned_stale += 1;
                     dropped += 1;
                 }
                 TaskStatus::MissingTarget => {
-                    retain_snapshots(&mut pages, classification.pages)
-                        .map_err(classification_drift)?;
+                    retain_snapshots(&mut pages, captured_pages).map_err(classification_drift)?;
                     summary.pruned_missing_target += 1;
                     dropped += 1;
                 }
@@ -260,51 +255,6 @@ fn prepare_with_classifier(
     })
 }
 
-struct CapturedClassification {
-    status: TaskStatus,
-    pages: BTreeMap<PathBuf, Option<String>>,
-}
-
-fn classify_for_retirement(
-    root: &Path,
-    task: &lk_queue::QueueTask,
-    revisions: &mut BTreeMap<PathBuf, Result<String, TaskStatus>>,
-) -> miette::Result<CapturedClassification> {
-    let mut pages = BTreeMap::new();
-    let mut classification = super::classify_with_reader(root, task, revisions, &mut |path| {
-        read_snapshot(root, path, &mut pages)
-    })?;
-    let retires = |status| {
-        matches!(
-            status,
-            TaskStatus::Done | TaskStatus::Stale | TaskStatus::MissingTarget
-        )
-    };
-    if retires(classification.status)
-        && classification
-            .dependencies
-            .iter()
-            .any(|path| !pages.contains_key(path))
-    {
-        pages.clear();
-        let mut fresh_revisions = BTreeMap::new();
-        classification =
-            super::classify_with_reader(root, task, &mut fresh_revisions, &mut |path| {
-                read_snapshot(root, path, &mut pages)
-            })?;
-        revisions.extend(fresh_revisions);
-    }
-    if retires(classification.status) {
-        pages.retain(|path, _| classification.dependencies.contains(path));
-    } else {
-        pages.clear();
-    }
-    Ok(CapturedClassification {
-        status: classification.status,
-        pages,
-    })
-}
-
 fn retain_snapshots(
     retained: &mut BTreeMap<PathBuf, Option<String>>,
     snapshots: BTreeMap<PathBuf, Option<String>>,
@@ -328,26 +278,6 @@ fn classification_drift(path: PathBuf) -> miette::Report {
         "queue classification inputs changed during retirement: {}",
         path.display()
     )
-}
-
-fn read_snapshot(
-    root: &Path,
-    path: &Path,
-    pages: &mut BTreeMap<PathBuf, Option<String>>,
-) -> std::io::Result<String> {
-    let raw = match pages.entry(path.to_path_buf()) {
-        std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
-        std::collections::btree_map::Entry::Vacant(entry) => {
-            let raw = match super::read_page(root, path) {
-                Ok(raw) => Some(raw),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-                Err(error) => return Err(error),
-            };
-            entry.insert(raw)
-        }
-    };
-    raw.clone()
-        .ok_or_else(|| std::io::ErrorKind::NotFound.into())
 }
 
 #[cfg(all(test, unix))]
@@ -700,8 +630,8 @@ mod tests {
         )]);
         fixture.write(origin, original);
         let classification = classify_for_retirement(&fixture.root, &task, &mut revisions).unwrap();
-        assert_eq!(classification.status, TaskStatus::Current);
-        assert!(classification.pages.is_empty());
+        assert_eq!(classification.status(), TaskStatus::Current);
+        assert!(classification.into_pages().is_empty());
     }
 
     #[test]

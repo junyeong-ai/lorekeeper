@@ -19,6 +19,7 @@ fn validation_policy() -> String {
         include_str!("../queue.rs"),
         include_str!("synthesis.rs"),
         include_str!("application.rs"),
+        include_str!("classification.rs"),
         include_str!("rejections.rs"),
         include_str!("../work.rs"),
         include_str!("../work/selection.rs"),

@@ -1,5 +1,6 @@
 pub(super) mod application;
 pub(super) mod check;
+mod classification;
 mod packet;
 pub(super) mod readiness;
 mod regenerate;
@@ -882,12 +883,19 @@ async fn apply_into(
             failed += 1;
             continue;
         }
+        let classification = classification::capture_result(&vault_root, task)?;
         // Every proposal is now bound to the same retained target. Dead work can
         // retire together without choosing among answers that cannot be published.
         let Some(rel_path) = resolve_target_path(&task.target.vault_path) else {
             drop_dead("target path escapes the vault root");
             dropped += 1;
-            application::retire_group(&vault_root, task, &snapshots, mutation.as_ref())?;
+            application::retire_group(
+                &vault_root,
+                task,
+                &snapshots,
+                classification,
+                mutation.as_ref(),
+            )?;
             report.outcome(
                 None,
                 &snapshots,
@@ -897,10 +905,16 @@ async fn apply_into(
             );
             continue;
         };
-        if policy_request_status(&vault_root, task) == Some(TaskStatus::Stale) {
+        if classification.has_superseded_policy(task)? {
             drop_dead("superseded generation policy");
             dropped += 1;
-            application::retire_group(&vault_root, task, &snapshots, mutation.as_ref())?;
+            application::retire_group(
+                &vault_root,
+                task,
+                &snapshots,
+                classification,
+                mutation.as_ref(),
+            )?;
             report.outcome(
                 None,
                 &snapshots,
@@ -910,31 +924,27 @@ async fn apply_into(
             );
             continue;
         }
-        match classify_against_page(
-            &vault_root,
-            &rel_path,
-            task.target.kind,
-            &task.cache_hash,
-            // One section, because `TaskResult` carries `concepts` and nothing else: a result
-            // from any other kind would arrive with no payload to apply, so the single anchor
-            // is what the type can express rather than what the protocol asks for.
-            &[task.target.anchor.as_str()],
-            Artifact::Result,
-        ) {
-            Ok(TaskStatus::Current) => {}
+        match classification.status() {
+            TaskStatus::Current => {}
             // A page nobody can read is the absence of a verdict, not a dead result. The
             // extraction it carries is the answer in flight, and a repair of the page is a
             // one-line fix that brings it back — consuming it here would spend that answer on
             // a page that could not receive it, with nothing left to say what was lost.
-            Ok(TaskStatus::Unreadable) => {
+            TaskStatus::Unreadable => {
                 return Err(miette::miette!(
                     "target page will not parse; repair it and this result applies"
                 ));
             }
-            Ok(status @ (TaskStatus::Done | TaskStatus::Stale | TaskStatus::MissingTarget)) => {
+            status @ (TaskStatus::Done | TaskStatus::Stale | TaskStatus::MissingTarget) => {
                 drop_dead(status.as_str());
                 dropped += 1;
-                application::retire_group(&vault_root, task, &snapshots, mutation.as_ref())?;
+                application::retire_group(
+                    &vault_root,
+                    task,
+                    &snapshots,
+                    classification,
+                    mutation.as_ref(),
+                )?;
                 report.outcome(
                     None,
                     &snapshots,
@@ -944,10 +954,12 @@ async fn apply_into(
                 );
                 continue;
             }
-            Err(error) => return Err(error),
         }
         let content = match origin_pages.get(&rel_path) {
             Some((pending, _)) => pending.clone(),
+            None if classification.task_status() == TaskStatus::Done => {
+                classification.target_raw(task)?.to_owned()
+            }
             None => match read_page(&vault_root, &rel_path) {
                 Ok(c) => c,
                 Err(e) => {
@@ -962,11 +974,17 @@ async fn apply_into(
         if group
             .iter()
             .all(|(_, proposal)| original_revision != proposal.target_revision)
-            && classify_task(&vault_root, task, &mut BTreeMap::new())? == TaskStatus::Done
+            && classification.task_status() == TaskStatus::Done
         {
             drop_dead("already materialized");
             dropped += 1;
-            application::retire_group(&vault_root, task, &snapshots, mutation.as_ref())?;
+            application::retire_group(
+                &vault_root,
+                task,
+                &snapshots,
+                classification.into_completed_task()?,
+                mutation.as_ref(),
+            )?;
             report.outcome(
                 None,
                 &snapshots,
@@ -1243,13 +1261,6 @@ fn register_publication_owner(
     }
     owned.insert(relative, original.into());
     Ok(())
-}
-
-fn policy_request_status(root: &Path, task: &QueueTask) -> Option<TaskStatus> {
-    let path = resolve_target_path(&task.target.vault_path)?;
-    let content = read_page(root, &path).ok()?;
-    let page = lk_core::frontmatter::parse_page(&content).ok()?;
-    policy_request_status_in_page(&page, task)
 }
 
 fn policy_request_status_in_page(
@@ -1881,22 +1892,8 @@ fn classify_task(
     task: &QueueTask,
     revisions: &mut BTreeMap<PathBuf, Result<String, TaskStatus>>,
 ) -> miette::Result<TaskStatus> {
-    if resolve_target_path(&task.target.vault_path).is_none() {
-        return Ok(TaskStatus::MissingTarget);
-    }
-    if task.generation_policy().is_err() || task.validate_retained_input().is_err() {
-        return Ok(TaskStatus::Unreadable);
-    }
-    classify_validated_task(vault_root, task, revisions)
-}
-
-fn classify_validated_task(
-    vault_root: &Path,
-    task: &QueueTask,
-    revisions: &mut BTreeMap<PathBuf, Result<String, TaskStatus>>,
-) -> miette::Result<TaskStatus> {
     Ok(
-        classify_with_reader(vault_root, task, revisions, &mut |path| {
+        classify_with_reader(vault_root, task, revisions, Artifact::Task, &mut |path| {
             read_page(vault_root, path)
         })?
         .status,
@@ -1905,6 +1902,7 @@ fn classify_validated_task(
 
 struct TaskClassification {
     status: TaskStatus,
+    task_status: TaskStatus,
     dependencies: Vec<PathBuf>,
 }
 
@@ -1912,13 +1910,18 @@ fn classify_with_reader(
     root: &Path,
     task: &QueueTask,
     revisions: &mut BTreeMap<PathBuf, Result<String, TaskStatus>>,
+    artifact: Artifact,
     read: &mut impl FnMut(&Path) -> std::io::Result<String>,
 ) -> miette::Result<TaskClassification> {
     let mut dependencies = Vec::new();
+    let mut target_status = None;
     let status = (|| -> miette::Result<TaskStatus> {
         let Some(target) = resolve_target_path(&task.target.vault_path) else {
             return Ok(TaskStatus::MissingTarget);
         };
+        if task.generation_policy().is_err() || task.validate_retained_input().is_err() {
+            return Ok(TaskStatus::Unreadable);
+        }
         dependencies.push(target.clone());
         let raw = match read(&target) {
             Ok(raw) => raw,
@@ -1936,13 +1939,25 @@ fn classify_with_reader(
         if lk_vault::writable_page_path(root, &target).is_err() {
             return Ok(TaskStatus::Unreadable);
         }
-        let status = classify_parsed_page(
+        let task_status = classify_parsed_page(
             &page,
             task.target.kind,
             &task.cache_hash,
             &task.anchors(),
             Artifact::Task,
         )?;
+        target_status = Some(task_status);
+        let status = if artifact == Artifact::Task {
+            task_status
+        } else {
+            classify_parsed_page(
+                &page,
+                task.target.kind,
+                &task.cache_hash,
+                &[task.target.anchor.as_str()],
+                Artifact::Result,
+            )?
+        };
         if status != TaskStatus::Current
             || task.target.kind != lk_queue::TargetKind::ConceptSynthesis
         {
@@ -1990,6 +2005,11 @@ fn classify_with_reader(
     })()?;
     Ok(TaskClassification {
         status,
+        task_status: if artifact == Artifact::Task {
+            status
+        } else {
+            target_status.unwrap_or(status)
+        },
         dependencies,
     })
 }

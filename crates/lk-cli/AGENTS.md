@@ -347,6 +347,10 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   Completed rows retained in a mixed pending file do not constrain retirement; validate
   their captured consistency only when that file is actually archived.
   Validate discovery storage containment before enumerating or reading its records.
+- Result retirement uses that same captured classification and guards its target/source
+  or absence in the deletion journal. Extraction result admission may ignore completion;
+  an already-materialized retirement uses the task verdict from the same capture.
+  Never replace the original decision's read proof with a later baseline.
 - Pending input retains full current typed validation. Processed history protects exact task/cache references through a strict known JSON
   envelope; its unique-key input object is opaque historical data, never current semantic
   authority. Do not reconstruct it with today's request, supply a policy, rehash, rewrite or
