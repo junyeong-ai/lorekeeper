@@ -21,6 +21,7 @@ fn validation_policy() -> String {
         include_str!("application.rs"),
         include_str!("classification.rs"),
         include_str!("rejections.rs"),
+        include_str!("../json.rs"),
         include_str!("../work.rs"),
         include_str!("../work/selection.rs"),
         include_str!("../work/publication.rs"),
@@ -80,12 +81,7 @@ fn relative_address(value: &str) -> bool {
 }
 
 fn decode(path: &Path, raw: &str) -> miette::Result<Receipt> {
-    let value: serde_json::Value = serde_json::from_str(raw).into_diagnostic()?;
-    if !value.is_object() {
-        return Err(miette::miette!(
-            "queue rejection receipt must be a JSON object"
-        ));
-    }
+    let value = crate::commands::json::decode_object(raw.as_bytes()).into_diagnostic()?;
     let receipt: Receipt = serde_json::from_value(value).into_diagnostic()?;
     if receipt.schema != SCHEMA
         || !is_revision(&receipt.validation_policy)
@@ -614,6 +610,44 @@ mod tests {
             },
             kind: RejectionKind::TargetChanged,
             reason: "Target changed.".into(),
+        }
+    }
+
+    #[test]
+    fn rejection_receipts_reject_duplicate_fields_without_retiring_original_bytes() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let task = retained_summary(root);
+        let mut receipt = receipt();
+        receipt.identity.task_id.clone_from(&task.task_id);
+        receipt.identity.cache_hash.clone_from(&task.cache_hash);
+        let path = path(&task.task_id, &task.cache_hash).unwrap();
+        let encoded = serde_json::to_string(&receipt).unwrap();
+        for field in [
+            "schema",
+            "config_revision",
+            "task_id",
+            "vault_path",
+            "path",
+            "revision",
+            "kind",
+        ] {
+            let key = format!("\"{field}\":");
+            let ambiguous = encoded.replacen(&key, &format!("{key}\"invalid\",{key}"), 1);
+            assert_ne!(ambiguous, encoded);
+            write(root, &path, &ambiguous);
+            assert!(decode(&path, &ambiguous).is_err(), "{field}");
+            assert!(validate_store(root).is_err(), "{field}");
+            let mut plan = lk_vault::MutationPlan::default();
+            assert!(remove_matching(root, &task, &mut plan).is_err(), "{field}");
+            assert!(
+                plan_prune(root, Some(&BTreeSet::new()), &mut plan).is_err(),
+                "{field}"
+            );
+            assert_eq!(
+                std::fs::read_to_string(root.join(&path)).unwrap(),
+                ambiguous
+            );
         }
     }
 

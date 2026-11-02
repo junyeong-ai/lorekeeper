@@ -505,8 +505,8 @@ pub(in crate::commands) fn decode_response(
     bytes: &[u8],
     limit: usize,
 ) -> miette::Result<Value> {
-    let response: Value = serde_json::from_slice(bytes).map_err(|_| {
-        miette::miette!("worker returned invalid JSON; no observation was recorded")
+    let response = crate::commands::json::decode_object(bytes).map_err(|_| {
+        miette::miette!("worker returned invalid or ambiguous JSON; no observation was recorded")
     })?;
     let output = match engine {
         AgentEngine::Codex => response,
@@ -567,6 +567,58 @@ pub(in crate::commands) fn validate_evidence_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_responses_reject_duplicate_fields_before_semantic_decoding() {
+        for raw in [
+            r#"{"decisions":[],"decisions":[]}"#,
+            r#"{"decisions":[{"candidate_ref":"c0","decision":"defer","decision":"inspect","reason":"Read further."}]}"#,
+            r#"{"results":[{"status":"needs-action","status":"complete","value":{"concepts":[]},"reason":null}]}"#,
+            r#"{"results":[{"status":"complete","value":{"synthesis":"First","synthesis":"Second","related":null},"reason":null}]}"#,
+            r#"{"results":[],"resul\u0074s":[]}"#,
+            r#"{"status":"needs-action","status":"complete","body":"Section prose.","reason":null}"#,
+        ] {
+            for engine in [AgentEngine::Codex, AgentEngine::ClaudeCode] {
+                let response = if engine == AgentEngine::ClaudeCode {
+                    format!(
+                        r#"{{"type":"result","subtype":"success","is_error":false,"structured_output":{raw}}}"#
+                    )
+                } else {
+                    raw.to_owned()
+                };
+                assert!(
+                    decode_response(engine, response.as_bytes(), 32768).is_err(),
+                    "{engine:?}: {response}"
+                );
+            }
+        }
+        for raw in [
+            r#"{"type":"result","subtype":"success","is_error":true,"is_error":false,"structured_output":{}}"#,
+            r#"{"type":"result","subtype":"success","is_error":false,"structured_output":{},"structured_output":{}}"#,
+        ] {
+            assert!(decode_response(AgentEngine::ClaudeCode, raw.as_bytes(), 32768).is_err());
+        }
+    }
+
+    #[test]
+    fn native_response_decoding_preserves_compact_byte_limits_on_both_hosts() {
+        let value =
+            json!({"results":[{"status":"complete","value":{"concepts":[]},"reason":null}]});
+        let limit = serde_json::to_vec(&value).unwrap().len();
+        for engine in [AgentEngine::Codex, AgentEngine::ClaudeCode] {
+            let response = if engine == AgentEngine::ClaudeCode {
+                json!({"type":"result","subtype":"success","is_error":false,"structured_output":value,"extra_host_metadata":{"unknown":null}})
+            } else {
+                value.clone()
+            };
+            let raw = serde_json::to_vec_pretty(&response).unwrap();
+            assert_eq!(decode_response(engine, &raw, limit).unwrap(), value);
+            let error = decode_response(engine, &raw, limit - 1).unwrap_err();
+            let capacity = error.downcast_ref::<OutputCapacity>().unwrap();
+            assert_eq!(capacity.actual_bytes, limit);
+            assert_eq!(capacity.max_bytes, limit - 1);
+        }
+    }
 
     #[test]
     fn authored_text_is_typed_without_repairing_valid_or_inherited_payloads() {

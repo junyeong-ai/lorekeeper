@@ -6881,8 +6881,10 @@ if leader and mode=='missing-reference': output['decisions'].pop()
 if leader and mode=='oversized-reason': output['decisions'][0]['reason']='근'*76+'x'*30
 output['decisions'].reverse()
 if '--safe-mode' in sys.argv:
-    print(json.dumps({'type':'result','subtype':'success','is_error':False,'structured_output':output}))
-else: print(json.dumps(output))
+    output={'type':'result','subtype':'success','is_error':False,'structured_output':output}
+encoded=json.dumps(output)
+if leader and mode=='duplicate-field': encoded=encoded.replace('"decision": "not-selected"', '"decision": "inspect", "decision": "not-selected"', 1)
+print(encoded)
 SCREENING
 "#;
 
@@ -7361,6 +7363,30 @@ fn native_screening_wave_overlaps_distinct_tasks_and_shares_fresh_capture_on_bot
                     .contains("concepts_done:")
             );
         }
+    }
+}
+
+#[test]
+fn native_screening_ambiguous_fields_are_fatal_and_preserve_independent_peers() {
+    for engine in ["codex", "claude-code"] {
+        let fixture = parallel_screening_fixture(engine, "duplicate-field", 2);
+        let (_, report) = fixture.run("process");
+        assert_eq!(report["semantic_calls"], 2, "{report}");
+        assert_eq!(report["halted"], true, "{report}");
+        assert_eq!(screening_receipts(&fixture), 1, "{report}");
+        assert_eq!(
+            report["work_steps"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|step| step["outcome"] == "recorded")
+                .count(),
+            1
+        );
+        assert_eq!(
+            screening_settlement(&fixture)["data"]["pending_mutation"],
+            false
+        );
     }
 }
 

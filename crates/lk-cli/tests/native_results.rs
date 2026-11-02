@@ -17,6 +17,12 @@ raw=sys.stdin.read()
 request=json.loads(raw.split('\nNative request:\n',1)[1])
 with (root/'calls.jsonl').open('a') as f: f.write(json.dumps(request)+'\n')
 mode=(root/'mode').read_text()
+def encode(output):
+    encoded=json.dumps(output)
+    if '"results":' in encoded:
+        if mode=='duplicate-status': encoded=encoded.replace('"status": "complete"', '"status": "needs-action", "status": "complete"', 1)
+        if mode=='duplicate-body': encoded=encoded.replace('"synthesis":', '"synthesis": "Ambiguous", "synthesis":', 1)
+    return encoded
 if mode in ['host-failure','host-envelope-error']:
     print(json.dumps({'type':'result','subtype':'error_during_execution','is_error':True,'errors':['PRIVATE_CANARY_ERROR']}))
     raise SystemExit(1 if mode=='host-failure' else 0)
@@ -87,7 +93,7 @@ if request.get('schema') in ['native-selected-results-v3','native-finalize-resul
     if mode=='prose': output='Completed without a native result.'
     if engine=='codex':
         if mode!='missing':
-            Path(sys.argv[sys.argv.index('--output-last-message')+1]).write_text(json.dumps(output))
+            Path(sys.argv[sys.argv.index('--output-last-message')+1]).write_text(encode(output))
         print(json.dumps({'type':'item.completed','item':{'type':'command_execution','output':'x'*100000}}))
         print('NOT THE RESULT')
         raise SystemExit()
@@ -106,7 +112,7 @@ else:
     if mode=='frontier-action-reduce-held':
         output={'status':'needs-action','observation':None,'action':{'reason':'This exact reducer requires an explicit processing action.'}}
 if engine=='claude-code': output={'type':'result','subtype':'success','is_error':False,'structured_output':output}
-print(json.dumps(output))
+print(encode(output))
 "#;
 
 struct Fixture {
@@ -1008,6 +1014,46 @@ fn native_assembled_new_concept_keeps_original_target_policy_and_source_support(
             citations.to_string().contains(&task.target.vault_path),
             "{citations}"
         );
+    }
+}
+
+#[test]
+fn native_generation_rejects_ambiguous_results_without_staging_on_both_hosts() {
+    for engine in ["codex", "claude-code"] {
+        for planned in [false, true] {
+            for mode in ["duplicate-status", "duplicate-body"] {
+                let fixture = Fixture::new(engine);
+                let (task, _) =
+                    fixture.add("subject", lk_queue::TaskKind::SynthesizeConcept, planned);
+                std::fs::write(fixture.root().join("mode"), mode).unwrap();
+                let report = fixture.run();
+                assert_eq!(
+                    report["halted"], true,
+                    "{engine}/{planned}/{mode}: {report}"
+                );
+                assert!(!fixture.done(&task));
+                assert!(
+                    report["work_steps"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|step| step["role"] == "finalizer"),
+                    "{report}"
+                );
+                assert!(
+                    report["stages"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|stage| stage["detail"]
+                            .as_str()
+                            .is_some_and(|detail| detail.contains("invalid or ambiguous JSON"))),
+                    "{report}"
+                );
+                let results = fixture.root().join("vault/.lorekeeper/queue/results");
+                assert!(!results.exists() || std::fs::read_dir(results).unwrap().next().is_none());
+            }
+        }
     }
 }
 

@@ -261,6 +261,10 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   guarded section result. In those roles Claude disables tools/customizations; Codex
   uses a read-only sandbox. Never fall back to parsing prose/Markdown when structured
   output is missing or invalid.
+- Decode worker objects and stored queue rejection receipts from their original JSON
+  with unique fields at every nesting level. Reject duplicate decoded keys before host
+  status checks, semantic assembly or cleanup; converting to a generic value first
+  erases that ambiguity. Malformed replies remain fatal and create no local hold.
 - Evidence observers return only a typed observation body or processing-action reason.
   Rust binds native work/node/input and screening selection/batch/input identities from
   the supervised invocation; reject model-supplied identity fields without adopting or
