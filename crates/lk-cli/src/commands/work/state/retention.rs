@@ -2,7 +2,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use lk_vault::{MutationPlan, MutationSession};
-use serde_json::Value;
 
 use super::super::resources::Subject;
 use super::{
@@ -291,10 +290,8 @@ fn capture_retention(root: &Path, id: &str, cutoff: i64) -> miette::Result<Reten
             }
             _ => return Err(fail("published work requires exactly one completion seal")),
         };
-        let result: Value = serde_json::from_str(
-            &read("final.json")?.ok_or_else(|| fail("published work result is missing"))?,
-        )
-        .map_err(fail)?;
+        let raw = read("final.json")?.ok_or_else(|| fail("published work result is missing"))?;
+        let result = crate::commands::json::decode_object(raw.as_bytes()).map_err(fail)?;
         if receipt.work_id != id
             || receipt.final_result_revision != sealed_revision
             || revision(&result)? != receipt.final_result_revision
@@ -500,7 +497,7 @@ mod tests {
     use super::super::{ReductionPolicy, encoded, validate_output};
     use super::*;
     use lk_core::semantic::SemanticResource;
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     fn context(subject: &str) -> Value {
         let mut context = test_context(subject);
@@ -556,6 +553,44 @@ mod tests {
             assert!(prune_published(root.path(), session, i64::MAX).is_err());
             assert_eq!(std::fs::read_to_string(&path).unwrap(), raw);
         }
+    }
+
+    #[test]
+    fn ambiguous_published_final_result_refuses_preview_and_cleanup() {
+        let root = tempfile::tempdir().unwrap();
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let source = resources();
+        let work =
+            Work::create(&session, &source, "subject", context("subject"), limits()).unwrap();
+        publish(&work, &session, &source);
+        let path = root
+            .path()
+            .join(work_path(&work.plan.id, "final.json").unwrap());
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let ambiguous = raw.replacen("\"body\":", "\"body\":\"Ambiguous\",\"body\":", 1);
+        assert_ne!(ambiguous, raw);
+        std::fs::write(&path, &ambiguous).unwrap();
+        let snapshot = || {
+            walkdir::WalkDir::new(root.path().join(".lorekeeper/work"))
+                .into_iter()
+                .map(Result::unwrap)
+                .filter(|e| e.file_type().is_file())
+                .map(|e| (e.path().to_owned(), std::fs::read(e.path()).unwrap()))
+                .collect::<BTreeMap<_, _>>()
+        };
+        let before = snapshot();
+        for session in [None, Some(&session)] {
+            assert!(prune_published(root.path(), session, i64::MAX).is_err());
+            assert_eq!(snapshot(), before);
+        }
+        let value: Value = serde_json::from_str(&raw).unwrap();
+        std::fs::write(&path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+        assert_eq!(
+            prune_published(root.path(), None, i64::MAX)
+                .unwrap()
+                .removed,
+            1
+        );
     }
 
     fn publish(work: &Work, session: &MutationSession, resources: &[SemanticResource]) {

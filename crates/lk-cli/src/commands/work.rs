@@ -1526,7 +1526,9 @@ fn load_native_finalization_input(
             ));
         }
     }
-    serde_json::from_slice(&bytes).map(Some).into_diagnostic()
+    super::json::decode_object(&bytes)
+        .map(Some)
+        .into_diagnostic()
 }
 
 #[cfg(unix)]
@@ -2901,13 +2903,11 @@ pub(super) fn verify_finished(
 }
 
 fn verify_finished_prepared(root: &Path, work: &Work, prepared: &Prepared) -> miette::Result<()> {
-    let result = std::fs::read(
-        root.join(".lorekeeper/work")
-            .join(&work.plan.id)
-            .join("final.json"),
-    )
-    .into_diagnostic()?;
-    let result: Value = serde_json::from_slice(&result).into_diagnostic()?;
+    let path = Path::new(".lorekeeper/work")
+        .join(&work.plan.id)
+        .join("final.json");
+    let (_, result) = state::load_result(root, &path)?
+        .ok_or_else(|| miette::miette!("work final result is missing"))?;
     work.guard_completion(
         &mut lk_vault::MutationPlan::default(),
         root,
@@ -2931,8 +2931,8 @@ fn is_finished(
 #[cfg(any(unix, test))]
 fn is_finished_prepared(root: &Path, work: &Work, prepared: &Prepared) -> miette::Result<bool> {
     let directory = Path::new(".lorekeeper/work").join(&work.plan.id);
-    match std::fs::symlink_metadata(root.join(&directory).join("final.json")) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+    match state::load_result(root, &directory.join("final.json"))? {
+        None => {
             for seal in ["seal.json", "frontier-seal.json"] {
                 if state::read_optional(root, &directory.join(seal))?.is_some() {
                     return Err(miette::miette!(
@@ -2942,8 +2942,12 @@ fn is_finished_prepared(root: &Path, work: &Work, prepared: &Prepared) -> miette
             }
             Ok(false)
         }
-        Err(error) => Err(miette::miette!("inspect final result: {error}")),
-        Ok(_) => match verify_finished_prepared(root, work, prepared) {
+        Some((_, result)) => match work.guard_completion(
+            &mut lk_vault::MutationPlan::default(),
+            root,
+            &prepared.resources,
+            &result,
+        ) {
             Ok(()) => Ok(true),
             Err(error)
                 if matches!(
@@ -2982,10 +2986,8 @@ pub(super) fn restage_finished(
     let final_path = PathBuf::from(".lorekeeper/work")
         .join(id)
         .join("final.json");
-    let final_raw =
-        std::fs::read_to_string(lk_vault::page_path(root, &final_path).into_diagnostic()?)
-            .into_diagnostic()?;
-    let result: Value = serde_json::from_str(&final_raw).into_diagnostic()?;
+    let (final_raw, result) = state::load_result(root, &final_path)?
+        .ok_or_else(|| miette::miette!("work final result is missing"))?;
     let mut mutation = lk_vault::MutationPlan::default();
     work.guard_completion(&mut mutation, root, &prepared.resources, &result)?;
     prepared.guard_pages(&mut mutation);
@@ -2998,18 +3000,13 @@ pub(super) fn restage_finished(
             .join(id)
             .join("assessment.json"),
     };
-    match std::fs::read_to_string(lk_vault::page_path(root, &path).into_diagnostic()?) {
-        Ok(raw) => {
-            let existing: Value = serde_json::from_str(&raw).into_diagnostic()?;
-            if existing != result {
-                return Err(miette::miette!(
-                    "staged result differs from the verified sealed result; retained for inspection"
-                ));
-            }
-            return Ok(());
+    if let Some((_, existing)) = state::load_result(root, &path)? {
+        if existing != result {
+            return Err(miette::miette!(
+                "staged result differs from the verified sealed result; retained for inspection"
+            ));
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(miette::miette!("read staged result: {error}")),
+        return Ok(());
     }
     mutation
         .publish_expected(
@@ -3299,7 +3296,7 @@ pub async fn run(opts: &GlobalOptions, command: WorkCommand) -> miette::Result<(
             file,
             prepared: request,
         } => {
-            let result: Value = serde_json::from_slice(&std::fs::read(file).into_diagnostic()?)
+            let result = super::json::decode_object(&std::fs::read(file).into_diagnostic()?)
                 .into_diagnostic()?;
             let session = super::publication::acquire_mutation_now(&root)?;
             let (work, prepared) = load(&root, &config, &config_revision, &work_id)?;
@@ -3863,6 +3860,223 @@ mod tests {
         assert_eq!(loaded, work);
         assert_eq!(loaded.result(&root, &prepared.resources).unwrap(), result);
         assert_eq!(artifacts(), before);
+    }
+
+    fn work_snapshot(root: &Path, id: &str) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+        let directory = root.join(".lorekeeper/work").join(id);
+        walkdir::WalkDir::new(directory)
+            .into_iter()
+            .map(Result::unwrap)
+            .filter(|entry| entry.file_type().is_file())
+            .map(|entry| {
+                (
+                    entry.path().to_owned(),
+                    std::fs::read(entry.path()).unwrap(),
+                )
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn standalone_finish_rejects_ambiguous_external_input_without_sealing() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let (work, _, result) = completed_audit_work(&root);
+        let input = tempfile::NamedTempFile::new().unwrap();
+        assert!(!input.path().starts_with(&root));
+        let raw = serde_json::to_string(&result).unwrap();
+        let ambiguous = raw.replacen("\"reason\":", "\"reason\":\"Ambiguous\",\"reason\":", 1);
+        assert_ne!(ambiguous, raw);
+        std::fs::write(input.path(), &ambiguous).unwrap();
+        let before = work_snapshot(&root, &work.plan.id);
+        let opts = GlobalOptions {
+            config: Some(root.join("config.yaml")),
+            template_dir: None,
+        };
+        let command = || WorkCommand::Finish {
+            work_id: work.plan.id.clone(),
+            file: input.path().to_owned(),
+            prepared: None,
+        };
+        assert!(run(&opts, command()).await.is_err());
+        assert_eq!(work_snapshot(&root, &work.plan.id), before);
+        assert_eq!(std::fs::read_to_string(input.path()).unwrap(), ambiguous);
+        std::fs::write(input.path(), serde_json::to_string_pretty(&result).unwrap()).unwrap();
+        run(&opts, command()).await.unwrap();
+        let final_path = root
+            .join(".lorekeeper/work")
+            .join(&work.plan.id)
+            .join("final.json");
+        assert_eq!(
+            serde_json::from_slice::<Value>(&std::fs::read(final_path).unwrap()).unwrap(),
+            result
+        );
+    }
+
+    #[test]
+    fn ambiguous_final_and_staged_results_refuse_reuse_without_mutating_paid_work() {
+        for artifact in ["final.json", "assessment.json"] {
+            let directory = tempfile::tempdir().unwrap();
+            let root = directory.path().canonicalize().unwrap();
+            let (work, prepared, result) = completed_audit_work(&root);
+            let session = MutationSession::acquire(&root).unwrap();
+            finish(&session, &work, &prepared, result.clone()).unwrap();
+            let path = root
+                .join(".lorekeeper/work")
+                .join(&work.plan.id)
+                .join(artifact);
+            let raw = std::fs::read_to_string(&path).unwrap();
+            let ambiguous = raw.replacen("\"reason\":", "\"reason\":\"Ambiguous\",\"reason\":", 1);
+            assert_ne!(ambiguous, raw);
+            std::fs::write(&path, &ambiguous).unwrap();
+            let before = work_snapshot(&root, &work.plan.id);
+            if artifact == "final.json" {
+                assert!(verify_finished_prepared(&root, &work, &prepared).is_err());
+                assert!(is_finished_prepared(&root, &work, &prepared).is_err());
+            }
+            let (config, revision) =
+                lk_core::config::Config::load_with_revision(&root.join("config.yaml")).unwrap();
+            assert!(
+                restage_finished(
+                    &session,
+                    &config,
+                    &revision,
+                    &work.plan.id,
+                    &lk_vault::ReadControl::default()
+                )
+                .is_err()
+            );
+            assert_eq!(work_snapshot(&root, &work.plan.id), before);
+            std::fs::write(&path, serde_json::to_string_pretty(&result).unwrap()).unwrap();
+            verify_finished_prepared(&root, &work, &prepared).unwrap();
+            let before = work_snapshot(&root, &work.plan.id);
+            restage_finished(
+                &session,
+                &config,
+                &revision,
+                &work.plan.id,
+                &lk_vault::ReadControl::default(),
+            )
+            .unwrap();
+            assert_eq!(work_snapshot(&root, &work.plan.id), before);
+        }
+    }
+
+    #[test]
+    fn ambiguous_manifest_context_is_not_adopted_as_current_work() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let (work, _, _) = completed_audit_work(&root);
+        let path = root
+            .join(".lorekeeper/work")
+            .join(&work.plan.id)
+            .join("plan.json");
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let ambiguous = raw.replacen("\"subject\":", "\"subject\":null,\"subject\":", 1);
+        assert_ne!(ambiguous, raw);
+        std::fs::write(&path, &ambiguous).unwrap();
+        let before = work_snapshot(&root, &work.plan.id);
+        assert!(Work::load(&root, &work.plan.id).is_err());
+        assert!(work.is_planned(&root).is_err());
+        assert!(work.clone().with_saved_policy(&root).is_err());
+        assert_eq!(work_snapshot(&root, &work.plan.id), before);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prepared_finalizer_inputs_reject_ambiguity_without_changing_byte_pins() {
+        let input = tempfile::NamedTempFile::new().unwrap();
+        let raw = br#"{"kind":"first","kind":"last"}"#;
+        std::fs::write(input.path(), raw).unwrap();
+        let revision = lk_core::rss_original::digest(raw);
+        for inherited in [None, Some((input.path(), revision.as_str()))] {
+            assert!(load_native_finalization_input(Some(input.path()), inherited).is_err());
+        }
+        assert_eq!(std::fs::read(input.path()).unwrap(), raw);
+        let value = json!({"kind":"finalize-section","unknown":null});
+        let raw = serde_json::to_vec_pretty(&value).unwrap();
+        std::fs::write(input.path(), &raw).unwrap();
+        let revision = lk_core::rss_original::digest(&raw);
+        assert_eq!(
+            load_native_finalization_input(Some(input.path()), None).unwrap(),
+            Some(value.clone())
+        );
+        assert_eq!(
+            load_native_finalization_input(None, Some((input.path(), &revision))).unwrap(),
+            Some(value)
+        );
+        assert!(load_native_finalization_input(None, Some((input.path(), "changed"))).is_err());
+        assert_eq!(std::fs::read(input.path()).unwrap(), raw);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn final_result_fifo_is_refused_without_waiting_for_a_writer() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let (work, prepared, result) = completed_audit_work(&root);
+        {
+            let session = MutationSession::acquire(&root).unwrap();
+            finish(&session, &work, &prepared, result).unwrap();
+        }
+        let path = root
+            .join(".lorekeeper/work")
+            .join(&work.plan.id)
+            .join("final.json");
+        std::fs::remove_file(&path).unwrap();
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let (send, receive) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            send.send(verify_finished_prepared(&root, &work, &prepared).is_err())
+                .unwrap();
+        });
+        assert!(
+            receive
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .expect("final result validation waited on a nonregular file")
+        );
+        worker.join().unwrap();
+        use std::os::unix::fs::FileTypeExt;
+        assert!(
+            std::fs::symlink_metadata(path)
+                .unwrap()
+                .file_type()
+                .is_fifo()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn final_result_symlinks_are_refused_before_following_the_target() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let (work, prepared, result) = completed_audit_work(&root);
+        let session = MutationSession::acquire(&root).unwrap();
+        finish(&session, &work, &prepared, result).unwrap();
+        let path = root
+            .join(".lorekeeper/work")
+            .join(&work.plan.id)
+            .join("final.json");
+        let raw = std::fs::read(&path).unwrap();
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(outside.path(), &raw).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(outside.path(), &path).unwrap();
+        assert!(verify_finished_prepared(&root, &work, &prepared).is_err());
+        assert!(is_finished_prepared(&root, &work, &prepared).is_err());
+        assert_eq!(std::fs::read(outside.path()).unwrap(), raw);
+        assert!(
+            std::fs::symlink_metadata(path)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
     }
 
     #[test]

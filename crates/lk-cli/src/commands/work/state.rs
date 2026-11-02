@@ -64,6 +64,7 @@ pub(crate) struct WorkLimits {
 #[serde(deny_unknown_fields)]
 pub(crate) struct Work {
     pub plan: SemanticPlan,
+    #[serde(deserialize_with = "crate::commands::json::deserialize_value")]
     pub context: Value,
     pub max_input_bytes: usize,
     #[serde(default, skip_serializing_if = "ReductionPolicy::is_binary")]
@@ -337,6 +338,10 @@ impl CompletedWork {
             return Err(fail("completion belongs to another work"));
         }
         let prior_final = read_optional(root, &work_path(&self.work_id, "final.json")?)?;
+        let prior_value = prior_final
+            .as_deref()
+            .map(|raw| crate::commands::json::decode_object(raw.as_bytes()).map_err(fail))
+            .transpose()?;
         let (name, other, after) = match self.authority {
             CompletionAuthority::Root(root_output_revision) => (
                 "seal.json",
@@ -364,13 +369,10 @@ impl CompletedWork {
             && let Some(raw) = &before
         {
             let prior = FrontierSeal::decode(raw, work)?;
-            let final_result: Value = serde_json::from_str(
-                prior_final
-                    .as_deref()
-                    .ok_or_else(|| fail("sealed final result is missing"))?,
-            )
-            .map_err(fail)?;
-            if prior.final_result_revision != revision(&final_result)? {
+            let final_result = prior_value
+                .as_ref()
+                .ok_or_else(|| fail("sealed final result is missing"))?;
+            if prior.final_result_revision != revision(final_result)? {
                 return Err(fail("prior frontier seal differs from its final result"));
             }
         }
@@ -379,12 +381,9 @@ impl CompletedWork {
             if before.is_some() {
                 return Err(fail("work has conflicting completion seals"));
             }
-            let prior: Value = serde_json::from_str(
-                prior_final
-                    .as_deref()
-                    .ok_or_else(|| fail("sealed final result is missing"))?,
-            )
-            .map_err(fail)?;
+            let prior = prior_value
+                .as_ref()
+                .ok_or_else(|| fail("sealed final result is missing"))?;
             let (work_id, root_node, final_revision) = if other == "seal.json" {
                 let seal: Seal = serde_json::from_str(&raw).map_err(fail)?;
                 require_id(&seal.root_output_revision)?;
@@ -399,7 +398,7 @@ impl CompletedWork {
             };
             if work_id != self.work_id
                 || root_node != self.root_node
-                || final_revision != revision(&prior)?
+                || final_revision != revision(prior)?
             {
                 return Err(fail(
                     "prior completion authority differs from its final result",
@@ -544,6 +543,15 @@ pub(super) fn read_optional(root: &Path, path: &Path) -> miette::Result<Option<S
         Err(error) => return Err(fail(error)),
     }
     std::fs::read_to_string(full).map(Some).map_err(fail)
+}
+
+pub(super) fn load_result(root: &Path, path: &Path) -> miette::Result<Option<(String, Value)>> {
+    read_optional(root, path)?
+        .map(|raw| {
+            let value = crate::commands::json::decode_object(raw.as_bytes()).map_err(fail)?;
+            Ok((raw, value))
+        })
+        .transpose()
 }
 
 fn require_settled(root: &Path) -> miette::Result<()> {
@@ -718,7 +726,7 @@ impl Work {
         let Some(raw) = read_optional(root, &work_path(&self.plan.id, "plan.json")?)? else {
             return Ok(self);
         };
-        let saved: Self = serde_json::from_str(&raw).map_err(fail)?;
+        let saved = Self::decode(&raw)?;
         self.reduction = saved.reduction;
         if self != saved {
             return Err(fail(
@@ -733,7 +741,7 @@ impl Work {
         require_settled(root)?;
         let path = work_path(id, "plan.json")?;
         let raw = read_optional(root, &path)?.ok_or_else(|| fail("work manifest is missing"))?;
-        let work: Self = serde_json::from_str(&raw).map_err(fail)?;
+        let work = Self::decode(&raw)?;
         if work.plan.id != id {
             return Err(fail("work manifest id differs from its address"));
         }
@@ -746,11 +754,15 @@ impl Work {
         let Some(raw) = read_optional(root, &work_path(&self.plan.id, "plan.json")?)? else {
             return Ok(false);
         };
-        let current: Self = serde_json::from_str(&raw).map_err(fail)?;
+        let current = Self::decode(&raw)?;
         if current != *self {
             return Err(fail("work manifest changed"));
         }
         Ok(true)
+    }
+
+    fn decode(raw: &str) -> miette::Result<Self> {
+        crate::commands::work::receipt::decode(raw).map_err(fail)
     }
 
     fn verify_context(&self) -> miette::Result<()> {
@@ -767,7 +779,7 @@ impl Work {
     fn manifest(&self, root: &Path) -> miette::Result<(PathBuf, String)> {
         let path = work_path(&self.plan.id, "plan.json")?;
         let raw = read_optional(root, &path)?.ok_or_else(|| fail("work manifest disappeared"))?;
-        let current: Self = serde_json::from_str(&raw).map_err(fail)?;
+        let current = Self::decode(&raw)?;
         if &current != self {
             return Err(fail("work manifest changed"));
         }

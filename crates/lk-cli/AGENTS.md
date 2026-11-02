@@ -190,6 +190,9 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
 - Completion requires exact sealed typed results and source/work guards in the canonical
   publication journal. Keep the queue target's guard in its publication edit: a separate
   unchanged guard for the same target would reject the journal's own recovery.
+- Load canonical final/staged results through direct-file and vault-address checks before
+  reading. Validate unique JSON fields before completion hashing, restaging, authority
+  replacement or retention, using the same captured raw bytes for mutation guards.
 - Prepare ready native nodes and their progress from one captured evaluation. Refresh
   the complete scope after the host returns before recording; added discovery matches
   invalidate work too. Never retain a candidate capture across host execution.
@@ -261,9 +264,10 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   guarded section result. In those roles Claude disables tools/customizations; Codex
   uses a read-only sandbox. Never fall back to parsing prose/Markdown when structured
   output is missing or invalid.
-- Decode worker objects and stored queue rejection receipts from their original JSON
-  with unique fields at every nesting level. Reject duplicate decoded keys before host
-  status checks, semantic assembly or cleanup; converting to a generic value first
+- Decode worker objects, Work manifests/finalizer inputs/results and queue rejection
+  receipts from their original JSON with unique fields at every nesting level. Reject
+  duplicate decoded keys before host status checks, semantic assembly or cleanup;
+  converting to a generic value first
   erases that ambiguity. Malformed replies remain fatal and create no local hold.
 - Evidence observers return only a typed observation body or processing-action reason.
   Rust binds native work/node/input and screening selection/batch/input identities from

@@ -11,11 +11,17 @@ pub(super) fn decode_object(bytes: &[u8]) -> serde_json::Result<Value> {
     Ok(value)
 }
 
+pub(super) fn deserialize_value<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Value, D::Error> {
+    deserializer.deserialize_any(JsonVisitor)
+}
+
 struct JsonValue(Value);
 
 impl<'de> Deserialize<'de> for JsonValue {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        deserializer.deserialize_any(JsonVisitor).map(Self)
+        deserialize_value(deserializer).map(Self)
     }
 }
 
