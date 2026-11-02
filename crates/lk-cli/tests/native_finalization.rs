@@ -31,7 +31,11 @@ if kind in ['finalize-section','whole-section']:
     assert 'No tools' in request['instructions']
     assert work['context']['purpose']['parameters']['locale']=='ko'
     if kind=='finalize-section': assert not work['output']['unresolved']
-    else: assert work['resources'] and 'output' not in work
+    else:
+        assert work['resources'] and 'output' not in work
+        assert 'Generate directly from those resources' in request['instructions']
+        assert 'from the supplied completed guarded observations' not in request['instructions']
+        assert 'parameters, completed observations and their evidence mapping' not in request['instructions']
     (root/'last-finalization.json').write_text(json.dumps(request))
     mode=(root/'mode').read_text()
     if mode=='exit': raise SystemExit(23)
@@ -68,6 +72,7 @@ if kind in ['finalize-section','whole-section']:
             if mode=='reversed-events': events=list(reversed(events))
             body='\n\n'.join(e['heading']+'\n\n'+body+'\n'+'\n'.join(e['inline_links']) for e in events)
         if mode=='oversized': body='x'*request['max_response_bytes']
+        if mode=='empty': body=''
         if mode=='section-boundary': body='## Unexpected section\nEscaped body.'
         output={'status':'complete','body':body,'reason':None}
         if mode=='forged-guards': output['task_id']='forged'
@@ -663,28 +668,49 @@ fn whole_sections_use_one_tool_free_call_without_fabricated_work_on_both_hosts()
             TaskKind::RefineEvents,
             TaskKind::IdentifyThemes,
         ] {
-            let fixture = Fixture::new(engine, 32768);
-            let (task, _) = fixture.add_with_plan("source", kind, false);
-            let (output, report) = fixture.run();
-            assert!(
-                output.status.success(),
-                "{report}: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            assert_eq!(report["semantic_calls"], 1);
-            assert_eq!(fixture.calls().len(), 1);
-            assert_eq!(fixture.calls()[0]["kind"], "whole-section");
-            assert!(!fixture.root().join("vault/.lorekeeper/work").exists());
-            let status = fixture.json(&["queue", "status", "--json"]);
-            assert!(
-                status["data"]["tasks"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .any(|entry| entry["task_id"] == task.task_id && entry["status"] == "done")
-            );
-            let (_, repeated) = fixture.run();
-            assert_eq!(repeated["semantic_calls"], 0);
+            for mode in if kind == TaskKind::RefineEvents {
+                &["complete"][..]
+            } else {
+                &["complete", "empty"][..]
+            } {
+                let fixture = Fixture::new(engine, 32768);
+                fixture.mode(mode);
+                let (task, _) = fixture.add_with_plan("source", kind, false);
+                let (output, report) = fixture.run();
+                assert!(
+                    output.status.success(),
+                    "{report}: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                assert_eq!(report["semantic_calls"], 1);
+                assert_eq!(fixture.calls().len(), 1);
+                assert_eq!(fixture.calls()[0]["kind"], "whole-section");
+                assert!(!fixture.root().join("vault/.lorekeeper/work").exists());
+                let status = fixture.json(&["queue", "status", "--json"]);
+                assert!(
+                    status["data"]["tasks"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|entry| entry["task_id"] == task.task_id && entry["status"] == "done")
+                );
+                if *mode == "empty" {
+                    let raw = std::fs::read_to_string(
+                        fixture.root().join("vault").join(&task.target.vault_path),
+                    )
+                    .unwrap();
+                    let page = lk_vault::parse_page(&raw).unwrap();
+                    let heading = task.target.anchor.strip_prefix("## ").unwrap();
+                    assert!(
+                        lk_vault::section_body(&page.body, heading)
+                            .unwrap()
+                            .trim()
+                            .is_empty()
+                    );
+                }
+                let (_, repeated) = fixture.run();
+                assert_eq!(repeated["semantic_calls"], 0);
+            }
         }
     }
 }
