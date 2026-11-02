@@ -5,7 +5,7 @@ description: Extracts repository decisions and reusable knowledge into a Lorekee
   and optional Git history. Use when a whole repository's knowledge should enter the vault
   or its extraction needs refreshing; use lore-wiki capture for an insight from current work.
 metadata:
-  version: 0.114.0
+  version: 0.115.0
 ---
 
 # Repository knowledge extraction
