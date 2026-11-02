@@ -841,6 +841,19 @@ fn whole_section_action_retention_preserves_pending_and_removes_unreferenced_rec
     assert!(output.status.success());
     assert_eq!(std::fs::read(&before).unwrap(), raw);
     std::fs::remove_file(fixture.root().join("vault/.lorekeeper/queue/source.jsonl")).unwrap();
+    let calls = fixture.calls().len();
+    let output = fixture
+        .command()
+        .args(["queue", "prune", "--dry-run"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("[dry-run] would prune 1 unreferenced whole-section action receipt(s)")
+    );
+    assert_eq!(std::fs::read(&before).unwrap(), raw);
+    assert_eq!(fixture.calls().len(), calls);
     let output = fixture.command().args(["queue", "prune"]).output().unwrap();
     assert!(
         output.status.success(),

@@ -27,6 +27,11 @@ impl PreparedPrune {
                 "pending mutation must be recovered before queue retirement preview"
             ));
         }
+        for (kind, count) in self.removed {
+            if count != 0 {
+                eprintln!("[dry-run] would prune {count} unreferenced {kind}");
+            }
+        }
         Ok(self.summary)
     }
 
@@ -62,14 +67,29 @@ pub(super) fn prepare(root: &Path, queue: &Path) -> miette::Result<PreparedPrune
     let mut complete = true;
     super::rejections::validate_store(root)?;
     for file in super::pending_queue_files(queue)? {
-        let (raw, read) = match lk_queue::read_tasks_snapshot(&file) {
+        let relative = file.strip_prefix(root).into_diagnostic()?.to_path_buf();
+        let full = match lk_vault::page_path(root, &relative) {
+            Ok(full) => full,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error).into_diagnostic(),
+        };
+        let metadata = match std::fs::symlink_metadata(&file) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error).into_diagnostic(),
+        };
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            return Err(miette::miette!(
+                "queue retirement requires direct regular files"
+            ));
+        }
+        let (raw, read) = match lk_queue::read_tasks_snapshot(&full) {
             Ok(snapshot) => snapshot,
             Err(error) => match std::fs::metadata(&file) {
                 Err(missing) if missing.kind() == std::io::ErrorKind::NotFound => continue,
                 _ => return Err(error).into_diagnostic(),
             },
         };
-        let relative = file.strip_prefix(root).into_diagnostic()?.to_path_buf();
         for task in &read.tasks {
             pending.insert((task.task_id.clone(), task.cache_hash.clone()));
         }
@@ -291,6 +311,40 @@ mod tests {
                 "untouched paid bytes\n"
             );
             assert!(!self.root.join(".lorekeeper/mutation/pending.json").exists());
+        }
+    }
+
+    #[test]
+    fn queue_storage_aliases_keep_the_vault_boundary_before_claiming_a_writer() {
+        for external in [false, true] {
+            let fixture = Fixture::new();
+            let outside = tempfile::tempdir().unwrap();
+            let destination = if external {
+                outside.path().join("queue")
+            } else {
+                fixture.root.join("retained-queue")
+            };
+            let queue = fixture.root.join(".lorekeeper/queue");
+            std::fs::rename(&queue, &destination).unwrap();
+            std::os::unix::fs::symlink(&destination, &queue).unwrap();
+            for dry_run in [true, false] {
+                let result = super::super::prune_queue(&fixture.root, &queue, dry_run);
+                if external {
+                    assert!(result.is_err());
+                    assert!(!destination.join(".lock").exists());
+                    assert_eq!(
+                        std::fs::read_to_string(destination.join("run.jsonl")).unwrap(),
+                        fixture.pending
+                    );
+                } else {
+                    assert_eq!(result.unwrap().files_archived, 1);
+                    if dry_run {
+                        assert!(destination.join("run.jsonl").exists());
+                    } else {
+                        fixture.verify();
+                    }
+                }
+            }
         }
     }
 

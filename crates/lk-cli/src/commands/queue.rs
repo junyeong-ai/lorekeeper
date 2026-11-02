@@ -1620,6 +1620,8 @@ fn prune_queue_with_session(
         .strip_prefix(vault_root)
         .map_err(|error| miette::miette!("queue directory is outside its vault: {error}"))?;
     let vault_root = session.map_or(vault_root, lk_vault::MutationSession::root);
+    lk_vault::page_path(vault_root, queue_relative)
+        .map_err(|error| miette::miette!("validate queue storage: {error}"))?;
     let queue_dir = vault_root.join(queue_relative);
     let queue_dir = queue_dir.as_path();
     let dry_run = session.is_none();

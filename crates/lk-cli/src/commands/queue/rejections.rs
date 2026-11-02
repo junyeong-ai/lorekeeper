@@ -349,17 +349,19 @@ pub(super) fn plan_prune(
     let active = active_proposals(&root)?;
     let mut identities = retained.clone();
     let mut plan = lk_vault::MutationPlan::default();
-    let processed = root
-        .join(".lorekeeper/queue")
-        .join(lk_queue::PROCESSED_SUBDIR);
+    let relative = Path::new(".lorekeeper/queue").join(lk_queue::PROCESSED_SUBDIR);
+    lk_vault::page_path(&root, &relative).into_diagnostic()?;
+    let processed = root.join(relative);
     for path in super::pending_queue_files(&processed)? {
+        let relative = path.strip_prefix(&root).into_diagnostic()?;
+        let full = lk_vault::page_path(&root, relative).into_diagnostic()?;
         let metadata = std::fs::symlink_metadata(&path).into_diagnostic()?;
         if !metadata.is_file() || metadata.file_type().is_symlink() {
             return Err(miette::miette!(
                 "retained queue identity requires direct regular files"
             ));
         }
-        let raw = std::fs::read_to_string(&path).into_diagnostic()?;
+        let raw = std::fs::read_to_string(full).into_diagnostic()?;
         for line in raw
             .split('\n')
             .filter(|line| !line.bytes().all(|byte| byte.is_ascii_whitespace()))
@@ -964,6 +966,47 @@ mod tests {
         let session = lk_vault::MutationSession::acquire(&root).unwrap();
         assert_eq!(prune(&root, Some(&session)).unwrap(), 1);
         assert!(!root.join(receipt_path).exists());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn processed_history_cannot_supply_references_from_outside_the_vault() {
+        for external in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let outside = tempfile::tempdir().unwrap();
+            let root = directory.path().canonicalize().unwrap();
+            let task = retained_summary(&root);
+            let mut receipt = receipt();
+            receipt.identity.task_id = task.task_id.clone();
+            receipt.identity.cache_hash = task.cache_hash.clone();
+            let receipt_path = path(&task.task_id, &task.cache_hash).unwrap();
+            let raw = serde_json::to_string(&receipt).unwrap();
+            write(&root, &receipt_path, &raw);
+            let history = serde_json::to_string(&task).unwrap();
+            let destination = if external {
+                outside.path().to_path_buf()
+            } else {
+                root.join("retained-history")
+            };
+            std::fs::create_dir_all(&destination).unwrap();
+            std::fs::write(destination.join("old.jsonl"), &history).unwrap();
+            std::os::unix::fs::symlink(&destination, root.join(".lorekeeper/queue/processed"))
+                .unwrap();
+            let result = plan_prune(&root, Some(&BTreeSet::new()), &mut Default::default());
+            if external {
+                assert!(result.is_err());
+            } else {
+                assert_eq!(result.unwrap(), 0);
+            }
+            assert_eq!(
+                std::fs::read_to_string(root.join(receipt_path)).unwrap(),
+                raw
+            );
+            assert_eq!(
+                std::fs::read_to_string(destination.join("old.jsonl")).unwrap(),
+                history
+            );
+        }
     }
 
     #[test]
