@@ -342,6 +342,8 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   including absence and RSS membership snapshots. Guard only classifications that retire
   work, before destructive queue steps; unrelated retained current pages do not constrain
   cleanup. Share captures only within that preparation, never attach a later read baseline.
+  Discard non-retiring raw snapshots. If a cached revision yields retirement without its
+  read proof, reclassify the whole task from fresh snapshots before creating guards.
   Validate discovery storage containment before enumerating or reading its records.
 - Pending input retains full current typed validation. Processed history protects exact task/cache references through a strict known JSON
   envelope; its unique-key input object is opaque historical data, never current semantic

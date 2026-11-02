@@ -65,7 +65,6 @@ pub(super) fn prepare(root: &Path, queue: &Path) -> miette::Result<PreparedPrune
     let mut changed = BTreeSet::new();
     let mut archives = BTreeSet::new();
     let mut pages = BTreeMap::new();
-    let mut dependencies = BTreeSet::new();
     let mut complete = true;
     for file in super::pending_queue_files(queue)? {
         let relative = file.strip_prefix(root).into_diagnostic()?.to_path_buf();
@@ -105,40 +104,37 @@ pub(super) fn prepare(root: &Path, queue: &Path) -> miette::Result<PreparedPrune
         }
         let raw = String::from_utf8(raw).into_diagnostic()?;
         let mut tasks = Vec::with_capacity(read.tasks.len());
+        let mut done_pages = BTreeMap::new();
         let (mut dropped, mut work_left) = (0, 0);
         for task in read.tasks {
             let valid = task.generation_policy().is_ok() && task.validate_retained_input().is_ok();
-            let status = if valid {
-                let classification =
-                    super::classify_with_reader(root, &task, &mut revisions, &mut |path| {
-                        read_snapshot(root, path, &mut pages)
-                    })?;
-                if matches!(
-                    classification.status,
-                    TaskStatus::Done | TaskStatus::Stale | TaskStatus::MissingTarget
-                ) {
-                    dependencies.extend(classification.dependencies);
-                }
-                classification.status
+            let classification = if valid {
+                classify_for_retirement(root, &task, &mut revisions)?
             } else {
                 complete = false;
-                super::classify_task(root, &task, &mut revisions)?
+                CapturedClassification {
+                    status: super::classify_task(root, &task, &mut revisions)?,
+                    pages: BTreeMap::new(),
+                }
             };
-            match status {
+            match classification.status {
                 TaskStatus::Current => {
                     work_left += 1;
                     summary.kept_current += 1;
                     tasks.push(task);
                 }
                 TaskStatus::Done => {
+                    retain_snapshots(&mut done_pages, classification.pages)?;
                     summary.retired_done += 1;
                     tasks.push(task);
                 }
                 TaskStatus::Stale => {
+                    retain_snapshots(&mut pages, classification.pages)?;
                     summary.pruned_stale += 1;
                     dropped += 1;
                 }
                 TaskStatus::MissingTarget => {
+                    retain_snapshots(&mut pages, classification.pages)?;
                     summary.pruned_missing_target += 1;
                     dropped += 1;
                 }
@@ -148,6 +144,9 @@ pub(super) fn prepare(root: &Path, queue: &Path) -> miette::Result<PreparedPrune
                     tasks.push(task);
                 }
             }
+        }
+        if work_left == 0 {
+            retain_snapshots(&mut pages, done_pages)?;
         }
         for task in &tasks {
             let identity = (task.task_id.clone(), task.cache_hash.clone());
@@ -193,11 +192,8 @@ pub(super) fn prepare(root: &Path, queue: &Path) -> miette::Result<PreparedPrune
         }
     }
     let mut guarded = MutationPlan::default();
-    for path in dependencies {
-        match pages
-            .remove(&path)
-            .ok_or_else(|| miette::miette!("missing queue classification snapshot"))?
-        {
+    for (path, raw) in pages {
+        match raw {
             Some(raw) => guarded.require_unchanged(path, raw),
             None => guarded.require_absent(path),
         }
@@ -243,6 +239,72 @@ pub(super) fn prepare(root: &Path, queue: &Path) -> miette::Result<PreparedPrune
         selection_directories,
         removed,
     })
+}
+
+struct CapturedClassification {
+    status: TaskStatus,
+    pages: BTreeMap<PathBuf, Option<String>>,
+}
+
+fn classify_for_retirement(
+    root: &Path,
+    task: &lk_queue::QueueTask,
+    revisions: &mut BTreeMap<PathBuf, Result<String, TaskStatus>>,
+) -> miette::Result<CapturedClassification> {
+    let mut pages = BTreeMap::new();
+    let mut classification = super::classify_with_reader(root, task, revisions, &mut |path| {
+        read_snapshot(root, path, &mut pages)
+    })?;
+    let retires = |status| {
+        matches!(
+            status,
+            TaskStatus::Done | TaskStatus::Stale | TaskStatus::MissingTarget
+        )
+    };
+    if retires(classification.status)
+        && classification
+            .dependencies
+            .iter()
+            .any(|path| !pages.contains_key(path))
+    {
+        pages.clear();
+        let mut fresh_revisions = BTreeMap::new();
+        classification =
+            super::classify_with_reader(root, task, &mut fresh_revisions, &mut |path| {
+                read_snapshot(root, path, &mut pages)
+            })?;
+        revisions.extend(fresh_revisions);
+    }
+    if retires(classification.status) {
+        pages.retain(|path, _| classification.dependencies.contains(path));
+    } else {
+        pages.clear();
+    }
+    Ok(CapturedClassification {
+        status: classification.status,
+        pages,
+    })
+}
+
+fn retain_snapshots(
+    retained: &mut BTreeMap<PathBuf, Option<String>>,
+    snapshots: BTreeMap<PathBuf, Option<String>>,
+) -> miette::Result<()> {
+    for (path, raw) in snapshots {
+        match retained.entry(path) {
+            std::collections::btree_map::Entry::Occupied(entry) if entry.get() != &raw => {
+                return Err(miette::miette!(
+                    "queue classification inputs changed during retirement: {}",
+                    entry.key().display()
+                ));
+            }
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(raw);
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 fn read_snapshot(
@@ -583,6 +645,72 @@ mod tests {
             std::fs::read_to_string(fixture.root.join(".lorekeeper/queue/current.jsonl")).unwrap(),
             pending
         );
+    }
+
+    #[test]
+    fn cached_stale_source_is_reclassified_before_retirement_gets_a_fresh_guard() {
+        let fixture = Fixture::new();
+        let origin = Path::new("wiki/documents/evidence.md");
+        let original = "---\ntype: document\n---\n## Content\nOriginal evidence.\n";
+        let citation =
+            lk_core::concept::Citation::new(origin, &lk_vault::parse_page(original).unwrap());
+        let task = lk_queue::QueueLlmClient::new(fixture.root.join(".lorekeeper/queue"))
+            .build_task(
+                "retirement",
+                lk_queue::TaskKind::SynthesizeConcept,
+                lk_queue::ConceptSynthesisRequest {
+                    citations: vec![citation],
+                    locale: lk_core::i18n::Locale::En,
+                    related_anchor: Some("## Related Concepts".into()),
+                    target: lk_queue::TaskTarget {
+                        vault_path: "wiki/concepts/topic.md".into(),
+                        kind: lk_queue::TargetKind::ConceptSynthesis,
+                        anchor: "## Synthesis".into(),
+                    },
+                },
+            );
+        fixture.write(Path::new(&task.target.vault_path), &format!("---\ntype: concept\nllm_inputs:\n  synthesis: {}\n---\n## Synthesis\n\n## Related Concepts\n",task.cache_hash));
+        fixture.write(origin, &original.replace("Original", "Changed"));
+        let mut revisions = BTreeMap::from([(
+            origin.to_path_buf(),
+            super::super::read_source_revision(&fixture.root, origin),
+        )]);
+        fixture.write(origin, original);
+        let classification = classify_for_retirement(&fixture.root, &task, &mut revisions).unwrap();
+        assert_eq!(classification.status, TaskStatus::Current);
+        assert!(classification.pages.is_empty());
+    }
+
+    #[test]
+    fn retained_done_rows_do_not_guard_their_pages_when_other_rows_are_pruned() {
+        let fixture = Fixture::new();
+        let done: lk_queue::QueueTask = serde_json::from_str(fixture.pending.trim()).unwrap();
+        let mut current = done.clone();
+        current.task_id.push_str("-current");
+        current.target.vault_path = "wiki/documents/current.md".into();
+        let mut missing = done.clone();
+        missing.task_id.push_str("-missing");
+        missing.target.vault_path = "wiki/documents/missing.md".into();
+        let raw = format!(
+            "---\ntype: document\nllm_inputs:\n  summary: {}\n---\n## Summary\n",
+            current.cache_hash
+        );
+        fixture.write(Path::new(&current.target.vault_path), &raw);
+        fixture.write(
+            Path::new(".lorekeeper/queue/run.jsonl"),
+            &lk_queue::serialize_tasks(&[done.clone(), current.clone(), missing]).unwrap(),
+        );
+        let prepared = fixture.prepare();
+        assert_eq!(prepared.summary.pruned_missing_target, 1);
+        fixture.write(Path::new(&done.target.vault_path), &raw);
+        let session = MutationSession::acquire(&fixture.root).unwrap();
+        prepared.apply(&session).unwrap();
+        let retained =
+            lk_queue::read_tasks(&fixture.root.join(".lorekeeper/queue/run.jsonl")).unwrap();
+        assert_eq!(retained.tasks.len(), 2);
+        assert_eq!(retained.tasks[0].task_id, done.task_id);
+        assert_eq!(retained.tasks[1].task_id, current.task_id);
+        assert!(fixture.root.join(&fixture.action).exists());
     }
 
     #[test]
