@@ -516,6 +516,9 @@ impl MutationSession {
                         let from = self.path(from)?;
                         let to = self.path(to)?;
                         File::open(&from)?.sync_all()?;
+                        if let Some(parent) = to.parent() {
+                            create_directories(parent, &self.root)?;
+                        }
                         fs::rename(&from, &to)?;
                         sync_parent(&from)?;
                         sync_parent(&to)?;
@@ -1453,6 +1456,53 @@ mod tests {
             fs::read_to_string(root.path().join("origin.md")).unwrap(),
             "linked"
         );
+    }
+
+    #[test]
+    fn journaled_rename_prepares_missing_parents_and_preserves_retention_metadata() {
+        for stage in ["fresh", "journaled", "directories", "renamed"] {
+            let root = tempfile::tempdir().unwrap();
+            let from = root.path().join("original.jsonl");
+            let to = root.path().join("processed/nested/archive.jsonl");
+            fs::write(&from, "exact retained history\r\n").unwrap();
+            let modified = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+            File::options()
+                .write(true)
+                .open(&from)
+                .unwrap()
+                .set_times(fs::FileTimes::new().set_modified(modified))
+                .unwrap();
+            let modified = fs::metadata(&from).unwrap().modified().unwrap();
+            let session = MutationSession::acquire(root.path()).unwrap();
+            let mut plan = MutationPlan::default();
+            plan.rename(
+                "original.jsonl",
+                "processed/nested/archive.jsonl",
+                "exact retained history\r\n".into(),
+            );
+            if stage == "fresh" {
+                session.apply(plan).unwrap();
+            } else {
+                session.save(&Journal { version: 1, plan }).unwrap();
+                if matches!(stage, "directories" | "renamed") {
+                    fs::create_dir_all(to.parent().unwrap()).unwrap();
+                }
+                if stage == "renamed" {
+                    fs::rename(&from, &to).unwrap();
+                }
+                drop(session);
+                let _recovered = MutationSession::acquire(root.path()).unwrap();
+            }
+            assert!(!from.exists(), "{stage}");
+            assert_eq!(fs::read(&to).unwrap(), b"exact retained history\r\n");
+            assert_eq!(fs::metadata(&to).unwrap().modified().unwrap(), modified);
+            assert!(
+                !root
+                    .path()
+                    .join(".lorekeeper/mutation/pending.json")
+                    .exists()
+            );
+        }
     }
 
     #[test]

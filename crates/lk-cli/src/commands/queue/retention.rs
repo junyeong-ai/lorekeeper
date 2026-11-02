@@ -142,13 +142,13 @@ pub(super) fn prepare(root: &Path, queue: &Path) -> miette::Result<PreparedPrune
                 .into_diagnostic()?
                 .to_path_buf();
             changed.insert(relative.clone());
-            let after = if dropped == 0 {
-                raw.clone()
+            if dropped == 0 {
+                plan.rename(relative, destination, raw);
             } else {
-                lk_queue::serialize_tasks(&tasks).into_diagnostic()?
-            };
-            plan.create(destination, after);
-            plan.remove(relative, raw);
+                let after = lk_queue::serialize_tasks(&tasks).into_diagnostic()?;
+                plan.rename(relative, destination.clone(), raw.clone());
+                plan.edit(destination, raw, after);
+            }
         } else if dropped != 0 {
             summary.files_rewritten += 1;
             changed.insert(relative.clone());
@@ -211,6 +211,7 @@ mod tests {
         _directory: tempfile::TempDir,
         root: PathBuf,
         pending: String,
+        archived: String,
         action: PathBuf,
     }
 
@@ -242,6 +243,7 @@ mod tests {
             let fixture = Self {
                 _directory: directory,
                 root,
+                archived: pending.clone(),
                 pending,
                 action,
             };
@@ -265,13 +267,24 @@ mod tests {
             prepare(&self.root, &self.root.join(".lorekeeper/queue")).unwrap()
         }
 
+        fn add_missing_task(&mut self) {
+            let mut task: lk_queue::QueueTask = serde_json::from_str(self.pending.trim()).unwrap();
+            self.archived = lk_queue::serialize_tasks(std::slice::from_ref(&task)).unwrap();
+            task.task_id.push_str("-missing");
+            task.target.vault_path = "wiki/documents/deleted.md".into();
+            self.pending
+                .push_str(&serde_json::to_string(&task).unwrap());
+            self.pending.push('\n');
+            self.write(Path::new(".lorekeeper/queue/run.jsonl"), &self.pending);
+        }
+
         fn verify(&self) {
             assert!(!self.root.join(".lorekeeper/queue/run.jsonl").exists());
             assert!(!self.root.join(&self.action).exists());
             assert_eq!(
                 std::fs::read_to_string(self.root.join(".lorekeeper/queue/processed/run.jsonl"))
                     .unwrap(),
-                self.pending
+                self.archived
             );
             assert_eq!(
                 std::fs::read_to_string(self.root.join(".lorekeeper/work/paid/node.json")).unwrap(),
@@ -282,30 +295,87 @@ mod tests {
     }
 
     #[test]
+    fn unchanged_archive_preserves_the_processed_history_retention_clock() {
+        let fixture = Fixture::new();
+        let path = fixture.root.join(".lorekeeper/queue/run.jsonl");
+        let modified = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(modified))
+            .unwrap();
+        let before = std::fs::metadata(path).unwrap().modified().unwrap();
+        let session = MutationSession::acquire(&fixture.root).unwrap();
+        fixture.prepare().apply(&session).unwrap();
+        fixture.verify();
+        assert_eq!(
+            std::fs::metadata(fixture.root.join(".lorekeeper/queue/processed/run.jsonl"))
+                .unwrap()
+                .modified()
+                .unwrap(),
+            before
+        );
+    }
+
+    #[test]
     fn retirement_recovers_every_prepared_prefix_with_exact_archive_and_paid_bytes() {
-        for prefix in 0..=3 {
-            let fixture = Fixture::new();
-            let prepared = fixture.prepare();
-            assert!(prepared.plan.has_changes());
-            let plan = serde_json::to_value(&prepared.plan).unwrap();
-            let steps = plan["steps"].as_array().unwrap();
-            assert_eq!(steps.len(), 3);
-            fixture.write(
-                Path::new(".lorekeeper/mutation/pending.json"),
-                &json!({"version":1, "plan":plan}).to_string(),
-            );
-            for step in &steps[..prefix] {
-                let path = Path::new(step["path"].as_str().unwrap());
-                match step["kind"].as_str().unwrap() {
-                    "create" => fixture.write(path, step["after"].as_str().unwrap()),
-                    "remove" => std::fs::remove_file(fixture.root.join(path)).unwrap(),
-                    _ => panic!("unexpected retirement step"),
+        for rewritten in [false, true] {
+            let count: usize = if rewritten { 3 } else { 2 };
+            for prefix in 0..=count {
+                for completed in BTreeSet::from([prefix.saturating_sub(1), prefix]) {
+                    let mut fixture = Fixture::new();
+                    if rewritten {
+                        fixture.add_missing_task();
+                    }
+                    let prepared = fixture.prepare();
+                    assert!(prepared.plan.has_changes());
+                    let revision = lk_core::concept::file_revision(
+                        &serde_json::to_string(&prepared.plan).unwrap(),
+                    );
+                    let plan = serde_json::to_value(&prepared.plan).unwrap();
+                    let steps = plan["steps"].as_array().unwrap();
+                    assert_eq!(steps.len(), count);
+                    fixture.write(
+                        Path::new(".lorekeeper/mutation/pending.json"),
+                        &json!({"version":1, "plan":plan}).to_string(),
+                    );
+                    if completed != 0 {
+                        let checksum =
+                            lk_core::concept::file_revision(&format!("{revision}:{completed}"));
+                        fixture.write(Path::new(".lorekeeper/mutation/progress.json"), &json!({"plan_revision":revision,"completed":completed,"checksum":checksum}).to_string());
+                    }
+                    for step in &steps[..prefix] {
+                        match step["kind"].as_str().unwrap() {
+                            "rename" => {
+                                let from = fixture.root.join(step["from"].as_str().unwrap());
+                                let to = fixture.root.join(step["to"].as_str().unwrap());
+                                std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+                                std::fs::rename(from, to).unwrap();
+                            }
+                            "edit" => fixture.write(
+                                Path::new(step["path"].as_str().unwrap()),
+                                step["after"].as_str().unwrap(),
+                            ),
+                            "remove" => std::fs::remove_file(
+                                fixture.root.join(step["path"].as_str().unwrap()),
+                            )
+                            .unwrap(),
+                            _ => panic!("unexpected retirement step"),
+                        }
+                    }
+                    let session = MutationSession::acquire(&fixture.root).unwrap();
+                    fixture.verify();
+                    assert!(
+                        !fixture
+                            .root
+                            .join(".lorekeeper/mutation/progress.json")
+                            .exists()
+                    );
+                    assert!(!fixture.prepare().plan.has_changes());
+                    drop(session);
                 }
             }
-            let session = MutationSession::acquire(&fixture.root).unwrap();
-            fixture.verify();
-            assert!(!fixture.prepare().plan.has_changes());
-            drop(session);
         }
     }
 
