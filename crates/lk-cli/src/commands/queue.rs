@@ -1264,17 +1264,20 @@ fn policy_request_status_in_page(
     {
         return None;
     }
-    let inputs = page.frontmatter.get("llm_inputs")?;
+    let inputs = match llm_input_markers(page, task.target.kind) {
+        Ok(inputs) => inputs?,
+        Err(status) => return Some(status),
+    };
     let key = task.target.kind.llm_inputs_key();
     if inputs
-        .get(format!("{key}_policy_requested_input"))
+        .get(&format!("{key}_policy_requested_input"))
         .and_then(|v| v.as_str())
         != Some(&task.cache_hash)
     {
         return None;
     }
     let requested = inputs
-        .get(format!("{key}_policy_requested"))
+        .get(&format!("{key}_policy_requested"))
         .and_then(|v| v.as_str())?;
     if task.generation_policy().ok().flatten() != Some(requested) {
         Some(TaskStatus::Stale)
@@ -2049,6 +2052,36 @@ fn classify_against_page(
     classify_parsed_page(&page, kind, cache_hash, anchors, artifact)
 }
 
+fn llm_input_markers(
+    page: &lk_vault::VaultPage,
+    kind: lk_queue::TargetKind,
+) -> Result<Option<&serde_json::Map<String, serde_json::Value>>, TaskStatus> {
+    let Some(value) = page
+        .frontmatter
+        .get(lk_core::frontmatter::field::LLM_INPUTS)
+        .filter(|value| !value.is_null())
+    else {
+        return Ok(None);
+    };
+    let inputs = value.as_object().ok_or(TaskStatus::Unreadable)?;
+    let key = kind.llm_inputs_key();
+    for marker in [
+        key.to_owned(),
+        kind.completion_key(),
+        format!("{key}_policy_done"),
+        format!("{key}_policy_requested"),
+        format!("{key}_policy_requested_input"),
+    ] {
+        if inputs
+            .get(&marker)
+            .is_some_and(|value| !value.is_null() && !value.is_string())
+        {
+            return Err(TaskStatus::Unreadable);
+        }
+    }
+    Ok(Some(inputs))
+}
+
 /// Shared marker and section classification for task and result readers.
 fn classify_parsed_page(
     page: &lk_vault::VaultPage,
@@ -2065,9 +2098,10 @@ fn classify_parsed_page(
     {
         return Ok(TaskStatus::Unreadable);
     }
-    let llm_inputs = page
-        .frontmatter
-        .get(lk_core::frontmatter::field::LLM_INPUTS);
+    let llm_inputs = match llm_input_markers(page, kind) {
+        Ok(inputs) => inputs,
+        Err(status) => return Ok(status),
+    };
     let field = |key: &str| {
         llm_inputs
             .and_then(|v| v.get(key))
@@ -2620,6 +2654,113 @@ mod tests {
                 assert_eq!(report.files_deleted, 0);
                 assert_eq!(std::fs::read(&pending).unwrap(), before);
                 assert_eq!(std::fs::read_to_string(dir.path().join(path)).unwrap(), raw);
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_input_markers_are_unreadable_for_tasks_and_results() {
+        let dir = TempDir::new().unwrap();
+        let path = Path::new("page.md");
+        for kind in TargetKind::iter() {
+            let key = kind.llm_inputs_key();
+            let mut inputs = vec![
+                serde_json::json!("broken"),
+                serde_json::json!([]),
+                serde_json::json!(false),
+                serde_json::json!(17),
+            ];
+            for marker in [
+                key.to_owned(),
+                kind.completion_key(),
+                format!("{key}_policy_done"),
+                format!("{key}_policy_requested"),
+                format!("{key}_policy_requested_input"),
+            ] {
+                for invalid in [
+                    serde_json::json!([]),
+                    serde_json::json!({}),
+                    serde_json::json!(42),
+                ] {
+                    let mut fields = serde_json::json!({});
+                    fields[key] = "captured".into();
+                    fields[kind.completion_key()] = "captured".into();
+                    fields[marker.clone()] = invalid;
+                    inputs.push(fields);
+                }
+            }
+            for input in inputs {
+                let raw = format!(
+                    "---\ntype: {}\nllm_inputs: {input}\n---\n## Target\n",
+                    kind.page_format()
+                );
+                std::fs::write(dir.path().join(path), raw).unwrap();
+                for artifact in [Artifact::Task, Artifact::Result] {
+                    assert_eq!(
+                        classify_against_page(
+                            dir.path(),
+                            path,
+                            kind,
+                            "captured",
+                            &["## Target"],
+                            artifact
+                        )
+                        .unwrap(),
+                        TaskStatus::Unreadable,
+                        "{kind:?}: {input}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn missing_null_and_unrelated_input_markers_preserve_classification() {
+        for kind in TargetKind::iter() {
+            let key = kind.llm_inputs_key();
+            for (input, task_status) in [
+                (serde_json::Value::Null, TaskStatus::Stale),
+                (serde_json::json!({}), TaskStatus::Stale),
+                (serde_json::json!({key: null}), TaskStatus::Stale),
+                (serde_json::json!({key: "newer"}), TaskStatus::Stale),
+                (
+                    serde_json::json!({key: "captured", "custom": 42}),
+                    TaskStatus::Current,
+                ),
+                (
+                    serde_json::json!({key: "captured", kind.completion_key(): "captured"}),
+                    TaskStatus::Done,
+                ),
+            ] {
+                let raw = format!(
+                    "---\ntype: {}\nllm_inputs: {input}\n---\n## Target\n",
+                    kind.page_format()
+                );
+                let page = lk_core::frontmatter::parse_page(&raw).unwrap();
+                for artifact in [Artifact::Task, Artifact::Result] {
+                    let expected = if matches!(artifact, Artifact::Result)
+                        && task_status == TaskStatus::Done
+                    {
+                        TaskStatus::Current
+                    } else {
+                        task_status
+                    };
+                    assert_eq!(
+                        classify_parsed_page(&page, kind, "captured", &["## Target"], artifact)
+                            .unwrap(),
+                        expected,
+                        "{kind:?}: {input}"
+                    );
+                }
+                let mut page = page;
+                page.frontmatter
+                    .fields
+                    .remove(lk_core::frontmatter::field::LLM_INPUTS);
+                assert_eq!(
+                    classify_parsed_page(&page, kind, "captured", &["## Target"], Artifact::Task)
+                        .unwrap(),
+                    TaskStatus::Stale
+                );
             }
         }
     }

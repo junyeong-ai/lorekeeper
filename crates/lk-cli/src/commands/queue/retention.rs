@@ -56,6 +56,19 @@ impl PreparedPrune {
 }
 
 pub(super) fn prepare(root: &Path, queue: &Path) -> miette::Result<PreparedPrune> {
+    prepare_with_classifier(root, queue, &mut |task, revisions| {
+        classify_for_retirement(root, task, revisions)
+    })
+}
+
+fn prepare_with_classifier(
+    root: &Path,
+    queue: &Path,
+    classify: &mut impl FnMut(
+        &lk_queue::QueueTask,
+        &mut BTreeMap<PathBuf, Result<String, TaskStatus>>,
+    ) -> miette::Result<CapturedClassification>,
+) -> miette::Result<PreparedPrune> {
     let mut summary = PruneSummary::default();
     let mut plan = MutationPlan::default();
     let mut revisions = BTreeMap::new();
@@ -104,12 +117,12 @@ pub(super) fn prepare(root: &Path, queue: &Path) -> miette::Result<PreparedPrune
         }
         let raw = String::from_utf8(raw).into_diagnostic()?;
         let mut tasks = Vec::with_capacity(read.tasks.len());
-        let mut done_pages = BTreeMap::new();
+        let mut done_pages = Ok(BTreeMap::new());
         let (mut dropped, mut work_left) = (0, 0);
         for task in read.tasks {
             let valid = task.generation_policy().is_ok() && task.validate_retained_input().is_ok();
             let classification = if valid {
-                classify_for_retirement(root, &task, &mut revisions)?
+                classify(&task, &mut revisions)?
             } else {
                 complete = false;
                 CapturedClassification {
@@ -124,17 +137,22 @@ pub(super) fn prepare(root: &Path, queue: &Path) -> miette::Result<PreparedPrune
                     tasks.push(task);
                 }
                 TaskStatus::Done => {
-                    retain_snapshots(&mut done_pages, classification.pages)?;
+                    done_pages = done_pages.and_then(|mut pages| {
+                        retain_snapshots(&mut pages, classification.pages)?;
+                        Ok(pages)
+                    });
                     summary.retired_done += 1;
                     tasks.push(task);
                 }
                 TaskStatus::Stale => {
-                    retain_snapshots(&mut pages, classification.pages)?;
+                    retain_snapshots(&mut pages, classification.pages)
+                        .map_err(classification_drift)?;
                     summary.pruned_stale += 1;
                     dropped += 1;
                 }
                 TaskStatus::MissingTarget => {
-                    retain_snapshots(&mut pages, classification.pages)?;
+                    retain_snapshots(&mut pages, classification.pages)
+                        .map_err(classification_drift)?;
                     summary.pruned_missing_target += 1;
                     dropped += 1;
                 }
@@ -146,7 +164,8 @@ pub(super) fn prepare(root: &Path, queue: &Path) -> miette::Result<PreparedPrune
             }
         }
         if work_left == 0 {
-            retain_snapshots(&mut pages, done_pages)?;
+            retain_snapshots(&mut pages, done_pages.map_err(classification_drift)?)
+                .map_err(classification_drift)?;
         }
         for task in &tasks {
             let identity = (task.task_id.clone(), task.cache_hash.clone());
@@ -289,14 +308,11 @@ fn classify_for_retirement(
 fn retain_snapshots(
     retained: &mut BTreeMap<PathBuf, Option<String>>,
     snapshots: BTreeMap<PathBuf, Option<String>>,
-) -> miette::Result<()> {
+) -> Result<(), PathBuf> {
     for (path, raw) in snapshots {
         match retained.entry(path) {
             std::collections::btree_map::Entry::Occupied(entry) if entry.get() != &raw => {
-                return Err(miette::miette!(
-                    "queue classification inputs changed during retirement: {}",
-                    entry.key().display()
-                ));
+                return Err(entry.key().clone());
             }
             std::collections::btree_map::Entry::Vacant(entry) => {
                 entry.insert(raw);
@@ -305,6 +321,13 @@ fn retain_snapshots(
         }
     }
     Ok(())
+}
+
+fn classification_drift(path: PathBuf) -> miette::Report {
+    miette::miette!(
+        "queue classification inputs changed during retirement: {}",
+        path.display()
+    )
 }
 
 fn read_snapshot(
@@ -711,6 +734,149 @@ mod tests {
         assert_eq!(retained.tasks[0].task_id, done.task_id);
         assert_eq!(retained.tasks[1].task_id, current.task_id);
         assert!(fixture.root.join(&fixture.action).exists());
+    }
+
+    #[test]
+    fn malformed_markers_preserve_pending_requests_and_action_bytes() {
+        let fixture = Fixture::new();
+        let task: lk_queue::QueueTask = serde_json::from_str(fixture.pending.trim()).unwrap();
+        for inputs in [
+            json!("broken"),
+            json!([]),
+            json!({"summary": 42}),
+            json!({"summary": "other", "summary_done": []}),
+            json!({"summary_policy_requested_input": 42}),
+            json!({"summary": task.cache_hash, "summary_done": [], "summary_policy_requested_input": task.cache_hash, "summary_policy_requested": "changed-policy"}),
+        ] {
+            let raw = format!("---\ntype: document\nllm_inputs: {inputs}\n---\n## Summary\n");
+            let target = Path::new("wiki/documents/source.md");
+            fixture.write(target, &raw);
+            let action = std::fs::read(fixture.root.join(&fixture.action)).unwrap();
+            for dry_run in [true, false] {
+                let summary = super::super::prune_queue(
+                    &fixture.root,
+                    &fixture.root.join(".lorekeeper/queue"),
+                    dry_run,
+                )
+                .unwrap();
+                assert_eq!(summary.kept_unreadable, 1, "{inputs}");
+                assert_eq!(summary.pruned_stale, 0);
+                assert_eq!(summary.files_archived, 0);
+                assert_eq!(
+                    std::fs::read_to_string(fixture.root.join(".lorekeeper/queue/run.jsonl"))
+                        .unwrap(),
+                    fixture.pending
+                );
+                assert_eq!(
+                    std::fs::read(fixture.root.join(&fixture.action)).unwrap(),
+                    action
+                );
+                assert_eq!(
+                    std::fs::read_to_string(fixture.root.join(target)).unwrap(),
+                    raw
+                );
+                assert_eq!(
+                    std::fs::read_to_string(fixture.root.join(".lorekeeper/work/paid/node.json"))
+                        .unwrap(),
+                    "untouched paid bytes\n"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn retained_done_capture_conflicts_do_not_block_independent_retirement() {
+        for mixed in [true, false] {
+            for preview in [true, false] {
+                let fixture = Fixture::new();
+                let first: lk_queue::QueueTask =
+                    serde_json::from_str(fixture.pending.trim()).unwrap();
+                let mut second = first.clone();
+                second.task_id.push_str("-second");
+                let mut missing = first.clone();
+                missing.task_id.push_str("-missing");
+                missing.target.vault_path = "wiki/documents/missing.md".into();
+                let mut tasks = vec![first.clone(), second, missing];
+                if mixed {
+                    let mut current = first.clone();
+                    current.task_id.push_str("-current");
+                    current.target.vault_path = "wiki/documents/current.md".into();
+                    fixture.write(
+                        Path::new(&current.target.vault_path),
+                        &format!(
+                            "---\ntype: document\nllm_inputs: {{summary: {}}}\n---\n## Summary\n",
+                            current.cache_hash
+                        ),
+                    );
+                    tasks.push(current);
+                }
+                let pending = lk_queue::serialize_tasks(&tasks).unwrap();
+                fixture.write(Path::new(".lorekeeper/queue/run.jsonl"), &pending);
+                let action = std::fs::read(fixture.root.join(&fixture.action)).unwrap();
+                let target = Path::new(&first.target.vault_path);
+                let edited = format!(
+                    "{}Authored addition.\n",
+                    std::fs::read_to_string(fixture.root.join(target)).unwrap()
+                );
+                let prepared = prepare_with_classifier(
+                    &fixture.root,
+                    &fixture.root.join(".lorekeeper/queue"),
+                    &mut |task, revisions| {
+                        let classification =
+                            classify_for_retirement(&fixture.root, task, revisions)?;
+                        if task.task_id == first.task_id {
+                            fixture.write(target, &edited);
+                        }
+                        Ok(classification)
+                    },
+                );
+                if !mixed {
+                    assert!(
+                        prepared.is_err(),
+                        "archival must reject conflicting evidence"
+                    );
+                    assert_eq!(
+                        std::fs::read_to_string(fixture.root.join(".lorekeeper/queue/run.jsonl"))
+                            .unwrap(),
+                        pending
+                    );
+                    continue;
+                }
+                let prepared = prepared.unwrap();
+                assert_eq!(prepared.summary.pruned_missing_target, 1);
+                if preview {
+                    prepared.preview().unwrap();
+                    assert_eq!(
+                        std::fs::read_to_string(fixture.root.join(".lorekeeper/queue/run.jsonl"))
+                            .unwrap(),
+                        pending
+                    );
+                } else {
+                    let session = MutationSession::acquire(&fixture.root).unwrap();
+                    prepared.apply(&session).unwrap();
+                    tasks.remove(2);
+                    assert_eq!(
+                        std::fs::read_to_string(fixture.root.join(".lorekeeper/queue/run.jsonl"))
+                            .unwrap(),
+                        lk_queue::serialize_tasks(&tasks).unwrap()
+                    );
+                }
+                assert_eq!(
+                    std::fs::read_to_string(fixture.root.join(target)).unwrap(),
+                    edited
+                );
+                assert_eq!(
+                    std::fs::read(fixture.root.join(&fixture.action)).unwrap(),
+                    action
+                );
+                assert!(
+                    !fixture
+                        .root
+                        .join(".lorekeeper/mutation/pending.json")
+                        .exists()
+                );
+            }
+        }
     }
 
     #[test]

@@ -344,6 +344,8 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   cleanup. Share captures only within that preparation, never attach a later read baseline.
   Discard non-retiring raw snapshots. If a cached revision yields retirement without its
   read proof, reclassify the whole task from fresh snapshots before creating guards.
+  Completed rows retained in a mixed pending file do not constrain retirement; validate
+  their captured consistency only when that file is actually archived.
   Validate discovery storage containment before enumerating or reading its records.
 - Pending input retains full current typed validation. Processed history protects exact task/cache references through a strict known JSON
   envelope; its unique-key input object is opaque historical data, never current semantic
@@ -514,6 +516,8 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
 - The shared typed classifier owns current/stale/done/unreadable decisions. Validate
   input kind/policy, target revisions, and synthesis citation guards. Missing or
   unreadable evidence is not a stale task that can safely disappear.
+  Malformed target-owned input/completion/policy markers are unreadable, never evidence
+  of supersession. Absent/null markers retain their existing absence meaning.
 - Queue counts describe current work, not raw lines. Prune only eligible dead work,
   remove empty files, archive all-done files, preserve unreadable/unparseable data.
   A file with unparseable lines is not rewritable. Use the shared queue reader and
