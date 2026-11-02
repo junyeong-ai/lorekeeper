@@ -14,6 +14,12 @@ Only `lore queue prune` retires queue files after classification. It removes sta
 and missing-target tasks, archives a run whose remaining tasks are done, and
 preserves unfinished or blocked work.
 
+Preview with `lore queue prune --dry-run --json`. Queue retirement and related
+receipt cleanup are validated before one recoverable publication; a failed preview
+does not authorize manual deletion. Processed history preserves references through its strict task envelope without
+interpreting the old input as a current request. This does not make it runnable.
+Never fill a missing policy, rehash history or rewrite its original bytes.
+
 On failure, retain the queue file and report the task ID and error. Apply may have
 published other valid results before returning nonzero: inspect status, remaining
 results and quarantine before retrying. Reclassify the retained file and skip

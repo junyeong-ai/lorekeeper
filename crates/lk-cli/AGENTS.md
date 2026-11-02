@@ -242,6 +242,10 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   TaskResult/SynthesisResult metadata from the exact prepared scope, reserves envelope
   bytes and owns finish/staging. Models return semantic values, needs-action, or
   extraction-only needs-discovery with explicit DiscoveryQuery values.
+- Section instructions follow the typed input form: whole-input requests read retained
+  resources directly; bounded finalizers compose completed observations and their evidence
+  mapping. Neither representation may claim the other is supplied. Both retain complete
+  input bounds, scoped review requirements and native publication ownership.
 - Discovery recovery journals the legacy recipe and native request-bound sidecar
   together under vault→queue claims. Preserve exact current Source Work; changed
   knowledge scope replans without retagging paid nodes. Recovery is incomplete; exact
@@ -327,6 +331,18 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   and saved Work remain unchanged. Exact request-bound action receipts suppress
   unchanged native calls; unknown/corrupt state refuses and pending identities protect
   receipts from pruning.
+
+## Queue retirement
+
+- Prepare queue retirement and related rejection/action/discovery/selection cleanup before
+  publishing one guarded mutation plan. Preview validates the same plan without recovery
+  or canonical writes. Skip guard-only journals; empty selection-directory cleanup follows
+  successful publication and can resume separately.
+- Pending input retains full current typed validation. Processed history protects exact task/cache references through a strict known JSON
+  envelope; its unique-key input object is opaque historical data, never current semantic
+  authority. Do not reconstruct it with today's request, supply a policy, rehash, rewrite or
+  publish it. Unknown envelopes, duplicate fields and unreadable records refuse cleanup. Preserve original history bytes and live
+  staged references; a missing historical field never grants current semantic authority.
 
 ## Native queue scheduling
 

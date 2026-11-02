@@ -65,11 +65,11 @@ pub(super) fn retire(
     Ok(())
 }
 
-pub(super) fn prune(
-    session: &lk_vault::MutationSession,
+pub(super) fn plan_prune(
+    root: &Path,
     pending: &std::collections::BTreeSet<(String, String)>,
+    plan: &mut lk_vault::MutationPlan,
 ) -> miette::Result<usize> {
-    let root = session.root();
     let queue = root.join(".lorekeeper/queue");
     let directory = queue.join("discovery");
     let entries = match std::fs::read_dir(&directory) {
@@ -82,7 +82,6 @@ pub(super) fn prune(
         }
     };
     let mut removed = 0;
-    let mut plan = lk_vault::MutationPlan::default();
     for entry in entries {
         let entry = entry.into_diagnostic()?;
         if entry
@@ -90,7 +89,7 @@ pub(super) fn prune(
             .to_str()
             .is_some_and(|name| name.ends_with(".recovery.json"))
         {
-            removed += usize::from(recovery::prune_entry(root, &entry, pending, &mut plan)?);
+            removed += usize::from(recovery::prune_entry(root, &entry, pending, plan)?);
             continue;
         }
         if !entry.file_type().into_diagnostic()?.is_file()
@@ -118,6 +117,16 @@ pub(super) fn prune(
         plan.remove(path(&record.task_id), raw);
         removed += 1;
     }
+    Ok(removed)
+}
+
+#[cfg(test)]
+fn prune(
+    session: &lk_vault::MutationSession,
+    pending: &std::collections::BTreeSet<(String, String)>,
+) -> miette::Result<usize> {
+    let mut plan = lk_vault::MutationPlan::default();
+    let removed = plan_prune(session.root(), pending, &mut plan)?;
     if removed != 0 {
         session.apply(plan).into_diagnostic()?;
     }

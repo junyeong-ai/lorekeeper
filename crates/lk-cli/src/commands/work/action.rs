@@ -87,13 +87,14 @@ impl Store {
         Ok(action)
     }
 
-    pub fn prune(
+    pub fn plan_prune(
         &self,
-        session: &lk_vault::MutationSession,
+        root: &Path,
         pending: &std::collections::BTreeSet<(String, String)>,
+        mutation: &mut lk_vault::MutationPlan,
     ) -> miette::Result<usize> {
         let directory = Path::new(self.directory);
-        let absolute = lk_vault::page_path(session.root(), directory).into_diagnostic()?;
+        let absolute = lk_vault::page_path(root, directory).into_diagnostic()?;
         match std::fs::symlink_metadata(&absolute) {
             Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
             Ok(_) => {
@@ -117,10 +118,12 @@ impl Store {
             if !pending.contains(&(action.task_id, action.cache_hash)) {
                 plan.remove(path, raw);
                 removed += 1;
+            } else {
+                plan.require_unchanged(path, raw);
             }
         }
         if removed != 0 {
-            session.apply(plan).into_diagnostic()?;
+            mutation.extend(plan);
         }
         Ok(removed)
     }

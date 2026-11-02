@@ -629,18 +629,29 @@ pub(super) fn retire_discovery(
     discovery::retire(root, task, plan)
 }
 
-pub(super) fn prune_discovery(
-    session: &lk_vault::MutationSession,
+pub(super) fn plan_prune_discovery(
+    root: &Path,
     pending: &std::collections::BTreeSet<(String, String)>,
+    plan: &mut lk_vault::MutationPlan,
 ) -> miette::Result<usize> {
-    discovery::prune(session, pending)
+    discovery::plan_prune(root, pending, plan)
 }
 
-pub(super) fn prune_selection(
-    session: &lk_vault::MutationSession,
+pub(super) fn plan_prune_selection(
+    root: &Path,
     pending: &std::collections::BTreeSet<(String, String)>,
-) -> miette::Result<usize> {
-    selection::prune(session, pending)
+    retained: &std::collections::BTreeSet<(String, String)>,
+    changed_queue_files: &std::collections::BTreeSet<PathBuf>,
+    plan: &mut lk_vault::MutationPlan,
+) -> miette::Result<selection::PreparedSelectionPrune> {
+    selection::plan_prune(root, pending, retained, changed_queue_files, plan)
+}
+
+pub(super) fn cleanup_selection_directories(
+    root: &Path,
+    directories: &[PathBuf],
+) -> miette::Result<()> {
+    selection::cleanup_directories(root, directories)
 }
 
 pub(super) fn needs_discovery(

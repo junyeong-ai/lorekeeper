@@ -33,11 +33,12 @@ fn read_action(
 ) -> miette::Result<Option<(String, Action)>> {
     SECTION.read(root, task_id, cache_hash)
 }
-pub(in crate::commands) fn prune(
-    session: &lk_vault::MutationSession,
+pub(in crate::commands) fn plan_prune(
+    root: &Path,
     pending: &std::collections::BTreeSet<(String, String)>,
+    plan: &mut lk_vault::MutationPlan,
 ) -> miette::Result<usize> {
-    SECTION.prune(session, pending)
+    SECTION.plan_prune(root, pending, plan)
 }
 
 pub(in crate::commands) fn prepare(

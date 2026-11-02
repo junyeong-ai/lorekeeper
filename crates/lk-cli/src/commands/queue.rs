@@ -4,6 +4,7 @@ mod packet;
 pub(super) mod readiness;
 mod regenerate;
 pub(super) mod rejections;
+mod retention;
 mod synthesis;
 
 use std::collections::BTreeMap;
@@ -1366,9 +1367,17 @@ fn quarantine(corrupt_dir: &Path, unreadable: &[(PathBuf, String)], dry_run: boo
 /// quarantined result is evidence, an archived run is a record — so neither may overwrite
 /// an earlier file that happens to share a name.
 fn free_path(dir: &Path, source: &Path) -> PathBuf {
+    free_path_avoiding(dir, source, &Default::default())
+}
+
+fn free_path_avoiding(
+    dir: &Path,
+    source: &Path,
+    reserved: &std::collections::BTreeSet<PathBuf>,
+) -> PathBuf {
     let name = source.file_name().unwrap_or(source.as_os_str());
     let candidate = dir.join(name);
-    if !candidate.exists() {
+    if !candidate.exists() && !reserved.contains(&candidate) {
         return candidate;
     }
     let stem = source.file_stem().unwrap_or(name).to_string_lossy();
@@ -1378,7 +1387,7 @@ fn free_path(dir: &Path, source: &Path) -> PathBuf {
         .unwrap_or_default();
     (1u32..)
         .map(|n| dir.join(format!("{stem}.{n}{ext}")))
-        .find(|p| !p.exists())
+        .find(|p| !p.exists() && !reserved.contains(p))
         .expect("an unused suffix always exists")
 }
 
@@ -1592,8 +1601,8 @@ struct PruneSummary {
 /// `processed/` as it stands — so the two agree on what a finished run looks like.
 ///
 /// A file with nothing retained held only dead tasks, so it never edited a page and there
-/// is nothing to archive; it is deleted. Rewrites go through `lk_queue::write_tasks_atomic`
-/// (temp + fsync + rename), and a file needing no change stays byte-identical.
+/// is nothing to archive; it is deleted. Queue and sidecar retirement share one guarded
+/// journal prepared before mutation; unchanged files remain byte-identical.
 fn prune_queue(vault_root: &Path, queue_dir: &Path, dry_run: bool) -> miette::Result<PruneSummary> {
     let session = (!dry_run)
         .then(|| crate::commands::publication::acquire_mutation_now(vault_root))
@@ -1615,153 +1624,11 @@ fn prune_queue_with_session(
     let queue_dir = queue_dir.as_path();
     let dry_run = session.is_none();
     let _claim = claim_writer(queue_dir, dry_run)?;
-    rejections::validate_store(vault_root)?;
-    let mut revisions = BTreeMap::new();
-    let mut summary = PruneSummary::default();
-    for file in pending_queue_files(queue_dir)? {
-        let read = match read_tasks(&file) {
-            Ok(read) => read,
-            Err(error) => match std::fs::metadata(&file) {
-                Err(io_error) if io_error.kind() == std::io::ErrorKind::NotFound => continue,
-                _ => return Err(error),
-            },
-        };
-        // A file holding a line nobody can parse keeps every line: rewriting it would drop
-        // work nothing could classify. Its own GC waits for a human; the rest proceeds.
-        //
-        // The tasks held with it are counted, because what is stuck is what a reader needs —
-        // and counted as blocked rather than under their classification, because nothing here
-        // acted on it.
-        if !read.is_rewritable() {
-            summary.kept_unparseable += read.unparseable;
-            summary.kept_blocked += read.tasks.len();
-            continue;
-        }
-        let tasks = read.tasks;
-        let mut retained = Vec::with_capacity(tasks.len());
-        let (mut dropped, mut work_left) = (0usize, 0usize);
-        for task in tasks {
-            match classify_task(vault_root, &task, &mut revisions)? {
-                TaskStatus::Current => {
-                    work_left += 1;
-                    summary.kept_current += 1;
-                    retained.push(task);
-                }
-                TaskStatus::Done => {
-                    summary.retired_done += 1;
-                    retained.push(task);
-                }
-                TaskStatus::Stale => {
-                    summary.pruned_stale += 1;
-                    dropped += 1;
-                }
-                TaskStatus::MissingTarget => {
-                    summary.pruned_missing_target += 1;
-                    dropped += 1;
-                }
-                TaskStatus::Unreadable => {
-                    // Counted as work LEFT, not merely retained. Retiring a run is for one whose
-                    // every remaining task is ANSWERED; an unreadable task is not answered, and
-                    // archiving it puts it where nothing will ever reclassify it — so the repair
-                    // this status exists to wait for could never bring it back.
-                    work_left += 1;
-                    summary.kept_unreadable += 1;
-                    retained.push(task);
-                }
-            }
-        }
-
-        if retained.is_empty() {
-            // Nothing worth keeping: only dead tasks, or none at all. Either way the run
-            // never edited a page, so there is no record to archive — and leaving it would
-            // keep `lore ingest` warning about pending work no session will ever do.
-            summary.files_deleted += 1;
-            if !dry_run {
-                std::fs::remove_file(&file)
-                    .map_err(|e| miette::miette!("remove {}: {e}", file.display()))?;
-            }
-        } else if work_left == 0 {
-            // Archive before rewriting so a failed rewrite retains the complete run history.
-            summary.files_archived += 1;
-            if !dry_run
-                && let Some(archived) = archive_queue_file(queue_dir, &file)?
-                && dropped > 0
-            {
-                lk_queue::write_tasks_atomic(&archived, &retained)
-                    .map_err(|e| miette::miette!("rewrite {}: {e}", archived.display()))?;
-            }
-        } else if dropped > 0 {
-            summary.files_rewritten += 1;
-            if !dry_run {
-                lk_queue::write_tasks_atomic(&file, &retained)
-                    .map_err(|e| miette::miette!("rewrite {}: {e}", file.display()))?;
-            }
-        }
-    }
-    let removed = rejections::prune(vault_root, session)?;
-    if removed != 0 {
-        eprintln!(
-            "{}pruned {removed} unreferenced queue rejection receipt(s)",
-            if dry_run { "[dry-run] " } else { "" }
-        );
-    }
+    let prepared = retention::prepare(vault_root, queue_dir)?;
     if let Some(session) = session {
-        let mut identities = std::collections::BTreeSet::new();
-        let mut complete = true;
-        for path in pending_queue_files(queue_dir)? {
-            let pending = match read_tasks(&path) {
-                Ok(pending) => pending,
-                Err(error) => match std::fs::metadata(&path) {
-                    Err(io_error) if io_error.kind() == std::io::ErrorKind::NotFound => continue,
-                    _ => return Err(error),
-                },
-            };
-            if !pending.is_rewritable() {
-                complete = false;
-                break;
-            }
-            identities.extend(
-                pending
-                    .tasks
-                    .into_iter()
-                    .map(|task| (task.task_id, task.cache_hash)),
-            );
-        }
-        if complete {
-            #[cfg(unix)]
-            {
-                let removed = super::work::section::prune(session, &identities)?;
-                if removed != 0 {
-                    eprintln!("pruned {removed} unreferenced whole-section action receipt(s)");
-                }
-                let removed = super::work::generation::prune(session, &identities)?;
-                if removed != 0 {
-                    eprintln!("pruned {removed} unreferenced native result action receipt(s)");
-                }
-            }
-            let removed = super::work::prune_discovery(session, &identities)?;
-            if removed != 0 {
-                eprintln!("pruned {removed} unreferenced extraction discovery recipe(s)");
-            }
-            let removed = super::work::prune_selection(session, &identities)?;
-            if removed != 0 {
-                eprintln!("pruned {removed} unreferenced extraction selection ledger(s)");
-            }
-        }
-    }
-    Ok(summary)
-}
-
-/// Archive a settled run under the queue writer lock, preserving earlier archive names.
-/// A missing source has already been retired; other filesystem failures are reported.
-fn archive_queue_file(queue_dir: &Path, file: &Path) -> miette::Result<Option<PathBuf>> {
-    let dir = queue_dir.join(lk_queue::PROCESSED_SUBDIR);
-    std::fs::create_dir_all(&dir).map_err(|e| miette::miette!("create {}: {e}", dir.display()))?;
-    let dest = free_path(&dir, file);
-    match std::fs::rename(file, &dest) {
-        Ok(()) => Ok(Some(dest)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(miette::miette!("archive {}: {e}", file.display())),
+        prepared.apply(session)
+    } else {
+        prepared.preview()
     }
 }
 
@@ -2002,15 +1869,23 @@ fn classify_task(
     task: &QueueTask,
     revisions: &mut BTreeMap<PathBuf, Result<String, TaskStatus>>,
 ) -> miette::Result<TaskStatus> {
-    // A target outside the vault root is a task that can never land, which is exactly what
-    // `MissingTarget` means — and the answer has to be a status rather than an error, or one
-    // malformed task takes down every command that classifies the queue.
-    let Some(rel_path) = resolve_target_path(&task.target.vault_path) else {
+    if resolve_target_path(&task.target.vault_path).is_none() {
         return Ok(TaskStatus::MissingTarget);
-    };
+    }
     if task.generation_policy().is_err() || task.validate_retained_input().is_err() {
         return Ok(TaskStatus::Unreadable);
     }
+    classify_validated_task(vault_root, task, revisions)
+}
+
+fn classify_validated_task(
+    vault_root: &Path,
+    task: &QueueTask,
+    revisions: &mut BTreeMap<PathBuf, Result<String, TaskStatus>>,
+) -> miette::Result<TaskStatus> {
+    let Some(rel_path) = resolve_target_path(&task.target.vault_path) else {
+        return Ok(TaskStatus::MissingTarget);
+    };
     if let Some(status) = policy_request_status(vault_root, task) {
         return Ok(status);
     }
@@ -3043,41 +2918,58 @@ mod tests {
         );
     }
 
-    /// The archive is a record. A drain retiring a run of the same name must not have its
-    /// file replaced, and a drain that already moved THIS file is the outcome prune wanted.
     #[test]
-    fn archiving_never_overwrites_and_never_fails_on_an_already_retired_run() {
+    fn planned_archives_preserve_occupied_names_and_each_other() {
         let dir = TempDir::new().unwrap();
-        let queue_dir = dir.path().join(".lorekeeper").join("queue");
+        let queue_dir = dir.path().join(".lorekeeper/queue");
         let processed = queue_dir.join(lk_queue::PROCESSED_SUBDIR);
         std::fs::create_dir_all(&processed).unwrap();
-        std::fs::write(processed.join("run-1.jsonl"), "earlier run\n").unwrap();
-
-        let file = queue_dir.join("run-1.jsonl");
-        std::fs::write(&file, "later run\n").unwrap();
+        std::fs::write(processed.join("run.jsonl"), "earlier run\n").unwrap();
+        let mut before = Vec::new();
+        for file in ["run.jsonl", "run.1.jsonl"] {
+            write_page(
+                dir.path(),
+                "daily/s/2026-05-23.md",
+                &format!(
+                    "llm_inputs:\n  summary: {}\n  summary_done: {}\n",
+                    summary_hash("live"),
+                    summary_hash("live")
+                ),
+            );
+            let path = write_queue_file(&queue_dir, file, &[task("daily/s/2026-05-23.md", "live")]);
+            before.push(std::fs::read_to_string(path).unwrap());
+        }
         assert_eq!(
-            archive_queue_file(&queue_dir, &file).unwrap(),
-            Some(processed.join("run-1.1.jsonl")),
-            "it must report where the run landed"
+            prune_queue(dir.path(), &queue_dir, true)
+                .unwrap()
+                .files_archived,
+            2
+        );
+        assert!(!processed.join("run.1.jsonl").exists());
+        assert_eq!(
+            prune_queue(dir.path(), &queue_dir, false)
+                .unwrap()
+                .files_archived,
+            2
         );
         assert_eq!(
-            std::fs::read_to_string(processed.join("run-1.jsonl")).unwrap(),
-            "earlier run\n",
-            "the earlier record must survive"
+            std::fs::read_to_string(processed.join("run.jsonl")).unwrap(),
+            "earlier run\n"
         );
+        let mut archived = std::fs::read_dir(&processed)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.file_name().unwrap() != "run.jsonl")
+            .map(|path| std::fs::read_to_string(path).unwrap())
+            .collect::<Vec<_>>();
+        before.sort();
+        archived.sort();
+        assert_eq!(archived, before);
         assert_eq!(
-            std::fs::read_to_string(processed.join("run-1.1.jsonl")).unwrap(),
-            "later run\n",
-            "and the later one keeps its extension"
-        );
-
-        // Already gone: a drain retired it between the scan and here. Reporting no
-        // destination is what stops the caller writing back to the pending path, which an
-        // atomic write would RECREATE — leaving two archive records for one run.
-        assert_eq!(
-            archive_queue_file(&queue_dir, &queue_dir.join("never-existed.jsonl"))
-                .expect("a vanished source is the outcome this wanted"),
-            None
+            prune_queue(dir.path(), &queue_dir, false)
+                .unwrap()
+                .files_archived,
+            0
         );
     }
 

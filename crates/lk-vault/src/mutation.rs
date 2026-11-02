@@ -80,6 +80,10 @@ impl Progress {
 }
 
 impl MutationPlan {
+    pub fn has_changes(&self) -> bool {
+        self.steps.iter().any(|step| !step.is_guard())
+    }
+
     /// Check publication address ownership without publishing or recovering a plan.
     /// Missing names are tested in disposable directory-only probes on their target filesystem.
     pub fn validate_addresses(&self, root: &Path) -> Result<(), VaultError> {

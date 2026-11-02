@@ -1107,7 +1107,9 @@ struct QueueReferences {
 fn retained_queue_references(
     root: &Path,
     pending: &BTreeSet<(String, String)>,
+    retained_pending: &BTreeSet<(String, String)>,
 ) -> miette::Result<QueueReferences> {
+    let mut observed = BTreeSet::new();
     let mut retained = BTreeSet::new();
     let mut snapshots = BTreeMap::new();
     for (directory, extension, staged) in [
@@ -1160,13 +1162,17 @@ fn retained_queue_references(
                             "pending queue identities changed during selection retention",
                         ));
                     }
-                    retained.insert((task.task_id, task.cache_hash));
+                    let key = (task.task_id, task.cache_hash);
+                    observed.insert(key.clone());
+                    if retained_pending.contains(&key) {
+                        retained.insert(key);
+                    }
                 }
             }
             snapshots.insert(path, raw);
         }
     }
-    if !pending.is_subset(&retained) {
+    if !pending.is_subset(&observed) {
         return Err(fail(
             "pending queue reference disappeared during selection retention",
         ));
@@ -1204,19 +1210,32 @@ fn require_directory_identity(name: &std::ffi::OsStr) -> miette::Result<()> {
 }
 
 /// The caller holds the queue claim inside its mutation session. Unknown state refuses cleanup.
-pub(super) fn prune(
-    session: &MutationSession,
+pub(in crate::commands) struct PreparedSelectionPrune {
+    pub removed: usize,
+    pub directories: Vec<PathBuf>,
+}
+
+pub(super) fn plan_prune(
+    root: &Path,
     pending: &BTreeSet<(String, String)>,
-) -> miette::Result<usize> {
-    let root = session.root();
-    require_settled(root)?;
+    retained_pending: &BTreeSet<(String, String)>,
+    changed_queue_files: &BTreeSet<PathBuf>,
+    plan: &mut MutationPlan,
+) -> miette::Result<PreparedSelectionPrune> {
+    let mut mutation = MutationPlan::default();
     let directory = Path::new(".lorekeeper/queue/selection");
     let full = lk_vault::page_path(root, directory).into_diagnostic()?;
     let entries = match std::fs::read_dir(&full) {
         Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(PreparedSelectionPrune {
+                removed: 0,
+                directories: Vec::new(),
+            });
+        }
         Err(error) => return Err(error).into_diagnostic(),
     };
+    require_settled(root)?;
     if std::fs::symlink_metadata(&full)
         .into_diagnostic()?
         .file_type()
@@ -1227,10 +1246,11 @@ pub(super) fn prune(
     let QueueReferences {
         identities: retained,
         snapshots,
-    } = retained_queue_references(root, pending)?;
-    let mut mutation = MutationPlan::default();
+    } = retained_queue_references(root, pending, retained_pending)?;
     for (path, raw) in snapshots {
-        mutation.require_unchanged(path, raw);
+        if !changed_queue_files.contains(&path) {
+            mutation.require_unchanged(path, raw);
+        }
     }
     let mut removed = Vec::new();
     let mut empty = Vec::new();
@@ -1295,10 +1315,19 @@ pub(super) fn prune(
             }
         }
     }
-    if !removed.is_empty() {
-        session.apply(mutation).into_diagnostic()?;
+    if mutation.has_changes() {
+        plan.extend(mutation);
     }
-    for path in removed.iter().chain(&empty) {
+    let count = removed.len();
+    removed.extend(empty);
+    Ok(PreparedSelectionPrune {
+        removed: count,
+        directories: removed,
+    })
+}
+
+pub(super) fn cleanup_directories(root: &Path, directories: &[PathBuf]) -> miette::Result<()> {
+    for path in directories {
         for directory in [
             path.join("batches"),
             path.clone(),
@@ -1315,7 +1344,24 @@ pub(super) fn prune(
             }
         }
     }
-    Ok(removed.len())
+    Ok(())
+}
+
+#[cfg(test)]
+fn prune(session: &MutationSession, pending: &BTreeSet<(String, String)>) -> miette::Result<usize> {
+    let mut plan = MutationPlan::default();
+    let prepared = plan_prune(
+        session.root(),
+        pending,
+        pending,
+        &BTreeSet::new(),
+        &mut plan,
+    )?;
+    if prepared.removed != 0 {
+        session.apply(plan).into_diagnostic()?;
+    }
+    cleanup_directories(session.root(), &prepared.directories)?;
+    Ok(prepared.removed)
 }
 
 #[cfg(test)]

@@ -323,11 +323,12 @@ pub(super) fn admission(
     Ok(Admission::Deferred(action.reason))
 }
 
-pub(in crate::commands) fn prune(
-    session: &lk_vault::MutationSession,
+pub(in crate::commands) fn plan_prune(
+    root: &Path,
     pending: &std::collections::BTreeSet<(String, String)>,
+    plan: &mut lk_vault::MutationPlan,
 ) -> miette::Result<usize> {
-    GENERATION.prune(session, pending)
+    GENERATION.plan_prune(root, pending, plan)
 }
 
 pub(in crate::commands) fn finish_selected(

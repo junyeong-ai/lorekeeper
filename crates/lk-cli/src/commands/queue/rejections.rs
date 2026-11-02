@@ -8,6 +8,8 @@ use super::application::{
     Proposal, ProposalSnapshot, PublicationRejection, RejectionKind, RejectionScope, TaskIdentity,
 };
 
+mod history;
+
 const DIRECTORY: &str = ".lorekeeper/queue/rejections";
 const SCHEMA: &str = "queue-application-rejection-v1";
 
@@ -332,47 +334,42 @@ pub(super) fn remove_matching(
     Ok(())
 }
 
-pub(super) fn prune(
+pub(super) fn plan_prune(
     root: &Path,
-    session: Option<&lk_vault::MutationSession>,
+    retained: Option<&BTreeSet<(String, String)>>,
+    mutation: &mut lk_vault::MutationPlan,
 ) -> miette::Result<usize> {
     let root = root.canonicalize().into_diagnostic()?;
     let receipts = inventory(&root)?;
     if receipts.is_empty() {
         return Ok(0);
     }
+    let retained = retained
+        .ok_or_else(|| miette::miette!("unknown pending references prevent rejection cleanup"))?;
     let active = active_proposals(&root)?;
-    let queue = root.join(".lorekeeper/queue");
-    let mut identities = BTreeSet::new();
-    let mut guards = BTreeMap::new();
-    for directory in [&queue, &queue.join(lk_queue::PROCESSED_SUBDIR)] {
-        for path in super::pending_queue_files(directory)? {
-            let metadata = std::fs::symlink_metadata(&path).into_diagnostic()?;
-            if !metadata.is_file() || metadata.file_type().is_symlink() {
-                return Err(miette::miette!(
-                    "retained queue identity requires direct regular files"
-                ));
-            }
-            let (raw, read) = lk_queue::read_tasks_snapshot(&path).into_diagnostic()?;
-            if !read.is_rewritable() {
-                return Err(miette::miette!(
-                    "unparseable retained queue lines prevent rejection cleanup"
-                ));
-            }
-            for task in read.tasks {
-                task.validate_retained_input()
-                    .map_err(|error| miette::miette!("{error}"))?;
-                task.generation_policy()
-                    .map_err(|error| miette::miette!("{error}"))?;
-                identities.insert((task.task_id, task.cache_hash));
-            }
-            let relative = path.strip_prefix(&root).into_diagnostic()?.to_path_buf();
-            guards.insert(relative, String::from_utf8(raw).into_diagnostic()?);
-        }
-    }
+    let mut identities = retained.clone();
     let mut plan = lk_vault::MutationPlan::default();
-    for (path, raw) in guards {
-        plan.require_unchanged(path, raw);
+    let processed = root
+        .join(".lorekeeper/queue")
+        .join(lk_queue::PROCESSED_SUBDIR);
+    for path in super::pending_queue_files(&processed)? {
+        let metadata = std::fs::symlink_metadata(&path).into_diagnostic()?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            return Err(miette::miette!(
+                "retained queue identity requires direct regular files"
+            ));
+        }
+        let raw = std::fs::read_to_string(&path).into_diagnostic()?;
+        for line in raw
+            .split('\n')
+            .filter(|line| !line.bytes().all(|byte| byte.is_ascii_whitespace()))
+        {
+            identities.insert(history::reference(line)?);
+        }
+        plan.require_unchanged(
+            path.strip_prefix(&root).into_diagnostic()?.to_path_buf(),
+            raw,
+        );
     }
     for snapshots in active.values() {
         for snapshot in snapshots {
@@ -385,8 +382,40 @@ pub(super) fn prune(
         if !identities.contains(&key) && !active.contains_key(&key) {
             plan.remove(path, raw);
             removed += 1;
+        } else {
+            plan.require_unchanged(path, raw);
         }
     }
+    if removed != 0 {
+        mutation.extend(plan);
+    }
+    Ok(removed)
+}
+
+#[cfg(test)]
+fn prune(root: &Path, session: Option<&lk_vault::MutationSession>) -> miette::Result<usize> {
+    let mut retained = BTreeSet::new();
+    let mut plan = lk_vault::MutationPlan::default();
+    for path in super::pending_queue_files(&root.join(".lorekeeper/queue"))? {
+        let (raw, read) = lk_queue::read_tasks_snapshot(&path).into_diagnostic()?;
+        if !read.is_rewritable() {
+            return Err(miette::miette!(
+                "unparseable retained queue lines prevent rejection cleanup"
+            ));
+        }
+        for task in read.tasks {
+            task.validate_retained_input()
+                .map_err(|error| miette::miette!("{error}"))?;
+            task.generation_policy()
+                .map_err(|error| miette::miette!("{error}"))?;
+            retained.insert((task.task_id, task.cache_hash));
+        }
+        plan.require_unchanged(
+            path.strip_prefix(root).into_diagnostic()?.to_path_buf(),
+            String::from_utf8(raw).into_diagnostic()?,
+        );
+    }
+    let removed = plan_prune(root, Some(&retained), &mut plan)?;
     if removed != 0
         && let Some(session) = session
     {
@@ -935,6 +964,188 @@ mod tests {
         let session = lk_vault::MutationSession::acquire(&root).unwrap();
         assert_eq!(prune(&root, Some(&session)).unwrap(), 1);
         assert!(!root.join(receipt_path).exists());
+    }
+
+    #[test]
+    fn processed_legacy_extraction_protects_receipts_without_semantic_adoption() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let request: lk_queue::ExtractConceptsRequest = serde_json::from_value(serde_json::json!({
+            "text":"Retained source with a Unicode line separator: \u{2028}.",
+            "source_id":"notes", "source_type":"manual", "date":"2026-10-23",
+            "locale":"en", "concept_policy":"supported-new", "focus":null,
+            "target":{"vault_path":"wiki/documents/source.md", "kind":"document-concepts", "anchor":"## Related Concepts"}
+        })).unwrap();
+        let mut task = lk_queue::QueueLlmClient::new(root.join(".lorekeeper/queue")).build_task(
+            "legacy",
+            lk_queue::TaskKind::ExtractConcepts,
+            request,
+        );
+        task.input.remove("concept_policy");
+        assert!(task.validate_retained_input().is_err());
+        let mut receipt = receipt();
+        receipt.identity.task_id = task.task_id.clone();
+        receipt.identity.cache_hash = task.cache_hash.clone();
+        let receipt_path = path(&task.task_id, &task.cache_hash).unwrap();
+        let receipt_raw = serde_json::to_string(&receipt).unwrap();
+        write(&root, &receipt_path, &receipt_raw);
+        let history_path = Path::new(".lorekeeper/queue/processed/legacy.jsonl");
+        let history = format!(" \r\n{}\r\n", serde_json::to_string(&task).unwrap());
+        write(&root, history_path, &history);
+        assert_eq!(prune(&root, None).unwrap(), 0);
+        let session = lk_vault::MutationSession::acquire(&root).unwrap();
+        assert_eq!(prune(&root, Some(&session)).unwrap(), 0);
+        assert_eq!(
+            std::fs::read(root.join(history_path)).unwrap(),
+            history.as_bytes()
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join(&receipt_path)).unwrap(),
+            receipt_raw
+        );
+        assert!(task.validate_retained_input().is_err());
+        drop(session);
+        let pending = Path::new(".lorekeeper/queue/empty.jsonl");
+        write(&root, pending, "\n");
+        let original = serde_json::to_value(&task).unwrap();
+        for payload in [
+            serde_json::json!({}),
+            serde_json::json!({"generation_policy":"old-policy","text":null,"future_metadata":[true,1,-2,3.25,null,"Unicode\u{2028}"]}),
+        ] {
+            let mut historical = original.clone();
+            historical["input"] = payload;
+            write(&root, history_path, &historical.to_string());
+            assert_eq!(prune(&root, None).unwrap(), 0);
+        }
+        let mut invalid = Vec::new();
+        for (pointer, value) in [
+            ("/input", serde_json::Value::Null),
+            ("/input", serde_json::json!([])),
+            ("/task_id", serde_json::json!(" ")),
+            ("/cache_hash", serde_json::json!("invalid")),
+            ("/kind", serde_json::json!({"extract-concepts":null})),
+            (
+                "/target",
+                serde_json::json!([
+                    "wiki/documents/source.md",
+                    "document-concepts",
+                    "## Related Concepts"
+                ]),
+            ),
+            (
+                "/target/kind",
+                serde_json::json!({"document-concepts":null}),
+            ),
+            (
+                "/target/anchor",
+                serde_json::json!("## Related Concepts\n## Sibling"),
+            ),
+            ("/kind", serde_json::json!("unknown-kind")),
+            ("/target/kind", serde_json::json!("daily-summary")),
+            ("/target/vault_path", serde_json::json!("../../escape.md")),
+        ] {
+            let mut row = original.clone();
+            *row.pointer_mut(pointer).unwrap() = value;
+            invalid.push(row.to_string());
+        }
+        let mut unknown = original.clone();
+        unknown["future_envelope"] = serde_json::json!(true);
+        invalid.push(unknown.to_string());
+        let mut unknown = original.clone();
+        unknown["target"]["future"] = serde_json::json!(true);
+        invalid.push(unknown.to_string());
+        let raw = original.to_string();
+        invalid.push(raw.replacen(
+            "\"source_id\":",
+            "\"source_id\":\"duplicate\",\"source_id\":",
+            1,
+        ));
+        invalid.push(raw.replacen("\"task_id\":", "\"task_id\":\"duplicate\",\"task_id\":", 1));
+        invalid.push(raw.replacen(
+            "\"input\":{",
+            "\"input\":{\"nested\":[{\"a\":1,\"a\":2}],",
+            1,
+        ));
+        for raw in invalid {
+            write(&root, history_path, &raw);
+            for dry_run in [true, false] {
+                assert!(
+                    super::super::prune_queue(&root, &root.join(".lorekeeper/queue"), dry_run)
+                        .is_err()
+                );
+                assert_eq!(std::fs::read_to_string(root.join(pending)).unwrap(), "\n");
+                assert_eq!(
+                    std::fs::read_to_string(root.join(&receipt_path)).unwrap(),
+                    receipt_raw
+                );
+                assert_eq!(
+                    std::fs::read_to_string(root.join(history_path)).unwrap(),
+                    raw
+                );
+            }
+        }
+        write(&root, history_path, &history);
+        assert_eq!(
+            super::super::prune_queue(&root, &root.join(".lorekeeper/queue"), true)
+                .unwrap()
+                .files_deleted,
+            1
+        );
+        assert!(root.join(pending).exists());
+        assert_eq!(
+            super::super::prune_queue(&root, &root.join(".lorekeeper/queue"), false)
+                .unwrap()
+                .files_deleted,
+            1
+        );
+        assert!(!root.join(pending).exists());
+        assert_eq!(
+            std::fs::read_to_string(root.join(history_path)).unwrap(),
+            history
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join(receipt_path)).unwrap(),
+            receipt_raw
+        );
+        let pending = Path::new(".lorekeeper/queue/legacy-pending.jsonl");
+        write(&root, pending, &history);
+        assert_eq!(
+            super::super::classify_task(&root, &task, &mut BTreeMap::new()).unwrap(),
+            super::super::TaskStatus::Unreadable
+        );
+        assert!(super::super::prune_queue(&root, &root.join(".lorekeeper/queue"), true).is_err());
+        assert_eq!(
+            std::fs::read_to_string(root.join(pending)).unwrap(),
+            history
+        );
+    }
+
+    #[test]
+    fn unknown_history_refuses_before_any_pending_retirement() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let mut task = retained_summary(&root);
+        let mut receipt = receipt();
+        receipt.identity.task_id = task.task_id.clone();
+        receipt.identity.cache_hash = task.cache_hash.clone();
+        let receipt_path = path(&task.task_id, &task.cache_hash).unwrap();
+        let raw = serde_json::to_string(&receipt).unwrap();
+        write(&root, &receipt_path, &raw);
+        task.cache_hash = "invalid".into();
+        let history = Path::new(".lorekeeper/queue/processed/unknown.jsonl");
+        write(&root, history, &serde_json::to_string(&task).unwrap());
+        let pending = Path::new(".lorekeeper/queue/empty.jsonl");
+        write(&root, pending, "\n");
+        for dry_run in [true, false] {
+            assert!(
+                super::super::prune_queue(&root, &root.join(".lorekeeper/queue"), dry_run).is_err()
+            );
+            assert_eq!(std::fs::read_to_string(root.join(pending)).unwrap(), "\n");
+            assert_eq!(
+                std::fs::read_to_string(root.join(&receipt_path)).unwrap(),
+                raw
+            );
+        }
     }
 
     #[test]
