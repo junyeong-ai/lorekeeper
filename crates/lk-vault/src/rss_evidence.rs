@@ -337,18 +337,34 @@ pub fn has_rss_citation(
     concept: &Path,
     citation: &Citation,
 ) -> Result<bool, VaultError> {
+    citation
+        .rss_event
+        .as_ref()
+        .ok_or_else(|| err("expected RSS citation"))?
+        .validate(&citation.revision)
+        .map_err(err)?;
+    let raw = std::fs::read_to_string(crate::page_path(root, Path::new(&citation.path))?)?;
+    has_rss_citation_in_page(root, concept, citation, &raw)
+}
+
+/// Check the supplied origin snapshot; its caller owns currentness and publication guards.
+pub fn has_rss_citation_in_page(
+    root: &Path,
+    concept: &Path,
+    citation: &Citation,
+    raw: &str,
+) -> Result<bool, VaultError> {
     let selector = citation
         .rss_event
         .as_ref()
         .ok_or_else(|| err("expected RSS citation"))?;
     selector.validate(&citation.revision).map_err(err)?;
     let origin = Path::new(&citation.path);
-    let raw = std::fs::read_to_string(crate::page_path(root, origin)?)?;
     let mut entries = crate::ExistingEntryResolver::new(root);
-    let map = rss_concept_citations_mode(root, &mut entries, origin, &raw, false)?;
+    let map = rss_concept_citations_mode(root, &mut entries, origin, raw, false)?;
     let found = has_selected_membership(&mut entries, &map, concept, citation)?;
     if found {
-        let page = crate::parse_page(&raw).map_err(err)?;
+        let page = crate::parse_page(raw).map_err(err)?;
         let selection = RssEventSelection {
             event_id: selector.event_id.clone(),
             revision: citation.revision.clone(),

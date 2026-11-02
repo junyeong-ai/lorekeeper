@@ -338,6 +338,11 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   publishing one guarded mutation plan. Preview validates the same plan without recovery
   or canonical writes. Skip guard-only journals; empty selection-directory cleanup follows
   successful publication and can resume separately.
+- Retirement classifications retain their same-read target and cited-source dependencies,
+  including absence and RSS membership snapshots. Guard only classifications that retire
+  work, before destructive queue steps; unrelated retained current pages do not constrain
+  cleanup. Share captures only within that preparation, never attach a later read baseline.
+  Validate discovery storage containment before enumerating or reading its records.
 - Pending input retains full current typed validation. Processed history protects exact task/cache references through a strict known JSON
   envelope; its unique-key input object is opaque historical data, never current semantic
   authority. Do not reconstruct it with today's request, supply a policy, rehash, rewrite or

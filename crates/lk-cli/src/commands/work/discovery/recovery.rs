@@ -379,7 +379,13 @@ pub(super) fn prune_entry(
             "discovery recovery history is not a regular file"
         ));
     }
-    let raw = std::fs::read_to_string(entry.path()).into_diagnostic()?;
+    let relative = entry
+        .path()
+        .strip_prefix(root)
+        .into_diagnostic()?
+        .to_path_buf();
+    let raw = std::fs::read_to_string(lk_vault::page_path(root, &relative).into_diagnostic()?)
+        .into_diagnostic()?;
     let history = History::decode(&raw)?;
     if entry.path() != root.join(path(&history.task_id)) {
         return Err(miette::miette!(

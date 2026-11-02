@@ -64,8 +64,9 @@ pub(super) fn prepare(root: &Path, queue: &Path) -> miette::Result<PreparedPrune
     let mut retained = BTreeSet::new();
     let mut changed = BTreeSet::new();
     let mut archives = BTreeSet::new();
+    let mut pages = BTreeMap::new();
+    let mut dependencies = BTreeSet::new();
     let mut complete = true;
-    super::rejections::validate_store(root)?;
     for file in super::pending_queue_files(queue)? {
         let relative = file.strip_prefix(root).into_diagnostic()?.to_path_buf();
         let full = match lk_vault::page_path(root, &relative) {
@@ -108,7 +109,17 @@ pub(super) fn prepare(root: &Path, queue: &Path) -> miette::Result<PreparedPrune
         for task in read.tasks {
             let valid = task.generation_policy().is_ok() && task.validate_retained_input().is_ok();
             let status = if valid {
-                super::classify_validated_task(root, &task, &mut revisions)?
+                let classification =
+                    super::classify_with_reader(root, &task, &mut revisions, &mut |path| {
+                        read_snapshot(root, path, &mut pages)
+                    })?;
+                if matches!(
+                    classification.status,
+                    TaskStatus::Done | TaskStatus::Stale | TaskStatus::MissingTarget
+                ) {
+                    dependencies.extend(classification.dependencies);
+                }
+                classification.status
             } else {
                 complete = false;
                 super::classify_task(root, &task, &mut revisions)?
@@ -181,6 +192,18 @@ pub(super) fn prepare(root: &Path, queue: &Path) -> miette::Result<PreparedPrune
             plan.require_unchanged(relative, raw);
         }
     }
+    let mut guarded = MutationPlan::default();
+    for path in dependencies {
+        match pages
+            .remove(&path)
+            .ok_or_else(|| miette::miette!("missing queue classification snapshot"))?
+        {
+            Some(raw) => guarded.require_unchanged(path, raw),
+            None => guarded.require_absent(path),
+        }
+    }
+    guarded.extend(plan);
+    let mut plan = guarded;
     let mut removed = vec![(
         "queue rejection receipt(s)",
         super::rejections::plan_prune(root, complete.then_some(&retained), &mut plan)?,
@@ -220,6 +243,26 @@ pub(super) fn prepare(root: &Path, queue: &Path) -> miette::Result<PreparedPrune
         selection_directories,
         removed,
     })
+}
+
+fn read_snapshot(
+    root: &Path,
+    path: &Path,
+    pages: &mut BTreeMap<PathBuf, Option<String>>,
+) -> std::io::Result<String> {
+    let raw = match pages.entry(path.to_path_buf()) {
+        std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+        std::collections::btree_map::Entry::Vacant(entry) => {
+            let raw = match super::read_page(root, path) {
+                Ok(raw) => Some(raw),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => return Err(error),
+            };
+            entry.insert(raw)
+        }
+    };
+    raw.clone()
+        .ok_or_else(|| std::io::ErrorKind::NotFound.into())
 }
 
 #[cfg(all(test, unix))]
@@ -349,6 +392,229 @@ mod tests {
     }
 
     #[test]
+    fn retirement_refuses_changed_classification_pages_before_publication_or_recovery() {
+        for decision in ["done", "stale", "policy", "missing-section", "missing-file"] {
+            for recover in [false, true] {
+                let fixture = Fixture::new();
+                let target = Path::new("wiki/documents/source.md");
+                let original = std::fs::read_to_string(fixture.root.join(target)).unwrap();
+                let current = original
+                    .lines()
+                    .filter(|line| !line.contains("summary_done:"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                match decision {
+                    "done" => {}
+                    "stale" => fixture.write(target, &current.replace("  summary:", "  other:")),
+                    "policy" => {
+                        let task: lk_queue::QueueTask =
+                            serde_json::from_str(fixture.pending.trim()).unwrap();
+                        fixture.write(target, &current.replace("---\n##", &format!("  summary_policy_requested_input: {}\n  summary_policy_requested: changed\n---\n##",task.cache_hash)));
+                    }
+                    "missing-section" => {
+                        fixture.write(target, &current.replace("## Summary", "## Other"));
+                    }
+                    "missing-file" => std::fs::remove_file(fixture.root.join(target)).unwrap(),
+                    _ => unreachable!(),
+                }
+                let prepared = fixture.prepare();
+                fixture.write(target, &current);
+                if recover {
+                    fixture.write(
+                        Path::new(".lorekeeper/mutation/pending.json"),
+                        &json!({"version":1,"plan":prepared.plan}).to_string(),
+                    );
+                    assert!(
+                        MutationSession::acquire(&fixture.root).is_err(),
+                        "{decision}"
+                    );
+                } else {
+                    let session = MutationSession::acquire(&fixture.root).unwrap();
+                    assert!(prepared.apply(&session).is_err(), "{decision}");
+                    assert!(
+                        !fixture
+                            .root
+                            .join(".lorekeeper/mutation/pending.json")
+                            .exists()
+                    );
+                }
+                assert_eq!(
+                    std::fs::read_to_string(fixture.root.join(".lorekeeper/queue/run.jsonl"))
+                        .unwrap(),
+                    fixture.pending
+                );
+                assert!(fixture.root.join(&fixture.action).exists());
+                assert!(!fixture.root.join(".lorekeeper/queue/processed").exists());
+            }
+        }
+    }
+
+    #[test]
+    fn retirement_guards_regular_and_rss_sources_that_made_synthesis_stale() {
+        for rss in [false, true] {
+            let fixture = Fixture::new();
+            let concept = "wiki/concepts/topic.md";
+            fixture.write(
+                Path::new(concept),
+                "---\ntype: concept\n---\n## Synthesis\n\n## Related Concepts\n",
+            );
+            let (origin, original, changed, citation) = if rss {
+                let event: lk_core::event::Event = serde_json::from_value(json!({
+                    "id":"rss:2026-10-18:0000000000000001","source_id":"rss","source_type":"rss",
+                    "timestamp":"2026-10-18T00:00:00Z","date":"2026-10-18","title":"Title","body":"Original evidence.",
+                    "url":"https://example.com","author":null,"labels":[],"category":null,
+                    "performance_category":null,"is_self":false,"is_personal":false,"metadata":{}
+                })).unwrap();
+                let capture =
+                    lk_core::rss_original::RssOriginalCapture::from_events(&[&event]).unwrap();
+                let session = MutationSession::acquire(&fixture.root).unwrap();
+                let reference = lk_vault::publish_rss_original(&session, &capture).unwrap();
+                drop(session);
+                let selected = &capture.manifest.events[0];
+                let bindings = json!([{"schema":lk_core::rss_evidence::RSS_EVIDENCE_SCHEMA,
+                    "concept":concept,"manifest":reference,
+                    "events":[{"event_id":selected.event_id,"revision":selected.revision}]}]);
+                let original = format!(
+                    "---\ntype: daily\nsource: rss\ncreated: 2026-10-18\nsource_record: {{rss_original: {}}}\nconcept_evidence: {bindings}\n---\n## Related Concepts\n- [Topic](../wiki/concepts/topic.md)\n",
+                    serde_json::to_string(&reference).unwrap()
+                );
+                let origin = "daily/rss.md";
+                let citation =
+                    lk_vault::rss_concept_citations(&fixture.root, Path::new(origin), &original)
+                        .unwrap()[concept][0]
+                        .clone();
+                let changed = original.replace(
+                    &format!("concept_evidence: {bindings}"),
+                    "concept_evidence: []",
+                );
+                (origin, original, changed, citation)
+            } else {
+                let origin = "wiki/documents/evidence.md";
+                let original =
+                    "---\ntype: document\n---\n## Content\nOriginal evidence.\n".to_owned();
+                let citation = lk_core::concept::Citation::new(
+                    Path::new(origin),
+                    &lk_vault::parse_page(&original).unwrap(),
+                );
+                let changed = original.replace("Original", "Changed");
+                (origin, original, changed, citation)
+            };
+            let task = lk_queue::QueueLlmClient::new(fixture.root.join(".lorekeeper/queue"))
+                .build_task(
+                    "retirement",
+                    lk_queue::TaskKind::SynthesizeConcept,
+                    lk_queue::ConceptSynthesisRequest {
+                        citations: vec![citation],
+                        locale: lk_core::i18n::Locale::En,
+                        related_anchor: Some("## Related Concepts".into()),
+                        target: lk_queue::TaskTarget {
+                            vault_path: concept.into(),
+                            kind: lk_queue::TargetKind::ConceptSynthesis,
+                            anchor: "## Synthesis".into(),
+                        },
+                    },
+                );
+            let pending = lk_queue::serialize_tasks(std::slice::from_ref(&task)).unwrap();
+            fixture.write(Path::new(".lorekeeper/queue/run.jsonl"), &pending);
+            fixture.write(Path::new(concept), &format!("---\ntype: concept\nllm_inputs:\n  synthesis: {}\n---\n## Synthesis\n\n## Related Concepts\n",task.cache_hash));
+            fixture.write(Path::new(origin), &changed);
+            if !rss {
+                let current = lk_queue::QueueLlmClient::new(fixture.root.join(".lorekeeper/queue"))
+                    .build_task(
+                        "current",
+                        lk_queue::TaskKind::SynthesizeConcept,
+                        lk_queue::ConceptSynthesisRequest {
+                            citations: vec![lk_core::concept::Citation::new(
+                                Path::new(origin),
+                                &lk_vault::parse_page(&changed).unwrap(),
+                            )],
+                            locale: lk_core::i18n::Locale::En,
+                            related_anchor: Some("## Related Concepts".into()),
+                            target: lk_queue::TaskTarget {
+                                vault_path: "wiki/concepts/current.md".into(),
+                                kind: lk_queue::TargetKind::ConceptSynthesis,
+                                anchor: "## Synthesis".into(),
+                            },
+                        },
+                    );
+                fixture.write(Path::new("wiki/concepts/current.md"), &format!("---\ntype: concept\nllm_inputs:\n  synthesis: {}\n---\n## Synthesis\n\n## Related Concepts\n", current.cache_hash));
+                fixture.write(
+                    Path::new(".lorekeeper/queue/a-current.jsonl"),
+                    &lk_queue::serialize_tasks(&[current]).unwrap(),
+                );
+            }
+            let prepared = fixture.prepare();
+            assert_eq!(prepared.summary.pruned_stale, 1);
+            assert_eq!(prepared.summary.kept_current, usize::from(!rss));
+            fixture.write(Path::new(origin), &original);
+            let session = MutationSession::acquire(&fixture.root).unwrap();
+            assert!(prepared.apply(&session).is_err(), "rss={rss}");
+            assert_eq!(
+                std::fs::read_to_string(fixture.root.join(".lorekeeper/queue/run.jsonl")).unwrap(),
+                pending
+            );
+            assert!(fixture.root.join(&fixture.action).exists());
+        }
+    }
+
+    #[test]
+    fn unrelated_retained_current_page_edits_do_not_block_retirement() {
+        let fixture = Fixture::new();
+        let task: lk_queue::QueueTask = serde_json::from_str(fixture.pending.trim()).unwrap();
+        let mut current = task.clone();
+        current.task_id.push_str("-current");
+        current.target.vault_path = "wiki/documents/current.md".into();
+        let raw = format!(
+            "---\ntype: document\nllm_inputs:\n  summary: {}\n---\n## Summary\n",
+            current.cache_hash
+        );
+        fixture.write(Path::new(&current.target.vault_path), &raw);
+        let pending = lk_queue::serialize_tasks(&[current.clone()]).unwrap();
+        fixture.write(Path::new(".lorekeeper/queue/current.jsonl"), &pending);
+        let prepared = fixture.prepare();
+        fixture.write(
+            Path::new(&current.target.vault_path),
+            &format!("{raw}\nUnrelated edit.\n"),
+        );
+        let session = MutationSession::acquire(&fixture.root).unwrap();
+        prepared.apply(&session).unwrap();
+        fixture.verify();
+        assert_eq!(
+            std::fs::read_to_string(fixture.root.join(".lorekeeper/queue/current.jsonl")).unwrap(),
+            pending
+        );
+    }
+
+    #[test]
+    fn discovery_retention_checks_directory_containment_before_reading_entries() {
+        for external in [false, true] {
+            let fixture = Fixture::new();
+            let outside = tempfile::tempdir().unwrap();
+            let destination = if external {
+                outside.path().join("discovery")
+            } else {
+                fixture.root.join("retained-discovery")
+            };
+            std::fs::create_dir_all(&destination).unwrap();
+            let directory = fixture.root.join(".lorekeeper/queue/discovery");
+            std::os::unix::fs::symlink(&destination, &directory).unwrap();
+            let mut plan = MutationPlan::default();
+            let result = super::super::super::work::plan_prune_discovery(
+                &fixture.root,
+                &BTreeSet::new(),
+                &mut plan,
+            );
+            if external {
+                assert!(result.is_err());
+            } else {
+                assert_eq!(result.unwrap(), 0);
+            }
+            assert!(!plan.has_changes());
+            assert!(destination.is_dir());
+        }
+    }
+
+    #[test]
     fn unchanged_archive_preserves_the_processed_history_retention_clock() {
         let fixture = Fixture::new();
         let path = fixture.root.join(".lorekeeper/queue/run.jsonl");
@@ -375,9 +641,37 @@ mod tests {
     #[test]
     fn retirement_recovers_every_prepared_prefix_with_exact_archive_and_paid_bytes() {
         for rewritten in [false, true] {
-            let count: usize = if rewritten { 3 } else { 2 };
+            let mut fixture = Fixture::new();
+            if rewritten {
+                fixture.add_missing_task();
+            }
+            let count = serde_json::to_value(fixture.prepare().plan).unwrap()["steps"]
+                .as_array()
+                .unwrap()
+                .len();
             for prefix in 0..=count {
-                for completed in BTreeSet::from([prefix.saturating_sub(1), prefix]) {
+                let mut fixture = Fixture::new();
+                if rewritten {
+                    fixture.add_missing_task();
+                }
+                let value = serde_json::to_value(fixture.prepare().plan).unwrap();
+                let steps = value["steps"].as_array().unwrap();
+                let is_guard = |step: &serde_json::Value| {
+                    step["kind"] == "require-absent"
+                        || (step["kind"] == "edit" && step["before"] == step["after"])
+                };
+                let durable = steps[..prefix]
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, step)| !is_guard(step))
+                    .map(|(index, _)| index + 1)
+                    .collect::<Vec<_>>();
+                let last = durable.last().copied().unwrap_or(0);
+                let mut checkpoints = BTreeSet::from([last]);
+                if prefix == last && last != 0 {
+                    checkpoints.insert(durable.iter().rev().nth(1).copied().unwrap_or(0));
+                }
+                for completed in checkpoints {
                     let mut fixture = Fixture::new();
                     if rewritten {
                         fixture.add_missing_task();
@@ -400,6 +694,9 @@ mod tests {
                         fixture.write(Path::new(".lorekeeper/mutation/progress.json"), &json!({"plan_revision":revision,"completed":completed,"checksum":checksum}).to_string());
                     }
                     for step in &steps[..prefix] {
+                        if is_guard(step) {
+                            continue;
+                        }
                         match step["kind"].as_str().unwrap() {
                             "rename" => {
                                 let from = fixture.root.join(step["from"].as_str().unwrap());

@@ -1249,6 +1249,13 @@ fn policy_request_status(root: &Path, task: &QueueTask) -> Option<TaskStatus> {
     let path = resolve_target_path(&task.target.vault_path)?;
     let content = read_page(root, &path).ok()?;
     let page = lk_core::frontmatter::parse_page(&content).ok()?;
+    policy_request_status_in_page(&page, task)
+}
+
+fn policy_request_status_in_page(
+    page: &lk_vault::VaultPage,
+    task: &QueueTask,
+) -> Option<TaskStatus> {
     if page
         .frontmatter
         .get("type")
@@ -1885,66 +1892,118 @@ fn classify_validated_task(
     task: &QueueTask,
     revisions: &mut BTreeMap<PathBuf, Result<String, TaskStatus>>,
 ) -> miette::Result<TaskStatus> {
-    let Some(rel_path) = resolve_target_path(&task.target.vault_path) else {
-        return Ok(TaskStatus::MissingTarget);
-    };
-    if let Some(status) = policy_request_status(vault_root, task) {
-        return Ok(status);
-    }
-    let status = classify_against_page(
-        vault_root,
-        &rel_path,
-        task.target.kind,
-        &task.cache_hash,
-        &task.anchors(),
-        Artifact::Task,
-    )?;
-    if status != TaskStatus::Current || task.target.kind != lk_queue::TargetKind::ConceptSynthesis {
-        return Ok(status);
-    }
-    let Some(value) = task.input.get("citations") else {
-        return Ok(TaskStatus::Unreadable);
-    };
-    let Ok(citations) = serde_json::from_value::<Vec<lk_core::concept::Citation>>(value.clone())
-    else {
-        return Ok(TaskStatus::Unreadable);
-    };
-    // Bind the semantic payload to the marker before trusting its source guards.
-    // A shortened list must not silently skip evidence while keeping the old hash.
-    if lk_core::concept::citation_digest(&citations) != task.cache_hash {
-        tracing::warn!(task_id = %task.task_id, "synthesis citations do not match cache identity");
-        return Ok(TaskStatus::Unreadable);
-    }
-    for citation in citations {
-        if citation.rss_event.is_some() {
-            match lk_vault::has_rss_citation(vault_root, &rel_path, &citation) {
-                Ok(true) => {}
-                Ok(false) => return Ok(TaskStatus::Stale),
-                Err(_) => return Ok(TaskStatus::Unreadable),
+    Ok(
+        classify_with_reader(vault_root, task, revisions, &mut |path| {
+            read_page(vault_root, path)
+        })?
+        .status,
+    )
+}
+
+struct TaskClassification {
+    status: TaskStatus,
+    dependencies: Vec<PathBuf>,
+}
+
+fn classify_with_reader(
+    root: &Path,
+    task: &QueueTask,
+    revisions: &mut BTreeMap<PathBuf, Result<String, TaskStatus>>,
+    read: &mut impl FnMut(&Path) -> std::io::Result<String>,
+) -> miette::Result<TaskClassification> {
+    let mut dependencies = Vec::new();
+    let status = (|| -> miette::Result<TaskStatus> {
+        let Some(target) = resolve_target_path(&task.target.vault_path) else {
+            return Ok(TaskStatus::MissingTarget);
+        };
+        dependencies.push(target.clone());
+        let raw = match read(&target) {
+            Ok(raw) => raw,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(TaskStatus::MissingTarget);
             }
-            continue;
-        }
-        let Some(path) = resolve_target_path(&citation.path) else {
+            Err(_) => return Ok(TaskStatus::Unreadable),
+        };
+        let Ok(page) = lk_core::frontmatter::parse_page(&raw) else {
             return Ok(TaskStatus::Unreadable);
         };
-        let revision = revisions
-            .entry(path.clone())
-            .or_insert_with(|| read_source_revision(vault_root, &path));
-        match revision {
-            Ok(revision) if *revision == citation.revision => {}
-            Ok(_) => return Ok(TaskStatus::Stale),
-            Err(status) => return Ok(*status),
+        if let Some(status) = policy_request_status_in_page(&page, task) {
+            return Ok(status);
         }
-    }
-    Ok(status)
+        if lk_vault::writable_page_path(root, &target).is_err() {
+            return Ok(TaskStatus::Unreadable);
+        }
+        let status = classify_parsed_page(
+            &page,
+            task.target.kind,
+            &task.cache_hash,
+            &task.anchors(),
+            Artifact::Task,
+        )?;
+        if status != TaskStatus::Current
+            || task.target.kind != lk_queue::TargetKind::ConceptSynthesis
+        {
+            return Ok(status);
+        }
+        let Some(value) = task.input.get("citations") else {
+            return Ok(TaskStatus::Unreadable);
+        };
+        let Ok(citations) =
+            serde_json::from_value::<Vec<lk_core::concept::Citation>>(value.clone())
+        else {
+            return Ok(TaskStatus::Unreadable);
+        };
+        if lk_core::concept::citation_digest(&citations) != task.cache_hash {
+            tracing::warn!(task_id = %task.task_id, "synthesis citations do not match cache identity");
+            return Ok(TaskStatus::Unreadable);
+        }
+        for citation in citations {
+            let Some(path) = resolve_target_path(&citation.path) else {
+                return Ok(TaskStatus::Unreadable);
+            };
+            dependencies.push(path.clone());
+            if citation.rss_event.is_some() {
+                let raw = match read(&path) {
+                    Ok(raw) => raw,
+                    Err(_) => return Ok(TaskStatus::Unreadable),
+                };
+                match lk_vault::has_rss_citation_in_page(root, &target, &citation, &raw) {
+                    Ok(true) => {}
+                    Ok(false) => return Ok(TaskStatus::Stale),
+                    Err(_) => return Ok(TaskStatus::Unreadable),
+                }
+                continue;
+            }
+            let revision = revisions
+                .entry(path.clone())
+                .or_insert_with(|| read_source_revision_with_reader(&path, read));
+            match revision {
+                Ok(revision) if *revision == citation.revision => {}
+                Ok(_) => return Ok(TaskStatus::Stale),
+                Err(status) => return Ok(*status),
+            }
+        }
+        Ok(status)
+    })()?;
+    Ok(TaskClassification {
+        status,
+        dependencies,
+    })
 }
 
 fn read_page(root: &Path, relative: &Path) -> std::io::Result<String> {
     std::fs::read_to_string(lk_vault::page_path(root, relative)?)
 }
 
-fn read_source_revision(vault_root: &Path, path: &Path) -> Result<String, TaskStatus> {
-    let content = read_page(vault_root, path).map_err(|e| {
+fn read_source_revision(root: &Path, path: &Path) -> Result<String, TaskStatus> {
+    read_source_revision_with_reader(path, &mut |path| read_page(root, path))
+}
+
+fn read_source_revision_with_reader(
+    path: &Path,
+    read: &mut impl FnMut(&Path) -> std::io::Result<String>,
+) -> Result<String, TaskStatus> {
+    let content = read(path).map_err(|e| {
         tracing::warn!(path = %path.display(), error = %e, "cannot read synthesis source");
         TaskStatus::Unreadable
     })?;
@@ -1966,8 +2025,6 @@ fn resolve_target_path(vault_path: &str) -> Option<PathBuf> {
     lk_core::link::resolve_dest(Path::new(""), vault_path)
 }
 
-/// The queue's one classification rule. Pending tasks and drained results go through it
-/// together, so they can never disagree about what any status means.
 fn classify_against_page(
     vault_root: &Path,
     rel_path: &Path,
@@ -1989,6 +2046,17 @@ fn classify_against_page(
     let Ok(page) = lk_core::frontmatter::parse_page(&content) else {
         return Ok(TaskStatus::Unreadable);
     };
+    classify_parsed_page(&page, kind, cache_hash, anchors, artifact)
+}
+
+/// Shared marker and section classification for task and result readers.
+fn classify_parsed_page(
+    page: &lk_vault::VaultPage,
+    kind: lk_queue::TargetKind,
+    cache_hash: &str,
+    anchors: &[&str],
+    artifact: Artifact,
+) -> miette::Result<TaskStatus> {
     if page
         .frontmatter
         .get("type")

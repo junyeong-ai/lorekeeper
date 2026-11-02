@@ -70,8 +70,8 @@ pub(super) fn plan_prune(
     pending: &std::collections::BTreeSet<(String, String)>,
     plan: &mut lk_vault::MutationPlan,
 ) -> miette::Result<usize> {
-    let queue = root.join(".lorekeeper/queue");
-    let directory = queue.join("discovery");
+    let directory =
+        lk_vault::page_path(root, Path::new(".lorekeeper/queue/discovery")).into_diagnostic()?;
     let entries = match std::fs::read_dir(&directory) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
@@ -100,7 +100,9 @@ pub(super) fn plan_prune(
         {
             continue;
         }
-        let raw = std::fs::read_to_string(entry.path()).into_diagnostic()?;
+        let relative = Path::new(".lorekeeper/queue/discovery").join(entry.file_name());
+        let raw = std::fs::read_to_string(lk_vault::page_path(root, &relative).into_diagnostic()?)
+            .into_diagnostic()?;
         let Ok(record) = serde_json::from_str::<DiscoveryRecord>(&raw) else {
             eprintln!(
                 "preserving malformed extraction discovery: {}",
