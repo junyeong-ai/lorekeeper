@@ -602,13 +602,6 @@ mod tests {
             .unwrap();
         work.plan_publication(&mut plan, session.root(), &result)
             .unwrap();
-        plan.publish_expected(
-            session.root(),
-            work_path(&work.plan.id, "final.json").unwrap(),
-            None,
-            encoded(&result).unwrap(),
-        )
-        .unwrap();
         session.apply(plan).unwrap();
     }
 

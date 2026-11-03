@@ -185,14 +185,18 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   history sidecar. Preserve historical matching and reference-aware retention together.
   Revalidate the exact full request and completion proof after host execution and at
   apply. Corrected observations require a newly generated result; preserve old
-  proposals. Authority replacement refuses corruption/dual seals and published work;
-  journal its prior final bytes and publication absence in the same mutation.
+  proposals. Every sealing path validates the captured prior seal/final pair and
+  publication receipt or absence, including same-kind updates. Published authority and
+  result are immutable; exact retries preserve original bytes. Unpublished replacement
+  journals the prior final bytes and publication absence in the same mutation.
 - Completion requires exact sealed typed results and source/work guards in the canonical
   publication journal. Keep the queue target's guard in its publication edit: a separate
   unchanged guard for the same target would reject the journal's own recovery.
 - Load canonical final/staged results through direct-file and vault-address checks before
-  reading. Validate unique JSON fields before completion hashing, restaging, authority
-  replacement or retention, using the same captured raw bytes for mutation guards.
+  reading, including existing destinations during finalization. Never overwrite a staged
+  result unrelated to the requested result or a captured unpublished audit completion.
+  Validate unique JSON fields before completion hashing, restaging, authority replacement
+  or retention, using the same captured raw bytes for mutation guards.
 - Prepare ready native nodes and their progress from one captured evaluation. Refresh
   the complete scope after the host returns before recording; added discovery matches
   invalidate work too. Never retain a candidate capture across host execution.

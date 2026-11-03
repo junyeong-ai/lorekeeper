@@ -709,14 +709,6 @@ mod tests {
             .unwrap();
         work.plan_publication(&mut publication, root.path(), &final_result)
             .unwrap();
-        publication
-            .publish_expected(
-                root.path(),
-                work_path(&work.plan.id, "final.json").unwrap(),
-                None,
-                encoded(&final_result).unwrap(),
-            )
-            .unwrap();
         session.apply(publication).unwrap();
         let required_child = output_path(&work.plan.id, &nested.inspection_nodes[0]).unwrap();
         let child_raw = std::fs::read(root.path().join(&required_child)).unwrap();

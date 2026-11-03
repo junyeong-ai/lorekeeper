@@ -294,9 +294,56 @@ pub(super) enum CompletionKind {
     Frontier,
 }
 
+#[derive(PartialEq, Eq)]
 enum CompletionAuthority {
     Root(String),
     Frontier(FrontierProof),
+}
+
+struct CompletionSeal {
+    path: PathBuf,
+    raw: String,
+    authority: CompletionAuthority,
+    result_revision: String,
+}
+
+impl CompletionSeal {
+    fn load(root: &Path, work: &Work) -> miette::Result<Option<Self>> {
+        let root_path = work_path(&work.plan.id, "seal.json")?;
+        let frontier_path = work_path(&work.plan.id, "frontier-seal.json")?;
+        match (
+            read_optional(root, &root_path)?,
+            read_optional(root, &frontier_path)?,
+        ) {
+            (Some(_), Some(_)) => Err(fail("work has conflicting completion seals")),
+            (Some(raw), None) => {
+                let seal: Seal = crate::commands::work::receipt::decode(&raw).map_err(fail)?;
+                if seal.work_id != work.plan.id
+                    || seal.root_node != work.nodes()?.last().expect("nonempty work tree").id
+                {
+                    return Err(fail("invalid root seal identity"));
+                }
+                require_id(&seal.root_output_revision)?;
+                require_id(&seal.final_result_revision)?;
+                Ok(Some(Self {
+                    path: root_path,
+                    raw,
+                    authority: CompletionAuthority::Root(seal.root_output_revision),
+                    result_revision: seal.final_result_revision,
+                }))
+            }
+            (None, Some(raw)) => {
+                let seal = FrontierSeal::decode(&raw, work)?;
+                Ok(Some(Self {
+                    path: frontier_path,
+                    raw,
+                    authority: CompletionAuthority::Frontier(seal.proof),
+                    result_revision: seal.final_result_revision,
+                }))
+            }
+            (None, None) => Ok(None),
+        }
+    }
 }
 
 impl CompletedWork {
@@ -342,15 +389,50 @@ impl CompletedWork {
             .as_deref()
             .map(|raw| crate::commands::json::decode_object(raw.as_bytes()).map_err(fail))
             .transpose()?;
-        let (name, other, after) = match self.authority {
+        let prior_seal = CompletionSeal::load(root, work)?;
+        match (&prior_seal, &prior_value) {
+            (Some(seal), Some(value)) if seal.result_revision == revision(value)? => {}
+            (None, None) => {}
+            _ => {
+                return Err(fail(
+                    "prior completion seal and final result differ or are missing",
+                ));
+            }
+        }
+        let result_revision = revision(final_result)?;
+        let unchanged = prior_seal.as_ref().is_some_and(|seal| {
+            seal.authority == self.authority && seal.result_revision == result_revision
+        });
+        let publication_path = work_path(&self.work_id, "publication.json")?;
+        if let Some(raw) = read_optional(root, &publication_path)? {
+            let publication: Publication =
+                crate::commands::work::receipt::decode(&raw).map_err(fail)?;
+            if publication.work_id != self.work_id
+                || prior_seal.as_ref().map(|seal| &seal.result_revision)
+                    != Some(&publication.final_result_revision)
+            {
+                return Err(fail(
+                    "publication receipt differs from its prior completion",
+                ));
+            }
+            if !unchanged {
+                return Err(fail(
+                    "published completion authority and result cannot be replaced",
+                ));
+            }
+            mutation.require_unchanged(publication_path, raw);
+        } else {
+            mutation.require_absent(publication_path);
+        }
+        let (name, other, after) = match &self.authority {
             CompletionAuthority::Root(root_output_revision) => (
                 "seal.json",
                 "frontier-seal.json",
                 encoded(&Seal {
                     work_id: self.work_id.clone(),
                     root_node: self.root_node.clone(),
-                    root_output_revision,
-                    final_result_revision: revision(final_result)?,
+                    root_output_revision: root_output_revision.clone(),
+                    final_result_revision: result_revision,
                 })?,
             ),
             CompletionAuthority::Frontier(proof) => (
@@ -358,69 +440,35 @@ impl CompletedWork {
                 "seal.json",
                 encoded(&FrontierSeal {
                     schema: "work-frontier-seal-v1".into(),
-                    proof,
-                    final_result_revision: revision(final_result)?,
+                    proof: proof.clone(),
+                    final_result_revision: result_revision,
                 })?,
             ),
         };
         let path = work_path(&self.work_id, name)?;
-        let before = read_optional(root, &path)?;
-        if name == "frontier-seal.json"
-            && let Some(raw) = &before
-        {
-            let prior = FrontierSeal::decode(raw, work)?;
-            let final_result = prior_value
-                .as_ref()
-                .ok_or_else(|| fail("sealed final result is missing"))?;
-            if prior.final_result_revision != revision(final_result)? {
-                return Err(fail("prior frontier seal differs from its final result"));
-            }
-        }
         let other_path = work_path(&self.work_id, other)?;
-        if let Some(raw) = read_optional(root, &other_path)? {
-            if before.is_some() {
-                return Err(fail("work has conflicting completion seals"));
+        let before = match prior_seal {
+            Some(prior) if prior.path == path => {
+                mutation.require_absent(other_path);
+                Some(prior.raw)
             }
-            let prior = prior_value
-                .as_ref()
-                .ok_or_else(|| fail("sealed final result is missing"))?;
-            let (work_id, root_node, final_revision) = if other == "seal.json" {
-                let seal: Seal = serde_json::from_str(&raw).map_err(fail)?;
-                require_id(&seal.root_output_revision)?;
-                (seal.work_id, seal.root_node, seal.final_result_revision)
-            } else {
-                let seal = FrontierSeal::decode(&raw, work)?;
-                (
-                    seal.proof.work_id().into(),
-                    seal.proof.root_node().into(),
-                    seal.final_result_revision,
-                )
-            };
-            if work_id != self.work_id
-                || root_node != self.root_node
-                || final_revision != revision(prior)?
-            {
-                return Err(fail(
-                    "prior completion authority differs from its final result",
-                ));
+            Some(prior) => {
+                mutation.remove(prior.path, prior.raw);
+                None
             }
-            let publication_path = work_path(&self.work_id, "publication.json")?;
-            if read_optional(root, &publication_path)?.is_some() {
-                return Err(fail("published completion authority cannot be replaced"));
+            None => {
+                mutation.require_absent(other_path);
+                None
             }
-            mutation.require_absent(publication_path);
-            mutation.remove(other_path, raw);
-        } else {
-            mutation.require_absent(other_path);
-        }
+        };
         for path in self.absent {
             mutation.require_absent(path);
         }
         for (path, raw) in self.guards {
             mutation.require_unchanged(path, raw);
         }
-        if before.as_ref() == Some(&after) {
-            mutation.require_unchanged(path, after);
+        if unchanged {
+            mutation.require_unchanged(path, before.expect("unchanged seal was captured"));
         } else {
             mutation
                 .publish_expected(root, path, before, after)
@@ -1663,8 +1711,17 @@ impl Work {
         final_result: Value,
     ) -> miette::Result<()> {
         let mut mutation = MutationPlan::default();
-        self.capture_completion(session.root(), resources)?
+        let before = self
+            .capture_completion(session.root(), resources)?
             .plan_seal(self, &mut mutation, session.root(), &final_result)?;
+        mutation
+            .publish_expected(
+                session.root(),
+                work_path(&self.plan.id, "final.json")?,
+                before,
+                encoded(&final_result)?,
+            )
+            .map_err(fail)?;
         session.apply(mutation).map_err(fail)
     }
 
@@ -3052,14 +3109,6 @@ mod tests {
             .unwrap();
         work.plan_publication(&mut publication, root.path(), &final_result)
             .unwrap();
-        publication
-            .publish_expected(
-                root.path(),
-                work_path(&work.plan.id, "final.json").unwrap(),
-                None,
-                encoded(&final_result).unwrap(),
-            )
-            .unwrap();
         session.apply(publication).unwrap();
         assert_eq!(
             prune_published(root.path(), None, i64::MAX)
@@ -3890,6 +3939,58 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn published_frontier_requires_the_same_result_and_observation_proof() {
+        let root = tempfile::tempdir().unwrap();
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let (work, source) = frontier_fixture(&session);
+        inspect_frontier(&work, &session, &source);
+        let result = json!({"synthesis":"Guarded source claim."});
+        seal_frontier(&work, &session, &source, &result);
+        let mut publication = MutationPlan::default();
+        work.plan_publication(&mut publication, root.path(), &result)
+            .unwrap();
+        session.apply(publication).unwrap();
+        let snapshot = || {
+            walkdir::WalkDir::new(root.path().join(work_path(&work.plan.id, "").unwrap()))
+                .into_iter()
+                .map(Result::unwrap)
+                .filter(|entry| entry.file_type().is_file())
+                .map(|entry| {
+                    (
+                        entry.path().to_owned(),
+                        std::fs::read(entry.path()).unwrap(),
+                    )
+                })
+                .collect::<BTreeMap<_, _>>()
+        };
+        let before = snapshot();
+        seal_frontier(&work, &session, &source, &result);
+        assert_eq!(snapshot(), before);
+        let changed = json!({"synthesis":"A different published claim."});
+        assert!(
+            work.capture_frontier(root.path(), &source)
+                .unwrap()
+                .unwrap()
+                .plan_seal(&work, &mut MutationPlan::default(), root.path(), &changed)
+                .is_err()
+        );
+        assert_eq!(snapshot(), before);
+        let part = &work.plan.parts[0];
+        let mut corrected = draft(&work, root.path(), &part.id, &source);
+        corrected.summary = "Corrected source attribution.".into();
+        work.record(&session, corrected, &source).unwrap();
+        let before = snapshot();
+        assert!(
+            work.capture_frontier(root.path(), &source)
+                .unwrap()
+                .unwrap()
+                .plan_seal(&work, &mut MutationPlan::default(), root.path(), &result)
+                .is_err()
+        );
+        assert_eq!(snapshot(), before);
     }
 
     #[test]

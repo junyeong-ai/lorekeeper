@@ -45,13 +45,6 @@ fn parts(node: &Node, nodes: &[Node], covered: &mut BTreeSet<String>) -> miette:
 }
 
 impl FrontierProof {
-    pub(super) fn work_id(&self) -> &str {
-        &self.work_id
-    }
-    pub(super) fn root_node(&self) -> &str {
-        &self.root_node
-    }
-
     fn verify_structure(&self, work: &Work) -> miette::Result<()> {
         let nodes = work.nodes()?;
         if self.schema != "work-frontier-v1"
