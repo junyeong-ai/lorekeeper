@@ -35,6 +35,11 @@ and CLI discovery, not a second graph authority.
   computes live topology and structural checks, without Markdown catalog/map exports
   or a catalog-currency check. Only entry/schema guides are reserved meta pages;
   ordinary `log.md`, `map.md` or `catalog/` addresses are not implicitly generated.
+- Citation capture drift carries the shared typed diagnostic through vault/CLI adapters.
+  Compare existing complete captures on refusal; counts cover every difference while
+  examples are bounded. Preserve absent, unreadable and unresolved states distinctly.
+  Diagnostic address digests are not page revisions or evidence authority. No raw
+  page/account data, extra scans, automatic retry or reduced currentness scope.
 - Community clustering is topology, not taxonomy or semantic equivalence. Preserve
   original destinations; suggestions guide judgment rather than establish relations.
 - Exit codes distinguish clean (0), structural violations (1), and execution errors

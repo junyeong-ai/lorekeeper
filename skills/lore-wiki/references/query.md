@@ -20,6 +20,18 @@ collection membership is required; full preparation reads and verifies the corpu
 Prepare again after writes that must enter this investigation. A single current
 lookup can use live search without preparing a snapshot. An unchanged capture may
 answer historical questions, but never present its membership as freshly verified.
+A preparation or refresh refusal beginning with `citation capture changed` identifies
+the `selected-page` or final `graph` comparison. Graph counts include exact metadata
+changes and the whole graph inventory, beyond the selected search collection.
+Counts describe component differences, which can involve the same page. At most
+three examples per component are shown and `omitted` counts the rest; long or unavailable display paths
+have only a diagnostic digest. Evidence digests describe citation projections; these
+diagnostic digests are not file revisions or publication authority. This evidence identifies
+a difference, not its actor. Preserve the failed result and prior snapshot. After
+writers settle, an operator-owned workflow may request one ordinary fresh refresh;
+a repeated refusal requires inspection rather than an unchanged retry loop.
+Successful refresh does not clear semantic holds or repair paid observations.
+
 For an unfamiliar topic, start with `lore wiki browse --snapshot <id> --json`
 in a prepared session (omit `--snapshot` for a single live lookup).
 Use its category/type/tag counts to select a scope with `--category`, `--type` and

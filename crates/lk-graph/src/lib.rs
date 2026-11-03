@@ -21,6 +21,8 @@ use std::path::PathBuf;
 
 #[derive(Debug, thiserror::Error)]
 pub enum GraphError {
+    #[error(transparent)]
+    CaptureChanged(#[from] Box<lk_vault::CitationCaptureError>),
     #[error("failed to read page {path}: {error}")]
     UnreadablePage {
         path: PathBuf,
@@ -44,4 +46,13 @@ pub enum GraphError {
     },
     #[error("I/O error: {0}")]
     Io(String),
+}
+
+impl GraphError {
+    pub fn into_vault_error(self) -> lk_vault::VaultError {
+        match self {
+            Self::CaptureChanged(change) => lk_vault::VaultError::CitationCapture(change),
+            other => std::io::Error::other(other).into(),
+        }
+    }
 }

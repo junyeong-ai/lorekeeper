@@ -88,7 +88,9 @@ fn failed_capture_preserves_the_existing_guide_and_snapshot() {
         [0xff, 0xfe],
     )
     .unwrap();
-    assert!(!run(&config, &["wiki", "refresh"]).status.success());
+    let failed = run(&config, &["wiki", "refresh"]);
+    assert!(!failed.status.success());
+    assert!(!String::from_utf8_lossy(&failed.stderr).contains("citation capture changed"));
     assert_eq!(
         std::fs::read(vault.join("knowledge/index.md")).unwrap(),
         entry

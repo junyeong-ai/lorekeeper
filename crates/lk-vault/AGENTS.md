@@ -177,6 +177,9 @@ canonical; SQLite navigation is derived.
   for overlapping search inputs. Enumerate the complete search inventory independently,
   check owners and read uncovered paths; never reuse initial or prior-phase proofs.
   Projection/schema changes bump snapshot version.
+  Citation capture drift uses the shared typed error, rather than an I/O string.
+  Preserve its bounded diagnostics through callbacks without changing the commit
+  predicate; actual I/O and unknown failures retain their own error paths.
   Per-page graph capture membership distinguishes uncaptured concepts from captured empty
   evidence; missing evidence rows for captured concepts remain errors.
   Indexed name/tag/document identities and declared relations avoid full vocabulary/collection

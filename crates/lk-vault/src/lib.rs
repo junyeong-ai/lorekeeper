@@ -1,6 +1,7 @@
 mod address;
 mod body_search;
 mod brief;
+mod capture_change;
 mod citations;
 mod context;
 mod discovery;
@@ -41,6 +42,10 @@ pub use self::body_search::{
     BodyContextLine, BodySearchHit, BodySearchOptions, BodySearchResult, search_body,
 };
 pub use self::brief::{Brief, BriefEntry, build_brief};
+pub use self::capture_change::{
+    CaptureChange, CaptureChangeCounts, CaptureFileState, CapturePath, CaptureResolutionState,
+    CaptureRevision, CitationCaptureError,
+};
 pub use self::citations::{
     CitationOptions, ConceptCitationProjection, ConceptCitationSet, ConceptCitations,
     inspect_concept_citations,
@@ -124,6 +129,8 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum VaultError {
+    #[error(transparent)]
+    CitationCapture(#[from] Box<CitationCaptureError>),
     #[error("vault read cancelled; incomplete capture discarded")]
     Cancelled,
     #[error("vault mutation is busy: lock acquisition would block")]

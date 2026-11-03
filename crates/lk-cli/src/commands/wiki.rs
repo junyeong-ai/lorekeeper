@@ -1293,7 +1293,7 @@ fn prepare_discovery_snapshot(
         |selected| {
             captured
                 .verify_file_revisions(selected)
-                .map_err(|error| std::io::Error::other(error.to_string()).into())
+                .map_err(lk_graph::GraphError::into_vault_error)
         },
     )
     .map_err(|error| miette::miette!("prepare discovery snapshot: {error}"))

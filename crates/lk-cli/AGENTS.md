@@ -514,6 +514,9 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
 - Use captured config to refuse canonical manual-inbox overlap before capture or
   navigation mutation. Guide ownership, symlink, nonregular-file and authored
   collision guards remain strict; never infer ownership from an old export name.
+  Map graph capture verification through GraphError::into_vault_error so typed
+  drift reaches the command result without becoming a generic I/O string.
+  A capture refusal remains incomplete and stops native continuation.
 - Browse metadata with query=None; reject query-only/date-sort combinations in the
   library too. Declared-created bounds compose with queries; created sorting is browse-only.
   Exact repository/provider scopes match declared ownership, not concept evidence membership.

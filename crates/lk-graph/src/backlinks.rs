@@ -26,6 +26,8 @@ use lk_vault::{
 use serde::Serialize;
 
 use crate::GraphError;
+
+mod capture_change;
 use crate::scan::{ScannedPage, VaultExistence, is_concept_page};
 
 /// Outcome of one concept page's reconciliation.
@@ -570,17 +572,20 @@ impl CapturedConceptCitations {
             if let Some(captured) = self.file_revisions.get(path)
                 && captured.as_ref() != Some(revision)
             {
-                return Err(GraphError::Io(format!(
-                    "search page differs from captured graph input: {}",
-                    path.display()
+                return Err(GraphError::CaptureChanged(Box::new(
+                    lk_vault::CitationCaptureError::SelectedPage {
+                        path: lk_vault::CapturePath::build(path),
+                        expected_revision: captured.clone(),
+                        current_revision: lk_vault::CaptureRevision::build(revision),
+                    },
                 )));
             }
         }
         let current = capture_concept_citations(&self.root, &self.dirs, self.follow_links)?;
         if current.projection != self.projection {
-            return Err(GraphError::Io(
-                "graph evidence inputs or filesystem resolution changed during snapshot".into(),
-            ));
+            return Err(GraphError::CaptureChanged(Box::new(
+                self.capture_change(&current),
+            )));
         }
         Ok(current)
     }
@@ -1672,7 +1677,7 @@ mod tests {
             |selected| {
                 captured
                     .verify(selected)
-                    .map_err(|error| std::io::Error::other(error.to_string()).into())
+                    .map_err(GraphError::into_vault_error)
             },
         )
         .unwrap();
@@ -1813,7 +1818,7 @@ mod tests {
             |selected| {
                 captured
                     .verify(selected)
-                    .map_err(|error| std::io::Error::other(error.to_string()).into())
+                    .map_err(GraphError::into_vault_error)
             },
         )
         .unwrap();
@@ -1825,7 +1830,7 @@ mod tests {
                 |selected| {
                     captured
                         .verify_file_revisions(selected)
-                        .map_err(|error| std::io::Error::other(error.to_string()).into())
+                        .map_err(GraphError::into_vault_error)
                 },
             )
         };
@@ -1857,7 +1862,10 @@ mod tests {
 
         // Bookkeeping does not change source_revision, but snapshot bytes must still agree.
         std::fs::write(&source, raw.replace("2026-10-18", "2026-10-19")).unwrap();
-        assert!(prepare(&captured).is_err());
+        assert!(matches!(
+            prepare(&captured),
+            Err(lk_vault::VaultError::CitationCapture(_))
+        ));
         assert_eq!(
             std::fs::read(root.path().join(".lorekeeper/search.sqlite")).unwrap(),
             before
@@ -1867,7 +1875,10 @@ mod tests {
         // This page is outside search scope, but remains part of graph existence capture.
         std::fs::create_dir_all(root.path().join("authored")).unwrap();
         std::fs::write(root.path().join("authored/note.md"), "# Unmanaged\n").unwrap();
-        assert!(prepare(&captured).is_err());
+        assert!(matches!(
+            prepare(&captured),
+            Err(lk_vault::VaultError::CitationCapture(_))
+        ));
         assert_eq!(
             std::fs::read(root.path().join(".lorekeeper/search.sqlite")).unwrap(),
             before
@@ -1886,6 +1897,199 @@ mod tests {
         )
         .unwrap();
         assert!(capture_concept_citations(root.path(), &dirs, false).is_err());
+    }
+
+    #[test]
+    fn captured_graph_drift_identifies_changed_page_without_source_text() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        write_owner_test_concept(root.path());
+        let path = root.path().join("wiki/concepts/topic.md");
+        let before = std::fs::read_to_string(&path).unwrap();
+        let captured = capture_concept_citations(root.path(), &dirs, false).unwrap();
+        std::fs::write(&path, format!("{before}\nPrivate authored text.\n")).unwrap();
+        let error = captured.verify(&[]).unwrap_err();
+        let GraphError::CaptureChanged(change) = &error else {
+            panic!("{error}");
+        };
+        let value = serde_json::to_value(change).unwrap();
+        assert_eq!(value["phase"], "graph");
+        assert_eq!(value["pages"]["changed"], 1);
+        assert_eq!(
+            value["examples"][0]["path"]["path"],
+            "wiki/concepts/topic.md"
+        );
+        assert!(!error.to_string().contains("Private authored text."));
+        assert!(!error.to_string().contains(root.path().to_str().unwrap()));
+        let vault = error.into_vault_error();
+        assert!(matches!(&vault, lk_vault::VaultError::CitationCapture(_)));
+        assert!(!vault.to_string().contains("I/O error"));
+    }
+
+    #[test]
+    fn selected_search_revision_drift_reports_its_exact_comparison() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        write_owner_test_concept(root.path());
+        let captured = capture_concept_citations(root.path(), &dirs, false).unwrap();
+        let selected = [(PathBuf::from("wiki/concepts/topic.md"), "a".repeat(64))];
+        let error = captured.verify(&selected).unwrap_err().to_string();
+        assert!(error.contains("\"phase\":\"selected-page\""), "{error}");
+        assert!(error.contains(&"a".repeat(64)), "{error}");
+    }
+
+    #[test]
+    fn capture_drift_counts_metadata_and_membership_without_inventing_evidence_changes() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        write_owner_test_concept(root.path());
+        std::fs::create_dir_all(root.path().join("authored")).unwrap();
+        let removed = root.path().join("authored/removed.md");
+        std::fs::write(&removed, "Unmanaged content.").unwrap();
+        let path = root.path().join("wiki/concepts/topic.md");
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let original = lk_core::concept::source_revision(&frontmatter::parse_page(&raw).unwrap());
+        let captured = capture_concept_citations(root.path(), &dirs, false).unwrap();
+        let updated = raw.replacen("type: concept", "type: concept\nupdated: 2026-11-03", 1);
+        std::fs::write(&path, &updated).unwrap();
+        assert_eq!(
+            lk_core::concept::source_revision(&frontmatter::parse_page(&updated).unwrap()),
+            original
+        );
+        std::fs::remove_file(removed).unwrap();
+        std::fs::write(
+            root.path().join("authored/added.md"),
+            "Other unmanaged content.",
+        )
+        .unwrap();
+        let GraphError::CaptureChanged(change) = captured.verify(&[]).unwrap_err() else {
+            panic!("capture drift must remain typed");
+        };
+        let value = serde_json::to_value(change).unwrap();
+        assert_eq!(
+            value["pages"],
+            serde_json::json!({"added":1,"removed":1,"changed":1})
+        );
+        assert_eq!(
+            value["resolutions"],
+            serde_json::json!({"added":1,"removed":1,"changed":0})
+        );
+        assert_eq!(
+            value["evidence"],
+            serde_json::json!({"added":0,"removed":0,"changed":0})
+        );
+        assert_eq!(value["readability_changed"], 0);
+        assert_eq!(value["omitted"], 0);
+    }
+
+    #[test]
+    fn capture_drift_bounds_examples_counts_all_inputs_and_uses_no_further_reads() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        write_owner_test_concept(root.path());
+        std::fs::create_dir_all(root.path().join("authored")).unwrap();
+        for index in 0..25 {
+            std::fs::write(
+                root.path().join(format!("authored/{index:02}.md")),
+                "Before.",
+            )
+            .unwrap();
+        }
+        let before = capture_concept_citations(root.path(), &dirs, false).unwrap();
+        for index in 0..25 {
+            std::fs::write(
+                root.path().join(format!("authored/{index:02}.md")),
+                "After.",
+            )
+            .unwrap();
+        }
+        std::fs::create_dir_all(root.path().join("daily")).unwrap();
+        std::fs::write(
+            root.path().join("daily/report.md"),
+            "---\ntype: daily\n---\n[Topic](../wiki/concepts/topic.md)\n",
+        )
+        .unwrap();
+        let after = capture_concept_citations(root.path(), &dirs, false).unwrap();
+        std::fs::remove_dir_all(root.path()).unwrap();
+        let value = serde_json::to_value(before.capture_change(&after)).unwrap();
+        assert_eq!(value["pages"]["changed"], 25);
+        assert_eq!(value["pages"]["added"], 1);
+        assert_eq!(value["resolutions"]["added"], 1);
+        assert_eq!(value["evidence"]["changed"], 1);
+        let examples = value["examples"].as_array().unwrap();
+        assert_eq!(examples.len(), 5);
+        for component in ["page", "resolution", "evidence"] {
+            assert!(examples.iter().any(|row| row["component"] == component));
+        }
+        assert_eq!(value["omitted"], 23);
+    }
+
+    #[test]
+    fn capture_drift_distinguishes_absent_unreadable_missing_and_resolved() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        write_owner_test_concept(root.path());
+        let before = capture_concept_citations(root.path(), &dirs, false).unwrap();
+        let mut after = capture_concept_citations(root.path(), &dirs, false).unwrap();
+        after
+            .file_revisions
+            .insert(PathBuf::from("wiki/concepts/topic.md"), None);
+        after
+            .file_revisions
+            .insert(PathBuf::from("unavailable.md"), None);
+        after.resolutions.insert(PathBuf::from("missing.md"), None);
+        after
+            .resolutions
+            .insert(PathBuf::from("wiki/concepts/topic.md"), None);
+        let value = serde_json::to_value(before.capture_change(&after)).unwrap();
+        assert_eq!(value["pages"]["added"], 1);
+        assert_eq!(value["pages"]["changed"], 1);
+        assert_eq!(value["readability_changed"], 1);
+        let examples = value["examples"].as_array().unwrap();
+        assert!(
+            examples
+                .iter()
+                .any(|row| row["expected"]["state"] == "absent"
+                    && row["current"]["state"] == "unreadable")
+        );
+        assert!(examples.iter().any(
+            |row| row["expected"]["state"] == "absent" && row["current"]["state"] == "missing"
+        ));
+        assert!(
+            examples
+                .iter()
+                .any(|row| row["expected"]["state"] == "owner"
+                    && row["current"]["state"] == "missing")
+        );
+        let mut reordered = capture_concept_citations(root.path(), &dirs, false).unwrap();
+        reordered
+            .projection
+            .concepts
+            .push(lk_vault::ConceptCitationSet {
+                path: PathBuf::from("wiki/concepts/second.md"),
+                source_count: 0,
+                citations: Vec::new(),
+            });
+        let mut original_order = capture_concept_citations(root.path(), &dirs, false).unwrap();
+        original_order.projection.concepts = reordered.projection.concepts.clone();
+        reordered.projection.concepts.reverse();
+        let ordered = serde_json::to_value(original_order.capture_change(&reordered)).unwrap();
+        assert_eq!(ordered["evidence_order_changed"], true);
+        assert_eq!(
+            ordered["evidence"],
+            serde_json::json!({"added":0,"removed":0,"changed":0})
+        );
+        let original = serde_json::to_value(before.capture_change(&before)).unwrap();
+        assert_eq!(original["examples"], serde_json::json!([]));
+        assert_eq!(original["omitted"], 0);
+        let failure = GraphError::Io("actual read failure".into()).into_vault_error();
+        let lk_vault::VaultError::Io(error) = failure else {
+            panic!("real IO remains IO")
+        };
+        assert!(matches!(
+            error.get_ref().unwrap().downcast_ref::<GraphError>(),
+            Some(GraphError::Io(_))
+        ));
     }
 
     #[cfg(unix)]
@@ -1912,7 +2116,19 @@ mod tests {
         captured.verify(&[]).unwrap();
         std::fs::remove_file(root.path().join("route")).unwrap();
         std::os::unix::fs::symlink("alternatives", root.path().join("route")).unwrap();
-        assert!(captured.verify(&[]).is_err());
+        let GraphError::CaptureChanged(change) = captured.verify(&[]).unwrap_err() else {
+            panic!("resolution drift must remain typed");
+        };
+        let value = serde_json::to_value(change).unwrap();
+        assert!(value["resolutions"]["changed"].as_u64().unwrap() > 0);
+        assert_eq!(value["evidence"]["changed"], 1);
+        assert!(
+            value["examples"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["component"] == "resolution")
+        );
     }
 
     #[cfg(unix)]
@@ -2458,7 +2674,7 @@ mod tests {
             |selected| {
                 captured
                     .verify(selected)
-                    .map_err(|error| std::io::Error::other(error.to_string()).into())
+                    .map_err(GraphError::into_vault_error)
             },
         )
         .unwrap();
