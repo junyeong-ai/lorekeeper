@@ -45,8 +45,8 @@ section or create a concept. Processing blockers do not become source questions 
 `inspected_resources` supplies the complete planned read roster with native resource
 indices and full guards. `completed.evidence_resources` or
 `frontier.evidence_resources` lists the exact cited subset by resource index into that
-complete table. Every guard value is supplied once; use the same table with each
-finding, question and resolution range. Neither roster membership nor absence from that citation mapping
+complete table. Cited guards reference this table instead of a second copy; use it with this Work's
+observation findings, questions and resolutions. Captured context retains its own mappings. Neither roster membership nor absence from that citation mapping
 decides semantic support, owner identity or permission to reuse a concept. When a
 required identity judgment is absent from the observations, use the permitted targeted
 read or return `needs-action`. The roster contains guards, not source bodies; native

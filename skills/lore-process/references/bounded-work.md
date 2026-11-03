@@ -480,6 +480,21 @@ already-complete work can have no invocation, so this array is not a call ledger
 An interactive `returned` outcome means the host exited successfully, not that an
 observation, assessment or publication was verified.
 
+`finalization_admissions` separately records native queue-planning checks for prepared
+Root or Frontier finalization. Each entry names the Work, task, Work subject revision,
+mode and typed outcome from that same capture. It does not enumerate every current
+task. Known canonical input/completion revisions are copied unchanged. When a full
+frontier request was assembled, `request_revision` uses the same native digest domain
+as finalization-action receipts. Unavailable or unmeasured revisions remain null;
+none of these fields is a raw file checksum. Up to 1024 checks are retained;
+`finalization_admissions_omitted` counts later
+checks. Repeated entries are checks, not distinct tasks or calls, and add no
+`work_steps`, semantic calls or retained progress. `available` is readiness, not host
+execution or publication. Canonical-frontier input, full native-request input and
+minimum result-envelope capacities are distinct measurements; do not compare their
+revision or size domains interchangeably. Root `needs-action` is the prepared outcome,
+not proof of a new model call or a newly recorded action.
+
 `stages` names the typed invocation stages. `execution` records the selected profile,
 engine, observed CLI version and requested model/effort; omitted native settings stay
 `null`. It does not establish the actual provider model, effective effort, tokens or

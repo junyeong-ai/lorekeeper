@@ -18,6 +18,8 @@ mod refinement;
 mod retention;
 pub(crate) use evidence::ObservationEvidenceError;
 use evidence::validate_output_evidence;
+pub(super) use frontier::FrontierCapture;
+pub(in crate::commands) use frontier::FrontierUnavailable;
 use frontier::{FrontierProof, FrontierSeal};
 pub(crate) use inspection::OutputCapacity;
 pub(crate) use inspection::{ObservationCandidate, ObservationRecordPlan, ObservationViolation};
@@ -3160,6 +3162,7 @@ mod tests {
                 let completed = work
                     .capture_frontier(root.path(), &source)
                     .unwrap()
+                    .into_completion()
                     .unwrap();
                 let CompletionAuthority::Frontier(proof) = completed.authority else {
                     panic!()
@@ -4002,6 +4005,7 @@ mod tests {
         let prior = work
             .capture_frontier(session.root(), source)
             .unwrap()
+            .into_completion()
             .unwrap()
             .plan_seal(work, &mut plan, session.root(), result)
             .unwrap();
@@ -4016,15 +4020,15 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let session = MutationSession::acquire(root.path()).unwrap();
         let (work, source) = frontier_fixture(&session);
-        assert!(
-            work.capture_frontier(root.path(), &source)
-                .unwrap()
-                .is_none()
-        );
+        assert!(matches!(
+            work.capture_frontier(root.path(), &source).unwrap(),
+            FrontierCapture::Unavailable(FrontierUnavailable::IncompleteCoverage)
+        ));
         inspect_frontier(&work, &session, &source);
         let completed = work
             .capture_frontier(root.path(), &source)
             .unwrap()
+            .into_completion()
             .unwrap();
         assert_eq!(
             completed.result()["observations"].as_array().unwrap().len(),
@@ -4049,11 +4053,10 @@ mod tests {
             evidence: vec![part.ranges[0].clone()],
         });
         work.record(&session, blocked, &source).unwrap();
-        assert!(
-            work.capture_frontier(root.path(), &source)
-                .unwrap()
-                .is_none()
-        );
+        assert!(matches!(
+            work.capture_frontier(root.path(), &source).unwrap(),
+            FrontierCapture::Unavailable(FrontierUnavailable::ProcessingConcern)
+        ));
         let mut changed = source.clone();
         changed[0].revision = "changed".into();
         assert!(work.capture_frontier(root.path(), &changed).is_err());
@@ -4143,6 +4146,7 @@ mod tests {
             let mut mutation = MutationPlan::default();
             work.capture_frontier(root.path(), &source)
                 .unwrap()
+                .into_completion()
                 .unwrap()
                 .plan_seal(
                     &work,
@@ -4279,6 +4283,7 @@ mod tests {
         assert!(
             work.capture_frontier(root.path(), &source)
                 .unwrap()
+                .into_completion()
                 .unwrap()
                 .plan_seal(&work, &mut MutationPlan::default(), root.path(), &changed)
                 .is_err()
@@ -4300,6 +4305,7 @@ mod tests {
         assert!(
             work.capture_frontier(root.path(), &source)
                 .unwrap()
+                .into_completion()
                 .unwrap()
                 .plan_seal(&work, &mut MutationPlan::default(), root.path(), &result)
                 .is_err()
@@ -4402,11 +4408,23 @@ mod tests {
             output.summary = "Exact assigned observation. ".repeat(20);
             work.record(&session, output, &source).unwrap();
         }
-        assert!(
-            work.capture_frontier(root.path(), &source)
-                .unwrap()
-                .is_none()
-        );
+        let capacity = work.capture_frontier(root.path(), &source).unwrap();
+        match capacity {
+            FrontierCapture::Unavailable(
+                FrontierUnavailable::ObservationsCapacity {
+                    actual_bytes,
+                    max_bytes,
+                }
+                | FrontierUnavailable::InputCapacity {
+                    actual_bytes,
+                    max_bytes,
+                },
+            ) => {
+                assert!(actual_bytes > max_bytes);
+                assert_eq!(max_bytes, work.max_input_bytes);
+            }
+            _ => panic!("the complete frontier must retain its actual capacity refusal"),
+        }
         assert!(
             !work
                 .progress(root.path(), &source)
@@ -4420,17 +4438,16 @@ mod tests {
             unsupported
                 .capture_frontier(root.path(), &source)
                 .unwrap()
+                .into_completion()
                 .is_none()
         );
         unsupported.context["purpose"]["task_kind"] = json!("extract-concepts");
         unsupported.context["purpose"]["extraction_scope"] =
             json!({"policy":"source-proposals-v1"});
-        assert!(
-            unsupported
-                .capture_frontier(root.path(), &source)
-                .unwrap()
-                .is_none()
-        );
+        assert!(matches!(
+            unsupported.capture_frontier(root.path(), &source).unwrap(),
+            FrontierCapture::Unavailable(FrontierUnavailable::UnsupportedPurpose)
+        ));
     }
     #[test]
     fn frontier_authority_replacement_uses_one_prior_final_read() {

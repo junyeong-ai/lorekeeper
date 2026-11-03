@@ -241,6 +241,8 @@ execution:
 `lore run process --json`의 실제 결과로 범위·호출·준비·검증 시간을 확인하세요.
 자세한 조정·재개 조건은 [실행 프로필](skills/lore-setup/references/config.md#execution-profiles),
 [대용량 작업](skills/lore-process/references/bounded-work.md), [계측 정의](skills/lore-process/references/bounded-work.md#native-run-measurements)에 있습니다.
+`finalization_admissions`는 모델 호출 없이 확인한 최종화 진입 결과를 별도로 보고합니다.
+이 기록 자체는 관측·호출·게시 진척이 아닙니다.
 
 ## 운영과 완료 확인
 

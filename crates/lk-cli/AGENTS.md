@@ -86,6 +86,10 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   cancellation. Invocation counts and wall time are not tokens or billed cost. Native
   work telemetry retains at most 1024 evidence/screening/finalizer steps and counts
   omissions. Measure existing operations only; unknown/inapplicable fields are null.
+  Queue-planning `finalization_admissions` records typed outcomes from that same
+  captured preparation, separately bounded with an omitted count. These checks are
+  neither host calls nor retained progress; keep `work_steps` and campaign decisions
+  unchanged. Do not recapture inputs just to explain admission.
   Compact request/decoded-result bytes exclude prompts and host envelopes; tool-enabled
   native result request/response bytes are measured; ordinary interactive audit
   responses remain unobserved. Revalidation and recording share one measured operation.

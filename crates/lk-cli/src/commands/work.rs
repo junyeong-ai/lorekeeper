@@ -1444,6 +1444,22 @@ pub(super) enum TaskWork {
     },
 }
 
+pub(super) struct TaskPreparation {
+    pub work: TaskWork,
+    #[cfg(unix)]
+    pub admissions: Vec<native::FinalizationAdmission>,
+}
+
+impl From<TaskWork> for TaskPreparation {
+    fn from(work: TaskWork) -> Self {
+        Self {
+            work,
+            #[cfg(unix)]
+            admissions: Vec::new(),
+        }
+    }
+}
+
 #[cfg(unix)]
 fn validate_native_finalization(
     root: &Path,
@@ -1557,7 +1573,7 @@ pub(super) fn prepare_task(
     config: &lk_core::config::Config,
     config_revision: &str,
     task_id: &str,
-) -> miette::Result<TaskWork> {
+) -> miette::Result<TaskPreparation> {
     let task = super::queue::current_task(session.root(), task_id)?;
     prepare_task_in_session(session, config, config_revision, &task, None, None, None)
 }
@@ -1569,7 +1585,11 @@ pub(super) fn prepare_tasks_with_audit(
     tasks: &[lk_queue::QueueTask],
     audits: &std::collections::BTreeMap<String, lk_graph::audit::AuditCandidate>,
     read: &lk_vault::ReadControl,
-) -> miette::Result<(Vec<TaskWork>, lk_vault::DiscoveryCaptureMetrics, usize)> {
+) -> miette::Result<(
+    Vec<TaskPreparation>,
+    lk_vault::DiscoveryCaptureMetrics,
+    usize,
+)> {
     read.check().into_diagnostic()?;
     let root = session.root();
     let mut recipes = Vec::new();
@@ -1650,7 +1670,7 @@ fn prepare_task_in_session(
     audit: Option<&lk_graph::audit::AuditCandidate>,
     inventory: Option<resources::SelectionInventory>,
     native_contract: Option<(&str, &mut usize)>,
-) -> miette::Result<TaskWork> {
+) -> miette::Result<TaskPreparation> {
     let root = session.root();
     let prepared = if task.kind == lk_queue::TaskKind::ExtractConcepts
         && is_progressive(config)?
@@ -1664,23 +1684,25 @@ fn prepare_task_in_session(
             ScreeningPreparation::SourceBlocked { work_id, .. } => {
                 return Ok(TaskWork::Admission {
                     reason: source_blocked_reason(&work_id),
-                });
+                }
+                .into());
             }
             ScreeningPreparation::Capacity { capacity, .. } => {
                 return Ok(TaskWork::Admission {
                     reason: capacity.to_string(),
-                });
+                }
+                .into());
             }
             ScreeningPreparation::Source { work, prepared } => {
                 persist_prepared(session, config, config_revision, &prepared)?;
                 if let Some(reason) = inspection_admission(root, &work, &prepared.resources)? {
-                    return Ok(TaskWork::Admission { reason });
+                    return Ok(TaskWork::Admission { reason }.into());
                 }
-                return Ok(TaskWork::Source { id: work.plan.id });
+                return Ok(TaskWork::Source { id: work.plan.id }.into());
             }
             ScreeningPreparation::Candidates(screening) => {
                 if let Some(reason) = screening.selection.admission_reason(config, root)? {
-                    return Ok(TaskWork::Admission { reason });
+                    return Ok(TaskWork::Admission { reason }.into());
                 }
                 if let Some((contract, reused)) = native_contract {
                     *reused += screening.selection.create_native(
@@ -1699,11 +1721,13 @@ fn prepare_task_in_session(
                     if let ScreeningState::Deferred(reason) = &turn.state {
                         return Ok(TaskWork::Admission {
                             reason: reason.clone(),
-                        });
+                        }
+                        .into());
                     }
                     return Ok(TaskWork::Screening {
                         turn: Box::new(turn),
-                    });
+                    }
+                    .into());
                 }
                 admitted_task(&screening, &ledger.binding()?, &ledger.selected_owners)?
             }
@@ -1725,7 +1749,7 @@ fn prepare_task_in_session(
         #[cfg(not(unix))]
         {
             work.whole_input_bytes(&prepared.resources)?;
-            return Ok(TaskWork::WholeInput {});
+            return Ok(TaskWork::WholeInput {}.into());
         }
         #[cfg(unix)]
         {
@@ -1734,7 +1758,8 @@ fn prepare_task_in_session(
                 return Ok(TaskWork::WholeInput {
                     native: None,
                     individual: false,
-                });
+                }
+                .into());
             }
             let owner = lk_vault::resolve_page_owner(root, Path::new(&task.target.vault_path))
                 .into_diagnostic()?;
@@ -1743,7 +1768,8 @@ fn prepare_task_in_session(
                 Err(error) if error.downcast_ref::<generation::ResultCapacity>().is_some() => {
                     return Ok(TaskWork::Admission {
                         reason: error.to_string(),
-                    });
+                    }
+                    .into());
                 }
                 Err(error) => return Err(error),
             };
@@ -1751,7 +1777,7 @@ fn prepare_task_in_session(
                 generation::Admission::Batch => false,
                 generation::Admission::Single => true,
                 generation::Admission::Deferred(reason) => {
-                    return Ok(TaskWork::Admission { reason });
+                    return Ok(TaskWork::Admission { reason }.into());
                 }
             };
             let request = native::selected_request(config, std::slice::from_ref(&input))?;
@@ -1760,13 +1786,19 @@ fn prepare_task_in_session(
                 return Ok(TaskWork::WholeInput {
                     native: Some(Box::new(input)),
                     individual,
-                });
+                }
+                .into());
             }
         }
     }
     persist_prepared(session, config, config_revision, &prepared)?;
+    let mut preparation = TaskPreparation::from(TaskWork::Partitioned {
+        id: work.plan.id.clone(),
+    });
     #[cfg(unix)]
     {
+        use native::{FinalizationAdmission, FinalizationAdmissionState, FinalizationMode};
+
         if work.has_root_output(root)? && work.progress(root, &prepared.resources)?.complete {
             let checkpoint = prepare_native_finalization_from_capture(
                 root,
@@ -1776,20 +1808,48 @@ fn prepare_task_in_session(
                 &prepared,
                 false,
             )?;
+            let outcome = match &checkpoint.state {
+                NativeFinalization::Finished => FinalizationAdmissionState::Finished,
+                NativeFinalization::Replan => FinalizationAdmissionState::Replan,
+                NativeFinalization::Ready(FinalizationPreparation::NeedsAction(_)) => {
+                    FinalizationAdmissionState::NeedsAction
+                }
+                NativeFinalization::Ready(FinalizationPreparation::Capacity {
+                    request_bytes,
+                    max_input_bytes,
+                }) => FinalizationAdmissionState::PreparedInputCapacity {
+                    request_bytes: *request_bytes,
+                    max_input_bytes: *max_input_bytes,
+                },
+                NativeFinalization::Ready(_) => FinalizationAdmissionState::Available {
+                    request_bytes: None,
+                },
+            };
+            let mut admission =
+                FinalizationAdmission::new(&work, task, FinalizationMode::Root, outcome);
+            if let NativeFinalization::Ready(FinalizationPreparation::Result(result)) =
+                &checkpoint.state
+            {
+                admission = admission.with_completion(&result.completed)?;
+            }
+            preparation.admissions.push(admission);
             match checkpoint.state {
                 NativeFinalization::Ready(FinalizationPreparation::NeedsAction(reason)) => {
-                    return Ok(TaskWork::Admission { reason });
+                    preparation.work = TaskWork::Admission { reason };
+                    return Ok(preparation);
                 }
                 NativeFinalization::Ready(FinalizationPreparation::Capacity {
                     request_bytes,
                     max_input_bytes,
                 }) => {
-                    return Ok(TaskWork::Admission {
+                    preparation.work = TaskWork::Admission {
                         reason: finalization_capacity_reason(request_bytes, max_input_bytes),
-                    });
+                    };
+                    return Ok(preparation);
                 }
                 NativeFinalization::Finished | NativeFinalization::Ready(_) => {
-                    return Ok(TaskWork::RootFinalization { id: work.plan.id });
+                    preparation.work = TaskWork::RootFinalization { id: work.plan.id };
+                    return Ok(preparation);
                 }
                 NativeFinalization::Replan => {}
             }
@@ -1799,7 +1859,16 @@ fn prepare_task_in_session(
             .join("frontier-seal.json");
         if state::read_optional(root, &seal)?.is_some() {
             match verify_finished_prepared(root, &work, &prepared) {
-                Ok(()) => return Ok(TaskWork::Finalization { id: work.plan.id }),
+                Ok(()) => {
+                    preparation.admissions.push(FinalizationAdmission::new(
+                        &work,
+                        task,
+                        FinalizationMode::Frontier,
+                        FinalizationAdmissionState::ReusableSeal,
+                    ));
+                    preparation.work = TaskWork::Finalization { id: work.plan.id };
+                    return Ok(preparation);
+                }
                 Err(error)
                     if matches!(
                         error.downcast_ref::<state::CompletionRefusal>(),
@@ -1808,20 +1877,46 @@ fn prepare_task_in_session(
                 Err(error) => return Err(error),
             }
         }
-        if let Some(result) = frontier_result(root, config, task, &work, &prepared)? {
-            match native_finalization_hold(root, task, &work, &result.request, &result.completed)? {
-                None => return Ok(TaskWork::Finalization { id: work.plan.id }),
-                Some(FinalizationHold::DiscoveryRecovery(reason)) => {
-                    return Ok(TaskWork::Admission { reason });
+        match frontier_result(root, config, task, &work, &prepared)? {
+            FrontierFinalization::Unavailable(admission) => {
+                preparation.admissions.push(admission);
+            }
+            FrontierFinalization::Ready { result, admission } => {
+                let hold = native_finalization_hold(
+                    root,
+                    task,
+                    &work,
+                    &result.request,
+                    &result.completed,
+                )?;
+                let admission = match &hold {
+                    None => admission,
+                    Some(FinalizationHold::DiscoveryRecovery(_)) => {
+                        admission.with_outcome(FinalizationAdmissionState::DiscoveryRecovery)
+                    }
+                    Some(FinalizationHold::ProcessingAction(_)) => {
+                        admission.with_outcome(FinalizationAdmissionState::ProcessingAction)
+                    }
+                };
+                preparation.admissions.push(admission);
+                match hold {
+                    None => {
+                        preparation.work = TaskWork::Finalization { id: work.plan.id };
+                        return Ok(preparation);
+                    }
+                    Some(FinalizationHold::DiscoveryRecovery(reason)) => {
+                        preparation.work = TaskWork::Admission { reason };
+                        return Ok(preparation);
+                    }
+                    Some(FinalizationHold::ProcessingAction(_)) => {}
                 }
-                Some(FinalizationHold::ProcessingAction(_)) => {}
             }
         }
     }
     if let Some(reason) = inspection_admission(root, &work, &prepared.resources)? {
-        return Ok(TaskWork::Admission { reason });
+        preparation.work = TaskWork::Admission { reason };
     }
-    Ok(TaskWork::Partitioned { id: work.plan.id })
+    Ok(preparation)
 }
 
 fn inspection_admission(
@@ -2309,32 +2404,97 @@ pub(super) struct ResultFinalization {
 }
 
 #[cfg(unix)]
+enum FrontierFinalization {
+    Ready {
+        result: Box<ResultFinalization>,
+        admission: native::FinalizationAdmission,
+    },
+    Unavailable(native::FinalizationAdmission),
+}
+
+#[cfg(unix)]
+impl FrontierFinalization {
+    fn build(
+        work: &Work,
+        task: &lk_queue::QueueTask,
+        request: Value,
+        completed: Value,
+        max_input_bytes: usize,
+    ) -> miette::Result<Self> {
+        let raw = serde_json::to_vec(&request).into_diagnostic()?;
+        let request_bytes = raw.len();
+        let admission = native::FinalizationAdmission::new(
+            work,
+            task,
+            native::FinalizationMode::Frontier,
+            native::FinalizationAdmissionState::Available {
+                request_bytes: Some(request_bytes),
+            },
+        )
+        .with_completion(&completed)?
+        .with_request_revision(lk_core::rss_original::digest(&raw));
+        if request_bytes > max_input_bytes {
+            return Ok(Self::Unavailable(admission.with_outcome(
+                native::FinalizationAdmissionState::NativeInputCapacity {
+                    request_bytes,
+                    max_input_bytes,
+                },
+            )));
+        }
+        Ok(Self::Ready {
+            result: Box::new(ResultFinalization {
+                request,
+                completed,
+                kind: state::CompletionKind::Frontier,
+            }),
+            admission,
+        })
+    }
+}
+
+#[cfg(unix)]
 fn frontier_result(
     root: &Path,
     config: &lk_core::config::Config,
     task: &lk_queue::QueueTask,
     work: &Work,
     prepared: &Prepared,
-) -> miette::Result<Option<ResultFinalization>> {
-    let Some(snapshot) = work.capture_frontier(root, &prepared.resources)? else {
-        return Ok(None);
+) -> miette::Result<FrontierFinalization> {
+    let snapshot = match work.capture_frontier(root, &prepared.resources)? {
+        state::FrontierCapture::Ready(snapshot) => snapshot,
+        state::FrontierCapture::Unavailable(reason) => {
+            return Ok(FrontierFinalization::Unavailable(
+                native::FinalizationAdmission::new(
+                    work,
+                    task,
+                    native::FinalizationMode::Frontier,
+                    native::FinalizationAdmissionState::FrontierUnavailable { reason },
+                ),
+            ));
+        }
     };
     let completed = snapshot.result().clone();
     let request = match native::frontier_request(config, task, work, &completed) {
         Ok(request) => request,
-        Err(error) if error.downcast_ref::<generation::ResultCapacity>().is_some() => {
-            return Ok(None);
+        Err(error) => {
+            let Some(capacity) = error.downcast_ref::<generation::ResultCapacity>() else {
+                return Err(error);
+            };
+            return Ok(FrontierFinalization::Unavailable(
+                native::FinalizationAdmission::new(
+                    work,
+                    task,
+                    native::FinalizationMode::Frontier,
+                    native::FinalizationAdmissionState::NativeResultCapacity {
+                        minimum_bytes: capacity.minimum_bytes,
+                        max_result_bytes: capacity.max_result_bytes,
+                    },
+                )
+                .with_completion(&completed)?,
+            ));
         }
-        Err(error) => return Err(error),
     };
-    if serde_json::to_vec(&request).into_diagnostic()?.len() > work.max_input_bytes {
-        return Ok(None);
-    }
-    Ok(Some(ResultFinalization {
-        request,
-        completed,
-        kind: state::CompletionKind::Frontier,
-    }))
+    FrontierFinalization::build(work, task, request, completed, work.max_input_bytes)
 }
 
 #[cfg(unix)]
@@ -2378,7 +2538,9 @@ fn prepare_frontier_finalization(
         return Ok(None);
     };
     let task = super::queue::current_task(root, task_id)?;
-    let Some(result) = frontier_result(root, config, &task, work, prepared)? else {
+    let FrontierFinalization::Ready { result, .. } =
+        frontier_result(root, config, &task, work, prepared)?
+    else {
         return Ok(None);
     };
     if let Some(hold) =
@@ -2386,7 +2548,7 @@ fn prepare_frontier_finalization(
     {
         return Ok(Some(FinalizationPreparation::NeedsAction(hold.reason())));
     }
-    Ok(Some(FinalizationPreparation::Result(Box::new(result))))
+    Ok(Some(FinalizationPreparation::Result(result)))
 }
 
 #[cfg(unix)]
@@ -5136,7 +5298,9 @@ mod tests {
             }
             let prepared = {
                 let session = MutationSession::acquire(&root).unwrap();
-                prepare_task(&session, &config, &config_revision, &task.task_id).unwrap()
+                prepare_task(&session, &config, &config_revision, &task.task_id)
+                    .unwrap()
+                    .work
             };
             let TaskWork::Partitioned { id } = prepared else {
                 panic!("fixture must require bounded work");

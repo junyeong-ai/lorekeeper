@@ -164,6 +164,8 @@ mod native {
         retained_progress: RetainedProgress,
         work_steps: Vec<WorkStepMetrics>,
         work_steps_omitted: usize,
+        finalization_admissions: Vec<crate::commands::work::native::FinalizationAdmission>,
+        finalization_admissions_omitted: usize,
         evidence_preparation_io: lk_vault::DiscoveryCaptureMetrics,
         evidence_preparation_duration_ms: u64,
         evidence_revalidation_io: lk_vault::DiscoveryCaptureMetrics,
@@ -177,6 +179,17 @@ mod native {
 
     impl WorkTelemetry {
         const MAX_STEPS: usize = 1024;
+
+        fn record_admission(
+            &mut self,
+            admission: crate::commands::work::native::FinalizationAdmission,
+        ) {
+            if self.finalization_admissions.len() < Self::MAX_STEPS {
+                self.finalization_admissions.push(admission);
+            } else {
+                self.finalization_admissions_omitted += 1;
+            }
+        }
 
         fn record(&mut self, step: WorkStepMetrics) {
             match (step.role, step.outcome) {
@@ -3684,7 +3697,12 @@ mod native {
                 let mut prepared = materialize
                     .into_iter()
                     .zip(prepared)
-                    .map(|(task, work)| (task.target.vault_path.clone(), (task, work)))
+                    .map(|(task, preparation)| {
+                        for admission in preparation.admissions {
+                            self.result.work_telemetry.record_admission(admission);
+                        }
+                        (task.target.vault_path.clone(), (task, preparation.work))
+                    })
                     .collect::<std::collections::BTreeMap<_, _>>();
                 let mut batch = Vec::new();
                 for target in window {
@@ -3863,7 +3881,8 @@ mod native {
                             &self.config,
                             &self.config_revision,
                             &current.task_id,
-                        )?,
+                        )?
+                        .work,
                         crate::commands::work::TaskWork::Partitioned { .. }
                             | crate::commands::work::TaskWork::Finalization { .. }
                             | crate::commands::work::TaskWork::RootFinalization { .. }
@@ -5166,6 +5185,64 @@ mod native {
             assert_eq!(telemetry.retained_progress.screening_packets, 0);
             assert_eq!(telemetry.retained_progress.action_receipts, 0);
             assert!(telemetry.retained_progress.has_progress());
+        }
+
+        #[test]
+        fn finalization_admission_diagnostics_do_not_count_as_calls_or_progress() {
+            use crate::commands::work::native::{
+                FinalizationAdmission, FinalizationAdmissionState, FinalizationMode,
+            };
+            let resource = lk_core::semantic::SemanticResource {
+                address: "wiki/documents/source.md".into(),
+                revision: "source-revision".into(),
+                authority: lk_core::semantic::SemanticAuthority::Page,
+                text: "Declared source claim.".into(),
+            };
+            let work = crate::commands::work::state::Work::build(
+                &[resource],
+                "captured-subject",
+                serde_json::json!({
+                    "subject":{"kind":"queue","task_id":"task","cache_hash":"hash","target":"wiki/documents/test.md","target_revision":"target"},
+                    "purpose":{"task_kind":"extract-concepts"}
+                }),
+                crate::commands::work::state::WorkLimits {
+                    max_input_bytes: 3000,
+                    max_result_bytes: 1024,
+                },
+            )
+            .unwrap();
+            let task: lk_queue::QueueTask = serde_json::from_value(serde_json::json!({
+                "task_id":"task", "kind":"extract-concepts", "created_at":"2026-10-24T00:00:00Z",
+                "cache_hash":"hash", "input":{"text":"source","locale":"ko","source_type":"manual","concept_policy":"supported-new","date":"2026-10-24"},
+                "target":{"vault_path":"wiki/documents/test.md","anchor":"## Related Concepts","kind":"document-concepts"}
+            })).unwrap();
+            let mut result = JobResult::new(Operation::Process);
+            for _ in 0..WorkTelemetry::MAX_STEPS + 2 {
+                result
+                    .work_telemetry
+                    .record_admission(FinalizationAdmission::new(
+                        &work,
+                        &task,
+                        FinalizationMode::Frontier,
+                        FinalizationAdmissionState::Available {
+                            request_bytes: Some(1234),
+                        },
+                    ));
+            }
+            assert_eq!(result.semantic_calls, 0);
+            assert!(!result.work_telemetry.retained_progress.has_progress());
+            assert!(result.work_telemetry.work_steps.is_empty());
+            let json = serde_json::to_value(result).unwrap();
+            assert_eq!(
+                json["finalization_admissions"].as_array().unwrap().len(),
+                WorkTelemetry::MAX_STEPS
+            );
+            assert_eq!(json["finalization_admissions_omitted"], 2);
+            assert_eq!(
+                json["finalization_admissions"][0]["work_subject_revision"],
+                "captured-subject"
+            );
+            assert_eq!(json["finalization_admissions"][0]["request_bytes"], 1234);
         }
 
         #[test]

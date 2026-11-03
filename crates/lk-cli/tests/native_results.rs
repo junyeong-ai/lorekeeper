@@ -1310,6 +1310,22 @@ fn current_complete_frontier_finalizes_without_a_reduction_or_rewriting_paid_nod
             std::fs::write(fixture.root().join("mode"), "frontier").unwrap();
             let report = fixture.run();
             assert_eq!(report["halted"], false, "{engine}/{kind:?}: {report}");
+            assert!(
+                report["finalization_admissions"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|check| {
+                        check["work_id"] == id
+                            && check["task_id"] == task.task_id.as_str()
+                            && check["mode"] == "frontier"
+                            && check["state"] == "available"
+                            && check["request_bytes"]
+                                .as_u64()
+                                .is_some_and(|bytes| bytes <= 262144)
+                    }),
+                "{report}"
+            );
             assert!(fixture.done(&task), "{report}");
             assert_eq!(fixture.calls(), 1, "{report}");
             assert!(directory.join("frontier-seal.json").is_file());
@@ -1326,6 +1342,20 @@ fn current_complete_frontier_finalizes_without_a_reduction_or_rewriting_paid_nod
             )
             .unwrap();
             let frontier = &request["frontier"];
+            let revision = lk_core::rss_original::digest(&serde_json::to_vec(&request).unwrap());
+            assert!(
+                report["finalization_admissions"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|check| {
+                        check["work_id"] == id
+                            && check["request_revision"] == revision
+                            && check["canonical_input_revision"] == frontier["input_revision"]
+                            && check["completion_revision"] == frontier["result_revision"]
+                    }),
+                "{report}"
+            );
             assert_eq!(
                 frontier["observations"].as_array().unwrap().len(),
                 observations.len()
@@ -1551,6 +1581,26 @@ fn held_frontier_reduces_under_native_supervision_and_preserves_paid_history() {
             fixture.calls(),
             count,
             "unchanged held requests must spend no calls"
+        );
+        assert_eq!(again["semantic_calls"], 0, "{again}");
+        assert!(
+            again["work_steps"].as_array().unwrap().is_empty(),
+            "{again}"
+        );
+        assert!(
+            again["finalization_admissions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|check| {
+                    check["work_id"] == id
+                        && check["task_id"] == task.task_id.as_str()
+                        && matches!(
+                            check["state"].as_str(),
+                            Some("processing-action" | "needs-action")
+                        )
+                }),
+            "{again}"
         );
         assert_eq!(std::fs::read(&active).unwrap(), before);
         let requests = std::fs::read_to_string(fixture.root().join("calls.jsonl")).unwrap();

@@ -8,6 +8,103 @@ use serde_json::{Value, json};
 
 use super::{Prepared, Subject, Work};
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(in crate::commands) enum FinalizationMode {
+    Root,
+    Frontier,
+}
+
+#[derive(serde::Serialize)]
+#[serde(tag = "state", rename_all = "kebab-case")]
+pub(in crate::commands) enum FinalizationAdmissionState {
+    Available {
+        request_bytes: Option<usize>,
+    },
+    Finished,
+    Replan,
+    NeedsAction,
+    ReusableSeal,
+    ProcessingAction,
+    DiscoveryRecovery,
+    FrontierUnavailable {
+        reason: super::state::FrontierUnavailable,
+    },
+    PreparedInputCapacity {
+        request_bytes: usize,
+        max_input_bytes: usize,
+    },
+    NativeInputCapacity {
+        request_bytes: usize,
+        max_input_bytes: usize,
+    },
+    NativeResultCapacity {
+        minimum_bytes: usize,
+        max_result_bytes: usize,
+    },
+}
+
+#[derive(serde::Serialize)]
+pub(in crate::commands) struct FinalizationAdmission {
+    work_id: String,
+    task_id: String,
+    work_subject_revision: String,
+    canonical_input_revision: Option<String>,
+    completion_revision: Option<String>,
+    request_revision: Option<String>,
+    mode: FinalizationMode,
+    #[serde(flatten)]
+    outcome: FinalizationAdmissionState,
+}
+
+impl FinalizationAdmission {
+    pub(in crate::commands) fn new(
+        work: &Work,
+        task: &QueueTask,
+        mode: FinalizationMode,
+        outcome: FinalizationAdmissionState,
+    ) -> Self {
+        Self {
+            work_id: work.plan.id.clone(),
+            task_id: task.task_id.clone(),
+            work_subject_revision: work.plan.subject_revision.clone(),
+            canonical_input_revision: None,
+            completion_revision: None,
+            request_revision: None,
+            mode,
+            outcome,
+        }
+    }
+
+    pub(super) fn with_completion(mut self, completed: &Value) -> miette::Result<Self> {
+        if completed["work_id"] != self.work_id {
+            return Err(miette::miette!(
+                "finalization admission differs from captured Work"
+            ));
+        }
+        let revision = |field: &str| {
+            completed[field]
+                .as_str()
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+                .ok_or_else(|| miette::miette!("finalization admission has no canonical revision"))
+        };
+        self.canonical_input_revision = Some(revision("input_revision")?);
+        self.completion_revision = Some(revision("result_revision")?);
+        Ok(self)
+    }
+
+    pub(super) fn with_request_revision(mut self, revision: String) -> Self {
+        self.request_revision = Some(revision);
+        self
+    }
+
+    pub(super) fn with_outcome(mut self, outcome: FinalizationAdmissionState) -> Self {
+        self.outcome = outcome;
+        self
+    }
+}
+
 struct Captured<'a> {
     subject: &'a Subject,
     context: &'a Value,
@@ -273,7 +370,7 @@ pub(in crate::commands) fn finalization_request(
         "max_input_bytes":work.max_input_bytes, "max_result_bytes":work.plan.max_result_bytes,
         "max_response_bytes":super::generation::response_limit(task, &subject, &work.context, context_revision, work.plan.max_result_bytes)?,
         "response_schema":super::generation::schema(),
-        "instructions":format!("Finalize only this exact Work from its complete guarded root observation. inspected_resources is the complete planned read roster with every native resource index and full guard. completed.evidence_resources lists the exact cited subset by resource index into that roster; use it with every finding/question/resolution range. No guard or observation content was dropped. input_revision identifies the canonical native observation, not a hash to reconstruct from this model view. The roster is not source content or a semantic identity judgment. The supplied completed object replaces work result/status setup reads; preceding discovery and full evidence observations must not restart. {}", super::generation::instruction()),
+        "instructions":format!("Finalize only this exact Work from its complete guarded root observation. inspected_resources is the complete planned read roster with every native resource index and full guard. completed.evidence_resources lists the exact cited subset by resource index into that roster; use it with this Work's finding/question/resolution ranges. Captured context retains its own mappings. No guard or observation content was dropped. input_revision identifies the canonical native observation, not a hash to reconstruct from this model view. The roster is not source content or a semantic identity judgment. The supplied completed object replaces work result/status setup reads; preceding discovery and full evidence observations must not restart. {}", super::generation::instruction()),
     }))
 }
 
@@ -319,7 +416,7 @@ pub(in crate::commands) fn frontier_request(
         "max_input_bytes":work.max_input_bytes,"max_result_bytes":work.plan.max_result_bytes,
         "max_response_bytes":super::generation::response_limit(task, &subject, &work.context, &work.plan.subject_revision, work.plan.max_result_bytes)?,
         "response_schema":super::generation::schema(),
-        "instructions":format!("Finalize only this exact Work from the supplied complete current frontier. Its observations cover every planned inspection exactly once; no combined reduction or joint verdict has been recorded. Read every observation and evidence mapping. inspected_resources is the complete planned read roster with every native resource index and full guard. frontier.evidence_resources lists the exact cited subset by resource index into that roster; use it with every finding/question/resolution range. No guard or observation content was dropped. input_revision identifies the canonical native frontier, not a hash to reconstruct from this model view. The roster is not source content or a semantic identity judgment. Compare claims only under their declared scope and effective time; an inherited resolution is not authority to resolve another open question. Processing concerns cannot be relabeled as source uncertainty. The frontier replaces work result/status setup reads; do not restart paid inspections or write a reduction output. Rust owns its distinct guarded completion proof and final publication. {}", super::generation::instruction()),
+        "instructions":format!("Finalize only this exact Work from the supplied complete current frontier. Its observations cover every planned inspection exactly once; no combined reduction or joint verdict has been recorded. Read every observation and evidence mapping. inspected_resources is the complete planned read roster with every native resource index and full guard. frontier.evidence_resources lists the exact cited subset by resource index into that roster; use it with this Work's finding/question/resolution ranges. Captured context retains its own mappings. No guard or observation content was dropped. input_revision identifies the canonical native frontier, not a hash to reconstruct from this model view. The roster is not source content or a semantic identity judgment. Compare claims only under their declared scope and effective time; an inherited resolution is not authority to resolve another open question. Processing concerns cannot be relabeled as source uncertainty. The frontier replaces work result/status setup reads; do not restart paid inspections or write a reduction output. Rust owns its distinct guarded completion proof and final publication. {}", super::generation::instruction()),
     }))
 }
 
@@ -502,7 +599,9 @@ mod tests {
     fn finalizer_view_requires_exact_unique_native_evidence_references() {
         let (_, _, _, _, work, _) = fixture();
         let roster = work.inspection_guards().unwrap();
-        let canonical = json!({"input_revision":"canonical-domain","evidence":roster,"output":{"summary":"Unchanged","source_questions":[],"unresolved":[]}});
+        let canonical = json!({"input_revision":"canonical-domain","evidence":roster,
+            "context":{"source_observations":{"work_id":"another-work","evidence":[{"resource":99,"guard":{"revision":"another-native-domain"}}]}},
+            "output":{"summary":"Unchanged","source_questions":[],"unresolved":[]}});
         let mut corrupt = Vec::new();
         let mut duplicate = canonical.clone();
         duplicate["evidence"]
@@ -530,6 +629,7 @@ mod tests {
         let mut uncited = canonical.clone();
         uncited["evidence"] = json!([]);
         let view = FinalizationView::build(&work, &uncited).unwrap();
+        assert_eq!(view.observation["context"], canonical["context"]);
         assert!(
             view.observation["evidence_resources"]
                 .as_array()
@@ -609,6 +709,7 @@ mod tests {
         let completed = work
             .capture_frontier(root.path(), &resources)
             .unwrap()
+            .into_completion()
             .unwrap();
         let canonical = completed.result();
         let before = canonical.clone();
@@ -632,5 +733,46 @@ mod tests {
         );
         assert_eq!(canonical, &before);
         eprintln!("canonical {canonical_bytes} bytes; native finalizer {request_bytes} bytes");
+        let exact =
+            super::super::FrontierFinalization::build(&work, &task, request, before, request_bytes)
+                .unwrap();
+        let super::super::FrontierFinalization::Ready { result, admission } = exact else {
+            panic!("the exact complete request bound must fit");
+        };
+        let accepted = serde_json::to_value(admission).unwrap();
+        assert_eq!(
+            accepted["canonical_input_revision"],
+            result.completed["input_revision"]
+        );
+        assert_eq!(
+            accepted["completion_revision"],
+            result.completed["result_revision"]
+        );
+        assert_eq!(
+            accepted["request_revision"],
+            lk_core::rss_original::digest(&serde_json::to_vec(&result.request).unwrap())
+        );
+        let overflow = super::super::FrontierFinalization::build(
+            &work,
+            &task,
+            result.request,
+            result.completed,
+            request_bytes - 1,
+        )
+        .unwrap();
+        let super::super::FrontierFinalization::Unavailable(admission) = overflow else {
+            panic!("one byte over the complete request bound must refuse admission");
+        };
+        let rejected = serde_json::to_value(admission).unwrap();
+        assert_eq!(rejected["state"], "native-input-capacity");
+        assert_eq!(rejected["request_bytes"], request_bytes);
+        assert_eq!(rejected["max_input_bytes"], request_bytes - 1);
+        for field in [
+            "canonical_input_revision",
+            "completion_revision",
+            "request_revision",
+        ] {
+            assert_eq!(rejected[field], accepted[field]);
+        }
     }
 }

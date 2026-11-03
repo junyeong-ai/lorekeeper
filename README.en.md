@@ -243,6 +243,8 @@ and actual `lore run process --json` results to inspect scope, calls, preparatio
 See [execution profiles](skills/lore-setup/references/config.md#execution-profiles),
 [bounded work](skills/lore-process/references/bounded-work.md) and [measurement definitions](skills/lore-process/references/bounded-work.md#native-run-measurements)
 for tuning and resume contracts.
+`finalization_admissions` reports checks made without a model call, separately from
+work and completion; its entries do not establish progress or publication.
 
 ## Operations and completion
 

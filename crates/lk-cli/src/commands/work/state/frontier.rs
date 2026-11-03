@@ -1,5 +1,36 @@
 use super::*;
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub(in crate::commands) enum FrontierUnavailable {
+    UnsupportedPurpose,
+    CompleteRoot,
+    IncompleteCoverage,
+    ProcessingConcern,
+    ObservationsCapacity {
+        actual_bytes: usize,
+        max_bytes: usize,
+    },
+    InputCapacity {
+        actual_bytes: usize,
+        max_bytes: usize,
+    },
+}
+
+pub(in crate::commands::work) enum FrontierCapture {
+    Ready(CompletedWork),
+    Unavailable(FrontierUnavailable),
+}
+
+impl FrontierCapture {
+    pub(in crate::commands::work) fn into_completion(self) -> Option<CompletedWork> {
+        match self {
+            Self::Ready(completed) => Some(completed),
+            Self::Unavailable(_) => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FrontierNode {
@@ -167,13 +198,17 @@ impl Work {
         &self,
         root: &Path,
         resources: &[SemanticResource],
-    ) -> miette::Result<Option<CompletedWork>> {
+    ) -> miette::Result<FrontierCapture> {
         if !self.supports_frontier()? {
-            return Ok(None);
+            return Ok(FrontierCapture::Unavailable(
+                FrontierUnavailable::UnsupportedPurpose,
+            ));
         }
         let evaluated = self.evaluate(root, resources)?;
         if evaluated.progress().complete {
-            return Ok(None);
+            return Ok(FrontierCapture::Unavailable(
+                FrontierUnavailable::CompleteRoot,
+            ));
         }
         fn collect(
             node: &Node,
@@ -205,7 +240,9 @@ impl Work {
         let node = evaluated.nodes.last().expect("nonempty work tree");
         let mut nodes = Vec::new();
         if !collect(node, &evaluated, &mut nodes) {
-            return Ok(None);
+            return Ok(FrontierCapture::Unavailable(
+                FrontierUnavailable::IncompleteCoverage,
+            ));
         }
         if nodes.iter().any(|node| {
             !evaluated.current[&node.node_id]
@@ -213,7 +250,9 @@ impl Work {
                 .unresolved
                 .is_empty()
         }) {
-            return Ok(None);
+            return Ok(FrontierCapture::Unavailable(
+                FrontierUnavailable::ProcessingConcern,
+            ));
         }
         let proof = FrontierProof {
             schema: "work-frontier-v1".into(),
@@ -227,7 +266,12 @@ impl Work {
                 .ok_or_else(|| fail("frontier size overflow"))
         })?;
         if bytes > self.max_input_bytes {
-            return Ok(None);
+            return Ok(FrontierCapture::Unavailable(
+                FrontierUnavailable::ObservationsCapacity {
+                    actual_bytes: bytes,
+                    max_bytes: self.max_input_bytes,
+                },
+            ));
         }
         let observations = proof
             .nodes
@@ -246,8 +290,14 @@ impl Work {
             "evidence":self.evidence_guards(&outputs)?,
         });
         result["input_revision"] = revision(&result)?.into();
-        if encoded(&result)?.len() > self.max_input_bytes {
-            return Ok(None);
+        let actual_bytes = encoded(&result)?.len();
+        if actual_bytes > self.max_input_bytes {
+            return Ok(FrontierCapture::Unavailable(
+                FrontierUnavailable::InputCapacity {
+                    actual_bytes,
+                    max_bytes: self.max_input_bytes,
+                },
+            ));
         }
         let absent = evaluated
             .nodes
@@ -257,7 +307,7 @@ impl Work {
             .into_iter()
             .filter(|path| !evaluated.raw.contains_key(path))
             .collect();
-        Ok(Some(CompletedWork {
+        Ok(FrontierCapture::Ready(CompletedWork {
             work_id: self.plan.id.clone(),
             root_node: node.id.clone(),
             authority: CompletionAuthority::Frontier(proof),
@@ -277,6 +327,7 @@ impl Work {
             CompletionKind::Root => self.capture_completion(root, resources),
             CompletionKind::Frontier => self
                 .capture_frontier(root, resources)?
+                .into_completion()
                 .ok_or_else(|| fail("current complete frontier is unavailable")),
         }
     }
@@ -295,6 +346,7 @@ impl Work {
         }
         let completed = self
             .capture_frontier(root, resources)?
+            .into_completion()
             .ok_or_else(|| miette::Report::new(CompletionRefusal::ChangedObservations))?;
         let CompletionAuthority::Frontier(proof) = completed.authority else {
             unreachable!("frontier capture")
