@@ -45,6 +45,22 @@ fn parts(node: &Node, nodes: &[Node], covered: &mut BTreeSet<String>) -> miette:
 }
 
 impl FrontierProof {
+    pub(super) fn verify_captured(
+        &self,
+        work: &Work,
+        outputs: &BTreeMap<String, StoredOutput>,
+        nodes: &[Node],
+    ) -> miette::Result<()> {
+        let required = self
+            .nodes
+            .iter()
+            .map(|reference| reference.node_id.clone())
+            .collect::<Vec<_>>();
+        work.verify_stored_dependencies(outputs, &required, nodes)?;
+        self.verify(work, outputs)?;
+        Ok(())
+    }
+
     fn verify_structure(&self, work: &Work) -> miette::Result<()> {
         let nodes = work.nodes()?;
         if self.schema != "work-frontier-v1"
@@ -125,22 +141,6 @@ impl FrontierSeal {
         seal.proof.verify_structure(work)?;
         require_id(&seal.final_result_revision)?;
         Ok(seal)
-    }
-
-    pub(super) fn verify_captured(
-        &self,
-        work: &Work,
-        outputs: &BTreeMap<String, StoredOutput>,
-    ) -> miette::Result<()> {
-        let required = self
-            .proof
-            .nodes
-            .iter()
-            .map(|reference| reference.node_id.clone())
-            .collect::<Vec<_>>();
-        work.verify_stored_dependencies(outputs, &required, &work.nodes()?)?;
-        self.proof.verify(work, outputs)?;
-        Ok(())
     }
 }
 

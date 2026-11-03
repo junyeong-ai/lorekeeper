@@ -328,6 +328,11 @@ The evidence mapping lists cited resources, not every inspected resource. Preser
 the children's findings, qualifications, uncertainty and processing blockers.
 Completing one reduction does not complete the Work or its final assessment.
 
+After canonical publication or extraction consumption, that Work's observations
+and attribution are fixed. Exact retries preserve their stored bytes; a published
+frontier must not acquire further nodes. Complete amendments before publication.
+Unpublished corrections retain their normal revision guards.
+
 Follow [private draft handling](#private-drafts). Write one JSON observation and
 submit with `lore work record --file FILE`:
 

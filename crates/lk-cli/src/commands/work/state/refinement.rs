@@ -710,6 +710,17 @@ mod tests {
         work.plan_publication(&mut publication, root.path(), &final_result)
             .unwrap();
         session.apply(publication).unwrap();
+        let retained = outputs
+            .values()
+            .find(|output| output.refinement.is_some() && output.retained.is_some())
+            .unwrap();
+        let node_snapshot = root
+            .path()
+            .join(output_path(&work.plan.id, &retained.output.node_id).unwrap());
+        let before = std::fs::read(&node_snapshot).unwrap();
+        work.record(&session, retained.output.clone(), &resources)
+            .unwrap();
+        assert_eq!(std::fs::read(node_snapshot).unwrap(), before);
         let required_child = output_path(&work.plan.id, &nested.inspection_nodes[0]).unwrap();
         let child_raw = std::fs::read(root.path().join(&required_child)).unwrap();
         std::fs::remove_file(root.path().join(&required_child)).unwrap();

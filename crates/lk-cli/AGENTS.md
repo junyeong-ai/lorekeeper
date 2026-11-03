@@ -189,6 +189,14 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   publication receipt or absence, including same-kind updates. Published authority and
   result are immutable; exact retries preserve original bytes. Unpublished replacement
   journals the prior final bytes and publication absence in the same mutation.
+- Publication or source consumption closes observation writes. The shared record owner
+  validates that exact completion proof before refusing changes, including reuse
+  destinations and late native results. Equal content, origin and refinement may retry
+  without rewriting the captured node bytes; preserve its raw snapshot guard. Unpublished
+  amendments remain valid. Guard closure receipt bytes or absence through apply/recovery;
+  structural completion alone never closes a Work. A published frontier is closed even
+  when its unused root reduction is unfinished. Historical inconsistent state refuses
+  rather than being repaired or given a new identity.
 - Completion requires exact sealed typed results and source/work guards in the canonical
   publication journal. Keep the queue target's guard in its publication edit: a separate
   unchanged guard for the same target would reject the journal's own recovery.

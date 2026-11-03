@@ -5,8 +5,8 @@ use lk_vault::{MutationPlan, MutationSession};
 
 use super::super::resources::Subject;
 use super::{
-    Consumption, FinalizationAction, Publication, Seal, StoredOutput, Work, fail, output_path,
-    read_optional, require_id, require_settled, revision, work_path,
+    CompletionSeal, Consumption, FinalizationAction, Publication, StoredOutput, Work, fail,
+    output_path, read_optional, require_id, require_settled, revision, work_path,
 };
 
 #[derive(Default)]
@@ -268,28 +268,10 @@ fn capture_retention(root: &Path, id: &str, cutoff: i64) -> miette::Result<Reten
     }
     let expired = if let Some(raw) = publication {
         let receipt: Publication = serde_json::from_str(&raw).map_err(fail)?;
-        let sealed_revision = match (read("seal.json")?, read("frontier-seal.json")?) {
-            (Some(raw), None) => {
-                let seal: Seal = serde_json::from_str(&raw).map_err(fail)?;
-                let node = nodes.last().expect("nonempty work tree");
-                if seal.work_id != id || seal.root_node != node.id {
-                    return Err(fail("published work seal root identity differs"));
-                }
-                work.verify_stored_dependencies(&outputs, std::slice::from_ref(&node.id), &nodes)?;
-                if seal.root_output_revision != outputs[&node.id].output_revision {
-                    return Err(fail(
-                        "published work root observation differs from its seal",
-                    ));
-                }
-                seal.final_result_revision
-            }
-            (None, Some(raw)) => {
-                let seal = super::frontier::FrontierSeal::decode(&raw, &work)?;
-                seal.verify_captured(&work, &outputs)?;
-                seal.final_result_revision
-            }
-            _ => return Err(fail("published work requires exactly one completion seal")),
-        };
+        let seal = CompletionSeal::decode(&work, read("seal.json")?, read("frontier-seal.json")?)?
+            .ok_or_else(|| fail("published work requires exactly one completion seal"))?;
+        seal.verify_captured(&work, &outputs, &nodes)?;
+        let sealed_revision = seal.result_revision;
         let raw = read("final.json")?.ok_or_else(|| fail("published work result is missing"))?;
         let result = crate::commands::json::decode_object(raw.as_bytes()).map_err(fail)?;
         if receipt.work_id != id
@@ -304,34 +286,7 @@ fn capture_retention(root: &Path, id: &str, cutoff: i64) -> miette::Result<Reten
             return Err(fail("source consumption cannot use a frontier seal"));
         }
         let receipt: Consumption = serde_json::from_str(&raw).map_err(fail)?;
-        let Subject::Queue {
-            task_id,
-            cache_hash,
-            target,
-            target_revision,
-        } = &subject
-        else {
-            return Err(fail("consumed source work has no queue subject"));
-        };
-        let node = nodes.last().expect("nonempty work tree");
-        work.verify_stored_dependencies(&outputs, std::slice::from_ref(&node.id), &nodes)?;
-        let output = &outputs[&node.id];
-        if work.context["purpose"]["extraction_scope"]["policy"] != "source-proposals-v1"
-            || work.context["purpose"]["task_kind"] != "extract-concepts"
-            || receipt.work_id != id
-            || receipt.root_node != node.id
-            || receipt.root_output_revision != output.output_revision
-            || &receipt.task_id != task_id
-            || &receipt.cache_hash != cache_hash
-            || &receipt.target != target
-            || &receipt.target_revision != target_revision
-            || receipt.result_revision.trim().is_empty()
-            || !output.output.unresolved.is_empty()
-        {
-            return Err(fail(
-                "source consumption receipt or completed observation differs",
-            ));
-        }
+        receipt.verify_captured(&work, &outputs, &nodes)?;
         !unknown && receipt.consumed_at.as_second() < cutoff
     } else {
         false
@@ -1443,6 +1398,17 @@ mod tests {
         blocked.require_unchanged("wiki/documents/changed.md", "expected".into());
         assert!(session.apply(blocked).is_err());
         assert!(!root.path().join(&receipt).exists());
+        let node = &work.plan.parts[0].id;
+        let path = root.path().join(output_path(&work.plan.id, node).unwrap());
+        let stored: StoredOutput = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let original = stored.output;
+        let mut amendment = original.clone();
+        amendment
+            .summary
+            .push_str(" Prepared before source consumption.");
+        let amendment = work
+            .plan_record(&session, amendment, &source, None, Vec::new())
+            .unwrap();
         let mut canonical = MutationPlan::default();
         work.plan_consumption(&mut canonical, root.path(), &source, &result)
             .unwrap();
@@ -1452,6 +1418,18 @@ mod tests {
         );
         session.apply(canonical).unwrap();
         assert!(root.path().join(&receipt).exists());
+        assert!(session.apply(amendment).is_err());
+        work.record(&session, original, &source).unwrap();
+        let node = &work.plan.parts[0].id;
+        let path = root.path().join(output_path(&work.plan.id, node).unwrap());
+        let before = std::fs::read(&path).unwrap();
+        let stored: StoredOutput = serde_json::from_slice(&before).unwrap();
+        let mut changed = stored.output;
+        changed
+            .summary
+            .push_str(" A changed consumed interpretation.");
+        assert!(work.record(&session, changed, &source).is_err());
+        assert_eq!(std::fs::read(path).unwrap(), before);
         for name in ["seal.json", "final.json", "publication.json"] {
             assert!(
                 !root

@@ -3948,6 +3948,47 @@ mod tests {
         verify_finished_prepared(&root, &work, &prepared).unwrap();
     }
 
+    #[tokio::test]
+    async fn published_observations_refuse_replacement_and_preserve_exact_retries() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let (work, prepared, result) = completed_audit_work(&root);
+        let session = MutationSession::acquire(&root).unwrap();
+        finish(&session, &work, &prepared, result.clone()).unwrap();
+        let mut publication = MutationPlan::default();
+        work.plan_publication(&mut publication, &root, &result)
+            .unwrap();
+        session.apply(publication).unwrap();
+        drop(session);
+        let path = root
+            .join(".lorekeeper/work")
+            .join(&work.plan.id)
+            .join("nodes")
+            .join(format!("{}.json", work.plan.parts[0].id));
+        let stored: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let original: WorkOutput = serde_json::from_value(stored["output"].clone()).unwrap();
+        std::fs::write(&path, serde_json::to_string_pretty(&stored).unwrap()).unwrap();
+        let before = work_snapshot(&root, &work.plan.id);
+        let input = tempfile::NamedTempFile::new().unwrap();
+        let opts = GlobalOptions {
+            config: Some(root.join("config.yaml")),
+            template_dir: None,
+        };
+        let command = || WorkCommand::Record {
+            file: input.path().to_owned(),
+        };
+        let mut changed = original.clone();
+        changed.summary.push_str(" A later interpretation.");
+        std::fs::write(input.path(), serde_json::to_string(&changed).unwrap()).unwrap();
+        assert!(run(&opts, command()).await.is_err());
+        assert_eq!(work_snapshot(&root, &work.plan.id), before);
+        std::fs::write(input.path(), serde_json::to_string(&original).unwrap()).unwrap();
+        run(&opts, command()).await.unwrap();
+        assert_eq!(work_snapshot(&root, &work.plan.id), before);
+        assert!(work.progress(&root, &prepared.resources).unwrap().complete);
+        verify_finished_prepared(&root, &work, &prepared).unwrap();
+    }
+
     #[test]
     fn unpublished_completion_update_pins_publication_absence() {
         let directory = tempfile::tempdir().unwrap();

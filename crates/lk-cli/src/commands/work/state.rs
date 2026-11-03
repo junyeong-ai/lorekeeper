@@ -182,7 +182,7 @@ struct StoredOutput {
     refinement: Option<String>,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Reuse {
     work_id: String,
@@ -234,6 +234,46 @@ struct Consumption {
     target_revision: String,
     result_revision: String,
     consumed_at: jiff::Timestamp,
+}
+
+impl Consumption {
+    fn verify_captured(
+        &self,
+        work: &Work,
+        outputs: &BTreeMap<String, StoredOutput>,
+        nodes: &[Node],
+    ) -> miette::Result<()> {
+        let subject: super::resources::Subject =
+            serde_json::from_value(work.context["subject"].clone()).map_err(fail)?;
+        let super::resources::Subject::Queue {
+            task_id,
+            cache_hash,
+            target,
+            target_revision,
+        } = subject
+        else {
+            return Err(fail("consumed source work has no queue subject"));
+        };
+        let node = nodes.last().expect("nonempty work tree");
+        work.verify_stored_dependencies(outputs, std::slice::from_ref(&node.id), nodes)?;
+        let output = &outputs[&node.id];
+        if work.context["purpose"]["extraction_scope"]["policy"] != "source-proposals-v1"
+            || work.context["purpose"]["task_kind"] != "extract-concepts"
+            || self.work_id != work.plan.id
+            || self.root_node != node.id
+            || self.root_output_revision != output.output_revision
+            || self.task_id != task_id
+            || self.cache_hash != cache_hash
+            || self.target != target
+            || self.target_revision != target_revision
+            || !output.output.unresolved.is_empty()
+        {
+            return Err(fail(
+                "source consumption receipt or completed observation differs",
+            ));
+        }
+        require_id(&self.result_revision)
+    }
 }
 
 #[derive(PartialEq, Serialize, Deserialize)]
@@ -309,12 +349,21 @@ struct CompletionSeal {
 
 impl CompletionSeal {
     fn load(root: &Path, work: &Work) -> miette::Result<Option<Self>> {
+        Self::decode(
+            work,
+            read_optional(root, &work_path(&work.plan.id, "seal.json")?)?,
+            read_optional(root, &work_path(&work.plan.id, "frontier-seal.json")?)?,
+        )
+    }
+
+    fn decode(
+        work: &Work,
+        root_raw: Option<String>,
+        frontier_raw: Option<String>,
+    ) -> miette::Result<Option<Self>> {
         let root_path = work_path(&work.plan.id, "seal.json")?;
         let frontier_path = work_path(&work.plan.id, "frontier-seal.json")?;
-        match (
-            read_optional(root, &root_path)?,
-            read_optional(root, &frontier_path)?,
-        ) {
+        match (root_raw, frontier_raw) {
             (Some(_), Some(_)) => Err(fail("work has conflicting completion seals")),
             (Some(raw), None) => {
                 let seal: Seal = crate::commands::work::receipt::decode(&raw).map_err(fail)?;
@@ -342,6 +391,27 @@ impl CompletionSeal {
                 }))
             }
             (None, None) => Ok(None),
+        }
+    }
+
+    fn verify_captured(
+        &self,
+        work: &Work,
+        outputs: &BTreeMap<String, StoredOutput>,
+        nodes: &[Node],
+    ) -> miette::Result<()> {
+        match &self.authority {
+            CompletionAuthority::Root(revision) => {
+                let node = nodes.last().expect("nonempty work tree");
+                work.verify_stored_dependencies(outputs, std::slice::from_ref(&node.id), nodes)?;
+                if outputs[&node.id].output_revision != *revision {
+                    return Err(fail(
+                        "published work root observation differs from its seal",
+                    ));
+                }
+                Ok(())
+            }
+            CompletionAuthority::Frontier(proof) => proof.verify_captured(work, outputs, nodes),
         }
     }
 }
@@ -1525,6 +1595,17 @@ impl Work {
         let path = output_path(&self.plan.id, &node.id)?;
         let before = evaluated.raw.get(&path).cloned();
         let mut mutation = MutationPlan::default();
+        let closed = self.guard_closed_observations(root, &evaluated, &mut mutation)?;
+        let unchanged = evaluated.current.get(&node.id).is_some_and(|prior| {
+            prior.output == stored.output
+                && prior.reused_from == stored.reused_from
+                && prior.refinement == stored.refinement
+        });
+        if closed && !unchanged {
+            return Err(fail(
+                "published or consumed work observations cannot be replaced",
+            ));
+        }
         let rejected = inspection::rejection_path(self)?;
         if !evaluated.raw.contains_key(&rejected) {
             mutation.require_absent(rejected);
@@ -1544,10 +1625,77 @@ impl Work {
                 mutation.require_unchanged(dependency, raw);
             }
         }
-        mutation
-            .publish_expected(root, path, before, encoded(&stored)?)
-            .map_err(fail)?;
+        if unchanged {
+            mutation.require_unchanged(
+                path,
+                before.ok_or_else(|| fail("recorded observation snapshot is missing"))?,
+            );
+        } else {
+            mutation
+                .publish_expected(root, path, before, encoded(&stored)?)
+                .map_err(fail)?;
+        }
         Ok(mutation)
+    }
+
+    fn guard_closed_observations(
+        &self,
+        root: &Path,
+        evaluated: &Evaluation<'_>,
+        mutation: &mut MutationPlan,
+    ) -> miette::Result<bool> {
+        let publication_path = work_path(&self.plan.id, "publication.json")?;
+        let consumption_path = work_path(&self.plan.id, "consumption.json")?;
+        match (
+            read_optional(root, &publication_path)?,
+            read_optional(root, &consumption_path)?,
+        ) {
+            (Some(_), Some(_)) => Err(fail(
+                "work cannot be both published and consumed source observations",
+            )),
+            (Some(raw), None) => {
+                let receipt: Publication = super::receipt::decode(&raw).map_err(fail)?;
+                let final_path = work_path(&self.plan.id, "final.json")?;
+                let (final_raw, result) = load_result(root, &final_path)?
+                    .ok_or_else(|| fail("published work result is missing"))?;
+                let seal = CompletionSeal::load(root, self)?
+                    .ok_or_else(|| fail("published work completion seal is missing"))?;
+                seal.verify_captured(self, &evaluated.current, &evaluated.nodes)?;
+                if receipt.work_id != self.plan.id
+                    || receipt.final_result_revision != seal.result_revision
+                    || revision(&result)? != seal.result_revision
+                {
+                    return Err(fail("published work receipt, seal or result differs"));
+                }
+                let other = match seal.authority {
+                    CompletionAuthority::Root(_) => "frontier-seal.json",
+                    CompletionAuthority::Frontier(_) => "seal.json",
+                };
+                mutation.require_absent(work_path(&self.plan.id, other)?);
+                mutation.require_unchanged(seal.path, seal.raw);
+                mutation.require_unchanged(final_path, final_raw);
+                mutation.require_unchanged(publication_path, raw);
+                mutation.require_absent(consumption_path);
+                Ok(true)
+            }
+            (None, Some(raw)) => {
+                let receipt: Consumption = super::receipt::decode(&raw).map_err(fail)?;
+                receipt.verify_captured(self, &evaluated.current, &evaluated.nodes)?;
+                let frontier = work_path(&self.plan.id, "frontier-seal.json")?;
+                if read_optional(root, &frontier)?.is_some() {
+                    return Err(fail("source consumption cannot use a frontier seal"));
+                }
+                mutation.require_absent(frontier);
+                mutation.require_absent(publication_path);
+                mutation.require_unchanged(consumption_path, raw);
+                Ok(true)
+            }
+            (None, None) => {
+                mutation.require_absent(publication_path);
+                mutation.require_absent(consumption_path);
+                Ok(false)
+            }
+        }
     }
 
     pub fn reuse_from(
@@ -3043,7 +3191,9 @@ mod tests {
                         Some((node.id, serde_json::from_str(&raw).unwrap()))
                     })
                     .collect();
-                seal.verify_captured(&work, &outputs).unwrap();
+                seal.proof
+                    .verify_captured(&work, &outputs, &work.nodes().unwrap())
+                    .unwrap();
                 frontier_verified = true;
             }
             for id in progress.ready {
@@ -3110,6 +3260,13 @@ mod tests {
         work.plan_publication(&mut publication, root.path(), &final_result)
             .unwrap();
         session.apply(publication).unwrap();
+        for node in &packed {
+            let path = root.path().join(output_path(&work.plan.id, node).unwrap());
+            let before = std::fs::read(&path).unwrap();
+            let stored: StoredOutput = serde_json::from_slice(&before).unwrap();
+            work.record(&session, stored.output, &source).unwrap();
+            assert_eq!(std::fs::read(path).unwrap(), before);
+        }
         assert_eq!(
             prune_published(root.path(), None, i64::MAX)
                 .unwrap()
@@ -3226,6 +3383,155 @@ mod tests {
             .is_err()
         );
         work.seal(&session, &source, final_result).unwrap();
+    }
+
+    #[test]
+    fn observation_amendment_refuses_publication_after_preparation() {
+        let root = tempfile::tempdir().unwrap();
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let source = resources();
+        let work =
+            Work::create(&session, &source, "subject", context("subject"), limits()).unwrap();
+        finish(&work, &session, &source);
+        let result = json!({"body":"Published result."});
+        work.seal(&session, &source, result.clone()).unwrap();
+        let part = &work.plan.parts[0];
+        let mut amended = draft(&work, root.path(), &part.id, &source);
+        amended.summary.push_str(" An unpublished correction.");
+        let mutation = work
+            .plan_record(&session, amended, &source, None, Vec::new())
+            .unwrap();
+        let mut publication = MutationPlan::default();
+        work.plan_publication(&mut publication, root.path(), &result)
+            .unwrap();
+        session.apply(publication).unwrap();
+        let path = root
+            .path()
+            .join(output_path(&work.plan.id, &part.id).unwrap());
+        let before = std::fs::read(&path).unwrap();
+        assert!(session.apply(mutation).is_err());
+        assert_eq!(std::fs::read(path).unwrap(), before);
+        assert!(work.progress(root.path(), &source).unwrap().complete);
+    }
+
+    #[test]
+    fn identical_observation_retries_preserve_raw_bytes_and_guard_their_snapshot() {
+        let root = tempfile::tempdir().unwrap();
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let source = resources();
+        let work =
+            Work::create(&session, &source, "subject", context("subject"), limits()).unwrap();
+        let node = &work.plan.parts[0].id;
+        let output = draft(&work, root.path(), node, &source);
+        work.record(&session, output.clone(), &source).unwrap();
+        let path = root.path().join(output_path(&work.plan.id, node).unwrap());
+        let stored: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let before = serde_json::to_string_pretty(&stored).unwrap();
+        std::fs::write(&path, &before).unwrap();
+        work.record(&session, output.clone(), &source).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+        let mutation = work
+            .plan_record(&session, output, &source, None, Vec::new())
+            .unwrap();
+        std::fs::write(&path, format!("{before}\n")).unwrap();
+        assert!(session.apply(mutation).is_err());
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            format!("{before}\n")
+        );
+    }
+
+    #[test]
+    fn published_observation_retries_refuse_corrupt_completion_without_repair() {
+        for artifact in [
+            "publication.json",
+            "seal.json",
+            "final.json",
+            "consumption.json",
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let session = MutationSession::acquire(root.path()).unwrap();
+            let source = resources();
+            let work =
+                Work::create(&session, &source, "subject", context("subject"), limits()).unwrap();
+            finish(&work, &session, &source);
+            let result = json!({"body":"Published result."});
+            work.seal(&session, &source, result.clone()).unwrap();
+            let mut publication = MutationPlan::default();
+            work.plan_publication(&mut publication, root.path(), &result)
+                .unwrap();
+            session.apply(publication).unwrap();
+            let path = root
+                .path()
+                .join(work_path(&work.plan.id, artifact).unwrap());
+            std::fs::write(&path, "{}").unwrap();
+            let node = &work.plan.parts[0].id;
+            let node_path = root.path().join(output_path(&work.plan.id, node).unwrap());
+            let before = std::fs::read(&node_path).unwrap();
+            let stored: StoredOutput = serde_json::from_slice(&before).unwrap();
+            assert!(
+                work.record(&session, stored.output, &source).is_err(),
+                "{artifact}"
+            );
+            assert_eq!(std::fs::read(node_path).unwrap(), before);
+            assert_eq!(std::fs::read_to_string(path).unwrap(), "{}");
+            assert!(
+                !root
+                    .path()
+                    .join(".lorekeeper/mutation/pending.json")
+                    .exists()
+            );
+        }
+    }
+
+    #[test]
+    fn published_reuse_preserves_its_exact_origin_and_refuses_provenance_replacement() {
+        let root = tempfile::tempdir().unwrap();
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let mut source = resources();
+        source[0].text = "Exact source evidence.".into();
+        let prior = Work::create(&session, &source, "prior", context("prior"), limits()).unwrap();
+        let node = &prior.plan.parts[0].id;
+        prior
+            .record(&session, draft(&prior, root.path(), node, &source), &source)
+            .unwrap();
+        let current =
+            Work::create(&session, &source, "current", context("current"), limits()).unwrap();
+        let destination = &current.plan.parts[0].id;
+        current
+            .reuse_from(&session, &prior, node, destination, &source)
+            .unwrap();
+        assert!(current.progress(root.path(), &source).unwrap().complete);
+        let result = json!({"body":"Published attributed result."});
+        current.seal(&session, &source, result.clone()).unwrap();
+        let mut publication = MutationPlan::default();
+        current
+            .plan_publication(&mut publication, root.path(), &result)
+            .unwrap();
+        session.apply(publication).unwrap();
+        let path = root
+            .path()
+            .join(output_path(&current.plan.id, destination).unwrap());
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let stored: StoredOutput = serde_json::from_str(&raw).unwrap();
+        current
+            .reuse_from(&session, &prior, node, destination, &source)
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), raw);
+        assert!(current.record(&session, stored.output, &source).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), raw);
+        let mut changed = draft(&prior, root.path(), node, &source);
+        changed
+            .summary
+            .push_str(" A later unpublished interpretation.");
+        prior.record(&session, changed, &source).unwrap();
+        assert!(
+            current
+                .reuse_from(&session, &prior, node, destination, &source)
+                .is_err()
+        );
+        assert_eq!(std::fs::read_to_string(path).unwrap(), raw);
+        assert!(current.progress(root.path(), &source).unwrap().complete);
     }
 
     #[test]
@@ -3981,7 +4287,15 @@ mod tests {
         let part = &work.plan.parts[0];
         let mut corrected = draft(&work, root.path(), &part.id, &source);
         corrected.summary = "Corrected source attribution.".into();
-        work.record(&session, corrected, &source).unwrap();
+        assert!(work.record(&session, corrected.clone(), &source).is_err());
+        assert_eq!(snapshot(), before);
+        let stored = StoredOutput::build(corrected, &[], work.plan.max_result_bytes, None).unwrap();
+        std::fs::write(
+            root.path()
+                .join(output_path(&work.plan.id, &part.id).unwrap()),
+            encoded(&stored).unwrap(),
+        )
+        .unwrap();
         let before = snapshot();
         assert!(
             work.capture_frontier(root.path(), &source)
@@ -3991,6 +4305,79 @@ mod tests {
                 .is_err()
         );
         assert_eq!(snapshot(), before);
+    }
+
+    #[test]
+    fn published_frontier_refuses_new_native_nodes_and_keeps_independent_work_recordable() {
+        let root = tempfile::tempdir().unwrap();
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let (work, source) = frontier_fixture(&session);
+        inspect_frontier(&work, &session, &source);
+        let result = json!({"synthesis":"Published complete frontier."});
+        seal_frontier(&work, &session, &source, &result);
+        let mut publication = MutationPlan::default();
+        work.plan_publication(&mut publication, root.path(), &result)
+            .unwrap();
+        session.apply(publication).unwrap();
+        let node = work.progress(root.path(), &source).unwrap().ready[0].clone();
+        let request = work.input(root.path(), &node, &source).unwrap();
+        let candidate = |work: &Work, node: &str, source: &[SemanticResource]| {
+            let output = draft(work, root.path(), node, source);
+            ObservationCandidate {
+                response_json_bytes: encoded(&output).unwrap().len(),
+                response_revision: revision(&output).unwrap(),
+                output,
+                text_violation: None,
+            }
+        };
+        assert!(
+            work.plan_native_observation(
+                root.path(),
+                &source,
+                &request,
+                &"c".repeat(64),
+                candidate(&work, &node, &source)
+            )
+            .is_err()
+        );
+        assert!(
+            !root
+                .path()
+                .join(output_path(&work.plan.id, &node).unwrap())
+                .exists()
+        );
+        work.guard_completion(&mut MutationPlan::default(), root.path(), &source, &result)
+            .unwrap();
+        let independent = Work::create(
+            &session,
+            &source,
+            "independent",
+            context("independent"),
+            limits(),
+        )
+        .unwrap();
+        let node = &independent.plan.parts[0].id;
+        let request = independent.input(root.path(), node, &source).unwrap();
+        let ObservationRecordPlan::Accepted(mutation) = independent
+            .plan_native_observation(
+                root.path(),
+                &source,
+                &request,
+                &"c".repeat(64),
+                candidate(&independent, node, &source),
+            )
+            .unwrap()
+        else {
+            panic!("independent valid observation must remain recordable");
+        };
+        session.apply(mutation).unwrap();
+        assert_eq!(
+            independent
+                .progress(root.path(), &source)
+                .unwrap()
+                .completed,
+            1
+        );
     }
 
     #[test]
