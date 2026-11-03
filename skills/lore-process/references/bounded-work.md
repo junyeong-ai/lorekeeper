@@ -400,8 +400,8 @@ standalone processing use the command procedure below.
 
 ## Finalize
 
-When the controller supplies `native-finalize-results-v2` or
-`native-finalize-frontier-v2`, follow
+When the controller supplies `native-finalize-results-v3` or
+`native-finalize-frontier-v3`, follow
 [prepared native input](native-input.md#completed-work) directly. It already contains
 the complete root or observation coverage, distinct context guard and applicable rules; do not repeat steps 1–2
 below. Rust reconstructs the exact current request and completion authority before sealing the assembled result.

@@ -178,6 +178,9 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   input limit and no processing blocker remains. Its distinct frontier seal never marks
   a missing root complete or rewrites paid nodes. Missing/stale/oversized/blocked
   coverage retains normal reduction; source-only work, sections and audits are excluded.
+  Root/frontier model views share one complete resource guard table and exact cited
+  indices. Preserve every guard value and observation; the canonical completion and
+  its input revision stay in Rust, separate from the projected host request.
   An exact frontier-finalizer hold also retains normal Reduce admission; do not block
   its whole Work by identity. Keep the next node's own exact hold and capacity checks.
   Distinguish discovery recovery: its current hold still defers the whole target.

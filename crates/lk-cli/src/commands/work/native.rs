@@ -14,6 +14,49 @@ struct Captured<'a> {
     resources: &'a [SemanticResource],
 }
 
+struct FinalizationView {
+    observation: Value,
+    resources: Vec<Value>,
+}
+
+impl FinalizationView {
+    fn build(work: &Work, observation: &Value) -> miette::Result<Self> {
+        let resources = work.inspection_guards()?;
+        let object = observation
+            .as_object()
+            .filter(|object| !object.contains_key("evidence_resources"))
+            .ok_or_else(|| miette::miette!("invalid canonical finalization observation"))?;
+        let evidence = object
+            .get("evidence")
+            .and_then(Value::as_array)
+            .ok_or_else(|| miette::miette!("canonical finalization evidence is missing"))?;
+        let mut indices = Vec::with_capacity(evidence.len());
+        let mut seen = std::collections::BTreeSet::new();
+        for reference in evidence {
+            let index = reference["resource"]
+                .as_u64()
+                .and_then(|value| usize::try_from(value).ok())
+                .ok_or_else(|| miette::miette!("invalid canonical evidence resource index"))?;
+            if resources.get(index) != Some(reference) || !seen.insert(index) {
+                return Err(miette::miette!(
+                    "canonical evidence differs from the complete inspected roster"
+                ));
+            }
+            indices.push(index);
+        }
+        let mut observation = object
+            .iter()
+            .filter(|(key, _)| key.as_str() != "evidence")
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect::<serde_json::Map<_, _>>();
+        observation.insert("evidence_resources".into(), json!(indices));
+        Ok(Self {
+            observation: observation.into(),
+            resources,
+        })
+    }
+}
+
 pub(super) fn selected_task(
     config: &Config,
     task: &QueueTask,
@@ -222,14 +265,15 @@ pub(in crate::commands) fn finalization_request(
         crate::commands::execution::finalization::generation_contracts(config, kind, target.kind)?;
     let subject: Subject =
         serde_json::from_value(work.context["subject"].clone()).into_diagnostic()?;
+    let view = FinalizationView::build(work, completed)?;
     Ok(json!({
-        "schema":"native-finalize-results-v2", "context_revision":context_revision,
-        "completed":completed, "contracts":contracts,
-        "inspected_resources":work.inspection_guards()?,
+        "schema":"native-finalize-results-v3", "context_revision":context_revision,
+        "completed":view.observation, "contracts":contracts,
+        "inspected_resources":view.resources,
         "max_input_bytes":work.max_input_bytes, "max_result_bytes":work.plan.max_result_bytes,
         "max_response_bytes":super::generation::response_limit(task, &subject, &work.context, context_revision, work.plan.max_result_bytes)?,
         "response_schema":super::generation::schema(),
-        "instructions":format!("Finalize only this exact Work from its complete guarded root observation and evidence mapping. inspected_resources is the complete planned read roster with native resource indices and guards; completed.evidence is the cited subset. The roster is not source content or a semantic identity judgment. The supplied completed object replaces work result/status setup reads; preceding discovery and full evidence observations must not restart. {}", super::generation::instruction()),
+        "instructions":format!("Finalize only this exact Work from its complete guarded root observation. inspected_resources is the complete planned read roster with every native resource index and full guard. completed.evidence_resources lists the exact cited subset by resource index into that roster; use it with every finding/question/resolution range. No guard or observation content was dropped. input_revision identifies the canonical native observation, not a hash to reconstruct from this model view. The roster is not source content or a semantic identity judgment. The supplied completed object replaces work result/status setup reads; preceding discovery and full evidence observations must not restart. {}", super::generation::instruction()),
     }))
 }
 
@@ -267,24 +311,42 @@ pub(in crate::commands) fn frontier_request(
         serde_json::from_value(work.context["subject"].clone()).into_diagnostic()?;
     let contracts =
         crate::commands::execution::finalization::generation_contracts(config, kind, target.kind)?;
+    let view = FinalizationView::build(work, frontier)?;
     Ok(json!({
-        "schema":"native-finalize-frontier-v2", "context_revision":work.plan.subject_revision,
-        "frontier":frontier, "contracts":contracts,
-        "inspected_resources":work.inspection_guards()?,
+        "schema":"native-finalize-frontier-v3", "context_revision":work.plan.subject_revision,
+        "frontier":view.observation, "contracts":contracts,
+        "inspected_resources":view.resources,
         "max_input_bytes":work.max_input_bytes,"max_result_bytes":work.plan.max_result_bytes,
         "max_response_bytes":super::generation::response_limit(task, &subject, &work.context, &work.plan.subject_revision, work.plan.max_result_bytes)?,
         "response_schema":super::generation::schema(),
-        "instructions":format!("Finalize only this exact Work from the supplied complete current frontier. Its observations cover every planned inspection exactly once; no combined reduction or joint verdict has been recorded. Read every observation and evidence mapping. inspected_resources is the complete planned read roster with native resource indices and guards; frontier.evidence is the cited subset. The roster is not source content or a semantic identity judgment. Compare claims only under their declared scope and effective time; an inherited resolution is not authority to resolve another open question. Processing concerns cannot be relabeled as source uncertainty. The frontier replaces work result/status setup reads; do not restart paid inspections or write a reduction output. Rust owns its distinct guarded completion proof and final publication. {}", super::generation::instruction()),
+        "instructions":format!("Finalize only this exact Work from the supplied complete current frontier. Its observations cover every planned inspection exactly once; no combined reduction or joint verdict has been recorded. Read every observation and evidence mapping. inspected_resources is the complete planned read roster with every native resource index and full guard. frontier.evidence_resources lists the exact cited subset by resource index into that roster; use it with every finding/question/resolution range. No guard or observation content was dropped. input_revision identifies the canonical native frontier, not a hash to reconstruct from this model view. The roster is not source content or a semantic identity judgment. Compare claims only under their declared scope and effective time; an inherited resolution is not authority to resolve another open question. Processing concerns cannot be relabeled as source uncertainty. The frontier replaces work result/status setup reads; do not restart paid inspections or write a reduction output. Rust owns its distinct guarded completion proof and final publication. {}", super::generation::instruction()),
     }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::work::state::WorkLimits;
+    use crate::commands::work::state::{WorkFinding, WorkLimits, WorkOutput, WorkQuestion};
 
     fn config() -> Config {
         lk_core::yaml::from_str(include_str!("../../../../../config.starter.yaml")).unwrap()
+    }
+
+    fn canonical_observation(request: &Value, field: &str) -> Value {
+        let mut observation = request[field].clone();
+        let indices = observation
+            .as_object_mut()
+            .unwrap()
+            .remove("evidence_resources")
+            .unwrap();
+        observation["evidence"] = indices
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|index| request["inspected_resources"][index.as_u64().unwrap() as usize].clone())
+            .collect::<Vec<_>>()
+            .into();
+        observation
     }
 
     fn fixture() -> (
@@ -407,9 +469,9 @@ mod tests {
     #[test]
     fn finalizer_keeps_root_and_publication_guards_distinct_without_source_bodies() {
         let (task, _, context, resources, work, _) = fixture();
-        let completed = json!({"kind":"finalize","work_id":work.plan.id,"context":context,"input_revision":"root-input","output":{"summary":"Pinned finding","source_questions":[{"id":"question"}]},"evidence":work.plan.resources});
+        let completed = json!({"kind":"finalize","work_id":work.plan.id,"context":context,"input_revision":"root-input","output":{"summary":"Pinned finding","source_questions":[{"id":"question"}]},"evidence":work.inspection_guards().unwrap()});
         let request = finalization_request(&config(), &task, &work, "scope", &completed).unwrap();
-        assert_eq!(request["completed"], completed);
+        assert_eq!(canonical_observation(&request, "completed"), completed);
         assert_eq!(
             request["inspected_resources"],
             json!(work.inspection_guards().unwrap())
@@ -434,5 +496,141 @@ mod tests {
         assert!(
             finalization_request(&config(), &task, &work, "another-scope", &completed).is_err()
         );
+    }
+
+    #[test]
+    fn finalizer_view_requires_exact_unique_native_evidence_references() {
+        let (_, _, _, _, work, _) = fixture();
+        let roster = work.inspection_guards().unwrap();
+        let canonical = json!({"input_revision":"canonical-domain","evidence":roster,"output":{"summary":"Unchanged","source_questions":[],"unresolved":[]}});
+        let mut corrupt = Vec::new();
+        let mut duplicate = canonical.clone();
+        duplicate["evidence"]
+            .as_array_mut()
+            .unwrap()
+            .push(roster[0].clone());
+        corrupt.push(duplicate);
+        for invalid in [json!(1), json!(-1), json!(false), Value::Null] {
+            let mut changed = canonical.clone();
+            changed["evidence"][0]["resource"] = invalid;
+            corrupt.push(changed);
+        }
+        let mut changed = canonical.clone();
+        changed["evidence"][0]["guard"]["revision"] = "another-domain".into();
+        corrupt.push(changed);
+        let mut changed = canonical.clone();
+        changed["evidence_resources"] = json!([]);
+        corrupt.push(changed);
+        let mut changed = canonical.clone();
+        changed.as_object_mut().unwrap().remove("evidence");
+        corrupt.push(changed);
+        for invalid in corrupt {
+            assert!(FinalizationView::build(&work, &invalid).is_err());
+        }
+        let mut uncited = canonical.clone();
+        uncited["evidence"] = json!([]);
+        let view = FinalizationView::build(&work, &uncited).unwrap();
+        assert!(
+            view.observation["evidence_resources"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(view.resources, roster);
+        assert_eq!(canonical["input_revision"], "canonical-domain");
+    }
+
+    #[test]
+    fn complete_frontier_fits_finalizer_without_repeated_resource_guards() {
+        let (task, _, context, _, _, _) = fixture();
+        let root = tempfile::tempdir().unwrap();
+        let session = lk_vault::MutationSession::acquire(root.path()).unwrap();
+        let resources = (0..384)
+            .map(|index| {
+                let text = format!("Declared source {index}. {}", "x".repeat(2000));
+                SemanticResource {
+                    address: format!("wiki/documents/{index:03}-{}.md", "a".repeat(170)),
+                    revision: lk_core::concept::file_revision(&text),
+                    authority: SemanticAuthority::Page,
+                    text,
+                }
+            })
+            .collect::<Vec<_>>();
+        let work = Work::create(
+            &session,
+            &resources,
+            "scope",
+            context,
+            WorkLimits {
+                max_input_bytes: 262144,
+                max_result_bytes: 32768,
+            },
+        )
+        .unwrap();
+        assert!(work.plan.parts.len() > 1);
+        for part in &work.plan.parts {
+            let input = work.input(root.path(), &part.id, &resources).unwrap();
+            let ranges = input["input"]["ranges"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|range| serde_json::from_value(range["range"].clone()).unwrap())
+                .collect::<Vec<lk_core::semantic::SemanticRange>>();
+            work.record(
+                &session,
+                WorkOutput {
+                    work_id: work.plan.id.clone(),
+                    node_id: part.id.clone(),
+                    input_revision: input["input_revision"].as_str().unwrap().into(),
+                    summary: "Every assigned source range was inspected.".into(),
+                    findings: ranges
+                        .iter()
+                        .map(|range| WorkFinding {
+                            statement: "보존된 source claim.".into(),
+                            scope: Some("Declared scope".into()),
+                            effective_time: None,
+                            attribution: None,
+                            evidence: vec![range.clone()],
+                        })
+                        .collect(),
+                    source_questions: vec![WorkQuestion {
+                        id: format!("{}:source:0", part.id),
+                        question: "Which independent evidence confirms this claim?".into(),
+                        evidence: vec![ranges[0].clone()],
+                    }],
+                    unresolved: vec![],
+                    resolutions: vec![],
+                },
+                &resources,
+            )
+            .unwrap();
+        }
+        assert!(!work.progress(root.path(), &resources).unwrap().complete);
+        let completed = work
+            .capture_frontier(root.path(), &resources)
+            .unwrap()
+            .unwrap();
+        let canonical = completed.result();
+        let before = canonical.clone();
+        let request = frontier_request(&config(), &task, &work, canonical).unwrap();
+        let canonical_bytes = serde_json::to_vec(canonical).unwrap().len();
+        let request_bytes = serde_json::to_vec(&request).unwrap().len();
+        assert!(canonical_bytes <= work.max_input_bytes);
+        assert!(
+            request_bytes <= work.max_input_bytes,
+            "canonical {canonical_bytes} bytes fits; native finalizer {request_bytes} exceeds {}",
+            work.max_input_bytes
+        );
+        assert_eq!(canonical_observation(&request, "frontier"), before);
+        assert_eq!(
+            request["inspected_resources"].as_array().unwrap().len(),
+            resources.len()
+        );
+        assert_eq!(
+            request["frontier"]["input_revision"],
+            canonical["input_revision"]
+        );
+        assert_eq!(canonical, &before);
+        eprintln!("canonical {canonical_bytes} bytes; native finalizer {request_bytes} bytes");
     }
 }

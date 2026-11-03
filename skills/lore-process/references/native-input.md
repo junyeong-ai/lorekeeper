@@ -4,7 +4,7 @@ Contents: selected tasks; revision ownership; completed Work; complete observati
 coverage; semantic response.
 
 Use only when the native controller supplies `native-selected-results-v3`,
-`native-finalize-results-v2` or `native-finalize-frontier-v2`. The complete request arrives through supervised stdin.
+`native-finalize-results-v3` or `native-finalize-frontier-v3`. The complete request arrives through supervised stdin.
 It is neither semantic completion nor permission to process unrelated work.
 
 Its task metadata, exact context, evidence and shared contracts replace ordinary
@@ -34,15 +34,19 @@ that an input changed. Rust validates captured revisions; do not reconstruct gua
 
 `completed` supplies the exact complete root, evidence mapping, source questions and
 processing concerns. Its `input_revision` is distinct from the publication
-`context_revision`. Generate from those observations without restarting preceding
+`context_revision`. It identifies the canonical Rust observation, not a hash to
+reconstruct from this model-facing view. Rust retains the complete canonical evidence
+mapping and all original revisions. Generate from those observations without restarting preceding
 intake, discovery or full-source reading. Native Work preserves all source questions
 and their provenance independently of the publication. Reflect task-relevant uncertainty
 with attribution; questions about unrelated captured context need not appear in this
 section or create a concept. Processing blockers do not become source questions or approval.
 
 `inspected_resources` supplies the complete planned read roster with native resource
-indices and guards. `completed.evidence` or `frontier.evidence` supplies only resources
-cited by observations. Neither roster membership nor absence from that citation mapping
+indices and full guards. `completed.evidence_resources` or
+`frontier.evidence_resources` lists the exact cited subset by resource index into that
+complete table. Every guard value is supplied once; use the same table with each
+finding, question and resolution range. Neither roster membership nor absence from that citation mapping
 decides semantic support, owner identity or permission to reuse a concept. When a
 required identity judgment is absent from the observations, use the permitted targeted
 read or return `needs-action`. The roster contains guards, not source bodies; native
@@ -50,7 +54,7 @@ revision fields remain opaque and domain-specific.
 
 ## Complete observation coverage
 
-`native-finalize-frontier-v2` supplies `frontier` instead of `completed`. Its current
+`native-finalize-frontier-v3` supplies `frontier` instead of `completed`. Its current
 observations jointly cover every planned inspection exactly once, but no combined
 root observation has been recorded. Read every supplied observation, its source
 questions, resolutions and evidence mapping. Compare claims under their stated scope
