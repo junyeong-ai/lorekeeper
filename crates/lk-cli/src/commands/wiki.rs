@@ -1271,6 +1271,8 @@ pub async fn run_refresh_with_wait(
             .is_some_and(|config| config.graph.scope.follow_links),
     )?;
     eprintln!("Prepared navigation snapshot {}", snapshot.snapshot);
+    pin.validate()?;
+    super::workflow::validate_root(session.root())?;
     session
         .apply(plan)
         .map_err(|error| miette::miette!("refresh navigation entry: {error}"))?;

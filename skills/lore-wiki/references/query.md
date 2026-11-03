@@ -31,6 +31,10 @@ a difference, not its actor. Preserve the failed result and prior snapshot. Afte
 writers settle, an operator-owned workflow may request one ordinary fresh refresh;
 a repeated refusal requires inspection rather than an unchanged retry loop.
 Successful refresh does not clear semantic holds or repair paid observations.
+Refresh checks its captured configuration and workflow vault again before publishing
+its entry guide. A later refusal can retain an already prepared SQLite snapshot;
+`Prepared navigation snapshot` alone does not mean refresh completed. Require a
+successful exit and `Updated SQLite navigation and entry guide`.
 
 For an unfamiliar topic, start with `lore wiki browse --snapshot <id> --json`
 in a prepared session (omit `--snapshot` for a single live lookup).

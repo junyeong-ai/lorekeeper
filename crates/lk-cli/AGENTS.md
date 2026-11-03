@@ -509,6 +509,9 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
 
 - Markdown is canonical; SQLite is the prepared derived query snapshot. Refresh
   validates the small owned entry guide, prepares SQLite, then publishes that guide.
+  Revalidate the captured configuration and inherited workflow target immediately
+  before guide apply, after snapshot preparation and progress output. A late refusal
+  retains the derived snapshot and never publishes the guide or redirects its plan.
   There are no Markdown catalog/log/map exporters, archive-replace migration, or
   graph index-currency checks. Existing authored files are not retired by refresh.
 - Use captured config to refuse canonical manual-inbox overlap before capture or
