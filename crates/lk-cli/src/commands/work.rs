@@ -2438,6 +2438,11 @@ impl FrontierFinalization {
                 native::FinalizationAdmissionState::NativeInputCapacity {
                     request_bytes,
                     max_input_bytes,
+                    canonical_input_bytes: serde_json::to_vec(&completed).into_diagnostic()?.len(),
+                    request_components: native::FinalizationInputBytes::build(
+                        &request,
+                        request_bytes,
+                    )?,
                 },
             )));
         }

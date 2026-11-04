@@ -495,6 +495,15 @@ minimum result-envelope capacities are distinct measurements; do not compare the
 revision or size domains interchangeably. Root `needs-action` is the prepared outcome,
 not proof of a new model call or a newly recorded action.
 
+`native-input-capacity` includes `canonical_input_bytes` and `request_components`
+from that same capture. Components count compact UTF-8 JSON bytes for observations,
+context, proof, inspected resource roster, contracts, response schema and instructions;
+`metadata_envelope` counts all remaining metadata, keys and JSON delimiters. Their sum
+equals `request_bytes`. Canonical bytes belong to the separate native completion
+value and are not an additional request component. Measurement performs no recapture
+or source read, changes no request/revision/hold and does not count tokens or establish
+that a faithful smaller response exists.
+
 `stages` names the typed invocation stages. `execution` records the selected profile,
 engine, observed CLI version and requested model/effort; omitted native settings stay
 `null`. It does not establish the actual provider model, effective effort, tokens or

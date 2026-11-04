@@ -96,6 +96,9 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   captured preparation, separately bounded with an omitted count. These checks are
   neither host calls nor retained progress; keep `work_steps` and campaign decisions
   unchanged. Do not recapture inputs just to explain admission.
+  For native frontier input capacity, partition the same compact request into
+  disjoint value bytes and remaining metadata/envelope; count canonical completion
+  bytes separately. This diagnostic never changes the native request or receipt key.
   Compact request/decoded-result bytes exclude prompts and host envelopes; tool-enabled
   native result request/response bytes are measured; ordinary interactive audit
   responses remain unobserved. Revalidation and recording share one measured operation.

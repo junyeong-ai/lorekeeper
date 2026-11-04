@@ -37,11 +37,57 @@ pub(in crate::commands) enum FinalizationAdmissionState {
     NativeInputCapacity {
         request_bytes: usize,
         max_input_bytes: usize,
+        canonical_input_bytes: usize,
+        request_components: FinalizationInputBytes,
     },
     NativeResultCapacity {
         minimum_bytes: usize,
         max_result_bytes: usize,
     },
+}
+
+#[derive(serde::Serialize)]
+pub(in crate::commands) struct FinalizationInputBytes {
+    observations: usize,
+    context: usize,
+    proof: usize,
+    inspected_resources: usize,
+    contracts: usize,
+    response_schema: usize,
+    instructions: usize,
+    metadata_envelope: usize,
+}
+
+impl FinalizationInputBytes {
+    pub(super) fn build(request: &Value, request_bytes: usize) -> miette::Result<Self> {
+        let bytes = |value: &Value| {
+            serde_json::to_vec(value)
+                .map(|raw| raw.len())
+                .into_diagnostic()
+        };
+        let frontier = &request["frontier"];
+        let mut components = Self {
+            observations: bytes(&frontier["observations"])?,
+            context: bytes(&frontier["context"])?,
+            proof: bytes(&frontier["proof"])?,
+            inspected_resources: bytes(&request["inspected_resources"])?,
+            contracts: bytes(&request["contracts"])?,
+            response_schema: bytes(&request["response_schema"])?,
+            instructions: bytes(&request["instructions"])?,
+            metadata_envelope: 0,
+        };
+        let values = components.observations
+            + components.context
+            + components.proof
+            + components.inspected_resources
+            + components.contracts
+            + components.response_schema
+            + components.instructions;
+        components.metadata_envelope = request_bytes.checked_sub(values).ok_or_else(|| {
+            miette::miette!("finalization components exceed the captured request")
+        })?;
+        Ok(components)
+    }
 }
 
 #[derive(serde::Serialize)]
@@ -767,6 +813,16 @@ mod tests {
         assert_eq!(rejected["state"], "native-input-capacity");
         assert_eq!(rejected["request_bytes"], request_bytes);
         assert_eq!(rejected["max_input_bytes"], request_bytes - 1);
+        assert_eq!(rejected["canonical_input_bytes"], canonical_bytes);
+        let components = rejected["request_components"].as_object().unwrap();
+        assert_eq!(components.len(), 8);
+        assert_eq!(
+            components
+                .values()
+                .map(|size| size.as_u64().unwrap())
+                .sum::<u64>(),
+            request_bytes as u64
+        );
         for field in [
             "canonical_input_revision",
             "completion_revision",
@@ -774,5 +830,49 @@ mod tests {
         ] {
             assert_eq!(rejected[field], accepted[field]);
         }
+    }
+
+    #[test]
+    fn capacity_components_measure_disjoint_json_bytes_without_changing_the_request() {
+        let request = json!({
+            "frontier": {
+                "context": {"purpose":"한글 \"quoted\"\n"},
+                "observations":[{"summary":"évidence \\完整"}],
+                "proof":{"nodes":[]},
+                "evidence_resources":[0],
+                "input_revision":"same canonical identity"
+            },
+            "inspected_resources":[{"address":"한글.md"}],
+            "contracts":["exact rules"],
+            "response_schema":{"type":"object"},
+            "instructions":"preserve every claim\n",
+            "schema":"native-finalize-frontier-v3"
+        });
+        let raw = serde_json::to_vec(&request).unwrap();
+        let components =
+            serde_json::to_value(FinalizationInputBytes::build(&request, raw.len()).unwrap())
+                .unwrap();
+        for (name, value) in [
+            ("observations", &request["frontier"]["observations"]),
+            ("context", &request["frontier"]["context"]),
+            ("proof", &request["frontier"]["proof"]),
+            ("inspected_resources", &request["inspected_resources"]),
+            ("contracts", &request["contracts"]),
+            ("response_schema", &request["response_schema"]),
+            ("instructions", &request["instructions"]),
+        ] {
+            assert_eq!(components[name], serde_json::to_vec(value).unwrap().len());
+        }
+        assert_eq!(
+            components
+                .as_object()
+                .unwrap()
+                .values()
+                .map(|size| size.as_u64().unwrap())
+                .sum::<u64>(),
+            raw.len() as u64
+        );
+        assert!(components["metadata_envelope"].as_u64().unwrap() > 0);
+        assert_eq!(serde_json::to_vec(&request).unwrap(), raw);
     }
 }
