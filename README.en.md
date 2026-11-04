@@ -307,6 +307,11 @@ Cooperating commands resolve installation paths without creating them before
 admission. This guarantee requires participating commands to use the updated binary;
 invalid lock files are never automatically removed or repaired.
 
+`lore self uninstall` checks the complete deletion scope against the selected vault and held coordinator files.
+A vault inside installed `templates` blocks removal; a vault inside the configuration directory blocks `--purge-config`.
+Owned project skills inside a vault can still be removed while retaining vault data.
+Standalone removal scripts refuse deletion and direct users to this native command.
+
 ## Further reading and development
 
 | Goal | Starting point |

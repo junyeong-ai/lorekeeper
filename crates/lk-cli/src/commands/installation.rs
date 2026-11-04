@@ -18,6 +18,7 @@ use std::path::PathBuf;
 mod lease;
 mod protection;
 mod snapshot;
+mod uninstall;
 
 pub(crate) use protection::Protection;
 
@@ -592,92 +593,17 @@ fn uninstall(
     yes: bool,
     purge_config: bool,
 ) -> miette::Result<()> {
-    let _protection = Protection::mutation(
-        opts,
-        installation.clone(),
-        override_dir,
-        AgentTarget::Both,
-        None,
-        true,
-    )?;
-    let deployments = AgentTarget::Both
-        .engines()
-        .iter()
-        .flat_map(|engine| {
-            let view = installation.for_engine(*engine);
-            view.deployed_skill_levels()
-                .into_iter()
-                .map(move |level| (view.clone(), level))
-        })
-        .collect::<Vec<_>>();
-    eprintln!("This removes:");
-    eprintln!("  {}", installation.binary().display());
-    eprintln!("  {}", installation.templates_dir().display());
-    for (view, level) in &deployments {
-        if let Some(dir) = view.skills_dir(*level) {
-            eprintln!("  {}/lore-*", dir.display());
-        }
-    }
-    if purge_config {
-        eprintln!("  {}", installation.config_dir().display());
-    }
-    // The vault holds the user's knowledge and their credentials; the tool is the disposable
-    // half of the pair. Saying so is part of the confirmation, not a footnote after it.
-    eprintln!("\nYour vault is not touched.");
-
+    let protection = Protection::uninstall(opts, installation.clone(), override_dir)?;
+    let plan = uninstall::RemovalPlan::build(installation, &protection, purge_config)?;
+    plan.display();
     if !confirm("Remove this installation?", yes)? {
         eprintln!("Cancelled");
         return Ok(());
     }
-
-    for (view, level) in deployments {
-        let Some(root) = view.skills_dir(level) else {
-            continue;
-        };
-        for name in lk_dist::skill_names() {
-            remove_dir(&root.join(name))?;
-        }
-    }
-    remove_dir(&installation.templates_dir())?;
-    remove_dir(&installation.data_dir().join("skills"))?;
-    // Only when it is now empty: a data directory holding something this tool did not put
-    // there is not this tool's to delete.
-    let _ = std::fs::remove_dir(installation.data_dir());
-
-    if purge_config {
-        remove_dir(installation.config_dir())?;
-    } else {
-        // The records go with the copies they describe. Leaving `data-dir` behind meant a later
-        // bare `self deploy` resurrected the very directory this removed, in preference to the
-        // default, with nothing said.
-        for name in lk_dist::config_files()
-            .iter()
-            .map(|file| file.relative)
-            .chain(["data-dir", "deployed-skills"])
-        {
-            remove_file(&installation.config_dir().join(name))?;
-        }
-    }
-
-    remove_file(installation.binary())?;
+    protection.recheck_uninstall_configuration(opts)?;
+    plan.apply(&protection)?;
     eprintln!("Removed");
     Ok(())
-}
-
-fn remove_dir(path: &std::path::Path) -> miette::Result<()> {
-    match std::fs::remove_dir_all(path) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(miette::miette!("remove {}: {e}", path.display())),
-    }
-}
-
-fn remove_file(path: &std::path::Path) -> miette::Result<()> {
-    match std::fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(miette::miette!("remove {}: {e}", path.display())),
-    }
 }
 
 /// Ask, unless the caller already answered — or unless nobody is there to.

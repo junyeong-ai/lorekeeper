@@ -16,60 +16,6 @@ fn read(path: &Path) -> String {
     std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
 }
 
-/// Every directory under `skills`, which is what the release workflow packages (it
-/// enumerates the directory) and therefore what a release ships.
-fn shipped_skills() -> Vec<String> {
-    let dir = repo_root().join("skills");
-    let mut names: Vec<String> = std::fs::read_dir(&dir)
-        .unwrap_or_else(|e| panic!("read {}: {e}", dir.display()))
-        .flatten()
-        .filter(|entry| entry.path().is_dir())
-        .map(|entry| entry.file_name().to_string_lossy().into_owned())
-        .collect();
-    names.sort();
-    assert!(!names.is_empty(), "no skills under {}", dir.display());
-    names
-}
-
-/// The quoted names on the one line of `script` that declares its skill list. Read from the
-/// declaration rather than by scanning the file, so a legacy scheduled-task name elsewhere in it
-/// is not mistaken for a skill — and so both directions can be compared as sets: a missing name
-/// is never installed, and a leftover name asks the release for an archive it does not contain.
-fn declared_skills(script: &str, anchor: &str) -> Vec<String> {
-    let path = repo_root().join(script);
-    let body = read(&path);
-    let line = body
-        .lines()
-        .find(|line| line.contains(anchor))
-        .unwrap_or_else(|| panic!("{script} no longer declares its skill list with `{anchor}`"));
-    let mut names: Vec<String> = line
-        .split(['\'', '"'])
-        .filter(|token| token.starts_with("lore-"))
-        .map(str::to_owned)
-        .collect();
-    names.sort();
-    names
-}
-
-/// The uninstallers carry their own list because they must work when the binary is gone — the
-/// installers no longer do, since `lore self deploy` writes what the binary carries. A skill
-/// missing from an uninstaller stays on disk, and stale skill instructions an agent still loads
-/// are worse than a leftover file: they describe a binary that is no longer there.
-#[test]
-fn the_uninstall_scripts_list_every_skill() {
-    let skills = shipped_skills();
-    for (script, anchor) in [
-        ("scripts/uninstall.sh", "SKILL_NAMES=("),
-        ("scripts/uninstall.ps1", "$SkillNames = @("),
-    ] {
-        assert_eq!(
-            declared_skills(script, anchor),
-            skills,
-            "{script}'s skill list must be exactly the directories under skills"
-        );
-    }
-}
-
 /// `scripts/check.sh` says a green run there is the same answer CI gives, and nothing compared
 /// the two — so five of ten jobs went unrun while the claim stood, and a release shipped after a
 /// green local run whose shellcheck, actionlint, MSRV and audit had never been asked.
@@ -342,35 +288,12 @@ fn every_spelled_executable_has_a_skill_preapproval_entry() {
     );
 }
 
-/// The two scripts agree about where an install lives.
-///
-/// `install.sh --install-dir /opt/bin` put the binary somewhere `uninstall.sh` had no way to be
-/// told about, so it reported "Nothing to uninstall" and left it there.
 #[test]
-fn the_uninstaller_takes_every_path_flag_the_installer_does() {
-    for (installer, uninstaller, flags) in [
-        (
-            "scripts/install.sh",
-            "scripts/uninstall.sh",
-            ["--install-dir", "--data-dir"],
-        ),
-        // The PowerShell pair had the same hole and no gate: `install.ps1 -InstallDir C:\tools`
-        // was invisible to its uninstaller, which reported nothing to remove.
-        (
-            "scripts/install.ps1",
-            "scripts/uninstall.ps1",
-            ["$InstallDir", "$DataDir"],
-        ),
-    ] {
-        let install = read(&repo_root().join(installer));
-        let uninstall = read(&repo_root().join(uninstaller));
-        for flag in flags {
-            assert!(install.contains(flag), "{installer} lost {flag}");
-            assert!(
-                uninstall.contains(flag),
-                "{uninstaller} cannot be told about {flag}, so an install made with it is invisible"
-            );
-        }
+fn removal_scripts_require_the_guarded_native_owner() {
+    for script in ["scripts/uninstall.sh", "scripts/uninstall.ps1"] {
+        let body = read(&repo_root().join(script));
+        assert!(body.contains("lore self uninstall"));
+        assert!(!body.contains("rm -") && !body.contains("Remove-Item"));
     }
 }
 

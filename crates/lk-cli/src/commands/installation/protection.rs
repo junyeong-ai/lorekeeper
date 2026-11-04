@@ -1,4 +1,3 @@
-#[cfg(unix)]
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -40,6 +39,16 @@ impl Configuration {
 
     fn load(opts: &GlobalOptions) -> miette::Result<Self> {
         let path = crate::commands::find_config(opts)?;
+        Self::load_path(path)
+    }
+
+    fn load_optional(opts: &GlobalOptions) -> miette::Result<Option<Self>> {
+        crate::commands::find_optional_config(opts)?
+            .map(Self::load_path)
+            .transpose()
+    }
+
+    fn load_path(path: PathBuf) -> miette::Result<Self> {
         let (config, revision) = crate::commands::load_config_with_revision(&path)?;
         Ok(Self {
             path,
@@ -245,8 +254,75 @@ impl Protection {
         skills: Option<SkillScope>,
         replace_binary: bool,
     ) -> miette::Result<Self> {
-        let inherited = std::env::var_os(HANDOFF).is_some();
         let config = Configuration::capture(opts);
+        Self::mutation_with_config(
+            opts,
+            installation,
+            override_dir,
+            agent,
+            skills,
+            replace_binary,
+            config,
+        )
+    }
+
+    pub(super) fn uninstall(
+        opts: &GlobalOptions,
+        installation: Installation,
+        override_dir: Option<PathBuf>,
+    ) -> miette::Result<Self> {
+        if std::env::var_os(HANDOFF).is_some() {
+            return Err(miette::miette!(
+                "uninstall cannot inherit deployment access"
+            ));
+        }
+        let config = Configuration::load_optional(opts)?;
+        let protection = Self::mutation_with_config(
+            opts,
+            installation,
+            override_dir,
+            AgentTarget::Both,
+            None,
+            true,
+            config,
+        )?;
+        #[cfg(unix)]
+        if let Some(config) = &protection.config {
+            match std::fs::symlink_metadata(&config.root) {
+                Ok(_) if protection.root_pin.is_none() => {
+                    return Err(miette::miette!(
+                        "uninstall cannot protect the selected vault"
+                    ));
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(miette::miette!("inspect uninstall vault: {error}")),
+            }
+        }
+        protection.recheck_uninstall_configuration(opts)?;
+        Ok(protection)
+    }
+
+    pub(super) fn recheck_uninstall_configuration(
+        &self,
+        opts: &GlobalOptions,
+    ) -> miette::Result<()> {
+        if crate::commands::find_optional_config(opts)?.as_deref() != self.configuration_path() {
+            return Err(miette::miette!("uninstall configuration selection changed"));
+        }
+        self.recheck_configuration()
+    }
+
+    fn mutation_with_config(
+        opts: &GlobalOptions,
+        installation: Installation,
+        override_dir: Option<PathBuf>,
+        agent: AgentTarget,
+        skills: Option<SkillScope>,
+        replace_binary: bool,
+        config: Option<Configuration>,
+    ) -> miette::Result<Self> {
+        let inherited = std::env::var_os(HANDOFF).is_some();
         let protection = Self {
             installation,
             schema_ready: config.is_some(),
@@ -285,6 +361,37 @@ impl Protection {
         #[cfg(not(unix))]
         let _ = (opts, override_dir, agent, skills, replace_binary, inherited);
         Ok(protection)
+    }
+
+    pub(super) fn vault_paths(&self) -> Option<Vec<PathBuf>> {
+        let mut paths = vec![self.config.as_ref()?.root.clone()];
+        #[cfg(unix)]
+        if let Some(pin) = &self.root_pin {
+            paths.push(pin.root().to_path_buf());
+        }
+        paths.sort();
+        paths.dedup();
+        Some(paths)
+    }
+
+    pub(super) fn configuration_path(&self) -> Option<&Path> {
+        self.config.as_ref().map(|config| config.path.as_path())
+    }
+
+    pub(super) fn coordination_paths(&self) -> Vec<PathBuf> {
+        #[cfg(unix)]
+        {
+            self.lease
+                .as_ref()
+                .into_iter()
+                .flat_map(Lease::paths)
+                .map(Path::to_path_buf)
+                .collect()
+        }
+        #[cfg(not(unix))]
+        {
+            Vec::new()
+        }
     }
 
     #[cfg(unix)]
@@ -602,8 +709,7 @@ fn destination_request(path: &Path, mode: Mode) -> miette::Result<Request> {
     Ok(Request { path, scope, mode })
 }
 
-#[cfg(unix)]
-fn resolve_resource(path: &Path) -> std::io::Result<PathBuf> {
+pub(super) fn resolve_resource(path: &Path) -> std::io::Result<PathBuf> {
     let selected = std::path::absolute(path)?;
     let mut ancestor = selected.as_path();
     let mut missing = Vec::new();
@@ -728,6 +834,64 @@ mod tests {
             lease: None,
             root_pin: None,
         }
+    }
+
+    #[test]
+    fn uninstall_preflight_rechecks_configuration_and_vault_before_any_removal() {
+        for change in ["configuration", "replacement", "creation"] {
+            let temporary = tempfile::tempdir().unwrap();
+            let root = temporary.path();
+            let vault = root.join("vault");
+            if change != "creation" {
+                std::fs::create_dir(&vault).unwrap();
+            }
+            let path = root.join("config.yaml");
+            let body = "vault: {root: vault}\nidentity: {name: Test, email: test@example.invalid}\nsources:\n  notes: {type: manual, params: {inbox_dir: inbox}}\n";
+            std::fs::write(&path, body).unwrap();
+            let options = GlobalOptions {
+                config: Some(path.clone()),
+                template_dir: None,
+            };
+            let mut protection = protection(root);
+            protection.config = Configuration::load_optional(&options).unwrap();
+            let payload = protection.installation.templates_dir().join("payload");
+            std::fs::write(&payload, b"owned").unwrap();
+            let plan = super::super::uninstall::RemovalPlan::build(
+                &protection.installation,
+                &protection,
+                false,
+            )
+            .unwrap();
+            match change {
+                "configuration" => std::fs::write(&path, format!("{body}\n")).unwrap(),
+                "replacement" => {
+                    std::fs::rename(&vault, root.join("old-vault")).unwrap();
+                    std::fs::create_dir(&vault).unwrap();
+                }
+                "creation" => std::fs::create_dir(&vault).unwrap(),
+                _ => unreachable!(),
+            }
+            assert!(plan.apply(&protection).is_err());
+            assert_eq!(std::fs::read(payload).unwrap(), b"owned");
+            assert!(protection.installation.binary().is_file());
+        }
+    }
+
+    #[test]
+    fn uninstall_does_not_treat_new_configuration_as_still_absent() {
+        let temporary = tempfile::tempdir().unwrap();
+        let protection = protection(temporary.path());
+        let path = temporary.path().join("config.yaml");
+        std::fs::write(&path, "new configuration").unwrap();
+        let options = GlobalOptions {
+            config: Some(path),
+            template_dir: None,
+        };
+        assert!(
+            protection
+                .recheck_uninstall_configuration(&options)
+                .is_err()
+        );
     }
 
     #[test]

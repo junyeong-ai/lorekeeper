@@ -60,7 +60,7 @@ impl Fixture {
         Self::write_config(self.directory.path(), "second")
     }
 
-    fn command(&self, config: &Path) -> Command {
+    fn command_without_config(&self) -> Command {
         let mut command = Command::new(&self.binary);
         for (key, _) in std::env::vars_os() {
             if key.to_string_lossy().starts_with("LORE_") {
@@ -73,9 +73,13 @@ impl Fixture {
             .env("USERPROFILE", &self.home)
             .env("XDG_CONFIG_HOME", &self.config_home)
             .env("XDG_DATA_HOME", &self.data_home)
-            .env("LORE_INSTALL_DATA_DIR", &self.data_dir)
-            .arg("--config")
-            .arg(config);
+            .env("LORE_INSTALL_DATA_DIR", &self.data_dir);
+        command
+    }
+
+    fn command(&self, config: &Path) -> Command {
+        let mut command = self.command_without_config();
+        command.arg("--config").arg(config);
         command
     }
 
@@ -964,4 +968,262 @@ fn native_consumer_protects_project_skills_in_its_vault_working_directory() {
     assert_eq!(result["semantic_calls"], 2);
     assert_eq!(result["ok"], false);
     assert_success(&deploy_project());
+}
+
+fn uninstall_fixture(root_in_templates: bool) -> Fixture {
+    let fixture = Fixture::new();
+    assert_success(&fixture.deploy());
+    let root = if root_in_templates {
+        fixture.data_dir.join("templates")
+    } else {
+        fixture.config_home.join("lorekeeper/vault")
+    };
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("user-note.md"), b"retained knowledge\n").unwrap();
+    let body = std::fs::read_to_string(&fixture.config).unwrap();
+    std::fs::write(
+        &fixture.config,
+        body.replace("root: first", &format!("root: {}", root.display())),
+    )
+    .unwrap();
+    fixture
+}
+
+#[test]
+fn uninstall_refuses_nested_vaults_before_removing_any_payload() {
+    for templates in [true, false] {
+        let fixture = uninstall_fixture(templates);
+        assert_success(
+            &fixture
+                .workflow(&fixture.config)
+                .arg("/usr/bin/true")
+                .output()
+                .unwrap(),
+        );
+        let before = artifacts(&fixture.data_dir);
+        let binary = revision(&fixture.binary);
+        let config = revision(&fixture.config);
+        let mut command = fixture.command(&fixture.config);
+        command.args(["self", "uninstall", "--yes"]);
+        if !templates {
+            command.arg("--purge-config");
+        }
+        let output = command.output().unwrap();
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("protected vault"),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(before, artifacts(&fixture.data_dir));
+        assert_eq!(binary, revision(&fixture.binary));
+        assert_eq!(config, revision(&fixture.config));
+        let root = if templates {
+            fixture.data_dir.join("templates")
+        } else {
+            fixture.config_home.join("lorekeeper/vault")
+        };
+        assert_eq!(
+            std::fs::read(root.join("user-note.md")).unwrap(),
+            b"retained knowledge\n"
+        );
+    }
+}
+
+#[test]
+fn uninstall_preserves_independent_and_config_nested_vaults_without_purge() {
+    for nested in [true, false] {
+        let fixture = if nested {
+            uninstall_fixture(false)
+        } else {
+            let fixture = Fixture::new();
+            assert_success(&fixture.deploy());
+            fixture
+        };
+        let root = if nested {
+            fixture.config_home.join("lorekeeper/vault")
+        } else {
+            fixture.directory.path().join("first")
+        };
+        std::fs::write(root.join("user-note.md"), b"retained knowledge\n").unwrap();
+        let config = revision(&fixture.config);
+        assert_success(
+            &fixture
+                .command(&fixture.config)
+                .args(["self", "uninstall", "--yes"])
+                .output()
+                .unwrap(),
+        );
+        assert!(!fixture.binary.exists());
+        assert!(!fixture.data_dir.join("templates").exists());
+        assert_eq!(config, revision(&fixture.config));
+        assert_eq!(
+            std::fs::read(root.join("user-note.md")).unwrap(),
+            b"retained knowledge\n"
+        );
+    }
+}
+
+#[test]
+fn uninstall_allows_missing_vault_and_absent_configuration() {
+    for absent_config in [false, true] {
+        let fixture = Fixture::new();
+        assert_success(&fixture.deploy());
+        std::fs::remove_dir_all(fixture.directory.path().join("first")).unwrap();
+        let mut command = fixture.command(&fixture.config);
+        if absent_config {
+            std::fs::remove_file(&fixture.config).unwrap();
+            command = fixture.command_without_config();
+        }
+        assert_success(
+            &command
+                .args(["self", "uninstall", "--yes", "--purge-config"])
+                .output()
+                .unwrap(),
+        );
+        assert!(!fixture.binary.exists());
+        assert!(!fixture.config_home.join("lorekeeper").exists());
+    }
+}
+
+#[test]
+fn uninstall_refuses_invalid_or_missing_explicit_configuration() {
+    for invalid in [false, true] {
+        let fixture = Fixture::new();
+        assert_success(&fixture.deploy());
+        let before = artifacts(&fixture.data_dir);
+        if invalid {
+            std::fs::write(&fixture.config, b"vault: [invalid").unwrap();
+        } else {
+            std::fs::remove_file(&fixture.config).unwrap();
+        }
+        let output = fixture
+            .command(&fixture.config)
+            .args(["self", "uninstall", "--yes", "--purge-config"])
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(fixture.binary.is_file());
+        assert_eq!(before, artifacts(&fixture.data_dir));
+    }
+}
+
+#[test]
+fn uninstall_refuses_purging_claimed_coordinators() {
+    let mut fixture = Fixture::new();
+    fixture.data_dir = fixture.config_home.join("lorekeeper/runtime");
+    assert_success(&fixture.deploy());
+    let before = artifacts(&fixture.data_dir);
+    let output = fixture
+        .command(&fixture.config)
+        .args(["self", "uninstall", "--yes", "--purge-config"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("protected installation coordination"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(fixture.binary.is_file());
+    assert_eq!(before, artifacts(&fixture.data_dir));
+}
+
+#[test]
+fn uninstall_removes_project_skills_inside_vault_without_removing_knowledge() {
+    let fixture = Fixture::new();
+    let root = fixture.directory.path().join("first");
+    std::fs::write(root.join("user-note.md"), b"retained knowledge\n").unwrap();
+    assert_success(
+        &fixture
+            .command(&fixture.config)
+            .current_dir(&root)
+            .args(["self", "deploy", "--skills", "project", "--agent", "both"])
+            .output()
+            .unwrap(),
+    );
+    assert!(root.join(".agents/skills/lore-wiki/SKILL.md").is_file());
+    assert_success(
+        &fixture
+            .command(&fixture.config)
+            .current_dir(&root)
+            .args(["self", "uninstall", "--yes"])
+            .output()
+            .unwrap(),
+    );
+    assert!(!root.join(".agents/skills/lore-wiki").exists());
+    assert!(!root.join(".claude/skills/lore-wiki").exists());
+    assert_eq!(
+        std::fs::read(root.join("user-note.md")).unwrap(),
+        b"retained knowledge\n"
+    );
+}
+
+#[test]
+fn legacy_removal_script_refuses_without_deleting_private_installation() {
+    let fixture = Fixture::new();
+    assert_success(&fixture.deploy());
+    let before = artifacts(&fixture.data_dir);
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/uninstall.sh");
+    let output = Command::new("bash")
+        .arg(script)
+        .args(["--yes", "--install-dir"])
+        .arg(fixture.binary.parent().unwrap())
+        .arg("--data-dir")
+        .arg(&fixture.data_dir)
+        .env("HOME", &fixture.home)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("lore self uninstall"));
+    assert!(fixture.binary.is_file());
+    assert_eq!(before, artifacts(&fixture.data_dir));
+}
+
+#[test]
+fn uninstall_refuses_templates_aliasing_the_vault() {
+    let fixture = Fixture::new();
+    assert_success(&fixture.deploy());
+    let root = fixture.directory.path().join("first");
+    let note = root.join("user-note.md");
+    std::fs::write(&note, b"retained knowledge\n").unwrap();
+    let templates = fixture.data_dir.join("templates");
+    std::fs::remove_dir_all(&templates).unwrap();
+    std::os::unix::fs::symlink(&root, &templates).unwrap();
+    let output = fixture
+        .command(&fixture.config)
+        .args(["self", "uninstall", "--yes"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("protected vault"));
+    assert!(fixture.binary.is_file());
+    assert_eq!(std::fs::read(note).unwrap(), b"retained knowledge\n");
+    assert!(
+        std::fs::symlink_metadata(templates)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+}
+
+#[test]
+fn uninstall_preserves_an_explicitly_selected_carried_example() {
+    let fixture = Fixture::new();
+    assert_success(&fixture.deploy());
+    let selected = fixture.config_home.join("lorekeeper/config.example.yaml");
+    let body = std::fs::read_to_string(&fixture.config).unwrap().replace(
+        "root: first",
+        &format!("root: {}", fixture.directory.path().join("first").display()),
+    );
+    std::fs::write(&selected, &body).unwrap();
+    assert_success(
+        &fixture
+            .command(&selected)
+            .args(["self", "uninstall", "--yes"])
+            .output()
+            .unwrap(),
+    );
+    assert!(!fixture.binary.exists());
+    assert_eq!(std::fs::read_to_string(selected).unwrap(), body);
 }

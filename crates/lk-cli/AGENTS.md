@@ -660,7 +660,11 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
 
 `commands/installation.rs` performs artifact/schema synchronization using the NEW
 binary and refuses unsafe update over pending queue work. Uninstall never removes
-user vaults. Delegate byte coherence/target/release validation to lk-dist.
+user vaults. Prepare and validate the whole uninstall removal plan before confirmation
+or deletion. Resolve native directory identity and selected-path ancestry; protect
+vault containers and held coordinator files, while allowing owned project skills below
+the vault. Strict optional config discovery distinguishes absence from invalid selection;
+recheck config and vault identity after confirmation. Delegate byte coherence/target/release validation to lk-dist.
 Unix dispatch retains shared installation claims on absolute selected destinations;
 schedule rendering creates no files and does not acquire installation claims.
 Mutators exclusively claim changed resources and the selected vault workflow before

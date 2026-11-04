@@ -36,6 +36,7 @@ pub(super) struct Request {
 #[derive(Debug)]
 pub(super) struct Lease {
     claims: Vec<(File, Mode)>,
+    paths: Vec<PathBuf>,
 }
 
 impl Lease {
@@ -78,7 +79,12 @@ impl Lease {
                 .into_iter()
                 .map(|(_, file, mode)| (file, mode))
                 .collect(),
+            paths: ordered.iter().map(|request| request.path.clone()).collect(),
         })
+    }
+
+    pub fn paths(&self) -> impl Iterator<Item = &Path> {
+        self.paths.iter().map(PathBuf::as_path)
     }
 
     /// Keep claims alive when a foreground workflow replaces its process image.
@@ -175,7 +181,7 @@ impl Lease {
             return Err(invalid("invalid installation descriptor handoff"));
         }
         let mut claims = Vec::with_capacity(files.len());
-        for (file, request) in files.into_iter().zip(requests) {
+        for (file, request) in files.into_iter().zip(&requests) {
             let expected = open_lock(&request.path, false)?.metadata()?;
             let actual = file.metadata()?;
             if !actual.is_file() || (actual.dev(), actual.ino()) != (expected.dev(), expected.ino())
@@ -188,7 +194,13 @@ impl Lease {
                 .map_err(|error| context("claim received installation descriptor", error))?;
             claims.push((file, Mode::Exclusive));
         }
-        Ok(Self { claims })
+        Ok(Self {
+            claims,
+            paths: requests
+                .iter()
+                .map(|request| request.path.clone())
+                .collect(),
+        })
     }
 }
 
