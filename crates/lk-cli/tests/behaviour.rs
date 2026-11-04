@@ -367,6 +367,10 @@ const EXEMPT: &[(&[&str], &str)] = &[
         "reads the machine's own installation — which binary is running and what is deployed beside it — none of which the fixture supplies",
     ),
     (
+        &["self", "snapshot"],
+        "executes an external foreground backup command under installation and vault claims; installation_workflow tests busy admission, descriptor inheritance, literal arguments, journal preservation and claim release",
+    ),
+    (
         &["self", "deploy"],
         "writes the skills, pipelines and templates into the running user's directories, which is not the fixture's to observe",
     ),
