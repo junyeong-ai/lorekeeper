@@ -28,6 +28,7 @@ fn identity(path: &Path) -> io::Result<Identity> {
 #[derive(Clone, Copy)]
 enum RemovalKind {
     Tree,
+    ConfigurationDirectory,
     File,
     EmptyDirectory,
 }
@@ -101,6 +102,7 @@ pub(super) struct RemovalPlan {
     removals: Vec<Removal>,
     vault: Option<Vault>,
     coordination: HashSet<Identity>,
+    configuration: HashSet<Identity>,
 }
 
 impl RemovalPlan {
@@ -114,10 +116,15 @@ impl RemovalPlan {
         for path in protection.coordination_paths() {
             capture_ancestors(&path, &mut coordination)?;
         }
+        let mut configuration = HashSet::new();
+        if let Some(path) = protection.configuration_path() {
+            capture_ancestors(path, &mut configuration)?;
+        }
         let mut plan = Self {
             removals: Vec::new(),
             vault,
             coordination,
+            configuration,
         };
         for engine in AgentTarget::Both.engines() {
             let view = installation.for_engine(*engine);
@@ -136,7 +143,10 @@ impl RemovalPlan {
             RemovalKind::EmptyDirectory,
         )?;
         if purge_config {
-            plan.push(installation.config_dir().to_path_buf(), RemovalKind::Tree)?;
+            plan.push(
+                installation.config_dir().to_path_buf(),
+                RemovalKind::ConfigurationDirectory,
+            )?;
         } else {
             let selected = protection
                 .configuration_path()
@@ -198,7 +208,7 @@ impl RemovalPlan {
         protection.recheck_configuration()?;
         let vault = self.vault_ancestors()?;
         for removal in &self.removals {
-            removal.validate(&vault, &self.coordination)?;
+            removal.validate(&vault, &self.configuration, &self.coordination)?;
         }
         Ok(())
     }
@@ -220,7 +230,7 @@ impl RemovalPlan {
             if let Some(root) = &self.vault {
                 root.validate_root()?;
             }
-            if removal.validate(&vault, &self.coordination)? {
+            if removal.validate(&vault, &self.configuration, &self.coordination)? {
                 removal.apply()?;
             }
         }
@@ -232,6 +242,7 @@ impl Removal {
     fn validate(
         &self,
         vault: &HashSet<Identity>,
+        configuration: &HashSet<Identity>,
         coordination: &HashSet<Identity>,
     ) -> miette::Result<bool> {
         let actual = match identity(&self.path) {
@@ -253,11 +264,27 @@ impl Removal {
                 self.path.display()
             ));
         }
+        if configuration.contains(&actual)
+            && !matches!(self.kind, RemovalKind::ConfigurationDirectory)
+        {
+            if matches!(self.kind, RemovalKind::EmptyDirectory) {
+                return Ok(false);
+            }
+            return Err(miette::miette!(
+                "uninstall removal overlaps selected configuration: {}",
+                self.path.display()
+            ));
+        }
         let metadata = std::fs::symlink_metadata(&self.path).map_err(io_error)?;
         match self.kind {
-            RemovalKind::Tree if !metadata.is_dir() && !metadata.file_type().is_symlink() => Err(
-                miette::miette!("uninstall tree is not a directory: {}", self.path.display()),
-            ),
+            RemovalKind::Tree | RemovalKind::ConfigurationDirectory
+                if !metadata.is_dir() && !metadata.file_type().is_symlink() =>
+            {
+                Err(miette::miette!(
+                    "uninstall tree is not a directory: {}",
+                    self.path.display()
+                ))
+            }
             RemovalKind::File if metadata.is_dir() => Err(miette::miette!(
                 "uninstall file is a directory: {}",
                 self.path.display()
@@ -268,7 +295,9 @@ impl Removal {
 
     fn apply(&self) -> miette::Result<()> {
         let result = match self.kind {
-            RemovalKind::Tree => std::fs::remove_dir_all(&self.path),
+            RemovalKind::Tree | RemovalKind::ConfigurationDirectory => {
+                std::fs::remove_dir_all(&self.path)
+            }
             RemovalKind::File => std::fs::remove_file(&self.path),
             RemovalKind::EmptyDirectory => {
                 let _ = std::fs::remove_dir(&self.path);
@@ -327,7 +356,7 @@ mod tests {
                     path,
                     kind: RemovalKind::Tree
                 }
-                .validate(&protected, &HashSet::new())
+                .validate(&protected, &HashSet::new(), &HashSet::new())
                 .is_err()
             );
         }
@@ -336,14 +365,18 @@ mod tests {
                 path: root.clone(),
                 kind: RemovalKind::EmptyDirectory
             }
-            .validate(&protected, &HashSet::new())
+            .validate(&protected, &HashSet::new(), &HashSet::new())
             .is_ok_and(|remove| !remove)
         );
         let removal = Removal {
             path: skill.clone(),
             kind: RemovalKind::Tree,
         };
-        assert!(removal.validate(&protected, &HashSet::new()).unwrap());
+        assert!(
+            removal
+                .validate(&protected, &HashSet::new(), &HashSet::new())
+                .unwrap()
+        );
         removal.apply().unwrap();
         assert!(!skill.exists());
         vault.validate_selection().unwrap();
@@ -375,7 +408,7 @@ mod tests {
                 path: lock,
                 kind: RemovalKind::File
             }
-            .validate(&HashSet::new(), &coordination)
+            .validate(&HashSet::new(), &HashSet::new(), &coordination)
             .is_err()
         );
         assert!(
@@ -383,7 +416,7 @@ mod tests {
                 path: temporary.path().to_path_buf(),
                 kind: RemovalKind::Tree
             }
-            .validate(&HashSet::new(), &coordination)
+            .validate(&HashSet::new(), &HashSet::new(), &coordination)
             .is_err()
         );
     }
@@ -406,7 +439,7 @@ mod tests {
                 path: selected.clone(),
                 kind: RemovalKind::Tree
             }
-            .validate(&protected, &HashSet::new())
+            .validate(&protected, &HashSet::new(), &HashSet::new())
             .is_err()
         );
         for alias in [

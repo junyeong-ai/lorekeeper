@@ -1227,3 +1227,80 @@ fn uninstall_preserves_an_explicitly_selected_carried_example() {
     assert!(!fixture.binary.exists());
     assert_eq!(std::fs::read_to_string(selected).unwrap(), body);
 }
+
+#[test]
+fn uninstall_preserves_selected_configuration_inside_every_owned_tree() {
+    for (relative, skills, purge) in [
+        ("runtime/templates/selected.yaml", None, false),
+        ("runtime/skills/selected.yaml", None, true),
+        (
+            "home/.agents/skills/lore-wiki/selected.yaml",
+            Some("user"),
+            false,
+        ),
+        (
+            ".claude/skills/lore-wiki/selected.yaml",
+            Some("project"),
+            true,
+        ),
+    ] {
+        let fixture = Fixture::new();
+        assert_success(&fixture.deploy());
+        if let Some(skills) = skills {
+            assert_success(
+                &fixture
+                    .command(&fixture.config)
+                    .args(["self", "deploy", "--skills", skills, "--agent", "both"])
+                    .output()
+                    .unwrap(),
+            );
+        }
+        let selected = fixture.directory.path().join(relative);
+        std::fs::create_dir_all(selected.parent().unwrap()).unwrap();
+        let body = std::fs::read_to_string(&fixture.config).unwrap().replace(
+            "root: first",
+            &format!("root: {}", fixture.directory.path().join("first").display()),
+        );
+        std::fs::write(&selected, &body).unwrap();
+        let before = artifacts(&fixture.data_dir);
+        let binary = revision(&fixture.binary);
+        let mut command = fixture.command(&selected);
+        command.args(["self", "uninstall", "--yes"]);
+        if purge {
+            command.arg("--purge-config");
+        }
+        let output = command.output().unwrap();
+        assert!(!output.status.success(), "{relative} purge={purge}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("selected configuration"),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(std::fs::read_to_string(&selected).unwrap(), body);
+        assert_eq!(before, artifacts(&fixture.data_dir));
+        assert_eq!(binary, revision(&fixture.binary));
+    }
+}
+
+#[test]
+fn uninstall_allows_explicit_purge_of_the_selected_config_directory() {
+    let fixture = Fixture::new();
+    assert_success(&fixture.deploy());
+    let selected = fixture.config_home.join("lorekeeper/config.yaml");
+    let root = fixture.directory.path().join("first");
+    let body = std::fs::read_to_string(&fixture.config)
+        .unwrap()
+        .replace("root: first", &format!("root: {}", root.display()));
+    std::fs::write(&selected, &body).unwrap();
+    std::fs::write(root.join("note.md"), b"user note").unwrap();
+    assert_success(
+        &fixture
+            .command(&selected)
+            .args(["self", "uninstall", "--yes", "--purge-config"])
+            .output()
+            .unwrap(),
+    );
+    assert!(!fixture.binary.exists());
+    assert!(!fixture.config_home.join("lorekeeper").exists());
+    assert_eq!(std::fs::read(root.join("note.md")).unwrap(), b"user note");
+}

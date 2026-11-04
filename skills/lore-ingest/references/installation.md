@@ -162,11 +162,13 @@ selected vault and active installation coordinator files. A vault inside the ins
 `templates` directory refuses removal; a vault inside the configuration directory
 refuses `--purge-config`. A normal project skill directory inside a vault can still be
 removed. Missing or invalid explicitly selected configuration refuses removal rather
-than treating the vault as absent. Keep the selected configuration and vault unchanged
-through confirmation. Uninstall does not relocate data or unregister OS jobs. Unregister schedules explicitly before removal;
+than treating the vault as absent. The selected configuration file and its containing directories are protected from
+ordinary removal. `--purge-config` authorizes only the installation configuration
+directory; a selected config under another owned tree still refuses removal. Keep
+the selected configuration and vault unchanged through confirmation. Uninstall does not relocate data or unregister OS jobs. Unregister schedules explicitly before removal;
 see the scheduling reference for the platform procedure.
 
-Use the installed executable from version 0.120.0 or newer for guarded removal.
+Use the installed executable from version 0.120.1 or newer for guarded removal.
 The standalone removal scripts refuse without deleting files. Their path and
 keep-data options do not run; they cannot establish native configuration and
 installation protection when the executable is absent.
