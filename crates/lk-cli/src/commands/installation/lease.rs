@@ -10,7 +10,6 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
-use rustix::fs::{Mode as FileMode, OFlags};
 use rustix::io::{FdFlags, fcntl_getfd, fcntl_setfd};
 use rustix::net::{
     RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags, ReturnFlags, SendAncillaryBuffer,
@@ -30,6 +29,7 @@ pub(super) enum Mode {
 #[derive(Clone, Debug)]
 pub(super) struct Request {
     pub path: PathBuf,
+    pub scope: PathBuf,
     pub mode: Mode,
 }
 
@@ -39,15 +39,46 @@ pub(super) struct Lease {
 }
 
 impl Lease {
+    /// The first request anchors admission. Existing coordinators are claimed
+    /// before provisioning; missing ones follow containing scopes, with the anchor
+    /// ahead of unrelated resources. Descriptor handoff retains path-sorted order.
     pub fn acquire(requests: &[Request]) -> io::Result<Self> {
-        let requests = ordered_requests(requests)?;
-        let mut claims = Vec::with_capacity(requests.len());
-        for request in requests {
+        let ordered = ordered_requests(requests)?;
+        let primary = &requests[0].scope;
+        let mut admission: Vec<_> = ordered.iter().enumerate().collect();
+        admission.sort_by_key(|(_, request)| {
+            (
+                !primary.starts_with(&request.scope),
+                request.scope.components().count(),
+                &request.path,
+            )
+        });
+        let mut claims = Vec::with_capacity(ordered.len());
+        let mut missing = Vec::new();
+        for (index, request) in admission {
+            match open_lock(&request.path, false) {
+                Ok(file) => {
+                    lock(&file, request.mode)?;
+                    claims.push((index, file, request.mode));
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    missing.push((index, request))
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        for (index, request) in missing {
             let file = open_lock(&request.path, true)?;
             lock(&file, request.mode)?;
-            claims.push((file, request.mode));
+            claims.push((index, file, request.mode));
         }
-        Ok(Self { claims })
+        claims.sort_by_key(|(index, _, _)| *index);
+        Ok(Self {
+            claims: claims
+                .into_iter()
+                .map(|(_, file, mode)| (file, mode))
+                .collect(),
+        })
     }
 
     /// Keep claims alive when a foreground workflow replaces its process image.
@@ -173,37 +204,26 @@ fn ordered_requests(requests: &[Request]) -> io::Result<Vec<&Request>> {
     if ordered.is_empty() || ordered.len() > MAX_CLAIMS {
         return Err(invalid("installation requires between 1 and 16 lock files"));
     }
-    if ordered.iter().any(|request| !request.path.is_absolute()) {
-        return Err(invalid("installation lock paths must be absolute"));
+    if ordered
+        .iter()
+        .any(|request| !request.path.is_absolute() || !request.scope.is_absolute())
+    {
+        return Err(invalid(
+            "installation lock paths and scopes must be absolute",
+        ));
     }
     Ok(ordered)
 }
 
 fn open_lock(path: &Path, create: bool) -> io::Result<File> {
-    if create {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        match rustix::fs::open(
-            path,
-            OFlags::CREATE | OFlags::EXCL | OFlags::WRONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
-            FileMode::RUSR | FileMode::WUSR | FileMode::RGRP | FileMode::ROTH,
-        ) {
-            Ok(file) => drop(file),
-            Err(rustix::io::Errno::EXIST) => {}
-            Err(error) => return Err(error.into()),
-        }
+    if create && let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
     }
-    // NONBLOCK prevents an occupied FIFO from hanging before its type is checked.
-    let file = File::from(rustix::fs::open(
+    lk_core::fs::open_lock_file(
         path,
-        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
-        FileMode::empty(),
-    )?);
-    if !file.metadata()?.is_file() {
-        return Err(invalid("installation lock is not a regular file"));
-    }
-    Ok(file)
+        lk_core::fs::LockFileAccess::Read,
+        create.then_some(0o644),
+    )
 }
 
 fn lock(file: &File, mode: Mode) -> io::Result<()> {
@@ -235,6 +255,7 @@ mod tests {
     fn request(path: &Path, mode: Mode) -> Request {
         Request {
             path: path.to_path_buf(),
+            scope: path.to_path_buf(),
             mode,
         }
     }
@@ -279,6 +300,57 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn busy_existing_claims_refuse_before_missing_coordinators_are_provisioned() {
+        let temporary = tempfile::tempdir().unwrap();
+        let busy = temporary.path().join("z-existing.lock");
+        let _holder = Lease::acquire(&[request(&busy, Mode::Exclusive)]).unwrap();
+        let missing = temporary.path().join("a-missing/nested.lock");
+        assert_eq!(
+            Lease::acquire(&[
+                request(&missing, Mode::Exclusive),
+                request(&busy, Mode::Exclusive)
+            ])
+            .unwrap_err()
+            .kind(),
+            io::ErrorKind::WouldBlock
+        );
+        assert!(!missing.parent().unwrap().exists());
+    }
+
+    #[test]
+    fn acquisition_preserves_canonical_handoff_order_across_resource_scopes() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().canonicalize().unwrap();
+        let requests = [
+            Request {
+                path: root.join("z-binary.lock"),
+                scope: root.join("bin/lore"),
+                mode: Mode::Exclusive,
+            },
+            Request {
+                path: root.join("a-vault/workflow.lock"),
+                scope: root.clone(),
+                mode: Mode::Exclusive,
+            },
+            Request {
+                path: root.join("b-data.lock"),
+                scope: root.join("data"),
+                mode: Mode::Exclusive,
+            },
+        ];
+        let lease = Lease::acquire(&requests).unwrap();
+        let canonical = ordered_requests(&requests).unwrap();
+        for ((file, _), expected) in lease.claims.iter().zip(canonical) {
+            let expected = std::fs::metadata(&expected.path).unwrap();
+            let actual = file.metadata().unwrap();
+            assert_eq!(
+                (actual.dev(), actual.ino()),
+                (expected.dev(), expected.ino())
+            );
+        }
     }
 
     #[test]

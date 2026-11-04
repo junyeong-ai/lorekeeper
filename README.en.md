@@ -303,6 +303,9 @@ On Unix, `lore self snapshot -- BACKUP_COMMAND ARGS...` excludes native users of
 same installation and cooperating writers of the selected vault until the foreground
 backup command exits. Busy state refuses without starting it. Stop external editors
 separately and verify the backup contents.
+Cooperating commands resolve installation paths without creating them before
+admission. This guarantee requires participating commands to use the updated binary;
+invalid lock files are never automatically removed or repaired.
 
 ## Further reading and development
 

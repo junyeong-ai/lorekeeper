@@ -389,11 +389,11 @@ pub enum QueueClaim {
 /// and an exclusive claim held that long needs a liveness answer nothing here can give.
 pub fn claim_queue(queue_dir: &Path) -> std::io::Result<QueueClaim> {
     std::fs::create_dir_all(queue_dir)?;
-    let file = std::fs::File::options()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(queue_dir.join(LOCK_FILE))?;
+    let file = lk_core::fs::open_lock_file(
+        &queue_dir.join(LOCK_FILE),
+        lk_core::fs::LockFileAccess::Write,
+        Some(0o666),
+    )?;
     match file.try_lock() {
         Ok(()) => Ok(QueueClaim::Held(file)),
         Err(std::fs::TryLockError::WouldBlock) => Ok(QueueClaim::Busy),
@@ -1057,6 +1057,17 @@ mod tests {
             "the claim is released by dropping it, with the file still on disk"
         );
         assert!(queue.join(LOCK_FILE).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn queue_claim_refuses_a_symlink_without_changing_its_target() {
+        let dir = TempDir::new().unwrap();
+        let target = dir.path().join("target");
+        std::fs::write(&target, b"retained").unwrap();
+        std::os::unix::fs::symlink(&target, dir.path().join(LOCK_FILE)).unwrap();
+        assert!(claim_queue(dir.path()).is_err());
+        assert_eq!(std::fs::read(target).unwrap(), b"retained");
     }
 
     #[test]

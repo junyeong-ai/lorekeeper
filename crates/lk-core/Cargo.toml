@@ -24,3 +24,6 @@ same-file = { workspace = true }
 tempfile = { workspace = true }
 pulldown-cmark = { workspace = true }
 pulldown-cmark-to-cmark = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true }

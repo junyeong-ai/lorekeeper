@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io;
 use std::path::{Component, Path, PathBuf};
 
@@ -210,12 +210,11 @@ impl MutationClaim {
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(&state, fs::Permissions::from_mode(0o700))?;
         }
-        let lock = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(state.join("lock"))?;
+        let lock = lk_core::fs::open_lock_file(
+            &state.join("lock"),
+            lk_core::fs::LockFileAccess::ReadWrite,
+            Some(0o666),
+        )?;
         if wait {
             lock.lock()?;
         } else {
@@ -701,6 +700,27 @@ mod tests {
             MutationClaim::acquire(root.path()),
             Err(VaultError::Io(_))
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_mutation_lock_symlink_refuses_without_recovery() {
+        let root = tempfile::tempdir().unwrap();
+        let state = root.path().join(".lorekeeper/mutation");
+        fs::create_dir_all(&state).unwrap();
+        let target = root.path().join("target");
+        fs::write(&target, b"retained").unwrap();
+        fs::write(state.join("pending.json"), b"unverified journal").unwrap();
+        std::os::unix::fs::symlink(&target, state.join("lock")).unwrap();
+        assert!(matches!(
+            MutationClaim::acquire(root.path()),
+            Err(VaultError::Io(_))
+        ));
+        assert_eq!(fs::read(target).unwrap(), b"retained");
+        assert_eq!(
+            fs::read(state.join("pending.json")).unwrap(),
+            b"unverified journal"
+        );
     }
 
     fn plan() -> MutationPlan {

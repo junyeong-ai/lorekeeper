@@ -664,7 +664,11 @@ user vaults. Delegate byte coherence/target/release validation to lk-dist.
 Unix dispatch retains shared installation claims on absolute selected destinations;
 schedule rendering creates no files and does not acquire installation claims.
 Mutators exclusively claim changed resources and the selected vault workflow before
-writing. Native runs retain claims across collection and batch gaps. Pin the same
+writing. Resolve coordinator paths without provisioning. Acquire existing claims
+before creating missing coordinators; containing resource scopes precede descendants,
+and the selected binary precedes unrelated resources. Keep descriptor handoff in
+canonical path order independently of acquisition order. Native runs retain claims
+across collection and batch gaps. Pin the same
 Installation and data directory in children rather than rediscovering mutable records.
 Standalone mutators also pin the physical vault. Schema synchronization carries the
 original configuration revision and root identity through acquisition and publication;

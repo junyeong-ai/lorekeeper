@@ -80,6 +80,10 @@ Native runs and participating workflow children retain protection across collect
 and inference. Updates reacquire exclusive protection and recheck config, binary
 bytes and queue state after downloading. Adjacent `.lorekeeper-*.lock` files are
 persistent coordination state; never unlink them during execution or cache cleanup.
+Installation paths are resolved without provisioning before admission. Participating
+commands must use the updated binary for this guarantee; older binaries retain their
+own preparation behavior. Nonregular or symlink lock files refuse access without
+automatic removal or repair.
 Their creation requires write access to the resource's parent directory.
 
 Bootstrap scripts, `cargo install`, manual binary replacement and older binaries

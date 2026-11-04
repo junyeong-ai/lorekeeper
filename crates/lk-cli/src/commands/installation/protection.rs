@@ -492,7 +492,13 @@ impl Protection {
             for level in levels {
                 if let Some(path) = selected.skills_dir(level) {
                     if let Some(lock) = skill_lock(&path, mode)? {
-                        requests.push(Request { path: lock, mode });
+                        requests.push(Request {
+                            path: lock,
+                            scope: resolve_resource(&path).map_err(|error| {
+                                miette::miette!("resolve skill resource: {error}")
+                            })?,
+                            mode,
+                        });
                     }
                     if std::fs::symlink_metadata(&path).is_ok() {
                         resources.push((path, mode));
@@ -508,27 +514,33 @@ impl Protection {
         let resources = resources
             .into_iter()
             .filter(|(path, _)| mode == Mode::Exclusive || path.exists())
-            .map(|(path, mode)| destination_lock(&path).map(|path| Request { path, mode }))
+            .map(|(path, mode)| destination_request(&path, mode))
             .collect::<miette::Result<Vec<_>>>()?;
-        requests.extend(resources);
+        let mut resources = resources;
+        resources.append(&mut requests);
+        let mut requests = resources;
         if mode == Mode::Exclusive && schema {
             if let Some(config) = &self.config {
                 match schema_state(&config.root) {
                     Ok(state) => {
-                        let root = state.parent().expect("vault state has a parent");
+                        let root = config
+                            .root
+                            .canonicalize()
+                            .map_err(|error| miette::miette!("resolve vault root: {error}"))?;
                         let pin = match crate::commands::workflow::VaultRootPin::inherited()? {
                             Some(pin) => {
-                                pin.validate_target(root)?;
+                                pin.validate_target(&root)?;
                                 pin
                             }
                             None => crate::commands::workflow::VaultRootPin::capture(
                                 &config.root,
-                                root,
+                                &root,
                             )?,
                         };
                         self.root_pin = Some(pin);
                         requests.push(Request {
                             path: state.join("workflow.lock"),
+                            scope: root,
                             mode: Mode::Exclusive,
                         });
                     }
@@ -550,14 +562,7 @@ impl Protection {
 #[cfg(unix)]
 fn schema_state(root: &Path) -> std::io::Result<PathBuf> {
     let root = root.canonicalize()?;
-    let state = root.join(".lorekeeper");
-    if !lk_core::fs::canonical_prefix(&state).starts_with(&root) {
-        return Err(std::io::Error::other(
-            "installation schema state escapes vault",
-        ));
-    }
-    std::fs::create_dir_all(&state)?;
-    let state = state.canonicalize()?;
+    let state = resolve_resource(&root.join(".lorekeeper"))?;
     if !state.starts_with(&root) {
         return Err(std::io::Error::other(
             "installation schema state escapes vault",
@@ -580,48 +585,62 @@ fn acquire(requests: &[Request]) -> miette::Result<Lease> {
 }
 
 #[cfg(unix)]
-fn destination_lock(path: &Path) -> miette::Result<PathBuf> {
-    let selected = std::path::absolute(path).map_err(|error| miette::miette!("{error}"))?;
-    let selected = match selected.canonicalize() {
-        Ok(path) => path,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            if std::fs::symlink_metadata(&selected).is_ok() {
-                return Err(miette::miette!(
-                    "installation resource is a broken symlink: {}",
-                    selected.display()
-                ));
-            }
-            selected
-        }
-        Err(error) => {
-            return Err(miette::miette!(
-                "resolve installation resource {}: {error}",
-                selected.display()
-            ));
-        }
-    };
-    let parent = selected.parent().ok_or_else(|| {
-        miette::miette!(
-            "installation resource has no parent: {}",
-            selected.display()
-        )
+fn destination_request(path: &Path, mode: Mode) -> miette::Result<Request> {
+    let scope = resolve_resource(path).map_err(|error| {
+        miette::miette!("resolve installation resource {}: {error}", path.display())
     })?;
-    let name = selected.file_name().ok_or_else(|| {
-        miette::miette!("installation resource has no name: {}", selected.display())
+    let parent = scope.parent().ok_or_else(|| {
+        miette::miette!("installation resource has no parent: {}", scope.display())
     })?;
-    std::fs::create_dir_all(parent).map_err(|error| {
-        miette::miette!(
-            "prepare installation coordination {}: {error}",
-            parent.display()
-        )
-    })?;
-    let parent = parent
-        .canonicalize()
-        .map_err(|error| miette::miette!("{error}"))?;
-    Ok(parent.join(format!(
+    let name = scope
+        .file_name()
+        .ok_or_else(|| miette::miette!("installation resource has no name: {}", scope.display()))?;
+    let path = parent.join(format!(
         ".lorekeeper-{}.lock",
         lk_dist::sha256_hex(name.as_encoded_bytes())
-    )))
+    ));
+    Ok(Request { path, scope, mode })
+}
+
+#[cfg(unix)]
+fn resolve_resource(path: &Path) -> std::io::Result<PathBuf> {
+    let selected = std::path::absolute(path)?;
+    let mut ancestor = selected.as_path();
+    let mut missing = Vec::new();
+    loop {
+        match ancestor.canonicalize() {
+            Ok(mut resolved) => {
+                for component in missing.into_iter().rev() {
+                    if component == ".." {
+                        resolved.pop();
+                    } else {
+                        resolved.push(component);
+                    }
+                }
+                return Ok(resolved);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                match std::fs::symlink_metadata(ancestor) {
+                    Ok(_) => {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "installation resource is a broken symlink",
+                        ));
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error),
+                }
+            }
+            Err(error) => return Err(error),
+        }
+        let component = ancestor.components().next_back().ok_or_else(|| {
+            std::io::Error::other("installation resource has no resolvable ancestor")
+        })?;
+        missing.push(component.as_os_str().to_os_string());
+        ancestor = ancestor.parent().ok_or_else(|| {
+            std::io::Error::other("installation resource has no resolvable ancestor")
+        })?;
+    }
 }
 
 #[cfg(unix)]
@@ -633,17 +652,14 @@ fn skill_lock(path: &Path, mode: Mode) -> miette::Result<Option<PathBuf>> {
     let relative = path
         .strip_prefix(base)
         .expect("skill root is under its host");
-    if mode == Mode::Exclusive {
-        std::fs::create_dir_all(base)
-            .map_err(|error| miette::miette!("prepare skill host {}: {error}", base.display()))?;
-    } else if !base
-        .try_exists()
-        .map_err(|error| miette::miette!("inspect skill host {}: {error}", base.display()))?
+    if mode == Mode::Shared
+        && !base
+            .try_exists()
+            .map_err(|error| miette::miette!("inspect skill host {}: {error}", base.display()))?
     {
         return Ok(None);
     }
-    let base = base
-        .canonicalize()
+    let base = resolve_resource(base)
         .map_err(|error| miette::miette!("resolve skill host {}: {error}", base.display()))?;
     Ok(Some(base.join(format!(
         ".lorekeeper-{}.lock",
@@ -654,6 +670,44 @@ fn skill_lock(path: &Path, mode: Mode) -> miette::Result<Option<PathBuf>> {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resource_projection_is_pure_and_preserves_alias_and_missing_path_identity() {
+        use std::os::unix::fs::symlink;
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().canonicalize().unwrap();
+        let actual = root.join("actual");
+        std::fs::create_dir(&actual).unwrap();
+        symlink(&actual, root.join("alias")).unwrap();
+        let first =
+            destination_request(&root.join("alias/missing/runtime"), Mode::Exclusive).unwrap();
+        let second = destination_request(&actual.join("missing/runtime"), Mode::Exclusive).unwrap();
+        assert_eq!(first.path, second.path);
+        assert_eq!(first.scope, second.scope);
+        assert!(!actual.join("missing").exists());
+        let state = schema_state(&root).unwrap();
+        assert!(!state.exists());
+        let skill = root.join("absent/.agents/skills");
+        skill_lock(&skill, Mode::Exclusive).unwrap().unwrap();
+        assert!(!root.join("absent").exists());
+        symlink(root.join("missing-target"), root.join("broken")).unwrap();
+        assert!(destination_request(&root.join("broken/runtime"), Mode::Exclusive).is_err());
+        assert_eq!(
+            resolve_resource(&root.join("missing/../actual")).unwrap(),
+            actual
+        );
+        std::fs::write(root.join("file"), b"retained").unwrap();
+        let path = root.join("file/../actual");
+        match path.canonicalize() {
+            Ok(expected) => assert_eq!(resolve_resource(&path).unwrap(), expected),
+            Err(_) => assert!(resolve_resource(&path).is_err()),
+        }
+        assert!(resolve_resource(&root.join("file/child")).is_err());
+        std::fs::create_dir_all(&first.scope).unwrap();
+        let installed = destination_request(&first.scope, Mode::Exclusive).unwrap();
+        assert_eq!(installed.path, first.path);
+        assert_eq!(installed.scope, first.scope);
+    }
 
     fn protection(root: &Path) -> Protection {
         let installation = Installation::at(
@@ -831,10 +885,7 @@ mod tests {
             config: None,
             template_dir: Some(external.clone()),
         };
-        let external_request = Request {
-            path: destination_lock(&external).unwrap(),
-            mode: Mode::Exclusive,
-        };
+        let external_request = destination_request(&external, Mode::Exclusive).unwrap();
         let _external_mutation = Lease::acquire(&[external_request]).unwrap();
         let consumer = protection
             .requests(

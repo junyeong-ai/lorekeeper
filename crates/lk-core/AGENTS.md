@@ -112,6 +112,12 @@ config loading and the shared filesystem primitives intentionally perform I/O.
 
 ## Durable files (`fs.rs`)
 
+- `open_lock_file` opens or exclusively creates a persistent regular coordinator
+  without truncation, parent provisioning or lock acquisition. Preserve each
+  caller's access and creation mode; Unix no-follow/nonblocking opens reject
+  symlinks and special files before advisory waiting. Invalid files are I/O errors,
+  never contention or permission to unlink coordination state.
+
 - `write_atomic` replaces a destination: unique same-directory temp, fsync,
   optional permissions, rename, parent fsync, cleanup on error. Keep the extension
   before `.tmp` for existing suffix sweeps. Use this shared implementation.

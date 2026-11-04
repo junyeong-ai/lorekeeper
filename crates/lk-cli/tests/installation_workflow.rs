@@ -448,6 +448,133 @@ fn snapshot_excludes_ingest_admission_and_keeps_writer_claims_through_exec() {
 }
 
 #[test]
+fn refused_installation_contenders_preserve_the_complete_snapshot_namespace() {
+    let fixture = Fixture::new();
+    let vault = fixture.directory.path().join("first");
+    let mut holder = hold(fixture.snapshot());
+    let capture = || {
+        walkdir::WalkDir::new(&vault)
+            .into_iter()
+            .map(|entry| {
+                let entry = entry.unwrap();
+                (
+                    entry.path().strip_prefix(&vault).unwrap().to_path_buf(),
+                    if entry.file_type().is_file() {
+                        Some(revision(entry.path()))
+                    } else {
+                        None
+                    },
+                )
+            })
+            .collect::<BTreeMap<_, _>>()
+    };
+    let before = capture();
+    let destination = vault.join("introduced/runtime");
+    let refused = fixture
+        .command(&fixture.config)
+        .args([
+            "self",
+            "deploy",
+            "--skills",
+            "none",
+            "--agent",
+            "codex",
+            "--data-dir",
+        ])
+        .arg(&destination)
+        .output()
+        .unwrap();
+    assert_installation_busy(&refused);
+    assert_eq!(capture(), before);
+
+    let other = Fixture::new();
+    let config = std::fs::read_to_string(&other.config)
+        .unwrap()
+        .replace("root: first", &format!("root: {}", vault.display()));
+    std::fs::write(&other.config, config).unwrap();
+    let refused = other
+        .command(&other.config)
+        .args([
+            "self",
+            "deploy",
+            "--skills",
+            "none",
+            "--agent",
+            "codex",
+            "--data-dir",
+        ])
+        .arg(&destination)
+        .output()
+        .unwrap();
+    assert_installation_busy(&refused);
+    assert_eq!(capture(), before);
+    holder.release();
+    assert_success(
+        &fixture
+            .command(&fixture.config)
+            .args([
+                "self",
+                "deploy",
+                "--skills",
+                "none",
+                "--agent",
+                "codex",
+                "--data-dir",
+            ])
+            .arg(destination)
+            .output()
+            .unwrap(),
+    );
+}
+
+#[test]
+fn snapshot_rejects_a_queue_fifo_without_starting_a_child_or_retaining_claims() {
+    use std::os::unix::fs::FileTypeExt;
+    let fixture = Fixture::new();
+    let queue = fixture.directory.path().join("first/.lorekeeper/queue");
+    std::fs::create_dir_all(&queue).unwrap();
+    let lock = queue.join(".lock");
+    assert!(
+        Command::new("mkfifo")
+            .arg(&lock)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let mut child = fixture
+        .snapshot()
+        .args(["/bin/sh", "-c", "printf child-started"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while child.try_wait().unwrap().is_none() {
+        if std::time::Instant::now() >= deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("snapshot did not exit before the private test deadline");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let output = child.wait_with_output().unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(
+        std::fs::symlink_metadata(&lock)
+            .unwrap()
+            .file_type()
+            .is_fifo()
+    );
+    let validation = fixture
+        .command(&fixture.config)
+        .arg("validate")
+        .output()
+        .unwrap();
+    assert_success(&validation);
+}
+
+#[test]
 fn snapshot_refuses_busy_or_unsettled_state_without_running_the_child_or_recovery() {
     let fixture = Fixture::new();
     let marker = fixture.directory.path().join("started");
