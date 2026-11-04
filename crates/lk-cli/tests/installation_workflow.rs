@@ -85,6 +85,12 @@ impl Fixture {
         command
     }
 
+    fn snapshot(&self) -> Command {
+        let mut command = self.command(&self.config);
+        command.args(["self", "snapshot", "--"]);
+        command
+    }
+
     fn deploy(&self) -> Output {
         self.command(&self.config)
             .args(["self", "deploy", "--skills", "none"])
@@ -356,6 +362,179 @@ fn force_update_of_a_shared_binary_refuses_before_download_with_other_data_and_c
     assert!(!alternate_data.join("skills").exists());
     assert!(!alternate_data.join("templates").exists());
     holder.release();
+}
+
+#[test]
+fn workflow_only_exclusion_does_not_freeze_ingest_admission_state() {
+    let fixture = Fixture::new();
+    let config = std::fs::read_to_string(&fixture.config).unwrap();
+    std::fs::write(
+        &fixture.config,
+        format!("{config}\nllm: {{provider: noop}}\n"),
+    )
+    .unwrap();
+    let inbox = fixture.directory.path().join("inbox");
+    std::fs::create_dir(&inbox).unwrap();
+    std::fs::write(
+        inbox.join("note.md"),
+        "# Captured note\n\nOriginal source.\n",
+    )
+    .unwrap();
+    let mut holder = hold(fixture.workflow(&fixture.config));
+    let cursor = fixture
+        .directory
+        .path()
+        .join("first/.lorekeeper/ingest-cursor.json");
+    let before = br#"{"next_source":"earlier-source"}"#;
+    std::fs::write(&cursor, before).unwrap();
+    let result = fixture
+        .command(&fixture.config)
+        .args(["ingest", "--publication-workflow", "refuse"])
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    assert!(
+        String::from_utf8_lossy(&result.stderr).contains("workflow busy"),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let after = std::fs::read(&cursor).unwrap();
+    assert_ne!(after, before);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&after).unwrap()["next_source"],
+        "notes"
+    );
+    holder.release();
+}
+
+#[test]
+fn snapshot_excludes_ingest_admission_and_keeps_writer_claims_through_exec() {
+    let fixture = Fixture::new();
+    let vault = fixture.directory.path().join("first");
+    let state = vault.join(".lorekeeper");
+    std::fs::create_dir(&state).unwrap();
+    let cursor = state.join("ingest-cursor.json");
+    let before = br#"{"next_source":"earlier-source"}"#;
+    std::fs::write(&cursor, before).unwrap();
+    let mut holder = hold(fixture.snapshot());
+    let blocked = fixture
+        .command(&fixture.config)
+        .args(["ingest"])
+        .output()
+        .unwrap();
+    assert_installation_busy(&blocked);
+    assert_eq!(std::fs::read(&cursor).unwrap(), before);
+    assert!(matches!(
+        lk_vault::MutationClaim::acquire(&vault),
+        Err(lk_vault::VaultError::MutationBusy)
+    ));
+    assert!(matches!(
+        lk_queue::claim_queue(&state.join("queue")).unwrap(),
+        lk_queue::QueueClaim::Busy
+    ));
+    let workflow = std::fs::File::open(state.join("workflow.lock")).unwrap();
+    assert!(matches!(
+        workflow.try_lock(),
+        Err(std::fs::TryLockError::WouldBlock)
+    ));
+    drop(workflow);
+    holder.release();
+    lk_vault::MutationClaim::acquire(&vault).unwrap();
+    assert!(matches!(
+        lk_queue::claim_queue(&state.join("queue")).unwrap(),
+        lk_queue::QueueClaim::Held(_)
+    ));
+    assert_eq!(std::fs::read(cursor).unwrap(), before);
+}
+
+#[test]
+fn snapshot_refuses_busy_or_unsettled_state_without_running_the_child_or_recovery() {
+    let fixture = Fixture::new();
+    let marker = fixture.directory.path().join("started");
+    let invoke = || {
+        fixture
+            .snapshot()
+            .args(["/bin/sh", "-c", "printf started > \"$1\"", "snapshot"])
+            .arg(&marker)
+            .output()
+            .unwrap()
+    };
+    let mut workflow = hold(fixture.workflow(&fixture.config));
+    assert_installation_busy(&invoke());
+    assert!(!marker.exists());
+    workflow.release();
+    let journal = fixture
+        .directory
+        .path()
+        .join("first/.lorekeeper/mutation/pending.json");
+    std::fs::create_dir_all(journal.parent().unwrap()).unwrap();
+    let before = b"unverified journal bytes must remain unchanged";
+    std::fs::write(&journal, before).unwrap();
+    let result = invoke();
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("pending mutation journal"));
+    assert!(!marker.exists());
+    assert_eq!(std::fs::read(&journal).unwrap(), before);
+    std::fs::remove_file(journal).unwrap();
+    assert_success(&invoke());
+    assert_eq!(std::fs::read_to_string(marker).unwrap(), "started");
+}
+
+#[test]
+fn snapshot_preserves_literal_arguments_scope_cwd_and_child_exit() {
+    let fixture = Fixture::new();
+    let result = fixture.snapshot().args([
+        "/bin/sh", "-c", "printf '%s\\n' \"$PWD\" \"$LORE_VAULT_ROOT\" \"$LORE_CONFIG\" \"$@\"; printf diagnostic >&2; exit 7", "snapshot", "one space", "한글", "--literal"
+    ]).output().unwrap();
+    assert_eq!(result.status.code(), Some(7));
+    let stdout = String::from_utf8(result.stdout).unwrap();
+    let lines = stdout.lines().collect::<Vec<_>>();
+    assert_eq!(
+        lines,
+        [
+            fixture
+                .directory
+                .path()
+                .canonicalize()
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            fixture
+                .directory
+                .path()
+                .join("first")
+                .canonicalize()
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            fixture.config.canonicalize().unwrap().to_str().unwrap(),
+            "one space",
+            "한글",
+            "--literal",
+        ]
+    );
+    assert_eq!(String::from_utf8(result.stderr).unwrap(), "diagnostic");
+    assert_success(&fixture.deploy());
+}
+
+#[test]
+fn snapshot_invalid_configuration_and_exec_failure_leave_claims_releasable() {
+    let fixture = Fixture::new();
+    let missing = fixture.directory.path().join("no-such-program");
+    let failed = fixture.snapshot().arg(missing).output().unwrap();
+    assert!(!failed.status.success());
+    assert!(String::from_utf8_lossy(&failed.stderr).contains("exec snapshot command"));
+    assert_success(&fixture.deploy());
+    std::fs::write(&fixture.config, "invalid: configuration").unwrap();
+    let marker = fixture.directory.path().join("not-started");
+    let failed = fixture
+        .snapshot()
+        .args(["/bin/sh", "-c", "touch \"$1\"", "snapshot"])
+        .arg(&marker)
+        .output()
+        .unwrap();
+    assert!(!failed.status.success());
+    assert!(!marker.exists());
 }
 
 #[test]

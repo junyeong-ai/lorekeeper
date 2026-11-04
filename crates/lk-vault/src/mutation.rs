@@ -185,6 +185,13 @@ pub struct MutationClaim {
     _lock: File,
 }
 
+#[cfg(unix)]
+impl std::os::fd::AsFd for MutationClaim {
+    fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
+        std::os::fd::AsFd::as_fd(&self._lock)
+    }
+}
+
 impl MutationClaim {
     pub fn acquire(root: &Path) -> Result<Self, VaultError> {
         Self::acquire_with_wait(root, false)

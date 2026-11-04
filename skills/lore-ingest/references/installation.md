@@ -100,8 +100,28 @@ Back up the **entire vault, including hidden files**, separately from Git histor
 Original/evidence archives, observations, review receipts and unfinished queues or
 journals under `.lorekeeper/` cannot be reconstructed from Markdown alone.
 Stop scheduled and interactive writers and external editors, wait for foreground
-work to finish, then take a consistent copy or filesystem snapshot. Include the
-selected configuration and custom templates. Protect credential backups separately
+work to finish. On Unix, run the external backup command under native exclusion:
+
+```bash
+lore self snapshot -- /path/to/backup-command /outside/the/vault/backup-destination
+```
+
+This foreground boundary excludes native consumers of the same installation,
+including acquisition before workflow admission, and holds the selected vault's
+workflow, mutation and queue writer claims. It refuses busy state or a pending
+mutation journal without running the child or recovering writes. Other vaults
+sharing that installation cannot use it during this window. There is no implicit
+wait or force option. A workflow lease alone does not freeze acquisition state.
+
+The command receives literal arguments, the caller's working directory and I/O,
+the pinned `LORE_CONFIG` and physical `LORE_VAULT_ROOT`; its exit status is preserved.
+Keep it in the foreground with inherited descriptors open. It must not invoke Lore
+commands while holding this exclusion. External editors and nonparticipating
+installations remain outside the guarantee; keep them stopped. The backup command
+owns complete inventory, copy/archive and byte verification. A successful child
+exit alone does not prove a restorable backup or semantic completion.
+
+Include the selected configuration and custom templates. Protect credential backups separately
 or authenticate again; restored Unix credential stores and their lock files require `0600`.
 
 Restore to a separate location with the same CLI version. Adjust the copied

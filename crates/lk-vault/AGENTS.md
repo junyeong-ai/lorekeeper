@@ -53,6 +53,8 @@ canonical; SQLite navigation is derived.
   journals. Installation uses it for settlement inspection and replacement; it is
   not a publication session and must be released before schema publication.
   `into_session` recovers under the same held claim without an unlock gap.
+  Its Unix borrowed `AsFd` permits explicit foreground inheritance; retain that
+  descriptor until the protected command exits. It grants no recovery or publication.
   Only `VaultError::MutationBusy` denotes contention; other lock I/O stays fatal.
 - Preflight rejects conflicting publication addresses resolving to one file entry,
   including absent case/Unicode aliases and missing descendants under directory aliases.

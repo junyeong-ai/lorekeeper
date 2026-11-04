@@ -45,6 +45,7 @@
 | `lore workflow -- claude` or `lore workflow -- codex` | Start a manual Unix agent session under the semantic workflow lease before reading inputs; add `--wait` to wait for another consumer. Scheduled headless calls already acquire it |
 | `lore self deploy` | Rewrite those copies from what the binary carries. This is the repair `lore self status` reports, and what an install and an update both run |
 | `lore self update [--version V]` | Replace the binary with a published release, then redeploy. Refuses active installation users and pending queue work; `--force` never overrides active claims. Older releases require explicit `--version` |
+| `lore self snapshot -- COMMAND [ARGS...]` | Unix foreground external backup command under exclusive installation and selected-vault workflow/mutation/queue claims. Refuses busy state or pending mutation without running the child. No wait/force/recovery; keep inherited descriptors open and do not invoke Lore commands from the child. Verify backup contents separately |
 | `lore self uninstall` | Remove the binary and everything it deployed. The vault is never touched |
 
 `schema`, `queue apply`, `graph backlinks-sync`, `wiki refresh` and `wiki audit-record`

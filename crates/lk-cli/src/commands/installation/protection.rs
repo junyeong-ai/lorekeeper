@@ -35,9 +35,13 @@ struct Configuration {
 
 impl Configuration {
     fn capture(opts: &GlobalOptions) -> Option<Self> {
-        let path = crate::commands::find_optional_config(opts).ok()??;
-        let (config, revision) = crate::commands::load_config_with_revision(&path).ok()?;
-        Some(Self {
+        Self::load(opts).ok()
+    }
+
+    fn load(opts: &GlobalOptions) -> miette::Result<Self> {
+        let path = crate::commands::find_config(opts)?;
+        let (config, revision) = crate::commands::load_config_with_revision(&path)?;
+        Ok(Self {
             path,
             revision,
             root: config.vault.root_path(),
@@ -65,7 +69,8 @@ impl Protection {
     pub(crate) fn prepare(opts: &GlobalOptions, command: &crate::Command) -> miette::Result<Self> {
         let override_dir = match command {
             crate::Command::Installation { cmd } => match cmd {
-                SelfCommand::Status { data_dir, .. }
+                SelfCommand::Snapshot { data_dir, .. }
+                | SelfCommand::Status { data_dir, .. }
                 | SelfCommand::Deploy { data_dir, .. }
                 | SelfCommand::Update { data_dir, .. }
                 | SelfCommand::Uninstall { data_dir, .. } => data_dir.clone(),
@@ -94,7 +99,8 @@ impl Protection {
         let unclaimed = matches!(
             command,
             crate::Command::Installation {
-                cmd: SelfCommand::Deploy { .. }
+                cmd: SelfCommand::Snapshot { .. }
+                    | SelfCommand::Deploy { .. }
                     | SelfCommand::Update { .. }
                     | SelfCommand::Uninstall { .. }
             } | crate::Command::Schedule { .. }
@@ -128,6 +134,75 @@ impl Protection {
 
     pub(crate) fn installation(&self) -> &Installation {
         &self.installation
+    }
+
+    #[cfg(unix)]
+    pub(super) fn snapshot(
+        opts: &GlobalOptions,
+        installation: Installation,
+        override_dir: Option<PathBuf>,
+    ) -> miette::Result<Self> {
+        if std::env::var_os(HANDOFF).is_some() {
+            return Err(miette::miette!(
+                "snapshot cannot inherit installation deployment access"
+            ));
+        }
+        let config = Configuration::load(opts)?;
+        config
+            .root
+            .canonicalize()
+            .map_err(|error| miette::miette!("snapshot vault is unavailable: {error}"))?;
+        let mut protection = Self {
+            installation,
+            config: Some(config),
+            schema_ready: true,
+            lease: None,
+            root_pin: None,
+        };
+        let requests = protection.requests(
+            opts,
+            Mode::Exclusive,
+            AgentTarget::Both,
+            Some(SkillScope::None),
+            true,
+            true,
+        )?;
+        if protection.root_pin.is_none() || !protection.schema_ready {
+            return Err(miette::miette!(
+                "snapshot requires an available protected vault"
+            ));
+        }
+        protection.lease = Some(acquire(&requests)?);
+        protection.validate_selection(override_dir)?;
+        protection.validate_binary()?;
+        protection.recheck_configuration()?;
+        Ok(protection)
+    }
+
+    #[cfg(unix)]
+    pub(super) fn configure_snapshot(
+        &self,
+        command: &mut std::process::Command,
+    ) -> miette::Result<()> {
+        self.recheck_configuration()?;
+        let config = self
+            .config
+            .as_ref()
+            .ok_or_else(|| miette::miette!("snapshot has no selected configuration"))?;
+        let root = self
+            .root_pin
+            .as_ref()
+            .ok_or_else(|| miette::miette!("snapshot has no protected vault"))?;
+        root.configure(command);
+        command
+            .env("LORE_INSTALL_DATA_DIR", self.installation.data_dir())
+            .env("LORE_CONFIG", &config.path)
+            .env(crate::commands::CONFIG_REVISION_ENV, &config.revision);
+        self.lease
+            .as_ref()
+            .ok_or_else(|| miette::miette!("snapshot has no installation exclusion"))?
+            .inherit()
+            .map_err(|error| miette::miette!("inherit snapshot exclusion: {error}"))
     }
 
     #[cfg(unix)]
@@ -641,17 +716,39 @@ mod tests {
             original.schema_root().unwrap(),
             Some(first.canonicalize().unwrap())
         );
+        assert!(
+            original
+                .configure_snapshot(&mut std::process::Command::new("unused"))
+                .is_ok()
+        );
         std::fs::remove_file(&selected).unwrap();
         symlink(&equivalent, &selected).unwrap();
         assert_eq!(
             original.schema_root().unwrap(),
             Some(first.canonicalize().unwrap())
         );
+        assert!(
+            original
+                .configure_snapshot(&mut std::process::Command::new("unused"))
+                .is_ok()
+        );
+        std::fs::write(options.config.as_ref().unwrap(), format!("{body}\n")).unwrap();
+        assert!(
+            original
+                .configure_snapshot(&mut std::process::Command::new("unused"))
+                .is_err()
+        );
+        std::fs::write(options.config.as_ref().unwrap(), body).unwrap();
         std::fs::remove_file(&selected).unwrap();
         symlink(&second, &selected).unwrap();
         assert!(original.schema_root().is_err());
         assert!(original.recheck_configuration().is_err());
         assert!(original.claim_publication().is_err());
+        assert!(
+            original
+                .configure_snapshot(&mut std::process::Command::new("unused"))
+                .is_err()
+        );
         assert_eq!(
             std::fs::read_to_string(options.config.as_ref().unwrap()).unwrap(),
             body

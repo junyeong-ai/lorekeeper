@@ -45,6 +45,12 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   PID/TTL cleanup, env-bool bypass, or reentrancy guess. Windows is explicitly
   unsupported. Ordinary short CLI writers do not reacquire the lease; they retain their
   own locks/revision guards. Workflow does not recover journals.
+- `self snapshot` holds existing exclusive installation claims, including the binary,
+  and the selected physical vault's workflow, mutation and queue claims through a
+  foreground external command. Refuse pending journals without recovery; validate
+  config/root selection again before exec. No Lore child command, implicit wait,
+  archive implementation or exemption for acquisition before publication. External
+  editors and nonparticipating installations still require separate coordination.
 - Child PATH starts with the selected executable's directory and LORE_BIN names that
   executable. Its canonical `lore` sibling must identify the same file; a renamed binary
   cannot silently delegate skill commands to another installation. Claude grants exact

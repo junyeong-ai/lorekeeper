@@ -17,6 +17,7 @@ use std::path::PathBuf;
 #[cfg(unix)]
 mod lease;
 mod protection;
+mod snapshot;
 
 pub(crate) use protection::Protection;
 
@@ -26,6 +27,15 @@ use super::{GlobalOptions, find_config, load_config};
 
 #[derive(clap::Subcommand)]
 pub enum SelfCommand {
+    /// Run a foreground backup command while this installation and selected vault are idle
+    Snapshot {
+        /// Directory holding the templates and runtime skills (default: the installer's data dir)
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+        /// External backup command and literal arguments after --; must not invoke Lore commands
+        #[arg(required = true, last = true, num_args = 1..)]
+        command: Vec<std::ffi::OsString>,
+    },
     /// Report what this installation is, and whether every deployed copy matches this binary
     Status {
         /// Emit the report as JSON
@@ -121,6 +131,7 @@ impl SkillScope {
 
 pub async fn run(opts: &GlobalOptions, cmd: SelfCommand) -> miette::Result<()> {
     match cmd {
+        SelfCommand::Snapshot { data_dir, command } => snapshot::run(opts, data_dir, command),
         SelfCommand::Status { json, data_dir } => status(opts, json, data_dir),
         SelfCommand::Deploy {
             skills,

@@ -299,6 +299,10 @@ A workflow pins its configuration and physical vault. Start a new session to wor
 
 Use `lore self update` for updates. Active installation users prevent replacement, and pending work blocks it by default.
 Back up the entire vault, including hidden state. Originals, paid observations, queues and review history are different from rebuildable caches.
+On Unix, `lore self snapshot -- BACKUP_COMMAND ARGS...` excludes native users of the
+same installation and cooperating writers of the selected vault until the foreground
+backup command exits. Busy state refuses without starting it. Stop external editors
+separately and verify the backup contents.
 
 ## Further reading and development
 
