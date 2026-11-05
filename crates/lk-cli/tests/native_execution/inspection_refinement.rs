@@ -76,6 +76,17 @@ fn explicit_queue_refinement_resumes_serial_and_parallel_hosts_with_independent_
             .unwrap();
             assert!(!actions["actions"].as_object().unwrap().is_empty());
             let calls = bounded_calls(&fixture).len();
+            for step in held["work_steps"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|step| step["role"] == "evidence" && step["agent_duration_ms"].is_number())
+            {
+                assert_eq!(step["workload"]["kind"], step["node_kind"]);
+                if step["node_kind"] == "inspect" {
+                    assert!(step["workload"]["characters"].as_u64().unwrap() > 0);
+                }
+            }
             let (_, repeated) = fixture.run("process");
             assert_eq!(repeated["semantic_calls"], 0, "{repeated}");
             assert_eq!(bounded_calls(&fixture).len(), calls);
@@ -92,7 +103,14 @@ fn explicit_queue_refinement_resumes_serial_and_parallel_hosts_with_independent_
                 preview.push("--dry-run");
                 let sidecar = directory.join("inspection-refinements.json");
                 let before = sidecar.exists().then(|| std::fs::read(&sidecar).unwrap());
-                assert_eq!(execution_json(&fixture, &preview)["dry_run"], true);
+                let previewed = execution_json(&fixture, &preview);
+                assert_eq!(previewed["dry_run"], true);
+                assert!(
+                    previewed["workload"]["added_observation_nodes"]
+                        .as_u64()
+                        .unwrap()
+                        > 0
+                );
                 assert_eq!(
                     before,
                     sidecar.exists().then(|| std::fs::read(&sidecar).unwrap())
@@ -105,7 +123,10 @@ fn explicit_queue_refinement_resumes_serial_and_parallel_hosts_with_independent_
                         > 1
                 );
                 let before = std::fs::read(directory.join("inspection-refinements.json")).unwrap();
-                assert_eq!(execution_json(&fixture, &args)["already_refined"], true);
+                let repeated = execution_json(&fixture, &args);
+                assert_eq!(repeated["already_refined"], true);
+                assert_eq!(repeated["workload"]["added_observation_nodes"], 0);
+                assert!(repeated["workload"]["original_canonical_request_bytes"].is_null());
                 assert_eq!(
                     before,
                     std::fs::read(directory.join("inspection-refinements.json")).unwrap()

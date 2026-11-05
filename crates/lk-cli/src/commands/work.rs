@@ -19,6 +19,7 @@ mod resources;
 pub(super) mod section;
 mod selection;
 pub(crate) mod state;
+pub(super) mod workload;
 
 pub(super) use publication::publication_scope;
 #[cfg(unix)]
@@ -3213,11 +3214,16 @@ fn progress_value(
         .collect::<Vec<_>>();
     let next_offset = (offset.saturating_add(ready.len()) < total_ready)
         .then_some(offset.saturating_add(ready.len()));
+    let ready_workload = ready
+        .iter()
+        .map(|id| (id, &status.ready_workload[id]))
+        .collect::<std::collections::BTreeMap<_, _>>();
     json!({"work_id":work.plan.id,"subject":prepared.subject,
         "context_revision":work.plan.subject_revision,
         "resources":work.plan.resources.len(),"parts":work.plan.parts.len(),
         "completed":status.completed,"total":status.total,"complete":status.complete,
         "root_node":status.root_node,"ready_total":total_ready,"ready":ready,
+        "max_input_bytes":work.max_input_bytes,"ready_workload":ready_workload,
         "limit":limit,"offset":offset,"next_offset":next_offset})
 }
 
@@ -4735,10 +4741,12 @@ mod tests {
                     .unwrap()
             );
         }
-        assert_eq!(
-            progress_value(&work, &prepared, status, 1, 0),
-            progress(&work, &root, &prepared, 1, 0).unwrap(),
-        );
+        let reported = progress_value(&work, &prepared, status, 1, 0);
+        assert_eq!(reported, progress(&work, &root, &prepared, 1, 0).unwrap());
+        let ready = reported["ready"][0].as_str().unwrap();
+        assert_eq!(reported["ready_workload"].as_object().unwrap().len(), 1);
+        assert_eq!(reported["ready_workload"][ready]["kind"], "reduce");
+        assert_eq!(reported["max_input_bytes"], work.max_input_bytes);
     }
 
     #[cfg(unix)]

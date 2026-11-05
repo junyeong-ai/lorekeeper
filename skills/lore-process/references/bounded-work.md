@@ -200,6 +200,14 @@ declaration retain binary reduction and resume without rewriting their observati
 Actual request and result limits still apply. Fewer reduction calls do not establish
 semantic equivalence, lower billed cost or complete corpus coverage.
 
+`work status` paginates `ready_workload` with the same IDs as `ready`. Inspect workloads
+describe structural readiness, not host admission or completion. They
+count assigned Unicode scalars, ranges and resource indices, including the largest range,
+largest per-resource assignment and authority groups. They use existing guards, not a new
+source read or a complexity estimate. Reduce workloads count child observations instead of
+claiming another source read. Native evidence steps report the same `workload` beside the
+measured compact `request_json_bytes`; an unprepared status does not invent that byte size.
+
 On Unix, for queue or audit Work with an exact current inspection action, an operator can explicitly
 refine that unfinished node without changing its canonical plan or configuration.
 Use a fresh `lore workflow -- COMMAND` with the original selected configuration and
@@ -213,6 +221,13 @@ lore work refine WORK NODE --max-part-characters 20000
 
 The positive character bound must be smaller than the assigned range total. It is
 an execution choice, not a model-context guarantee. The preview publishes nothing.
+Its `workload` reports the original inspection, retained completed observation nodes,
+pending observation nodes before/after the operation and added nodes. A repeated immutable
+refinement adds zero nodes. `original_canonical_request_bytes` measures the already-prepared
+canonical inspection JSON on a fresh refinement; it is null on repeats, not reconstructed
+just for diagnostics. It excludes host prompts/envelopes and is not a provider token count.
+Observation counts include Inspect and Reduce nodes; final generation and other job stages
+are separate. A preview does not reserve calls, authorize a retry or guarantee completion.
 Native execution then supervises the smaller inspections and a byte-budgeted
 reduction hierarchy under the existing profile and shared call/parallel/byte limits.
 Every original range remains covered; inherited questions retain their exact IDs,

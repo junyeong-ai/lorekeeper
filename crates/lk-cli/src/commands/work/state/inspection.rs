@@ -178,7 +178,7 @@ impl Work {
             .get(&rejection::path(self)?)
             .map(|raw| ObservationRejections::decode(raw, self, &evaluated.nodes))
             .transpose()?;
-        let progress = evaluated.progress();
+        let progress = evaluated.progress()?;
         for id in &progress.ready {
             if progress.ready.first() != Some(id)
                 && !actions

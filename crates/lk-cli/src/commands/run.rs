@@ -97,6 +97,7 @@ mod native {
         work_id: Option<String>,
         node_id: Option<String>,
         node_kind: Option<NodeKind>,
+        workload: Option<crate::commands::work::workload::ObservationWorkload>,
         selection_id: Option<String>,
         batch_id: Option<String>,
         // Compact UTF-8 JSON, excluding prompts and host envelopes. Results measure
@@ -124,6 +125,7 @@ mod native {
                 work_id: None,
                 node_id: None,
                 node_kind: None,
+                workload: None,
                 selection_id: None,
                 batch_id: None,
                 request_json_bytes: None,
@@ -1212,7 +1214,11 @@ mod native {
             role: WorkRole,
             metrics: &WorkStepMetrics,
             budget: lk_core::execution::SemanticWorkConfig,
-        ) -> miette::Result<(execution::observation::Invocation, usize)> {
+        ) -> miette::Result<(
+            execution::observation::Invocation,
+            usize,
+            Option<crate::commands::work::workload::ObservationWorkload>,
+        )> {
             let profile = self.agent_profile(metrics);
             let mut invocation = match role {
                 WorkRole::Evidence => execution::observation::build_invocation(
@@ -1239,7 +1245,12 @@ mod native {
                 .checked_mul(3)
                 .and_then(|limit| limit.checked_add(16384))
                 .ok_or_else(|| miette::miette!("host output envelope limit overflow"))?;
-            Ok((invocation, limit))
+            let workload = matches!(role, WorkRole::Evidence)
+                .then(|| {
+                    crate::commands::work::workload::ObservationWorkload::from_request(request)
+                })
+                .transpose()?;
+            Ok((invocation, limit, workload))
         }
 
         async fn request_observation(
@@ -1289,7 +1300,7 @@ mod native {
                 };
                 return None;
             }
-            let (invocation, limit) =
+            let (invocation, limit, workload) =
                 match self.observation_invocation(&request, metrics.role, metrics, budget) {
                     Ok(invocation) => invocation,
                     Err(error) => {
@@ -1298,6 +1309,7 @@ mod native {
                     }
                 };
             metrics.request_json_bytes = Some(invocation.request_json_bytes);
+            metrics.workload = workload;
             let timeout = self.agent_profile(metrics).timeout();
             if let Some(binding) = self
                 .queue_turn
@@ -1847,7 +1859,7 @@ mod native {
                     return Some(self.agent_preflight_failure("bounded work receipt", error));
                 }
                 let timeout = self.agent_profile(&turn.metrics).timeout();
-                let (invocation, capture_limit) = match self.observation_invocation(
+                let (invocation, capture_limit, workload) = match self.observation_invocation(
                     &turn.request,
                     WorkRole::Evidence,
                     &turn.metrics,
@@ -1857,6 +1869,7 @@ mod native {
                     Err(error) => return Some(self.failure("bounded work receipt", error)),
                 };
                 turn.metrics.request_json_bytes = Some(invocation.request_json_bytes);
+                turn.metrics.workload = workload;
                 engines.push(invocation.engine);
                 let (request, directory) = invocation.into_request(timeout, capture_limit);
                 requests.push(request);
@@ -3191,7 +3204,7 @@ mod native {
                     return self.agent_preflight_failure("bounded queue receipt", error);
                 }
                 let timeout = self.agent_profile(turn.metrics()).timeout();
-                let (invocation, limit) = match self.observation_invocation(
+                let (invocation, limit, workload) = match self.observation_invocation(
                     turn.request(),
                     turn.role(),
                     turn.metrics(),
@@ -3204,6 +3217,7 @@ mod native {
                     }
                 };
                 turn.metrics_mut().request_json_bytes = Some(invocation.request_json_bytes);
+                turn.metrics_mut().workload = workload;
                 engines.push(invocation.engine);
                 let (request, directory) = invocation.into_request(timeout, limit);
                 requests.push(request);

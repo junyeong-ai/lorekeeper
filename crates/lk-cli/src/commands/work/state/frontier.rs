@@ -218,7 +218,7 @@ impl Work {
         &self,
         evaluated: Evaluation<'_>,
     ) -> miette::Result<FrontierCapture> {
-        if evaluated.progress().complete {
+        if evaluated.progress()?.complete {
             return Ok(FrontierCapture::Unavailable(
                 FrontierUnavailable::CompleteRoot,
             ));

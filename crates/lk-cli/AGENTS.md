@@ -231,6 +231,13 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   in that checkpoint, after reusable root/frontier completion. A later held node cannot
   suppress an earlier ready request. Keep the pre-host recheck for changed state; do not
   replace complete preparation with a Work-ID hold filter.
+- Workload is a presentation projection of the same validated ranges and guards. Keep
+  Unicode-scalar inspection counts and authority groups separate from request bytes;
+  reducers count child observations. Paginate status workloads with ready IDs. Native
+  telemetry uses the actual prepared request, never another discovery capture. Refinement
+  previews count observation nodes before/after, including the retained parent; these are
+  not token, billing, readability or completion estimates. Never add these projections to
+  canonical plans, model inputs or request/contract hashes, or infer a split from them.
 
 ## Progressive extraction and work cost
 

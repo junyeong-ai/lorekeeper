@@ -239,6 +239,10 @@ Default `progressive` extraction screens cards for the complete retrieved candid
 Deferred work is incomplete, and a card-only exclusion is not a full-body assessment.
 An operator can explicitly split a held queue or audit inspection with `lore work refine`.
 It preserves the original plan and observations; refinement and retries are never automatic.
+`lore work status WORK` reports `ready_workload`; native steps report `workload` separately
+from request bytes. Refinement previews report retained completed observations and pending
+observation counts before and after the split. These counts do not predict reading fidelity,
+tokens, billing or completion.
 
 These settings are not token or billing caps, or a throughput guarantee. Start with `lore work cost --task-id ID`
 and actual `lore run process --json` results to inspect scope, calls, preparation and validation time.

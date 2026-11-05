@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use lk_core::semantic::{
     SemanticInputs, SemanticPartInput, SemanticPlan, SemanticRange, SemanticResource,
+    SemanticResourceGuard,
 };
 use lk_vault::{MutationPlan, MutationSession};
 use serde::{Deserialize, Serialize};
@@ -159,6 +160,7 @@ pub(crate) struct WorkProgress {
     pub completed: usize,
     pub total: usize,
     pub complete: bool,
+    pub ready_workload: BTreeMap<String, super::workload::ObservationWorkload>,
 }
 
 #[derive(Clone)]
@@ -314,6 +316,7 @@ impl FinalizationAction {
 
 struct Evaluation<'a> {
     inputs: SemanticInputs<'a>,
+    resources: &'a [SemanticResourceGuard],
     nodes: Vec<Node>,
     current: BTreeMap<String, StoredOutput>,
     raw: BTreeMap<PathBuf, String>,
@@ -554,15 +557,34 @@ impl CompletedWork {
 }
 
 impl Evaluation<'_> {
-    fn progress(&self) -> WorkProgress {
+    fn progress(&self) -> miette::Result<WorkProgress> {
         let root_node = self.nodes.last().expect("nonempty tree").id.clone();
-        WorkProgress {
+        let ready = self.ready.iter().collect::<BTreeSet<_>>();
+        let ready_workload = self
+            .nodes
+            .iter()
+            .filter(|node| ready.contains(&node.id))
+            .map(|node| {
+                use super::workload::{InspectionWorkload, ObservationWorkload};
+                let workload = match &node.kind {
+                    NodeKind::Inspect { .. } => ObservationWorkload::Inspect {
+                        assigned: InspectionWorkload::build(&node.ranges, self.resources)?,
+                    },
+                    NodeKind::Reduce { children } => ObservationWorkload::Reduce {
+                        child_observations: children.len(),
+                    },
+                };
+                Ok((node.id.clone(), workload))
+            })
+            .collect::<miette::Result<_>>()?;
+        Ok(WorkProgress {
             complete: self.current.contains_key(&root_node),
             root_node,
             ready: self.ready.clone(),
             completed: self.current.len(),
             total: self.nodes.len(),
-        }
+            ready_workload,
+        })
     }
 }
 
@@ -1338,6 +1360,7 @@ impl Work {
         }
         Ok(Evaluation {
             inputs,
+            resources: &self.plan.resources,
             nodes,
             current,
             raw,
@@ -1351,7 +1374,7 @@ impl Work {
         root: &Path,
         resources: &[SemanticResource],
     ) -> miette::Result<WorkProgress> {
-        Ok(self.evaluate(root, resources)?.progress())
+        self.evaluate(root, resources)?.progress()
     }
 
     #[cfg(unix)]
@@ -1367,7 +1390,7 @@ impl Work {
         resources: &[SemanticResource],
     ) -> miette::Result<(WorkProgress, BTreeMap<PathBuf, String>)> {
         let evaluated = self.evaluate(root, resources)?;
-        Ok((evaluated.progress(), evaluated.raw))
+        Ok((evaluated.progress()?, evaluated.raw))
     }
 
     pub fn prepare_inspection(
@@ -1387,7 +1410,7 @@ impl Work {
     ) -> miette::Result<(WorkProgress, Vec<Value>)> {
         debug_assert!(limit > 0);
         let evaluated = self.evaluate(root, resources)?;
-        let progress = evaluated.progress();
+        let progress = evaluated.progress()?;
         let mut inputs = Vec::new();
         if !progress.complete {
             let limit = match &evaluated.refinements {
@@ -1462,7 +1485,7 @@ impl Work {
         resources: &[SemanticResource],
     ) -> miette::Result<Option<(Value, BTreeMap<PathBuf, String>)>> {
         let evaluated = self.evaluate(root, resources)?;
-        if !evaluated.progress().complete {
+        if !evaluated.progress()?.complete {
             return Ok(None);
         }
         let result = self.build_finalizer_result(&evaluated)?;

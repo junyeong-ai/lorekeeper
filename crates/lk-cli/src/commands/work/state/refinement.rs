@@ -57,6 +57,19 @@ pub(in crate::commands::work) struct RefinementPreview {
     pub inspection_nodes: Vec<String>,
     pub reduction_nodes: usize,
     pub already_refined: bool,
+    workload: RefinementWorkload,
+}
+
+#[derive(Serialize)]
+#[cfg(unix)]
+struct RefinementWorkload {
+    original_inspection: super::super::workload::InspectionWorkload,
+    original_canonical_request_bytes: Option<usize>,
+    max_input_bytes: usize,
+    completed_observation_nodes: usize,
+    pending_observation_nodes_before: usize,
+    pending_observation_nodes_after: usize,
+    added_observation_nodes: usize,
 }
 
 pub(super) fn path(work: &Work) -> miette::Result<PathBuf> {
@@ -430,6 +443,7 @@ impl Work {
         };
         let mut mutation = MutationPlan::default();
         let already_refined = state.entries.contains_key(node_id);
+        let mut original_canonical_request_bytes = None;
         let parent_output = output_path(&self.plan.id, node_id)?;
         if !already_refined && !evaluated.raw.contains_key(&parent_output) {
             mutation.require_absent(parent_output);
@@ -442,6 +456,7 @@ impl Work {
             let request = self
                 .node_input(node, &evaluated.inputs, &evaluated.current)
                 .map_err(NodeInputError::report)?;
+            original_canonical_request_bytes = Some(encoded(&request)?.len());
             let contract = contract(&request)?;
             let action = match state.action(self, &request, &contract)? {
                 Some(action) => Some(action),
@@ -508,6 +523,18 @@ impl Work {
                 })
                 .count(),
             already_refined,
+            workload: RefinementWorkload {
+                original_inspection: super::super::workload::InspectionWorkload::build(
+                    &node.ranges,
+                    &self.plan.resources,
+                )?,
+                original_canonical_request_bytes,
+                max_input_bytes: self.max_input_bytes,
+                completed_observation_nodes: evaluated.current.len(),
+                pending_observation_nodes_before: evaluated.nodes.len() - evaluated.current.len(),
+                pending_observation_nodes_after: nodes.len() - evaluated.current.len(),
+                added_observation_nodes: nodes.len() - evaluated.nodes.len(),
+            },
         };
         let target = path(self)?;
         let before = evaluated.raw.get(&target).cloned();
@@ -655,6 +682,20 @@ mod tests {
                 })
                 .unwrap();
             assert!(preview.inspection_nodes.len() > 1);
+            let added = preview.inspection_nodes.len() + preview.reduction_nodes - 1;
+            assert_eq!(preview.workload.added_observation_nodes, added);
+            assert_eq!(preview.workload.completed_observation_nodes, 1);
+            assert_eq!(
+                preview.workload.pending_observation_nodes_after,
+                preview.workload.pending_observation_nodes_before + added
+            );
+            assert_eq!(
+                preview.workload.original_inspection.characters,
+                characters(&work.plan.parts[1].ranges).unwrap()
+            );
+            assert!(
+                preview.workload.original_canonical_request_bytes.unwrap() <= work.max_input_bytes
+            );
             session.apply(mutation).unwrap();
             let sidecar = root.path().join(path(&work).unwrap());
             let saved = std::fs::read(&sidecar).unwrap();
