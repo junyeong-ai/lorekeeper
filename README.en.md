@@ -237,6 +237,8 @@ Set these budgets under `execution.work`; a profile's `work` overrides only the 
 Large evidence is inspected in parts and combined; verified observations are retained for resumption.
 Default `progressive` extraction screens cards for the complete retrieved candidate set, then reads selected bodies.
 Deferred work is incomplete, and a card-only exclusion is not a full-body assessment.
+An operator can explicitly split a held queue or audit inspection with `lore work refine`.
+It preserves the original plan and observations; refinement and retries are never automatic.
 
 These settings are not token or billing caps, or a throughput guarantee. Start with `lore work cost --task-id ID`
 and actual `lore run process --json` results to inspect scope, calls, preparation and validation time.

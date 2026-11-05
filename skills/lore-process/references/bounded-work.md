@@ -200,7 +200,7 @@ declaration retain binary reduction and resume without rewriting their observati
 Actual request and result limits still apply. Fewer reduction calls do not establish
 semantic equivalence, lower billed cost or complete corpus coverage.
 
-On Unix, for audit Work with an exact current inspection action, an operator can explicitly
+On Unix, for queue or audit Work with an exact current inspection action, an operator can explicitly
 refine that unfinished node without changing its canonical plan or configuration.
 Use a fresh `lore workflow -- COMMAND` with the original selected configuration and
 existing `LORE_EXECUTION_PROFILE` context; default lease contention still refuses.
@@ -218,14 +218,17 @@ reduction hierarchy under the existing profile and shared call/parallel/byte lim
 Every original range remains covered; inherited questions retain their exact IDs,
 kinds, content and evidence unless explicitly resolved with support. An unfinished
 child with its own current action can be refined further. Unknown state refuses;
-remaining input/result capacity or processing holds still leave the audit incomplete.
+remaining input/result capacity or processing holds still leave the Work incomplete.
 
 Keep `inspection-refinements.json` with the Work. It binds exact parent requests,
 complete coverage and action history while preserving the original plan, positive
 observations and `inspection-actions.json` bytes. New derived nodes use
-`work-output-refinement-v1`, including retained-question snapshots when needed;
-readers lacking that contract refuse those records. Workers never select a split
-from reason text or run this operator command themselves. Queue Work is excluded.
+`work-output-refinement-v1`, including retained-question snapshots when needed.
+Audit sidecars retain `inspection-refinements-v1`; queue sidecars use
+`inspection-refinements-v2`. Earlier readers refuse queue refinement when encountered;
+there is no global downgrade lock. Existing plans, observations and actions are never
+converted. Workers never select a split from reason text or run this operator command
+themselves. Refinement changes execution coverage, not source scope or semantic approval.
 
 For native queue extraction and concept synthesis, a complete current set of disjoint
 observations may finalize directly when the entire request, evidence and generation

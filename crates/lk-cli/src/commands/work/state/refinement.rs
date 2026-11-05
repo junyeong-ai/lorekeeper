@@ -3,6 +3,16 @@ use inspection::{InspectionAction, InspectionActions, request_revision};
 use lk_core::semantic::SemanticPart;
 
 const SCHEMA: &str = "inspection-refinements-v1";
+const QUEUE_SCHEMA: &str = "inspection-refinements-v2";
+
+fn refinement_schema(work: &Work) -> miette::Result<&'static str> {
+    let subject: super::super::resources::Subject =
+        serde_json::from_value(work.context["subject"].clone()).map_err(fail)?;
+    Ok(match subject {
+        super::super::resources::Subject::Audit { .. } => SCHEMA,
+        super::super::resources::Subject::Queue { .. } => QUEUE_SCHEMA,
+    })
+}
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -104,7 +114,7 @@ impl Refinement {
         ranges: &[SemanticRange],
     ) -> miette::Result<String> {
         revision(&json!([
-            SCHEMA,
+            refinement_schema(work)?,
             work.plan.id,
             node,
             self.input_revision,
@@ -160,7 +170,7 @@ impl Refinement {
             Some(&provenance),
             |children| {
                 revision(&json!([
-                    SCHEMA,
+                    refinement_schema(work)?,
                     "reduce",
                     work.plan.id,
                     provenance,
@@ -192,15 +202,13 @@ impl Refinements {
     }
 
     fn expand(&self, work: &Work) -> miette::Result<Vec<Node>> {
-        if self.schema != SCHEMA || self.work_id != work.plan.id || self.entries.is_empty() {
+        if self.schema != refinement_schema(work)?
+            || self.work_id != work.plan.id
+            || self.entries.is_empty()
+        {
             return Err(fail("invalid inspection refinement identity or schema"));
         }
         require_id(&self.legacy_revision)?;
-        let subject: super::super::resources::Subject =
-            serde_json::from_value(work.context["subject"].clone()).map_err(fail)?;
-        if !matches!(subject, super::super::resources::Subject::Audit { .. }) {
-            return Err(fail("inspection refinement requires audit work"));
-        }
         let mut nodes = work.nodes()?;
         let mut expanded = BTreeSet::new();
         let mut at = 0;
@@ -409,7 +417,7 @@ impl Work {
         let mut state = match evaluated.refinements.clone() {
             Some(state) => state,
             None => Refinements {
-                schema: SCHEMA.into(),
+                schema: refinement_schema(self)?.into(),
                 work_id: self.plan.id.clone(),
                 legacy_revision: lk_core::concept::file_revision(
                     legacy_raw.as_deref().ok_or_else(|| {
@@ -598,6 +606,90 @@ mod tests {
             )
             .unwrap();
         session.apply(mutation).unwrap();
+    }
+
+    #[test]
+    fn queue_refinement_preserves_paid_inspections_and_original_actions() {
+        let root = tempfile::tempdir().unwrap();
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let (_, resources) = fixture(&session);
+        let context = json!({
+            "subject":{"kind":"queue", "task_id":"synthesis", "cache_hash":"cache",
+                "target":"wiki/concepts/subject.md", "target_revision":"a".repeat(64)},
+            "purpose":{"operation":"queue", "task_kind":"synthesize-concept",
+                "target":{"vault_path":"wiki/concepts/subject.md", "anchor":"## Synthesis", "kind":"concept-synthesis"}}
+        });
+        let work = Work::create(
+            &session,
+            &resources,
+            "queue-subject",
+            context,
+            WorkLimits {
+                max_input_bytes: 16000,
+                max_result_bytes: 1200,
+            },
+        )
+        .unwrap();
+        let first = &work.plan.parts[0].id;
+        work.record(
+            &session,
+            output(&work, root.path(), &resources, first),
+            &resources,
+        )
+        .unwrap();
+        let parent = &work.plan.parts[1].id;
+        hold(&work, &session, &resources, parent);
+        let originals = [
+            work_path(&work.plan.id, "plan.json").unwrap(),
+            output_path(&work.plan.id, first).unwrap(),
+            work_path(&work.plan.id, "inspection-actions.json").unwrap(),
+        ]
+        .map(|path| {
+            let bytes = std::fs::read(root.path().join(&path)).unwrap();
+            (path, bytes)
+        });
+        let (mutation, preview) = work
+            .plan_refinement(root.path(), &resources, parent, 1000, |_| {
+                Ok("contract".into())
+            })
+            .unwrap();
+        assert!(preview.inspection_nodes.len() > 1);
+        session.apply(mutation).unwrap();
+        let sidecar = root.path().join(path(&work).unwrap());
+        let saved = std::fs::read(&sidecar).unwrap();
+        let mut legacy: Value = serde_json::from_slice(&saved).unwrap();
+        assert_eq!(legacy["schema"], QUEUE_SCHEMA);
+        legacy["schema"] = SCHEMA.into();
+        std::fs::write(&sidecar, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        assert!(work.progress(root.path(), &resources).is_err());
+        std::fs::write(&sidecar, saved).unwrap();
+        let resumed = Work::load(root.path(), &work.plan.id).unwrap();
+        assert_eq!(resumed, work);
+        loop {
+            let progress = resumed.progress(root.path(), &resources).unwrap();
+            if progress.complete {
+                break;
+            }
+            for node in progress.ready {
+                resumed
+                    .record(
+                        &session,
+                        output(&resumed, root.path(), &resources, &node),
+                        &resources,
+                    )
+                    .unwrap();
+            }
+        }
+        assert!(
+            resumed
+                .result(root.path(), &resources)
+                .unwrap()
+                .to_string()
+                .contains("unverified")
+        );
+        for (path, bytes) in originals {
+            assert_eq!(bytes, std::fs::read(root.path().join(path)).unwrap());
+        }
     }
 
     #[test]

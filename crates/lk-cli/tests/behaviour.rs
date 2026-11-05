@@ -204,7 +204,7 @@ const EXEMPT: &[(&[&str], &str)] = &[
     ),
     (
         &["work", "refine"],
-        "requires an exact current audit inspection action; native_execution verifies both-host dry-run, idempotent refinement and paid-byte preservation, while work state tests cover full range coverage, inherited questions, stale reductions, journal recovery and retention",
+        "requires an exact current inspection action; native_execution verifies both-host dry-run, idempotent refinement and paid-byte preservation, while work state tests cover full range coverage, inherited questions, stale reductions, journal recovery and retention",
     ),
     (
         &["work", "result"],
