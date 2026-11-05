@@ -18,14 +18,14 @@ pub(in crate::commands) enum FrontierUnavailable {
 }
 
 pub(in crate::commands::work) enum FrontierCapture {
-    Ready(CompletedWork),
+    Ready(Box<CompletedWork>),
     Unavailable(FrontierUnavailable),
 }
 
 impl FrontierCapture {
     pub(in crate::commands::work) fn into_completion(self) -> Option<CompletedWork> {
         match self {
-            Self::Ready(completed) => Some(completed),
+            Self::Ready(completed) => Some(*completed),
             Self::Unavailable(_) => None,
         }
     }
@@ -320,7 +320,7 @@ impl Work {
             .into_iter()
             .filter(|path| !evaluated.raw.contains_key(path))
             .collect();
-        Ok(FrontierCapture::Ready(CompletedWork {
+        Ok(FrontierCapture::Ready(Box::new(CompletedWork {
             work_id: self.plan.id.clone(),
             root_node: node.id.clone(),
             authority: CompletionAuthority::Frontier(proof),
@@ -328,7 +328,7 @@ impl Work {
             guards: evaluated.raw,
             absent,
             nodes: evaluated.nodes,
-        }))
+        })))
     }
 
     pub(in crate::commands::work) fn capture_native_completion(
