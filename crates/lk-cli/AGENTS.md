@@ -198,6 +198,8 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   An exact frontier-finalizer hold also retains normal Reduce admission; do not block
   its whole Work by identity. Keep the next node's own exact hold and capacity checks.
   Distinguish discovery recovery: its current hold still defers the whole target.
+  Carry the same captured expanded tree through frontier coverage, sealing, publication
+  and historical retention, including every explicit refinement child.
 - Replacing an active finalization action journals its exact old bytes in the validated
   history sidecar. Preserve historical matching and reference-aware retention together.
   Revalidate the exact full request and completion proof after host execution and at

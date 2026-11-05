@@ -88,12 +88,11 @@ impl FrontierProof {
             .map(|reference| reference.node_id.clone())
             .collect::<Vec<_>>();
         work.verify_stored_dependencies(outputs, &required, nodes)?;
-        self.verify(work, outputs)?;
+        self.verify(work, outputs, nodes)?;
         Ok(())
     }
 
-    fn verify_structure(&self, work: &Work) -> miette::Result<()> {
-        let nodes = work.nodes()?;
+    fn verify_structure(&self, work: &Work, nodes: &[Node]) -> miette::Result<()> {
         if self.schema != "work-frontier-v1"
             || self.work_id != work.plan.id
             || self.root_node != nodes.last().expect("nonempty work tree").id
@@ -109,9 +108,16 @@ impl FrontierProof {
                 .iter()
                 .find(|node| node.id == reference.node_id)
                 .ok_or_else(|| fail("frontier names an unknown node"))?;
-            parts(node, &nodes, &mut covered)?;
+            parts(node, nodes, &mut covered)?;
         }
-        if covered != work.plan.parts.iter().map(|part| part.id.clone()).collect() {
+        let expected = nodes
+            .iter()
+            .filter_map(|node| match &node.kind {
+                NodeKind::Inspect { part_id } => Some(part_id.clone()),
+                NodeKind::Reduce { .. } => None,
+            })
+            .collect();
+        if covered != expected {
             return Err(fail(
                 "frontier does not cover every planned inspection exactly once",
             ));
@@ -123,9 +129,9 @@ impl FrontierProof {
         &self,
         work: &Work,
         outputs: &'a BTreeMap<String, StoredOutput>,
+        nodes: &[Node],
     ) -> miette::Result<Vec<&'a WorkOutput>> {
-        let nodes = work.nodes()?;
-        self.verify_structure(work)?;
+        self.verify_structure(work, nodes)?;
         let mut result = Vec::new();
         let mut inherited = BTreeMap::new();
         for reference in &self.nodes {
@@ -161,7 +167,7 @@ impl FrontierProof {
 }
 
 impl FrontierSeal {
-    pub(super) fn decode(raw: &str, work: &Work) -> miette::Result<Self> {
+    pub(super) fn decode(raw: &str, work: &Work, nodes: &[Node]) -> miette::Result<Self> {
         let seal: Self = serde_json::from_str(raw).map_err(fail)?;
         if seal.schema != "work-frontier-seal-v1"
             || seal.proof.work_id != work.plan.id
@@ -169,7 +175,7 @@ impl FrontierSeal {
         {
             return Err(fail("invalid frontier seal identity or schema"));
         }
-        seal.proof.verify_structure(work)?;
+        seal.proof.verify_structure(work, nodes)?;
         require_id(&seal.final_result_revision)?;
         Ok(seal)
     }
@@ -205,6 +211,13 @@ impl Work {
             ));
         }
         let evaluated = self.evaluate(root, resources)?;
+        self.capture_evaluated_frontier(evaluated)
+    }
+
+    fn capture_evaluated_frontier(
+        &self,
+        evaluated: Evaluation<'_>,
+    ) -> miette::Result<FrontierCapture> {
         if evaluated.progress().complete {
             return Ok(FrontierCapture::Unavailable(
                 FrontierUnavailable::CompleteRoot,
@@ -260,7 +273,7 @@ impl Work {
             root_node: node.id.clone(),
             nodes,
         };
-        let outputs = proof.verify(self, &evaluated.current)?;
+        let outputs = proof.verify(self, &evaluated.current, &evaluated.nodes)?;
         let bytes = outputs.iter().try_fold(0usize, |size, output| {
             size.checked_add(encoded(*output)?.len())
                 .ok_or_else(|| fail("frontier size overflow"))
@@ -314,6 +327,7 @@ impl Work {
             result,
             guards: evaluated.raw,
             absent,
+            nodes: evaluated.nodes,
         }))
     }
 
@@ -340,12 +354,13 @@ impl Work {
         final_result: &Value,
         raw: String,
     ) -> miette::Result<()> {
-        let seal = FrontierSeal::decode(&raw, self)?;
+        let evaluated = self.evaluate(root, resources)?;
+        let seal = FrontierSeal::decode(&raw, self, &evaluated.nodes)?;
         if seal.final_result_revision != revision(final_result)? {
             return Err(miette::Report::new(CompletionRefusal::ChangedResult));
         }
         let completed = self
-            .capture_frontier(root, resources)?
+            .capture_evaluated_frontier(evaluated)?
             .into_completion()
             .ok_or_else(|| miette::Report::new(CompletionRefusal::ChangedObservations))?;
         let CompletionAuthority::Frontier(proof) = completed.authority else {

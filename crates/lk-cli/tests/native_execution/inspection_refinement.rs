@@ -26,7 +26,7 @@ fn explicit_queue_refinement_resumes_serial_and_parallel_hosts_with_independent_
         .replace("exec < \"$TEST_EXECUTION_ROOT/whole-section-request.txt\"", "exec < \"$TEST_REFINEMENT_SECTION_INPUT\"");
     let behavior = format!("{section}\n{behavior}");
     for engine in ["codex", "claude-code"] {
-        for parallel in [1, 2] {
+        for parallel in [1, 6] {
             let fixture = Fixture::new(engine, 30, &behavior);
             let config = std::fs::read_to_string(&fixture.config).unwrap()
                 .replace("concept_policy: supported-new", "concept_policy: disabled")

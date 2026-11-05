@@ -192,7 +192,7 @@ fn capture_retention(root: &Path, id: &str, cutoff: i64) -> miette::Result<Reten
             .file_name()
             .is_some_and(|name| name == "frontier-seal.json")
         {
-            super::frontier::FrontierSeal::decode(&raw, &work)?;
+            super::frontier::FrontierSeal::decode(&raw, &work, &nodes)?;
         }
         if path
             .file_name()
@@ -268,8 +268,13 @@ fn capture_retention(root: &Path, id: &str, cutoff: i64) -> miette::Result<Reten
     }
     let expired = if let Some(raw) = publication {
         let receipt: Publication = serde_json::from_str(&raw).map_err(fail)?;
-        let seal = CompletionSeal::decode(&work, read("seal.json")?, read("frontier-seal.json")?)?
-            .ok_or_else(|| fail("published work requires exactly one completion seal"))?;
+        let seal = CompletionSeal::decode(
+            &work,
+            &nodes,
+            read("seal.json")?,
+            read("frontier-seal.json")?,
+        )?
+        .ok_or_else(|| fail("published work requires exactly one completion seal"))?;
         seal.verify_captured(&work, &outputs, &nodes)?;
         let sealed_revision = seal.result_revision;
         let raw = read("final.json")?.ok_or_else(|| fail("published work result is missing"))?;

@@ -610,85 +610,168 @@ mod tests {
 
     #[test]
     fn queue_refinement_preserves_paid_inspections_and_original_actions() {
-        let root = tempfile::tempdir().unwrap();
-        let session = MutationSession::acquire(root.path()).unwrap();
-        let (_, resources) = fixture(&session);
-        let context = json!({
-            "subject":{"kind":"queue", "task_id":"synthesis", "cache_hash":"cache",
-                "target":"wiki/concepts/subject.md", "target_revision":"a".repeat(64)},
-            "purpose":{"operation":"queue", "task_kind":"synthesize-concept",
-                "target":{"vault_path":"wiki/concepts/subject.md", "anchor":"## Synthesis", "kind":"concept-synthesis"}}
-        });
-        let work = Work::create(
-            &session,
-            &resources,
-            "queue-subject",
-            context,
-            WorkLimits {
-                max_input_bytes: 16000,
-                max_result_bytes: 1200,
-            },
-        )
-        .unwrap();
-        let first = &work.plan.parts[0].id;
-        work.record(
-            &session,
-            output(&work, root.path(), &resources, first),
-            &resources,
-        )
-        .unwrap();
-        let parent = &work.plan.parts[1].id;
-        hold(&work, &session, &resources, parent);
-        let originals = [
-            work_path(&work.plan.id, "plan.json").unwrap(),
-            output_path(&work.plan.id, first).unwrap(),
-            work_path(&work.plan.id, "inspection-actions.json").unwrap(),
-        ]
-        .map(|path| {
-            let bytes = std::fs::read(root.path().join(&path)).unwrap();
-            (path, bytes)
-        });
-        let (mutation, preview) = work
-            .plan_refinement(root.path(), &resources, parent, 1000, |_| {
-                Ok("contract".into())
-            })
+        for use_frontier in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let session = MutationSession::acquire(root.path()).unwrap();
+            let (_, resources) = fixture(&session);
+            let context = json!({
+                "subject":{"kind":"queue", "task_id":"synthesis", "cache_hash":"cache",
+                    "target":"wiki/concepts/subject.md", "target_revision":"a".repeat(64)},
+                "purpose":{"operation":"queue", "task_kind":"synthesize-concept",
+                    "target":{"vault_path":"wiki/concepts/subject.md", "anchor":"## Synthesis", "kind":"concept-synthesis"}}
+            });
+            let work = Work::create(
+                &session,
+                &resources,
+                "queue-subject",
+                context,
+                WorkLimits {
+                    max_input_bytes: 16000,
+                    max_result_bytes: 1200,
+                },
+            )
             .unwrap();
-        assert!(preview.inspection_nodes.len() > 1);
-        session.apply(mutation).unwrap();
-        let sidecar = root.path().join(path(&work).unwrap());
-        let saved = std::fs::read(&sidecar).unwrap();
-        let mut legacy: Value = serde_json::from_slice(&saved).unwrap();
-        assert_eq!(legacy["schema"], QUEUE_SCHEMA);
-        legacy["schema"] = SCHEMA.into();
-        std::fs::write(&sidecar, serde_json::to_vec(&legacy).unwrap()).unwrap();
-        assert!(work.progress(root.path(), &resources).is_err());
-        std::fs::write(&sidecar, saved).unwrap();
-        let resumed = Work::load(root.path(), &work.plan.id).unwrap();
-        assert_eq!(resumed, work);
-        loop {
-            let progress = resumed.progress(root.path(), &resources).unwrap();
-            if progress.complete {
-                break;
+            let first = &work.plan.parts[0].id;
+            work.record(
+                &session,
+                output(&work, root.path(), &resources, first),
+                &resources,
+            )
+            .unwrap();
+            let parent = &work.plan.parts[1].id;
+            hold(&work, &session, &resources, parent);
+            let originals = [
+                work_path(&work.plan.id, "plan.json").unwrap(),
+                output_path(&work.plan.id, first).unwrap(),
+                work_path(&work.plan.id, "inspection-actions.json").unwrap(),
+            ]
+            .map(|path| {
+                let bytes = std::fs::read(root.path().join(&path)).unwrap();
+                (path, bytes)
+            });
+            let (mutation, preview) = work
+                .plan_refinement(root.path(), &resources, parent, 1000, |_| {
+                    Ok("contract".into())
+                })
+                .unwrap();
+            assert!(preview.inspection_nodes.len() > 1);
+            session.apply(mutation).unwrap();
+            let sidecar = root.path().join(path(&work).unwrap());
+            let saved = std::fs::read(&sidecar).unwrap();
+            let mut legacy: Value = serde_json::from_slice(&saved).unwrap();
+            assert_eq!(legacy["schema"], QUEUE_SCHEMA);
+            legacy["schema"] = SCHEMA.into();
+            std::fs::write(&sidecar, serde_json::to_vec(&legacy).unwrap()).unwrap();
+            assert!(work.progress(root.path(), &resources).is_err());
+            std::fs::write(&sidecar, saved).unwrap();
+            let resumed = Work::load(root.path(), &work.plan.id).unwrap();
+            assert_eq!(resumed, work);
+            loop {
+                let progress = resumed.progress(root.path(), &resources).unwrap();
+                let inspections = progress
+                    .ready
+                    .into_iter()
+                    .filter(|id| {
+                        resumed.input(root.path(), id, &resources).unwrap()["kind"] == "inspect"
+                    })
+                    .collect::<Vec<_>>();
+                if inspections.is_empty() {
+                    break;
+                }
+                for node in inspections {
+                    resumed
+                        .record(
+                            &session,
+                            output(&resumed, root.path(), &resources, &node),
+                            &resources,
+                        )
+                        .unwrap();
+                }
             }
-            for node in progress.ready {
-                resumed
-                    .record(
-                        &session,
-                        output(&resumed, root.path(), &resources, &node),
-                        &resources,
-                    )
-                    .unwrap();
-            }
-        }
-        assert!(
-            resumed
-                .result(root.path(), &resources)
+            let frontier = resumed
+                .capture_frontier(root.path(), &resources)
                 .unwrap()
-                .to_string()
-                .contains("unverified")
-        );
-        for (path, bytes) in originals {
-            assert_eq!(bytes, std::fs::read(root.path().join(path)).unwrap());
+                .into_completion()
+                .unwrap();
+            let completed = if use_frontier {
+                frontier
+            } else {
+                loop {
+                    let progress = resumed.progress(root.path(), &resources).unwrap();
+                    if progress.complete {
+                        break;
+                    }
+                    for node in progress.ready {
+                        resumed
+                            .record(
+                                &session,
+                                output(&resumed, root.path(), &resources, &node),
+                                &resources,
+                            )
+                            .unwrap();
+                    }
+                }
+                resumed.capture_completion(root.path(), &resources).unwrap()
+            };
+            assert!(completed.result().to_string().contains("unverified"));
+            let final_result =
+                json!({"synthesis":"A source-scoped statement; deployment is unverified."});
+            let mut mutation = MutationPlan::default();
+            let before = completed
+                .plan_seal(&resumed, &mut mutation, root.path(), &final_result)
+                .unwrap();
+            mutation
+                .publish_expected(
+                    root.path(),
+                    work_path(&work.plan.id, "final.json").unwrap(),
+                    before,
+                    encoded(&final_result).unwrap(),
+                )
+                .unwrap();
+            session.apply(mutation).unwrap();
+            if use_frontier {
+                let seal_path = root
+                    .path()
+                    .join(work_path(&work.plan.id, "frontier-seal.json").unwrap());
+                let seal_raw = std::fs::read(&seal_path).unwrap();
+                let mut corrupt: Value = serde_json::from_slice(&seal_raw).unwrap();
+                corrupt["proof"]["nodes"][0]["node_id"] = "f".repeat(64).into();
+                std::fs::write(&seal_path, serde_json::to_vec(&corrupt).unwrap()).unwrap();
+                let observation = root.path().join(output_path(&work.plan.id, first).unwrap());
+                let node_raw = std::fs::read(&observation).unwrap();
+                std::fs::remove_file(&observation).unwrap();
+                let error = resumed
+                    .guard_completion(
+                        &mut MutationPlan::default(),
+                        root.path(),
+                        &resources,
+                        &final_result,
+                    )
+                    .unwrap_err();
+                assert!(error.downcast_ref::<CompletionRefusal>().is_none());
+                std::fs::write(observation, node_raw).unwrap();
+                std::fs::write(seal_path, seal_raw).unwrap();
+            }
+            let mut publication = MutationPlan::default();
+            resumed
+                .guard_completion(&mut publication, root.path(), &resources, &final_result)
+                .unwrap();
+            resumed
+                .plan_publication(&mut publication, root.path(), &final_result)
+                .unwrap();
+            session.apply(publication).unwrap();
+            let mut changed = output(&resumed, root.path(), &resources, first);
+            changed.summary = "Attempted amendment after publication.".into();
+            assert!(resumed.record(&session, changed, &resources).is_err());
+            for (path, bytes) in originals {
+                assert_eq!(bytes, std::fs::read(root.path().join(path)).unwrap());
+            }
+            assert_eq!(
+                prune_published(root.path(), None, i64::MAX)
+                    .unwrap()
+                    .removed,
+                1
+            );
         }
     }
 

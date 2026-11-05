@@ -328,6 +328,7 @@ pub(super) struct CompletedWork {
     result: Value,
     guards: BTreeMap<PathBuf, String>,
     absent: BTreeSet<PathBuf>,
+    nodes: Vec<Node>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -350,9 +351,10 @@ struct CompletionSeal {
 }
 
 impl CompletionSeal {
-    fn load(root: &Path, work: &Work) -> miette::Result<Option<Self>> {
+    fn load(root: &Path, work: &Work, nodes: &[Node]) -> miette::Result<Option<Self>> {
         Self::decode(
             work,
+            nodes,
             read_optional(root, &work_path(&work.plan.id, "seal.json")?)?,
             read_optional(root, &work_path(&work.plan.id, "frontier-seal.json")?)?,
         )
@@ -360,6 +362,7 @@ impl CompletionSeal {
 
     fn decode(
         work: &Work,
+        nodes: &[Node],
         root_raw: Option<String>,
         frontier_raw: Option<String>,
     ) -> miette::Result<Option<Self>> {
@@ -370,7 +373,7 @@ impl CompletionSeal {
             (Some(raw), None) => {
                 let seal: Seal = crate::commands::work::receipt::decode(&raw).map_err(fail)?;
                 if seal.work_id != work.plan.id
-                    || seal.root_node != work.nodes()?.last().expect("nonempty work tree").id
+                    || seal.root_node != nodes.last().expect("nonempty work tree").id
                 {
                     return Err(fail("invalid root seal identity"));
                 }
@@ -384,7 +387,7 @@ impl CompletionSeal {
                 }))
             }
             (None, Some(raw)) => {
-                let seal = FrontierSeal::decode(&raw, work)?;
+                let seal = FrontierSeal::decode(&raw, work, nodes)?;
                 Ok(Some(Self {
                     path: frontier_path,
                     raw,
@@ -461,7 +464,7 @@ impl CompletedWork {
             .as_deref()
             .map(|raw| crate::commands::json::decode_object(raw.as_bytes()).map_err(fail))
             .transpose()?;
-        let prior_seal = CompletionSeal::load(root, work)?;
+        let prior_seal = CompletionSeal::load(root, work, &self.nodes)?;
         match (&prior_seal, &prior_value) {
             (Some(seal), Some(value)) if seal.result_revision == revision(value)? => {}
             (None, None) => {}
@@ -1489,6 +1492,7 @@ impl Work {
             } else {
                 BTreeSet::new()
             },
+            nodes: evaluated.nodes,
         })
     }
 
@@ -1660,7 +1664,7 @@ impl Work {
                 let final_path = work_path(&self.plan.id, "final.json")?;
                 let (final_raw, result) = load_result(root, &final_path)?
                     .ok_or_else(|| fail("published work result is missing"))?;
-                let seal = CompletionSeal::load(root, self)?
+                let seal = CompletionSeal::load(root, self, &evaluated.nodes)?
                     .ok_or_else(|| fail("published work completion seal is missing"))?;
                 seal.verify_captured(self, &evaluated.current, &evaluated.nodes)?;
                 if receipt.work_id != self.plan.id
@@ -3180,7 +3184,9 @@ mod tests {
                     proof,
                     final_result_revision: "0".repeat(64),
                 };
-                let seal = FrontierSeal::decode(&encoded(&seal).unwrap(), &work).unwrap();
+                let seal =
+                    FrontierSeal::decode(&encoded(&seal).unwrap(), &work, &work.nodes().unwrap())
+                        .unwrap();
                 let outputs = work
                     .nodes()
                     .unwrap()
@@ -4044,7 +4050,9 @@ mod tests {
         let mut bad = serde_json::to_value(&proof).unwrap();
         bad["work_id"] = json!("f".repeat(64));
         let seal = json!({"schema":"work-frontier-seal-v1","proof":bad,"final_result_revision":"a".repeat(64)});
-        assert!(FrontierSeal::decode(&encoded(&seal).unwrap(), &work).is_err());
+        assert!(
+            FrontierSeal::decode(&encoded(&seal).unwrap(), &work, &work.nodes().unwrap()).is_err()
+        );
         let part = &work.plan.parts[0];
         let mut blocked = draft(&work, root.path(), &part.id, &source);
         blocked.unresolved.push(WorkQuestion {
