@@ -184,7 +184,7 @@ lore wiki citations wiki/concepts/retry-policy.md --snapshot SNAPSHOT_ID --limit
 | `google-calendar` | 일정과 지원되는 Drive 회의록 | Google OAuth |
 | `google-drive` | 선택한 폴더의 문서 | Google OAuth |
 | `rss` | 피드와 선택적 기사 본문 | 인증 불필요 |
-| `nodex` | 프로젝트 저장소의 결정·학습 기록 | `nodex.toml`, nodex `>=0.63,<0.64` |
+| `nodex` | 프로젝트 저장소의 결정·학습 기록 | `nodex.toml`, nodex `>=0.64` |
 | `manual` | 로컬 Markdown·텍스트·HTML과 지원되는 바이너리 문서 | 기본 입력은 인증 불필요 |
 | `tasks` | Lorekeeper에서 완료한 할 일과 메모 | 인증 불필요 |
 

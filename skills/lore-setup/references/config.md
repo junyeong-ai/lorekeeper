@@ -451,7 +451,7 @@ Legacy pages without verified document identity require explicit migration; a ma
 path alone cannot authorize overwriting a curated synthesis. Missing inventory entries
 do not imply deletion, archival or false claims.
 
-The adapter supports nodex `>=0.63, <0.64`. Lore's installer and
+The adapter supports nodex `>=0.64`. Lore's installer and
 `lore self update --version` select Lore versions, not nodex versions.
 Set a source's optional `params.executable` to a compatible binary's absolute path.
 Omitted, it uses

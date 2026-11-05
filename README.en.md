@@ -184,7 +184,7 @@ See [search, relationships and originals](skills/lore-wiki/references/query.md) 
 | `google-calendar` | Events and supported Drive meeting notes | Google OAuth |
 | `google-drive` | Documents from a selected folder | Google OAuth |
 | `rss` | Feeds and optional full article text | None |
-| `nodex` | A project repository's decision and learning records | `nodex.toml`, nodex `>=0.63,<0.64` |
+| `nodex` | A project repository's decision and learning records | `nodex.toml`, nodex `>=0.64` |
 | `manual` | Local Markdown, text, HTML and supported binary documents | No authentication for basic inputs |
 | `tasks` | Tasks and notes completed through Lorekeeper | None |
 
