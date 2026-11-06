@@ -64,6 +64,7 @@ impl miette::Diagnostic for WorkflowBusy {}
 pub(super) struct WorkflowLease {
     id: lk_core::execution::WorkflowId,
     lock: std::fs::File,
+    admission: std::fs::File,
     root: VaultRootPin,
     config_path: std::path::PathBuf,
     config_revision: String,
@@ -117,21 +118,28 @@ impl WorkflowLease {
             Mode::empty(),
         )
         .map_err(|e| miette::miette!("open workflow state: {e}"))?;
-        let lock = rustix::fs::openat(
-            &directory,
-            "workflow.lock",
-            OFlags::CREATE | OFlags::RDWR | OFlags::CLOEXEC | OFlags::NOFOLLOW,
-            Mode::RUSR | Mode::WUSR,
-        )
-        .map(std::fs::File::from)
-        .map_err(|e| miette::miette!("open workflow lock: {e}"))?;
-        if !lock
-            .metadata()
-            .map_err(|e| miette::miette!("inspect workflow lock: {e}"))?
-            .is_file()
-        {
-            return Err(miette::miette!("workflow lock is not a regular file"));
-        }
+        let open_lock = |name: &str| -> miette::Result<std::fs::File> {
+            let file = rustix::fs::openat(
+                &directory,
+                name,
+                OFlags::CREATE | OFlags::RDWR | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+                Mode::RUSR | Mode::WUSR,
+            )
+            .map(std::fs::File::from)
+            .map_err(|error| miette::miette!("open workflow lock {name}: {error}"))?;
+            if !file
+                .metadata()
+                .map_err(|error| miette::miette!("inspect workflow lock {name}: {error}"))?
+                .is_file()
+            {
+                return Err(miette::miette!(
+                    "workflow lock {name} is not a regular file"
+                ));
+            }
+            Ok(file)
+        };
+        let lock = open_lock("workflow.lock")?;
+        let admission = open_lock("workflow-admission.lock")?;
         let flags = fcntl_getfd(&lock)
             .map_err(|e| miette::miette!("read workflow descriptor flags: {e}"))?;
         fcntl_setfd(&lock, flags & !FdFlags::CLOEXEC)
@@ -148,6 +156,7 @@ impl WorkflowLease {
         Ok(Self {
             id: lk_core::execution::WorkflowId::from_bytes(identity),
             lock,
+            admission,
             root,
             config_path,
             config_revision,
@@ -171,30 +180,37 @@ impl WorkflowLease {
         let lease =
             Self::prepare_selected(opts, config, expected_root, config_path, config_revision)?;
         let mut waiting = false;
-        loop {
-            pin.validate()?;
-            lease.root.validate()?;
-            match lease.try_lock() {
-                Ok(()) => {
-                    pin.validate()?;
-                    lease.root.validate()?;
-                    return Ok(lease);
-                }
-                Err(std::fs::TryLockError::WouldBlock) if wait => {
-                    if !waiting {
-                        eprintln!("Waiting for the vault workflow lease...");
-                        waiting = true;
+        // A waiter holds admission while the active workflow finishes. The next
+        // batch must acquire admission too, so it cannot race past that waiter.
+        for lock in [&lease.admission, &lease.lock] {
+            loop {
+                pin.validate()?;
+                lease.root.validate()?;
+                match lock.try_lock() {
+                    Ok(()) => break,
+                    Err(std::fs::TryLockError::WouldBlock) if wait => {
+                        if !waiting {
+                            eprintln!("Waiting for the vault workflow lease...");
+                            waiting = true;
+                        }
+                    }
+                    Err(std::fs::TryLockError::WouldBlock) => {
+                        return Err(miette::Report::new(WorkflowBusy));
+                    }
+                    Err(std::fs::TryLockError::Error(error)) => {
+                        return Err(miette::miette!("workflow lock unavailable: {error}"));
                     }
                 }
-                Err(std::fs::TryLockError::WouldBlock) => {
-                    return Err(miette::Report::new(WorkflowBusy));
-                }
-                Err(std::fs::TryLockError::Error(error)) => {
-                    return Err(miette::miette!("workflow lock unavailable: {error}"));
-                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
+        pin.validate()?;
+        lease.root.validate()?;
+        lease
+            .admission
+            .unlock()
+            .map_err(|error| miette::miette!("release workflow admission: {error}"))?;
+        Ok(lease)
     }
 
     pub async fn acquire_publication(
@@ -223,7 +239,14 @@ impl WorkflowLease {
     }
 
     pub fn try_lock(&self) -> Result<(), std::fs::TryLockError> {
-        self.lock.try_lock()
+        self.admission.try_lock()?;
+        let locked = self.lock.try_lock();
+        let released = self
+            .admission
+            .unlock()
+            .map_err(std::fs::TryLockError::Error);
+        locked?;
+        released
     }
 
     pub fn id(&self) -> &lk_core::execution::WorkflowId {

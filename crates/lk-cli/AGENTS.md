@@ -40,6 +40,13 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   FD_CLOEXEC, and `exec`s literal argv. Busy defaults to nonzero with no child; `--wait`
   explicitly waits. Pass selected absolute LORE_CONFIG and optional LORE_TEMPLATE_DIR to
   the child via Command.env, not global environment mutation.
+- Acquire persistent `workflow-admission.lock` before `workflow.lock`. A waiting
+  contender retains admission until it obtains the workflow lease, preventing a
+  new campaign batch from barging ahead. Release admission before working/exec;
+  only the workflow descriptor is inherited. Cancellation/refusal releases held
+  claims by descriptor lifetime. Maintenance's nonblocking retention claim uses
+  the same admission order. Neither file is unlinked, and legacy binaries still
+  share mutual exclusion through `workflow.lock` without the admission guarantee.
 - The lease lasts only while a participating process retains the descriptor. Detached
   programs or programs closing inherited descriptors are outside that guarantee. No
   PID/TTL cleanup, env-bool bypass, or reentrancy guess. Windows is explicitly

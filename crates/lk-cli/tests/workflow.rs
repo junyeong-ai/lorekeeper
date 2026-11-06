@@ -523,6 +523,108 @@ fn explicit_wait_runs_after_the_foreground_holder_releases() {
 }
 
 #[test]
+fn an_admitted_waiter_gets_the_next_workflow_before_a_new_batch_can_barge() {
+    let (directory, config) = fixture();
+    let (mut holder, _) = held(&config, "printf 'ready\\n'; read -r release");
+    let mut waiter = Held(
+        Command::new(env!("CARGO_BIN_EXE_lore"))
+            .arg("--config")
+            .arg(&config)
+            .args([
+                "workflow",
+                "--wait",
+                "--",
+                "/bin/sh",
+                "-c",
+                "printf 'ready\\n'; read -r release",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let mut stderr = BufReader::new(waiter.0.stderr.take().unwrap());
+    let mut line = String::new();
+    stderr.read_line(&mut line).unwrap();
+    assert!(line.contains("Waiting for"));
+    // Freeze only this private fixture waiter, making the old polling race deterministic.
+    assert!(
+        Command::new("/bin/kill")
+            .args(["-STOP", &waiter.0.id().to_string()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    holder
+        .0
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"release\n")
+        .unwrap();
+    assert!(holder.0.wait().unwrap().success());
+    let marker = directory.path().join("barge-must-not-start");
+    let barging = workflow(&config)
+        .arg("/usr/bin/touch")
+        .arg(&marker)
+        .output()
+        .unwrap();
+    assert!(
+        !barging.status.success(),
+        "a waiting workflow must own admission to the next turn"
+    );
+    assert!(!marker.exists());
+    assert!(
+        Command::new("/bin/kill")
+            .args(["-CONT", &waiter.0.id().to_string()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let mut stdout = BufReader::new(waiter.0.stdout.take().unwrap());
+    line.clear();
+    stdout.read_line(&mut line).unwrap();
+    assert_eq!(line, "ready\n");
+    waiter
+        .0
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"release\n")
+        .unwrap();
+    assert!(waiter.0.wait().unwrap().success());
+    assert!(
+        workflow(&config)
+            .arg("/usr/bin/true")
+            .status()
+            .unwrap()
+            .success()
+    );
+}
+
+#[test]
+fn workflow_coordination_files_refuse_symlinks_without_touching_the_destination() {
+    for name in ["workflow.lock", "workflow-admission.lock"] {
+        let (directory, config) = fixture();
+        let state = directory.path().join("vault/.lorekeeper");
+        std::fs::create_dir(&state).unwrap();
+        let outside = directory.path().join("outside");
+        std::fs::write(&outside, "preserved").unwrap();
+        std::os::unix::fs::symlink(&outside, state.join(name)).unwrap();
+        let marker = directory.path().join("must-not-start");
+        let output = workflow(&config)
+            .arg("/usr/bin/touch")
+            .arg(&marker)
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{name}");
+        assert!(!marker.exists());
+        assert_eq!(std::fs::read_to_string(outside).unwrap(), "preserved");
+    }
+}
+
+#[test]
 fn a_waiting_workflow_refuses_changed_configuration_before_starting_its_child() {
     let (directory, config) = fixture();
     let (mut holder, _) = held(&config, "printf 'ready\\n'; read -r release");
