@@ -52,6 +52,14 @@ required identity judgment is absent from the observations, use the permitted ta
 read or return `needs-action`. The roster contains guards, not source bodies; native
 revision fields remain opaque and domain-specific.
 
+When `source_read` is present, use its command for a necessary targeted read of
+the exact retained source, including facts omitted from a lossy observation.
+Literal `--find` seeks a text position; `--offset` and `--limit` page in Unicode
+scalars with an explicit `next_offset`. Follow continuation until the required
+claim and qualifications have been read. This does not restart paid inspections,
+prove an event identity or approve a claim. Missing source facts remain unknown;
+an owner outside the captured scope requires explicit typed discovery recovery.
+
 `rss_evidence_bindings` maps each bound original article to its inspected resource
 index and exact `event_id`/`revision` selector. Choose only articles supporting the
 reported concept; copy their selectors rather than reconstructing identities from

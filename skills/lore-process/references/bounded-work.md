@@ -7,6 +7,7 @@
 - [Plan and resume](#plan-and-resume)
 - [Private drafts](#private-drafts)
 - [Inspect or reduce one node](#inspect-or-reduce-one-node)
+- [Read retained source](#read-retained-source)
 - [Native section finalization](#native-section-finalization)
 - [Interactive finalization](#finalize)
 - [Changed inputs](#changed-inputs)
@@ -420,6 +421,23 @@ An inspection cannot resolve another part's concern. New output values and nativ
 must fit the request's result-byte limit; exactly unchanged inherited questions can use
 the native snapshot described above. All evidence references must lie within assigned
 coverage. Return after the selected node is recorded; do not drain other tasks.
+
+## Read retained source
+
+For a necessary targeted read of an exact Work's retained task input, use
+`lore work source WORK --find 'literal source text' --limit 4000`, then continue
+with `--offset NEXT_OFFSET` as needed. Without `--find`, reading starts at the
+requested Unicode scalar offset. A literal match is a text position, not an event
+identity; duplicate titles remain distinct. Preserve each event's own links,
+attribution and scope, and never infer missing article claims from a title.
+
+`work-source-v1` returns `page` with its exact resource guard, half-open range and
+`next_offset`, or `not-found` for the exact literal search. The complete compact
+JSON obeys this Work's input byte limit; a shorter page explicitly continues.
+Each page permits at most the shared inspection scalar workload. The command
+revalidates current Work/configuration/evidence and never records an observation,
+recovers a journal, changes paid outputs or establishes completion. Work without
+a unique retained task source refuses. A stale Work must be replanned and reread.
 
 ## Native section finalization
 

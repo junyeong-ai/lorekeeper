@@ -18,6 +18,7 @@ mod resources;
 #[cfg(unix)]
 pub(super) mod section;
 mod selection;
+mod source;
 pub(crate) mod state;
 pub(super) mod workload;
 
@@ -115,6 +116,20 @@ pub enum WorkCommand {
         work_id: String,
         /// Ready node identifier returned by status
         node_id: String,
+    },
+    /// Read a current retained source page without recording an observation or completion
+    Source {
+        /// Work identifier pinning the task source and its complete current scope
+        work_id: String,
+        /// Half-open Unicode scalar start, also the starting position for literal find
+        #[arg(long, default_value = "0")]
+        offset: usize,
+        /// Maximum Unicode scalars to return (1..80000); complete JSON also obeys the Work input bound
+        #[arg(long, default_value = "4000")]
+        limit: usize,
+        /// Seek the first exact literal match at or after offset; matches are not event identities
+        #[arg(long)]
+        find: Option<String>,
     },
     /// Refine a held inspection on Unix without changing its canonical plan or paid observations
     Refine {
@@ -3498,6 +3513,15 @@ pub async fn run(opts: &GlobalOptions, command: WorkCommand) -> miette::Result<(
         WorkCommand::Read { work_id, node_id } => {
             let (work, prepared) = load(&root, &config, &config_revision, &work_id)?;
             work.input(&root, &node_id, &prepared.resources)?
+        }
+        WorkCommand::Source {
+            work_id,
+            offset,
+            limit,
+            find,
+        } => {
+            let (work, prepared) = load(&root, &config, &config_revision, &work_id)?;
+            source::read(&work, &prepared.resources, offset, limit, find.as_deref())?
         }
         #[cfg(unix)]
         WorkCommand::Refine {

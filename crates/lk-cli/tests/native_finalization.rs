@@ -362,6 +362,35 @@ impl Fixture {
 }
 
 #[test]
+fn retained_source_reads_are_current_guarded_and_leave_paid_work_unchanged() {
+    let fixture = Fixture::new("codex", 8192);
+    let (task, plan) = fixture.add("source", TaskKind::Summarize);
+    fixture.record_source(&plan);
+    let before = fixture.source_snapshot(&plan);
+    let id = plan["work_id"].as_str().unwrap();
+    let source = fixture.json(&["work", "source", id, "--find", "proposal", "--limit", "16"]);
+    assert_eq!(source["status"], "page");
+    assert_eq!(source["guard"]["authority"], "retained-input");
+    assert!(source["text"].as_str().unwrap().starts_with("proposal"));
+    assert!(source["next_offset"].is_number());
+    assert_eq!(fixture.source_snapshot(&plan), before);
+    assert!(fixture.calls().is_empty());
+    assert!(!fixture.work_path(&plan, "seal.json").exists());
+    let path = fixture.root().join("vault").join(&task.target.vault_path);
+    let original = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(&path, original + "\nChanged publication context.\n").unwrap();
+    let refused = fixture
+        .command()
+        .args(["work", "source", id])
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    assert!(refused.stdout.is_empty());
+    assert_eq!(fixture.source_snapshot(&plan), before);
+    assert!(fixture.calls().is_empty());
+}
+
+#[test]
 fn completed_root_actions_are_admitted_before_dispatch_without_restarting_planning() {
     for engine in ["codex", "claude-code"] {
         let fixture = Fixture::new(engine, 32768);

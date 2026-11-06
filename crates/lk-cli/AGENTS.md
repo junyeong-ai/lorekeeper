@@ -178,6 +178,10 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   fails explicitly, without clipping evidence.
 - Resume current explicit Work plans even when the remaining batch fits whole input;
   validate their exact manifest before using recorded observations.
+- `work source` reuses fresh Work capture to page its unique retained task input.
+  Literal seeks identify text positions, never events. Bound complete page JSON and
+  scalar counts, report continuation, and never record coverage/completion or recover
+  journals. Native `source_read` metadata supplies this capability without source bodies.
 - Fresh source inspection uses the shared scalar workload policy as well as complete
   JSON byte admission. Apply it to Work partitioning, whole-input task batches and raw
   screening context. Exact retained legacy Work/selection keeps its original policy;
