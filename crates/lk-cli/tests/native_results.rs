@@ -1399,7 +1399,7 @@ fn changed_publication_contract_recovers_frontier_without_retrying_capacity_held
         let (independent, _) =
             fixture.add("independent", lk_queue::TaskKind::SynthesizeConcept, false);
         let (task, plan, _) =
-            fixture.paid_frontier_with_repetitions(lk_queue::TaskKind::SynthesizeConcept, 36000);
+            fixture.paid_frontier_with_repetitions(lk_queue::TaskKind::SynthesizeConcept, 24000);
         let id = plan["work_id"].as_str().unwrap();
         let status = fixture.json(&["work", "status", id]);
         let root = status["root_node"].as_str().unwrap();
@@ -1407,6 +1407,16 @@ fn changed_publication_contract_recovers_frontier_without_retrying_capacity_held
         std::fs::write(fixture.root().join("mode"), "frontier-action-root-capacity").unwrap();
         let report = fixture.run();
         assert_eq!(report["halted"], false, "{engine}: {report}");
+        assert!(
+            report["finalization_admissions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["work_id"] == id
+                    && entry["mode"] == "frontier"
+                    && entry["state"] == "available"),
+            "{report}"
+        );
         assert!(fixture.done(&independent), "{report}");
         assert!(!fixture.done(&task), "{report}");
         let status = fixture.json(&["work", "status", id]);
