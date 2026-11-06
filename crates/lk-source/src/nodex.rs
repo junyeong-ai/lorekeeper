@@ -92,7 +92,7 @@ const INITIAL_REACH: usize = 500;
 /// `lookback_hours` the operator meant differently — not something the adapter can settle
 /// by asking again.
 const MAX_REACH: usize = 64_000;
-const NODEX_COMPATIBILITY: &str = ">=0.65";
+const NODEX_COMPATIBILITY: &str = ">=0.66";
 const INVENTORY_FIELDS: &str = "id,title,kind,status,path,created,updated,reviewed,supersedes,superseded_by,implements,related,covers,tags";
 
 /// One document, as `nodex query recent` reports it.
@@ -1001,7 +1001,7 @@ printf '%s' '{"ok":true,"data":{"items":[]},"snapshot":{"verification":"content"
                 "-C",
                 root.path().to_str().unwrap(),
                 "--check-version",
-                NODEX_COMPATIBILITY,
+                ">=0.66",
                 "--today",
                 "2026-10-17",
                 "query",
@@ -1299,22 +1299,17 @@ exit "$rc"
         }
         std::fs::write(&path, original).unwrap();
         std::fs::write(&config_path, original_config).unwrap();
-        for args in [
-            vec!["init", "--quiet"],
-            vec!["add", "docs"],
-            vec![
-                "-c",
-                "user.name=Fixture",
-                "-c",
-                "user.email=fixture@example.test",
-                "commit",
-                "--quiet",
-                "-m",
-                "Record source documents",
-            ],
-        ] {
+        let git = |args: &[&str]| {
             let output = std::process::Command::new("git")
                 .current_dir(root.path())
+                .args([
+                    "-c",
+                    "user.name=Fixture",
+                    "-c",
+                    "user.email=fixture@example.test",
+                    "-c",
+                    "commit.gpgsign=false",
+                ])
                 .args(args)
                 .output()
                 .unwrap();
@@ -1323,23 +1318,12 @@ exit "$rc"
                 "{}",
                 String::from_utf8_lossy(&output.stderr)
             );
-        }
+        };
+        git(&["init", "--quiet"]);
+        git(&["add", "docs"]);
+        git(&["commit", "--quiet", "-m", "Record source documents"]);
         std::fs::remove_file(root.path().join("docs/b.md")).unwrap();
-        let removed = std::process::Command::new("git")
-            .current_dir(root.path())
-            .args([
-                "-c",
-                "user.name=Fixture",
-                "-c",
-                "user.email=fixture@example.test",
-                "commit",
-                "--quiet",
-                "-am",
-                "Retire source document",
-            ])
-            .output()
-            .unwrap();
-        assert!(removed.status.success());
+        git(&["commit", "--quiet", "-am", "Retire source document"]);
         let history_policy = format!(
             "{original_config}\n[[detection.unresolved_policy]]\nname = \"recorded-citation\"\ncause = \"missing\"\nsource_kinds = [\"generic\"]\nhistory = \"recorded\"\nseverity = \"info\"\n"
         );
@@ -1364,7 +1348,34 @@ exit "$rc"
         .await
         .unwrap();
         assert_eq!(history["present"], false);
-        assert_eq!(history["removed"][0]["id"], "b");
+        assert_eq!(history["items"][0]["id"], "b");
+        assert_eq!(history["items"][0]["removal"]["type"], "committed");
+        let retired: serde_json::Value = run_nodex(
+            &supported,
+            root.path(),
+            ctx.target_date,
+            &["history"],
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(retired["total"], 1);
+        assert_eq!(retired["items"], history["items"]);
+        let blob = std::process::Command::new("git")
+            .current_dir(root.path())
+            .args([
+                "cat-file",
+                "-p",
+                retired["items"][0]["blob"].as_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert!(blob.status.success());
+        assert!(
+            String::from_utf8(blob.stdout)
+                .unwrap()
+                .contains("title: Beta")
+        );
         let rebuilt = std::process::Command::new(&supported)
             .arg("-C")
             .arg(root.path())
@@ -1390,6 +1401,61 @@ exit "$rc"
             error.contains("absent from the selected date/kind scope or current inventory"),
             "{error}"
         );
+        // Reusing the retired path does not resurrect its old identity. Restoring that
+        // identity elsewhere does: diagnostics retain the old path, collection reads the
+        // new current document, and the unfiltered retirement ledger no longer lists it.
+        std::fs::write(
+            root.path().join("docs/b.md"),
+            "---\nid: c\ntitle: Replacement\nkind: generic\nstatus: active\n---\n# Replacement\n",
+        )
+        .unwrap();
+        git(&["add", "docs"]);
+        git(&["commit", "--quiet", "-m", "Reuse retired path"]);
+        let by_path: serde_json::Value = run_nodex(
+            &supported,
+            root.path(),
+            ctx.target_date,
+            &["history", "--path", "docs/b.md"],
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(by_path["present"], true);
+        assert_eq!(by_path["items"][0]["id"], "b");
+        let restored = root.path().join("docs/restored.md");
+        std::fs::write(
+            &restored,
+            "---\nid: b\ntitle: Restored Beta\nkind: generic\nstatus: active\n---\n# Restored Beta\nCurrent body.\n",
+        )
+        .unwrap();
+        git(&["add", "docs"]);
+        git(&["commit", "--quiet", "-m", "Restore identity at a new path"]);
+        let retired: serde_json::Value = run_nodex(
+            &supported,
+            root.path(),
+            ctx.target_date,
+            &["history"],
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(retired["total"], 0);
+        let built = std::process::Command::new(&supported)
+            .arg("-C")
+            .arg(root.path())
+            .arg("build")
+            .output()
+            .unwrap();
+        assert!(
+            built.status.success(),
+            "{}",
+            String::from_utf8_lossy(&built.stdout)
+        );
+        let current = NodexSource.extract(&missing, &ctx).await.unwrap();
+        assert_eq!(current.len(), 1);
+        assert_eq!(current[0].title, "Restored Beta");
+        assert!(current[0].body.contains("Current body."));
+        assert_eq!(current[0].metadata["path"], "docs/restored.md");
         assert_eq!(
             std::fs::read_to_string(&config_path).unwrap(),
             history_policy

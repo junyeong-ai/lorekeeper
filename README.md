@@ -122,7 +122,7 @@ lore wiki read wiki/concepts/retry-policy.md
 | `google-calendar` | 일정·지원되는 Drive 회의록 | Google OAuth |
 | `google-drive` | 선택한 폴더의 문서 | Google OAuth |
 | `rss` | 피드·선택적 기사 본문 | 인증 불필요 |
-| `nodex` | 저장소의 결정·학습 기록 | `nodex.toml`, nodex `>=0.65` |
+| `nodex` | 저장소의 결정·학습 기록 | `nodex.toml`, nodex `>=0.66` |
 | `manual` | 로컬 텍스트·지원되는 바이너리 문서 | 기본 입력은 인증 불필요 |
 | `tasks` | 완료한 할 일·메모 | 인증 불필요 |
 

@@ -127,6 +127,38 @@ jobs:
       - run: INSTA_UPDATE=no cargo nextest run --locked --workspace --all-targets
       - run: cargo test --locked --workspace --doc
 
+  nodex:
+    name: nodex (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - name: Read repository toolchain
+        id: toolchain
+        shell: bash
+        run: |
+          channel=$(awk -F'"' '/^[[:space:]]*channel[[:space:]]*=/ { print $2; exit }' rust-toolchain.toml)
+          [ -n "$channel" ] || { echo "rust-toolchain.toml declares no channel" >&2; exit 1; }
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master commit (2026-10-16)
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: nodex
+      - uses: taiki-e/install-action@68a389c788b2cd04016ce8c80ee23b80d2ab3d68 # v2.88.1
+        with:
+          tool: cargo-nextest@0.9.150
+      - name: Verify the Nodex floor and retirement boundary with real binaries
+        shell: bash
+        run: bash scripts/check-nodex.sh
+
   # The release builds `x86_64-pc-windows-msvc` and `install.ps1` installs it, but nothing here
   # compiled it: `google/oauth.rs` and `atlassian/oauth.rs` carry `#[cfg(target_os = "windows")]`
   # bodies that no job has ever type-checked. `--all-targets` covers the test code too, which is

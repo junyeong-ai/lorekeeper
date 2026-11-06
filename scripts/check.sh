@@ -32,6 +32,9 @@ gate test
 INSTA_UPDATE=no cargo nextest run --locked --workspace --all-targets
 cargo test --locked --workspace --doc
 
+gate nodex
+bash scripts/check-nodex.sh
+
 gate shell
 bash -n scripts/*.sh
 shellcheck --severity=warning scripts/*.sh

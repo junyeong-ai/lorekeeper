@@ -451,7 +451,7 @@ Legacy pages without verified document identity require explicit migration; a ma
 path alone cannot authorize overwriting a curated synthesis. Missing inventory entries
 do not imply deletion, archival or false claims.
 
-The adapter requires nodex `>=0.65`, with no upper version bound. A newer binary
+The adapter requires nodex `>=0.66`, with no upper version bound. A newer binary
 must still satisfy the same public response and currentness checks. Lore's installer and
 `lore self update --version` select Lore versions, not nodex versions.
 Set a source's optional `params.executable` to a compatible binary's absolute path.
@@ -475,9 +475,18 @@ For a missing source document, use the selected Nodex binary's read-only diagnos
 |---|---|
 | Does this path belong to the configured scope? | `nodex -C /absolute/repo classify docs/example.md` — inferred defaults do not override authored metadata or establish a current indexed node |
 | Was this ID or path recorded and later removed? | `nodex -C /absolute/repo history DOCUMENT_ID` or `history --path docs/example.md` — requires complete Git history and interprets revisions under current configuration |
+| Which documents were retired? | `nodex -C /absolute/repo history` — lists removed documents whose IDs are no longer present, not moves or an ID changed in place |
 
 These diagnostics do not add documents to the current collection, approve their claims,
-or authorize deletion of imported pages. Nodex 0.65 can classify unresolved references
+or authorize deletion of imported pages. Nodex 0.66 returns history as `items` with
+the last recorded blob and typed `removal`; use `git cat-file -p BLOB` to read that
+revision. A reused path can name a different current document, and restoring the
+old ID removes it from the unfiltered retirement list. A shallow, grafted or
+replaced history cannot prove completeness and is refused. These results are
+interpreted under today's scope/identity rules, not a historical configuration.
+Projects may delete retired source files while retaining them in Git; Lore keeps
+their already captured evidence and never imports Git history as current inventory.
+Nodex can classify unresolved references
 by source kind and recorded target history; those project rule verdicts remain distinct
 from Lore's complete-current-inventory requirement. A missing history prerequisite or
 configuration refusal must be resolved by the repository owner, not bypassed by Lore.

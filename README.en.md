@@ -122,7 +122,7 @@ An empty concept result is valid when nothing should be extracted.
 | `google-calendar` | Events and supported Drive meeting notes | Google OAuth |
 | `google-drive` | Documents in selected folders | Google OAuth |
 | `rss` | Feeds and optional article bodies | No authentication |
-| `nodex` | Repository decisions and learning | `nodex.toml`, nodex `>=0.65` |
+| `nodex` | Repository decisions and learning | `nodex.toml`, nodex `>=0.66` |
 | `manual` | Local text and supported binary documents | Basic input needs no authentication |
 | `tasks` | Completed tasks and notes | No authentication |
 
