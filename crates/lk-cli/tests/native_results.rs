@@ -380,13 +380,13 @@ impl Fixture {
     }
 
     fn paid_frontier(&self, kind: lk_queue::TaskKind) -> (lk_queue::QueueTask, Value, Vec<Value>) {
-        self.paid_frontier_with_repetitions(kind, 36000)
+        self.build_paid_frontier(kind, 6)
     }
 
-    fn paid_frontier_with_repetitions(
+    fn build_paid_frontier(
         &self,
         kind: lk_queue::TaskKind,
-        repetitions: usize,
+        minimum_inspection_parts: usize,
     ) -> (lk_queue::QueueTask, Value, Vec<Value>) {
         let config = std::fs::read_to_string(&self.config).unwrap();
         std::fs::write(
@@ -396,17 +396,21 @@ impl Fixture {
                 .replace("max_result_bytes: 8192", "max_result_bytes: 32768"),
         )
         .unwrap();
-        let (task, plan) = self.add_with_text(
-            "frontier",
-            kind,
-            true,
-            &"A retained protocol observation. ".repeat(repetitions),
-        );
+        assert!(minimum_inspection_parts >= 5);
+        let reading_bound = lk_core::semantic::INSPECTION_CHARACTERS.get();
+        let characters = reading_bound * (minimum_inspection_parts - 1) + reading_bound / 2;
+        let source = "A retained protocol observation. ";
+        let repetitions = characters.div_ceil(source.chars().count());
+        let (task, plan) = self.add_with_text("frontier", kind, true, &source.repeat(repetitions));
         let plan = plan.unwrap();
         let id = plan["work_id"].as_str().unwrap();
         let status = self.json(&["work", "status", id, "--limit", "100"]);
         let ready = status["ready"].as_array().unwrap();
-        assert!(ready.len() >= 5, "{status}");
+        assert!(ready.len() >= minimum_inspection_parts, "{status}");
+        assert_eq!(
+            status["ready_total"].as_u64().unwrap() as usize,
+            ready.len()
+        );
         let mut observations = Vec::new();
         for (index, node) in ready.iter().enumerate() {
             let node = node.as_str().unwrap();
@@ -1399,7 +1403,7 @@ fn changed_publication_contract_recovers_frontier_without_retrying_capacity_held
         let (independent, _) =
             fixture.add("independent", lk_queue::TaskKind::SynthesizeConcept, false);
         let (task, plan, _) =
-            fixture.paid_frontier_with_repetitions(lk_queue::TaskKind::SynthesizeConcept, 24000);
+            fixture.build_paid_frontier(lk_queue::TaskKind::SynthesizeConcept, 10);
         let id = plan["work_id"].as_str().unwrap();
         let status = fixture.json(&["work", "status", id]);
         let root = status["root_node"].as_str().unwrap();
@@ -1512,9 +1516,9 @@ fn held_frontier_reduces_under_native_supervision_and_preserves_paid_history() {
         let (independent, _) =
             fixture.add("independent", lk_queue::TaskKind::SynthesizeConcept, false);
         let multilevel = engine == "codex" && !held_reduce;
-        let (task, plan, observations) = fixture.paid_frontier_with_repetitions(
+        let (task, plan, observations) = fixture.build_paid_frontier(
             lk_queue::TaskKind::SynthesizeConcept,
-            if multilevel { 72000 } else { 36000 },
+            if multilevel { 10 } else { 6 },
         );
         let id = plan["work_id"].as_str().unwrap();
         let directory = fixture.root().join("vault/.lorekeeper/work").join(id);
@@ -1538,6 +1542,16 @@ fn held_frontier_reduces_under_native_supervision_and_preserves_paid_history() {
         .unwrap();
         let report = fixture.run();
         assert_eq!(report["halted"], false, "{report}");
+        assert!(
+            report["finalization_admissions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["work_id"] == id
+                    && entry["mode"] == "frontier"
+                    && entry["state"] == "available"),
+            "{report}"
+        );
         assert!(!fixture.done(&task));
         assert!(fixture.done(&independent));
         let status = fixture.json(&["work", "status", id, "--limit", "100"]);
