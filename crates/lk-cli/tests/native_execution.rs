@@ -18,6 +18,9 @@ mod inspection_admission;
 #[path = "native_execution/observation_rejections.rs"]
 mod observation_rejections;
 
+#[path = "native_execution/audit_recovery.rs"]
+mod audit_recovery;
+
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};

@@ -310,6 +310,14 @@ mod native {
         Failed,
     }
 
+    fn semantic_context_changed(error: &miette::Report) -> bool {
+        matches!(
+            error.downcast_ref::<crate::commands::queue::application::PublicationRejection>(),
+            Some(rejection)
+                if rejection.kind == crate::commands::queue::application::RejectionKind::SemanticContextChanged
+        )
+    }
+
     enum QueueDispatch {
         Discovery {
             task: lk_queue::QueueTask,
@@ -1772,6 +1780,7 @@ mod native {
                 self.supervisor.read_control(),
             ) {
                 Ok(captured) => captured,
+                Err(error) if semantic_context_changed(&error) => return None,
                 Err(error) => return Some(self.failure("bounded work progress", error)),
             };
             self.result
@@ -1790,6 +1799,7 @@ mod native {
                     {
                         return None;
                     }
+                    Err(error) if semantic_context_changed(&error) => return None,
                     Err(error) => return Some(self.failure("bounded work progress", error)),
                 };
                 if !progress.complete && requests.is_empty() {
@@ -2660,6 +2670,14 @@ mod native {
                         self.deferred("bounded work capacity", &reason);
                         return WorkStep::Deferred(reason);
                     }
+                    if stage == ExecutionStage::Audit && semantic_context_changed(&error) {
+                        self.record(
+                            "bounded audit inputs changed",
+                            StageState::Skipped,
+                            Some(error.to_string()),
+                        );
+                        return WorkStep::Replan;
+                    }
                     self.failure("bounded work progress", error);
                     return WorkStep::Failed;
                 }
@@ -2847,6 +2865,15 @@ mod native {
                         Some(id.into()),
                     );
                     WorkStep::Staged
+                }
+                Err(error) if semantic_context_changed(&error) => {
+                    metrics.outcome = WorkOutcome::Rejected;
+                    self.record(
+                        "bounded audit inputs changed",
+                        StageState::Skipped,
+                        Some(error.to_string()),
+                    );
+                    WorkStep::Replan
                 }
                 Err(error) => {
                     self.failure("bounded work completion", error);
@@ -4452,6 +4479,76 @@ mod native {
             Ok(plan)
         }
 
+        async fn discover_audit(&mut self, paths: &[String]) -> bool {
+            let paths = serde_json::to_string(paths).expect("string paths serialize");
+            self.consumer(ExecutionStage::Discovery, "lore-wiki", &format!("discover. Plan related-document search only for these exact audit subjects: {paths}. Read their names, scope and outline, choose explicit search queries and record each through wiki audit-discover. Do not audit, repair, synthesize or record completed assessments in this discovery session."), None).await
+        }
+
+        async fn prepare_audit_jobs(
+            &mut self,
+            candidates: &[lk_graph::audit::AuditCandidate],
+        ) -> Option<std::collections::BTreeMap<String, String>> {
+            let mut jobs = std::collections::BTreeMap::new();
+            for candidate in candidates {
+                let (session, _) = self.mutation_session("bounded audit planning").await?;
+                match crate::commands::work::prepare_audit(
+                    &session,
+                    &self.config,
+                    &self.config_revision,
+                    candidate,
+                ) {
+                    Ok(id) => {
+                        jobs.insert(candidate.path.clone(), id);
+                    }
+                    Err(error) => {
+                        self.failure("bounded audit planning", error);
+                        return None;
+                    }
+                }
+            }
+            Some(jobs)
+        }
+
+        async fn replan_audit(&mut self, paths: &[String]) -> Option<lk_graph::audit::AuditPlan> {
+            let mut plan = match self.audit_plan(paths) {
+                Ok(plan) => plan,
+                Err(error) => {
+                    self.failure("audit replanning", error);
+                    return None;
+                }
+            };
+            let missing = plan
+                .candidates
+                .iter()
+                .filter(|candidate| candidate.discovery.is_none())
+                .map(|candidate| candidate.path.clone())
+                .collect::<Vec<_>>();
+            if !missing.is_empty() {
+                if !self.discover_audit(&missing).await {
+                    return None;
+                }
+                plan = match self.audit_plan(paths) {
+                    Ok(plan) => plan,
+                    Err(error) => {
+                        self.failure("audit discovery replanning", error);
+                        return None;
+                    }
+                };
+                if plan
+                    .candidates
+                    .iter()
+                    .any(|candidate| candidate.discovery.is_none())
+                {
+                    self.failure(
+                        "related-document discovery",
+                        "selected subjects lack current recorded search queries",
+                    );
+                    return None;
+                }
+            }
+            Some(plan)
+        }
+
         async fn admit_audit(&mut self) -> miette::Result<lk_graph::audit::AuditPlan> {
             let (session, _) = self
                 .mutation_session("audit admission")
@@ -4750,11 +4847,10 @@ mod native {
                 .candidates
                 .iter()
                 .filter(|candidate| candidate.discovery.is_none())
-                .map(|candidate| candidate.path.as_str())
+                .map(|candidate| candidate.path.clone())
                 .collect::<Vec<_>>();
             if !missing.is_empty() {
-                let missing = serde_json::to_string(&missing).expect("string paths serialize");
-                if !self.consumer(ExecutionStage::Discovery, "lore-wiki", &format!("discover. Plan related-document search only for these exact audit subjects: {missing}. Read their names, scope and outline, choose explicit search queries and record each through wiki audit-discover. Do not audit, repair, synthesize or record completed assessments in this discovery session."), None).await {
+                if !self.discover_audit(&missing).await {
                     return;
                 }
                 plan = match self.audit_plan(&paths) {
@@ -4813,27 +4909,10 @@ mod native {
             }
             let mut deferred_subjects = std::collections::BTreeSet::new();
             if bounded {
-                let mut jobs = std::collections::BTreeMap::new();
-                for candidate in &plan.candidates {
-                    let path = &candidate.path;
-                    let Some((session, _)) = self.mutation_session("bounded audit planning").await
-                    else {
-                        return;
-                    };
-                    let work = match crate::commands::work::prepare_audit(
-                        &session,
-                        &self.config,
-                        &self.config_revision,
-                        candidate,
-                    ) {
-                        Ok(id) => id,
-                        Err(error) => {
-                            self.failure("bounded audit planning", error);
-                            return;
-                        }
-                    };
-                    jobs.insert(path.clone(), work);
-                }
+                let Some(mut jobs) = self.prepare_audit_jobs(&plan.candidates).await else {
+                    return;
+                };
+                let mut replanned = std::collections::BTreeSet::new();
                 while !jobs.is_empty() {
                     jobs.retain(|path, work| {
                         if self.inspection_deferred.contains_key(work) {
@@ -4887,7 +4966,36 @@ mod native {
                         }
                         WorkStep::Failed => return,
                         WorkStep::Replan => {
-                            unreachable!("audit cannot request extraction discovery")
+                            if !replanned.insert(selected.clone()) {
+                                self.deferred("bounded audit inputs unstable", format!("{selected}: inputs changed again after fresh replanning; retained for a later run"));
+                                deferred_subjects.insert(selected.clone());
+                                jobs.remove(&selected);
+                                continue;
+                            }
+                            let pending = jobs.keys().cloned().collect::<Vec<_>>();
+                            let Some(fresh) = self.replan_audit(&pending).await else {
+                                return;
+                            };
+                            let Some(fresh_jobs) = self.prepare_audit_jobs(&fresh.candidates).await
+                            else {
+                                return;
+                            };
+                            for path in &pending {
+                                if !fresh_jobs.contains_key(path) {
+                                    deferred_subjects.insert(path.clone());
+                                }
+                            }
+                            for candidate in fresh.candidates {
+                                let prior = plan
+                                    .candidates
+                                    .iter_mut()
+                                    .find(|prior| prior.path == candidate.path)
+                                    .expect("replanned audit belongs to the selected batch");
+                                *prior = candidate;
+                            }
+                            jobs = fresh_jobs;
+                            self.record("bounded audit replanning", StageState::Skipped, Some("captured fresh selected inputs; prior Work remains unchanged and the current run budget is retained".into()));
+                            continue;
                         }
                         WorkStep::Staged => {}
                     }

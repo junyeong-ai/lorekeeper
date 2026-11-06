@@ -150,6 +150,13 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   that checked scope.
 - Grant each temporary selection manifest's directory explicitly to the selected host;
   keep it alive through the foreground consumer and remove it afterward.
+- An interactive bounded audit finalizer may legitimately create reviews or repair
+  its inputs. A typed semantic-context refusal still rejects the old submission;
+  recapture the remaining selected subjects, refresh missing discovery and prepare
+  current Work under the same run budget. Allow one such replan per subject per run;
+  repeated drift defers that subject while independent subjects continue. Keep all
+  predecessor Work and paid outputs unchanged. Configuration/root drift, corrupt
+  state and unexpected changes during tool-free observation recording remain fatal.
 
 ## Resumable semantic Work (`commands/work.rs`)
 

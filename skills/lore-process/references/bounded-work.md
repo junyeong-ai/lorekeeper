@@ -483,6 +483,14 @@ concerns requires `follow-up` and a current durable open scoped review. New revi
 repairs change the input: replan and read changes before final assessment, rather
 than relabeling an old result. Preserve contrary evidence and resolution criteria.
 
+During a native bounded audit, the controller rejects the obsolete submission and
+can recapture the remaining selected subjects after a typed context change. It
+refreshes missing discovery and reads current Work within the same run's call
+budget, preserving all predecessor observations. It allows one replan per subject
+per run; further changes defer that subject for a later run. Do not repeatedly
+repair the same input on each finalization. Configuration/root changes and corrupt
+state still stop execution; this transition never approves an old assessment.
+
 The applier checks the complete tree, seal, exact result and current evidence in
 the same journal as canonical publication. An agent exiting successfully, a full
 section or a recorded part alone does not establish completion or semantic truth.
