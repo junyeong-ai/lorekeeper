@@ -451,7 +451,8 @@ Legacy pages without verified document identity require explicit migration; a ma
 path alone cannot authorize overwriting a curated synthesis. Missing inventory entries
 do not imply deletion, archival or false claims.
 
-The adapter supports nodex `>=0.64`. Lore's installer and
+The adapter requires nodex `>=0.65`, with no upper version bound. A newer binary
+must still satisfy the same public response and currentness checks. Lore's installer and
 `lore self update --version` select Lore versions, not nodex versions.
 Set a source's optional `params.executable` to a compatible binary's absolute path.
 Omitted, it uses
@@ -467,6 +468,19 @@ excludes that legitimately match nothing need the repository owner's explicit
 `may_be_empty = true`; Lore does not suppress warnings or rewrite source configuration.
 Relations retain every authored `references` location; earlier captured evidence keeps its
 original shape and revision rather than being relabeled as a new observation.
+
+For a missing source document, use the selected Nodex binary's read-only diagnostics:
+
+| Question | Nodex command and limit |
+|---|---|
+| Does this path belong to the configured scope? | `nodex -C /absolute/repo classify docs/example.md` — inferred defaults do not override authored metadata or establish a current indexed node |
+| Was this ID or path recorded and later removed? | `nodex -C /absolute/repo history DOCUMENT_ID` or `history --path docs/example.md` — requires complete Git history and interprets revisions under current configuration |
+
+These diagnostics do not add documents to the current collection, approve their claims,
+or authorize deletion of imported pages. Nodex 0.65 can classify unresolved references
+by source kind and recorded target history; those project rule verdicts remain distinct
+from Lore's complete-current-inventory requirement. A missing history prerequisite or
+configuration refusal must be resolved by the repository owner, not bypassed by Lore.
 `lore validate` checks the parameter shape; `lore ingest --dry-run <source-id>` checks
 actual source compatibility without vault or queue writes. `doctor` audits page contracts,
 `health` reads collection history, and `self status` checks Lore's installation; none

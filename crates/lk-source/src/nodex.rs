@@ -92,7 +92,7 @@ const INITIAL_REACH: usize = 500;
 /// `lookback_hours` the operator meant differently — not something the adapter can settle
 /// by asking again.
 const MAX_REACH: usize = 64_000;
-const NODEX_COMPATIBILITY: &str = ">=0.64";
+const NODEX_COMPATIBILITY: &str = ">=0.65";
 const INVENTORY_FIELDS: &str = "id,title,kind,status,path,created,updated,reviewed,supersedes,superseded_by,implements,related,covers,tags";
 
 /// One document, as `nodex query recent` reports it.
@@ -1297,6 +1297,104 @@ exit "$rc"
                 "{error}"
             );
         }
+        std::fs::write(&path, original).unwrap();
+        std::fs::write(&config_path, original_config).unwrap();
+        for args in [
+            vec!["init", "--quiet"],
+            vec!["add", "docs"],
+            vec![
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.test",
+                "commit",
+                "--quiet",
+                "-m",
+                "Record source documents",
+            ],
+        ] {
+            let output = std::process::Command::new("git")
+                .current_dir(root.path())
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        std::fs::remove_file(root.path().join("docs/b.md")).unwrap();
+        let removed = std::process::Command::new("git")
+            .current_dir(root.path())
+            .args([
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.test",
+                "commit",
+                "--quiet",
+                "-am",
+                "Retire source document",
+            ])
+            .output()
+            .unwrap();
+        assert!(removed.status.success());
+        let history_policy = format!(
+            "{original_config}\n[[detection.unresolved_policy]]\nname = \"recorded-citation\"\ncause = \"missing\"\nsource_kinds = [\"generic\"]\nhistory = \"recorded\"\nseverity = \"info\"\n"
+        );
+        std::fs::write(&config_path, &history_policy).unwrap();
+        let classified: serde_json::Value = run_nodex(
+            &supported,
+            root.path(),
+            ctx.target_date,
+            &["classify", "docs/b.md"],
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(classified["items"][0]["in_scope"], true);
+        let history: serde_json::Value = run_nodex(
+            &supported,
+            root.path(),
+            ctx.target_date,
+            &["history", "b"],
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(history["present"], false);
+        assert_eq!(history["removed"][0]["id"], "b");
+        let rebuilt = std::process::Command::new(&supported)
+            .arg("-C")
+            .arg(root.path())
+            .arg("build")
+            .output()
+            .unwrap();
+        assert!(
+            rebuilt.status.success(),
+            "{}",
+            String::from_utf8_lossy(&rebuilt.stdout)
+        );
+        let current = NodexSource.extract(&selected, &ctx).await.unwrap();
+        assert_eq!(current.len(), 1);
+        assert_eq!(current[0].metadata["source_record"]["id"], "a");
+        let mut missing = selected.clone();
+        missing["document_ids"] = serde_json::json!(["b"]);
+        let error = NodexSource
+            .extract(&missing, &ctx)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("absent from the selected date/kind scope or current inventory"),
+            "{error}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&config_path).unwrap(),
+            history_policy
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
         assert!(!ctx.vault_root.exists());
     }
 
