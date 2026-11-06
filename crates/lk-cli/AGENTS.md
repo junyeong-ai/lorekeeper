@@ -60,6 +60,12 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
 
 ## Native runs (`commands/run.rs`, `execution.rs`)
 
+- Bounded native finalizers receive RSS article selectors separately from semantic
+  observations. Match the retained manifest revision and every event's authority,
+  address and revision to the current Work before supplying resource-indexed
+  bindings. Count these bytes in admission. Neither a binding nor roster membership
+  establishes support; unbound legacy inputs never gain original authority.
+
 - `commands/run.rs` owns daily/process/knowledge sequencing; `execution.rs` owns
   host-specific invocation and supervised Unix process groups. The shared WorkflowLease
   covers semantic reads through final publication. Native daily acquisition precedes a

@@ -52,6 +52,7 @@ pub(in crate::commands) struct FinalizationInputBytes {
     context: usize,
     proof: usize,
     inspected_resources: usize,
+    rss_evidence_bindings: usize,
     contracts: usize,
     response_schema: usize,
     instructions: usize,
@@ -71,6 +72,7 @@ impl FinalizationInputBytes {
             context: bytes(&frontier["context"])?,
             proof: bytes(&frontier["proof"])?,
             inspected_resources: bytes(&request["inspected_resources"])?,
+            rss_evidence_bindings: bytes(&request["rss_evidence_bindings"])?,
             contracts: bytes(&request["contracts"])?,
             response_schema: bytes(&request["response_schema"])?,
             instructions: bytes(&request["instructions"])?,
@@ -80,6 +82,7 @@ impl FinalizationInputBytes {
             + components.context
             + components.proof
             + components.inspected_resources
+            + components.rss_evidence_bindings
             + components.contracts
             + components.response_schema
             + components.instructions;
@@ -392,6 +395,68 @@ pub(in crate::commands) fn selected_characters(tasks: &[Value]) -> miette::Resul
     })
 }
 
+fn rss_evidence_bindings(task: &QueueTask, work: &Work) -> miette::Result<Value> {
+    let subject: Subject =
+        serde_json::from_value(work.context["subject"].clone()).into_diagnostic()?;
+    if !matches!(subject, Subject::Queue { task_id, cache_hash, target, .. }
+        if task_id == task.task_id && cache_hash == task.cache_hash && target == task.target.vault_path)
+        || work.context["purpose"]["task_kind"] != json!(task.kind)
+        || work.context["purpose"]["target"] != json!(task.target)
+    {
+        return Err(miette::miette!(
+            "publication bindings belong to another task"
+        ));
+    }
+    let Some(manifest) = task.input.get("rss_original") else {
+        if !work.context["purpose"]["parameters"]["rss_evidence"].is_null() {
+            return Err(miette::miette!(
+                "inspected RSS publication manifest is absent from the retained task"
+            ));
+        }
+        return Ok(json!([]));
+    };
+    let manifest: lk_core::rss_original::RssOriginalManifest =
+        serde_json::from_value(manifest.clone()).into_diagnostic()?;
+    let reference = manifest
+        .reference()
+        .map_err(|error| miette::miette!("{error}"))?;
+    if work.context["purpose"]["parameters"]["rss_evidence"]
+        != json!({"manifest_revision":reference,"events":manifest.events.len()})
+    {
+        return Err(miette::miette!(
+            "RSS publication manifest differs from inspected Work"
+        ));
+    }
+    let resources = work
+        .plan
+        .resources
+        .iter()
+        .enumerate()
+        .map(|(index, guard)| (guard.address.as_str(), (index, guard)))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    manifest
+        .events
+        .iter()
+        .map(|event| {
+            let address = format!(
+                "{}/events/{}.json",
+                lk_core::rss_original::RSS_ORIGINAL_STORE,
+                event.revision
+            );
+            let (resource, guard) = resources.get(address.as_str()).ok_or_else(|| {
+                miette::miette!("RSS publication event is absent from inspected Work")
+            })?;
+            if guard.authority != SemanticAuthority::RssEvent || guard.revision != event.revision {
+                return Err(miette::miette!(
+                    "RSS publication event differs from its inspected guard"
+                ));
+            }
+            Ok(json!({"resource":resource,"event_id":event.event_id,"revision":event.revision}))
+        })
+        .collect::<miette::Result<Vec<_>>>()
+        .map(Value::Array)
+}
+
 pub(in crate::commands) fn finalization_request(
     config: &Config,
     task: &QueueTask,
@@ -426,13 +491,14 @@ pub(in crate::commands) fn finalization_request(
         serde_json::from_value(work.context["subject"].clone()).into_diagnostic()?;
     let view = FinalizationView::build(work, completed)?;
     Ok(json!({
-        "schema":"native-finalize-results-v3", "context_revision":context_revision,
+        "schema":"native-finalize-results-v4", "context_revision":context_revision,
         "completed":view.observation, "contracts":contracts,
         "inspected_resources":view.resources,
+        "rss_evidence_bindings":rss_evidence_bindings(task, work)?,
         "max_input_bytes":work.max_input_bytes, "max_result_bytes":work.plan.max_result_bytes,
         "max_response_bytes":super::generation::response_limit(task, &subject, &work.context, context_revision, work.plan.max_result_bytes)?,
         "response_schema":super::generation::schema(),
-        "instructions":format!("Finalize only this exact Work from its complete guarded root observation. inspected_resources is the complete planned read roster with every native resource index and full guard. completed.evidence_resources lists the exact cited subset by resource index into that roster; use it with this Work's finding/question/resolution ranges. Captured context retains its own mappings. No guard or observation content was dropped. input_revision identifies the canonical native observation, not a hash to reconstruct from this model view. The roster is not source content or a semantic identity judgment. The supplied completed object replaces work result/status setup reads; preceding discovery and full evidence observations must not restart. {}", super::generation::instruction()),
+        "instructions":format!("Finalize only this exact Work from its complete guarded root observation. inspected_resources is the complete planned read roster with every native resource index and full guard. completed.evidence_resources lists the exact cited subset by resource index into that roster; use it with this Work's finding/question/resolution ranges. Captured context retains its own mappings. No guard or observation content was dropped. input_revision identifies the canonical native observation, not a hash to reconstruct from this model view. The roster is not source content or a semantic identity judgment. rss_evidence_bindings supplies exact retained-manifest event_id/revision selectors and their inspected resource indices; copy selectors only for articles that support the reported concept. Do not reconstruct IDs from URLs, titles or payload filenames, infer support from roster membership, or upgrade legacy page-only evidence. The supplied completed object replaces work result/status setup reads; preceding discovery and full evidence observations must not restart. {}", super::generation::instruction()),
     }))
 }
 
@@ -472,13 +538,14 @@ pub(in crate::commands) fn frontier_request(
         crate::commands::execution::finalization::generation_contracts(config, kind, target.kind)?;
     let view = FinalizationView::build(work, frontier)?;
     Ok(json!({
-        "schema":"native-finalize-frontier-v3", "context_revision":work.plan.subject_revision,
+        "schema":"native-finalize-frontier-v4", "context_revision":work.plan.subject_revision,
         "frontier":view.observation, "contracts":contracts,
         "inspected_resources":view.resources,
+        "rss_evidence_bindings":rss_evidence_bindings(task, work)?,
         "max_input_bytes":work.max_input_bytes,"max_result_bytes":work.plan.max_result_bytes,
         "max_response_bytes":super::generation::response_limit(task, &subject, &work.context, &work.plan.subject_revision, work.plan.max_result_bytes)?,
         "response_schema":super::generation::schema(),
-        "instructions":format!("Finalize only this exact Work from the supplied complete current frontier. Its observations cover every planned inspection exactly once; no combined reduction or joint verdict has been recorded. Read every observation and evidence mapping. inspected_resources is the complete planned read roster with every native resource index and full guard. frontier.evidence_resources lists the exact cited subset by resource index into that roster; use it with this Work's finding/question/resolution ranges. Captured context retains its own mappings. No guard or observation content was dropped. input_revision identifies the canonical native frontier, not a hash to reconstruct from this model view. The roster is not source content or a semantic identity judgment. Compare claims only under their declared scope and effective time; an inherited resolution is not authority to resolve another open question. Processing concerns cannot be relabeled as source uncertainty. The frontier replaces work result/status setup reads; do not restart paid inspections or write a reduction output. Rust owns its distinct guarded completion proof and final publication. {}", super::generation::instruction()),
+        "instructions":format!("Finalize only this exact Work from the supplied complete current frontier. Its observations cover every planned inspection exactly once; no combined reduction or joint verdict has been recorded. Read every observation and evidence mapping. inspected_resources is the complete planned read roster with every native resource index and full guard. frontier.evidence_resources lists the exact cited subset by resource index into that roster; use it with this Work's finding/question/resolution ranges. Captured context retains its own mappings. No guard or observation content was dropped. input_revision identifies the canonical native frontier, not a hash to reconstruct from this model view. The roster is not source content or a semantic identity judgment. rss_evidence_bindings supplies exact retained-manifest event_id/revision selectors and their inspected resource indices; copy selectors only for articles that support the reported concept. Do not reconstruct IDs from URLs, titles or payload filenames, infer support from roster membership, or upgrade legacy page-only evidence. Compare claims only under their declared scope and effective time; an inherited resolution is not authority to resolve another open question. Processing concerns cannot be relabeled as source uncertainty. The frontier replaces work result/status setup reads; do not restart paid inspections or write a reduction output. Rust owns its distinct guarded completion proof and final publication. {}", super::generation::instruction()),
     }))
 }
 
@@ -685,6 +752,76 @@ mod tests {
     }
 
     #[test]
+    fn bounded_finalizers_supply_exact_rss_selectors_from_the_inspected_manifest() {
+        use lk_core::rss_original::{RSS_ORIGINAL_SCHEME, RSS_ORIGINAL_STORE};
+        let (mut task, _, mut context, mut resources, _, _) = fixture();
+        let text = "Pinned original event";
+        let revision = lk_core::concept::file_revision(text);
+        let date = "2026-10-24".parse().unwrap();
+        let event_id = lk_core::event::EventId::new("rss", date, "entry");
+        let manifest: lk_core::rss_original::RssOriginalManifest = serde_json::from_value(json!({
+            "schema":RSS_ORIGINAL_SCHEME,"source_id":"rss","date":date,
+            "events":[{"event_id":event_id,"revision":revision,"bytes":text.len(),
+                "event_timestamp":"2026-10-24T00:00:00Z","title":"Original","url":null}]
+        }))
+        .unwrap();
+        task.input.insert("rss_original".into(), json!(manifest));
+        context["purpose"]["parameters"]["rss_evidence"] = json!({
+            "manifest_revision":manifest.reference().unwrap(),"events":1
+        });
+        resources.push(SemanticResource {
+            address: format!("{RSS_ORIGINAL_STORE}/events/{revision}.json"),
+            revision: revision.clone(),
+            authority: SemanticAuthority::RssEvent,
+            text: text.into(),
+        });
+        let work = Work::build(
+            &resources,
+            "scope",
+            context.clone(),
+            WorkLimits {
+                max_input_bytes: 262144,
+                max_result_bytes: 32768,
+            },
+        )
+        .unwrap();
+        let expected = json!([{"resource":1,"event_id":event_id,"revision":revision}]);
+        let completed = json!({"kind":"finalize","work_id":work.plan.id,
+            "context":context,"input_revision":"root-input","output":{"summary":"Source finding"},
+            "evidence":work.inspection_guards().unwrap()});
+        let frontier = json!({"kind":"finalize-frontier","work_id":work.plan.id,
+            "context":context,"input_revision":"frontier-input","observations":[],
+            "evidence":work.inspection_guards().unwrap()});
+        let root = finalization_request(&config(), &task, &work, "scope", &completed).unwrap();
+        let frontier_request = frontier_request(&config(), &task, &work, &frontier).unwrap();
+        for request in [&root, &frontier_request] {
+            assert_eq!(request["rss_evidence_bindings"], expected);
+            assert!(!serde_json::to_string(request).unwrap().contains(text));
+        }
+        assert_eq!(canonical_observation(&root, "completed"), completed);
+        assert_eq!(
+            canonical_observation(&frontier_request, "frontier"),
+            frontier
+        );
+        let mut changed = task.clone();
+        changed.input.remove("rss_original");
+        assert!(finalization_request(&config(), &changed, &work, "scope", &completed).is_err());
+        let mut changed = task.clone();
+        changed.input.get_mut("rss_original").unwrap()["events"][0]["revision"] =
+            "f".repeat(64).into();
+        assert!(finalization_request(&config(), &changed, &work, "scope", &completed).is_err());
+        let mut changed = work.clone();
+        changed.plan.resources[1].authority = SemanticAuthority::Page;
+        assert!(finalization_request(&config(), &task, &changed, "scope", &completed).is_err());
+        let (legacy, _, context, _, work, _) = fixture();
+        let completed = json!({"kind":"finalize","work_id":work.plan.id,
+            "context":context,"input_revision":"root-input","output":{"summary":"Legacy page only"},
+            "evidence":work.inspection_guards().unwrap()});
+        let legacy = finalization_request(&config(), &legacy, &work, "scope", &completed).unwrap();
+        assert_eq!(legacy["rss_evidence_bindings"], json!([]));
+    }
+
+    #[test]
     fn finalizer_view_requires_exact_unique_native_evidence_references() {
         let (_, _, _, _, work, _) = fixture();
         let roster = work.inspection_guards().unwrap();
@@ -858,7 +995,7 @@ mod tests {
         assert_eq!(rejected["max_input_bytes"], request_bytes - 1);
         assert_eq!(rejected["canonical_input_bytes"], canonical_bytes);
         let components = rejected["request_components"].as_object().unwrap();
-        assert_eq!(components.len(), 8);
+        assert_eq!(components.len(), 9);
         assert_eq!(
             components
                 .values()
@@ -886,10 +1023,11 @@ mod tests {
                 "input_revision":"same canonical identity"
             },
             "inspected_resources":[{"address":"한글.md"}],
+            "rss_evidence_bindings":[],
             "contracts":["exact rules"],
             "response_schema":{"type":"object"},
             "instructions":"preserve every claim\n",
-            "schema":"native-finalize-frontier-v3"
+            "schema":"native-finalize-frontier-v4"
         });
         let raw = serde_json::to_vec(&request).unwrap();
         let components =
@@ -900,6 +1038,7 @@ mod tests {
             ("context", &request["frontier"]["context"]),
             ("proof", &request["frontier"]["proof"]),
             ("inspected_resources", &request["inspected_resources"]),
+            ("rss_evidence_bindings", &request["rss_evidence_bindings"]),
             ("contracts", &request["contracts"]),
             ("response_schema", &request["response_schema"]),
             ("instructions", &request["instructions"]),

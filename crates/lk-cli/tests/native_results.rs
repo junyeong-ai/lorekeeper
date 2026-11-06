@@ -26,7 +26,7 @@ def encode(output):
 if mode in ['host-failure','host-envelope-error']:
     print(json.dumps({'type':'result','subtype':'error_during_execution','is_error':True,'errors':['PRIVATE_CANARY_ERROR']}))
     raise SystemExit(1 if mode=='host-failure' else 0)
-if request.get('schema') in ['native-selected-results-v3','native-finalize-results-v3','native-finalize-frontier-v3']:
+if request.get('schema') in ['native-selected-results-v3','native-finalize-results-v4','native-finalize-frontier-v4']:
     assert '--safe-mode' not in sys.argv
     assert '--output-schema' in sys.argv or '--json-schema' in sys.argv
     assert 'Do not write result files' in raw or 'do not write result files' in raw
@@ -53,7 +53,7 @@ if request.get('schema') in ['native-selected-results-v3','native-finalize-resul
         assert [entry['resource'] for entry in roster]==list(range(len(roster)))
         if (root/'expect-uncited-owner').exists():
             assert any(entry['resource'] not in completed['evidence_resources'] for entry in roster)
-    if request['schema']=='native-finalize-frontier-v3':
+    if request['schema']=='native-finalize-frontier-v4':
         (root/'last-frontier.json').write_text(json.dumps(request))
         assert completed['observations'] and completed['proof']['nodes']
     tasks=request.get('tasks') or [{'task':{'kind':completed['context']['purpose']['task_kind'],
@@ -1144,7 +1144,7 @@ fn result_identity_capacity_defers_without_calls_and_preserves_independent_work(
                         .all(|task| task["task"]["task_id"] != blocked.task_id)
                 );
             } else {
-                assert_ne!(call["schema"], "native-finalize-results-v3");
+                assert_ne!(call["schema"], "native-finalize-results-v4");
             }
         }
         for stage in report["stages"].as_array().unwrap() {

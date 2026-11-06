@@ -4,7 +4,7 @@ Contents: selected tasks; revision ownership; completed Work; complete observati
 coverage; semantic response.
 
 Use only when the native controller supplies `native-selected-results-v3`,
-`native-finalize-results-v3` or `native-finalize-frontier-v3`. The complete request arrives through supervised stdin.
+`native-finalize-results-v4` or `native-finalize-frontier-v4`. The complete request arrives through supervised stdin.
 It is neither semantic completion nor permission to process unrelated work.
 
 Its task metadata, exact context, evidence and shared contracts replace ordinary
@@ -52,9 +52,17 @@ required identity judgment is absent from the observations, use the permitted ta
 read or return `needs-action`. The roster contains guards, not source bodies; native
 revision fields remain opaque and domain-specific.
 
+`rss_evidence_bindings` maps each bound original article to its inspected resource
+index and exact `event_id`/`revision` selector. Choose only articles supporting the
+reported concept; copy their selectors rather than reconstructing identities from
+URLs, titles or payload filenames. Rust supplies these bindings from the retained
+manifest after matching its revision and event guards to this Work. The bindings
+establish article identity, not semantic support. An empty list supplies no bound
+original authority and cannot upgrade legacy page-only evidence.
+
 ## Complete observation coverage
 
-`native-finalize-frontier-v3` supplies `frontier` instead of `completed`. Its current
+`native-finalize-frontier-v4` supplies `frontier` instead of `completed`. Its current
 observations jointly cover every planned inspection exactly once, but no combined
 root observation has been recorded. Read every supplied observation, its source
 questions, resolutions and evidence mapping. Compare claims under their stated scope
