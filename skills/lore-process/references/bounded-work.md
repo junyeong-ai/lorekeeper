@@ -212,8 +212,9 @@ expanded tree. The `refined` work-step outcome records that transition, not a co
 observation. Children, reductions and legacy requests cannot request automatic refinement.
 Generic `needs-action`, output capacity and historical reason-only holds never trigger it.
 If the expansion cannot fit its metadata bound, the exact request remains held instead.
-Calls and parallelism stay within the originating job's existing budgets. Restart
-continues the saved children; it does not replay the parent or reset the call budget.
+Refinement does not reset the originating job's call or parallel budgets. A later
+authorized run resumes the saved children using that run's ordinary budgets instead
+of replaying the parent.
 Further processing holds remain incomplete and require their own supported recovery.
 
 New plans group consecutive observations using the exact reduction envelope and each
