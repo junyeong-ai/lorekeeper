@@ -79,6 +79,7 @@ mod native {
     #[serde(rename_all = "kebab-case")]
     enum WorkOutcome {
         Recorded,
+        Refined,
         Staged,
         Restaged,
         AlreadyComplete,
@@ -226,6 +227,7 @@ mod native {
 
     enum ObservationStep {
         Recorded,
+        Refined,
         Deferred(String),
         Failed,
     }
@@ -1507,6 +1509,17 @@ mod native {
                 Ok(execution::observation::ObservationResponse::NeedsAction(reason)) => Some(
                     crate::commands::work::InspectionResponse::NeedsAction(reason),
                 ),
+                Ok(execution::observation::ObservationResponse::SmallerInspection(reason)) => Some(
+                    crate::commands::work::InspectionResponse::SmallerInspection {
+                        reason,
+                        response: crate::commands::work::state::RefinementResponse {
+                            response_revision: lk_core::rss_original::digest(&reply.bytes),
+                            response_json_bytes: metrics
+                                .result_json_bytes
+                                .expect("decoded response size"),
+                        },
+                    },
+                ),
                 Err(error) => {
                     if let Some(capacity) =
                         error.downcast_ref::<crate::commands::work::state::OutputCapacity>()
@@ -1568,6 +1581,14 @@ mod native {
         ) -> ObservationStep {
             use crate::commands::work::InspectionRecordOutcome;
             match result {
+                Ok(InspectionRecordOutcome::Refined { added_nodes }) => {
+                    metrics.outcome = WorkOutcome::Refined;
+                    self.result.work_telemetry.retained_progress.action_receipts += 1;
+                    self.queue_replan = true;
+                    self.record("bounded inspection refinement", StageState::Completed,
+                        Some(format!("{node}: retained native refinement request and added {added_nodes} observation nodes; no observation recorded")));
+                    ObservationStep::Refined
+                }
                 Ok(InspectionRecordOutcome::Recorded(progress)) => {
                     if progress.completed <= completed
                         || progress.ready.iter().any(|ready| ready == node)
@@ -1600,7 +1621,8 @@ mod native {
                             metrics.outcome = WorkOutcome::Rejected;
                             ("bounded observation evidence", reason)
                         }
-                        InspectionRecordOutcome::Recorded(_) => unreachable!(),
+                        InspectionRecordOutcome::Recorded(_)
+                        | InspectionRecordOutcome::Refined { .. } => unreachable!(),
                     };
                     self.result.work_telemetry.retained_progress.action_receipts += 1;
                     self.inspection_deferred.insert(id.into(), reason.clone());
@@ -2651,7 +2673,7 @@ mod native {
                     .bounded_observation_step(id, progress, request, preparation_duration_ms)
                     .await
                 {
-                    ObservationStep::Recorded => WorkStep::Pending,
+                    ObservationStep::Recorded | ObservationStep::Refined => WorkStep::Pending,
                     ObservationStep::Deferred(reason) => WorkStep::Deferred(reason),
                     ObservationStep::Failed => WorkStep::Failed,
                 },
@@ -3792,6 +3814,8 @@ mod native {
                                 .map_err(|error| miette::miette!("{error}"))?
                                 .len()
                                 > budget.max_input_bytes
+                                || crate::commands::work::native::selected_characters(&inputs)?
+                                    > lk_core::semantic::INSPECTION_CHARACTERS.get()
                             {
                                 flush(&mut batch, &mut jobs);
                             }

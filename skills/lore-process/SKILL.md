@@ -82,6 +82,9 @@ schema generation replaces that file wholesale.
    Follow the returned bounded plan before loading a growing resource roster;
    multi-part work requires complete guarded reduction. Extraction source observations
    use the separate `work source-plan` phase described in discovery.
+   Native new-plan Inspect can explicitly request one smaller assignment; the controller
+   owns that bounded transition. Generic holds and legacy plans still require explicit
+   recovery. See [reading workload and refinement](references/bounded-work.md#plan-and-resume).
 
    Extraction must follow the schema's convergence procedure: resolve every
    source-written name/alias, search distinguishing terms, and examine candidate scope.

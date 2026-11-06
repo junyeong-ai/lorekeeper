@@ -23,6 +23,7 @@ pub(super) use frontier::FrontierCapture;
 pub(in crate::commands) use frontier::FrontierUnavailable;
 use frontier::{FrontierProof, FrontierSeal};
 pub(crate) use inspection::OutputCapacity;
+pub(crate) use inspection::RefinementResponse;
 pub(crate) use inspection::{ObservationCandidate, ObservationRecordPlan, ObservationViolation};
 pub(crate) use output::ObservationTextError;
 #[cfg(unix)]
@@ -718,19 +719,24 @@ fn nonblank(value: &str) -> miette::Result<()> {
     Ok(())
 }
 
-fn context_overhead(context: &Value) -> miette::Result<usize> {
+fn context_overhead(
+    context: &Value,
+    max_part_characters: Option<std::num::NonZeroUsize>,
+) -> miette::Result<usize> {
     if !context.is_object() || context.get("purpose").is_none_or(Value::is_null) {
         return Err(fail(
             "work context requires an object with an explicit semantic purpose",
         ));
     }
     let placeholder = "0".repeat(64);
-    Ok(encoded(&json!({
+    let mut envelope = json!({
         "work_id": placeholder, "node_id": placeholder, "kind": "inspect",
         "context": context, "input": null, "input_revision": placeholder,
-    }))?
-    .len()
-        - 4)
+    });
+    if let Some(characters) = max_part_characters {
+        envelope["inspection"] = json!({"max_characters":characters,"can_refine":false});
+    }
+    Ok(encoded(&envelope)?.len() - 4)
 }
 
 pub(crate) fn inherited_questions<'a>(
@@ -808,24 +814,44 @@ fn validate_output_questions(output: &WorkOutput, children: &[&WorkOutput]) -> m
 }
 
 impl Work {
+    #[cfg(test)]
     pub fn build(
         resources: &[SemanticResource],
         subject_revision: &str,
         context: Value,
         limits: WorkLimits,
     ) -> miette::Result<Self> {
-        let overhead = context_overhead(&context)?;
+        Self::build_with_inspection(resources, subject_revision, context, limits, None)
+    }
+
+    pub fn build_with_inspection(
+        resources: &[SemanticResource],
+        subject_revision: &str,
+        context: Value,
+        limits: WorkLimits,
+        max_part_characters: Option<std::num::NonZeroUsize>,
+    ) -> miette::Result<Self> {
+        let overhead = context_overhead(&context, max_part_characters)?;
         let inner_limit = limits
             .max_input_bytes
             .checked_sub(overhead)
             .filter(|limit| *limit > 0)
             .ok_or_else(|| fail("work context and envelope exceed the input bound"))?;
-        let plan = SemanticPlan::build(
-            subject_revision,
-            resources,
-            inner_limit,
-            limits.max_result_bytes,
-        )
+        let plan = match max_part_characters {
+            Some(characters) => SemanticPlan::build_inspection(
+                subject_revision,
+                resources,
+                inner_limit,
+                limits.max_result_bytes,
+                characters,
+            ),
+            None => SemanticPlan::build(
+                subject_revision,
+                resources,
+                inner_limit,
+                limits.max_result_bytes,
+            ),
+        }
         .map_err(fail)?;
         Ok(Self {
             plan,
@@ -835,6 +861,7 @@ impl Work {
         })
     }
 
+    #[cfg(test)]
     pub fn create(
         session: &MutationSession,
         resources: &[SemanticResource],
@@ -842,12 +869,16 @@ impl Work {
         context: Value,
         limits: WorkLimits,
     ) -> miette::Result<Self> {
-        require_settled(session.root())?;
         let work = Self::build(resources, subject_revision, context, limits)?
             .with_saved_policy(session.root())?;
-        let path = work_path(&work.plan.id, "plan.json")?;
+        work.persist(session)
+    }
+
+    pub fn persist(self, session: &MutationSession) -> miette::Result<Self> {
+        require_settled(session.root())?;
+        let path = work_path(&self.plan.id, "plan.json")?;
         let before = read_optional(session.root(), &path)?;
-        let after = encoded(&work)?;
+        let after = encoded(&self)?;
         if let Some(prior) = &before
             && prior != &after
         {
@@ -856,14 +887,14 @@ impl Work {
             ));
         }
         if before.is_some() {
-            return Ok(work);
+            return Ok(self);
         }
         let mut mutation = MutationPlan::default();
         mutation
             .publish_expected(session.root(), path, before, after)
             .map_err(fail)?;
         session.apply(mutation).map_err(fail)?;
-        Ok(work)
+        Ok(self)
     }
 
     pub fn with_saved_policy(mut self, root: &Path) -> miette::Result<Self> {
@@ -911,10 +942,10 @@ impl Work {
     }
 
     fn verify_context(&self) -> miette::Result<()> {
-        if self
-            .max_input_bytes
-            .checked_sub(context_overhead(&self.context)?)
-            != Some(self.plan.max_input_bytes)
+        if self.max_input_bytes.checked_sub(context_overhead(
+            &self.context,
+            self.plan.max_part_characters,
+        )?) != Some(self.plan.max_input_bytes)
         {
             return Err(fail("work context wrapper or input bound changed"));
         }
@@ -1267,6 +1298,16 @@ impl Work {
             "work_id": self.plan.id, "node_id": node_id, "kind": "inspect",
             "context": self.context, "input": part,
         });
+        if let Some(characters) = self.plan.max_part_characters {
+            let can_refine = match self.plan.parts.iter().find(|part| part.id == node_id) {
+                Some(part) => {
+                    lk_core::semantic::assigned_characters(&part.ranges).map_err(fail)? > 1
+                }
+                None => false,
+            };
+            input["inspection"] = json!({"max_characters":characters,
+                "can_refine":can_refine});
+        }
         let input_revision = revision(&input)?;
         input
             .as_object_mut()

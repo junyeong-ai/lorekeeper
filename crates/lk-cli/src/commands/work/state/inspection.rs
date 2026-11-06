@@ -43,13 +43,55 @@ pub(super) struct InspectionAction {
     pub reason: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capacity: Option<OutputCapacity>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "refinement_response"
+    )]
+    pub refinement_request: Option<RefinementResponse>,
+}
+
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RefinementResponse {
+    pub response_revision: String,
+    pub response_json_bytes: usize,
+}
+
+fn refinement_response<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<RefinementResponse>, D::Error> {
+    RefinementResponse::deserialize(deserializer).map(Some)
 }
 
 impl InspectionAction {
+    pub(super) fn build(request: &Value, contract: &str, reason: String) -> miette::Result<Self> {
+        Ok(Self {
+            input_revision: request["input_revision"]
+                .as_str()
+                .ok_or_else(|| fail("inspection request has no input revision"))?
+                .into(),
+            request_revision: request_revision(request, contract)?,
+            reason,
+            capacity: None,
+            refinement_request: None,
+        })
+    }
+
     pub(super) fn validate(&self, work: &Work) -> miette::Result<()> {
         require_id(&self.input_revision)?;
         require_id(&self.request_revision)?;
         nonblank(&self.reason)?;
+        if let Some(response) = &self.refinement_request {
+            require_id(&response.response_revision)?;
+            if work.plan.max_part_characters.is_none()
+                || response.response_json_bytes == 0
+                || response.response_json_bytes > work.plan.max_result_bytes
+                || self.capacity.is_some()
+            {
+                return Err(fail("invalid inspection refinement request"));
+            }
+        }
         if let Some(capacity) = &self.capacity
             && (capacity.max_bytes == 0
                 || capacity.max_bytes > work.plan.max_result_bytes
@@ -62,6 +104,28 @@ impl InspectionAction {
 }
 
 impl InspectionActions {
+    #[cfg(unix)]
+    pub(super) fn build_refinement(
+        work: &Work,
+        node: &str,
+        action: InspectionAction,
+    ) -> miette::Result<String> {
+        action.validate(work)?;
+        let raw = encoded(&Self {
+            schema: "inspection-actions-v3".into(),
+            work_id: work.plan.id.clone(),
+            actions: BTreeMap::from([(node.into(), action)]),
+        })?;
+        if raw.len() > work.max_input_bytes {
+            return Err(InputCapacity {
+                actual_bytes: raw.len(),
+                max_bytes: work.max_input_bytes,
+            }
+            .into());
+        }
+        Ok(raw)
+    }
+
     #[cfg(unix)]
     pub(super) fn matching_action(
         &self,
@@ -81,14 +145,22 @@ impl InspectionActions {
         let actions: Self = crate::commands::work::receipt::decode(raw).map_err(fail)?;
         if !matches!(
             actions.schema.as_str(),
-            "inspection-actions-v1" | "inspection-actions-v2"
-        ) || actions.work_id != work.plan.id
+            "inspection-actions-v1" | "inspection-actions-v2" | "inspection-actions-v3"
+        ) || (actions.schema == "inspection-actions-v3"
+            && work.plan.max_part_characters.is_none())
+            || actions.work_id != work.plan.id
             || actions.actions.is_empty()
         {
             return Err(fail("invalid inspection action receipt identity or schema"));
         }
         let nodes = work.nodes()?;
         for (node, action) in &actions.actions {
+            action.validate(work)?;
+            if action.refinement_request.is_some() && actions.schema != "inspection-actions-v3" {
+                return Err(fail(
+                    "refinement request requires its declared action format",
+                ));
+            }
             if !nodes.iter().any(|candidate| &candidate.id == node) {
                 return Err(fail("inspection action names an unknown work node"));
             }
@@ -96,8 +168,10 @@ impl InspectionActions {
             require_id(&action.request_revision)?;
             nonblank(&action.reason)?;
             if let Some(capacity) = &action.capacity
-                && (actions.schema != "inspection-actions-v2"
-                    || capacity.max_bytes == 0
+                && (!matches!(
+                    actions.schema.as_str(),
+                    "inspection-actions-v2" | "inspection-actions-v3"
+                ) || capacity.max_bytes == 0
                     || capacity.max_bytes > work.plan.max_result_bytes
                     || capacity.actual_bytes <= capacity.max_bytes)
             {
@@ -234,7 +308,13 @@ impl Work {
         contract: &str,
         reason: String,
     ) -> miette::Result<MutationPlan> {
-        self.plan_inspection_block(root, resources, request, contract, reason, None)
+        self.plan_inspection_block(
+            root,
+            resources,
+            request,
+            contract,
+            InspectionAction::build(request, contract, reason)?,
+        )
     }
 
     pub fn plan_inspection_capacity(
@@ -251,14 +331,24 @@ impl Work {
         {
             return Err(fail("invalid inspection capacity rejection"));
         }
-        self.plan_inspection_block(
-            root,
-            resources,
-            request,
-            contract,
-            capacity.to_string(),
-            Some(capacity),
-        )
+        let mut action = InspectionAction::build(request, contract, capacity.to_string())?;
+        action.capacity = Some(capacity);
+        self.plan_inspection_block(root, resources, request, contract, action)
+    }
+
+    #[cfg(unix)]
+    pub fn plan_inspection_refinement_hold(
+        &self,
+        root: &Path,
+        resources: &[SemanticResource],
+        request: &Value,
+        contract: &str,
+        reason: String,
+        response: RefinementResponse,
+    ) -> miette::Result<MutationPlan> {
+        let mut action = InspectionAction::build(request, contract, reason)?;
+        action.refinement_request = Some(response);
+        self.plan_inspection_block(root, resources, request, contract, action)
     }
 
     fn plan_inspection_block(
@@ -267,10 +357,9 @@ impl Work {
         resources: &[SemanticResource],
         request: &Value,
         contract: &str,
-        reason: String,
-        capacity: Option<OutputCapacity>,
+        action: InspectionAction,
     ) -> miette::Result<MutationPlan> {
-        nonblank(&reason)?;
+        action.validate(self)?;
         let evaluated = self.evaluate(root, resources)?;
         let node = evaluated
             .nodes
@@ -286,15 +375,13 @@ impl Work {
         if &current != request {
             return Err(fail("inspection action request changed before recording"));
         }
-        let action = InspectionAction {
-            input_revision: current["input_revision"]
-                .as_str()
-                .expect("native input revision")
-                .into(),
-            request_revision: request_revision(request, contract)?,
-            reason,
-            capacity,
-        };
+        if current["input_revision"].as_str() != Some(action.input_revision.as_str())
+            || request_revision(&current, contract)? != action.request_revision
+            || (action.refinement_request.is_some()
+                && (node.refinement.is_some() || current["inspection"]["can_refine"] != true))
+        {
+            return Err(fail("inspection action differs from its current request"));
+        }
         if let Some(refinements) = evaluated.refinements.clone() {
             return refinements.plan_action(self, root, request, action, evaluated);
         }
@@ -308,8 +395,11 @@ impl Work {
                 actions: BTreeMap::new(),
             },
         };
-        if action.capacity.is_some() {
+        if action.capacity.is_some() && actions.schema != "inspection-actions-v3" {
             actions.schema = "inspection-actions-v2".into();
+        }
+        if action.refinement_request.is_some() {
+            actions.schema = "inspection-actions-v3".into();
         }
         actions.actions.insert(node.id.clone(), action);
         let mut plan = MutationPlan::default();

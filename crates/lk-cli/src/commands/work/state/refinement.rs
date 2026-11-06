@@ -4,8 +4,12 @@ use lk_core::semantic::SemanticPart;
 
 const SCHEMA: &str = "inspection-refinements-v1";
 const QUEUE_SCHEMA: &str = "inspection-refinements-v2";
+const INSPECTION_SCHEMA: &str = "inspection-refinements-v3";
 
 fn refinement_schema(work: &Work) -> miette::Result<&'static str> {
+    if work.plan.max_part_characters.is_some() {
+        return Ok(INSPECTION_SCHEMA);
+    }
     let subject: super::super::resources::Subject =
         serde_json::from_value(work.context["subject"].clone()).map_err(fail)?;
     Ok(match subject {
@@ -70,6 +74,13 @@ struct RefinementWorkload {
     pending_observation_nodes_before: usize,
     pending_observation_nodes_after: usize,
     added_observation_nodes: usize,
+}
+
+#[cfg(unix)]
+impl RefinementPreview {
+    pub(in crate::commands::work) fn added_nodes(&self) -> usize {
+        self.workload.added_observation_nodes
+    }
 }
 
 pub(super) fn path(work: &Work) -> miette::Result<PathBuf> {
@@ -307,8 +318,11 @@ impl Refinements {
         let placeholder = "0".repeat(64);
         let reserve = encoded(&json!({placeholder.clone(): ActionRecord {
             node_id:placeholder.clone(), action:InspectionAction {
-                input_revision:placeholder.clone(), request_revision:placeholder,
+                input_revision:placeholder.clone(), request_revision:placeholder.clone(),
                 reason:String::new(),
+                refinement_request: work.plan.max_part_characters.map(|_| inspection::RefinementResponse {
+                    response_revision: placeholder.clone(), response_json_bytes: usize::MAX,
+                }),
                 capacity:Some(inspection::OutputCapacity { actual_bytes:usize::MAX,
                     max_bytes:work.plan.max_result_bytes }),
             }
@@ -416,6 +430,66 @@ impl Work {
         max_part_characters: usize,
         contract: impl Fn(&Value) -> miette::Result<String>,
     ) -> miette::Result<(MutationPlan, RefinementPreview)> {
+        self.plan_refinement_action(
+            root,
+            resources,
+            node_id,
+            max_part_characters,
+            contract,
+            None,
+        )
+    }
+
+    #[cfg(unix)]
+    pub(in crate::commands::work) fn plan_native_refinement(
+        &self,
+        root: &Path,
+        resources: &[SemanticResource],
+        request: &Value,
+        contract: &str,
+        reason: String,
+        response: inspection::RefinementResponse,
+    ) -> miette::Result<(MutationPlan, RefinementPreview)> {
+        let node_id = request["node_id"]
+            .as_str()
+            .ok_or_else(|| fail("refinement request has no node identity"))?;
+        let part = self
+            .plan
+            .parts
+            .iter()
+            .find(|part| part.id == node_id)
+            .ok_or_else(|| fail("automatic refinement requires an original inspection"))?;
+        let count = characters(&part.ranges)?;
+        if self.plan.max_part_characters.is_none()
+            || count < 2
+            || request["inspection"]["can_refine"] != true
+        {
+            return Err(fail(
+                "automatic refinement is not available for this inspection",
+            ));
+        }
+        let mut action = InspectionAction::build(request, contract, reason)?;
+        action.refinement_request = Some(response);
+        self.plan_refinement_action(
+            root,
+            resources,
+            node_id,
+            count.div_ceil(2),
+            |_| Ok(contract.into()),
+            Some(action),
+        )
+    }
+
+    #[cfg(unix)]
+    fn plan_refinement_action(
+        &self,
+        root: &Path,
+        resources: &[SemanticResource],
+        node_id: &str,
+        max_part_characters: usize,
+        contract: impl Fn(&Value) -> miette::Result<String>,
+        incoming: Option<InspectionAction>,
+    ) -> miette::Result<(MutationPlan, RefinementPreview)> {
         let evaluated = self.evaluate(root, resources)?;
         let node = evaluated
             .nodes
@@ -423,10 +497,26 @@ impl Work {
             .find(|node| node.id == node_id)
             .ok_or_else(|| fail("unknown inspection node"))?;
         let legacy_path = work_path(&self.plan.id, "inspection-actions.json")?;
-        let legacy_raw = match evaluated.raw.get(&legacy_path) {
+        let mut legacy_raw = match evaluated.raw.get(&legacy_path) {
             Some(raw) => Some(raw.clone()),
             None => read_optional(root, &legacy_path)?,
         };
+        let legacy_before = legacy_raw.clone();
+        if let Some(action) = &incoming {
+            action.validate(self)?;
+            if action.refinement_request.is_none() || self.plan.max_part_characters.is_none() {
+                return Err(fail(
+                    "automatic refinement requires its typed native request",
+                ));
+            }
+            if legacy_raw.is_none() {
+                legacy_raw = Some(InspectionActions::build_refinement(
+                    self,
+                    node_id,
+                    action.clone(),
+                )?);
+            }
+        }
         let mut state = match evaluated.refinements.clone() {
             Some(state) => state,
             None => Refinements {
@@ -441,8 +531,31 @@ impl Work {
                 actions: BTreeMap::new(),
             },
         };
+        if let Some(action) = &incoming {
+            let record = ActionRecord {
+                node_id: node_id.into(),
+                action: action.clone(),
+            };
+            if state
+                .actions
+                .get(&action.request_revision)
+                .is_some_and(|prior| prior != &record)
+            {
+                return Err(fail(
+                    "refinement request cannot replace its captured response",
+                ));
+            }
+            state
+                .actions
+                .insert(action.request_revision.clone(), record);
+        }
         let mut mutation = MutationPlan::default();
         let already_refined = state.entries.contains_key(node_id);
+        if already_refined && incoming.is_some() {
+            return Err(fail(
+                "inspection was already refined before its native response",
+            ));
+        }
         let mut original_canonical_request_bytes = None;
         let parent_output = output_path(&self.plan.id, node_id)?;
         if !already_refined && !evaluated.raw.contains_key(&parent_output) {
@@ -458,6 +571,15 @@ impl Work {
                 .map_err(NodeInputError::report)?;
             original_canonical_request_bytes = Some(encoded(&request)?.len());
             let contract = contract(&request)?;
+            if let Some(action) = &incoming
+                && (node.refinement.is_some()
+                    || request["input_revision"].as_str() != Some(action.input_revision.as_str())
+                    || request_revision(&request, &contract)? != action.request_revision)
+            {
+                return Err(fail(
+                    "native refinement request differs from its original assignment",
+                ));
+            }
             let action = match state.action(self, &request, &contract)? {
                 Some(action) => Some(action),
                 None => legacy_raw
@@ -543,9 +665,16 @@ impl Work {
                 mutation.require_unchanged(dependency, raw);
             }
         }
-        match legacy_raw {
+        match legacy_before {
             Some(raw) => mutation.require_unchanged(legacy_path, raw),
-            None => mutation.require_absent(legacy_path),
+            None => {
+                let raw =
+                    legacy_raw.ok_or_else(|| fail("refinement originating receipt is missing"))?;
+                mutation
+                    .publish_expected(root, legacy_path.clone(), None, raw.clone())
+                    .map_err(fail)?;
+                mutation.require_unchanged(legacy_path, raw);
+            }
         };
         if already_refined {
             mutation.require_unchanged(target, before.expect("existing refinement"));
@@ -633,6 +762,181 @@ mod tests {
             )
             .unwrap();
         session.apply(mutation).unwrap();
+    }
+
+    #[test]
+    fn native_refinement_preserves_paid_state_and_limits_each_original_lineage() {
+        for prior_action in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let session = MutationSession::acquire(root.path()).unwrap();
+            let resources = vec![SemanticResource {
+                address: "wiki/documents/source.md".into(),
+                revision: "source".into(),
+                authority: SemanticAuthority::Page,
+                text: "Condition, exception and attributable evidence.🙂\n\n".repeat(1400),
+            }];
+            let context = json!({"subject":{"kind":"audit","path":"wiki/documents/source.md",
+                "file_revision":"a".repeat(64),"input_revision":"b".repeat(64)},
+                "purpose":{"kind":"audit","locale":"en"},"output_contract":"audit"});
+            let work = Work::build_with_inspection(
+                &resources,
+                "native-subject",
+                context,
+                WorkLimits {
+                    max_input_bytes: 16000,
+                    max_result_bytes: 1200,
+                },
+                Some(lk_core::semantic::INSPECTION_CHARACTERS),
+            )
+            .unwrap()
+            .persist(&session)
+            .unwrap();
+            let first = &work.plan.parts[0].id;
+            work.record(
+                &session,
+                output(&work, root.path(), &resources, first),
+                &resources,
+            )
+            .unwrap();
+            let manifest = root
+                .path()
+                .join(work_path(&work.plan.id, "plan.json").unwrap());
+            let paid = root.path().join(output_path(&work.plan.id, first).unwrap());
+            let original_manifest = std::fs::read(&manifest).unwrap();
+            let original_paid = std::fs::read(&paid).unwrap();
+            let (before, requests) = work
+                .prepare_inspections(root.path(), &resources, 3)
+                .unwrap();
+            assert!(requests.len() >= 2);
+            let request = &requests[0];
+            let node = request["node_id"].as_str().unwrap();
+            assert_eq!(request["inspection"]["can_refine"], true);
+            let legacy_path = root
+                .path()
+                .join(work_path(&work.plan.id, "inspection-actions.json").unwrap());
+            let old_action = if prior_action {
+                hold(
+                    &work,
+                    &session,
+                    &resources,
+                    requests[1]["node_id"].as_str().unwrap(),
+                );
+                Some(std::fs::read(&legacy_path).unwrap())
+            } else {
+                None
+            };
+            let response = inspection::RefinementResponse {
+                response_revision: lk_core::rss_original::digest(
+                    b"supervised private fixture response",
+                ),
+                response_json_bytes: 180,
+            };
+            let mut changed = request.clone();
+            changed["context"]["purpose"]["locale"] = "ko".into();
+            assert!(
+                work.plan_native_refinement(
+                    root.path(),
+                    &resources,
+                    &changed,
+                    "contract",
+                    "Smaller reading units requested.".into(),
+                    response.clone()
+                )
+                .is_err()
+            );
+            let mut invalid_response = response.clone();
+            invalid_response.response_json_bytes = work.plan.max_result_bytes + 1;
+            assert!(
+                work.plan_native_refinement(
+                    root.path(),
+                    &resources,
+                    request,
+                    "contract",
+                    "Smaller reading units requested.".into(),
+                    invalid_response
+                )
+                .is_err()
+            );
+            let (mutation, preview) = work
+                .plan_native_refinement(
+                    root.path(),
+                    &resources,
+                    request,
+                    "contract",
+                    "Smaller reading units requested.".into(),
+                    response.clone(),
+                )
+                .unwrap();
+            assert!(preview.added_nodes() > 0);
+            session.apply(mutation).unwrap();
+            assert_eq!(std::fs::read(&manifest).unwrap(), original_manifest);
+            assert_eq!(std::fs::read(&paid).unwrap(), original_paid);
+            if let Some(old_action) = old_action {
+                assert_eq!(std::fs::read(&legacy_path).unwrap(), old_action);
+            }
+            let saved = std::fs::read(root.path().join(path(&work).unwrap())).unwrap();
+            let sidecar: Value = serde_json::from_slice(&saved).unwrap();
+            assert_eq!(sidecar["schema"], INSPECTION_SCHEMA);
+            let key = request_revision(request, "contract").unwrap();
+            assert_eq!(
+                sidecar["actions"][&key]["action"]["refinement_request"]["response_revision"],
+                response.response_revision
+            );
+            let work = Work::load(root.path(), &work.plan.id).unwrap();
+            assert_eq!(
+                work.progress(root.path(), &resources).unwrap().completed,
+                before.completed
+            );
+            let child = &preview.inspection_nodes[0];
+            let child_request = work.input(root.path(), child, &resources).unwrap();
+            assert_eq!(child_request["inspection"]["can_refine"], false);
+            assert!(
+                work.plan_native_refinement(
+                    root.path(),
+                    &resources,
+                    &child_request,
+                    "contract",
+                    "Another automatic split.".into(),
+                    response.clone()
+                )
+                .is_err()
+            );
+            assert!(
+                work.plan_native_refinement(
+                    root.path(),
+                    &resources,
+                    request,
+                    "contract",
+                    "A late old request.".into(),
+                    response
+                )
+                .is_err()
+            );
+            let (repeat, repeated) = work
+                .plan_refinement(
+                    root.path(),
+                    &resources,
+                    node,
+                    preview.max_part_characters,
+                    |_| Ok("contract".into()),
+                )
+                .unwrap();
+            assert!(repeated.already_refined);
+            assert_eq!(repeated.added_nodes(), 0);
+            session.apply(repeat).unwrap();
+            assert_eq!(
+                std::fs::read(root.path().join(path(&work).unwrap())).unwrap(),
+                saved
+            );
+            hold(&work, &session, &resources, child);
+            assert!(
+                work.load_inspection_action(root.path(), &child_request, "contract")
+                    .unwrap()
+                    .is_some()
+            );
+            assert_eq!(std::fs::read(&manifest).unwrap(), original_manifest);
+            assert_eq!(std::fs::read(&paid).unwrap(), original_paid);
+        }
     }
 
     #[test]
@@ -1284,6 +1588,93 @@ mod tests {
             assert!(!directory.join("pending.json").exists());
             assert!(work.progress(root.path(), &resources).unwrap().ready.len() > 1);
             assert_eq!(original, std::fs::read(&legacy).unwrap());
+        }
+    }
+
+    #[test]
+    fn native_refinement_recovers_initial_action_and_tree_as_one_guarded_transition() {
+        for action_receipted in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let session = MutationSession::acquire(root.path()).unwrap();
+            let (legacy, resources) = fixture(&session);
+            let work = Work::build_with_inspection(
+                &resources,
+                "native-journal",
+                legacy.context.clone(),
+                WorkLimits {
+                    max_input_bytes: legacy.max_input_bytes,
+                    max_result_bytes: legacy.plan.max_result_bytes,
+                },
+                Some(lk_core::semantic::INSPECTION_CHARACTERS),
+            )
+            .unwrap()
+            .persist(&session)
+            .unwrap();
+            let original = std::fs::read(
+                root.path()
+                    .join(work_path(&work.plan.id, "plan.json").unwrap()),
+            )
+            .unwrap();
+            let (_, request) = work.prepare_inspection(root.path(), &resources).unwrap();
+            let (plan, _) = work
+                .plan_native_refinement(
+                    root.path(),
+                    &resources,
+                    &request.unwrap(),
+                    "contract",
+                    "Smaller complete reading required.".into(),
+                    inspection::RefinementResponse {
+                        response_revision: lk_core::rss_original::digest(
+                            b"private native response",
+                        ),
+                        response_json_bytes: 140,
+                    },
+                )
+                .unwrap();
+            let plan_revision = lk_core::concept::file_revision(&encoded(&plan).unwrap());
+            let plan = serde_json::to_value(plan).unwrap();
+            let steps = plan["steps"].as_array().unwrap();
+            let index = steps
+                .iter()
+                .position(|step| {
+                    step["path"]
+                        .as_str()
+                        .unwrap()
+                        .ends_with("inspection-actions.json")
+                        && step.get("after").is_some()
+                })
+                .unwrap();
+            let action = &steps[index];
+            let action_path = root.path().join(action["path"].as_str().unwrap());
+            std::fs::write(&action_path, action["after"].as_str().unwrap()).unwrap();
+            let completed = index + usize::from(action_receipted);
+            drop(session);
+            let directory = root.path().join(".lorekeeper/mutation");
+            std::fs::write(
+                directory.join("pending.json"),
+                encoded(&json!({"version":1,"plan":plan})).unwrap(),
+            )
+            .unwrap();
+            std::fs::write(directory.join("progress.json"),encoded(&json!({"plan_revision":plan_revision,"completed":completed,"checksum":lk_core::concept::file_revision(&format!("{plan_revision}:{completed}"))})).unwrap()).unwrap();
+            let action_bytes = std::fs::read(&action_path).unwrap();
+            let mut changed = action_bytes.clone();
+            changed.push(b' ');
+            std::fs::write(&action_path, changed).unwrap();
+            assert!(MutationSession::acquire(root.path()).is_err());
+            std::fs::write(&action_path, &action_bytes).unwrap();
+            let _recovered = MutationSession::acquire(root.path()).unwrap();
+            assert!(!directory.join("pending.json").exists());
+            assert_eq!(std::fs::read(action_path).unwrap(), action_bytes);
+            assert_eq!(
+                std::fs::read(
+                    root.path()
+                        .join(work_path(&work.plan.id, "plan.json").unwrap())
+                )
+                .unwrap(),
+                original
+            );
+            assert!(work.progress(root.path(), &resources).unwrap().ready.len() > 1);
+            assert!(root.path().join(path(&work).unwrap()).is_file());
         }
     }
 

@@ -33,7 +33,9 @@ A native completion is `{status: "complete", observation: OBSERVATION, action: n
 An inability to complete assigned reading or establish its evidence mapping is
 `{status: "needs-action", observation: null, action: {reason}}`,
 using a concrete nonblank reason. An action records no observation or assessment
-and never supplies invented evidence. The native observation contains only `summary`,
+and never supplies invented evidence. A new original Inspect that explicitly allows
+refinement can instead return `needs-smaller-inspection`; see [plan and resume](#plan-and-resume)
+for its bounded native transition. The native observation contains only `summary`,
 `findings`, `source_questions`, `unresolved` and `resolutions`. Rust binds work, node
 and input identity from the supervised invocation; never return those fields.
 Standalone `work record` still requires its complete identity-bearing format.
@@ -100,8 +102,9 @@ Work input-byte metadata bound. A full or conflicting history refuses rather tha
 discarding an entry. Text-only `observation-rejections-v1` records remain readable
 without conversion. Adding an evidence violation uses `observation-rejections-v2`;
 an existing v1 file is retained byte-for-byte in its digest-checked legacy snapshot.
-The observation schema and host instructions stay unchanged, preserving existing
-exact-contract holds. Existing plan, observation, action and refinement bytes remain
+The rejection sidecar does not itself change the observation schema or host instructions.
+Legacy Inspect and Reduce retain their exact contracts; new-policy original Inspect
+declares its additional response explicitly. Existing plan, observation, action and refinement bytes remain
 unchanged. Pending Work protects this history; verified expired published Work can
 retire it with its complete dependency closure. A v1 reader refuses v2 when it reads
 the file. Still older binaries that do not know this sidecar cannot honor its holds;
@@ -192,6 +195,27 @@ boundaries with `continued` set. Ranges are half-open Unicode scalar offsets,
 not byte offsets. There is no overlapping or omitted source range. Parts are
 execution units, never new documents or concepts.
 
+Fresh native plans use `semantic-ranges-v2` with a separate 80000-scalar assignment
+bound. Both the complete JSON byte limit and the sum of assigned source characters
+must fit. The same reading bound routes oversized whole-input generation and raw
+screening context through source observations; combined whole-input batches share it.
+It is an execution workload policy, not a model token limit or measured quality
+threshold. Short inputs keep one reading unit. Retained `semantic-ranges-v1` plans
+and exact saved selections resume with their original policy and paid bytes.
+
+For a new original Inspect node whose request declares `inspection.can_refine`,
+native inference may return `needs-smaller-inspection` with a nonblank action reason
+and null observation. This typed response permits one automatic refinement of that
+original assignment, each child capped at half the original scalar count rounded up.
+Rust atomically retains the exact request/contract/captured-response receipt and the
+expanded tree. The `refined` work-step outcome records that transition, not a completed
+observation. Children, reductions and legacy requests cannot request automatic refinement.
+Generic `needs-action`, output capacity and historical reason-only holds never trigger it.
+If the expansion cannot fit its metadata bound, the exact request remains held instead.
+Calls and parallelism stay within the originating job's existing budgets. Restart
+continues the saved children; it does not replay the parent or reset the call budget.
+Further processing holds remain incomplete and require their own supported recovery.
+
 New plans group consecutive observations using the exact reduction envelope and each
 child's full result-byte allowance. A reduction can contain more than two children;
 read the request's entire child list. The topology is fixed at planning time, independent
@@ -239,9 +263,12 @@ Keep `inspection-refinements.json` with the Work. It binds exact parent requests
 complete coverage and action history while preserving the original plan, positive
 observations and `inspection-actions.json` bytes. New derived nodes use
 `work-output-refinement-v1`, including retained-question snapshots when needed.
-Audit sidecars retain `inspection-refinements-v1`; queue sidecars use
-`inspection-refinements-v2`. Earlier readers refuse queue refinement when encountered;
-there is no global downgrade lock. Existing plans, observations and actions are never
+Legacy audit sidecars retain `inspection-refinements-v1`; legacy queue sidecars retain
+`inspection-refinements-v2`. New-policy plans use `inspection-refinements-v3` and can
+record captured native refinement responses. Their first original-action file uses
+`inspection-actions-v3`; an existing original-action file remains byte-exact.
+Use a compatible reader for new formats; earlier readers refuse them when encountered,
+without a global downgrade lock. Existing plans, observations and actions are never
 converted. Workers never select a split from reason text or run this operator command
 themselves. Refinement changes execution coverage, not source scope or semantic approval.
 

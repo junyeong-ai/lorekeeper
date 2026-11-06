@@ -74,6 +74,23 @@ fn schema() -> Value {
         "required":["status","observation","action"]})
 }
 
+fn can_refine(request: &Value) -> bool {
+    request["kind"] == "inspect"
+        && request["input"]["policy"] == lk_core::semantic::INSPECTION_POLICY
+        && request["inspection"]["can_refine"] == true
+}
+
+fn response_schema(request: &Value) -> Value {
+    let mut schema = schema();
+    if can_refine(request) {
+        schema["properties"]["status"]["enum"]
+            .as_array_mut()
+            .expect("native status enum")
+            .push("needs-smaller-inspection".into());
+    }
+    schema
+}
+
 #[derive(Debug)]
 pub(in crate::commands) enum ObservationResponse {
     Complete(WorkOutput),
@@ -82,6 +99,7 @@ pub(in crate::commands) enum ObservationResponse {
         violation: ObservationTextError,
     },
     NeedsAction(String),
+    SmallerInspection(String),
 }
 
 #[derive(Deserialize)]
@@ -225,7 +243,7 @@ fn check_response_size(value: &Value, limit: usize) -> miette::Result<()> {
 pub(in crate::commands) fn contract_revision(request: &Value) -> miette::Result<String> {
     Ok(lk_core::rss_original::digest(
         &serde_json::to_vec(&(
-            schema(),
+            response_schema(request),
             evidence_instruction(request)?,
             native_request(request)?,
         ))
@@ -248,6 +266,11 @@ const RETAINED_RESULT_BOUND: &str = "For this reduction, Rust preserves exactly 
 const EVIDENCE_INSTRUCTION_SUFFIX: &str = "Needs-action records no observation and cannot discharge inherited concerns. Native Rust validates and stores the response; do not run lore work record or write files.";
 
 fn evidence_instruction(request: &Value) -> miette::Result<String> {
+    let refinement = if can_refine(request) {
+        "If this assigned inspection needs smaller reading units, return {status: needs-smaller-inspection, observation: null, action: {reason}}. This explicitly requests one native split of this original assignment; it does not claim a provider limit or completion. Use ordinary needs-action for missing evidence, output-fit concerns or any other processing blocker. Rust chooses and guards the smaller units under the existing shared budgets; do not choose ranges or retry the request yourself. "
+    } else {
+        ""
+    };
     let bound = if ActiveQuestions::from_request(request)?.has_inherited() {
         RETAINED_RESULT_BOUND
     } else {
@@ -259,7 +282,7 @@ fn evidence_instruction(request: &Value) -> miette::Result<String> {
         ""
     };
     Ok(format!(
-        "{EVIDENCE_INSTRUCTION_PREFIX}{reduction}{bound}Summary, finding statements, present scope/time/attribution strings, new questions and resolution reasons must contain a non-whitespace character. Empty findings are valid; unknown optional metadata is null, never blank filler. {EVIDENCE_INSTRUCTION_SUFFIX}"
+        "{EVIDENCE_INSTRUCTION_PREFIX}{reduction}{refinement}{bound}Summary, finding statements, present scope/time/attribution strings, new questions and resolution reasons must contain a non-whitespace character. Empty findings are valid; unknown optional metadata is null, never blank filler. {EVIDENCE_INSTRUCTION_SUFFIX}"
     ))
 }
 
@@ -284,7 +307,7 @@ pub(in crate::commands) fn build_invocation(
     build(
         profile,
         &native,
-        schema(),
+        response_schema(input),
         &format!("{instruction}\nNative reply allowance: {limit} compact UTF-8 JSON bytes."),
     )
 }
@@ -486,6 +509,11 @@ pub(in crate::commands) fn decode_observation(
         ("needs-action", None, Some(action)) if !action.reason.trim().is_empty() => {
             Ok(ObservationResponse::NeedsAction(action.reason))
         }
+        ("needs-smaller-inspection", None, Some(action))
+            if can_refine(request) && !action.reason.trim().is_empty() =>
+        {
+            Ok(ObservationResponse::SmallerInspection(action.reason))
+        }
         _ => Err(miette::miette!(
             "worker observation has an invalid completion or action disposition"
         )),
@@ -598,6 +626,53 @@ mod tests {
         ] {
             assert!(decode_response(AgentEngine::ClaudeCode, raw.as_bytes(), 32768).is_err());
         }
+    }
+
+    #[test]
+    fn smaller_inspection_is_typed_and_scoped_to_new_original_requests() {
+        let legacy = request();
+        let refusal = json!({"status":"needs-smaller-inspection","observation":null,
+            "action":{"reason":"Read this assignment in smaller units."}});
+        assert!(decode_observation(refusal.clone(), &legacy, 4096).is_err());
+        assert_eq!(response_schema(&legacy), schema());
+        let mut current = legacy.clone();
+        current["input"]["policy"] = lk_core::semantic::INSPECTION_POLICY.into();
+        current["inspection"] = json!({"max_characters":80000,"can_refine":true});
+        assert_ne!(
+            contract_revision(&legacy).unwrap(),
+            contract_revision(&current).unwrap()
+        );
+        for engine in [AgentEngine::Codex, AgentEngine::ClaudeCode] {
+            let envelope = if engine == AgentEngine::ClaudeCode {
+                json!({"type":"result","subtype":"success","is_error":false,"structured_output":refusal})
+            } else {
+                refusal.clone()
+            };
+            let raw = serde_json::to_vec(&envelope).unwrap();
+            validate_evidence_response(engine, &raw).unwrap();
+            let value = decode_response(engine, &raw, 4096).unwrap();
+            assert!(matches!(
+                decode_observation(value, &current, 4096).unwrap(),
+                ObservationResponse::SmallerInspection(_)
+            ));
+        }
+        let mut ordinary = refusal.clone();
+        ordinary["status"] = "needs-action".into();
+        assert!(matches!(
+            decode_observation(ordinary, &current, 4096).unwrap(),
+            ObservationResponse::NeedsAction(_)
+        ));
+        let mut child = current.clone();
+        child["inspection"]["can_refine"] = false.into();
+        assert_eq!(response_schema(&child), schema());
+        assert!(decode_observation(refusal.clone(), &child, 4096).is_err());
+        let mut reduce = current.clone();
+        reduce["kind"] = "reduce".into();
+        assert_eq!(response_schema(&reduce), schema());
+        assert!(decode_observation(refusal.clone(), &reduce, 4096).is_err());
+        let mut malformed = refusal;
+        malformed["action"]["reason"] = " \u{2003}".into();
+        assert!(decode_observation(malformed, &current, 4096).is_err());
     }
 
     #[test]

@@ -376,6 +376,22 @@ pub(in crate::commands) fn selected_request(
     }))
 }
 
+pub(in crate::commands) fn selected_characters(tasks: &[Value]) -> miette::Result<usize> {
+    tasks.iter().try_fold(0usize, |total, task| {
+        let resources = task["resources"]
+            .as_array()
+            .ok_or_else(|| miette::miette!("selected resources are missing"))?;
+        resources.iter().try_fold(total, |total, resource| {
+            let text = resource["text"]
+                .as_str()
+                .ok_or_else(|| miette::miette!("selected resource text is missing"))?;
+            total
+                .checked_add(text.chars().count())
+                .ok_or_else(|| miette::miette!("selected reading workload overflow"))
+        })
+    })
+}
+
 pub(in crate::commands) fn finalization_request(
     config: &Config,
     task: &QueueTask,
@@ -573,6 +589,33 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn selected_reading_workload_counts_complete_multitask_unicode_sources() {
+        let selected =
+            json!({"resources":[{"text":"a".repeat(40000)},{"text":"가".repeat(20000)}]});
+        let before = selected.clone();
+        assert_eq!(
+            selected_characters(std::slice::from_ref(&selected)).unwrap(),
+            60000
+        );
+        assert_eq!(
+            selected_characters(&[selected.clone(), selected.clone()]).unwrap(),
+            120000
+        );
+        assert!(
+            selected_characters(&[selected.clone(), selected.clone()]).unwrap()
+                > lk_core::semantic::INSPECTION_CHARACTERS.get()
+        );
+        assert_eq!(selected, before);
+        for malformed in [
+            json!({}),
+            json!({"resources":[{}]}),
+            json!({"resources":[{"text":null}]}),
+        ] {
+            assert!(selected_characters(&[malformed]).is_err());
+        }
     }
 
     #[test]

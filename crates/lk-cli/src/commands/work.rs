@@ -191,11 +191,32 @@ fn expected(
     config: &lk_core::config::Config,
     config_revision: &str,
 ) -> miette::Result<Work> {
-    let current = Work::build(
+    let legacy = expected_with_inspection(root, prepared, config, config_revision, None)?;
+    if legacy.is_planned(root)? {
+        return Ok(legacy);
+    }
+    expected_with_inspection(
+        root,
+        prepared,
+        config,
+        config_revision,
+        Some(lk_core::semantic::INSPECTION_CHARACTERS),
+    )
+}
+
+fn expected_with_inspection(
+    root: &Path,
+    prepared: &Prepared,
+    config: &lk_core::config::Config,
+    config_revision: &str,
+    max_part_characters: Option<std::num::NonZeroUsize>,
+) -> miette::Result<Work> {
+    let current = Work::build_with_inspection(
         &prepared.resources,
         &prepared.revision(config_revision)?,
         prepared.context.clone(),
         limits(config)?,
+        max_part_characters,
     )?
     .with_saved_policy(root)?;
     if current.is_planned(root)? {
@@ -226,11 +247,12 @@ fn expected(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(current),
         Err(error) => return Err(error).into_diagnostic(),
     }
-    let legacy = Work::build(
+    let legacy = Work::build_with_inspection(
         &prepared.resources,
         &legacy_revision,
         prepared.context.clone(),
         limits(config)?,
+        max_part_characters,
     )?
     .with_saved_policy(root)?;
     if legacy.is_planned(root)? {
@@ -247,13 +269,7 @@ fn persist_prepared(
     prepared: &Prepared,
 ) -> miette::Result<Work> {
     let work = expected(session.root(), prepared, config, config_revision)?;
-    Work::create(
-        session,
-        &prepared.resources,
-        &work.plan.subject_revision,
-        prepared.context.clone(),
-        limits(config)?,
-    )
+    work.persist(session)
 }
 
 fn guard_prepared(
@@ -830,7 +846,7 @@ fn screening_with_inventory(
         json!({"role":"complete-retained-input", "source_revision":source_revision,
             "context":inventory.source.context, "resources":inventory.source.resources})
     };
-    let source_fits = match selection::Selection::source_fits(
+    let mut source_fits = match selection::Selection::source_fits(
         &binding,
         &context,
         &inventory.capture,
@@ -851,6 +867,57 @@ fn screening_with_inventory(
             });
         }
     };
+    if source_fits
+        && !inventory.capture.candidates.is_empty()
+        && inventory
+            .source
+            .resources
+            .iter()
+            .try_fold(0usize, |total, resource| {
+                total
+                    .checked_add(resource.text.chars().count())
+                    .ok_or_else(|| miette::miette!("source reading workload overflow"))
+            })?
+            > lk_core::semantic::INSPECTION_CHARACTERS.get()
+    {
+        let retained = (|| {
+            selection::Selection::build(
+                binding.clone(),
+                context.clone(),
+                &inventory.capture,
+                bounds.max_input_bytes,
+                bounds.max_result_bytes,
+            )?
+            .prefer_saved_configuration(
+                root,
+                config_revision,
+                &inventory.source.legacy_revision(config_revision)?,
+            )?
+            .prefer_computed_receipts(root)
+        })();
+        let retained = match retained {
+            Ok(retained) => retained,
+            Err(error) => {
+                let Some(capacity) = error
+                    .downcast_ref::<selection::ScreeningCapacity>()
+                    .copied()
+                else {
+                    return Err(error);
+                };
+                return Ok(ScreeningPreparation::Capacity {
+                    inventory: Box::new(inventory),
+                    capacity,
+                });
+            }
+        };
+        if retained.is_planned(root)? {
+            return Ok(ScreeningPreparation::Candidates(Box::new(Screening {
+                selection: retained,
+                inventory,
+            })));
+        }
+        source_fits = false;
+    }
     if !source_fits {
         let work = expected(root, &inventory.source, config, config_revision)?;
         let observed = if work.is_planned(root)? {
@@ -1783,7 +1850,10 @@ fn prepare_task_in_session(
             };
             let request = native::selected_request(config, std::slice::from_ref(&input))?;
             let bytes = serde_json::to_vec(&request).into_diagnostic()?.len();
-            if bytes <= work.max_input_bytes {
+            if bytes <= work.max_input_bytes
+                && native::selected_characters(std::slice::from_ref(&input))?
+                    <= lk_core::semantic::INSPECTION_CHARACTERS.get()
+            {
                 return Ok(TaskWork::WholeInput {
                     native: Some(Box::new(input)),
                     individual,
@@ -2097,6 +2167,10 @@ pub(super) fn inspection_action(
 pub(super) enum InspectionResponse {
     Complete(Box<state::ObservationCandidate>),
     NeedsAction(String),
+    SmallerInspection {
+        reason: String,
+        response: state::RefinementResponse,
+    },
     Capacity(state::OutputCapacity),
 }
 
@@ -2111,6 +2185,7 @@ pub(super) struct InspectionReply {
 #[cfg(unix)]
 pub(super) enum InspectionRecordOutcome {
     Recorded(state::WorkProgress),
+    Refined { added_nodes: usize },
     Deferred(String),
     Rejected(String),
     InvalidText(String),
@@ -2344,6 +2419,41 @@ pub(super) fn record_inspections(
                         let revision =
                             super::execution::observation::contract_revision(&reply.request)?;
                         let (mut plan, outcome) = match response {
+                            InspectionResponse::SmallerInspection { reason, response } => {
+                                match work.plan_native_refinement(
+                                    root,
+                                    &prepared.resources,
+                                    &reply.request,
+                                    &revision,
+                                    reason.clone(),
+                                    response.clone(),
+                                ) {
+                                    Ok((plan, preview)) => (
+                                        plan,
+                                        InspectionRecordOutcome::Refined {
+                                            added_nodes: preview.added_nodes(),
+                                        },
+                                    ),
+                                    Err(error) => {
+                                        let Some(capacity) =
+                                            error.downcast_ref::<state::InputCapacity>()
+                                        else {
+                                            return Err(error);
+                                        };
+                                        (
+                                            work.plan_inspection_refinement_hold(
+                                                root,
+                                                &prepared.resources,
+                                                &reply.request,
+                                                &revision,
+                                                reason,
+                                                response,
+                                            )?,
+                                            InspectionRecordOutcome::Rejected(capacity.to_string()),
+                                        )
+                                    }
+                                }
+                            }
                             InspectionResponse::NeedsAction(reason) => (
                                 work.plan_inspection_action(
                                     root,
@@ -3224,6 +3334,7 @@ fn progress_value(
         "completed":status.completed,"total":status.total,"complete":status.complete,
         "root_node":status.root_node,"ready_total":total_ready,"ready":ready,
         "max_input_bytes":work.max_input_bytes,"ready_workload":ready_workload,
+        "max_part_characters":work.plan.max_part_characters,
         "limit":limit,"offset":offset,"next_offset":next_offset})
 }
 
@@ -3788,6 +3899,137 @@ mod tests {
         std::fs::write(path, raw).unwrap();
     }
 
+    #[test]
+    fn large_source_screening_preserves_exact_saved_selection_and_uses_new_reading_policy() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let config_path = root.join("config.yaml");
+        std::fs::write(&config_path, format!("vault:\n  root: {}\n  locale: en\nidentity: {{name: Tester, email: tester@example.com}}\nsources:\n  notes:\n    type: manual\n    params: {{inbox_dir: inbox}}\n    concept_policy: supported-new\nexecution:\n  work: {{max_input_bytes: 262144, max_result_bytes: 32768}}\n", serde_json::to_string(&root).unwrap())).unwrap();
+        let (config, config_revision) =
+            lk_core::config::Config::load_with_revision(&config_path).unwrap();
+        let text = "Candidate evidence retains attribution and conditions.\n".repeat(1800);
+        let target = "wiki/documents/source.md";
+        let task = lk_queue::QueueLlmClient::new(root.join(".lorekeeper/queue")).build_task(
+            "ext",
+            lk_queue::TaskKind::ExtractConcepts,
+            lk_queue::ExtractConceptsRequest {
+                concept_policy: lk_core::config::ConceptPolicy::SupportedNew,
+                rss_original: None,
+                text: text.clone(),
+                source_id: "notes".into(),
+                source_type: lk_core::config::SourceType::Manual,
+                date: jiff::civil::date(2026, 10, 22),
+                focus: None,
+                locale: lk_core::i18n::Locale::En,
+                categories: vec![],
+                target: lk_queue::TaskTarget {
+                    vault_path: target.into(),
+                    kind: lk_queue::TargetKind::DocumentConcepts,
+                    anchor: "## Related Concepts".into(),
+                },
+            },
+        );
+        write(
+            &root,
+            target,
+            &format!(
+                "---\ntype: document\ntitle: Source\nllm_inputs:\n  concepts: {}\n---\n## Content\n{text}\n\n## Related Concepts\n",
+                task.cache_hash
+            ),
+        );
+        write(
+            &root,
+            "wiki/concepts/candidate.md",
+            "---\ntype: concept\ntitle: Candidate\n---\n## Synthesis\nCandidate scope and conditions.\n",
+        );
+        write(
+            &root,
+            ".lorekeeper/queue/fixture.jsonl",
+            &(serde_json::to_string(&task).unwrap() + "\n"),
+        );
+        let queries = [lk_core::discovery::DiscoveryQuery {
+            query: "Candidate".into(),
+            phrase: true,
+            spacing: false,
+        }];
+        let inventory = || {
+            resources::selection_inventory_controlled(
+                &root,
+                &config,
+                &task.task_id,
+                &queries,
+                &lk_vault::ReadControl::default(),
+            )
+            .unwrap()
+        };
+        let captured = inventory();
+        assert!(!captured.capture.candidates.is_empty());
+        let preparation =
+            screening_with_inventory(&root, &config, &config_revision, captured).unwrap();
+        let ScreeningPreparation::Source { prepared, .. } = preparation else {
+            panic!("large raw source requires bounded observations");
+        };
+        let session = MutationSession::acquire(&root).unwrap();
+        let work = persist_prepared(&session, &config, &config_revision, &prepared).unwrap();
+        assert_eq!(
+            work.plan.max_part_characters,
+            Some(lk_core::semantic::INSPECTION_CHARACTERS)
+        );
+        assert!(work.plan.parts.len() > 1);
+        let before = work_snapshot(&root, &work.plan.id);
+        assert_eq!(
+            persist_prepared(&session, &config, &config_revision, &prepared).unwrap(),
+            work
+        );
+        assert_eq!(work_snapshot(&root, &work.plan.id), before);
+        let captured = inventory();
+        let Subject::Queue {
+            task_id,
+            cache_hash,
+            target,
+            target_revision,
+        } = &captured.source.subject
+        else {
+            unreachable!()
+        };
+        let context = json!({"role":"complete-retained-input","source_revision":captured.source.revision(&config_revision).unwrap(),"context":captured.source.context,"resources":captured.source.resources});
+        let binding = selection::SelectionBinding {
+            task_id: task_id.clone(),
+            cache_hash: cache_hash.clone(),
+            target: target.clone(),
+            target_revision: target_revision.clone(),
+            config_revision: config
+                .semantic_work_revision()
+                .unwrap_or(&config_revision)
+                .into(),
+            inventory_revision: captured.revision.clone(),
+        };
+        let legacy =
+            selection::Selection::build(binding, context, &captured.capture, 262144, 32768)
+                .unwrap();
+        legacy.create(&session, &captured.pages).unwrap();
+        let original = walkdir::WalkDir::new(root.join(".lorekeeper/queue/selection"))
+            .into_iter()
+            .map(Result::unwrap)
+            .filter(|entry| entry.file_type().is_file())
+            .map(|entry| {
+                (
+                    entry.path().to_owned(),
+                    std::fs::read(entry.path()).unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let ScreeningPreparation::Candidates(resumed) =
+            screening_with_inventory(&root, &config, &config_revision, inventory()).unwrap()
+        else {
+            panic!("exact retained screening must resume without paid rescreening");
+        };
+        assert_eq!(resumed.selection.id, legacy.id);
+        for (path, bytes) in original {
+            assert_eq!(std::fs::read(path).unwrap(), bytes);
+        }
+        assert_eq!(work_snapshot(&root, &work.plan.id), before);
+    }
     #[cfg(unix)]
     #[test]
     fn native_inspection_admission_checks_only_the_next_exact_request() {

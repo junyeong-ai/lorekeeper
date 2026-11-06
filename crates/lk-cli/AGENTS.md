@@ -158,6 +158,10 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   fails explicitly, without clipping evidence.
 - Resume current explicit Work plans even when the remaining batch fits whole input;
   validate their exact manifest before using recorded observations.
+- Fresh source inspection uses the shared scalar workload policy as well as complete
+  JSON byte admission. Apply it to Work partitioning, whole-input task batches and raw
+  screening context. Exact retained legacy Work/selection keeps its original policy;
+  persist the selected manifest, never rebuild it with a newer default.
 - Only freshly received unambiguous authored-text or evidence-reference violations can
   create native observation-rejection holds. Validate stored state, current identity
   and question inheritance first; canonical node ranges own evidence membership, not
@@ -184,9 +188,15 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   that snapshot or absence through recording, completion and historical retention. New
   records bind refinement provenance and compose with retained-question snapshots. Use
   the existing byte-budgeted reduction owner, preserve complete original coverage, and
-  retain audit v1 sidecars and use queue v2 sidecars without converting paid bytes;
-  earlier readers refuse queue v2. Refuse refined cross-Work reuse without its complete
+  retain legacy audit v1 and queue v2 sidecars without converting paid bytes;
+  earlier readers refuse unsupported formats. Refuse refined cross-Work reuse without its complete
   closure. Never infer splits from action prose or retry unchanged holds automatically.
+- New-policy original Inspect alone may return `needs-smaller-inspection`. Retain its
+  exact request/contract/captured response and one strictly smaller expansion atomically
+  using v3 sidecars; keep old original-action files unchanged. Children and Reduce cannot
+  request automatic refinement. Expansion input capacity retains the typed hold; unknown
+  errors stay strict. A refined outcome is durable action progress, not a paid observation,
+  and must preserve the same call/parallel budget, cancellation and fresh guard boundaries.
 - Native queue extraction/synthesis may finalize a disjoint current frontier covering
   every planned inspection when all observations, evidence and rules fit the existing
   input limit and no processing blocker remains. Its distinct frontier seal never marks
