@@ -2,11 +2,15 @@
 
 use std::collections::BTreeSet;
 use std::io::Write;
+use std::num::NonZeroUsize;
 
 use pulldown_cmark::{Event, Options};
 use serde::{Deserialize, Serialize};
 
 pub const SEMANTIC_POLICY: &str = "semantic-ranges-v1";
+pub const INSPECTION_POLICY: &str = "semantic-ranges-v2";
+/// Native reading work per request, independent of byte admissibility or model fidelity.
+pub const INSPECTION_CHARACTERS: NonZeroUsize = NonZeroUsize::new(80_000).unwrap();
 const DIGEST_WIDTH: usize = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -48,6 +52,16 @@ pub struct SemanticRange {
     pub resource: usize,
     pub start: usize,
     pub end: usize,
+}
+
+pub fn assigned_characters(ranges: &[SemanticRange]) -> Result<usize> {
+    ranges.iter().try_fold(0usize, |total, range| {
+        range
+            .end
+            .checked_sub(range.start)
+            .and_then(|count| total.checked_add(count))
+            .ok_or_else(|| error("invalid assigned character count"))
+    })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -92,8 +106,20 @@ pub struct SemanticPlan {
     pub subject_revision: String,
     pub max_input_bytes: usize,
     pub max_result_bytes: usize,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "inspection_characters"
+    )]
+    pub max_part_characters: Option<NonZeroUsize>,
     pub resources: Vec<SemanticResourceGuard>,
     pub parts: Vec<SemanticPart>,
+}
+
+fn inspection_characters<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<NonZeroUsize>, D::Error> {
+    NonZeroUsize::deserialize(deserializer).map(Some)
 }
 
 /// One verified view of exact resources for reconstructing several bounded inputs.
@@ -234,6 +260,8 @@ impl SemanticInputs<'_> {
 
     fn context(&self) -> InputContext<'_> {
         InputContext {
+            policy: &self.plan.policy,
+            max_part_characters: self.plan.max_part_characters,
             plan_id: &self.plan.id,
             subject_revision: &self.plan.subject_revision,
             max_input_bytes: self.plan.max_input_bytes,
@@ -356,6 +384,8 @@ impl<'a> TextIndex<'a> {
 }
 
 struct InputContext<'a> {
+    policy: &'a str,
+    max_part_characters: Option<NonZeroUsize>,
     plan_id: &'a str,
     subject_revision: &'a str,
     max_input_bytes: usize,
@@ -386,7 +416,7 @@ impl InputContext<'_> {
             .map(|range| self.range_input(range, self.texts[range.resource].text(range).into()))
             .collect::<Vec<_>>();
         let input_revision = digest(&(
-            SEMANTIC_POLICY,
+            self.policy,
             self.plan_id,
             &part.id,
             self.subject_revision,
@@ -394,7 +424,7 @@ impl InputContext<'_> {
             &ranges,
         ))?;
         Ok(SemanticPartInput {
-            policy: SEMANTIC_POLICY.into(),
+            policy: self.policy.into(),
             plan_id: self.plan_id.into(),
             part_id: part.id.clone(),
             subject_revision: self.subject_revision.into(),
@@ -405,6 +435,11 @@ impl InputContext<'_> {
     }
 
     fn fits(&self, ranges: &[SemanticRange]) -> Result<bool> {
+        if let Some(limit) = self.max_part_characters
+            && assigned_characters(ranges)? > limit.get()
+        {
+            return Ok(false);
+        }
         let raw_bytes = ranges.iter().try_fold(0usize, |total, range| {
             total.checked_add(self.texts[range.resource].text(range).len())
         });
@@ -417,7 +452,7 @@ impl InputContext<'_> {
     fn input_bytes(&self, ranges: &[SemanticRange]) -> Result<usize> {
         let placeholder = "0".repeat(DIGEST_WIDTH);
         let input = SemanticPartInput {
-            policy: SEMANTIC_POLICY.into(),
+            policy: self.policy.into(),
             plan_id: self.plan_id.into(),
             part_id: placeholder.clone(),
             subject_revision: self.subject_revision.into(),
@@ -494,11 +529,48 @@ impl SemanticPlan {
         max_input_bytes: usize,
         max_result_bytes: usize,
     ) -> Result<Self> {
+        Self::build_partitioned(
+            subject_revision,
+            resources,
+            max_input_bytes,
+            max_result_bytes,
+            None,
+        )
+    }
+
+    pub fn build_inspection(
+        subject_revision: &str,
+        resources: &[SemanticResource],
+        max_input_bytes: usize,
+        max_result_bytes: usize,
+        max_part_characters: NonZeroUsize,
+    ) -> Result<Self> {
+        Self::build_partitioned(
+            subject_revision,
+            resources,
+            max_input_bytes,
+            max_result_bytes,
+            Some(max_part_characters),
+        )
+    }
+
+    fn build_partitioned(
+        subject_revision: &str,
+        resources: &[SemanticResource],
+        max_input_bytes: usize,
+        max_result_bytes: usize,
+        max_part_characters: Option<NonZeroUsize>,
+    ) -> Result<Self> {
         if subject_revision.trim().is_empty() || max_input_bytes == 0 || max_result_bytes == 0 {
             return Err(error(
                 "subject revision and positive input/result bounds are required",
             ));
         }
+        let policy = if max_part_characters.is_some() {
+            INSPECTION_POLICY
+        } else {
+            SEMANTIC_POLICY
+        };
         let resource_guards = guards(resources)?;
         let texts = resources
             .iter()
@@ -506,6 +578,8 @@ impl SemanticPlan {
             .collect::<Result<Vec<_>>>()?;
         let placeholder = "0".repeat(DIGEST_WIDTH);
         let context = InputContext {
+            policy,
+            max_part_characters,
             plan_id: &placeholder,
             subject_revision,
             max_input_bytes,
@@ -579,10 +653,11 @@ impl SemanticPlan {
         flush(&mut parts, &mut active);
         let mut plan = Self {
             id: String::new(),
-            policy: SEMANTIC_POLICY.into(),
+            policy: policy.into(),
             subject_revision: subject_revision.into(),
             max_input_bytes,
             max_result_bytes,
+            max_part_characters,
             resources: resource_guards,
             parts,
         };
@@ -610,7 +685,7 @@ impl SemanticPlan {
     }
 
     fn identity_with_subject(&self, subject_revision: &str) -> Result<String> {
-        digest(&(
+        let identity = (
             &self.policy,
             subject_revision,
             self.max_input_bytes,
@@ -620,7 +695,11 @@ impl SemanticPlan {
                 .iter()
                 .map(|part| &part.ranges)
                 .collect::<Vec<_>>(),
-        ))
+        );
+        match self.max_part_characters {
+            Some(limit) => digest(&(identity, limit)),
+            None => digest(&identity),
+        }
     }
 
     /// Binds local evidence to a caller-defined semantic purpose, not a prior judgment.
@@ -638,12 +717,14 @@ impl SemanticPlan {
         if identity != part.id {
             return Err(error("part identity changed"));
         }
-        digest(&(SEMANTIC_POLICY, purpose_key, identity))
+        digest(&(&self.policy, purpose_key, identity))
     }
 
     fn verify_structure(&self) -> Result<()> {
-        if self.policy != SEMANTIC_POLICY
-            || self.subject_revision.trim().is_empty()
+        if !matches!(
+            (self.policy.as_str(), self.max_part_characters),
+            (SEMANTIC_POLICY, None) | (INSPECTION_POLICY, Some(_))
+        ) || self.subject_revision.trim().is_empty()
             || self.max_input_bytes == 0
             || self.max_result_bytes == 0
             || self.resources.is_empty()
@@ -658,6 +739,11 @@ impl SemanticPlan {
         for part in &self.parts {
             if part.id != part_identity(&self.resources, &part.ranges)? || part.ranges.is_empty() {
                 return Err(error("part identity or ranges changed"));
+            }
+            if let Some(limit) = self.max_part_characters
+                && assigned_characters(&part.ranges)? > limit.get()
+            {
+                return Err(error("part assignment exceeds its character bound"));
             }
             for range in &part.ranges {
                 let Some(guard) = self.resources.get(range.resource) else {
@@ -758,6 +844,8 @@ impl SemanticPlan {
             .map(|position| TextIndex::build(position.map_or(&empty, |index| &resources[index])))
             .collect::<Result<Vec<_>>>()?;
         let input = InputContext {
+            policy: &self.policy,
+            max_part_characters: self.max_part_characters,
             plan_id: &self.id,
             subject_revision: &self.subject_revision,
             max_input_bytes: self.max_input_bytes,
@@ -800,6 +888,157 @@ fn part_identity(resources: &[SemanticResourceGuard], ranges: &[SemanticRange]) 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn inspection_policy_bounds_reading_independently_of_utf8_bytes() {
+        for (label, text) in [
+            ("ascii", "a".repeat(240_000)),
+            ("hangul", "가".repeat(80_000)),
+        ] {
+            let resources = [resource(label, &text)];
+            let legacy = SemanticPlan::build("subject", &resources, 262_144, 32_768).unwrap();
+            for characters in [20_000, 40_000, 80_000] {
+                let plan = SemanticPlan::build_inspection(
+                    "subject",
+                    &resources,
+                    262_144,
+                    32_768,
+                    NonZeroUsize::new(characters).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(plan.parts.len(), text.chars().count().div_ceil(characters));
+                assert_ne!(plan.id, legacy.id);
+                assert_eq!(plan.policy, INSPECTION_POLICY);
+                for part in &plan.parts {
+                    assert!(assigned_characters(&part.ranges).unwrap() <= characters);
+                    assert_eq!(
+                        plan.part_input(&part.id, &resources).unwrap().policy,
+                        INSPECTION_POLICY
+                    );
+                }
+                reconstruct(&plan, &resources);
+                println!(
+                    "{}",
+                    serde_json::json!({"case":label,"characters_per_part":characters,
+                    "inspection_parts":plan.parts.len(),"total_characters":text.chars().count()})
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn inspection_policy_preserves_empty_resources_and_continued_unicode_blocks() {
+        let resources = [
+            resource("empty", ""),
+            resource(
+                "code",
+                &format!("```text\n{}\n```", "한🙂e\u{301}".repeat(30)),
+            ),
+            resource(
+                "context",
+                &"condition, exception and attribution\n\n".repeat(3),
+            ),
+        ];
+        let plan = SemanticPlan::build_inspection(
+            "subject",
+            &resources,
+            1400,
+            200,
+            NonZeroUsize::new(13).unwrap(),
+        )
+        .unwrap();
+        reconstruct(&plan, &resources);
+        assert!(
+            plan.parts
+                .iter()
+                .all(|part| assigned_characters(&part.ranges).unwrap() <= 13)
+        );
+        assert!(plan.parts.iter().any(|part| {
+            plan.part_input(&part.id, &resources)
+                .unwrap()
+                .ranges
+                .iter()
+                .any(|range| range.continued)
+        }));
+        assert_eq!(
+            plan.parts
+                .iter()
+                .flat_map(|part| &part.ranges)
+                .filter(|range| range.resource == 0)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn inspection_policy_preserves_small_work_and_refuses_invalid_declarations() {
+        let resources = [resource("note", "A short complete observation.")];
+        let plan = SemanticPlan::build_inspection(
+            "subject",
+            &resources,
+            4096,
+            1024,
+            INSPECTION_CHARACTERS,
+        )
+        .unwrap();
+        assert_eq!(plan.parts.len(), 1);
+        let legacy = SemanticPlan::build("subject", &resources, 4096, 1024).unwrap();
+        assert_eq!(plan.parts, legacy.parts);
+        assert!(
+            !serde_json::to_value(&legacy)
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .contains_key("max_part_characters")
+        );
+        for invalid in [serde_json::Value::Null, serde_json::json!(0)] {
+            let mut value = serde_json::to_value(&plan).unwrap();
+            value["max_part_characters"] = invalid;
+            assert!(serde_json::from_value::<SemanticPlan>(value).is_err());
+        }
+        let mut changed = plan.clone();
+        changed.max_part_characters = NonZeroUsize::new(2);
+        changed.id = changed.identity().unwrap();
+        assert!(changed.verify_resources(&resources).is_err());
+        let mut changed = plan;
+        changed.policy = SEMANTIC_POLICY.into();
+        changed.id = changed.identity().unwrap();
+        assert!(changed.verify_resources(&resources).is_err());
+        assert!(
+            assigned_characters(&[SemanticRange {
+                resource: 0,
+                start: 2,
+                end: 1
+            }])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn byte_fit_does_not_bound_inspection_characters() {
+        for (label, text, expected_characters) in [
+            ("ascii", "a".repeat(240_000), 240_000),
+            ("hangul", "가".repeat(80_000), 80_000),
+        ] {
+            let resources = [resource(label, &text)];
+            assert_eq!(text.len(), 240_000);
+            let plan = SemanticPlan::build("subject", &resources, 262_144, 32_768).unwrap();
+            assert_eq!(plan.parts.len(), 1);
+            let input = plan.part_input(&plan.parts[0].id, &resources).unwrap();
+            let characters = input
+                .ranges
+                .iter()
+                .map(|range| range.text.chars().count())
+                .sum::<usize>();
+            assert_eq!(characters, expected_characters);
+            assert!(serde_json::to_vec(&input).unwrap().len() <= 262_144);
+            println!(
+                "{}",
+                serde_json::json!({"case":label,"raw_bytes":text.len(),"characters":characters,
+                "parts":plan.parts.len(),"plan_id":plan.id,"input_revision":input.input_revision})
+            );
+        }
+    }
+
     #[test]
     fn configuration_lookup_matches_rebuilt_identity_only_for_equal_envelope_lengths() {
         let resources = [resource(
@@ -1021,6 +1260,8 @@ mod tests {
             .collect::<Result<Vec<_>>>()
             .unwrap();
         let mut context = InputContext {
+            policy: SEMANTIC_POLICY,
+            max_part_characters: None,
             plan_id: &"0".repeat(DIGEST_WIDTH),
             subject_revision: "revision\"\\\n🙂",
             max_input_bytes: usize::MAX,
