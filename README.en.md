@@ -160,7 +160,9 @@ See [bounded work](skills/lore-process/references/bounded-work.md) for status an
 | Check links / review reassessment / audit readiness | `lore graph lint`, `lore wiki reviews --check`, `lore wiki audit-plan --ready` |
 
 `process --batches N` and `knowledge --batches N` are explicit batch ceilings.
-They continue after budget exhaustion with retained progress and stop for applicable holds, errors or cancellation.
+`process` continues after call-budget exhaustion with newly retained progress.
+`knowledge` continues after verified audit completion; intermediate observations alone do not ensure continuation.
+Fatal or unknown errors, cancellation and holds without qualifying progress stop the campaign.
 Some publication can succeed while the overall job remains incomplete. Check results and remaining state;
 do not repeat an unchanged hold without diagnosing it or adopt an old answer by replacing its revisions.
 

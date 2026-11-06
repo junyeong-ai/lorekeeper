@@ -160,7 +160,9 @@ DOCX·XLSX·PDF·이미지는 [전처리 설정](skills/lore-setup/references/co
 | 링크 구조 / 판단 재검토 / 감사 준비 상태 | `lore graph lint`, `lore wiki reviews --check`, `lore wiki audit-plan --ready` |
 
 `process --batches N`과 `knowledge --batches N`은 명시적 배치 상한입니다.
-예산 소진 뒤 저장 진척이 있는 경우 다음 배치로 진행하고, 보류·오류·취소 조건에서는 멈춥니다.
+`process`는 호출 예산 소진 뒤 새로 저장한 진척이 있을 때 다음 배치로 진행합니다.
+`knowledge`는 감사 완료가 검증되어야 이어갑니다. 중간 관측 저장만으로는 다음 배치를 보장하지 않습니다.
+치명적·알 수 없는 오류, 취소나 진행 조건을 충족하지 못한 보류에서는 멈춥니다.
 일부 게시가 성공해도 전체 작업은 미완료일 수 있습니다. 결과와 남은 상태를 확인하고,
 같은 보류를 원인 확인 없이 반복 호출하거나 기존 답변의 리비전만 바꾸어 채택하지 마세요.
 
