@@ -23,6 +23,7 @@ pub(super) use frontier::FrontierCapture;
 pub(in crate::commands) use frontier::FrontierUnavailable;
 use frontier::{FrontierProof, FrontierSeal};
 pub(crate) use inspection::OutputCapacity;
+#[cfg(unix)]
 pub(crate) use inspection::RefinementResponse;
 pub(crate) use inspection::{ObservationCandidate, ObservationRecordPlan, ObservationViolation};
 pub(crate) use output::ObservationTextError;
