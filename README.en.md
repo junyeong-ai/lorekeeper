@@ -166,9 +166,13 @@ Fatal or unknown errors, cancellation and holds without qualifying progress stop
 Some publication can succeed while the overall job remains incomplete. Check results and remaining state;
 do not repeat an unchanged hold without diagnosing it or adopt an old answer by replacing its revisions.
 
+If review creation or repair changes a bounded audit's inputs, it replans and rereads once within the same call budget.
+Further changes defer that subject. Predecessor observations remain intact; an old assessment cannot complete new inputs.
+
 Generate schedule definitions with `lore schedule`, then register them with the OS using the [scheduling procedure](skills/lore-ingest/references/scheduling.md).
 Start manual writing agents **before reading evidence** with `lore workflow -- claude` or `lore workflow -- codex`.
 Native jobs own the same protection themselves; configuration and vault selection stay pinned during execution.
+An execution admitted while waiting with `--wait` gets the lease after the current batch, ahead of a new batch.
 
 Use `lore self update` to update and `lore self status` to check installation coherence.
 Back up the entire vault, including hidden state. Paid observations, queues and review history are not caches.
