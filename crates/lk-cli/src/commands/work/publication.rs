@@ -817,14 +817,7 @@ mod tests {
             panic!("large source requires observations")
         };
         let session = lk_vault::MutationSession::acquire(&fixture.root).unwrap();
-        super::super::state::Work::create(
-            &session,
-            &prepared.resources,
-            &prepared.revision(&fixture.config_revision).unwrap(),
-            prepared.context.clone(),
-            super::super::limits(&fixture.config).unwrap(),
-        )
-        .unwrap();
+        let work = work.persist(&session).unwrap();
         assert_ne!(unplanned.revision, fixture.scope().revision);
         let (_, request) = work
             .prepare_inspection(&fixture.root, &prepared.resources)
