@@ -2115,6 +2115,10 @@ mod native {
                             &turn.request,
                             self.supervisor.read_control(),
                         ) {
+                            if semantic_context_changed(&error) {
+                                self.record_uninvoked_observations(turns);
+                                return None;
+                            }
                             return Some(self.failure("bounded work scheduling", error));
                         }
                     }

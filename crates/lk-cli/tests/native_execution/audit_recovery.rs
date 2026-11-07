@@ -1,6 +1,111 @@
 use super::*;
 
 #[test]
+fn parallel_audit_writer_wait_replans_changed_reviews_without_pausing_scheduled_work() {
+    for engine in ["codex", "claude-code"] {
+        let fixture = bounded_audit_fixture(engine, 2, RECORD_BOUNDED_AUDIT);
+        let config = std::fs::read_to_string(&fixture.config)
+            .unwrap()
+            .replace("max_calls: 2}", "max_calls: 2, max_parallel: 2}")
+            .replace("execution:\n", "execution:\n  automation: {process_schedule: '0,15,30,45 * * * *', max_calls_per_day: 256, max_run_seconds: 60}\n");
+        std::fs::write(&fixture.config, config).unwrap();
+        let agent = fixture.root().join("agent executable");
+        let script = std::fs::read_to_string(&agent).unwrap();
+        let pause = "printf ready > \"$TEST_EXECUTION_ROOT/writer-ready\"; while [ ! -f \"$TEST_EXECUTION_ROOT/writer-release\" ]; do sleep 0.02; done; ";
+        std::fs::write(
+            agent,
+            script.replacen("then printf", &format!("then {pause}printf"), 1),
+        )
+        .unwrap();
+        let mut child = fixture
+            .command()
+            .args(["run", "knowledge", "--scheduled", "--json"])
+            .stdout(std::fs::File::create(fixture.root().join("contention-result.json")).unwrap())
+            .stderr(std::fs::File::create(fixture.root().join("contention-stderr.log")).unwrap())
+            .stdin(Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !fixture.root().join("writer-ready").exists() {
+            assert!(Instant::now() < deadline);
+            assert!(
+                child.try_wait().unwrap().is_none(),
+                "{}\n{}",
+                std::fs::read_to_string(fixture.root().join("contention-stderr.log")).unwrap(),
+                std::fs::read_to_string(fixture.root().join("contention-result.json")).unwrap(),
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(fixture.root().join("vault/.lorekeeper/mutation/lock"))
+            .unwrap();
+        lock.lock().unwrap();
+        std::fs::write(fixture.root().join("writer-release"), "release").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let error =
+                std::fs::read_to_string(fixture.root().join("contention-stderr.log")).unwrap();
+            if error.contains("Waiting for exclusive vault access...") {
+                break;
+            }
+            assert!(Instant::now() < deadline, "{error}");
+            assert!(child.try_wait().unwrap().is_none(), "{error}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(bounded_calls(&fixture).is_empty());
+        let predecessor = walkdir::WalkDir::new(fixture.root().join("vault/.lorekeeper/work"))
+            .into_iter()
+            .map(Result::unwrap)
+            .filter(|entry| entry.file_type().is_file())
+            .map(|entry| {
+                (
+                    entry.path().to_owned(),
+                    std::fs::read(entry.path()).unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let subject = "wiki/concepts/large.md";
+        let raw = std::fs::read_to_string(fixture.root().join("vault").join(subject)).unwrap();
+        let page = lk_core::frontmatter::parse_page(&raw).unwrap();
+        let metadata = serde_json::json!({"status":"open","subjects":[subject],"evidence":[{"path":subject,"revision":lk_core::concept::source_revision(&page)}]});
+        std::fs::create_dir_all(fixture.root().join("vault/wiki/explorations")).unwrap();
+        std::fs::write(
+            fixture.root().join("vault/wiki/explorations/concurrent.md"),
+            format!("---\ntype: exploration\ntitle: Concurrent review\nreview: {metadata}\n---\nA scoped evidence question.\n"),
+        )
+        .unwrap();
+        drop(lock);
+        let report = finish_contention_run(&fixture, child);
+        let run = &report["runs"][0];
+        assert_eq!(run["halted"], false, "{report}");
+        assert_eq!(run["semantic_calls"], 2, "{report}");
+        assert_eq!(bounded_calls(&fixture).len(), 2, "{report}");
+        let usage: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(
+                fixture
+                    .root()
+                    .join("vault/.lorekeeper/automation-usage.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(usage["reserved_calls"], 2);
+        assert!(usage["paused"].as_object().unwrap().is_empty());
+        for (path, bytes) in predecessor {
+            assert_eq!(std::fs::read(path).unwrap(), bytes);
+        }
+        assert!(
+            !fixture
+                .root()
+                .join("vault/.lorekeeper/mutation/pending.json")
+                .exists()
+        );
+    }
+}
+
+#[test]
 fn bounded_audit_actions_are_guarded_and_unchanged_holds_spend_no_calls() {
     for engine in ["codex", "claude-code"] {
         let fixture = bounded_audit_fixture(engine, 64, RECORD_BOUNDED_AUDIT);
