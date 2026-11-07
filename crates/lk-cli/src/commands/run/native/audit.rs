@@ -162,7 +162,12 @@ impl Runner<'_> {
                 else {
                     return;
                 };
-                let work = &jobs[&subjects[0].candidate.path];
+                let Some(work) = jobs.get(&subjects[0].candidate.path) else {
+                    for index in &slots[0] {
+                        pending.remove(index);
+                    }
+                    continue;
+                };
                 let outcome = loop {
                     if !self.call_budget_available() {
                         return;

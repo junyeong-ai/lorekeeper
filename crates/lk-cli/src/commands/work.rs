@@ -2042,6 +2042,8 @@ pub(super) fn prepare_audit(
     config_revision: &str,
     candidate: &lk_graph::audit::AuditCandidate,
 ) -> miette::Result<String> {
+    #[cfg(unix)]
+    audit::validate_result_capacity(candidate, limits(config)?.max_result_bytes)?;
     let root = session.root();
     let prepared = resources::audit_candidate(root, config, candidate)?;
     let work = persist_prepared(session, config, config_revision, &prepared)?;
@@ -2083,6 +2085,13 @@ pub(super) fn audit_processing_hold(
     config_revision: &str,
     candidate: &lk_graph::audit::AuditCandidate,
 ) -> miette::Result<Option<String>> {
+    if let Err(error) = audit::validate_result_capacity(candidate, limits(config)?.max_result_bytes)
+    {
+        if error.downcast_ref::<generation::ResultCapacity>().is_some() {
+            return Ok(Some(error.to_string()));
+        }
+        return Err(error);
+    }
     if candidate.discovery.is_none() {
         return Ok(None);
     }

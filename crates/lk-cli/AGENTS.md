@@ -182,6 +182,9 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   latest receipt per subject; canonical assessment removes it in the same journal.
   Retention under a workflow lease removes only expired receipts for proven-absent
   subjects, with absence and captured-byte guards; existing subjects stay held.
+  Check fixed assessment identity/review-path capacity before discovery or inspection,
+  and again before persisting a scope expanded by discovery/repair. A typed capacity
+  refusal defers that subject without a paid call or a durable semantic action.
 
 ## Resumable semantic Work (`commands/work.rs`)
 

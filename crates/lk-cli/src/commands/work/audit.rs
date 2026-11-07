@@ -4,6 +4,25 @@ use serde_json::{Value, json};
 use super::{Prepared, Subject, Work};
 use crate::commands::execution::audit::{self, Judgment};
 
+pub(super) fn validate_result_capacity(
+    candidate: &lk_graph::audit::AuditCandidate,
+    limit: usize,
+) -> miette::Result<()> {
+    let assessment = lk_graph::audit::AuditAssessment {
+        path: candidate.path.clone(),
+        file_revision: candidate.file_revision.clone(),
+        input_revision: candidate.input_revision.clone(),
+        disposition: lk_graph::audit::AuditDisposition::Reviewed,
+        reason: String::new(),
+        reviews: candidate
+            .reviews
+            .iter()
+            .map(|review| review.path.clone())
+            .collect(),
+    };
+    audit::response_limit(&[assessment], limit).map(|_| ())
+}
+
 fn assessment(prepared: &Prepared) -> miette::Result<lk_graph::audit::AuditAssessment> {
     let Subject::Audit {
         path,

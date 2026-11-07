@@ -4662,6 +4662,16 @@ mod native {
                     Ok(id) => {
                         jobs.insert(candidate.path.clone(), id);
                     }
+                    Err(error)
+                        if error
+                            .downcast_ref::<crate::commands::work::generation::ResultCapacity>()
+                            .is_some() =>
+                    {
+                        self.deferred(
+                            "audit result capacity",
+                            format!("{}: {error}", candidate.path),
+                        );
+                    }
                     Err(error) => {
                         self.failure("bounded audit planning", error);
                         return None;
