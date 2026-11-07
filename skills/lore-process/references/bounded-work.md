@@ -104,7 +104,7 @@ discarding an entry. Text-only `observation-rejections-v1` records remain readab
 without conversion. Adding an evidence violation uses `observation-rejections-v2`;
 an existing v1 file is retained byte-for-byte in its digest-checked legacy snapshot.
 The rejection sidecar does not itself change the observation schema or host instructions.
-Legacy Inspect and Reduce retain their exact contracts; new-policy original Inspect
+Legacy Inspect and Reduce retain their original response dispositions; new-policy original Inspect
 declares its additional response explicitly. Existing plan, observation, action and refinement bytes remain
 unchanged. Pending Work protects this history; verified expired published Work can
 retire it with its complete dependency closure. A v1 reader refuses v2 when it reads
@@ -124,6 +124,11 @@ A reference-coverage or blank/oversized-reason rejection records no decisions an
 defers that task under an exact request/contract receipt. The reason limit counts
 UTF-8 bytes of the JSON string, including quotes and escapes, not characters.
 Unchanged native calls are suppressed; changed scope or contracts may be reconsidered.
+Legacy inspection/reduction holds also survive a native-contract change when the
+complete canonical request still hashes to the original input revision. They
+require explicit action and keep their exact saved receipts; this does not approve
+an unmatched contract. Changed inputs do not inherit that hold. New-policy Work
+continues to match the exact current request and native contract.
 Existing v1 rejection receipts remain readable without rewriting; new receipts use
 `screening-rejections-v2`, which earlier readers refuse. Corrupt receipts, malformed
 reply shapes, failed fresh scope validation and unknown failures still stop.

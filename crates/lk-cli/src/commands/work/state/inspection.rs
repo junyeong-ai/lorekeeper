@@ -194,6 +194,22 @@ impl InspectionActions {
             return Ok(None);
         };
         if action.request_revision != request_revision(request, contract)? {
+            if work.plan.policy == lk_core::semantic::SEMANTIC_POLICY
+                && request["work_id"] == work.plan.id
+                && request["input_revision"].as_str() == Some(action.input_revision.as_str())
+            {
+                let mut input = request.clone();
+                input
+                    .as_object_mut()
+                    .ok_or_else(|| fail("inspection request is not an object"))?
+                    .remove("input_revision");
+                if revision(&input)? == action.input_revision {
+                    return Ok(Some(format!(
+                        "legacy input remains held under its saved action; the native contract no longer matches, so explicit action is required: {}",
+                        action.reason
+                    )));
+                }
+            }
             return Ok(None);
         }
         if request["work_id"] != work.plan.id
@@ -423,12 +439,83 @@ mod tests {
     use super::*;
 
     #[test]
+    fn exact_legacy_input_stays_held_after_native_contract_changes_without_rewriting_receipts() {
+        for reduce in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let session = MutationSession::acquire(root.path()).unwrap();
+            let source = resources();
+            let work =
+                Work::create(&session, &source, "subject", context("subject"), limits()).unwrap();
+            assert!(work.plan.max_part_characters.is_none());
+            let request = loop {
+                let (_, request) = work.prepare_inspection(root.path(), &source).unwrap();
+                let request = request.unwrap();
+                if !reduce || request["kind"] == "reduce" {
+                    break request;
+                }
+                work.record(
+                    &session,
+                    WorkOutput {
+                        work_id: work.plan.id.clone(),
+                        node_id: request["node_id"].as_str().unwrap().into(),
+                        input_revision: request["input_revision"].as_str().unwrap().into(),
+                        summary: "The complete assigned source range was read.".into(),
+                        findings: vec![],
+                        source_questions: vec![],
+                        unresolved: vec![],
+                        resolutions: vec![],
+                    },
+                    &source,
+                )
+                .unwrap();
+            };
+            session
+                .apply(
+                    work.plan_inspection_action(
+                        root.path(),
+                        &source,
+                        &request,
+                        "old-native-contract",
+                        "Explicit legacy action.".into(),
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+            let path = root
+                .path()
+                .join(work_path(&work.plan.id, "inspection-actions.json").unwrap());
+            let before = std::fs::read(&path).unwrap();
+            let held = work
+                .load_inspection_action(root.path(), &request, "new-native-contract")
+                .unwrap()
+                .unwrap();
+            assert!(held.contains("legacy input remains held"));
+            let mut changed = request.clone();
+            changed["context"]["purpose"]["locale"] = json!("changed");
+            assert!(
+                work.load_inspection_action(root.path(), &changed, "new-native-contract")
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+        }
+    }
+
+    #[test]
     fn admission_checks_exact_actions_on_current_ready_nodes_without_writes() {
         let root = tempfile::tempdir().unwrap();
         let session = MutationSession::acquire(root.path()).unwrap();
         let source = resources();
-        let work =
-            Work::create(&session, &source, "subject", context("subject"), limits()).unwrap();
+        let work = Work::build_with_inspection(
+            &source,
+            "subject",
+            context("subject"),
+            limits(),
+            Some(lk_core::semantic::INSPECTION_CHARACTERS),
+        )
+        .unwrap()
+        .persist(&session)
+        .unwrap();
         let (progress, requests) = work.prepare_inspections(root.path(), &source, 2).unwrap();
         assert_eq!(requests.len(), 2);
         let request = &requests[1];
@@ -480,8 +567,16 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let session = MutationSession::acquire(root.path()).unwrap();
         let source = resources();
-        let work =
-            Work::create(&session, &source, "subject", context("subject"), limits()).unwrap();
+        let work = Work::build_with_inspection(
+            &source,
+            "subject",
+            context("subject"),
+            limits(),
+            Some(lk_core::semantic::INSPECTION_CHARACTERS),
+        )
+        .unwrap()
+        .persist(&session)
+        .unwrap();
         let manifest = std::fs::read(
             root.path()
                 .join(work_path(&work.plan.id, "plan.json").unwrap()),
