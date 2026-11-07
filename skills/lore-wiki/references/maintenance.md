@@ -5,6 +5,7 @@
 - [Structural preflight and repair](#structural-preflight-and-repair)
 - [Related-document discovery](#related-document-discovery)
 - [Assessment](#assessment)
+- [Native assessment](#native-assessment)
 - [Operating budget and measurement](#operating-budget-and-measurement)
 
 This operation is a complete run of one batch, not a request to audit the entire vault.
@@ -206,6 +207,19 @@ them. The native audit verifier requires current scoped reviews; an unchanged op
 finding with a current scoped review remains a valid follow-up assessment.
 Report batch coverage, repairs, unresolved findings and remaining backlog separately.
 No lint or receipt count certifies that the entire corpus is semantically consistent.
+
+## Native assessment
+
+For `native-audit-results-v1`, read the supplied subjects and return one `results`
+entry per subject in exact order. Use `status: complete`, `disposition: reviewed`
+or `follow-up`, and a nonblank `reason`; unfinished work uses `status: needs-action`,
+null disposition and a concrete reason. Apply the assessment and curation criteria
+above. A supplied completed observation replaces `work result` setup reads.
+Necessary targeted reads and supported repairs remain available. Input-changing
+repairs require fresh scope; the controller rejects the old judgment and controls
+replanning. Rust supplies all subject/revision/review metadata and owns result files,
+Work finish, staging, assessment recording and final global checks. Return judgments
+instead of invoking `work finish` or `audit-record`.
 
 ## Operating budget and measurement
 

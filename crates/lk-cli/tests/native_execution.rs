@@ -1361,7 +1361,24 @@ root=Path(os.environ['TEST_EXECUTION_ROOT'])
 native=('--output-schema' in sys.argv and '--output-last-message' not in sys.argv) or '--safe-mode' in sys.argv
 prompt=Path(os.environ['TEST_INTERACTIVE_INPUT']).read_text() if Path(os.environ['TEST_INTERACTIVE_INPUT']).exists() else ''
 prompt=prompt or '\n'.join(sys.argv[1:])
-if native:
+prepared_input=json.loads(prompt.split('\nNative request:\n',1)[1]) if '\nNative request:\n' in prompt else None
+audit_final=prepared_input is not None and prepared_input.get('schema')=='native-audit-results-v1'
+def respond(value):
+    mode=(root/'audit-response-mode').read_text() if (root/'audit-response-mode').exists() else ''
+    if mode=='missing':
+        print('Finished reading, without submitting an assessment.')
+        return
+    if mode=='needs-action':
+        value={'results':[{'status':'needs-action','disposition':None,'reason':'Required scoped evidence needs an explicit decision.'}]}
+    if '--output-last-message' in sys.argv:
+        Path(sys.argv[sys.argv.index('--output-last-message')+1]).write_text(json.dumps(value))
+    if '--json-schema' in sys.argv:
+        value={'type':'result','subtype':'success','is_error':False,'structured_output':value}
+    print(json.dumps(value))
+if audit_final:
+    request=prepared_input['subjects'][0]['work']
+    action,work_id,node_id='finish',request['work_id'],None
+elif native:
     request=json.loads((root/'native-request.txt').read_text().split('\nNative request:\n',1)[1])
     action,work_id,node_id='inspect',request['work_id'],request['node_id']
 else:
@@ -1405,23 +1422,13 @@ if action=='inspect':
         path.write_text(json.dumps(output))
         cli('work', 'record', '--file', str(path))
 else:
-    prepared_match=re.search(r'pinned request file is ("[^"\n]+")', prompt)
-    prepared_path=Path(json.loads(prepared_match.group(1))) if prepared_match else None
-    prepared=json.loads(prompt.split('\nNative request:\n',1)[1]) if prepared_path else None
-    if prepared_path: assert prompt.split('\nNative request:\n',1)[1].encode()==prepared_path.read_bytes()
-    if prepared:
-        assert prepared['schema']=='native-finalize-v1' and prepared['contracts']
-        request=prepared['completed']
-    else:
+    if not audit_final:
         request=cli('work', 'result', work_id)
     subject=request['context']['subject']
     assert subject['kind']=='audit'
     assessment={key:subject[key] for key in ['path','file_revision','input_revision']}
     assessment.update(disposition='reviewed', reason='Fixture completes guarded structural coverage; no semantic truth assertion.', reviews=[])
-    path=root/'assessment.json'
-    path.write_text(json.dumps({'assessments':[assessment]}))
-    cli('work', 'finish', work_id, '--file', str(path))
-    cli('wiki', 'audit-record', '--file', str(path))
+    respond({'results':[{'status':'complete','disposition':assessment['disposition'],'reason':assessment['reason']}]})
     row={'action':action, 'work_id':work_id, 'pid':os.getpid()}
 with (root/'bounded-calls.jsonl').open('a') as stream:
     stream.write(json.dumps(row)+'\n')

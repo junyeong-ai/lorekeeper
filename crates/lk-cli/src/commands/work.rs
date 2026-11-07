@@ -7,6 +7,8 @@ use super::{GlobalOptions, find_config, load_config_with_revision};
 
 #[cfg(unix)]
 mod action;
+#[cfg(unix)]
+mod audit;
 mod discovery;
 #[cfg(unix)]
 pub(super) mod generation;
@@ -1572,20 +1574,29 @@ fn validate_result_finalization(
 ) -> miette::Result<Value> {
     let snapshot = work.capture_native_completion(root, &prepared.resources, kind)?;
     let completed = snapshot.result().clone();
-    let Subject::Queue { task_id, .. } = &prepared.subject else {
-        return Err(miette::miette!("native result requires a queue task"));
-    };
-    let task = super::queue::current_task(root, task_id)?;
-    let current = match kind {
-        state::CompletionKind::Root => native::finalization_request(
-            config,
-            &task,
-            work,
-            &work.plan.subject_revision,
-            &completed,
-        )?,
-        state::CompletionKind::Frontier => {
-            native::frontier_request(config, &task, work, &completed)?
+    let current = match &prepared.subject {
+        Subject::Audit { .. } if kind == state::CompletionKind::Root => {
+            audit::request(work, prepared, &completed)?
+        }
+        Subject::Audit { .. } => {
+            return Err(miette::miette!(
+                "audit finalization requires root completion"
+            ));
+        }
+        Subject::Queue { task_id, .. } => {
+            let task = super::queue::current_task(root, task_id)?;
+            match kind {
+                state::CompletionKind::Root => native::finalization_request(
+                    config,
+                    &task,
+                    work,
+                    &work.plan.subject_revision,
+                    &completed,
+                )?,
+                state::CompletionKind::Frontier => {
+                    native::frontier_request(config, &task, work, &completed)?
+                }
+            }
         }
     };
     if &current != request {
@@ -2089,7 +2100,7 @@ pub(super) fn audit_processing_hold(
             request_bytes,
             max_input_bytes,
         ))),
-        FinalizationPreparation::Interactive => Ok(None),
+        FinalizationPreparation::Result(_) => Ok(None),
         _ => Err(miette::miette!(
             "audit admission produced a queue finalization state"
         )),
@@ -2683,7 +2694,6 @@ fn prepare_frontier_finalization(
 
 #[cfg(unix)]
 pub(super) enum FinalizationPreparation {
-    Interactive,
     Ready(Box<SectionFinalization>),
     Result(Box<ResultFinalization>),
     NeedsAction(String),
@@ -2868,7 +2878,26 @@ fn prepare_finalization_from_capture(
         ..
     } = &prepared.subject
     else {
-        return Ok(FinalizationPreparation::Interactive);
+        let request = audit::request(work, prepared, &completed)?;
+        let request_bytes = serde_json::to_vec(&request).into_diagnostic()?.len();
+        if request_bytes > work.max_input_bytes {
+            return Ok(FinalizationPreparation::Capacity {
+                request_bytes,
+                max_input_bytes: work.max_input_bytes,
+            });
+        }
+        if let Some(reason) =
+            work.load_finalization_action_for(root, &request, &completed["result_revision"])?
+        {
+            return Ok(FinalizationPreparation::NeedsAction(reason));
+        }
+        return Ok(FinalizationPreparation::Result(Box::new(
+            ResultFinalization {
+                request,
+                completed,
+                kind: state::CompletionKind::Root,
+            },
+        )));
     };
     let task = super::queue::current_task(root, task_id)?;
     if !super::execution::finalization::supports(task.kind) {
@@ -3011,18 +3040,24 @@ pub(super) fn finish_result(
             "completed Work changed before native finalization"
         ));
     }
-    let Subject::Queue { task_id, .. } = &prepared.subject else {
-        return Err(miette::miette!("native result requires a queue subject"));
+    let outcome = match &prepared.subject {
+        Subject::Audit { .. } => audit::assemble(&prepared, reply)?,
+        Subject::Queue { task_id, .. } => generation::assemble_prepared(
+            &super::queue::current_task(root, task_id)?,
+            &prepared,
+            &work.plan.subject_revision,
+            reply,
+            work.plan.max_result_bytes,
+        )?,
     };
-    let task = super::queue::current_task(root, task_id)?;
-    match generation::assemble_prepared(
-        &task,
-        &prepared,
-        &work.plan.subject_revision,
-        reply,
-        work.plan.max_result_bytes,
-    )? {
+    match outcome {
         generation::Outcome::NeedsDiscovery(recovery, reason) => {
+            let Subject::Queue { task_id, .. } = &prepared.subject else {
+                return Err(miette::miette!(
+                    "discovery recovery requires a queue subject"
+                ));
+            };
+            let task = super::queue::current_task(root, task_id)?;
             let capture = work.capture_native_completion(root, &prepared.resources, result.kind)?;
             if capture.result() != &completed {
                 return Err(miette::miette!(
@@ -3183,7 +3218,8 @@ fn validate_section_response(request: &Value, body: &str) -> miette::Result<()> 
     Ok(())
 }
 
-pub(super) fn verify_finished(
+#[cfg(test)]
+fn verify_finished(
     root: &Path,
     config: &lk_core::config::Config,
     config_revision: &str,
@@ -4833,7 +4869,7 @@ mod tests {
             .unwrap(),
             NativeStep::Finalization {
                 checkpoint: FinalizationCheckpoint {
-                    state: NativeFinalization::Ready(FinalizationPreparation::Interactive),
+                    state: NativeFinalization::Ready(FinalizationPreparation::Result(_)),
                     ..
                 },
                 ..

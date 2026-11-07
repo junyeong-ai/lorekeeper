@@ -324,8 +324,8 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   (`execution/observation.rs`); bounded single-section finalization uses
   `execution/finalization.rs`. Rust selects applicable shared generation rules through
   typed task/target kinds. Extraction/synthesis use tool-enabled final-schema responses;
-  audits retain interactive finalization. Native Rust assembles
-  TaskResult/SynthesisResult metadata from the exact prepared scope, reserves envelope
+  bounded audits return structured judgments with supported review/repair tools. Native Rust assembles
+  TaskResult/SynthesisResult/assessment metadata from the exact prepared scope, reserves envelope
   bytes and owns finish/staging. Models return semantic values, needs-action, or
   extraction-only needs-discovery with explicit DiscoveryQuery values.
 - Section instructions follow the typed input form: whole-input requests read retained

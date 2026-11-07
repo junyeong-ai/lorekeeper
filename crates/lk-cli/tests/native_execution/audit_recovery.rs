@@ -1,5 +1,56 @@
 use super::*;
 
+#[test]
+fn bounded_audit_actions_are_guarded_and_unchanged_holds_spend_no_calls() {
+    for engine in ["codex", "claude-code"] {
+        let fixture = bounded_audit_fixture(engine, 64, RECORD_BOUNDED_AUDIT);
+        std::fs::write(fixture.root().join("audit-response-mode"), "needs-action").unwrap();
+        let (output, report) = fixture.run("knowledge");
+        assert!(!output.status.success(), "{report}");
+        assert_eq!(report["halted"], false, "{report}");
+        let calls = bounded_calls(&fixture);
+        let finalizer = calls
+            .iter()
+            .find(|call| call["action"] == "finish")
+            .unwrap();
+        let work = fixture
+            .root()
+            .join("vault/.lorekeeper/work")
+            .join(finalizer["work_id"].as_str().unwrap());
+        let action = work.join("finalization-action.json");
+        let before = std::fs::read(&action).unwrap();
+        assert!(!work.join("final.json").exists());
+        let (output, report) = fixture.run("knowledge");
+        assert!(!output.status.success(), "{report}");
+        assert_eq!(report["semantic_calls"], 0, "{report}");
+        assert_eq!(bounded_calls(&fixture).len(), calls.len());
+        assert_eq!(std::fs::read(action).unwrap(), before);
+    }
+}
+
+#[test]
+fn bounded_audit_requires_a_structured_assessment_after_host_success() {
+    for engine in ["codex", "claude-code"] {
+        let fixture = bounded_audit_fixture(engine, 64, RECORD_BOUNDED_AUDIT);
+        std::fs::write(fixture.root().join("audit-response-mode"), "missing").unwrap();
+        let (output, report) = fixture.run("knowledge");
+        assert!(!output.status.success(), "{report}");
+        assert_eq!(report["halted"], true, "{report}");
+        let calls = bounded_calls(&fixture);
+        let finalizer = calls
+            .iter()
+            .find(|call| call["action"] == "finish")
+            .unwrap();
+        let work = fixture
+            .root()
+            .join("vault/.lorekeeper/work")
+            .join(finalizer["work_id"].as_str().unwrap());
+        assert!(!work.join("final.json").exists());
+        assert!(!work.join("assessment.json").exists());
+        assert!(!work.join("finalization-action.json").exists());
+    }
+}
+
 fn review_during_finalization(repeated: bool) -> String {
     RECORD_BOUNDED_AUDIT.replace(
         "    assessment={key:subject[key] for key in ['path','file_revision','input_revision']}",
@@ -22,6 +73,7 @@ fn review_during_finalization(repeated: bool) -> String {
         cli('work','plan','--path',subject['path'])
         with (root/'bounded-calls.jsonl').open('a') as stream:
             stream.write(json.dumps({{'action':'changed-input','work_id':work_id}})+'\n')
+        respond({{'results':[{{'status':'needs-action','disposition':None,'reason':'Scoped repair changed the selected inputs.'}}]}})
         raise SystemExit(0)
     assert request['context']['purpose']['review_dependencies']==['wiki/explorations/repair-0.md']
     assessment={{key:subject[key] for key in ['path','file_revision','input_revision']}}"#,

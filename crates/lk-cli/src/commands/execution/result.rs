@@ -49,6 +49,7 @@ impl Output {
 
 pub(in crate::commands) fn build(
     profile: &ExecutionProfile,
+    skill: &str,
     installation: &lk_dist::Installation,
     config: &Path,
     request: &Value,
@@ -63,7 +64,7 @@ pub(in crate::commands) fn build(
     let result_path = directory.path().join("result.json");
     let agent = super::agent_invocation_with_output(
         profile,
-        "lore-process",
+        skill,
         "Complete only the supplied native semantic result request.",
         installation,
         config,

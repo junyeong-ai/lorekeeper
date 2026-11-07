@@ -2182,6 +2182,11 @@ mod native {
             let timeout = profile.timeout();
             let invocation = execution::result::build(
                 profile,
+                if metrics.stages == [ExecutionStage::Audit] {
+                    "lore-wiki"
+                } else {
+                    "lore-process"
+                },
                 self.installation,
                 self.opts.config.as_ref().expect("resolved config"),
                 request,
@@ -2283,13 +2288,12 @@ mod native {
             result: crate::commands::work::ResultFinalization,
             metrics: &mut WorkStepMetrics,
         ) -> WorkStep {
-            let Some(response) = self
-                .request_result(
-                    &result.request,
-                    &crate::commands::work::generation::schema(),
-                    metrics,
-                )
-                .await
+            let schema = if metrics.stages == [ExecutionStage::Audit] {
+                execution::audit::schema()
+            } else {
+                crate::commands::work::generation::schema()
+            };
+            let Some(response) = self.request_result(&result.request, &schema, metrics).await
             else {
                 return WorkStep::Failed;
             };
@@ -2349,8 +2353,18 @@ mod native {
                     WorkStep::Replan
                 }
                 Err(error) => {
-                    self.failure("native finalization", error);
-                    WorkStep::Failed
+                    if metrics.stages == [ExecutionStage::Audit] && semantic_context_changed(&error)
+                    {
+                        self.record(
+                            "bounded audit inputs changed",
+                            StageState::Skipped,
+                            Some(error.to_string()),
+                        );
+                        WorkStep::Replan
+                    } else {
+                        self.failure("native finalization", error);
+                        WorkStep::Failed
+                    }
                 }
             }
         }
@@ -2661,7 +2675,7 @@ mod native {
             }
         }
 
-        async fn bounded_step(&mut self, id: &str, skill: &str, stage: ExecutionStage) -> WorkStep {
+        async fn bounded_step(&mut self, id: &str, stage: ExecutionStage) -> WorkStep {
             let mut metrics = WorkStepMetrics::new(WorkRole::Evidence);
             metrics.work_id = Some(id.into());
             let started_at = Instant::now();
@@ -2718,8 +2732,7 @@ mod native {
                     metrics.stages.push(stage);
                     metrics.node_id = Some(root_node);
                     metrics.preparation_duration_ms = Some(0);
-                    self.bounded_finish_prepared(id, skill, metrics, checkpoint)
-                        .await
+                    self.bounded_finish_prepared(id, metrics, checkpoint).await
                 }
             }
         }
@@ -2727,7 +2740,6 @@ mod native {
         async fn bounded_finish(
             &mut self,
             id: &str,
-            skill: &str,
             mut metrics: WorkStepMetrics,
             frontier: bool,
         ) -> WorkStep {
@@ -2751,14 +2763,12 @@ mod native {
                     return WorkStep::Failed;
                 }
             };
-            self.bounded_finish_prepared(id, skill, metrics, checkpoint)
-                .await
+            self.bounded_finish_prepared(id, metrics, checkpoint).await
         }
 
         async fn bounded_finish_prepared(
             &mut self,
             id: &str,
-            skill: &str,
             mut metrics: WorkStepMetrics,
             checkpoint: crate::commands::work::FinalizationCheckpoint,
         ) -> WorkStep {
@@ -2808,11 +2818,10 @@ mod native {
                 }
             };
             match section {
-                crate::commands::work::FinalizationPreparation::Interactive => {}
                 crate::commands::work::FinalizationPreparation::Result(result) => {
                     let result = self.finalize_result(id, *result, &mut metrics).await;
                     self.record_work_step(metrics);
-                    return result;
+                    result
                 }
                 crate::commands::work::FinalizationPreparation::Capacity {
                     request_bytes,
@@ -2828,7 +2837,7 @@ mod native {
                         Some(reason.clone()),
                     );
                     self.record_work_step(metrics);
-                    return WorkStep::Deferred(reason);
+                    WorkStep::Deferred(reason)
                 }
                 crate::commands::work::FinalizationPreparation::NeedsAction(reason) => {
                     self.record(
@@ -2837,66 +2846,14 @@ mod native {
                         Some(reason.clone()),
                     );
                     self.record_work_step(metrics);
-                    return WorkStep::Deferred(reason);
+                    WorkStep::Deferred(reason)
                 }
                 crate::commands::work::FinalizationPreparation::Ready(section) => {
                     let result = self.finalize_section(id, *section, &mut metrics).await;
                     self.record_work_step(metrics);
-                    return result;
+                    result
                 }
-            };
-            let operation = format!(
-                "bounded finish {id}. Start at the bounded-work reference's Finalize section. Read the complete lore work result for this exact audit work using bounded continuation reads when necessary. Preserve all attributed questions and blockers. Perform only decision-relevant targeted reads or review/repair actions; changed scope requires replanning. Submit with lore work finish. Leave publication/global checks to the native controller."
-            );
-            let completed = self.consume(skill, &operation, None, &mut metrics).await;
-            if !completed {
-                metrics.outcome = if self.result.cancelled {
-                    WorkOutcome::Cancelled
-                } else if self.configuration_failed {
-                    WorkOutcome::Rejected
-                } else {
-                    WorkOutcome::Failed
-                };
-                self.record_work_step(metrics);
-                return WorkStep::Failed;
             }
-            let started_at = Instant::now();
-            let verified = crate::commands::work::verify_finished(
-                &self.root,
-                &self.config,
-                &self.config_revision,
-                id,
-            );
-            *metrics
-                .verification_duration_ms
-                .as_mut()
-                .expect("measured check") += started_at.elapsed().as_millis() as u64;
-            let result = match verified {
-                Ok(()) => {
-                    metrics.outcome = WorkOutcome::Staged;
-                    self.record(
-                        "bounded work completion",
-                        StageState::Completed,
-                        Some(id.into()),
-                    );
-                    WorkStep::Staged
-                }
-                Err(error) if semantic_context_changed(&error) => {
-                    metrics.outcome = WorkOutcome::Rejected;
-                    self.record(
-                        "bounded audit inputs changed",
-                        StageState::Skipped,
-                        Some(error.to_string()),
-                    );
-                    WorkStep::Replan
-                }
-                Err(error) => {
-                    self.failure("bounded work completion", error);
-                    WorkStep::Failed
-                }
-            };
-            self.record_work_step(metrics);
-            result
         }
 
         fn prepare_queue_screenings(
@@ -4150,7 +4107,7 @@ mod native {
                             metrics.stages.push(generation_stage(task.kind));
                             metrics.work_id = Some(id.clone());
                             metrics.preparation_duration_ms = Some(0);
-                            match self.bounded_finish(id, "lore-process", metrics, true).await {
+                            match self.bounded_finish(id, metrics, true).await {
                                 WorkStep::Staged => {}
                                 WorkStep::Deferred(_) => continue 'planning,
                                 WorkStep::Replan => continue 'planning,
@@ -4162,10 +4119,7 @@ mod native {
                             }
                         }
                         QueueDispatch::RootFinalization { id, task } => {
-                            match self
-                                .bounded_step(id, "lore-process", generation_stage(task.kind))
-                                .await
-                            {
+                            match self.bounded_step(id, generation_stage(task.kind)).await {
                                 WorkStep::Pending => continue,
                                 WorkStep::Deferred(_) => continue 'planning,
                                 WorkStep::Replan => continue 'planning,
@@ -4968,10 +4922,7 @@ mod native {
                         }
                         continue;
                     }
-                    match self
-                        .bounded_step(work, "lore-wiki", ExecutionStage::Audit)
-                        .await
-                    {
+                    match self.bounded_step(work, ExecutionStage::Audit).await {
                         WorkStep::Pending => continue,
                         WorkStep::Deferred(reason) => {
                             self.deferred("bounded audit action", reason);

@@ -7,6 +7,7 @@ use std::time::Instant;
 use lk_core::execution::{AgentEngine, ExecutionProfile};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+pub(super) mod audit;
 pub(super) mod diagnostic;
 pub(super) mod finalization;
 pub(super) mod observation;
