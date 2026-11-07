@@ -1107,7 +1107,9 @@ mod tests {
 
         let source_before = std::fs::metadata(&source).unwrap();
         std::fs::write(&source, &changed).unwrap();
-        std::fs::File::open(&source)
+        std::fs::File::options()
+            .write(true)
+            .open(&source)
             .unwrap()
             .set_times(std::fs::FileTimes::new().set_modified(source_before.modified().unwrap()))
             .unwrap();
@@ -1135,7 +1137,9 @@ mod tests {
             .join(evidence_archive_path(&evidence.citations[0].revision).unwrap());
         let archive_before = std::fs::metadata(&archive).unwrap();
         std::fs::write(&archive, &changed).unwrap();
-        std::fs::File::open(&archive)
+        std::fs::File::options()
+            .write(true)
+            .open(&archive)
             .unwrap()
             .set_times(std::fs::FileTimes::new().set_modified(archive_before.modified().unwrap()))
             .unwrap();

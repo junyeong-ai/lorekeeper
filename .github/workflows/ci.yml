@@ -159,13 +159,7 @@ jobs:
         shell: bash
         run: bash scripts/check-nodex.sh
 
-  # The release builds `x86_64-pc-windows-msvc` and `install.ps1` installs it, but nothing here
-  # compiled it: `google/oauth.rs` and `atlassian/oauth.rs` carry `#[cfg(target_os = "windows")]`
-  # bodies that no job has ever type-checked. `--all-targets` covers the test code too, which is
-  # where the platform-specific `std::os` calls live. Compile-only for now: whether the suite
-  # PASSES on Windows is a separate question, and a `cargo check` that cannot be run from a
-  # macOS or Linux host (blake3 and aws-lc-sys need a Windows C toolchain) is the part that has
-  # to live in CI.
+  # Compile all Windows targets and execute portable review-capture regressions.
   windows:
     name: check (windows-latest)
     runs-on: windows-latest
@@ -200,6 +194,8 @@ jobs:
         with:
           shared-key: windows
       - run: cargo check --locked --workspace --all-targets --all-features
+      - name: Verify review evidence capture on Windows
+        run: cargo test --locked -p lk-vault --lib review_inventory
 
   # Bootstrap scripts and workflow definitions are checked independently of Rust.
   shell:
