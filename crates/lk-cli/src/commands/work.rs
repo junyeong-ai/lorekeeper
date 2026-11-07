@@ -2131,7 +2131,8 @@ pub(super) fn audit_processing_hold(
             max_input_bytes,
         ))),
         FinalizationPreparation::Result(_) => Ok(None),
-        _ => Err(miette::miette!(
+        FinalizationPreparation::NeedsAction(reason) => Ok(Some(reason)),
+        FinalizationPreparation::Ready(_) => Err(miette::miette!(
             "audit admission produced a queue finalization state"
         )),
     }

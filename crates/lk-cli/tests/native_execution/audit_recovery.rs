@@ -124,12 +124,62 @@ fn bounded_audit_actions_are_guarded_and_unchanged_holds_spend_no_calls() {
             .join(finalizer["work_id"].as_str().unwrap());
         let action = work.join("finalization-action.json");
         let before = std::fs::read(&action).unwrap();
+        let originals = walkdir::WalkDir::new(&work)
+            .into_iter()
+            .map(Result::unwrap)
+            .filter(|entry| entry.file_type().is_file())
+            .map(|entry| {
+                (
+                    entry.path().to_owned(),
+                    std::fs::read(entry.path()).unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let config = std::fs::read(&fixture.config).unwrap();
         assert!(!work.join("final.json").exists());
         let (output, report) = fixture.run("knowledge");
         assert!(!output.status.success(), "{report}");
         assert_eq!(report["semantic_calls"], 0, "{report}");
+        assert_eq!(report["halted"], false, "{report}");
+        assert_eq!(report["audit_deferred_count"], 1, "{report}");
+        assert_eq!(
+            report["audit_deferred"][0]["reasons"][0],
+            "Required scoped evidence needs an explicit decision.",
+            "{report}"
+        );
         assert_eq!(bounded_calls(&fixture).len(), calls.len());
-        assert_eq!(std::fs::read(action).unwrap(), before);
+        assert_eq!(std::fs::read(&action).unwrap(), before);
+        std::fs::remove_file(fixture.root().join("audit-response-mode")).unwrap();
+        write_audit_concept(&fixture, "second");
+        let second = fixture.root().join("vault/wiki/concepts/second.md");
+        let body = std::fs::read_to_string(&second).unwrap()
+            + &"\nAn independent source clause remains fully assigned.\n".repeat(180);
+        std::fs::write(second, body).unwrap();
+        record_discovery(&fixture, "wiki/concepts/second.md");
+        let (_, report) = fixture.run("knowledge");
+        assert_eq!(report["halted"], false, "{report}");
+        assert_eq!(report["audit"].as_array().unwrap().len(), 1, "{report}");
+        assert_eq!(
+            report["audit"][0]["assessed_path"],
+            "wiki/concepts/second.md"
+        );
+        assert!(report["semantic_calls"].as_u64().unwrap() > 0, "{report}");
+        assert_eq!(
+            bounded_calls(&fixture)
+                .iter()
+                .filter(|call| call["work_id"] == finalizer["work_id"])
+                .count(),
+            calls.len()
+        );
+        assert_eq!(std::fs::read(&fixture.config).unwrap(), config);
+        for (path, bytes) in &originals {
+            assert_eq!(&std::fs::read(path).unwrap(), bytes);
+        }
+        std::fs::write(&action, "{}").unwrap();
+        let (_, report) = fixture.run("knowledge");
+        assert_eq!(report["halted"], true, "{report}");
+        assert_eq!(report["semantic_calls"], 0, "{report}");
+        assert_eq!(std::fs::read_to_string(&action).unwrap(), "{}");
     }
 }
 
