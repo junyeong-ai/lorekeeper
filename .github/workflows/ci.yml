@@ -124,7 +124,7 @@ jobs:
           tool: cargo-nextest@0.9.150
       # Pinned for the reason scripts/check.sh states: an inherited `always` turns every
       # snapshot into a rubber stamp.
-      - run: INSTA_UPDATE=no cargo nextest run --locked --workspace --all-targets
+      - run: INSTA_UPDATE=no cargo nextest run --locked --workspace --all-targets --no-fail-fast
       - run: cargo test --locked --workspace --doc
 
   nodex:

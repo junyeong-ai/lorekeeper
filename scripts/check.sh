@@ -29,7 +29,7 @@ gate test
 # INSTA_UPDATE pinned: inherited from the environment, `always` makes a changed snapshot
 # rewrite itself and pass, so the gate would report green on a contract nobody read. Accepting
 # a deliberate change stays a separate, explicit `cargo insta accept`.
-INSTA_UPDATE=no cargo nextest run --locked --workspace --all-targets
+INSTA_UPDATE=no cargo nextest run --locked --workspace --all-targets --no-fail-fast
 cargo test --locked --workspace --doc
 
 gate nodex
