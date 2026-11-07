@@ -197,6 +197,10 @@ impl MutationClaim {
         Self::acquire_with_wait(root, false)
     }
 
+    pub fn acquire_waiting(root: &Path) -> Result<Self, VaultError> {
+        Self::acquire_with_wait(root, true)
+    }
+
     fn acquire_with_wait(root: &Path, wait: bool) -> Result<Self, VaultError> {
         let root = root.canonicalize()?;
         let state = root.join(".lorekeeper/mutation");

@@ -694,11 +694,12 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
 
 ## Task intent (`commands/task.rs`, delegated to lk-task)
 
-- Reconcile→requested change→commit; recheck parsed board bytes before history,
-  history before board, reminder retirement after successful publication best-effort.
-  Read-only agenda/brief must not mutate. Hold PlaneLock for plane writes only.
+- Reconcile→requested change→commit; publish exact board/history replacements in one
+  mutation journal, then retire reminders best-effort. Acquire mutation claim before
+  PlaneLock and recover before deriving task writes. Read-only agenda/brief neither
+  mutate nor recover.
 - Parse yesterday/today/tomorrow in the vault timezone with command-specific bounds;
-  a close targets an ended day. Board state, completion history, carried_too_long,
+  a close cannot target a future day. Board state, completion history, carried_too_long,
   schedules, and reminder status have separate meanings, not one generic “done.”
 - JSON preserves unplaced tasks, unwritable diagnostics, timezone and completion
   information. Unavailable stores are null, not empty; incomplete parsing cannot

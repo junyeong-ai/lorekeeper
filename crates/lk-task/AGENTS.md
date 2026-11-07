@@ -70,8 +70,8 @@ stores. CLI orchestration and `IntentPlane::commit` live in `lk-cli/commands/tas
   append another observation. Preserve its original instant/title/carry information.
   `done` on an OPEN line closes it today; only a line this pass settled can amend
   a historical completion merely because history contains the ID.
-- Closing day and record date are separate. CLI accepts only ended days in the vault
-  timezone (`closing < today`). Older carry records without an explicit closing day
+- Closing day and record date are separate. CLI accepts closing days through today in the vault
+  timezone (`closing <= today`). Older carry records without an explicit closing day
   do not prove a specific day closed. A carry is idempotent by `(task ID, ended day)`,
   wherever the transition was recorded, including a retry after midnight.
 - Completion lookup starts at the earliest ticked task's `since`, then checks each
@@ -102,9 +102,10 @@ stores. CLI orchestration and `IntentPlane::commit` live in `lk-cli/commands/tas
   platforms. An absent lock on a fresh vault is holdable without creating a file.
   Report lasting unwriteability separately
   while still returning readable data.
-- CLI commit rechecks exact parsed board bytes BEFORE writing history, writes
-  history BEFORE board, then retires moot reminders best-effort. This prevents
-  overwriting editor changes and makes a partial commit safely reconcilable.
+- CLI writers acquire the mutation claim before `PlaneLock`, then recover pending
+  journals before reading board/history. Commit journals the exact board and prepared
+  history replacements together, then retires moot reminders best-effort. Recovery
+  completes interrupted publications without inferring completion from historical IDs.
   Each date's JSONL is atomically replaced; a malformed history line is a hard error.
 - Diagnose board write defects when opening the plane, but refuse them only if the
   operation actually writes the board. A reminder/judgment-only operation must not

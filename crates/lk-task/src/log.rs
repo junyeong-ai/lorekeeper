@@ -379,6 +379,13 @@ pub struct TransitionLog {
     shelf: crate::store::Shelf,
 }
 
+/// Exact history bytes prepared for the caller's guarded publication.
+pub struct HistoryUpdate {
+    pub path: std::path::PathBuf,
+    pub before: Option<String>,
+    pub after: String,
+}
+
 impl TransitionLog {
     pub fn new(vault_root: &Path) -> Self {
         Self {
@@ -496,26 +503,16 @@ impl TransitionLog {
         Ok(answered)
     }
 
-    /// Add `transitions` to their dates' records.
+    /// Prepare exact before/after bytes for every affected date without writing.
+    /// The caller publishes these replacements with the board in one guarded journal.
     ///
-    /// Read-modify-write through the workspace's one atomic writer rather than an append: a
-    /// day holds tens of lines, so rewriting costs nothing, and it is the same durability every
-    /// other file this tool produces gets. One command mutates the board at a time, so there is
-    /// no in-run race to lose an entry to.
-    ///
-    /// A day holds ONE completion per task, so an observation REPLACES the one already there
-    /// rather than joining it. That is not a new rule — `Transition::observation` keys its item
-    /// on `task:{id}` and `EventId` already carries the date, so a day's second completion of
-    /// one task collapses in the pipeline's dedup and only the record would have shown two.
-    /// Stating it here is what lets a note reach a completion already written: the amendment is
-    /// that transition plus the sentence, so the instant, the carry count and the title it was
-    /// closed under are the ones the day recorded. Every other kind is appended — a task moved
-    /// out of today and back is two moves, and reading them as one would lose the day's shape.
-    pub fn record(
+    /// Each date retains one completion per task. An amendment keeps its original instant,
+    /// title and carry count. Other transitions append in order, preserving repeated moves.
+    pub fn plan_record(
         &self,
         transitions: &[Transition],
         zone: &jiff::tz::TimeZone,
-    ) -> Result<(), TaskError> {
+    ) -> Result<Vec<HistoryUpdate>, TaskError> {
         let mut by_date: std::collections::BTreeMap<jiff::civil::Date, Vec<&Transition>> =
             std::collections::BTreeMap::new();
         for transition in transitions {
@@ -525,9 +522,10 @@ impl TransitionLog {
                 .push(transition);
         }
 
+        let mut updates = Vec::with_capacity(by_date.len());
         for (date, added) in by_date {
             let file = self.shelf.file(&date.to_string());
-            let mut day: Vec<Transition> = file.read()?;
+            let (before, mut day): (_, Vec<Transition>) = file.capture()?;
             for transition in added {
                 match day.iter_mut().find(|held| {
                     held.id == transition.id
@@ -538,7 +536,25 @@ impl TransitionLog {
                     None => day.push(transition.clone()),
                 }
             }
-            file.replace(&day)?;
+            updates.push(HistoryUpdate {
+                path: file.path().to_owned(),
+                before,
+                after: crate::store::Jsonl::encode(&day)?,
+            });
+        }
+        Ok(updates)
+    }
+
+    #[cfg(test)]
+    pub fn record(
+        &self,
+        transitions: &[Transition],
+        zone: &jiff::tz::TimeZone,
+    ) -> Result<(), TaskError> {
+        for update in self.plan_record(transitions, zone)? {
+            std::fs::create_dir_all(update.path.parent().unwrap()).unwrap();
+            lk_core::fs::write_atomic(&update.path, update.after.as_bytes(), None)
+                .map_err(|e| TaskError::io(format!("write {}", update.path.display()), e))?;
         }
         Ok(())
     }
@@ -563,6 +579,41 @@ mod tests {
     fn done(note: Option<&str>) -> Transition {
         Transition::new(id("7k2p"), TransitionKind::Done, "read the spec", at(9))
             .with_note(note.map(str::to_string))
+    }
+
+    #[test]
+    fn history_planning_captures_exact_bytes_and_never_writes_a_partial_date_set() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log = TransitionLog::new(tmp.path());
+        let first = log.shelf.file("2026-08-19");
+        let later = log.shelf.file("2026-08-20");
+        std::fs::create_dir_all(first.path().parent().unwrap()).unwrap();
+        let raw = format!(" \r\n{}\r\n", serde_json::to_string(&done(None)).unwrap());
+        std::fs::write(first.path(), &raw).unwrap();
+        std::fs::write(later.path(), "corrupt retained history\n").unwrap();
+        let amended = done(Some("A preserved completion note."));
+        let mut next = amended.clone();
+        next.at = next.at.checked_add(jiff::Span::new().hours(24)).unwrap();
+        assert!(
+            log.plan_record(&[amended.clone(), next], &jiff::tz::TimeZone::UTC)
+                .is_err()
+        );
+        assert_eq!(std::fs::read_to_string(first.path()).unwrap(), raw);
+        assert_eq!(
+            std::fs::read_to_string(later.path()).unwrap(),
+            "corrupt retained history\n"
+        );
+        let updates = log
+            .plan_record(&[amended], &jiff::tz::TimeZone::UTC)
+            .unwrap();
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].before.as_deref(), Some(raw.as_str()));
+        assert_eq!(std::fs::read_to_string(first.path()).unwrap(), raw);
+        let recorded: Transition = serde_json::from_str(updates[0].after.trim()).unwrap();
+        assert_eq!(
+            recorded.note.as_deref(),
+            Some("A preserved completion note.")
+        );
     }
 
     #[test]

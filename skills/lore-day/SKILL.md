@@ -71,9 +71,10 @@ Notes reach the completed-task archive and later extraction, so fabricated notes
 would become fabricated knowledge.
 
 `lore task add` returns its ID on stdout. Other diagnostic prose is not a machine
-contract. A nonzero transition may already have recorded history before board
-publication failed. Report the exact error; do not blindly repeat it or claim the
-completion was lost.
+contract. A failed transition can leave a guarded publication pending; the next
+task writer recovers it before reading the board. Report the exact error and inspect
+the current state before repeating a requested change. A recovery conflict needs
+resolution; never delete its journal or infer that the completion was lost.
 
 ## Proposal triage
 

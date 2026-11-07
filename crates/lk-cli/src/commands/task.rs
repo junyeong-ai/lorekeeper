@@ -455,6 +455,7 @@ pub(crate) struct IntentPlane {
     /// Held for a mutation, from before the board is read until after it and the log are
     /// written. Dropping it releases the plane.
     _guard: Option<lk_task::PlaneLock>,
+    mutation: Option<lk_vault::MutationSession>,
 }
 
 impl IntentPlane {
@@ -506,12 +507,17 @@ impl IntentPlane {
         // the contract said `unwritable: null` over a vault where the nightly close, every
         // command and the reminder timer were all being turned away.
         let mut guard = None;
+        let mut mutation = None;
         let mut unheld = None;
         match exclusive {
             true => {
+                std::fs::create_dir_all(&vault_root).map_err(|e| miette::miette!("{e}"))?;
+                let claim = lk_vault::MutationClaim::acquire_waiting(&vault_root)
+                    .map_err(|e| miette::miette!("{e}"))?;
                 guard = Some(
                     lk_task::PlaneLock::hold(&vault_root).map_err(|e| miette::miette!("{e}"))?,
-                )
+                );
+                mutation = Some(claim.into_session().map_err(|e| miette::miette!("{e}"))?);
             }
             false => {
                 if let Err(why) = lk_task::PlaneLock::is_holdable(&vault_root) {
@@ -605,6 +611,7 @@ impl IntentPlane {
             recorded: lk_task::Recorded::default(),
             read_as,
             _guard: guard,
+            mutation,
         })
     }
 
@@ -955,11 +962,7 @@ impl IntentPlane {
         }
     }
 
-    /// Write the board and the history it owes, history first.
-    ///
-    /// Order matters on a crash: a transition recorded without the board move is re-derived
-    /// harmlessly by the next reconcile, while a board written without its transition is work
-    /// that happened and left no record — and the log is the only thing the archive reads.
+    /// Journal the exact board and history replacements as one recoverable publication.
     async fn commit(&mut self) -> miette::Result<()> {
         // A page a write cannot land on is refused HERE, where the write is, and nowhere
         // earlier. Nothing has been written at this point, so a refusal leaves nothing
@@ -998,17 +1001,39 @@ impl IntentPlane {
         // harvested and settled are one thing to anyone who was waiting on the task.
         answered.append(&mut self.answered);
 
-        if !self.pending.is_empty() {
-            TransitionLog::new(&self.vault_root)
-                .record(&self.pending, &self.zone)
+        let session = self
+            .mutation
+            .as_ref()
+            .ok_or_else(|| miette::miette!("task publication requires an intent-plane writer"))?;
+        let mut plan = lk_vault::MutationPlan::default();
+        for update in TransitionLog::new(&self.vault_root)
+            .plan_record(&self.pending, &self.zone)
+            .map_err(|e| miette::miette!("{e}"))?
+        {
+            let path = update
+                .path
+                .strip_prefix(&self.vault_root)
                 .map_err(|e| miette::miette!("{e}"))?;
-            self.pending.clear();
+            match update.before {
+                Some(before) if before == update.after => plan.require_unchanged(path, before),
+                Some(before) => plan.edit(path, before, update.after),
+                None => plan.create(path, update.after),
+            }
         }
         let page = self.board.render(self.locale, self.today);
-        lk_vault::VaultWriter::new(&self.vault_root)
-            .write_page(&self.board_path, &page)
-            .await
-            .map_err(|e| miette::miette!("write {}: {e}", self.board_path.display()))?;
+        let before = self
+            .read_as
+            .clone()
+            .map(String::from_utf8)
+            .transpose()
+            .map_err(|e| miette::miette!("read {}: {e}", self.board_path.display()))?;
+        if before.as_deref() == Some(page.as_str()) {
+            plan.require_unchanged(&self.board_path, page.clone());
+        }
+        plan.publish_expected(session.root(), &self.board_path, before, page)
+            .map_err(|e| miette::miette!("{e}"))?;
+        session.apply(plan).map_err(|e| miette::miette!("{e}"))?;
+        self.pending.clear();
 
         self.retire_reminders(&answered);
         Ok(())

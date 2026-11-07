@@ -1,5 +1,8 @@
 #![cfg(unix)]
 
+#[path = "support/task_history.rs"]
+mod task_history;
+
 #[path = "native_execution/stage_profiles.rs"]
 mod stage_profiles;
 
@@ -4932,18 +4935,18 @@ PROCESS"#,
     )
     .unwrap();
     let vault = fixture.root().join("vault");
-    lk_task::TransitionLog::new(&vault)
-        .record(
-            &[lk_task::Transition::new(
-                "7k2p".parse().unwrap(),
-                lk_task::TransitionKind::Done,
-                "Review evidence",
-                "2020-01-05T12:00:00Z".parse().unwrap(),
-            )
-            .with_note(Some("Checked retained source evidence.".into()))],
-            &jiff::tz::TimeZone::UTC,
+    task_history::record(
+        &lk_task::TransitionLog::new(&vault),
+        &[lk_task::Transition::new(
+            "7k2p".parse().unwrap(),
+            lk_task::TransitionKind::Done,
+            "Review evidence",
+            "2020-01-05T12:00:00Z".parse().unwrap(),
         )
-        .unwrap();
+        .with_note(Some("Checked retained source evidence.".into()))],
+        &jiff::tz::TimeZone::UTC,
+    )
+    .unwrap();
     for args in [
         vec!["ingest", "--date", "2020-01-05"],
         vec!["run", "process"],

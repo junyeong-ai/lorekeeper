@@ -1,5 +1,8 @@
 use std::process::{Command, Output};
 
+#[path = "support/task_history.rs"]
+mod task_history;
+
 fn invoke(config: &std::path::Path, args: &[&str]) -> Output {
     let mut full_args = vec!["ingest"];
     full_args.extend_from_slice(args);
@@ -190,7 +193,8 @@ fn personal_period_refuses_changed_filtered_inputs_and_accepts_unchanged_refinem
         .unwrap()
         .timestamp();
     let log = lk_task::TransitionLog::new(&root);
-    log.record(
+    task_history::record(
+        &log,
         &[lk_task::Transition::new(
             "7k2p".parse().unwrap(),
             lk_task::TransitionKind::Done,
@@ -239,7 +243,8 @@ fn personal_period_refuses_changed_filtered_inputs_and_accepts_unchanged_refinem
     assert_ne!(resume_personal(&config)["status"], "blocked");
     let retained = std::fs::read(&work_log).unwrap();
 
-    log.record(
+    task_history::record(
+        &log,
         &[lk_task::Transition::new(
             "3b8q".parse().unwrap(),
             lk_task::TransitionKind::Done,
@@ -423,17 +428,17 @@ fn personal_period_requires_worklog_for_known_filtered_contributions_on_an_earli
         .to_zoned(zone.clone())
         .unwrap()
         .timestamp();
-    lk_task::TransitionLog::new(&root)
-        .record(
-            &[lk_task::Transition::new(
-                "7k2p".parse().unwrap(),
-                lk_task::TransitionKind::Done,
-                "Known contribution",
-                at,
-            )],
-            &zone,
-        )
-        .unwrap();
+    task_history::record(
+        &lk_task::TransitionLog::new(&root),
+        &[lk_task::Transition::new(
+            "7k2p".parse().unwrap(),
+            lk_task::TransitionKind::Done,
+            "Known contribution",
+            at,
+        )],
+        &zone,
+    )
+    .unwrap();
     let closing = invoke(&config, &["--date", &close.to_string()]);
     assert!(closing.status.success());
     let partial = invoke(&config, &["tasks", "--date", &day.to_string()]);

@@ -42,12 +42,18 @@ impl Jsonl {
     /// naming the file and the line, because the only writer replaces the file whole — so
     /// damage is external, and dropping the line would let the next write erase it for good.
     pub(crate) fn read<T: DeserializeOwned>(&self) -> Result<Vec<T>, TaskError> {
+        self.capture().map(|(_, rows)| rows)
+    }
+
+    pub(crate) fn capture<T: DeserializeOwned>(
+        &self,
+    ) -> Result<(Option<String>, Vec<T>), TaskError> {
         let content = match std::fs::read_to_string(&self.path) {
             Ok(content) => content,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((None, Vec::new())),
             Err(e) => return Err(TaskError::io(format!("read {}", self.path.display()), e)),
         };
-        content
+        let rows = content
             .lines()
             .enumerate()
             .filter(|(_, line)| !line.trim().is_empty())
@@ -60,7 +66,8 @@ impl Jsonl {
                     ))
                 })
             })
-            .collect()
+            .collect::<Result<_, _>>()?;
+        Ok((Some(content), rows))
     }
 
     /// Replace the file with `rows`, creating the directory it belongs in.
@@ -74,6 +81,12 @@ impl Jsonl {
         })?;
         std::fs::create_dir_all(dir)
             .map_err(|e| TaskError::io(format!("create {}", dir.display()), e))?;
+        let buf = Self::encode(rows)?;
+        lk_core::fs::write_atomic(&self.path, buf.as_bytes(), None)
+            .map_err(|e| TaskError::io(format!("write {}", self.path.display()), e))
+    }
+
+    pub(crate) fn encode<T: Serialize>(rows: &[T]) -> Result<String, TaskError> {
         let mut buf = String::new();
         for row in rows {
             let line = serde_json::to_string(row)
@@ -81,8 +94,7 @@ impl Jsonl {
             buf.push_str(&line);
             buf.push('\n');
         }
-        lk_core::fs::write_atomic(&self.path, buf.as_bytes(), None)
-            .map_err(|e| TaskError::io(format!("write {}", self.path.display()), e))
+        Ok(buf)
     }
 
     /// Remove the file. An absent one is already retired.

@@ -119,6 +119,18 @@ mod tests {
     use super::*;
     use lk_task::{Transition, TransitionKind};
 
+    fn record_history(
+        log: &lk_task::TransitionLog,
+        transitions: &[Transition],
+        zone: &jiff::tz::TimeZone,
+    ) -> Result<(), lk_task::TaskError> {
+        for update in log.plan_record(transitions, zone)? {
+            std::fs::create_dir_all(update.path.parent().unwrap()).unwrap();
+            std::fs::write(update.path, update.after).unwrap();
+        }
+        Ok(())
+    }
+
     #[tokio::test]
     async fn collection_identity_is_portable_local_transition_authority() {
         let identity = TasksSource.collection_identity().await.unwrap().unwrap();
@@ -159,7 +171,8 @@ mod tests {
     async fn a_days_completions_are_the_days_items() {
         let tmp = tempfile::tempdir().unwrap();
         let log = lk_task::TransitionLog::new(tmp.path());
-        log.record(
+        record_history(
+            &log,
             &[
                 Transition::new(
                     "7k2p".parse().unwrap(),
@@ -255,7 +268,8 @@ mod tests {
             .to_zoned(jiff::tz::TimeZone::UTC)
             .unwrap()
             .timestamp();
-        log.record(
+        record_history(
+            &log,
             &[Transition::new(
                 "7k2p".parse().unwrap(),
                 TransitionKind::Done,

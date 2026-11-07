@@ -59,6 +59,103 @@ fn wedge(root: &Path) {
 }
 
 #[test]
+fn fresh_vault_reads_leave_it_absent_and_first_task_write_creates_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config = vault(tmp.path());
+    let root = tmp.path().join("vault");
+    std::fs::remove_dir_all(&root).unwrap();
+    assert!(run(&config, &["task", "list"]).status.success());
+    assert!(!root.exists());
+    let output = run(&config, &["task", "add", "First task"]);
+    assert!(output.status.success(), "{}", said(&output));
+    let output = run(&config, &["task", "list", "--json"]);
+    assert!(output.status.success(), "{}", said(&output));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("First task"));
+}
+
+#[test]
+fn task_writers_recover_history_and_board_together_and_preserve_intentional_reopening() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config = vault(tmp.path());
+    let root = tmp.path().join("vault");
+    let today = jiff::Timestamp::now()
+        .to_zoned(jiff::tz::TimeZone::UTC)
+        .date();
+    let yesterday = today.yesterday().unwrap();
+    let id = "7k2p".parse().unwrap();
+    let before = format!("## Today\n\n- [ ] Ship docs <!--t:7k2p since:{yesterday}-->\n");
+    let board_path = lk_core::vault_path::VaultPath::task_board(
+        &lk_core::config::VaultDirs::default(),
+        "tasks.md",
+    )
+    .to_string();
+    std::fs::create_dir_all(root.join(&board_path).parent().unwrap()).unwrap();
+    std::fs::write(root.join(&board_path), &before).unwrap();
+    let mut board = lk_task::Board::parse(&before);
+    board.remove(&id).unwrap();
+    let after = board.render(lk_core::i18n::Locale::Ko, today);
+    let transition = lk_task::Transition::new(
+        id,
+        lk_task::TransitionKind::Done,
+        "Ship docs",
+        yesterday
+            .at(12, 0, 0, 0)
+            .to_zoned(jiff::tz::TimeZone::UTC)
+            .unwrap()
+            .timestamp(),
+    )
+    .with_note(Some("shipped".into()));
+    let history = format!("{}\n", serde_json::to_string(&transition).unwrap());
+    let history_path = format!(".lorekeeper/tasks/{yesterday}.jsonl");
+    let mut plan = lk_vault::MutationPlan::default();
+    plan.create(&history_path, history.clone());
+    plan.edit(&board_path, before.clone(), after);
+    std::fs::create_dir_all(root.join(".lorekeeper/mutation")).unwrap();
+    std::fs::create_dir_all(root.join(".lorekeeper/tasks")).unwrap();
+    std::fs::write(root.join(&history_path), &history).unwrap();
+    let journal = root.join(".lorekeeper/mutation/pending.json");
+    std::fs::write(
+        &journal,
+        serde_json::to_vec(&serde_json::json!({"version":1,"plan":plan})).unwrap(),
+    )
+    .unwrap();
+    assert!(run(&config, &["task", "list"]).status.success());
+    assert_eq!(
+        std::fs::read_to_string(root.join(&board_path)).unwrap(),
+        before
+    );
+    assert!(journal.exists());
+    let output = run(&config, &["task", "sync"]);
+    assert!(output.status.success(), "{}", said(&output));
+    assert!(
+        !std::fs::read_to_string(root.join(&board_path))
+            .unwrap()
+            .contains("t:7k2p")
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join(&history_path)).unwrap(),
+        history
+    );
+    assert!(!journal.exists());
+    std::fs::write(root.join(&board_path), before).unwrap();
+    let output = run(
+        &config,
+        &["task", "done", "7k2p", "--note", "shipped again"],
+    );
+    assert!(output.status.success(), "{}", said(&output));
+    assert_eq!(
+        std::fs::read_to_string(root.join(history_path)).unwrap(),
+        history
+    );
+    let current =
+        std::fs::read_to_string(root.join(format!(".lorekeeper/tasks/{today}.jsonl"))).unwrap();
+    assert_eq!(current.lines().count(), 1);
+    let done: serde_json::Value = serde_json::from_str(current.trim()).unwrap();
+    assert_eq!(done["kind"], "done");
+    assert_eq!(done["note"], "shipped again");
+}
+
+#[test]
 fn a_plane_that_cannot_be_held_refuses_writes_and_serves_reads() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let config = vault(tmp.path());
