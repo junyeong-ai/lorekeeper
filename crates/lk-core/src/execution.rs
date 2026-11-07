@@ -113,6 +113,7 @@ pub struct ExecutionConfig {
 #[serde(deny_unknown_fields)]
 pub struct AutomationConfig {
     pub process_schedule: String,
+    pub knowledge_schedule: Option<String>,
     pub max_calls_per_day: NonZeroUsize,
     pub max_run_seconds: NonZeroU64,
 }

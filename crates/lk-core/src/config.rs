@@ -451,6 +451,15 @@ impl Config {
             })?;
             self.execution
                 .resolve_profile(crate::execution::ExecutionOperation::Process, None)?;
+            if let Some(schedule) = &automation.knowledge_schedule {
+                validate_cron(schedule).map_err(|error| {
+                    ConfigError::Validation(format!(
+                        "execution.automation.knowledge_schedule: {error}"
+                    ))
+                })?;
+                self.execution
+                    .resolve_profile(crate::execution::ExecutionOperation::Knowledge, None)?;
+            }
         }
         if self.synthesis.weekly.enabled
             && let Some(sched) = &self.synthesis.weekly.schedule
@@ -1828,6 +1837,22 @@ mod tests {
             original.semantic_work_revision(),
             changed.semantic_work_revision()
         );
+        let knowledge = operational.replace(
+            "process_schedule:",
+            "knowledge_schedule: '5,20,35,50 * * * *', process_schedule:",
+        );
+        std::fs::write(&path, &knowledge).unwrap();
+        assert_eq!(
+            original.semantic_work_revision(),
+            Config::load(&path).unwrap().semantic_work_revision()
+        );
+        for invalid in [
+            knowledge.replace("5,20,35,50 * * * *", "60 * * * *"),
+            knowledge.replace("default_profile: main", "operations: {process: main}"),
+        ] {
+            std::fs::write(&path, invalid).unwrap();
+            assert!(Config::load(&path).is_err());
+        }
         for policy in [
             base.replace("locale: en", "locale: ko"),
             base.replace("engine: codex,", "engine: codex, model: selected-model,"),

@@ -233,7 +233,7 @@ pub async fn run(
             lk_core::execution::ExecutionOperation::Daily,
         ),
         (
-            config.graph.audit.schedule.is_some(),
+            knowledge_schedule(&config).is_some(),
             lk_core::execution::ExecutionOperation::Knowledge,
         ),
         (
@@ -299,6 +299,15 @@ fn checked_line(line: String) -> miette::Result<String> {
 }
 
 /// Scheduling slots stay stable when their executable changes.
+fn knowledge_schedule(config: &lk_core::config::Config) -> Option<&str> {
+    config
+        .execution
+        .automation
+        .as_ref()
+        .and_then(|automation| automation.knowledge_schedule.as_deref())
+        .or(config.graph.audit.schedule.as_deref())
+}
+
 fn build_jobs(config: &lk_core::config::Config, flags: &[String]) -> Vec<Job> {
     let lore_job = |name: &str, schedule: &str, tail: &[&str]| {
         let mut args = flags.to_vec();
@@ -320,7 +329,7 @@ fn build_jobs(config: &lk_core::config::Config, flags: &[String]) -> Vec<Job> {
     if let Some(schedule) = &config.ingest.schedule {
         jobs.push(semantic_job("ingest", schedule, "daily"));
     }
-    if let Some(schedule) = &config.graph.audit.schedule {
+    if let Some(schedule) = knowledge_schedule(config) {
         jobs.push(semantic_job("knowledge-audit", schedule, "knowledge"));
     }
     if let Some(automation) = &config.execution.automation {
@@ -829,7 +838,7 @@ mod tests {
     #[test]
     fn automation_adds_process_and_reuses_existing_semantic_schedule_slots() {
         let mut config = config_with_schedules();
-        config.graph.audit.schedule = Some("5,20,35,50 * * * *".into());
+        config.graph.audit.schedule = Some("30 10 * * 1,2,3,4,5".into());
         assert!(
             !build_jobs(&config, &[])
                 .iter()
@@ -837,6 +846,7 @@ mod tests {
         );
         config.execution.automation = Some(lk_core::execution::AutomationConfig {
             process_schedule: "0,15,30,45 * * * *".into(),
+            knowledge_schedule: Some("5,20,35,50 * * * *".into()),
             max_calls_per_day: 256.try_into().unwrap(),
             max_run_seconds: 900.try_into().unwrap(),
         });
@@ -871,6 +881,41 @@ mod tests {
                 .unwrap()
                 .args
                 .contains(&"--scheduled".into())
+        );
+        let audit = jobs
+            .iter()
+            .find(|job| job.name == "knowledge-audit")
+            .unwrap();
+        assert!(
+            matches!(&audit.schedule, When::Calendar(schedule) if schedule == "5,20,35,50 * * * *")
+        );
+        config.graph.audit.schedule = None;
+        assert_eq!(
+            build_jobs(&config, &[])
+                .iter()
+                .filter(|job| job.name == "knowledge-audit")
+                .count(),
+            1
+        );
+        config
+            .execution
+            .automation
+            .as_mut()
+            .unwrap()
+            .knowledge_schedule = None;
+        assert!(
+            !build_jobs(&config, &[])
+                .iter()
+                .any(|job| job.name == "knowledge-audit")
+        );
+        config.graph.audit.schedule = Some("30 10 * * 1,2,3,4,5".into());
+        let jobs = build_jobs(&config, &[]);
+        let audit = jobs
+            .iter()
+            .find(|job| job.name == "knowledge-audit")
+            .unwrap();
+        assert!(
+            matches!(&audit.schedule, When::Calendar(schedule) if schedule == "30 10 * * 1,2,3,4,5")
         );
     }
 

@@ -548,6 +548,7 @@ execution:
   # Counts outer agent invocations, not model turns, tokens or billing. Day boundaries are UTC.
   # automation:
   #   process_schedule: "0,15,30,45 * * * *"
+  #   knowledge_schedule: "5,20,35,50 * * * *" # optional; otherwise graph.audit.schedule
   #   max_calls_per_day: 256
   #   max_run_seconds: 900       # stop admitting new calls; retain returned results
   # Bounded worker requests/results are compact JSON bytes, not model tokens or cost.

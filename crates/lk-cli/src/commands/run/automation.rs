@@ -295,6 +295,7 @@ mod tests {
     fn policy(limit: usize) -> AutomationConfig {
         AutomationConfig {
             process_schedule: "0,15,30,45 * * * *".into(),
+            knowledge_schedule: None,
             max_calls_per_day: limit.try_into().unwrap(),
             max_run_seconds: 60.try_into().unwrap(),
         }

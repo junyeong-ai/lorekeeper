@@ -29,7 +29,12 @@ knowledge jobs and add one process job at `automation.process_schedule`. Process
 knowledge repeat ready batches within `max_run_seconds`; daily collects once.
 The selected profile's `execution.work.max_calls` also caps the complete scheduled
 invocation across those batches; a batch boundary cannot renew that allowance.
-The existing audit schedule and batch size remain authoritative. Every batch releases
+Optional `automation.knowledge_schedule` overrides the knowledge job's timing;
+omission retains `graph.audit.schedule`. It emits one stable job, not another audit
+writer. Batch size, readiness and holds still use the existing graph audit policy.
+Keep automatic timing changes in this policy to preserve new-policy Work identities.
+Stagger process and knowledge opportunities when both need progress; shared usage
+does not reserve an operation's share. Every batch releases
 the workflow lease. All scheduled jobs share `max_calls_per_day` in the physical
 vault's UTC-day usage ledger. Reservations are durable before host launch and survive
 restart/config changes; they count outer agent attempts, not internal model requests,
