@@ -2516,7 +2516,6 @@ pub(super) fn record_inspections(
 #[cfg(unix)]
 pub(super) struct SectionFinalization {
     pub request: Value,
-    pub max_response_bytes: usize,
     completed: Value,
     result: lk_queue::SectionResult,
     scope: Prepared,
@@ -2946,12 +2945,13 @@ fn prepare_finalization_from_capture(
         "dependencies":scope.context["purpose"]["review_dependencies"],
         "resources":review_resources,
     });
-    let request = super::execution::finalization::request(
+    let mut request = super::execution::finalization::request(
         &completed,
         events,
         max_response_bytes,
         review_context,
     )?;
+    request["source_read"] = json!(source::descriptor(work)?);
     let request_bytes = serde_json::to_vec(&request).into_diagnostic()?.len();
     let max_input_bytes = config
         .execution
@@ -2981,7 +2981,6 @@ fn prepare_finalization_from_capture(
             completed,
             result,
             scope,
-            max_response_bytes,
         },
     )))
 }

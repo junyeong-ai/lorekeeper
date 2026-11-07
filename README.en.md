@@ -148,6 +148,8 @@ An original reading node may explicitly request smaller units, allowing one spli
 Existing paid plans, observations and ordinary holds are preserved; children do not split automatically again.
 Reduction and finalization keep their separate size limits. Smaller units do not guarantee faithful reading or final completion.
 See [bounded work](skills/lore-process/references/bounded-work.md) for status and explicit recovery procedures.
+Bounded finalizers can reread necessary retained-source ranges when observations omit required evidence.
+These reads revalidate current inputs and leave existing observations and completion records unchanged.
 
 ## Operations and completion
 

@@ -17,7 +17,8 @@ if sys.argv[1:]==['--version']:
 import json, signal, subprocess, time
 from pathlib import Path
 root=Path(os.environ['TEST_SECTION_ROOT'])
-assert '--output-schema' in sys.argv or '--safe-mode' in sys.argv, 'interactive fallback is forbidden'
+assert '--output-schema' in sys.argv or '--safe-mode' in sys.argv or '--json-schema' in sys.argv, 'unstructured fallback is forbidden'
+tool_result='--output-last-message' in sys.argv or ('--json-schema' in sys.argv and '--safe-mode' not in sys.argv)
 raw=sys.stdin.read()
 request=json.loads(raw.split('\nNative request:\n',1)[1])
 kind=request['kind']
@@ -28,7 +29,8 @@ with (root/'calls.jsonl').open('a') as f:
 if kind in ['finalize-section','whole-section']:
     if (root/'measure-planning').exists(): print('FINALIZER_ADMISSION_HOST',file=sys.stderr,flush=True)
     assert all(key in request for key in ['instructions','max_response_bytes','events'])
-    assert 'No tools' in request['instructions']
+    assert ('No tools' in request['instructions']) == (kind=='whole-section')
+    assert tool_result == (kind=='finalize-section')
     assert work['context']['purpose']['parameters']['locale']=='ko'
     if kind=='finalize-section': assert not work['output']['unresolved']
     else:
@@ -71,6 +73,15 @@ if kind in ['finalize-section','whole-section']:
         if events is not None:
             if mode=='reversed-events': events=list(reversed(events))
             body='\n\n'.join(e['heading']+'\n\n'+body+'\n'+'\n'.join(e['inline_links']) for e in events)
+        if mode=='targeted-source':
+            assert kind=='finalize-section' and request['source_read']['work_id']==work_id
+            assert not work['output']['findings']
+            assert 'Another observation.' not in json.dumps(work['output'])
+            source=json.loads(subprocess.check_output([os.environ['LORE_BIN'],'work','source',work_id,'--find','### Second event','--limit','4000']))
+            assert source['status']=='page' and source['guard']['authority']=='retained-input'
+            assert 'Another observation.' in source['text']
+            (root/'targeted-source.json').write_text(json.dumps(source))
+            body='\n\n'.join(e['heading']+'\n\n'+('두 번째 이벤트에는 별도의 관찰이 기록되어 있다.' if i==1 else '원문은 제안을 설명하며 배포 여부는 확인되지 않았다.')+'\n'+'\n'.join(e['inline_links']) for i,e in enumerate(events))
         if mode=='oversized': body='x'*request['max_response_bytes']
         if mode=='empty': body=''
         if mode=='section-boundary': body='## Unexpected section\nEscaped body.'
@@ -105,6 +116,10 @@ if kind in ['inspect','reduce']:
             path.write_text(path.read_text()+'\nExternal edit during oversized inspection.\n')
     if mode=='empty-inspection-evidence':
         output['observation']['unresolved']=[{'question':'Cannot establish mapping.','evidence':[]}]
+if engine=='codex' and tool_result:
+    Path(sys.argv[sys.argv.index('--output-last-message')+1]).write_text(json.dumps(output))
+    print('Tool events are not the structured terminal result.')
+    raise SystemExit()
 if engine=='claude-code':
     output={'type':'result','subtype':'success','is_error':False,'structured_output':output}
 print(json.dumps(output))
@@ -358,6 +373,38 @@ impl Fixture {
         assert_eq!(reports[0]["effective_state"], "open", "{reports}");
         assert_eq!(reports[0]["errors"], json!([]));
         (review.into(), evidence.into())
+    }
+}
+
+#[test]
+fn bounded_sections_read_missing_retained_facts_without_replaying_paid_observations() {
+    for engine in ["codex", "claude-code"] {
+        let fixture = Fixture::new(engine, 32768);
+        let (task, plan) = fixture.add("source", TaskKind::RefineEvents);
+        fixture.record_source(&plan);
+        let before = fixture.source_snapshot(&plan);
+        fixture.mode("targeted-source");
+        let (output, report) = fixture.run();
+        assert!(
+            output.status.success(),
+            "{report}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(report["semantic_calls"], 1);
+        assert_eq!(fixture.calls().len(), 1);
+        assert_eq!(fixture.calls()[0]["kind"], "finalize-section");
+        assert!(fixture.root().join("targeted-source.json").exists());
+        assert_eq!(fixture.source_snapshot(&plan), before);
+        let page =
+            std::fs::read_to_string(fixture.root().join("vault").join(task.target.vault_path))
+                .unwrap();
+        assert!(
+            lk_vault::section_body(&page, "Events")
+                .unwrap()
+                .contains("두 번째 이벤트에는 별도의 관찰이 기록되어 있다.")
+        );
+        assert!(fixture.work_path(&plan, "seal.json").exists());
+        assert!(fixture.work_path(&plan, "publication.json").exists());
     }
 }
 

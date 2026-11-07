@@ -164,15 +164,18 @@ impl Fixture {
 
 const WHOLE_SECTION: &str = r#"
 case "$*" in
-  *--output-last-message*) ;;
-  *--output-schema*|*--safe-mode*)
-    /bin/cat > "$TEST_EXECUTION_ROOT/whole-section-request.txt"
+  *--output-schema*|*--safe-mode*|*--json-schema*)
+    case "$*" in
+      *--safe-mode*) /bin/cat > "$TEST_EXECUTION_ROOT/whole-section-request.txt" ;;
+      *--output-last-message*|*--json-schema*) /bin/cp "$TEST_EXECUTION_ROOT/interactive-request.txt" "$TEST_EXECUTION_ROOT/whole-section-request.txt" ;;
+      *) /bin/cat > "$TEST_EXECUTION_ROOT/whole-section-request.txt" ;;
+    esac
     python3 - "$@" <<'SECTION'
 import json, os, sys
 from pathlib import Path
 root=Path(os.environ['TEST_EXECUTION_ROOT'])
 request=json.loads((root/'whole-section-request.txt').read_text().split('\nNative request:\n',1)[1])
-if request['kind']!='whole-section': raise SystemExit(100)
+if request.get('kind') not in ['whole-section','finalize-section']: raise SystemExit(100)
 if (root/'forbid-prepared-work').exists():
     assert not (root/'vault/.lorekeeper/work').exists(), 'dependent work must not be prepared before source publication'
 work=request['work']
@@ -187,7 +190,9 @@ else:
 with (root/'whole-section-calls.jsonl').open('a') as stream:
     stream.write(json.dumps({'target':work['context']['subject']['target']})+'\n')
 response={'status':'complete','body':body,'reason':None}
-if '--safe-mode' in sys.argv:
+if '--output-last-message' in sys.argv:
+    Path(sys.argv[sys.argv.index('--output-last-message')+1]).write_text(json.dumps(response))
+if '--safe-mode' in sys.argv or '--json-schema' in sys.argv:
     response={'type':'result','subtype':'success','is_error':False,'structured_output':response}
 print(json.dumps(response))
 SECTION
@@ -2230,10 +2235,7 @@ fn queue_quantum_fixture(
 
 #[test]
 fn native_queue_quantum_completes_one_bounded_summary_before_rotating_without_extra_calls() {
-    let section = WHOLE_SECTION.replace(
-        "if request['kind']!='whole-section': raise SystemExit(100)",
-        "if request['kind'] not in ['whole-section','finalize-section']: raise SystemExit(100)",
-    );
+    let section = WHOLE_SECTION.to_owned();
     let behavior = format!("{section}\n{RECORD_BOUNDED_AUDIT}");
     for quantum in [Some(1), None] {
         let fixture = queue_quantum_fixture(&behavior, 4, 1, quantum, 2, 3000);
@@ -2329,10 +2331,7 @@ fn native_queue_quantum_completes_one_bounded_summary_before_rotating_without_ex
 
 #[test]
 fn process_campaign_resumes_retained_nodes_with_fresh_leases_and_explicit_limits() {
-    let section = WHOLE_SECTION.replace(
-        "if request['kind']!='whole-section': raise SystemExit(100)",
-        "if request['kind'] not in ['whole-section','finalize-section']: raise SystemExit(100)",
-    );
+    let section = WHOLE_SECTION.to_owned();
     let behavior = format!("{section}\n{RECORD_BOUNDED_AUDIT}");
     for (batches, expected_runs, settled) in [(6, 4, true), (2, 2, false)] {
         let fixture = queue_quantum_fixture(&behavior, 1, 1, None, 1, 3000);
@@ -2407,10 +2406,7 @@ fn process_campaign_resumes_retained_nodes_with_fresh_leases_and_explicit_limits
 
 #[test]
 fn process_campaign_continues_budget_progress_with_review_attention_but_stops_invalid_reviews() {
-    let section = WHOLE_SECTION.replace(
-        "if request['kind']!='whole-section': raise SystemExit(100)",
-        "if request['kind'] not in ['whole-section','finalize-section']: raise SystemExit(100)",
-    );
+    let section = WHOLE_SECTION.to_owned();
     let behavior = format!("{section}\n{RECORD_BOUNDED_AUDIT}");
     for invalid in [false, true] {
         let fixture = queue_quantum_fixture(&behavior, 1, 1, None, 1, 3000);
@@ -2485,10 +2481,7 @@ fn process_campaign_continues_budget_progress_with_review_attention_but_stops_in
 
 #[test]
 fn process_campaign_stops_on_fatal_cancelled_or_changed_configuration_after_progress() {
-    let section = WHOLE_SECTION.replace(
-        "if request['kind']!='whole-section': raise SystemExit(100)",
-        "if request['kind'] not in ['whole-section','finalize-section']: raise SystemExit(100)",
-    );
+    let section = WHOLE_SECTION.to_owned();
     for mode in ["failed", "cancelled", "configuration"] {
         let behavior = RECORD_BOUNDED_AUDIT.replace(
             "    output={'work_id':work_id",

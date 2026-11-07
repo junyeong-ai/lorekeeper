@@ -267,6 +267,13 @@ const RETAINED_RESULT_BOUND: &str = "For this reduction, Rust preserves exactly 
 const EVIDENCE_INSTRUCTION_SUFFIX: &str = "Needs-action records no observation and cannot discharge inherited concerns. Native Rust validates and stores the response; do not run lore work record or write files.";
 
 fn evidence_instruction(request: &Value) -> miette::Result<String> {
+    let event_goal = if request["context"]["purpose"]["task_kind"]
+        == serde_json::to_value(lk_queue::TaskKind::RefineEvents).expect("task kind serializes")
+    {
+        "For refine-events, the eventual section retains every supplied event. Preserve each assigned event's own title when present and enough grounded findings, conditions and event-specific uncertainty to write its body. Keep different events distinct even with similar topics or identical titles; a reduction must not replace separate events with a thematic digest. A continued range may omit its event heading: retain its exact evidence range without inventing an identity or claiming the entire event was read. The finalizer can perform a targeted retained-source read for missing context. A title or link alone does not establish the linked article's findings. "
+    } else {
+        ""
+    };
     let refinement = if can_refine(request) {
         "If this assigned inspection needs smaller reading units, return {status: needs-smaller-inspection, observation: null, action: {reason}}. This explicitly requests one native split of this original assignment; it does not claim a provider limit or completion. Use ordinary needs-action for missing evidence, output-fit concerns or any other processing blocker. Rust chooses and guards the smaller units under the existing shared budgets; do not choose ranges or retry the request yourself. "
     } else {
@@ -283,7 +290,7 @@ fn evidence_instruction(request: &Value) -> miette::Result<String> {
         ""
     };
     Ok(format!(
-        "{EVIDENCE_INSTRUCTION_PREFIX}{DECISION_RELEVANCE}{reduction}{refinement}{bound}Plan a faithful concise observation within the native reply allowance before composing it. If the decision-relevant content still cannot fit, use needs-action; never truncate or silently omit material evidence to fit. Summary, finding statements, present scope/time/attribution strings, new questions and resolution reasons must contain a non-whitespace character. Empty findings are valid; unknown optional metadata is null, never blank filler. {EVIDENCE_INSTRUCTION_SUFFIX}"
+        "{EVIDENCE_INSTRUCTION_PREFIX}{DECISION_RELEVANCE}{event_goal}{reduction}{refinement}{bound}Plan a faithful concise observation within the native reply allowance before composing it. If the decision-relevant content still cannot fit, use needs-action; never truncate or silently omit material evidence to fit. Summary, finding statements, present scope/time/attribution strings, new questions and resolution reasons must contain a non-whitespace character. Empty findings are valid; unknown optional metadata is null, never blank filler. {EVIDENCE_INSTRUCTION_SUFFIX}"
     ))
 }
 

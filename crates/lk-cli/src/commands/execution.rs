@@ -612,7 +612,7 @@ fn agent_invocation_with_output(
             }
             prompt = if matches!(output, AgentOutput::Structured { .. }) {
                 format!(
-                    "{operation} Use the complete supplied native contracts instead of ordinary skill intake. Keep decision-relevant targeted reads and repair capabilities. Return only the schema-constrained semantic response. Rust supplies identity and owns finish/staging/publication; do not write result files or run work finish/queue apply. Return explicit needs-action for a required action that cannot be satisfied."
+                    "{operation} Use the complete supplied native contracts instead of ordinary skill intake. Use only the targeted capabilities authorized by this request's contract. Return only the schema-constrained semantic response. Rust supplies identity and owns finish/staging/publication; do not write result files or run work finish/queue apply. Return explicit needs-action for a required action that cannot be satisfied."
                 )
             } else {
                 format!("/{skill}:{skill} {operation}")

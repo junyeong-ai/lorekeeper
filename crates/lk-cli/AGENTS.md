@@ -172,6 +172,11 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   bounded finalizer. Unplanned whole-input summarize/refine/themes use one tool-free
   section request, including scoped reviews and generation rules; other small requests
   retain ordinary batching.
+- Bounded section finalizers use the same structured tool-result host as extraction
+  and synthesis for necessary targeted source/review reads. Keep inspection workers
+  and whole-input section calls tool-free. `source_read` only exposes this exact
+  Work's retained source; it neither replaces fresh guards nor creates observations.
+  Event refinement observations retain separate event claims, not a thematic digest.
 - Complete-envelope capacity defers only that target without clipping or rewriting paid
   Work. `execution.work` limits serialized request/result bytes and agent calls per
   native run, resetting per knowledge batch. Exhaustion retains unfinished work and

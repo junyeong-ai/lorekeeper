@@ -2138,6 +2138,7 @@ mod native {
         async fn request_result(
             &mut self,
             request: &serde_json::Value,
+            schema: &serde_json::Value,
             metrics: &mut WorkStepMetrics,
         ) -> Option<serde_json::Value> {
             metrics.request_json_bytes = Some(
@@ -2184,7 +2185,7 @@ mod native {
                 self.installation,
                 self.opts.config.as_ref().expect("resolved config"),
                 request,
-                &crate::commands::work::generation::schema(),
+                schema,
                 budget.max_result_bytes,
             );
             let execution::result::Invocation { mut agent, output } = match invocation {
@@ -2282,7 +2283,14 @@ mod native {
             result: crate::commands::work::ResultFinalization,
             metrics: &mut WorkStepMetrics,
         ) -> WorkStep {
-            let Some(response) = self.request_result(&result.request, metrics).await else {
+            let Some(response) = self
+                .request_result(
+                    &result.request,
+                    &crate::commands::work::generation::schema(),
+                    metrics,
+                )
+                .await
+            else {
                 return WorkStep::Failed;
             };
             let reply = match crate::commands::work::generation::replies(response, 1) {
@@ -2369,7 +2377,14 @@ mod native {
                     }
                 };
             metrics.preparation_duration_ms = Some(started.elapsed().as_millis() as u64);
-            let Some(value) = self.request_result(&request, &mut metrics).await else {
+            let Some(value) = self
+                .request_result(
+                    &request,
+                    &crate::commands::work::generation::schema(),
+                    &mut metrics,
+                )
+                .await
+            else {
                 self.record_work_step(metrics);
                 return WorkStep::Failed;
             };
@@ -2565,17 +2580,17 @@ mod native {
             section: crate::commands::work::SectionFinalization,
             metrics: &mut WorkStepMetrics,
         ) -> WorkStep {
-            let Some(reply) = self
-                .request_observation(section.request.clone(), metrics)
+            let Some(value) = self
+                .request_result(
+                    &section.request,
+                    &execution::finalization::schema(),
+                    metrics,
+                )
                 .await
             else {
                 return WorkStep::Failed;
             };
-            let (response, bytes) = match execution::finalization::decode(
-                reply.engine,
-                &reply.bytes,
-                section.max_response_bytes,
-            ) {
+            let (response, bytes) = match execution::finalization::decode_value(value) {
                 Ok(decoded) => decoded,
                 Err(error) => {
                     self.failure("bounded section finalization", error);

@@ -24,8 +24,8 @@ one schema-constrained completion or processing-action response. Rust verifies a
 not invoke this skill's commands or write draft/cache/page files. Claude runs without
 built-in tools/customizations; Codex uses a read-only sandbox with command, app, plugin,
 hook and subagent features disabled. Both run in a private temporary workspace without
-copying the vault. Bounded native section finalization uses the same read-only host
-contract described below. Audits and standalone interactive processing use
+copying the vault. Bounded native section finalization uses a tool-enabled structured
+result host for necessary targeted reads, as described below. Audits and standalone interactive processing use
 the command protocol. These are distinct execution roles, not interchangeable write permissions.
 
 ## Native evidence responses
@@ -450,7 +450,12 @@ complete final request defers that Work without clipping reviews or blocking ind
 The worker returns only `{ "status": "complete", "body": "...", "reason": null }`, or
 `{ "status": "needs-action", "body": null, "reason": "Required action" }`. Rust supplies
 task identity and revision guards, checks the full result limit, and seals and stages
-the result before controller publication. The worker does not run commands or write files.
+the result before controller publication. For a necessary missing fact, use the supplied
+`source_read` capability and follow its bounded continuation. These are read-only targeted
+reads within the exact Work, not new observations or restarted inspections. Supplied
+scoped review evidence can also be read when needed. The worker does not write files,
+run publication commands, collect sources or process unrelated work. Whole-input section
+requests already contain their complete resources and remain tool-free.
 
 Use `needs-action` when a required read, review or repair cannot be completed from the
 supplied scope. Unknown source facts remain attributed source questions; processing
