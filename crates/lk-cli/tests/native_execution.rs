@@ -21,6 +21,9 @@ mod observation_rejections;
 #[path = "native_execution/audit_recovery.rs"]
 mod audit_recovery;
 
+#[path = "native_execution/automation.rs"]
+mod automation;
+
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -1352,7 +1355,7 @@ fn selected_review_drift_blocks_audit_completion_without_becoming_a_global_healt
 const RECORD_BOUNDED_AUDIT: &str = r#"
 case "$*" in
   *--output-last-message*) ;;
-  *--output-schema*|*--safe-mode*) pwd > "$TEST_EXECUTION_ROOT/observation-cwd"; /bin/cat > "$TEST_EXECUTION_ROOT/native-request.txt" ;;
+  *--output-schema*|*--safe-mode*) pwd > "$TEST_EXECUTION_ROOT/observation-cwd"; /bin/cat > "$TEST_EXECUTION_ROOT/native-request-$$.txt" ;;
 esac
 exec python3 - "$@" <<'BOUNDED'
 import json, os, re, subprocess, sys
@@ -1379,7 +1382,7 @@ if audit_final:
     request=prepared_input['subjects'][0]['work']
     action,work_id,node_id='finish',request['work_id'],None
 elif native:
-    request=json.loads((root/'native-request.txt').read_text().split('\nNative request:\n',1)[1])
+    request=json.loads((root/('native-request-'+str(os.getpid())+'.txt')).read_text().split('\nNative request:\n',1)[1])
     action,work_id,node_id='inspect',request['work_id'],request['node_id']
 else:
     match=re.search(r'bounded (inspect|finish) ([0-9a-f]{64})(?: ([0-9a-f]{64}))?', prompt)

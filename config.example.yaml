@@ -544,13 +544,19 @@ llm:
 # timeout_seconds is an explicit per-session wall-clock budget.
 execution:
   default_profile: primary
+  # Opt-in automatic queue draining; existing ingest/audit schedules use the same allowance.
+  # Counts outer agent invocations, not model turns, tokens or billing. Day boundaries are UTC.
+  # automation:
+  #   process_schedule: "0,15,30,45 * * * *"
+  #   max_calls_per_day: 256
+  #   max_run_seconds: 900       # stop admitting new calls; retain returned results
   # Bounded worker requests/results are compact JSON bytes, not model tokens or cost.
   # Native execution splits evidence and reduces observations in fresh sessions.
   work:
     extraction_context: progressive  # default; full-context reads every retrieved candidate body
     max_input_bytes: 262144        # >=4096; serialized evidence request, not total model context
     max_result_bytes: 32768        # >=1024 and <=max_input_bytes/4
-    max_calls: 64                  # per daily/process run, or per knowledge batch; >0
+    max_calls: 64                  # per native batch; scheduled invocations share this across batches
     max_parallel: 1               # concurrent evidence observers / distinct-target screening; bounded by remaining calls
     max_consecutive_calls: 4      # positive per-target phase quantum; uses the same total call budget
     # max_screening_batches: 8    # optional complete candidate-card scope limit; exceeding it defers, never clips

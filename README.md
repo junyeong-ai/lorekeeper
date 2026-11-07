@@ -172,6 +172,8 @@ DOCX·XLSX·PDF·이미지는 [전처리 설정](skills/lore-setup/references/co
 다시 바뀌면 해당 주제를 보류합니다. 이전 관측은 보존하며, 오래된 평가를 새 입력의 완료로 인정하지 않습니다.
 
 정기 실행은 `lore schedule`로 정의를 출력한 뒤 [스케줄링 절차](skills/lore-ingest/references/scheduling.md)에 따라 OS에 등록합니다.
+`execution.automation`을 설정하면 대기열 소진을 별도로 예약하고, 기존 수집·감사 예약도 공통 UTC 일일 호출 한도와 실행시간 안에서 진행합니다.
+호출 예약은 재시작 후에도 유지됩니다. 치명적 장애는 해당 자동 작업을 일시 중지하며, 원인 해결 후 `lore run OPERATION --scheduled --resume`으로 재개합니다.
 수동 쓰기 에이전트는 근거를 읽기 **전에** `lore workflow -- claude` 또는 `lore workflow -- codex`로 시작하세요.
 네이티브 실행은 같은 보호를 직접 소유하며, 실행 중에는 설정과 볼트 선택이 고정됩니다.
 `--wait`로 대기 중 차례를 확보한 실행은 현재 배치가 끝난 뒤 다음 배치보다 먼저 잠금을 얻습니다.

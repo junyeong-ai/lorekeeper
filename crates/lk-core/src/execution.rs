@@ -104,8 +104,17 @@ pub struct ExecutionConfig {
     #[serde(default, deserialize_with = "stage_profiles")]
     pub stages: BTreeMap<ExecutionStage, String>,
     pub work: SemanticWorkConfig,
+    pub automation: Option<AutomationConfig>,
     #[serde(skip)]
     selected_profile: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AutomationConfig {
+    pub process_schedule: String,
+    pub max_calls_per_day: NonZeroUsize,
+    pub max_run_seconds: NonZeroU64,
 }
 
 fn stage_profiles<'de, D: serde::Deserializer<'de>>(
@@ -478,6 +487,26 @@ impl ExecutionProfile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn automation_policy_requires_explicit_positive_limits_and_known_fields() {
+        let policy = "automation: {process_schedule: '0,15,30,45 * * * *', max_calls_per_day: 256, max_run_seconds: 900}\n";
+        let config: ExecutionConfig = crate::yaml::from_str(policy).unwrap();
+        assert_eq!(config.automation.unwrap().max_calls_per_day.get(), 256);
+        for invalid in [
+            policy.replace("max_calls_per_day: 256", "max_calls_per_day: 0"),
+            policy.replace("max_run_seconds: 900", "max_run_seconds: 0"),
+            policy.replace("max_calls_per_day: 256", "max_calls_per_day: -1"),
+            policy.replace("max_calls_per_day: 256", "max_calls_per_day: 2.5"),
+            policy.replace(", max_run_seconds: 900", ""),
+            policy.replace(
+                "max_run_seconds: 900",
+                "max_run_seconds: 900, retry_everything: true",
+            ),
+        ] {
+            assert!(crate::yaml::from_str::<ExecutionConfig>(&invalid).is_err());
+        }
+    }
 
     #[test]
     fn workflow_context_is_validated_and_roundtrips_without_changing_identity() {

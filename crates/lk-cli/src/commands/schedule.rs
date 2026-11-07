@@ -236,6 +236,10 @@ pub async fn run(
             config.graph.audit.schedule.is_some(),
             lk_core::execution::ExecutionOperation::Knowledge,
         ),
+        (
+            config.execution.automation.is_some(),
+            lk_core::execution::ExecutionOperation::Process,
+        ),
     ] {
         if enabled {
             let (name, _) = config
@@ -305,15 +309,25 @@ fn build_jobs(config: &lk_core::config::Config, flags: &[String]) -> Vec<Job> {
             args,
         }
     };
+    let semantic_job = |name: &str, schedule: &str, operation: &str| {
+        let mut job = lore_job(name, schedule, &["run", operation, "--wait"]);
+        if config.execution.automation.is_some() {
+            job.args.extend(["--scheduled".into(), "--json".into()]);
+        }
+        job
+    };
     let mut jobs = Vec::new();
     if let Some(schedule) = &config.ingest.schedule {
-        jobs.push(lore_job("ingest", schedule, &["run", "daily", "--wait"]));
+        jobs.push(semantic_job("ingest", schedule, "daily"));
     }
     if let Some(schedule) = &config.graph.audit.schedule {
-        jobs.push(lore_job(
-            "knowledge-audit",
-            schedule,
-            &["run", "knowledge", "--wait"],
+        jobs.push(semantic_job("knowledge-audit", schedule, "knowledge"));
+    }
+    if let Some(automation) = &config.execution.automation {
+        jobs.push(semantic_job(
+            "process",
+            &automation.process_schedule,
+            "process",
         ));
     }
     if config.synthesis.weekly.enabled
@@ -810,6 +824,54 @@ mod tests {
         )
         .unwrap();
         lk_core::config::Config::load(&path).unwrap()
+    }
+
+    #[test]
+    fn automation_adds_process_and_reuses_existing_semantic_schedule_slots() {
+        let mut config = config_with_schedules();
+        config.graph.audit.schedule = Some("5,20,35,50 * * * *".into());
+        assert!(
+            !build_jobs(&config, &[])
+                .iter()
+                .any(|job| job.name == "process")
+        );
+        config.execution.automation = Some(lk_core::execution::AutomationConfig {
+            process_schedule: "0,15,30,45 * * * *".into(),
+            max_calls_per_day: 256.try_into().unwrap(),
+            max_run_seconds: 900.try_into().unwrap(),
+        });
+        let jobs = build_jobs(&config, &["--config".into(), "/tmp/config.yaml".into()]);
+        for (name, operation) in [
+            ("ingest", "daily"),
+            ("process", "process"),
+            ("knowledge-audit", "knowledge"),
+        ] {
+            let matching = jobs
+                .iter()
+                .filter(|job| job.name == name)
+                .collect::<Vec<_>>();
+            assert_eq!(matching.len(), 1);
+            assert_eq!(
+                matching[0].args,
+                [
+                    "--config",
+                    "/tmp/config.yaml",
+                    "run",
+                    operation,
+                    "--wait",
+                    "--scheduled",
+                    "--json"
+                ]
+            );
+        }
+        assert!(
+            !jobs
+                .iter()
+                .find(|job| job.name == "maintenance")
+                .unwrap()
+                .args
+                .contains(&"--scheduled".into())
+        );
     }
 
     #[test]

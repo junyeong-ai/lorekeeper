@@ -445,6 +445,13 @@ impl Config {
             validate_cron(sched)
                 .map_err(|e| ConfigError::Validation(format!("ingest.schedule: {e}")))?;
         }
+        if let Some(automation) = &self.execution.automation {
+            validate_cron(&automation.process_schedule).map_err(|error| {
+                ConfigError::Validation(format!("execution.automation.process_schedule: {error}"))
+            })?;
+            self.execution
+                .resolve_profile(crate::execution::ExecutionOperation::Process, None)?;
+        }
         if self.synthesis.weekly.enabled
             && let Some(sched) = &self.synthesis.weekly.schedule
         {
@@ -571,6 +578,7 @@ fn work_policy_revision(content: &str) -> Result<String, ConfigError> {
             .get_mut("execution")
             .and_then(serde_json::Value::as_object_mut)
     {
+        execution.remove("automation");
         if execution
             .get("stages")
             .and_then(serde_json::Value::as_object)
@@ -1804,6 +1812,7 @@ mod tests {
         std::fs::write(&path, base).unwrap();
         let (original, bytes) = Config::load_with_revision(&path).unwrap();
         let operational = base
+            .replace("execution:\n", "execution:\n  automation: {process_schedule: '0,15,30,45 * * * *', max_calls_per_day: 256, max_run_seconds: 900}\n")
             .replace("max_calls: 4", "max_calls: 9")
             .replace("max_parallel: 1", "max_parallel: 3")
             .replace("work: {", "work: {max_consecutive_calls: 8, ")

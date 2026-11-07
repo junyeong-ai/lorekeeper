@@ -2,7 +2,34 @@ use clap::ValueEnum;
 use serde::Serialize;
 
 #[cfg(unix)]
+mod automation;
+#[cfg(unix)]
 mod scheduler;
+
+#[derive(clap::Args)]
+pub struct RunOptions {
+    /// Complete daily collection, queued processing, or knowledge audit batches
+    #[arg(value_enum)]
+    operation: Operation,
+    /// Job profile and work budget; otherwise operation override then default. Stage overrides select hosts only.
+    #[arg(long)]
+    profile: Option<String>,
+    /// Maximum process or knowledge batches; release the workflow lease between batches
+    #[arg(long, default_value = "1")]
+    batches: std::num::NonZeroUsize,
+    /// Wait for the semantic workflow lease; default contention starts no semantic work
+    #[arg(long)]
+    wait: bool,
+    /// Emit the structured job outcome; stage output goes to stderr
+    #[arg(long)]
+    json: bool,
+    /// Continue ready work within the configured automation duration and shared UTC-day allowance
+    #[arg(long, conflicts_with = "batches")]
+    scheduled: bool,
+    /// Explicitly resume this paused scheduled operation without resetting its allowance
+    #[arg(long, requires = "scheduled")]
+    resume: bool,
+}
 
 #[derive(Clone, Copy, Debug, ValueEnum, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -26,19 +53,34 @@ impl Operation {
 pub async fn run(
     opts: &super::GlobalOptions,
     installation: &lk_dist::Installation,
-    operation: Operation,
-    profile: Option<String>,
-    batches: usize,
-    wait: bool,
-    json: bool,
+    options: RunOptions,
 ) -> miette::Result<()> {
     #[cfg(unix)]
     {
-        native::run(opts, installation, operation, profile, batches, wait, json).await
+        native::run(opts, installation, options).await
     }
     #[cfg(not(unix))]
     {
-        let _ = (opts, installation, operation, profile, batches, wait, json);
+        let RunOptions {
+            operation,
+            profile,
+            batches,
+            wait,
+            json,
+            scheduled,
+            resume,
+        } = options;
+        let _ = (
+            opts,
+            installation,
+            operation,
+            profile,
+            batches,
+            wait,
+            json,
+            scheduled,
+            resume,
+        );
         Err(miette::miette!(
             "agent jobs require Unix workflow leases; Windows is unsupported"
         ))
@@ -47,8 +89,8 @@ pub async fn run(
 
 #[cfg(unix)]
 mod native {
-    use super::scheduler;
     use super::*;
+    use super::{automation, scheduler};
     use crate::commands::audit::{DeferredAudit, InputAvailability};
     use crate::commands::{
         CONFIG_REVISION_ENV, EXECUTION_PROFILE_ENV, GlobalOptions, execution, workflow,
@@ -502,6 +544,8 @@ mod native {
         workflow_id: Option<lk_core::execution::WorkflowId>,
         semantic_calls: usize,
         budget_exhausted: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        automation: Option<automation::Report>,
         #[serde(flatten)]
         work_telemetry: WorkTelemetry,
         queue_planning: QueuePlanningMetrics,
@@ -527,6 +571,7 @@ mod native {
         NoProgress,
         Failed,
         Cancelled,
+        AutomationLimit,
     }
 
     impl JobResult {
@@ -542,6 +587,7 @@ mod native {
                 workflow_id: None,
                 semantic_calls: 0,
                 budget_exhausted: false,
+                automation: None,
                 work_telemetry: WorkTelemetry::default(),
                 queue_planning: QueuePlanningMetrics::default(),
                 mutation_access: MutationAccessMetrics::default(),
@@ -560,6 +606,16 @@ mod native {
         fn campaign_stop(&self) -> CampaignStop {
             if self.cancelled {
                 return CampaignStop::Cancelled;
+            }
+            if !self.halted
+                && let Some(stop) = self.automation.as_ref().and_then(|report| report.stop)
+            {
+                return match stop {
+                    automation::Stop::Paused => CampaignStop::Blocked,
+                    automation::Stop::DayLimit
+                    | automation::Stop::RunLimit
+                    | automation::Stop::RunDuration => CampaignStop::AutomationLimit,
+                };
             }
             if matches!(self.operation, Operation::Process) {
                 return if self.halted {
@@ -612,6 +668,7 @@ mod native {
         configuration_failed: bool,
         root: PathBuf,
         supervisor: &'a mut execution::Supervisor,
+        automation: Option<&'a mut automation::Control>,
         lease: Option<workflow::WorkflowLease>,
         agents: std::collections::BTreeMap<String, PreparedAgent>,
         project_protection: Option<crate::commands::installation::Protection>,
@@ -628,6 +685,30 @@ mod native {
 
     impl Runner<'_> {
         fn finish(mut self) -> JobResult {
+            if self.result.halted
+                && !self.result.cancelled
+                && self.automation.is_some()
+                && self.lease.is_some()
+                && self.configuration_is_current()
+            {
+                let root = self
+                    .lease
+                    .as_ref()
+                    .expect("owned workflow")
+                    .root_pin()
+                    .root();
+                if let Err(error) = self.automation.as_mut().expect("scheduled run").pause(root) {
+                    self.record(
+                        "automation pause",
+                        StageState::Failed,
+                        Some(error.to_string()),
+                    );
+                }
+            }
+            self.result.automation = self
+                .automation
+                .as_ref()
+                .map(|control| control.report.clone());
             self.result.duration_ms = self.started_at.elapsed().as_millis() as u64;
             self.result
         }
@@ -920,22 +1001,40 @@ mod native {
             if self.result.halted || self.result.cancelled || !self.configuration_is_current() {
                 return false;
             }
-            match self
-                .supervisor
-                .acquire(
-                    self.opts,
-                    &self.config,
-                    &self.root,
-                    &self.config_revision,
-                    wait,
-                )
-                .await
-            {
+            let acquisition = self.supervisor.acquire(
+                self.opts,
+                &self.config,
+                &self.root,
+                &self.config_revision,
+                wait,
+            );
+            let acquired = if let Some(control) = &self.automation {
+                match tokio::time::timeout_at(control.deadline().into(), acquisition).await {
+                    Ok(acquired) => acquired,
+                    Err(_) => {
+                        self.automation
+                            .as_mut()
+                            .expect("scheduled run")
+                            .check_duration();
+                        return self.record_automation_stop();
+                    }
+                }
+            } else {
+                acquisition.await
+            };
+            match acquired {
                 Ok(Some(lease)) => {
                     self.root = lease.root_pin().root().to_path_buf();
                     self.config.vault.root = self.root.clone();
                     self.result.workflow_id = Some(lease.id().clone());
                     self.lease = Some(lease);
+                    if let Some(control) = &mut self.automation {
+                        match control.enter(&self.root) {
+                            Ok(true) => {}
+                            Ok(false) => return self.record_automation_stop(),
+                            Err(error) => return self.failure("automation admission", error),
+                        }
+                    }
                     self.configuration_is_current()
                 }
                 Ok(None) => self.record(
@@ -943,6 +1042,15 @@ mod native {
                     StageState::Cancelled,
                     Some("cancelled while waiting".into()),
                 ),
+                Err(error)
+                    if self.automation.is_some()
+                        && error.downcast_ref::<workflow::WorkflowBusy>().is_some() =>
+                {
+                    self.deferred(
+                        "workflow lease",
+                        "busy; retained for a later scheduled invocation",
+                    )
+                }
                 Err(error) => self.failure("workflow lease", error),
             }
         }
@@ -1198,7 +1306,9 @@ mod native {
                     if !self.reserve_queue_turn().await {
                         return false;
                     }
-                    self.result.semantic_calls += 1;
+                    if !self.reserve_calls(1) {
+                        return false;
+                    }
                     command.current_dir(&self.root);
                     let started_at = Instant::now();
                     let completed = self
@@ -1367,7 +1477,9 @@ mod native {
                 }
                 return None;
             }
-            self.result.semantic_calls += 1;
+            if !self.reserve_calls(1) {
+                return None;
+            }
             let started_at = Instant::now();
             let outcome = self
                 .supervisor
@@ -1682,6 +1794,15 @@ mod native {
         }
 
         fn call_budget_available(&mut self) -> bool {
+            if let Some(control) = &mut self.automation {
+                if !control.check_duration() {
+                    return self.record_automation_stop();
+                }
+                if control.available() == 0 {
+                    control.stop_for_limit();
+                    return self.record_automation_stop();
+                }
+            }
             match self.config.execution.effective_work() {
                 Ok(budget) if self.result.semantic_calls < budget.max_calls => true,
                 Ok(_) => {
@@ -1690,6 +1811,74 @@ mod native {
                 }
                 Err(error) => self.failure("semantic work budget", error),
             }
+        }
+
+        fn remaining_calls(&self, budget: lk_core::execution::SemanticWorkConfig) -> usize {
+            let remaining = budget.max_calls.saturating_sub(self.result.semantic_calls);
+            self.automation
+                .as_ref()
+                .map_or(remaining, |control| remaining.min(control.available()))
+        }
+
+        fn record_automation_stop(&mut self) -> bool {
+            let report = self
+                .automation
+                .as_ref()
+                .expect("scheduled run")
+                .report
+                .clone();
+            let already_reported = self
+                .result
+                .automation
+                .as_ref()
+                .is_some_and(|before| before.stop == report.stop);
+            let stop = report.stop.expect("automation stop");
+            self.result.automation = Some(report);
+            if !already_reported {
+                self.deferred(
+                    "scheduled invocation",
+                    format!("{stop:?}; unfinished work is retained; inspect the automation report"),
+                );
+            }
+            false
+        }
+
+        fn reserve_calls(&mut self, count: usize) -> bool {
+            if !self.configuration_is_current() || !self.call_budget_available() {
+                return false;
+            }
+            if self.supervisor.is_cancelled() {
+                return self.record(
+                    "agent admission",
+                    StageState::Cancelled,
+                    Some("cancelled before invocation".into()),
+                );
+            }
+            if let Some(control) = &mut self.automation {
+                let Some(lease) = &self.lease else {
+                    return self.failure(
+                        "automation admission",
+                        "an owned vault workflow is required",
+                    );
+                };
+                match control.reserve(lease.root_pin().root(), count) {
+                    Ok(true) => {}
+                    Ok(false) => return self.record_automation_stop(),
+                    Err(error) => return self.failure("automation reservation", error),
+                }
+            }
+            if !self.configuration_is_current() {
+                return false;
+            }
+            if self.supervisor.is_cancelled() {
+                return self.record(
+                    "agent admission",
+                    StageState::Cancelled,
+                    Some("cancelled after reservation".into()),
+                );
+            }
+            self.result.semantic_calls += count;
+            true
         }
 
         async fn reserve_queue_turn(&mut self) -> bool {
@@ -1746,9 +1935,7 @@ mod native {
                 Ok(budget) => budget,
                 Err(error) => return Some(self.failure("semantic work budget", error)),
             };
-            let limit = budget
-                .max_parallel
-                .min(budget.max_calls.saturating_sub(self.result.semantic_calls));
+            let limit = budget.max_parallel.min(self.remaining_calls(budget));
             if limit <= 1 || !jobs.contains_key(selected) {
                 return None;
             }
@@ -1939,7 +2126,10 @@ mod native {
                     return Some(self.failure("bounded work scheduling", error));
                 }
             }
-            self.result.semantic_calls += requests.len();
+            if !self.reserve_calls(requests.len()) {
+                self.record_uninvoked_observations(turns);
+                return Some(false);
+            }
             let attempts = self.supervisor.run_requests(requests).await;
             drop(directories);
             let cancelled = attempts
@@ -2205,7 +2395,9 @@ mod native {
             if !self.reserve_queue_turn().await {
                 return None;
             }
-            self.result.semantic_calls += 1;
+            if !self.reserve_calls(1) {
+                return None;
+            }
             let started = Instant::now();
             let child = self
                 .supervisor
@@ -2977,9 +3169,7 @@ mod native {
                 Ok(budget) => budget,
                 Err(error) => return self.failure("semantic work budget", error),
             };
-            let limit = budget
-                .max_parallel
-                .min(budget.max_calls.saturating_sub(self.result.semantic_calls));
+            let limit = budget.max_parallel.min(self.remaining_calls(budget));
             if limit == 0 {
                 return self.call_budget_available();
             }
@@ -3297,11 +3487,14 @@ mod native {
                     "evidence_requests":turns.iter().filter(|(_,turn)|matches!(turn,QueueReadTurn::Evidence(_))).count(),
                     "screening_requests":turns.iter().filter(|(_,turn)|matches!(turn,QueueReadTurn::Screening(_))).count(),
                     "max_parallel":budget.max_parallel,
-                    "remaining_calls":budget.max_calls.saturating_sub(self.result.semantic_calls),
+                    "remaining_calls":self.remaining_calls(budget),
                     "elapsed_job_ms":self.started_at.elapsed().as_millis(),
                 })
             );
-            self.result.semantic_calls += requests.len();
+            if !self.reserve_calls(requests.len()) {
+                self.record_uninvoked_queue_reads(turns, WorkOutcome::Rejected);
+                return false;
+            }
             let attempts = self.supervisor.run_requests(requests).await;
             drop(directories);
             let cancelled = attempts
@@ -3635,9 +3828,7 @@ mod native {
             }
             let mut keys = targets.keys().cloned().collect();
             let mut jobs = std::collections::BTreeMap::new();
-            if needs_application
-                || !targets.is_empty() && self.result.semantic_calls >= budget.max_calls
-            {
+            if needs_application || !targets.is_empty() && self.remaining_calls(budget) == 0 {
                 return Ok(QueuePlan {
                     jobs,
                     deferred,
@@ -3648,7 +3839,7 @@ mod native {
             let order = scheduler::order(session.root(), scheduler::Stage::Queue, &keys)?;
             let independent_limit = budget
                 .max_parallel
-                .min(budget.max_calls.saturating_sub(self.result.semantic_calls))
+                .min(self.remaining_calls(budget))
                 .min(MAX_PREPARED_QUEUE_TARGETS);
             let mut next = 0;
             while next < order.len() {
@@ -4998,8 +5189,8 @@ mod native {
                     );
                     jobs.remove(&selected);
                 }
-            } else {
-                self.consumer(ExecutionStage::Audit, "lore-wiki", &format!("maintain. The controller selected this exact batch: {selection}. Start with audit-plan --path for these addresses; do not select another batch. Use bounded work for any subject whose work envelope requires partitioning."), None).await;
+            } else if !self.consumer(ExecutionStage::Audit, "lore-wiki", &format!("maintain. The controller selected this exact batch: {selection}. Start with audit-plan --path for these addresses; do not select another batch. Use bounded work for any subject whose work envelope requires partitioning."), None).await {
+                return;
             }
             let assessed = plan
                 .candidates
@@ -5017,17 +5208,29 @@ mod native {
         }
     }
 
+    struct Campaign {
+        supervisor: execution::Supervisor,
+        root: Option<workflow::VaultRootPin>,
+        automation: Option<automation::Control>,
+    }
+
     pub(super) async fn run(
         opts: &GlobalOptions,
         installation: &lk_dist::Installation,
-        operation: Operation,
-        profile: Option<String>,
-        batches: usize,
-        wait: bool,
-        json: bool,
+        options: RunOptions,
     ) -> miette::Result<()> {
+        let RunOptions {
+            operation,
+            profile,
+            batches,
+            wait,
+            json,
+            scheduled,
+            resume,
+        } = options;
+        let batches = batches.get();
         let started_at = Instant::now();
-        if batches == 0 || batches != 1 && matches!(operation, Operation::Daily) {
+        if batches != 1 && matches!(operation, Operation::Daily) {
             return Err(miette::miette!(
                 "multiple batches are only supported for process and knowledge jobs"
             ));
@@ -5066,19 +5269,45 @@ mod native {
                 .transpose()
                 .map_err(|e| miette::miette!("template path: {e}"))?,
         };
-        let mut supervisor = execution::Supervisor::new()?;
+        let automation = if scheduled {
+            let policy = config
+                .execution
+                .automation
+                .clone()
+                .ok_or_else(|| miette::miette!("--scheduled requires execution.automation"))?;
+            Some(automation::Control::new(
+                policy,
+                operation.semantic(),
+                resume,
+                config
+                    .execution
+                    .effective_work()
+                    .map_err(|error| miette::miette!("{error}"))?
+                    .max_calls,
+            )?)
+        } else {
+            None
+        };
+        let mut campaign = Campaign {
+            supervisor: execution::Supervisor::new()?,
+            root: None,
+            automation,
+        };
         let mut outcomes = Vec::new();
         let mut stop_reason = CampaignStop::BatchLimit;
-        let mut campaign_root = None;
-        for _ in 0..batches {
+        let batch_limit = if scheduled && !matches!(operation, Operation::Daily) {
+            usize::MAX
+        } else {
+            batches
+        };
+        for _ in 0..batch_limit {
             let result = execute(
                 &options,
                 installation,
                 (config.clone(), config_revision.clone()),
                 operation,
                 wait,
-                &mut supervisor,
-                &mut campaign_root,
+                &mut campaign,
             )
             .await;
             stop_reason = result.campaign_stop();
@@ -5087,17 +5316,17 @@ mod native {
                 break;
             }
         }
-        let ok = if matches!(operation, Operation::Process) && batches > 1 {
+        let ok = if matches!(operation, Operation::Process) && batch_limit > 1 {
             stop_reason == CampaignStop::Settled
         } else {
             outcomes.iter().all(|result| result.ok)
         };
         if json {
-            let value = if batches == 1 {
+            let value = if batch_limit == 1 {
                 serde_json::to_value(&outcomes[0])
             } else {
                 Ok(serde_json::json!({
-                    "operation":operation,"ok":ok,"requested_batches":batches,
+                    "operation":operation,"ok":ok,"requested_batches":(!scheduled).then_some(batches),
                     "stop_reason":stop_reason,"runs":outcomes,
                     "duration_ms":started_at.elapsed().as_millis() as u64,
                 }))
@@ -5122,9 +5351,13 @@ mod native {
         configuration: (Config, String),
         operation: Operation,
         wait: bool,
-        supervisor: &mut execution::Supervisor,
-        campaign_root: &mut Option<workflow::VaultRootPin>,
+        campaign: &mut Campaign,
     ) -> JobResult {
+        let Campaign {
+            supervisor,
+            root: campaign_root,
+            automation,
+        } = campaign;
         let (config, config_revision) = configuration;
         let board = config
             .personal
@@ -5146,6 +5379,7 @@ mod native {
             configuration_failed: false,
             opts: options,
             supervisor,
+            automation: automation.as_mut(),
             lease: None,
             agents: std::collections::BTreeMap::new(),
             project_protection: None,

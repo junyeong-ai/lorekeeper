@@ -34,21 +34,8 @@ pub struct Cli {
 pub enum Command {
     /// Execute a complete job using the configured Claude Code or Codex profile
     Run {
-        /// Complete daily collection, queued processing, or knowledge audit batches
-        #[arg(value_enum)]
-        operation: commands::run::Operation,
-        /// Job profile and work budget; otherwise operation override then default. Stage overrides select hosts only.
-        #[arg(long)]
-        profile: Option<String>,
-        /// Maximum process or knowledge batches; release the workflow lease between batches
-        #[arg(long, default_value = "1")]
-        batches: std::num::NonZeroUsize,
-        /// Wait for the semantic workflow lease; default contention starts no semantic work
-        #[arg(long)]
-        wait: bool,
-        /// Emit the structured job outcome; stage output goes to stderr
-        #[arg(long)]
-        json: bool,
+        #[command(flatten)]
+        options: commands::run::RunOptions,
     },
     /// Hold a Unix workflow lease across a foreground command and its inherited children
     Workflow {
@@ -310,23 +297,8 @@ pub async fn run() -> miette::Result<()> {
     }
 
     match cli.command {
-        Command::Run {
-            operation,
-            profile,
-            batches,
-            wait,
-            json,
-        } => {
-            commands::run::run(
-                &opts,
-                protection.installation(),
-                operation,
-                profile,
-                batches.get(),
-                wait,
-                json,
-            )
-            .await
+        Command::Run { options } => {
+            commands::run::run(&opts, protection.installation(), options).await
         }
         Command::Workflow { wait, command } => {
             commands::workflow::run(&opts, protection.installation(), wait, command).await

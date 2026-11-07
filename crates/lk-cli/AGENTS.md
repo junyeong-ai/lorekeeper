@@ -124,6 +124,15 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   revalidation and host work. `mutation_access` measures in-process writer acquisition,
   including waiting, config validation and recovery; queue-planning duration excludes
   it. Child-command waits are not in that metric.
+- Scheduled runs share `execution.automation`'s UTC-day invocation allowance in the
+  physical vault. Under an acquired workflow lease, synchronously reserve complete
+  waves in the atomic operational usage ledger before spawning; a prepared but unlocked
+  lease grants no ownership. Never refund ambiguous launches, reset usage on config
+  changes, recover corrupt accounting as zero, or detach its writer. This ledger is
+  independent of canonical mutation journals; page, Work and cursor writes still use
+  `MutationSession`. Duration limits stop new calls and bound workflow waiting, while
+  returned paid results remain recordable. Fatal scheduled failures pause that operation;
+  explicit `--resume` clears its pause without clearing usage or semantic holds.
 - Native writer waiting is cancellable, retries only typed contention and validates the
   same-read config pin before recovery. A pre-host cursor wait discards prepared
   requests and replans before invocation; post-host recording reloads fresh inputs.
@@ -179,7 +188,7 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   Event refinement observations retain separate event claims, not a thematic digest.
 - Complete-envelope capacity defers only that target without clipping or rewriting paid
   Work. `execution.work` limits serialized request/result bytes and agent calls per
-  native run, resetting per knowledge batch. Exhaustion retains unfinished work and
+  native batch. Scheduled invocations share that call allowance across batches. Exhaustion retains unfinished work and
   fails explicitly, without clipping evidence.
 - Resume current explicit Work plans even when the remaining batch fits whole input;
   validate their exact manifest before using recorded observations.

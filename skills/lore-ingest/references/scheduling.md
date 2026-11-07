@@ -24,6 +24,25 @@ The scheduler emits native commands:
 - Maintenance: `lore maintenance --prune-queue --wait-for-vault`.
 - A configured task board: `lore task remind notify` every five minutes.
 
+With `execution.automation`, schedules add `--scheduled --json` to daily/process/
+knowledge jobs and add one process job at `automation.process_schedule`. Process and
+knowledge repeat ready batches within `max_run_seconds`; daily collects once.
+The selected profile's `execution.work.max_calls` also caps the complete scheduled
+invocation across those batches; a batch boundary cannot renew that allowance.
+The existing audit schedule and batch size remain authoritative. Every batch releases
+the workflow lease. All scheduled jobs share `max_calls_per_day` in the physical
+vault's UTC-day usage ledger. Reservations are durable before host launch and survive
+restart/config changes; they count outer agent attempts, not internal model requests,
+tokens or billing. Duration limits bound workflow waiting and new-call admission,
+not completion of an active host, source collection or paid-result recording.
+Unknown/corrupt accounting refuses execution. Fatal scheduled failures pause that
+operation across restarts and day rollover. After repairing the reported cause,
+explicit `lore run OPERATION --scheduled --resume --json` clears only its pause;
+it preserves usage, rejected proposals and exact semantic holds. Unchanged holds
+spend no calls. An exhausted allowance waits for a later UTC day or an explicitly
+changed configured limit; a new process never grants a fresh allowance.
+Without this policy, schedules and the one-batch defaults remain unchanged.
+
 Queue-mode scheduled jobs require an explicit execution profile. Selection is CLI
 `--profile`, then `execution.operations`, then `execution.default_profile`.
 An unavailable host, authentication error or denied action never switches hosts.
