@@ -45,14 +45,53 @@ pub(crate) fn store_path(
     Ok(full)
 }
 pub(crate) fn read_bytes(path: &Path, limit: usize) -> Result<Vec<u8>, VaultError> {
-    let mut file = std::fs::File::open(path)?;
-    if !file.metadata()?.is_file() {
-        return Err(error("original must be a regular file"));
-    }
+    let mut file = lk_core::fs::open_regular_file(path)?;
     let mut bytes = Vec::new();
     (&mut file).take(limit as u64 + 1).read_to_end(&mut bytes)?;
     if bytes.len() > limit {
         return Err(error("original exceeds supported byte limit"));
     }
     Ok(bytes)
+}
+
+#[cfg(all(test, unix))]
+pub(crate) mod tests {
+    use super::*;
+
+    pub(crate) fn assert_refuses_fifo(
+        path: PathBuf,
+        read: impl FnOnce() -> Result<(), VaultError> + Send + 'static,
+    ) {
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || sender.send(read()).unwrap());
+        let result = receiver.recv_timeout(std::time::Duration::from_secs(5));
+        let _release = result.is_err().then(|| {
+            std::fs::File::options()
+                .read(true)
+                .write(true)
+                .open(path)
+                .unwrap()
+        });
+        reader.join().unwrap();
+        assert!(
+            result
+                .expect("original reader waited for a FIFO writer")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn bounded_original_read_refuses_fifo_without_waiting() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("original");
+        let selected = path.clone();
+        assert_refuses_fifo(path, move || read_bytes(&selected, 64).map(|_| ()));
+    }
 }

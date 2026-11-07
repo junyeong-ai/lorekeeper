@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 mod lock;
-pub use lock::{LockFileAccess, open_lock_file};
+pub use lock::{LockFileAccess, open_lock_file, open_regular_file};
 
 /// Replace `path` with complete, durable bytes. Exclusively create a same-directory
 /// temporary with the requested Unix mode before writing, then fsync, rename and

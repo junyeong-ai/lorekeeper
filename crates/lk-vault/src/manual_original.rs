@@ -50,7 +50,7 @@ fn publish_member(
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
             if !destination.symlink_metadata()?.file_type().is_file()
                 || lk_core::captured_file::hash_reader(
-                    std::fs::File::open(&destination)?.take(bytes.byte_len() as u64 + 1),
+                    lk_core::fs::open_regular_file(&destination)?.take(bytes.byte_len() as u64 + 1),
                 )? != (bytes.byte_len(), digest.clone())
             {
                 return Err(crate::VaultError::Original(format!(
@@ -60,7 +60,7 @@ fn publish_member(
         }
         Err(error) => return Err(error.into()),
     }
-    std::fs::File::open(&destination)?.sync_all()?;
+    lk_core::fs::open_regular_file(&destination)?.sync_all()?;
     #[cfg(unix)]
     std::fs::File::open(
         destination
@@ -143,8 +143,8 @@ fn load_member(
         .ok_or_else(|| error("manifest address"))?
         .0;
     let full = original_path(root, Path::new(&format!("{base}/files/{member}")), false)?;
-    let mut file = std::fs::File::open(&full)?;
-    if !file.metadata()?.is_file() || file.metadata()?.len() != recorded.bytes as u64 {
+    let mut file = lk_core::fs::open_regular_file(&full)?;
+    if file.metadata()?.len() != recorded.bytes as u64 {
         return Err(error("original member digest/length mismatch"));
     }
     let (bytes, digest) =
@@ -502,6 +502,21 @@ mod tests {
         let base = reference.manifest_path.rsplit_once('/').unwrap().0;
         std::fs::write(root.path().join(base).join("files/figure.png"), [0, 255, 2]).unwrap();
         assert!(load_manual_original_manifest(root.path(), &reference).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn publication_receipt_refuses_fifo_members_without_waiting() {
+        let root = TempDir::new().unwrap();
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let reference = publish_manual_original(&session, &capture()).unwrap();
+        let base = reference.manifest_path.rsplit_once('/').unwrap().0;
+        let member = root.path().join(base).join("files/figure.png");
+        std::fs::remove_file(&member).unwrap();
+        let path = root.path().to_owned();
+        crate::original_io::tests::assert_refuses_fifo(member, move || {
+            load_manual_original_manifest(&path, &reference).map(|_| ())
+        });
     }
     #[test]
     fn originals_roundtrip_before_page_and_survive_mutable_source_absence() {

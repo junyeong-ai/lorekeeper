@@ -9,6 +9,12 @@ pub enum LockFileAccess {
     ReadWrite,
 }
 
+/// Open an existing regular file read-only without following a leaf symlink.
+/// Unix opens are nonblocking so special entries are rejected without waiting.
+pub fn open_regular_file(path: &Path) -> io::Result<File> {
+    open_file(path, LockFileAccess::Read, None)
+}
+
 /// Open a persistent regular lock file without truncation or following a leaf
 /// symlink. `create_mode` permits exclusive creation of an absent file; its parent
 /// must already exist. This does not acquire a lock or recover protected state.
@@ -18,6 +24,10 @@ pub fn open_lock_file(
     access: LockFileAccess,
     create_mode: Option<u32>,
 ) -> io::Result<File> {
+    open_file(path, access, create_mode)
+}
+
+fn open_file(path: &Path, access: LockFileAccess, create_mode: Option<u32>) -> io::Result<File> {
     #[cfg(unix)]
     let file = {
         use rustix::fs::{Mode, OFlags, open};
@@ -72,7 +82,7 @@ pub fn open_lock_file(
         if !std::fs::symlink_metadata(path)?.file_type().is_file() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "lock is not a regular file",
+                "file is not a regular file",
             ));
         }
         options.open(path)?
@@ -80,7 +90,7 @@ pub fn open_lock_file(
     if !file.metadata()?.is_file() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "lock is not a regular file",
+            "file is not a regular file",
         ));
     }
     Ok(file)
@@ -94,6 +104,11 @@ mod tests {
     fn opening_preserves_bytes_and_requires_explicit_creation_and_existing_parent() {
         let temporary = tempfile::tempdir().unwrap();
         let path = temporary.path().join("lock");
+        assert_eq!(
+            open_regular_file(&path).unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
+        assert!(!path.exists());
         assert!(open_lock_file(&path, LockFileAccess::Read, None).is_err());
         assert!(
             open_lock_file(
@@ -106,6 +121,12 @@ mod tests {
         assert!(!temporary.path().join("absent").exists());
         open_lock_file(&path, LockFileAccess::Write, Some(0o666)).unwrap();
         std::fs::write(&path, b"retained").unwrap();
+        let mut reader = open_regular_file(&path).unwrap();
+        use std::io::{Read, Write};
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"retained");
+        assert!(reader.write_all(b"changed").is_err());
         for access in [
             LockFileAccess::Read,
             LockFileAccess::Write,
@@ -163,6 +184,7 @@ mod tests {
                 .success()
         );
         for path in [&alias, &fifo, temporary.path()] {
+            assert!(open_regular_file(path).is_err());
             for access in [
                 LockFileAccess::Read,
                 LockFileAccess::Write,
