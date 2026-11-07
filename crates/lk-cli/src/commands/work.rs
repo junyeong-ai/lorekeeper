@@ -4056,7 +4056,14 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn native_inspection_admission_checks_only_the_next_exact_request() {
-        for (index, current_contract) in [(0, true), (1, true), (0, false)] {
+        for policy in [None, Some(lk_core::semantic::INSPECTION_CHARACTERS)] {
+            check_native_inspection_admission(policy);
+        }
+    }
+
+    #[cfg(unix)]
+    fn check_native_inspection_admission(policy: Option<std::num::NonZeroUsize>) {
+        for (index, current_contract) in [(0, true), (1, true), (0, false), (1, false)] {
             let root = tempfile::tempdir().unwrap();
             let session = MutationSession::acquire(root.path()).unwrap();
             let text = "Source-scoped evidence.\n\n".repeat(1000);
@@ -4066,8 +4073,7 @@ mod tests {
                 authority: lk_core::semantic::SemanticAuthority::Page,
                 text,
             }];
-            let work = Work::create(
-                &session,
+            let work = Work::build_with_inspection(
                 &resources,
                 "subject",
                 json!({"purpose":{"kind":"synthesis","locale":"en"}}),
@@ -4075,7 +4081,10 @@ mod tests {
                     max_input_bytes: 8192,
                     max_result_bytes: 2048,
                 },
+                policy,
             )
+            .unwrap()
+            .persist(&session)
             .unwrap();
             let (_, requests) = work
                 .prepare_inspections(root.path(), &resources, 2)
@@ -4106,7 +4115,7 @@ mod tests {
                 inspection_admission(root.path(), &work, &resources)
                     .unwrap()
                     .is_some(),
-                index == 0 && current_contract
+                index == 0 && (current_contract || policy.is_none())
             );
             if index == 1 {
                 work.record(
@@ -4124,10 +4133,11 @@ mod tests {
                     &resources,
                 )
                 .unwrap();
-                assert!(
+                assert_eq!(
                     inspection_admission(root.path(), &work, &resources)
                         .unwrap()
-                        .is_some()
+                        .is_some(),
+                    current_contract || policy.is_none()
                 );
                 assert_eq!(work.progress(root.path(), &resources).unwrap().completed, 1);
             }
