@@ -21,6 +21,9 @@ mod observation_rejections;
 #[path = "native_execution/audit_recovery.rs"]
 mod audit_recovery;
 
+#[path = "native_execution/whole_audit.rs"]
+mod whole_audit;
+
 #[path = "native_execution/automation.rs"]
 mod automation;
 
@@ -220,26 +223,34 @@ fn configure_profile_options(fixture: &Fixture, engine: &str) {
     std::fs::write(&fixture.config, config).unwrap();
 }
 
-const RECORD_FIRST_AUDIT: &str = r#"
-"$LORE_BIN" wiki audit-plan > "$TEST_EXECUTION_ROOT/plan.json" || exit 31
-python3 - <<'ASSESS'
-import json, os
+const RECORD_AUDIT: &str = r#"
+python3 - "$@" <<'ASSESS'
+import json, os, subprocess, sys
 from pathlib import Path
 root=Path(os.environ['TEST_EXECUTION_ROOT'])
-candidate=json.loads((root/'plan.json').read_text())['candidates'][0]
-import subprocess
-if candidate['discovery'] is None:
-    discovery={key:candidate[key] for key in ['path','file_revision']}
-    discovery['queries']=[{'query':candidate['title'],'phrase':True,'spacing':False}]
-    path=root/'discovery.json'
-    path.write_text(json.dumps(discovery))
-    subprocess.run([os.environ['LORE_BIN'],'wiki','audit-discover','--file',str(path)],check=True)
-    candidate=json.loads(subprocess.check_output([os.environ['LORE_BIN'],'wiki','audit-plan','--path',candidate['path']]))['candidates'][0]
-assessment={key:candidate[key] for key in ['path','file_revision','input_revision']}
-assessment.update(disposition='reviewed', reason='Read the exact selected concept and its scoped evidence.', reviews=[])
-(root/'assessment.json').write_text(json.dumps({'assessments':[assessment]}))
+prompt=Path(os.environ['TEST_INTERACTIVE_INPUT']).read_text() if Path(os.environ['TEST_INTERACTIVE_INPUT']).exists() else ''
+prompt=prompt or '\n'.join(sys.argv[1:])
+if '\nNative request:\n' not in prompt:
+    paths=json.JSONDecoder().raw_decode(prompt.split('these exact audit subjects: ',1)[1])[0]
+    for subject in paths:
+        candidate=json.loads(subprocess.check_output([os.environ['LORE_BIN'],'wiki','audit-plan','--path',subject]))['candidates'][0]
+        discovery={key:candidate[key] for key in ['path','file_revision']}
+        discovery['queries']=[{'query':candidate['title'],'phrase':True,'spacing':False}]
+        path=root/'discovery.json'
+        path.write_text(json.dumps(discovery))
+        subprocess.run([os.environ['LORE_BIN'],'wiki','audit-discover','--file',str(path)],check=True)
+    raise SystemExit(0)
+request=json.loads(prompt.split('\nNative request:\n',1)[1])
+assert request['schema']=='native-audit-results-v1'
+assert all('resources' in subject and 'work' not in subject for subject in request['subjects'])
+(root/'maintain-command').write_text(json.dumps([subject['context']['subject']['path'] for subject in request['subjects']],separators=(',',':')))
+value={'results':[{'subject_ref':subject['subject_ref'],'status':'complete','disposition':'reviewed','reason':'Read the exact supplied subject and its scoped evidence.'} for subject in request['subjects']]}
+if '--output-last-message' in sys.argv:
+    Path(sys.argv[sys.argv.index('--output-last-message')+1]).write_text(json.dumps(value))
+if '--json-schema' in sys.argv:
+    value={'type':'result','subtype':'success','is_error':False,'structured_output':value}
+print(json.dumps(value))
 ASSESS
-"$LORE_BIN" wiki audit-record --file "$TEST_EXECUTION_ROOT/assessment.json" || exit 32
 "#;
 
 fn write_audit_concept(fixture: &Fixture, name: &str) {
@@ -312,7 +323,7 @@ DISCOVERY
 esac
 "#;
     for engine in ["claude-code", "codex"] {
-        let fixture = Fixture::new(engine, 30, &format!("{discover}\n{RECORD_FIRST_AUDIT}"));
+        let fixture = Fixture::new(engine, 30, &format!("{discover}\n{RECORD_AUDIT}"));
         let config = std::fs::read_to_string(&fixture.config).unwrap().replace(
             "  default_profile: primary\n",
             "  default_profile: primary\n  work: {max_calls: 1}\n",
@@ -409,7 +420,7 @@ DISCOVERY
 esac
 "#;
     for engine in ["claude-code", "codex"] {
-        let fixture = Fixture::new(engine, 30, &format!("{discover}\n{RECORD_FIRST_AUDIT}"));
+        let fixture = Fixture::new(engine, 30, &format!("{discover}\n{RECORD_AUDIT}"));
         std::fs::write(
             &fixture.config,
             std::fs::read_to_string(&fixture.config).unwrap()
@@ -645,11 +656,7 @@ fn knowledge_queue_consumer_receives_bounded_maintenance_context() {
 
 #[test]
 fn knowledge_audit_progresses_before_unrelated_queue_backlog_and_reports_it_unfinished() {
-    let behavior = RECORD_FIRST_AUDIT.replace(
-        "wiki audit-plan >",
-        "wiki audit-plan --path wiki/concepts/stable.md >",
-    );
-    let fixture = Fixture::new("codex", 30, &behavior);
+    let fixture = Fixture::new("codex", 30, RECORD_AUDIT);
     fixture.ingest();
     write_audit_concept(&fixture, "stable");
     let config = std::fs::read_to_string(&fixture.config).unwrap()
@@ -720,16 +727,10 @@ if (root/'corrupt-after-discovery').exists():
 DISCOVER
     exit $?
     ;;
-  *"maintain."*)
-    printf '%s\n' "$*" > "$TEST_EXECUTION_ROOT/maintain-command"
-    ;;
-  *) exit 72 ;;
+  *) ;;
 esac
 "#;
-    let assessment = RECORD_FIRST_AUDIT.replace(
-        "wiki audit-plan >",
-        "wiki audit-plan --path wiki/documents/b.md >",
-    );
+    let assessment = RECORD_AUDIT;
     for engine in ["claude-code", "codex"] {
         for (batch_size, corrupt_queue) in [(1, false), (2, false), (1, true)] {
             let fixture =
@@ -918,7 +919,7 @@ fn knowledge_defers_selected_evidence_with_unfinished_semantics_and_record_reche
 
 #[test]
 fn current_authored_assessment_does_not_hide_unfinished_bookkeeping_or_force_a_reread() {
-    let fixture = Fixture::new("codex", 30, RECORD_FIRST_AUDIT);
+    let fixture = Fixture::new("codex", 30, RECORD_AUDIT);
     let path = fixture.root().join("vault/wiki/documents/subject.md");
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     let ready = "---\ntype: document\ntitle: Subject\nllm_inputs: {summary: captured, summary_done: captured}\n---\n## Summary\nA completed interpretation.\n";
@@ -1189,7 +1190,7 @@ fn audit_exit_zero_without_assessments_is_incomplete() {
 
 #[test]
 fn unrelated_review_drift_remains_visible_while_knowledge_campaign_progresses() {
-    let fixture = Fixture::new("codex", 30, RECORD_FIRST_AUDIT);
+    let fixture = Fixture::new("codex", 30, RECORD_AUDIT);
     let config =
         std::fs::read_to_string(&fixture.config).unwrap() + "graph:\n  audit:\n    batch_size: 1\n";
     std::fs::write(&fixture.config, config).unwrap();
@@ -1273,7 +1274,7 @@ fn empty_knowledge_plan_still_reports_review_attention_without_launching_agent()
 
 #[test]
 fn invalid_review_evidence_blocks_knowledge_before_launching_agent() {
-    let fixture = Fixture::new("codex", 30, RECORD_FIRST_AUDIT);
+    let fixture = Fixture::new("codex", 30, RECORD_AUDIT);
     write_audit_concept(&fixture, "a");
     write_review_attention(&fixture, "wiki/documents/reviewed.md", true);
     let (output, result) = fixture.run("knowledge");
@@ -1292,7 +1293,7 @@ fn invalid_review_evidence_blocks_knowledge_before_launching_agent() {
 
 #[test]
 fn selected_review_drift_blocks_audit_completion_without_becoming_a_global_health_failure() {
-    let fixture = Fixture::new("codex", 30, RECORD_FIRST_AUDIT);
+    let fixture = Fixture::new("codex", 30, RECORD_AUDIT);
     std::fs::write(
         &fixture.config,
         std::fs::read_to_string(&fixture.config).unwrap() + "graph:\n  audit:\n    batch_size: 1\n",
@@ -1307,9 +1308,9 @@ fn selected_review_drift_blocks_audit_completion_without_becoming_a_global_healt
     assert!(result["audit"].is_null());
     let stages = result["stages"].as_array().unwrap();
     assert!(
-        stages
-            .iter()
-            .any(|stage| { stage["name"] == "audit completion" && stage["state"] == "failed" })
+        stages.iter().any(|stage| {
+            stage["name"] == "whole audit publication" && stage["state"] == "failed"
+        })
     );
     assert!(
         stages
@@ -1367,12 +1368,14 @@ prompt=prompt or '\n'.join(sys.argv[1:])
 prepared_input=json.loads(prompt.split('\nNative request:\n',1)[1]) if '\nNative request:\n' in prompt else None
 audit_final=prepared_input is not None and prepared_input.get('schema')=='native-audit-results-v1'
 def respond(value):
+    for reply in value.get('results', []):
+        reply['subject_ref']='s0'
     mode=(root/'audit-response-mode').read_text() if (root/'audit-response-mode').exists() else ''
     if mode=='missing':
         print('Finished reading, without submitting an assessment.')
         return
     if mode=='needs-action':
-        value={'results':[{'status':'needs-action','disposition':None,'reason':'Required scoped evidence needs an explicit decision.'}]}
+        value={'results':[{'subject_ref':'s0','status':'needs-action','disposition':None,'reason':'Required scoped evidence needs an explicit decision.'}]}
     if '--output-last-message' in sys.argv:
         Path(sys.argv[sys.argv.index('--output-last-message')+1]).write_text(json.dumps(value))
     if '--json-schema' in sys.argv:
@@ -4728,21 +4731,7 @@ fn bounded_audit_resumes_call_budgets_and_exit_zero_cannot_forge_a_receipt() {
 fn knowledge_campaign_releases_each_lease_and_stops_on_failure_without_losing_progress() {
     for fail_second in [false, true] {
         let behavior = format!(
-            r#"
-if [ -f "$TEST_EXECUTION_ROOT/assessed-once" ] && [ {fail_second} = true ]; then exit 0; fi
-"$LORE_BIN" wiki audit-plan > "$TEST_EXECUTION_ROOT/plan.json" || exit 31
-python3 - <<'ASSESS'
-import json, os
-from pathlib import Path
-root=Path(os.environ['TEST_EXECUTION_ROOT'])
-candidate=json.loads((root/'plan.json').read_text())['candidates'][0]
-assessment={{key:candidate[key] for key in ['path','file_revision','input_revision']}}
-assessment.update(disposition='reviewed', reason='Coordinator fixture records this exact selected input.', reviews=[])
-(root/'assessment.json').write_text(json.dumps({{'assessments':[assessment]}}))
-ASSESS
-"$LORE_BIN" wiki audit-record --file "$TEST_EXECUTION_ROOT/assessment.json" || exit 32
-touch "$TEST_EXECUTION_ROOT/assessed-once"
-"#
+            "if [ -f \"$TEST_EXECUTION_ROOT/assessed-once\" ] && [ {fail_second} = true ]; then exit 0; fi\n{RECORD_AUDIT}\ntouch \"$TEST_EXECUTION_ROOT/assessed-once\"\n"
         );
         let fixture = Fixture::new("codex", 30, &behavior);
         let config = std::fs::read_to_string(&fixture.config).unwrap()
@@ -4824,7 +4813,7 @@ fn audit_completion_requires_this_workflows_native_merge_and_current_survivor() 
         ),
     ] {
         let behavior = format!(
-            "{}\n{action}\n{}",
+            "{}\nif [ ! -f \"$TEST_EXECUTION_ROOT/merged-once\" ]; then\n{action}\n\"$LORE_BIN\" graph backlinks-sync || exit 32\ntouch \"$TEST_EXECUTION_ROOT/merged-once\"\nfi\n{RECORD_AUDIT}",
             r#"merge_pair() {
 python3 - "$1" "$2" <<'MERGE'
 import json, os, subprocess, sys
@@ -4838,28 +4827,6 @@ subprocess.run([lore, 'graph', 'merge', source, survivor, '--force',
 MERGE
 }
 "#,
-            r#"
-"$LORE_BIN" graph backlinks-sync || exit 32
-"$LORE_BIN" wiki audit-plan --path wiki/concepts/z-canonical.md > "$TEST_EXECUTION_ROOT/plan.json" || exit 33
-python3 - <<'ASSESS'
-import json, os
-from pathlib import Path
-root=Path(os.environ['TEST_EXECUTION_ROOT'])
-candidate=json.loads((root/'plan.json').read_text())['candidates'][0]
-import subprocess
-if candidate['discovery'] is None:
-    discovery={key:candidate[key] for key in ['path','file_revision']}
-    discovery['queries']=[{'query':candidate['title'],'phrase':True,'spacing':False}]
-    path=root/'discovery.json'
-    path.write_text(json.dumps(discovery))
-    subprocess.run([os.environ['LORE_BIN'],'wiki','audit-discover','--file',str(path)],check=True)
-    candidate=json.loads(subprocess.check_output([os.environ['LORE_BIN'],'wiki','audit-plan','--path',candidate['path']]))['candidates'][0]
-assessment={key:candidate[key] for key in ['path','file_revision','input_revision']}
-assessment.update(disposition='reviewed', reason='The final survivor and its evidence were reviewed.', reviews=[])
-(root/'assessment.json').write_text(json.dumps({'assessments':[assessment]}))
-ASSESS
-"$LORE_BIN" wiki audit-record --file "$TEST_EXECUTION_ROOT/assessment.json"
-"#
         );
         let fixture = Fixture::new("codex", 30, &behavior);
         let config = std::fs::read_to_string(&fixture.config).unwrap()

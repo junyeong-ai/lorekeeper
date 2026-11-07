@@ -47,7 +47,7 @@ fn usage(fixture: &Fixture) -> serde_json::Value {
 
 #[test]
 fn scheduled_invocation_limit_survives_completed_audit_batch_boundaries() {
-    let fixture = Fixture::new("codex", 30, RECORD_FIRST_AUDIT);
+    let fixture = Fixture::new("codex", 30, RECORD_AUDIT);
     let config = std::fs::read_to_string(&fixture.config).unwrap().replace(
         "  default_profile: primary\n",
         "  default_profile: primary\n  work: {max_calls: 1}\n",

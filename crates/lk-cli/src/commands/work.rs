@@ -8,7 +8,7 @@ use super::{GlobalOptions, find_config, load_config_with_revision};
 #[cfg(unix)]
 mod action;
 #[cfg(unix)]
-mod audit;
+pub(super) mod audit;
 mod discovery;
 #[cfg(unix)]
 pub(super) mod generation;
@@ -2057,7 +2057,23 @@ pub(super) fn audit_needs_work(
     let root = root.canonicalize().into_diagnostic()?;
     let prepared = resources::audit_candidate(&root, config, candidate)?;
     let work = expected(&root, &prepared, config, config_revision)?;
-    Ok(work.plan.parts.len() > 1 || work.is_planned(&root)?)
+    if work.plan.parts.len() > 1 || work.is_planned(&root)? {
+        return Ok(true);
+    }
+    #[cfg(unix)]
+    {
+        let subject = audit::capture_prepared(&root, config_revision, candidate, prepared)?;
+        let request = audit::whole_request(config, &[subject]);
+        match request {
+            Ok(request) => {
+                Ok(serde_json::to_vec(&request).into_diagnostic()?.len() > work.max_input_bytes)
+            }
+            Err(error) if error.downcast_ref::<generation::ResultCapacity>().is_some() => Ok(true),
+            Err(error) => Err(error),
+        }
+    }
+    #[cfg(not(unix))]
+    Ok(false)
 }
 
 #[cfg(unix)]
@@ -2072,10 +2088,14 @@ pub(super) fn audit_processing_hold(
     }
     let prepared = resources::audit_candidate(root, config, candidate)?;
     let work = expected(root, &prepared, config, config_revision)?;
-    if !work.is_planned(root)? {
+    let planned = work.is_planned(root)?;
+    if planned && is_finished_prepared(root, &work, &prepared)? {
         return Ok(None);
     }
-    if is_finished_prepared(root, &work, &prepared)? {
+    if let Some(reason) = audit::processing_hold(root, config_revision, candidate, &prepared)? {
+        return Ok(Some(reason));
+    }
+    if !planned {
         return Ok(None);
     }
     let (progress, hold) = match work.prepare_inspection_admission(

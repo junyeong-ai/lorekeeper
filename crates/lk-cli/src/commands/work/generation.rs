@@ -214,9 +214,9 @@ pub(super) fn assemble_prepared(
 }
 
 #[derive(Debug)]
-pub(super) struct ResultCapacity {
-    pub(super) minimum_bytes: usize,
-    pub(super) max_result_bytes: usize,
+pub(in crate::commands) struct ResultCapacity {
+    pub(in crate::commands) minimum_bytes: usize,
+    pub(in crate::commands) max_result_bytes: usize,
 }
 
 impl std::fmt::Display for ResultCapacity {

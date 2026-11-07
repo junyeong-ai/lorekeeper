@@ -222,6 +222,74 @@ pub fn verify_batch(
     )
 }
 
+fn resolve_subject<'a>(
+    root: &Path,
+    original: &AuditCandidate,
+    candidates: &'a BTreeMap<String, AuditCandidate>,
+    merges: Option<&WorkflowMerges>,
+) -> Result<&'a AuditCandidate, GraphError> {
+    let mut path = original.path.clone();
+    let mut visited = BTreeSet::new();
+    loop {
+        if !visited.insert(path.clone()) {
+            return Err(error("audit merge chain contains a cycle"));
+        }
+        if let Some(candidate) = candidates.get(&path) {
+            if candidate.kind != original.kind {
+                return Err(error(format!("audit subject kind changed: {path}")));
+            }
+            return Ok(candidate);
+        }
+        if original.kind != AuditSubjectKind::Concept {
+            return Err(error(format!(
+                "audit document is no longer a current document: {path}"
+            )));
+        }
+        match std::fs::symlink_metadata(lk_vault::page_path(root, Path::new(&path)).map_err(error)?)
+        {
+            Ok(_) => {
+                return Err(error(format!(
+                    "audit concept is no longer a valid concept: {path}"
+                )));
+            }
+            Err(failure) if failure.kind() == std::io::ErrorKind::NotFound => {}
+            Err(failure) => return Err(error(failure)),
+        }
+        path = merges
+            .and_then(|merges| merges.concepts.get(&path))
+            .ok_or_else(|| {
+                error(format!(
+                    "audit concept disappeared without this workflow's guarded merge: {path}"
+                ))
+            })?
+            .into
+            .clone();
+    }
+}
+
+/// Resolve each original slot for fresh planning, without recording read coverage.
+pub fn resolve_batch_subjects(
+    root: &Path,
+    dirs: &VaultDirs,
+    pages: &[ScannedPage],
+    batch: &[AuditCandidate],
+    workflow_id: &lk_core::execution::WorkflowId,
+) -> Result<Vec<AuditCandidate>, GraphError> {
+    let (_, receipts) = load(root)?;
+    let candidates = inputs(root, dirs, pages, &receipts)?
+        .into_iter()
+        .map(|candidate| (candidate.path.clone(), candidate))
+        .collect::<BTreeMap<_, _>>();
+    let merges = receipts
+        .last_merges
+        .as_ref()
+        .filter(|merges| merges.workflow_id == *workflow_id);
+    batch
+        .iter()
+        .map(|original| resolve_subject(root, original, &candidates, merges).cloned())
+        .collect()
+}
+
 /// Verify current receipts with per-assessment completed-work checks. The scratch
 /// plan collects read guards without publishing or recovering any mutation.
 pub fn verify_batch_with_guard(
@@ -245,57 +313,24 @@ pub fn verify_batch_with_guard(
     let mut verified = Vec::new();
     let mut assessed = BTreeMap::new();
     for original in batch {
-        let mut path = original.path.as_str();
-        let mut visited = BTreeSet::new();
-        loop {
-            if !visited.insert(path) {
-                return Err(error("audit merge chain contains a cycle"));
-            }
-            if let Some(candidate) = candidates.get(path) {
-                if candidate.kind != original.kind {
-                    return Err(error(format!("audit subject kind changed: {path}")));
-                }
-                let receipt = receipts
-                    .entries
-                    .get(path)
-                    .filter(|receipt| receipt_is_current(receipt, candidate))
-                    .ok_or_else(|| {
-                        error(format!("audit subject lacks a current assessment: {path}"))
-                    })?;
-                verified.push(AuditCompletion {
-                    kind: candidate.kind,
-                    requested_path: original.path.clone(),
-                    assessed_path: path.into(),
-                    disposition: receipt.disposition,
-                });
-                assessed.insert(candidate.path.clone(), (candidate.clone(), receipt.clone()));
-                break;
-            }
-            if original.kind != AuditSubjectKind::Concept {
-                return Err(error(format!(
-                    "audit document is no longer a current document: {path}"
-                )));
-            }
-            match std::fs::symlink_metadata(
-                lk_vault::page_path(root, Path::new(path)).map_err(error)?,
-            ) {
-                Ok(_) => {
-                    return Err(error(format!(
-                        "audit concept is no longer a valid concept: {path}"
-                    )));
-                }
-                Err(failure) if failure.kind() == std::io::ErrorKind::NotFound => {}
-                Err(failure) => return Err(error(failure)),
-            }
-            let retirement = merges
-                .and_then(|merges| merges.concepts.get(path))
-                .ok_or_else(|| {
-                    error(format!(
-                        "audit concept disappeared without this workflow's guarded merge: {path}"
-                    ))
-                })?;
-            path = &retirement.into;
-        }
+        let candidate = resolve_subject(root, original, &candidates, merges)?;
+        let receipt = receipts
+            .entries
+            .get(&candidate.path)
+            .filter(|receipt| receipt_is_current(receipt, candidate))
+            .ok_or_else(|| {
+                error(format!(
+                    "audit subject lacks a current assessment: {}",
+                    candidate.path
+                ))
+            })?;
+        verified.push(AuditCompletion {
+            kind: candidate.kind,
+            requested_path: original.path.clone(),
+            assessed_path: candidate.path.clone(),
+            disposition: receipt.disposition,
+        });
+        assessed.insert(candidate.path.clone(), (candidate.clone(), receipt.clone()));
     }
     let complete = measure_inputs(
         root,

@@ -80,8 +80,9 @@ pub async fn run(
         .join(".lorekeeper/work")
         .try_exists()
         .map_err(|error| miette::miette!("inspect work store: {error}"))?;
+    let audit_actions_present = super::audit::action::present(&vault_root)?;
     #[cfg(unix)]
-    let work_lease = if work_present && !dry_run {
+    let work_lease = if (work_present || audit_actions_present) && !dry_run {
         let lease = super::workflow::WorkflowLease::prepare_selected(
             opts,
             &config,
@@ -154,6 +155,19 @@ pub async fn run(
             );
         } else {
             eprintln!("{prefix}work: retained; exclusive Unix workflow access is unavailable.");
+        }
+    }
+    if audit_actions_present {
+        if work_available {
+            let removed =
+                super::audit::action::prune(&vault_root, _mutation.as_ref(), cutoff_secs)?;
+            eprintln!(
+                "{prefix}audit actions: pruned {removed} expired receipts for absent subjects; existing subjects remain held."
+            );
+        } else {
+            eprintln!(
+                "{prefix}audit actions: retained; exclusive Unix workflow access is unavailable."
+            );
         }
     }
 

@@ -89,6 +89,8 @@ pub async fn run(
 
 #[cfg(unix)]
 mod native {
+    mod audit;
+
     use super::*;
     use super::{automation, scheduler};
     use crate::commands::audit::{DeferredAudit, InputAvailability};
@@ -5044,14 +5046,6 @@ mod native {
                     return;
                 }
             }
-            let selection = serde_json::to_string(
-                &plan
-                    .candidates
-                    .iter()
-                    .map(|candidate| &candidate.path)
-                    .collect::<Vec<_>>(),
-            )
-            .expect("string paths serialize");
             let mut bounded = plan.input.ensure_ready().is_err();
             for candidate in &plan.candidates {
                 match crate::commands::work::audit_needs_work(
@@ -5069,6 +5063,11 @@ mod native {
             }
             let mut deferred_subjects = std::collections::BTreeSet::new();
             if bounded {
+                let mut originals = plan
+                    .candidates
+                    .iter()
+                    .map(|candidate| (candidate.path.clone(), vec![candidate.clone()]))
+                    .collect::<std::collections::BTreeMap<_, _>>();
                 let Some(mut jobs) = self.prepare_audit_jobs(&plan.candidates).await else {
                     return;
                 };
@@ -5123,33 +5122,60 @@ mod native {
                         }
                         WorkStep::Failed => return,
                         WorkStep::Replan => {
-                            if !replanned.insert(selected.clone()) {
+                            originals
+                                .get_mut(&selected)
+                                .expect("selected audit has original slots")
+                                .retain(|original| {
+                                    if replanned.insert(original.path.clone()) {
+                                        true
+                                    } else {
+                                        deferred_subjects.insert(original.path.clone());
+                                        false
+                                    }
+                                });
+                            if originals[&selected].is_empty() {
                                 self.deferred("bounded audit inputs unstable", format!("{selected}: inputs changed again after fresh replanning; retained for a later run"));
                                 deferred_subjects.insert(selected.clone());
                                 jobs.remove(&selected);
                                 continue;
                             }
-                            let pending = jobs.keys().cloned().collect::<Vec<_>>();
-                            let Some(fresh) = self.replan_audit(&pending).await else {
+                            let pending = jobs
+                                .keys()
+                                .flat_map(|path| originals[path].iter().cloned())
+                                .collect::<Vec<_>>();
+                            let current = match self.current_audit_subjects(&pending) {
+                                Ok(current) => current,
+                                Err(error) => {
+                                    self.failure("bounded audit fresh scope", error);
+                                    return;
+                                }
+                            };
+                            let mut current_originals = std::collections::BTreeMap::<
+                                String,
+                                Vec<lk_graph::audit::AuditCandidate>,
+                            >::new();
+                            for (original, candidate) in pending.into_iter().zip(current) {
+                                current_originals
+                                    .entry(candidate.path)
+                                    .or_default()
+                                    .push(original);
+                            }
+                            let paths = current_originals.keys().cloned().collect::<Vec<_>>();
+                            let Some(fresh) = self.replan_audit(&paths).await else {
                                 return;
                             };
                             let Some(fresh_jobs) = self.prepare_audit_jobs(&fresh.candidates).await
                             else {
                                 return;
                             };
-                            for path in &pending {
+                            for (path, subjects) in &current_originals {
                                 if !fresh_jobs.contains_key(path) {
-                                    deferred_subjects.insert(path.clone());
+                                    deferred_subjects.extend(
+                                        subjects.iter().map(|subject| subject.path.clone()),
+                                    );
                                 }
                             }
-                            for candidate in fresh.candidates {
-                                let prior = plan
-                                    .candidates
-                                    .iter_mut()
-                                    .find(|prior| prior.path == candidate.path)
-                                    .expect("replanned audit belongs to the selected batch");
-                                *prior = candidate;
-                            }
+                            originals = current_originals;
                             jobs = fresh_jobs;
                             self.record("bounded audit replanning", StageState::Skipped, Some("captured fresh selected inputs; prior Work remains unchanged and the current run budget is retained".into()));
                             continue;
@@ -5180,30 +5206,20 @@ mod native {
                     {
                         return;
                     }
-                    self.audit_batch.get_or_insert_with(Vec::new).push(
-                        plan.candidates
-                            .iter()
-                            .find(|candidate| candidate.path == selected)
-                            .expect("prepared audit belongs to the selected batch")
-                            .clone(),
-                    );
+                    self.audit_batch
+                        .get_or_insert_with(Vec::new)
+                        .extend(originals[&selected].iter().cloned());
                     jobs.remove(&selected);
                 }
-            } else if !self.consumer(ExecutionStage::Audit, "lore-wiki", &format!("maintain. The controller selected this exact batch: {selection}. Start with audit-plan --path for these addresses; do not select another batch. Use bounded work for any subject whose work envelope requires partitioning."), None).await {
+            } else {
+                self.whole_audit(&plan.candidates).await;
                 return;
             }
-            let assessed = plan
-                .candidates
-                .into_iter()
-                .filter(|candidate| !deferred_subjects.contains(&candidate.path))
-                .collect::<Vec<_>>();
             if !deferred_subjects.is_empty() {
                 self.deferred("audit inspection dependencies", format!("{} selected audit subjects require explicit processing action; no assessment was recorded for them", deferred_subjects.len()));
             }
-            if assessed.is_empty() {
+            if self.audit_batch.as_ref().is_none_or(Vec::is_empty) {
                 self.result.audit = Some(Vec::new());
-            } else {
-                self.audit_batch = Some(assessed);
             }
         }
     }

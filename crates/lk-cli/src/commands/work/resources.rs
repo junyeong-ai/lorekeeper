@@ -1003,7 +1003,20 @@ pub(super) fn refresh_controlled(
                 task(root, config, task_id)?
             }
         }
-        Subject::Audit { path, .. } => audit(root, config, path)?,
+        Subject::Audit { path, .. } => {
+            let target = lk_vault::page_path(root, Path::new(path)).into_diagnostic()?;
+            match std::fs::symlink_metadata(target) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    return Err(super::publication_rejection(
+                        super::RejectionKind::SemanticContextChanged,
+                        "audit subject no longer exists; replan and reread its current scope",
+                    ));
+                }
+                Err(error) => return Err(error).into_diagnostic(),
+                Ok(_) => {}
+            }
+            audit(root, config, path)?
+        }
     };
     read.check().into_diagnostic()?;
     prepared.validate_context(context)

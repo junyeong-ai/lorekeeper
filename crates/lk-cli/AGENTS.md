@@ -19,8 +19,8 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   remain valid; another directory or incomplete inherited context refuses. Root context
   validates scope, never lease ownership or reentrancy. Native jobs stop after drift and
   retain unfinished work.
-- New semantic Work and selection identities exclude only execution
-  call/parallel/consecutive-call/ screening-packet limits and profile session timeouts.
+- New semantic Work and selection identities exclude execution automation policy,
+  call/parallel/consecutive-call/screening-packet limits and profile session timeouts.
   Input/result byte limits, extraction policy, model/effort and all other configuration
   remain semantic inputs. The live workflow still pins every configuration byte. Legacy
   byte-bound manifests resume only through an exact current-configuration
@@ -113,7 +113,7 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   disjoint value bytes and remaining metadata/envelope; count canonical completion
   bytes separately. This diagnostic never changes the native request or receipt key.
   Compact request/decoded-result bytes exclude prompts and host envelopes; tool-enabled
-  native result request/response bytes are measured; ordinary interactive audit
+  native result request/response bytes are measured; ordinary interactive discovery
   responses remain unobserved. Revalidation and recording share one measured operation.
   Parallel invocation durations are summed and can exceed elapsed job time. Failed
   structured hosts retain only fixed diagnostic fields, JSON types/sizes and recognized
@@ -166,13 +166,22 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
   that checked scope.
 - Grant each temporary selection manifest's directory explicitly to the selected host;
   keep it alive through the foreground consumer and remove it afterward.
-- An interactive bounded audit finalizer may legitimately create reviews or repair
+- A tool-enabled native audit finalizer may legitimately create reviews or repair
   its inputs. A typed semantic-context refusal still rejects the old submission;
   recapture the remaining selected subjects, refresh missing discovery and prepare
   current Work under the same run budget. Allow one such replan per subject per run;
   repeated drift defers that subject while independent subjects continue. Keep all
   predecessor Work and paid outputs unchanged. Configuration/root drift, corrupt
   state and unexpected changes during tool-free observation recording remain fatal.
+- Whole-input audit judgments carry unique complete subject references. Rust supplies
+  assessment metadata and records current inputs through the shared audit owner.
+  Replan original slots through this workflow's guarded concept merges; documents
+  retain exact addresses. Isolate known blocked peers from publication readiness.
+  Whole-input holds bind per-subject semantic context and assessment rules, excluding
+  batch peers/order. Unfinished plan creation never clears a hold. Keep one bounded
+  latest receipt per subject; canonical assessment removes it in the same journal.
+  Retention under a workflow lease removes only expired receipts for proven-absent
+  subjects, with absence and captured-byte guards; existing subjects stay held.
 
 ## Resumable semantic Work (`commands/work.rs`)
 

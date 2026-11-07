@@ -79,8 +79,8 @@ assessments or performs repairs.
    subject/evidence/context/review pages and can select later ready subjects without
    draining unrelated queue work. Newly discovered context can also block a selected
    assessment. `audit-record` rechecks these inputs under the publication locks.
-   Native admission also skips an exact current bounded-work processing hold, allowing
-   later ready subjects within the same subject limit. It preserves the held Work and
+   Native admission also skips an exact current processing hold, allowing
+   later ready subjects within the same subject limit. It preserves held results and
    pending order; an all-held selection stays deferred. This execution check uses the
    selected profile and is additional to the read-only `--ready` input preview.
    Complete authored pages need no synthetic completion markers. Do not clear an
@@ -211,15 +211,25 @@ No lint or receipt count certifies that the entire corpus is semantically consis
 ## Native assessment
 
 For `native-audit-results-v1`, read the supplied subjects and return one `results`
-entry per subject in exact order. Use `status: complete`, `disposition: reviewed`
+entry per `subject_ref`, copying that reference. Use `status: complete`, `disposition: reviewed`
 or `follow-up`, and a nonblank `reason`; unfinished work uses `status: needs-action`,
 null disposition and a concrete reason. Apply the assessment and curation criteria
-above. A supplied completed observation replaces `work result` setup reads.
+above. Whole-input subjects contain their complete guarded resources; a supplied
+completed observation replaces `work result` setup reads.
 Necessary targeted reads and supported repairs remain available. Input-changing
 repairs require fresh scope; the controller rejects the old judgment and controls
 replanning. Rust supplies all subject/revision/review metadata and owns result files,
 Work finish, staging, assessment recording and final global checks. Return judgments
 instead of invoking `work finish` or `audit-record`.
+
+An unchanged whole-input `needs-action` is held without another invocation, independent
+of batch peers and response order. Changed input or assessment rules reopen eligibility;
+creating an unfinished Work plan alone does not clear the hold. A valid explicit
+assessment clears its whole-input hold in the same publication journal. Input-changing
+repairs, including this workflow's guarded concept merges, get one fresh replan per
+original selected subject within the current call budget; repeated drift defers that
+subject. Existing Work and paid outputs remain unchanged. Durable open reviews are
+valid `follow-up` judgments, distinct from unfinished processing.
 
 ## Operating budget and measurement
 

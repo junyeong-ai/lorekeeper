@@ -652,62 +652,8 @@ pub async fn run(opts: &super::GlobalOptions, cmd: WikiCommand) -> miette::Resul
             .map_err(|error| miette::miette!("{error}"))?;
             let root = config.vault.root_path();
             let session = super::publication::acquire_mutation(&root, wait_for_vault, &pin).await?;
-            let root = session.root().to_path_buf();
-            let pages = lk_graph::scan::scan_vault(&root, config.graph.scope.follow_links)
-                .map_err(|error| miette::miette!("{error}"))?;
-            let selection = results
-                .assessments
-                .iter()
-                .map(|assessment| assessment.path.clone())
-                .collect::<Vec<_>>();
-            let selected = lk_graph::audit::plan_selected_partitioned(
-                &root,
-                &config.vault.dirs,
-                &pages,
-                selection.len(),
-                &selection,
-                config.graph.audit.max_input_bytes,
-            )
-            .map_err(|error| miette::miette!("{error}"))?;
-            if selected
-                .candidates
-                .iter()
-                .any(|candidate| candidate.discovery.is_none())
-            {
-                return Err(miette::miette!(
-                    "audit requires current related-document discovery; run wiki audit-discover, then reread the expanded audit-plan"
-                ));
-            }
-            let _queue_claim = super::queue::claim_writer(&root.join(".lorekeeper/queue"), false)?;
-            let mut readiness = super::queue::readiness::InputReadiness::load(&root)?;
-            for candidate in &selected.candidates {
-                readiness.require_ready(&root, candidate)?;
-            }
-            let mut readiness = Some(readiness);
-            let recorded = lk_graph::audit::record_with_guard(
-                &session,
-                &config.vault.dirs,
-                &pages,
-                results,
-                config.graph.audit.max_input_bytes,
-                |assessment, plan| {
-                    if let Some(readiness) = readiness.take() {
-                        readiness
-                            .guard(&root, plan)
-                            .map_err(|error| lk_graph::GraphError::Io(error.to_string()))?;
-                    }
-                    super::work::guard_audit(&root, &config, &config_revision, assessment, plan)
-                        .map(|completed| {
-                            if completed {
-                                lk_graph::audit::AuditReadCoverage::CompletedWork
-                            } else {
-                                lk_graph::audit::AuditReadCoverage::WholeInput
-                            }
-                        })
-                        .map_err(|error| lk_graph::GraphError::Io(error.to_string()))
-                },
-            )
-            .map_err(|error| miette::miette!("{error}"))?;
+            let recorded =
+                super::audit::record(&session, &config, &config_revision, results, |_, _| Ok(()))?;
             println!("{}", serde_json::json!({"recorded":recorded}));
             Ok(())
         }

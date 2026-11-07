@@ -273,3 +273,48 @@ fn audit_replanning_keeps_the_current_call_budget_and_resumes_paid_nodes() {
         "fresh Work must resume without repeating paid predecessor reads"
     );
 }
+
+#[test]
+fn bounded_audit_replans_a_workflow_merge_to_its_current_survivor() {
+    let behavior = RECORD_BOUNDED_AUDIT.replace(
+        "    assessment={key:subject[key] for key in ['path','file_revision','input_revision']}",
+        r"    if not (root/'merged-once').exists():
+        target='wiki/concepts/z-survivor.md'
+        before={str(path.relative_to(root)):list(path.read_bytes()) for path in (root/'vault/.lorekeeper/work'/work_id).rglob('*') if path.is_file()}
+        (root/'paid-before.json').write_text(json.dumps(before))
+        subprocess.run([os.environ['LORE_BIN'],'graph','merge','large','z-survivor','--force','--from-revision',cli('wiki','read',subject['path'])['file_revision'],'--into-revision',cli('wiki','read',target)['file_revision']],capture_output=True,text=True,check=True)
+        subprocess.run([os.environ['LORE_BIN'],'graph','backlinks-sync'],capture_output=True,text=True,check=True)
+        candidate=cli('wiki','audit-plan','--path',target)['candidates'][0]
+        discovery={key:candidate[key] for key in ['path','file_revision']}
+        discovery['queries']=[{'query':candidate['title'],'phrase':True,'spacing':False}]
+        path=root/'discovery.json'
+        path.write_text(json.dumps(discovery))
+        cli('wiki','audit-discover','--file',str(path))
+        (root/'merged-once').write_text('merged')
+        respond({'results':[{'status':'needs-action','disposition':None,'reason':'The supported merge changed this audit subject.'}]})
+        raise SystemExit(0)
+    assessment={key:subject[key] for key in ['path','file_revision','input_revision']}",
+    );
+    let fixture = bounded_audit_fixture("codex", 64, &behavior);
+    write_audit_concept(&fixture, "z-survivor");
+    let (output, report) = fixture.run("knowledge");
+    assert!(
+        output.status.success(),
+        "{report}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        report["audit"][0]["requested_path"],
+        "wiki/concepts/large.md"
+    );
+    assert_eq!(
+        report["audit"][0]["assessed_path"],
+        "wiki/concepts/z-survivor.md"
+    );
+    let before: std::collections::BTreeMap<String, Vec<u8>> =
+        serde_json::from_slice(&std::fs::read(fixture.root().join("paid-before.json")).unwrap())
+            .unwrap();
+    for (path, bytes) in before {
+        assert_eq!(std::fs::read(fixture.root().join(path)).unwrap(), bytes);
+    }
+}
