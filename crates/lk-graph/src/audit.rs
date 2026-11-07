@@ -780,8 +780,16 @@ fn load_page_input(
     Ok(Some((raw, input)))
 }
 
+enum ReviewReports {
+    Evaluated(BTreeMap<String, lk_vault::ReviewReport>),
+    Scoped {
+        inventory: lk_vault::ReviewInventory,
+        paths: BTreeMap<String, String>,
+    },
+}
+
 struct ReviewDependencyIndex {
-    reports: BTreeMap<String, lk_vault::ReviewReport>,
+    reports: ReviewReports,
     subjects: BTreeMap<String, Vec<String>>,
     by_subject: BTreeMap<String, BTreeSet<String>>,
     dependencies: BTreeMap<(String, bool), AuditReviewDependency>,
@@ -789,8 +797,57 @@ struct ReviewDependencyIndex {
 
 impl ReviewDependencyIndex {
     fn load(root: &Path, dirs: &VaultDirs) -> Result<Self, GraphError> {
-        let reports = lk_vault::list_reviews(root, dirs).map_err(error)?;
-        Self::from_reports(root, reports)
+        let mut inventory = lk_vault::ReviewInventory::load(root, dirs).map_err(error)?;
+        let paths = inventory.paths().map(str::to_owned).collect::<Vec<_>>();
+        let mut subjects = BTreeMap::new();
+        let mut by_subject: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        let mut owners = BTreeMap::new();
+        for path in paths {
+            let declared = inventory
+                .subjects(&path)
+                .expect("captured review path")
+                .iter()
+                .filter(|subject| exact_page_address(subject))
+                .cloned()
+                .collect::<Vec<_>>();
+            let mut resolved = Vec::new();
+            for subject in declared {
+                match lk_vault::find_page_owner(root, Path::new(&subject)) {
+                    Ok(Some(owner)) => resolved.push(owner.to_string_lossy().into_owned()),
+                    Ok(None) => {}
+                    Err(failure) => {
+                        if !inventory.has_errors(&path).expect("captured review path") {
+                            let report =
+                                inventory.load_report(&path).expect("captured review path");
+                            if report.effective_state != lk_vault::ReviewEffectiveState::Invalid {
+                                return Err(error(failure));
+                            }
+                        }
+                    }
+                }
+            }
+            let owner = lk_vault::resolve_page_owner(root, Path::new(&path))
+                .map_err(error)?
+                .to_string_lossy()
+                .into_owned();
+            for subject in &resolved {
+                by_subject
+                    .entry(subject.clone())
+                    .or_default()
+                    .insert(path.clone());
+            }
+            subjects.insert(owner.clone(), resolved);
+            owners.insert(owner, path);
+        }
+        Ok(Self {
+            reports: ReviewReports::Scoped {
+                inventory,
+                paths: owners,
+            },
+            subjects,
+            by_subject,
+            dependencies: BTreeMap::new(),
+        })
     }
 
     fn from_reports(root: &Path, reports: Vec<lk_vault::ReviewReport>) -> Result<Self, GraphError> {
@@ -814,7 +871,7 @@ impl ReviewDependencyIndex {
             indexed_reports.insert(owner, report);
         }
         Ok(Self {
-            reports: indexed_reports,
+            reports: ReviewReports::Evaluated(indexed_reports),
             subjects: indexed_subjects,
             by_subject,
             dependencies: BTreeMap::new(),
@@ -844,11 +901,17 @@ impl ReviewDependencyIndex {
         if let Some(dependency) = self.dependencies.get(&key) {
             return Ok(dependency.clone());
         }
+        let report = match &mut self.reports {
+            ReviewReports::Evaluated(reports) => reports.get(lookup).cloned(),
+            ReviewReports::Scoped { inventory, paths } => paths
+                .get(lookup)
+                .and_then(|path| inventory.load_report(path)),
+        };
         let dependency = review_dependency(
             root,
             &subject,
             path,
-            self.reports.get(lookup),
+            report.as_ref(),
             self.subjects.get(lookup),
         )?;
         self.dependencies.insert(key, dependency.clone());

@@ -272,8 +272,7 @@ pub(super) fn section_task(
         target.clone(),
         lk_vault::parse_page(raw).map_err(|error| miette::miette!("{target}: {error}"))?,
     )]);
-    let reports = lk_vault::list_reviews(root, &config.vault.dirs).into_diagnostic()?;
-    let reviews = lk_graph::audit::review_dependencies_with_reports(root, &subjects, reports)
+    let reviews = lk_graph::audit::review_dependencies(root, &config.vault.dirs, &subjects)
         .into_diagnostic()?;
     let mut captured = Capture {
         root,
