@@ -1195,20 +1195,41 @@ save('external-sheet.xlsx', invalid)
         let root = tempfile::tempdir().unwrap();
         let python = executable(
             root.path(),
-            "printf '%s' \"$$\" > \"$0.pid\"\n/bin/ps -o pgid= -p \"$$\" > \"$0.group\"\nexec /bin/sleep 60",
+            "printf '%s\\n' \"$$\" > \"$0.pid\"\nexec /bin/sleep 60",
         );
-        let mut config = configuration(&python);
-        config.timeout_seconds = std::num::NonZeroU64::new(2).unwrap();
-        assert!(matches!(
-            project(b"", InputFormat::Pdf, Some(&config)).await,
-            Err(ProcessingError::Timeout)
-        ));
-        let read_process_id = |extension| {
-            let value = std::fs::read_to_string(python.with_extension(extension)).unwrap();
-            rustix::process::Pid::from_raw(value.trim().parse::<i32>().unwrap()).unwrap()
+        let config = configuration(&python);
+        let projection = project(b"", InputFormat::Pdf, Some(&config));
+        tokio::pin!(projection);
+        let process_started = async {
+            loop {
+                match std::fs::read_to_string(python.with_extension("pid")) {
+                    Ok(value) if value.ends_with('\n') => {
+                        break rustix::process::Pid::from_raw(value.trim().parse::<i32>().unwrap())
+                            .unwrap();
+                    }
+                    Ok(_) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => panic!("cannot read processor readiness: {error}"),
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
         };
-        let pid = read_process_id("pid");
-        assert_eq!(read_process_id("group"), rustix::process::getpgrp());
+        let pid = tokio::select! {
+            result = &mut projection => panic!("processor ended before readiness: {result:?}"),
+            pid = process_started => pid,
+        };
+        assert_eq!(
+            rustix::process::getpgid(Some(pid)).unwrap(),
+            rustix::process::getpgrp()
+        );
+        tokio::time::pause();
+        tokio::time::advance(std::time::Duration::from_secs(
+            config.timeout_seconds.get() + 1,
+        ))
+        .await;
+        let result = projection.await;
+        tokio::time::resume();
+        assert!(matches!(result, Err(ProcessingError::Timeout)));
         assert_eq!(
             rustix::process::getpgid(Some(pid)),
             Err(rustix::io::Errno::SRCH)
