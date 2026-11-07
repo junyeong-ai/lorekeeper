@@ -23,7 +23,7 @@ def cli(*args):
 def record(value):
     with (root/'calls.jsonl').open('a') as output:
         output.write(json.dumps(value)+'\n')
-if '--output-schema' in sys.argv or '--safe-mode' in sys.argv:
+if ('--output-schema' in sys.argv and '--output-last-message' not in sys.argv) or '--safe-mode' in sys.argv:
     request=json.loads(sys.stdin.read().split('\nNative request:\n',1)[1])
     assert request['kind']=='whole-section'
     subject=request['work']['context']['subject']
@@ -36,6 +36,20 @@ if '--output-schema' in sys.argv or '--safe-mode' in sys.argv:
     print(json.dumps(output))
     raise SystemExit()
 prompt=sys.stdin.read() or prompt
+if '\nNative request:\n' in prompt:
+    request=json.loads(prompt.split('\nNative request:\n',1)[1])
+    assert request['schema']=='native-audit-results-v1'
+    output={'results':[]}
+    for subject in request['subjects']:
+        target=subject['context']['subject']['path']
+        record({'role':'audit','target':target})
+        output['results'].append({'subject_ref':subject['subject_ref'],'status':'complete','disposition':'reviewed','reason':'Read the supplied independent authored subject and its complete guarded resources.'})
+    if engine=='codex':
+        Path(sys.argv[sys.argv.index('--output-last-message')+1]).write_text(json.dumps(output))
+    else:
+        output={'type':'result','subtype':'success','is_error':False,'structured_output':output}
+    print(json.dumps(output))
+    raise SystemExit()
 if 'Selected queue task manifest: ' in prompt:
     selection,_=json.JSONDecoder().raw_decode(prompt.split('Selected queue task manifest: ',1)[1])
     ids=json.loads(Path(selection).read_text())
@@ -53,29 +67,17 @@ if 'Selected queue task manifest: ' in prompt:
         result.update(target_revision=rows[task['task_id']]['target_revision'],body='Independent source interpretation completed.')
         (results/(task['task_id']+'.section.json')).write_text(json.dumps(result))
 else:
-    if 'this exact batch: ' in prompt:
-        targets,_=json.JSONDecoder().raw_decode(prompt.split('this exact batch: ',1)[1])
-    else:
-        targets,_=json.JSONDecoder().raw_decode(prompt.split('these exact audit subjects: ',1)[1])
+    assert 'discover.' in prompt
+    targets,_=json.JSONDecoder().raw_decode(prompt.split('these exact audit subjects: ',1)[1])
     assert len(targets)==1
     target=targets[0]
     candidate=cli('wiki','audit-plan','--path',target)['candidates'][0]
-    if candidate['discovery'] is None:
-        request={key:candidate[key] for key in ['path','file_revision']}
-        request['queries']=[{'query':candidate['title'],'phrase':True,'spacing':False}]
-        path=root/'audit-discovery.json'
-        path.write_text(json.dumps(request))
-        cli('wiki','audit-discover','--file',str(path))
-        candidate=cli('wiki','audit-plan','--path',target)['candidates'][0]
-    if 'discover.' in prompt:
-        record({'role':'discovery','target':target})
-    else:
-        assessment={key:candidate[key] for key in ['path','file_revision','input_revision']}
-        assessment.update(disposition='reviewed',reason='Read the independent authored note and its exact scoped evidence.',reviews=[])
-        path=root/'assessment.json'
-        path.write_text(json.dumps({'assessments':[assessment]}))
-        cli('wiki','audit-record','--file',str(path))
-        record({'role':'audit','target':target})
+    request={key:candidate[key] for key in ['path','file_revision']}
+    request['queries']=[{'query':candidate['title'],'phrase':True,'spacing':False}]
+    path=root/'audit-discovery.json'
+    path.write_text(json.dumps(request))
+    cli('wiki','audit-discover','--file',str(path))
+    record({'role':'discovery','target':target})
 "#;
 
 struct Fixture {

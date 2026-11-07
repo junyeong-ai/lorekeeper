@@ -1922,9 +1922,17 @@ fn oversized_audit_completes_through_fresh_bounded_workers_on_both_hosts() {
             if call["action"] == "finish" {
                 assert_eq!(step["role"], "finalizer");
                 assert_eq!(step["outcome"], "staged");
-                assert!(step["request_json_bytes"].is_null());
-                assert!(step["result_json_bytes"].is_null());
-                assert!(step["revalidation_record_duration_ms"].is_null());
+                assert!(
+                    step["request_json_bytes"]
+                        .as_u64()
+                        .is_some_and(|bytes| bytes <= 8192)
+                );
+                assert!(
+                    step["result_json_bytes"]
+                        .as_u64()
+                        .is_some_and(|bytes| bytes <= 1024)
+                );
+                assert!(step["revalidation_record_duration_ms"].as_u64().is_some());
                 assert!(step["verification_duration_ms"].as_u64().is_some());
             } else {
                 assert_eq!(step["role"], "evidence");
@@ -2080,8 +2088,8 @@ fn bounded_telemetry_reports_failed_invocations_without_inventing_results() {
 #[test]
 fn bounded_telemetry_rejects_finalizer_exit_zero_without_a_sealed_result() {
     let behavior = RECORD_BOUNDED_AUDIT.replace(
-        "    request=cli('work', 'result', work_id)",
-        "    raise SystemExit(0)\n    request=cli('work', 'result', work_id)",
+        "if audit_final:\n",
+        "if audit_final:\n    raise SystemExit(0)\n",
     );
     let fixture = bounded_audit_fixture("codex", 64, &behavior);
     let (output, report) = fixture.run("knowledge");
@@ -2092,7 +2100,7 @@ fn bounded_telemetry_rejects_finalizer_exit_zero_without_a_sealed_result() {
     assert_eq!(step["outcome"], "rejected");
     assert!(step["agent_duration_ms"].as_u64().is_some());
     assert!(step["verification_duration_ms"].as_u64().is_some());
-    assert!(step["request_json_bytes"].is_null());
+    assert!(step["request_json_bytes"].as_u64().is_some());
     assert!(step["result_json_bytes"].is_null());
     assert!(step["revalidation_record_duration_ms"].is_null());
     assert_eq!(
