@@ -2414,6 +2414,17 @@ pub(super) fn record_inspections(
         .map(|reply| reply.work_id.as_str())
         .collect::<Vec<_>>();
     let loaded = load_inspection_works(root, config, config_revision, &ids, read)?;
+    record_prepared_inspections(session, loaded, replies, read)
+}
+
+#[cfg(unix)]
+fn record_prepared_inspections(
+    session: &lk_vault::MutationSession,
+    loaded: InspectionWorks,
+    replies: Vec<InspectionReply>,
+    read: &lk_vault::ReadControl,
+) -> miette::Result<RecordedInspections> {
+    let root = session.root();
     let mut selected = std::collections::BTreeSet::new();
     let records = replies
         .into_iter()
@@ -2447,7 +2458,8 @@ pub(super) fn record_inspections(
                             &contract,
                             *candidate,
                         )? {
-                            state::ObservationRecordPlan::Accepted(mutation) => {
+                            state::ObservationRecordPlan::Accepted(mut mutation) => {
+                                prepared.guard_pages(&mut mutation);
                                 session.apply(mutation).into_diagnostic()?;
                                 work.progress(root, &prepared.resources)
                                     .map(InspectionRecordOutcome::Recorded)
@@ -3647,7 +3659,10 @@ pub async fn run(opts: &GlobalOptions, command: WorkCommand) -> miette::Result<(
                     .into_diagnostic()?;
             let session = super::publication::acquire_mutation_now(&root)?;
             let (work, prepared) = load(&root, &config, &config_revision, &output.work_id)?;
-            let status = work.record(&session, output, &prepared.resources)?;
+            let mut mutation = work.plan_observation(&session, output, &prepared.resources)?;
+            prepared.guard_pages(&mut mutation);
+            session.apply(mutation).into_diagnostic()?;
+            let status = work.progress(&root, &prepared.resources)?;
             progress_value(&work, &prepared, status, 20, 0)
         }
         WorkCommand::Reuse {
@@ -3659,8 +3674,11 @@ pub async fn run(opts: &GlobalOptions, command: WorkCommand) -> miette::Result<(
             let session = super::publication::acquire_mutation_now(&root)?;
             let (work, prepared) = load(&root, &config, &config_revision, &work_id)?;
             let prior = Work::load(&root, &from_work)?;
-            let status =
-                work.reuse_from(&session, &prior, &from_node, &node_id, &prepared.resources)?;
+            let mut mutation =
+                work.plan_reuse(&session, &prior, &from_node, &node_id, &prepared.resources)?;
+            prepared.guard_pages(&mut mutation);
+            session.apply(mutation).into_diagnostic()?;
+            let status = work.progress(&root, &prepared.resources)?;
             progress_value(&work, &prepared, status, 20, 0)
         }
         WorkCommand::Finish {
@@ -3978,7 +3996,10 @@ mod tests {
         }
         let root = session.root();
         let (work, prepared) = load_controlled(root, config, config_revision, id, read)?;
-        work.record(session, output, &prepared.resources)
+        let mut mutation = work.plan_observation(session, output, &prepared.resources)?;
+        prepared.guard_pages(&mut mutation);
+        session.apply(mutation).into_diagnostic()?;
+        work.progress(root, &prepared.resources)
     }
 
     fn write(root: &Path, path: &str, raw: &str) {
@@ -5680,6 +5701,17 @@ mod tests {
                 unresolved: vec![],
                 resolutions: vec![],
             };
+            #[cfg(unix)]
+            let captured = (!added_candidate).then(|| {
+                load_inspection_works(
+                    &root,
+                    &config,
+                    &config_revision,
+                    &[&id],
+                    &lk_vault::ReadControl::default(),
+                )
+                .unwrap()
+            });
             if added_candidate {
                 write(
                     &root,
@@ -5692,6 +5724,29 @@ mod tests {
                     context,
                     "---\ntype: document\n---\nSelected Candidate context changed after inspection.\n",
                 );
+            }
+            #[cfg(unix)]
+            if let Some(captured) = captured {
+                let recorded = record_prepared_inspections(
+                    &MutationSession::acquire(&root).unwrap(),
+                    captured,
+                    vec![InspectionReply {
+                        work_id: id.clone(),
+                        node_id: node.clone(),
+                        request: input.clone(),
+                        response: InspectionResponse::Complete(Box::new(
+                            state::ObservationCandidate {
+                                output: output.clone(),
+                                text_violation: None,
+                                response_revision: lk_core::rss_original::digest(b"exact response"),
+                                response_json_bytes: 300,
+                            },
+                        )),
+                    }],
+                    &lk_vault::ReadControl::default(),
+                )
+                .unwrap();
+                assert!(recorded.records[0].result.is_err());
             }
             assert!(
                 record_inspection(

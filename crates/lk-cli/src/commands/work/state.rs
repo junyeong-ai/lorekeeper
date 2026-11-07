@@ -1589,15 +1589,25 @@ impl Work {
         Ok(result)
     }
 
+    #[cfg(test)]
     pub fn record(
         &self,
         session: &MutationSession,
         output: WorkOutput,
         resources: &[SemanticResource],
     ) -> miette::Result<WorkProgress> {
-        let mutation = self.plan_record(session, output, resources, None, Vec::new())?;
+        let mutation = self.plan_observation(session, output, resources)?;
         session.apply(mutation).map_err(fail)?;
         self.progress(session.root(), resources)
+    }
+
+    pub fn plan_observation(
+        &self,
+        session: &MutationSession,
+        output: WorkOutput,
+        resources: &[SemanticResource],
+    ) -> miette::Result<MutationPlan> {
+        self.plan_record(session, output, resources, None, Vec::new())
     }
 
     fn plan_record(
@@ -1769,6 +1779,7 @@ impl Work {
         }
     }
 
+    #[cfg(test)]
     pub fn reuse_from(
         &self,
         session: &MutationSession,
@@ -1777,6 +1788,19 @@ impl Work {
         new_node_id: &str,
         resources: &[SemanticResource],
     ) -> miette::Result<WorkProgress> {
+        let mutation = self.plan_reuse(session, prior, old_node_id, new_node_id, resources)?;
+        session.apply(mutation).map_err(fail)?;
+        self.progress(session.root(), resources)
+    }
+
+    pub fn plan_reuse(
+        &self,
+        session: &MutationSession,
+        prior: &Work,
+        old_node_id: &str,
+        new_node_id: &str,
+        resources: &[SemanticResource],
+    ) -> miette::Result<MutationPlan> {
         fn purpose(context: &Value) -> miette::Result<Value> {
             let mut context = context
                 .as_object()
@@ -1918,8 +1942,7 @@ impl Work {
         for (path, raw) in prior_captured.files {
             mutation.require_unchanged(path, raw);
         }
-        session.apply(mutation).map_err(fail)?;
-        self.progress(session.root(), resources)
+        Ok(mutation)
     }
 
     #[cfg(test)]
