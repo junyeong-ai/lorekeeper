@@ -35,6 +35,13 @@ pub(super) struct InspectionActions {
     actions: BTreeMap<String, InspectionAction>,
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum InspectionActionUse {
+    Admission,
+    #[cfg(unix)]
+    Refinement,
+}
+
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct InspectionAction {
@@ -133,7 +140,10 @@ impl InspectionActions {
         request: &Value,
         contract: &str,
     ) -> miette::Result<Option<InspectionAction>> {
-        if self.reason(work, request, contract)?.is_none() {
+        if self
+            .reason(work, request, contract, InspectionActionUse::Refinement)?
+            .is_none()
+        {
             return Ok(None);
         }
         Ok(self
@@ -186,6 +196,7 @@ impl InspectionActions {
         work: &Work,
         request: &Value,
         contract: &str,
+        usage: InspectionActionUse,
     ) -> miette::Result<Option<String>> {
         let Some(node) = request["node_id"].as_str() else {
             return Err(fail("inspection request has no node identity"));
@@ -194,7 +205,8 @@ impl InspectionActions {
             return Ok(None);
         };
         if action.request_revision != request_revision(request, contract)? {
-            if work.plan.policy == lk_core::semantic::SEMANTIC_POLICY
+            if usage == InspectionActionUse::Admission
+                && work.plan.policy == lk_core::semantic::SEMANTIC_POLICY
                 && request["work_id"] == work.plan.id
                 && request["input_revision"].as_str() == Some(action.input_revision.as_str())
             {
@@ -226,7 +238,7 @@ pub(super) fn request_revision(request: &Value, contract: &str) -> miette::Resul
 }
 
 impl Work {
-    pub fn load_inspection_action(
+    pub fn load_inspection_hold(
         &self,
         root: &Path,
         request: &Value,
@@ -250,7 +262,7 @@ impl Work {
         let Some(actions) = actions else {
             return Ok(None);
         };
-        actions.reason(self, request, contract)
+        actions.reason(self, request, contract, InspectionActionUse::Admission)
     }
 
     pub fn prepare_inspection_admission(
@@ -303,7 +315,12 @@ impl Work {
                 return Ok((progress, Some(action.reason)));
             }
             if let Some(actions) = &actions
-                && let Some(reason) = actions.reason(self, &request, &contract(&request)?)?
+                && let Some(reason) = actions.reason(
+                    self,
+                    &request,
+                    &contract(&request)?,
+                    InspectionActionUse::Admission,
+                )?
             {
                 return Ok((progress, Some(reason)));
             }
@@ -486,14 +503,22 @@ mod tests {
                 .join(work_path(&work.plan.id, "inspection-actions.json").unwrap());
             let before = std::fs::read(&path).unwrap();
             let held = work
-                .load_inspection_action(root.path(), &request, "new-native-contract")
+                .load_inspection_hold(root.path(), &request, "new-native-contract")
                 .unwrap()
                 .unwrap();
             assert!(held.contains("legacy input remains held"));
+            #[cfg(unix)]
+            assert!(
+                InspectionActions::decode(std::str::from_utf8(&before).unwrap(), &work)
+                    .unwrap()
+                    .matching_action(&work, &request, "new-native-contract")
+                    .unwrap()
+                    .is_none()
+            );
             let mut changed = request.clone();
             changed["context"]["purpose"]["locale"] = json!("changed");
             assert!(
-                work.load_inspection_action(root.path(), &changed, "new-native-contract")
+                work.load_inspection_hold(root.path(), &changed, "new-native-contract")
                     .unwrap()
                     .is_none()
             );
@@ -598,12 +623,12 @@ mod tests {
         }
         for request in &requests {
             assert!(
-                work.load_inspection_action(root.path(), request, "contract-1")
+                work.load_inspection_hold(root.path(), request, "contract-1")
                     .unwrap()
                     .is_some()
             );
             assert!(
-                work.load_inspection_action(root.path(), request, "contract-2")
+                work.load_inspection_hold(root.path(), request, "contract-2")
                     .unwrap()
                     .is_none()
             );
@@ -611,7 +636,7 @@ mod tests {
         let mut changed = requests[0].clone();
         changed["context"]["purpose"]["locale"] = json!("en");
         assert!(
-            work.load_inspection_action(root.path(), &changed, "contract-1")
+            work.load_inspection_hold(root.path(), &changed, "contract-1")
                 .unwrap()
                 .is_none()
         );
@@ -658,7 +683,7 @@ mod tests {
         for corrupt in [duplicate_field, duplicate_node] {
             std::fs::write(&path, &corrupt).unwrap();
             assert!(
-                work.load_inspection_action(root.path(), &requests[0], "contract-1")
+                work.load_inspection_hold(root.path(), &requests[0], "contract-1")
                     .is_err()
             );
             assert_eq!(std::fs::read_to_string(&path).unwrap(), corrupt);
@@ -671,7 +696,7 @@ mod tests {
         }] {
             std::fs::write(&path, encoded(&corrupt).unwrap()).unwrap();
             assert!(
-                work.load_inspection_action(root.path(), &requests[0], "contract-2")
+                work.load_inspection_hold(root.path(), &requests[0], "contract-2")
                     .is_err()
             );
             assert!(
@@ -741,7 +766,7 @@ mod tests {
             let _recovered = MutationSession::acquire(root.path()).unwrap();
             assert!(!directory.join("pending.json").exists());
             assert!(
-                work.load_inspection_action(root.path(), &request, "contract")
+                work.load_inspection_hold(root.path(), &request, "contract")
                     .unwrap()
                     .is_some()
             );

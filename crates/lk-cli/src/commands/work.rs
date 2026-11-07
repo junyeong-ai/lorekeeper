@@ -2012,7 +2012,7 @@ fn inspection_admission(
 ) -> miette::Result<Option<String>> {
     match work.prepare_inspection(root, resources) {
         #[cfg(unix)]
-        Ok((_, Some(request))) => work.load_inspection_action(
+        Ok((_, Some(request))) => work.load_inspection_hold(
             root,
             &request,
             &super::execution::observation::contract_revision(&request)?,
@@ -2171,7 +2171,7 @@ pub(super) fn inspection_action(
     id: &str,
     request: &Value,
 ) -> miette::Result<Option<String>> {
-    state::Work::load(root, id)?.load_inspection_action(
+    state::Work::load(root, id)?.load_inspection_hold(
         root,
         request,
         &super::execution::observation::contract_revision(request)?,

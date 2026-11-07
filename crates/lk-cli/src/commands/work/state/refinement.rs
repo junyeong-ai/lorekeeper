@@ -930,7 +930,7 @@ mod tests {
             );
             hold(&work, &session, &resources, child);
             assert!(
-                work.load_inspection_action(root.path(), &child_request, "contract")
+                work.load_inspection_hold(root.path(), &child_request, "contract")
                     .unwrap()
                     .is_some()
             );
@@ -1311,7 +1311,7 @@ mod tests {
         };
         session.apply(plan).unwrap();
         assert!(
-            work.load_inspection_action(root.path(), &request, &contract)
+            work.load_inspection_hold(root.path(), &request, &contract)
                 .unwrap()
                 .is_some()
         );
@@ -1327,7 +1327,7 @@ mod tests {
         }
         std::fs::write(root.path().join(path(&work).unwrap()), "{}").unwrap();
         assert!(
-            work.load_inspection_action(root.path(), &request, &contract)
+            work.load_inspection_hold(root.path(), &request, &contract)
                 .is_err()
         );
     }
@@ -1462,7 +1462,7 @@ mod tests {
         hold(&work, &session, &resources, node);
         assert_eq!(original, std::fs::read(root.path().join(&path)).unwrap());
         assert!(
-            work.load_inspection_action(root.path(), &request, "contract")
+            work.load_inspection_hold(root.path(), &request, "contract")
                 .unwrap()
                 .is_some()
         );
@@ -1532,7 +1532,7 @@ mod tests {
             session.apply(action_plan().unwrap()).unwrap();
             assert_eq!(before, std::fs::read(&legacy).unwrap());
             assert!(
-                work.load_inspection_action(root.path(), &request, "contract")
+                work.load_inspection_hold(root.path(), &request, "contract")
                     .unwrap()
                     .is_some()
             );

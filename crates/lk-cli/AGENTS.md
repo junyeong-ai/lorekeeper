@@ -194,8 +194,9 @@ meaning to the owning crate; do not recreate its parser/status model in a comman
 - A saved legacy inspection/reduction action stays held across native-contract changes
   only when its original canonical input revision still hashes the complete current
   request. Verify the whole request rather than trusting its supplied revision field;
-  keep the original receipt bytes. This is an explicit-action hold, never approval of
-  an unmatched contract. New-policy actions retain ordinary exact-contract matching.
+  keep the original receipt bytes. This automatic-admission hold never authorizes
+  refinement: refinement still requires the exact current request and native contract.
+  New-policy actions retain ordinary exact-contract matching.
 - Only freshly received unambiguous authored-text or evidence-reference violations can
   create native observation-rejection holds. Validate stored state, current identity
   and question inheritance first; canonical node ranges own evidence membership, not

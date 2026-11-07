@@ -435,11 +435,20 @@ mod tests {
 
     #[test]
     fn text_rejections_bind_fresh_requests_and_keep_append_only_history_and_paid_bytes() {
+        for policy in [None, Some(lk_core::semantic::INSPECTION_CHARACTERS)] {
+            check_text_rejection_history(policy);
+        }
+    }
+
+    fn check_text_rejection_history(policy: Option<std::num::NonZeroUsize>) {
         let root = tempfile::tempdir().unwrap();
         let session = MutationSession::acquire(root.path()).unwrap();
         let source = resources();
         let work =
-            Work::create(&session, &source, "subject", context("subject"), limits()).unwrap();
+            Work::build_with_inspection(&source, "subject", context("subject"), limits(), policy)
+                .unwrap()
+                .persist(&session)
+                .unwrap();
         let (_, requests) = work.prepare_inspections(root.path(), &source, 2).unwrap();
         let request = &requests[0];
         let node = request["node_id"].as_str().unwrap();
@@ -534,16 +543,19 @@ mod tests {
             .unwrap();
         let first = std::fs::read_to_string(&target).unwrap();
         assert!(
-            work.load_inspection_action(root.path(), request, &contract)
+            work.load_inspection_hold(root.path(), request, &contract)
                 .unwrap()
                 .unwrap()
                 .contains("summary")
         );
-        assert!(
-            work.load_inspection_action(root.path(), request, &changed)
-                .unwrap()
-                .is_none()
-        );
+        let changed_hold = work
+            .load_inspection_hold(root.path(), request, &changed)
+            .unwrap();
+        if policy.is_none() {
+            assert!(changed_hold.unwrap().contains("Explicit old action."));
+        } else {
+            assert!(changed_hold.is_none());
+        }
         assert!(
             work.rejection_plan(root.path(), &source, request, &contract, reply(request))
                 .is_err()
@@ -575,7 +587,7 @@ mod tests {
             std::fs::write(&target, &corrupt).unwrap();
             assert!(work.progress(root.path(), &source).is_err());
             assert!(
-                work.load_inspection_action(root.path(), request, &contract)
+                work.load_inspection_hold(root.path(), request, &contract)
                     .is_err()
             );
         }
@@ -647,7 +659,7 @@ mod tests {
                     after
                 );
                 assert!(
-                    work.load_inspection_action(root.path(), request, &contract)
+                    work.load_inspection_hold(root.path(), request, &contract)
                         .unwrap()
                         .is_some()
                 );
@@ -726,13 +738,13 @@ mod tests {
         );
         for expected in [&old_contract, &contract] {
             assert!(
-                work.load_inspection_action(root.path(), request, expected)
+                work.load_inspection_hold(root.path(), request, expected)
                     .unwrap()
                     .is_some()
             );
         }
         assert!(
-            work.load_inspection_action(root.path(), request, &"c".repeat(64))
+            work.load_inspection_hold(root.path(), request, &"c".repeat(64))
                 .unwrap()
                 .is_none()
         );
@@ -907,7 +919,7 @@ mod tests {
             request
         );
         assert!(
-            work.load_inspection_action(root.path(), &request, &"a".repeat(64))
+            work.load_inspection_hold(root.path(), &request, &"a".repeat(64))
                 .unwrap()
                 .is_some()
         );
