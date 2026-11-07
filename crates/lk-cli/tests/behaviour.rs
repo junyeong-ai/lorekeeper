@@ -706,7 +706,9 @@ fn leaf_commands() -> Vec<Vec<String>> {
         }
     }
     let mut out = Vec::new();
-    walk(&lore::Cli::command(), &[], &mut out);
+    let mut command = lore::Cli::command();
+    command.build();
+    walk(&command, &[], &mut out);
     out
 }
 
@@ -731,7 +733,9 @@ fn every_command_and_flag_describes_itself() {
     }
 
     let mut undocumented = Vec::new();
-    walk(&lore::Cli::command(), "lore", &mut undocumented);
+    let mut command = lore::Cli::command();
+    command.build();
+    walk(&command, "lore", &mut undocumented);
     assert!(
         undocumented.is_empty(),
         "these show up in `--help` with no description: {undocumented:?}"

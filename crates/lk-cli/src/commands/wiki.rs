@@ -8,6 +8,7 @@ use lk_vault::VaultStore;
 use super::{find_config, load_config};
 
 #[derive(clap::Subcommand)]
+#[command(defer = true)]
 pub enum WikiCommand {
     /// Discover preserved manual originals or RSS collection events (read-only JSON)
     Original {

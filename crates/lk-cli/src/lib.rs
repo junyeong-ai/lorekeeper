@@ -31,6 +31,7 @@ pub struct Cli {
 }
 
 #[derive(clap::Subcommand)]
+#[command(defer = true)]
 pub enum Command {
     /// Execute a complete job using the configured Claude Code or Codex profile
     Run {
@@ -256,6 +257,7 @@ pub enum InitTarget {
 }
 
 /// Parse the process arguments and run the selected command.
+#[warn(clippy::large_futures)]
 pub async fn run() -> miette::Result<()> {
     // Warnings carry incompleteness a run must disclose — a capped listing, an unresolved
     // dependency, a skipped item — so they print unless RUST_LOG asks for something else.
@@ -285,36 +287,49 @@ pub async fn run() -> miette::Result<()> {
         command,
     } = cli.command
     {
-        let code = commands::graph::run(&opts, command, json, root).await;
+        let code = Box::pin(commands::graph::run(&opts, command, json, root)).await;
         std::process::exit(code);
     }
 
     // Its exit code IS the answer — 0 owned, 1 absent, 2 ambiguous — so it bypasses miette
     // for the same reason `graph` does.
     if let Command::Resolve { name, json, root } = cli.command {
-        let code = commands::resolve::run(&opts, name, json, root).await;
+        let code = Box::pin(commands::resolve::run(&opts, name, json, root)).await;
         std::process::exit(code);
     }
 
     match cli.command {
         Command::Run { options } => {
-            commands::run::run(&opts, protection.installation(), options).await
+            Box::pin(commands::run::run(
+                &opts,
+                protection.installation(),
+                options,
+            ))
+            .await
         }
         Command::Workflow { wait, command } => {
-            commands::workflow::run(&opts, protection.installation(), wait, command).await
+            Box::pin(commands::workflow::run(
+                &opts,
+                protection.installation(),
+                wait,
+                command,
+            ))
+            .await
         }
         Command::Init { target } => match target {
-            InitTarget::Credentials { vault } => commands::init::credentials(&opts, vault).await,
-            InitTarget::Schema { root } => commands::schema::run(&opts, root).await,
+            InitTarget::Credentials { vault } => {
+                Box::pin(commands::init::credentials(&opts, vault)).await
+            }
+            InitTarget::Schema { root } => Box::pin(commands::schema::run(&opts, root)).await,
         },
-        Command::Input { cmd } => commands::input::run(&opts, cmd).await,
-        Command::Validate => commands::validate::run(&opts).await,
-        Command::Config { cmd } => commands::config::run(&opts, cmd).await,
+        Command::Input { cmd } => Box::pin(commands::input::run(&opts, cmd)).await,
+        Command::Validate => Box::pin(commands::validate::run(&opts)).await,
+        Command::Config { cmd } => Box::pin(commands::config::run(&opts, cmd)).await,
         Command::Schema {
             root,
             wait_for_vault,
-        } => commands::schema::run_with_wait(&opts, root, wait_for_vault).await,
-        Command::Status { json } => commands::status::run(&opts, json).await,
+        } => Box::pin(commands::schema::run_with_wait(&opts, root, wait_for_vault)).await,
+        Command::Status { json } => Box::pin(commands::status::run(&opts, json)).await,
         Command::Ingest {
             source,
             date,
@@ -324,52 +339,71 @@ pub async fn run() -> miette::Result<()> {
             publication_workflow,
         } => {
             if recover {
-                commands::ingest::recovery::run(
+                Box::pin(commands::ingest::recovery::run(
                     &opts,
                     dry_run,
                     wait_for_vault,
                     publication_workflow,
-                )
+                ))
                 .await
             } else {
-                commands::ingest::run(
+                Box::pin(commands::ingest::run(
                     &opts,
                     source,
                     date,
                     dry_run,
                     wait_for_vault,
                     publication_workflow,
-                )
+                ))
                 .await
             }
         }
-        Command::Task { cmd } => commands::task::run(&opts, cmd).await,
-        Command::Fetch { url, source } => commands::fetch::run(&opts, &url, source).await,
-        Command::Brief { date, json } => commands::brief::run(&opts, date, json).await,
-        Command::Agenda { date, json } => commands::agenda::run(&opts, date, json).await,
+        Command::Task { cmd } => Box::pin(commands::task::run(&opts, cmd)).await,
+        Command::Fetch { url, source } => Box::pin(commands::fetch::run(&opts, &url, source)).await,
+        Command::Brief { date, json } => Box::pin(commands::brief::run(&opts, date, json)).await,
+        Command::Agenda { date, json } => Box::pin(commands::agenda::run(&opts, date, json)).await,
         Command::Synthesis {
             period,
             wait_for_vault,
-        } => commands::synthesis::run(&opts, period, wait_for_vault).await,
-        Command::Health { strict, json } => commands::health::run(&opts, strict, json).await,
-        Command::Doctor => commands::doctor::run(&opts).await,
-        Command::Extract { cmd } => commands::extract::run(&opts, cmd).await,
-        Command::Performance => commands::performance::run(&opts).await,
+        } => Box::pin(commands::synthesis::run(&opts, period, wait_for_vault)).await,
+        Command::Health { strict, json } => {
+            Box::pin(commands::health::run(&opts, strict, json)).await
+        }
+        Command::Doctor => Box::pin(commands::doctor::run(&opts)).await,
+        Command::Extract { cmd } => Box::pin(commands::extract::run(&opts, cmd)).await,
+        Command::Performance => Box::pin(commands::performance::run(&opts)).await,
         Command::Schedule {
             bin,
             format,
             namespace,
             log_dir,
-        } => commands::schedule::run(&opts, &bin, format, &namespace, log_dir.as_deref()).await,
+        } => {
+            Box::pin(commands::schedule::run(
+                &opts,
+                &bin,
+                format,
+                &namespace,
+                log_dir.as_deref(),
+            ))
+            .await
+        }
         Command::Maintenance {
             dry_run,
             wait_for_vault,
             prune_queue,
-        } => commands::maintenance::run(&opts, dry_run, wait_for_vault, prune_queue).await,
+        } => {
+            Box::pin(commands::maintenance::run(
+                &opts,
+                dry_run,
+                wait_for_vault,
+                prune_queue,
+            ))
+            .await
+        }
         Command::Graph { .. } | Command::Resolve { .. } => unreachable!(),
-        Command::Wiki { cmd } => commands::wiki::run(&opts, cmd).await,
-        Command::Installation { cmd } => commands::installation::run(&opts, cmd).await,
-        Command::Queue { command } => commands::queue::run(&opts, command).await,
-        Command::Work { command } => commands::work::run(&opts, command).await,
+        Command::Wiki { cmd } => Box::pin(commands::wiki::run(&opts, cmd)).await,
+        Command::Installation { cmd } => Box::pin(commands::installation::run(&opts, cmd)).await,
+        Command::Queue { command } => Box::pin(commands::queue::run(&opts, command)).await,
+        Command::Work { command } => Box::pin(commands::work::run(&opts, command)).await,
     }
 }

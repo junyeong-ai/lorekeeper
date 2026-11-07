@@ -4,6 +4,9 @@ Clap front door and orchestration (`main.rs`, `commands/`). Follow the root
 AGENTS.md for shared architecture, output, locks, and mutation rules. Delegate
 meaning to the owning crate; do not recreate its parser/status model in a command.
 
+Build the Clap command tree before inspecting all arguments or nested commands;
+deferred subcommands expose their names eagerly for name-only discovery.
+
 ## Configuration and workflow sessions
 
 - `commands/mod.rs` resolves flag/environment config, working-directory config, then XDG

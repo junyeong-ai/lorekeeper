@@ -42,6 +42,7 @@ use state::{Work, WorkLimits, WorkOutput};
 use super::queue::application::{RejectionKind, rejection as publication_rejection};
 
 #[derive(clap::Subcommand)]
+#[command(defer = true)]
 pub enum WorkCommand {
     /// Inspect complete candidate-screening costs without creating or changing work
     Cost {

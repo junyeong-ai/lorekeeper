@@ -59,6 +59,20 @@ fn wedge(root: &Path) {
 }
 
 #[test]
+fn every_top_level_command_can_render_help() {
+    use clap::CommandFactory;
+    let tmp = tempfile::tempdir().unwrap();
+    let config = vault(tmp.path());
+    let command = lore::Cli::command();
+    for subcommand in command.get_subcommands() {
+        let name = subcommand.get_name();
+        let output = run(&config, &[name, "--help"]);
+        assert!(output.status.success(), "{name}: {}", said(&output));
+        assert!(!output.stdout.is_empty(), "{name}");
+    }
+}
+
+#[test]
 fn fresh_vault_reads_leave_it_absent_and_first_task_write_creates_it() {
     let tmp = tempfile::tempdir().unwrap();
     let config = vault(tmp.path());
