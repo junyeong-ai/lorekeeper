@@ -159,7 +159,7 @@ jobs:
         shell: bash
         run: bash scripts/check-nodex.sh
 
-  # Compile all Windows targets and execute portable review-capture regressions.
+  # Compile all Windows targets and execute portable filesystem and publication regressions.
   windows:
     name: check (windows-latest)
     runs-on: windows-latest
@@ -196,6 +196,10 @@ jobs:
       - run: cargo check --locked --workspace --all-targets --all-features
       - name: Verify review evidence capture on Windows
         run: cargo test --locked -p lk-vault --lib review_inventory
+      - name: Verify regular file reads on Windows
+        run: cargo test --locked -p lk-core --lib fs::lock
+      - name: Verify task publication and recovery on Windows
+        run: cargo test --locked -p lore --test plane_lock
 
   # Bootstrap scripts and workflow definitions are checked independently of Rust.
   shell:
