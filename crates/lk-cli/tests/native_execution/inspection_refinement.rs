@@ -19,11 +19,7 @@ fn explicit_queue_refinement_resumes_serial_and_parallel_hosts_with_independent_
                     output={'status':'needs-action','observation':None,'action':{'reason':'This assigned inspection requires explicit smaller units.'}}"#)
         .replace("\"$TEST_EXECUTION_ROOT/native-request.txt\"", "\"$TEST_EXECUTION_ROOT/native-request-$$.txt\"")
         .replace("(root/'native-request.txt')", "(root/('native-request-'+str(os.getpid())+'.txt'))");
-    let section = WHOLE_SECTION
-        .replace("/bin/cat > \"$TEST_EXECUTION_ROOT/whole-section-request.txt\"",
-            "export TEST_REFINEMENT_SECTION_INPUT=\"$TEST_EXECUTION_ROOT/whole-section-request-$$.txt\"\n    /bin/cat > \"$TEST_REFINEMENT_SECTION_INPUT\"")
-        .replace("(root/'whole-section-request.txt')", "Path(os.environ['TEST_REFINEMENT_SECTION_INPUT'])")
-        .replace("exec < \"$TEST_EXECUTION_ROOT/whole-section-request.txt\"", "exec < \"$TEST_REFINEMENT_SECTION_INPUT\"");
+    let section = WHOLE_SECTION;
     let behavior = format!("{section}\n{behavior}");
     for engine in ["codex", "claude-code"] {
         for parallel in [1, 6] {
@@ -318,11 +314,7 @@ fn typed_native_refinement_is_bounded_and_resumes_both_hosts_without_replaying_h
     row['output_bytes']="#)
         .replace("\"$TEST_EXECUTION_ROOT/native-request.txt\"", "\"$TEST_EXECUTION_ROOT/native-request-$$.txt\"")
         .replace("(root/'native-request.txt')", "(root/('native-request-'+str(os.getpid())+'.txt'))");
-    let section = WHOLE_SECTION
-        .replace("/bin/cat > \"$TEST_EXECUTION_ROOT/whole-section-request.txt\"",
-            "export TEST_REFINEMENT_SECTION_INPUT=\"$TEST_EXECUTION_ROOT/whole-section-request-$$.txt\"\n    /bin/cat > \"$TEST_REFINEMENT_SECTION_INPUT\"")
-        .replace("(root/'whole-section-request.txt')", "Path(os.environ['TEST_REFINEMENT_SECTION_INPUT'])")
-        .replace("exec < \"$TEST_EXECUTION_ROOT/whole-section-request.txt\"", "exec < \"$TEST_REFINEMENT_SECTION_INPUT\"");
+    let section = WHOLE_SECTION;
     for engine in ["codex", "claude-code"] {
         for parallel in [1, 6] {
             let fixture = Fixture::new(engine, 30, &format!("{section}\n{behavior}"));

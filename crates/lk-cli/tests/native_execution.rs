@@ -46,7 +46,7 @@ impl Fixture {
         } else {
             "2.1.303 (Claude Code)"
         };
-        std::fs::write(&agent, format!("#!/bin/sh\nif [ \"$1\" = --version ]; then printf '%s\\n' '{version}'; exit; fi\nprintf '%s\\n' \"$@\" > \"$TEST_EXECUTION_ROOT/arguments\"\ncase \"$*\" in *--output-last-message*) /bin/cat > \"$TEST_EXECUTION_ROOT/interactive-request.txt\" ;; *--output-schema*|*--safe-mode*) ;; *) /bin/cat > \"$TEST_EXECUTION_ROOT/interactive-request.txt\" ;; esac\n{behavior}\n")).unwrap();
+        std::fs::write(&agent, format!("#!/bin/sh\nif [ \"$1\" = --version ]; then printf '%s\\n' '{version}'; exit; fi\nprintf '%s\\n' \"$@\" > \"$TEST_EXECUTION_ROOT/arguments\"\nexport TEST_INTERACTIVE_INPUT=\"$TEST_EXECUTION_ROOT/interactive-request-$$.txt\"\ncase \"$*\" in *--output-last-message*) /bin/cat > \"$TEST_INTERACTIVE_INPUT\" ;; *--output-schema*|*--safe-mode*) ;; *) /bin/cat > \"$TEST_INTERACTIVE_INPUT\" ;; esac\nif [ -f \"$TEST_INTERACTIVE_INPUT\" ]; then /bin/cp \"$TEST_INTERACTIVE_INPUT\" \"$TEST_EXECUTION_ROOT/interactive-request.txt\"; fi\n{behavior}\n")).unwrap();
         std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o755)).unwrap();
         let config = root.join("config.yaml");
         std::fs::write(&config, format!("vault:\n  root: vault\nidentity:\n  name: Test\n  email: test@example.com\nsources:\n  notes:\n    type: manual\n    params: {{inbox_dir: inbox}}\n    labels: [knowledge]\n    concept_policy: supported-new\nexecution:\n  default_profile: primary\n  profiles:\n    primary:\n      engine: {engine}\n      executable: {}\n      timeout_seconds: {timeout}\n      work: {{extraction_context: full-context}}\n", serde_json::to_string(&agent).unwrap())).unwrap();
@@ -165,16 +165,17 @@ impl Fixture {
 const WHOLE_SECTION: &str = r#"
 case "$*" in
   *--output-schema*|*--safe-mode*|*--json-schema*)
+    export TEST_SECTION_INPUT="$TEST_EXECUTION_ROOT/whole-section-request-$$.txt"
     case "$*" in
-      *--safe-mode*) /bin/cat > "$TEST_EXECUTION_ROOT/whole-section-request.txt" ;;
-      *--output-last-message*|*--json-schema*) /bin/cp "$TEST_EXECUTION_ROOT/interactive-request.txt" "$TEST_EXECUTION_ROOT/whole-section-request.txt" ;;
-      *) /bin/cat > "$TEST_EXECUTION_ROOT/whole-section-request.txt" ;;
+      *--safe-mode*) /bin/cat > "$TEST_SECTION_INPUT" ;;
+      *--output-last-message*|*--json-schema*) /bin/cp "$TEST_INTERACTIVE_INPUT" "$TEST_SECTION_INPUT" ;;
+      *) /bin/cat > "$TEST_SECTION_INPUT" ;;
     esac
     python3 - "$@" <<'SECTION'
 import json, os, sys
 from pathlib import Path
 root=Path(os.environ['TEST_EXECUTION_ROOT'])
-request=json.loads((root/'whole-section-request.txt').read_text().split('\nNative request:\n',1)[1])
+request=json.loads(Path(os.environ['TEST_SECTION_INPUT']).read_text().split('\nNative request:\n',1)[1])
 if request.get('kind') not in ['whole-section','finalize-section']: raise SystemExit(100)
 if (root/'forbid-prepared-work').exists():
     assert not (root/'vault/.lorekeeper/work').exists(), 'dependent work must not be prepared before source publication'
@@ -198,7 +199,7 @@ print(json.dumps(response))
 SECTION
     section_status=$?
     if [ "$section_status" -ne 100 ]; then exit "$section_status"; fi
-    exec < "$TEST_EXECUTION_ROOT/whole-section-request.txt"
+    exec < "$TEST_SECTION_INPUT"
     ;;
 esac
 "#;
@@ -539,7 +540,7 @@ if sys.argv[1]=='exec':
 else:
     assert '--model=claude-sonnet-5-5' in sys.argv
     assert os.environ['CLAUDE_CODE_EFFORT_LEVEL']=='medium'
-prompt=(Path(os.environ['TEST_EXECUTION_ROOT'])/'interactive-request.txt').read_text() or '\n'.join(sys.argv[1:])
+prompt=Path(os.environ['TEST_INTERACTIVE_INPUT']).read_text() or '\n'.join(sys.argv[1:])
 raw=prompt.split('\nNative request:\n',1)[1]
 request=json.loads(raw)
 assert request['schema']=='native-selected-results-v3'
@@ -1358,7 +1359,7 @@ import json, os, re, subprocess, sys
 from pathlib import Path
 root=Path(os.environ['TEST_EXECUTION_ROOT'])
 native=('--output-schema' in sys.argv and '--output-last-message' not in sys.argv) or '--safe-mode' in sys.argv
-prompt=(root/'interactive-request.txt').read_text() if (root/'interactive-request.txt').exists() else ''
+prompt=Path(os.environ['TEST_INTERACTIVE_INPUT']).read_text() if Path(os.environ['TEST_INTERACTIVE_INPUT']).exists() else ''
 prompt=prompt or '\n'.join(sys.argv[1:])
 if native:
     request=json.loads((root/'native-request.txt').read_text().split('\nNative request:\n',1)[1])
@@ -2972,7 +2973,7 @@ fn build_extraction_behavior(discovery_handler: &str) -> String {
     );
     behavior = behavior.replace("native=('--output-schema'", r#"result_role='--output-last-message' in sys.argv or ('--json-schema' in sys.argv and '--safe-mode' not in sys.argv)
 if result_role:
-    prepared=json.loads((root/'interactive-request.txt').read_text().split('\nNative request:\n',1)[1])
+    prepared=json.loads(Path(os.environ['TEST_INTERACTIVE_INPUT']).read_text().split('\nNative request:\n',1)[1])
     if prepared['schema'] in ['native-finalize-results-v4','native-finalize-frontier-v4']:
         output={'results':[{'status':'complete','value':{'concepts':[]},'reason':None}]}
         with (root/'bounded-calls.jsonl').open('a') as stream:
@@ -3089,7 +3090,7 @@ fn oversized_extraction_records_discovery_before_planning_on_both_hosts() {
 fn small_extraction_hands_expanded_discovery_to_bounded_work_on_both_hosts() {
     let behavior = build_extraction_behavior(
         r#"    if match is None:
-        prompt=(Path(os.environ['TEST_EXECUTION_ROOT'])/'interactive-request.txt').read_text() or '\n'.join(sys.argv[1:])
+        prompt=Path(os.environ['TEST_INTERACTIVE_INPUT']).read_text() or '\n'.join(sys.argv[1:])
         prepared=json.loads(prompt.split('\nNative request:\n',1)[1])
         assert prepared['schema']=='native-selected-results-v3'
         assert prepared['contracts']
@@ -3273,7 +3274,7 @@ def log(row):
         stream.write(json.dumps(row)+'\n')
 result_role='--output-last-message' in sys.argv or ('--json-schema' in sys.argv and '--safe-mode' not in sys.argv)
 if result_role:
-    prepared=json.loads((root/'interactive-request.txt').read_text().split('\nNative request:\n',1)[1])
+    prepared=json.loads(Path(os.environ['TEST_INTERACTIVE_INPUT']).read_text().split('\nNative request:\n',1)[1])
     assert prepared['schema']=='native-selected-results-v3'
     output={'results':[]}
     for selected in prepared['tasks']:
@@ -3321,7 +3322,7 @@ if native:
     else:
         print(json.dumps(output))
     raise SystemExit(0)
-prompt=(Path(os.environ['TEST_EXECUTION_ROOT'])/'interactive-request.txt').read_text() or '\n'.join(sys.argv[1:])
+prompt=Path(os.environ['TEST_INTERACTIVE_INPUT']).read_text() or '\n'.join(sys.argv[1:])
 match=re.search(r'discover ("[^"\n]+")',prompt)
 if match:
     ids=json.loads(Path(json.loads(match.group(1))).read_text())
@@ -5984,7 +5985,7 @@ fn native_queue_preserves_interactive_batching_and_stops_at_capability_boundarie
             let capture = r#"exec python3 - "$@" <<'BATCH'
 import json, os, sys
 from pathlib import Path
-prompt=(Path(os.environ['TEST_EXECUTION_ROOT'])/'interactive-request.txt').read_text() or '\n'.join(sys.argv[1:])
+prompt=Path(os.environ['TEST_INTERACTIVE_INPUT']).read_text() or '\n'.join(sys.argv[1:])
 request=json.loads(prompt.split('\nNative request:\n',1)[1])
 Path(os.environ['TEST_EXECUTION_ROOT'],'selected-batch.json').write_text(json.dumps(request))
 BATCH"#;
