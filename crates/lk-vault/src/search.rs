@@ -11,8 +11,9 @@
 //! equivalent spellings or combine scattered words into a declared concept name.
 
 use std::borrow::Cow;
+use std::cell::RefCell;
 use std::cmp::{Ordering, Reverse};
-use std::collections::{BTreeMap, BinaryHeap};
+use std::collections::{BTreeMap, BinaryHeap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
@@ -1160,33 +1161,172 @@ pub(super) fn match_query(
     if options.query.is_none() {
         return Some((MatchField::Catalog, false, false));
     }
-    let names = page.names().collect::<Vec<_>>();
-    let projection = page.match_projection();
-    let exact = match_page(
-        terms,
-        identity,
-        spellings,
-        &names,
-        &page.page.body,
-        Some(&projection),
-    );
-    let matched = exact.or_else(|| {
-        options
-            .spacing
-            .then(|| match_spacing(terms, spellings, &names, &projection))
-            .flatten()
-    })?;
-    let phrase = options.query.is_some_and(|query| {
-        let phrase = fold_name(query);
-        page.names()
-            .any(|name| contains_term(&fold_name(name), &phrase))
-            || contains_term(&projection.text, &phrase)
-    });
-    Some((
-        matched,
-        phrase,
-        exact.is_none() || matched == MatchField::NameVariant,
-    ))
+    PageMatcher::from_page(page).match_query(options, spellings, terms, identity)
+}
+
+pub(super) struct QueryPlan {
+    pub(super) spellings: Vec<String>,
+    pub(super) terms: Vec<String>,
+    pub(super) identity: Option<String>,
+}
+
+pub(super) struct PageMatcher<'a> {
+    names: Vec<&'a str>,
+    fields: [MatchText<'a>; 3],
+}
+
+impl<'a> PageMatcher<'a> {
+    pub(super) fn from_page(page: &'a Page) -> Self {
+        Self::build(page.names().collect(), page.match_projection())
+    }
+
+    fn build(names: Vec<&'a str>, projection: Cow<'a, MatchProjection>) -> Self {
+        let name_text = names
+            .iter()
+            .map(|name| fold_name(name))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let (summary, text) = match projection {
+            Cow::Borrowed(projection) => (
+                Cow::Borrowed(projection.summary.as_str()),
+                Cow::Borrowed(projection.text.as_str()),
+            ),
+            Cow::Owned(projection) => (Cow::Owned(projection.summary), Cow::Owned(projection.text)),
+        };
+        Self {
+            names,
+            fields: [
+                MatchText::new(Cow::Owned(name_text)),
+                MatchText::new(summary),
+                MatchText::new(text),
+            ],
+        }
+    }
+
+    fn fields(&self) -> [(MatchField, &MatchText<'a>); 3] {
+        [
+            (MatchField::Name, &self.fields[0]),
+            (MatchField::Summary, &self.fields[1]),
+            (MatchField::Text, &self.fields[2]),
+        ]
+    }
+
+    pub(super) fn match_query(
+        &self,
+        options: &SearchOptions<'_>,
+        spellings: &[String],
+        terms: &[String],
+        identity: Option<&str>,
+    ) -> Option<(MatchField, bool, bool)> {
+        if options.query.is_none() {
+            return Some((MatchField::Catalog, false, false));
+        }
+        let exact = self.match_page(terms, identity, spellings);
+        let matched = exact.or_else(|| {
+            options
+                .spacing
+                .then(|| {
+                    match_fields_by(terms, spellings, &self.fields(), |field, term| {
+                        contains_spacing_term(&field.text, term)
+                    })
+                })
+                .flatten()
+        })?;
+        let phrase = options.query.is_some_and(|query| {
+            let phrase = fold_name(query);
+            self.names
+                .iter()
+                .any(|name| contains_term(&fold_name(name), &phrase))
+                || self.fields[2].contains(&phrase)
+        });
+        Some((
+            matched,
+            phrase,
+            exact.is_none() || matched == MatchField::NameVariant,
+        ))
+    }
+
+    /// Rank by the weakest field needed to match every term. Summary covers only
+    /// the opening statement, so a long synthesis cannot claim every query as its subject.
+    fn match_page(
+        &self,
+        terms: &[String],
+        query_identity: Option<&str>,
+        spellings: &[String],
+    ) -> Option<MatchField> {
+        if let Some(key) = query_identity
+            && self
+                .names
+                .iter()
+                .any(|name| identity_key(name).as_deref() == Some(key))
+        {
+            return Some(MatchField::Identity);
+        }
+        if let Some(key) = query_identity {
+            let compact = spacing_key(key);
+            if self
+                .names
+                .iter()
+                .any(|name| fold_name(name) != fold_name(key) && spacing_key(name) == compact)
+            {
+                return Some(MatchField::NameVariant);
+            }
+        }
+        match_fields_by(terms, spellings, &self.fields(), |field, term| {
+            field.contains(term)
+        })
+    }
+}
+
+struct MatchText<'a> {
+    text: Cow<'a, str>,
+    stems: RefCell<StemIndex>,
+}
+
+impl<'a> MatchText<'a> {
+    fn new(text: Cow<'a, str>) -> Self {
+        Self {
+            text,
+            stems: RefCell::new(StemIndex::default()),
+        }
+    }
+
+    fn contains(&self, term: &str) -> bool {
+        self.text
+            .match_indices(term)
+            .any(|(at, _)| has_term_boundaries(&self.text, term, at, at + term.len()))
+            || stem(term).is_some_and(|stem| self.stems.borrow_mut().contains(&self.text, &stem))
+    }
+}
+
+#[derive(Default)]
+struct StemIndex {
+    offset: usize,
+    words: HashSet<String>,
+    stems: HashSet<String>,
+}
+
+impl StemIndex {
+    fn contains(&mut self, text: &str, needle: &str) -> bool {
+        if self.stems.contains(needle) {
+            return true;
+        }
+        let stemmer = english();
+        for word in ascii_words(&text[self.offset..]) {
+            self.offset = word.as_ptr() as usize - text.as_ptr() as usize + word.len();
+            if is_stemmable(word) && !self.words.contains(word) {
+                self.words.insert(word.to_owned());
+                let stem = stemmer.stem(word).into_owned();
+                let matched = stem == needle;
+                self.stems.insert(stem);
+                if matched {
+                    return true;
+                }
+            }
+        }
+        self.offset = text.len();
+        false
+    }
 }
 
 pub(super) fn search_pages(
@@ -1418,63 +1558,6 @@ fn declared_names<'a>(title: &'a str, aliases: &'a [String]) -> impl Iterator<It
     std::iter::once(title).chain(aliases.iter().map(String::as_str))
 }
 
-/// The strongest claim this page has on the query, or `None` when some term is nowhere on it.
-///
-/// Every term must appear, and the page is ranked by the WEAKEST field it needed — a query
-/// whose second word only turns up deep in the prose is a prose match however well the first
-/// one matched the title. Ranking by the strongest field instead would let one common word in
-/// a title outrank a page that actually discusses the whole phrase.
-///
-/// The summary field is what keeps a long page from answering everything. A page states its
-/// subject in the line it OPENS with, so a page whose subject is the query outranks one that
-/// merely grew long enough to contain the words — which, ordered by evidence, is otherwise
-/// every hub page in the vault. It has to be that line rather than the whole section: a
-/// concept cited a hundred times has a synthesis long enough to hold any three common words.
-fn match_page(
-    terms: &[String],
-    query_identity: Option<&str>,
-    spellings: &[String],
-    names: &[&str],
-    body: &str,
-    projection: Option<&MatchProjection>,
-) -> Option<MatchField> {
-    if let Some(key) = query_identity
-        && names
-            .iter()
-            .any(|name| identity_key(name).as_deref() == Some(key))
-    {
-        return Some(MatchField::Identity);
-    }
-    if let Some(key) = query_identity {
-        let compact = spacing_key(key);
-        if names
-            .iter()
-            .any(|name| fold_name(name) != fold_name(key) && spacing_key(name) == compact)
-        {
-            return Some(MatchField::NameVariant);
-        }
-    }
-    let computed;
-    let projection = match projection {
-        Some(projection) => projection,
-        None => {
-            computed = MatchProjection::from_body(body);
-            &computed
-        }
-    };
-    let name_text = names
-        .iter()
-        .map(|name| fold_name(name))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let fields = [
-        (MatchField::Name, name_text.as_str()),
-        (MatchField::Summary, projection.summary.as_str()),
-        (MatchField::Text, projection.text.as_str()),
-    ];
-    match_fields(terms, spellings, &fields)
-}
-
 impl MatchProjection {
     fn from_body(body: &str) -> Self {
         let document = VisibleDocument::from_body(body);
@@ -1489,42 +1572,11 @@ impl MatchProjection {
     }
 }
 
-fn match_spacing(
-    terms: &[String],
-    spellings: &[String],
-    names: &[&str],
-    projection: &MatchProjection,
-) -> Option<MatchField> {
-    let names = names
-        .iter()
-        .map(|name| fold_name(name))
-        .collect::<Vec<_>>()
-        .join("\n");
-    match_fields_by(
-        terms,
-        spellings,
-        &[
-            (MatchField::Name, &names),
-            (MatchField::Summary, &projection.summary),
-            (MatchField::Text, &projection.text),
-        ],
-        contains_spacing_term,
-    )
-}
-
-fn match_fields(
-    terms: &[String],
-    spellings: &[String],
-    fields: &[(MatchField, &str)],
-) -> Option<MatchField> {
-    match_fields_by(terms, spellings, fields, contains_term)
-}
-
 fn match_fields_by(
     terms: &[String],
     spellings: &[String],
-    fields: &[(MatchField, &str)],
-    contains: impl Fn(&str, &str) -> bool,
+    fields: &[(MatchField, &MatchText<'_>)],
+    contains: impl Fn(&MatchText<'_>, &str) -> bool,
 ) -> Option<MatchField> {
     let field_of = |needle: &str| {
         fields
@@ -1561,12 +1613,7 @@ fn match_fields_by(
 /// word with its Snowball stem — the standard English lexical-search trade-off, which can join
 /// words a reader keeps apart (`organ`, `organization`).
 fn contains_term(text: &str, term: &str) -> bool {
-    text.match_indices(term)
-        .any(|(at, _)| has_term_boundaries(text, term, at, at + term.len()))
-        || stem(term).is_some_and(|stem| {
-            let stemmer = english();
-            ascii_words(text).any(|word| is_stemmable(word) && stemmer.stem(word) == stem)
-        })
+    MatchText::new(Cow::Borrowed(text)).contains(term)
 }
 
 fn english() -> rust_stemmers::Stemmer {
@@ -3165,24 +3212,29 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                match_page(
-                    &terms,
-                    None,
-                    &spellings,
-                    &["Other"],
-                    &format!("## Summary\n{body}"),
-                    None,
-                ),
+                PageMatcher::build(
+                    vec!["Other"],
+                    Cow::Owned(MatchProjection::from_body(&format!("## Summary\n{body}"))),
+                )
+                .match_page(&terms, None, &spellings),
                 expected,
                 "{body}"
             );
         }
         assert_eq!(
-            match_page(&terms, None, &spellings, &["Knowledge", "Graph"], "", None),
+            PageMatcher::build(
+                vec!["Knowledge", "Graph"],
+                Cow::Owned(MatchProjection::from_body(""))
+            )
+            .match_page(&terms, None, &spellings),
             None
         );
         assert_eq!(
-            match_page(&terms, None, &spellings, &["Knowledge\t  Graph"], "", None),
+            PageMatcher::build(
+                vec!["Knowledge\t  Graph"],
+                Cow::Owned(MatchProjection::from_body(""))
+            )
+            .match_page(&terms, None, &spellings),
             Some(MatchField::Name)
         );
     }
@@ -3454,6 +3506,28 @@ mod tests {
         assert!(!contains_term("the keyboard layout", "key"));
         assert!(!contains_term("md-wisely-daily-scrum", "ai"));
         assert!(!contains_term("retries", "retry policy"));
+    }
+
+    #[test]
+    fn repeated_queries_resume_partial_lexical_membership() {
+        let text = MatchText::new(Cow::Borrowed(
+            "재시도 retries retries retry2 policies tokens 끝",
+        ));
+        for (term, expected) in [
+            ("retry", true),
+            ("policy", true),
+            ("archive", false),
+            ("token", true),
+            ("retry", true),
+            ("2", false),
+            ("재시도", true),
+            ("retry policy", false),
+        ] {
+            assert_eq!(text.contains(term), expected, "{term}");
+        }
+        let numeric = MatchText::new(Cow::Borrowed("retry2"));
+        assert!(!numeric.contains("retry"));
+        assert!(!numeric.contains("retry"));
     }
 
     /// The other half of the same rule: Korean writes a noun and its particle as one word, so

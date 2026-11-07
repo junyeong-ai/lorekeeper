@@ -731,6 +731,45 @@ pub(super) fn visit_query_candidates(
     options: &SearchOptions<'_>,
     mut visit: impl FnMut(Page, &[String], &[String], Option<&str>) -> Result<(), VaultError>,
 ) -> Result<(Vec<String>, Vec<String>), VaultError> {
+    let plan = query_plan(connection, options)?;
+    let (sql, arguments) = build_candidate_query(options, &plan.spellings, &plan.terms);
+    let mut statement = connection.prepare(&sql)?;
+    let rows = statement.query_map(rusqlite::params_from_iter(&arguments), |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    })?;
+    for row in rows {
+        let (metadata, summary, text) = row?;
+        let mut page: Page = serde_json::from_str(&metadata)
+            .map_err(|error| VaultError::Serialization(error.to_string()))?;
+        page.projection = Some(MatchProjection { summary, text });
+        visit(page, &plan.spellings, &plan.terms, plan.identity.as_deref())?;
+    }
+    Ok((plan.spellings, plan.terms))
+}
+
+pub(super) fn query_candidate_paths(
+    connection: &Connection,
+    options: &SearchOptions<'_>,
+) -> Result<(super::search::QueryPlan, Vec<PathBuf>), VaultError> {
+    let plan = query_plan(connection, options)?;
+    let (filter, arguments) = build_candidate_filter(options, &plan.spellings, &plan.terms);
+    let mut statement = connection.prepare(&format!(
+        "SELECT path FROM pages WHERE {filter} ORDER BY traversal_rank"
+    ))?;
+    let rows = statement.query_map(rusqlite::params_from_iter(&arguments), |row| {
+        row.get::<_, String>(0).map(PathBuf::from)
+    })?;
+    Ok((plan, rows.collect::<Result<_, _>>()?))
+}
+
+fn query_plan(
+    connection: &Connection,
+    options: &SearchOptions<'_>,
+) -> Result<super::search::QueryPlan, VaultError> {
     let query = options.query.unwrap_or_default();
     let identity = lk_core::concept::identity_key(query);
     let terms = super::search::query_terms(query, options.phrase);
@@ -753,26 +792,26 @@ pub(super) fn visit_query_candidates(
         owners = vocabulary("spacing_key", &spacing_key(query))?;
     }
     let spellings = super::search::spellings_of(identity.as_deref(), &owners);
-    let (sql, arguments) = build_candidate_query(options, &spellings, &terms);
-    let mut statement = connection.prepare(&sql)?;
-    let rows = statement.query_map(rusqlite::params_from_iter(&arguments), |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, String>(2)?,
-        ))
-    })?;
-    for row in rows {
-        let (metadata, summary, text) = row?;
-        let mut page: Page = serde_json::from_str(&metadata)
-            .map_err(|error| VaultError::Serialization(error.to_string()))?;
-        page.projection = Some(MatchProjection { summary, text });
-        visit(page, &spellings, &terms, identity.as_deref())?;
-    }
-    Ok((spellings, terms))
+    Ok(super::search::QueryPlan {
+        identity,
+        spellings,
+        terms,
+    })
 }
 
 fn build_candidate_query(
+    options: &SearchOptions<'_>,
+    spellings: &[String],
+    terms: &[String],
+) -> (String, Vec<String>) {
+    let (filter, arguments) = build_candidate_filter(options, spellings, terms);
+    (
+        format!("SELECT metadata, summary, text FROM pages WHERE {filter} ORDER BY traversal_rank"),
+        arguments,
+    )
+}
+
+fn build_candidate_filter(
     options: &SearchOptions<'_>,
     spellings: &[String],
     terms: &[String],
@@ -837,10 +876,7 @@ fn build_candidate_query(
     } else {
         "knowledge = 1"
     };
-    let sql = format!(
-        "SELECT metadata, summary, text FROM pages WHERE {scope} AND {filter} ORDER BY traversal_rank"
-    );
-    (sql, arguments)
+    (format!("{scope} AND {filter}"), arguments)
 }
 
 fn attach_synthesis(connection: &Connection, result: &mut SearchResult) -> Result<(), VaultError> {

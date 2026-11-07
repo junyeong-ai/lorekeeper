@@ -9,6 +9,7 @@ use lk_core::concept::{Citation, file_revision, identity_key, source_revision};
 use lk_core::config::VaultDirs;
 pub use lk_core::discovery::DiscoveryQuery;
 
+use crate::search::QueryPlan;
 use crate::{SearchOptions, VaultError, search};
 
 pub const DISCOVERY_CAPTURE_POLICY: &str = "discovery-candidates-v1";
@@ -179,12 +180,6 @@ fn serialized<T: Serialize>(value: &T) -> Result<String, VaultError> {
 
 fn invalid(message: &str) -> VaultError {
     std::io::Error::other(message).into()
-}
-
-struct QueryPlan {
-    identity: Option<String>,
-    spellings: Vec<String>,
-    terms: Vec<String>,
 }
 
 struct CapturePlan {
@@ -368,37 +363,40 @@ fn capture_discovery_batch_inner(
                 let started_at = measured.then(std::time::Instant::now);
                 let document = search::VisibleDocument::from_body(&page.page.body);
                 page.projection = Some(search::MatchProjection::from_document(&document));
-                let matches = captures
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(capture_index, capture)| {
-                        let query_indexes = capture
-                            .queries
-                            .iter()
-                            .zip(&capture.plans)
-                            .enumerate()
-                            .filter_map(|(index, (query, plan))| {
-                                let options = SearchOptions {
-                                    query: Some(&query.query),
-                                    phrase: query.phrase,
-                                    spacing: query.spacing,
-                                    knowledge_status: None,
-                                    ..Default::default()
-                                };
-                                search::match_query(
-                                    &page,
-                                    &options,
-                                    &plan.spellings,
-                                    &plan.terms,
-                                    plan.identity.as_deref(),
-                                )
-                                .is_some()
-                                .then_some(index)
-                            })
-                            .collect::<BTreeSet<_>>();
-                        (!query_indexes.is_empty()).then_some((capture_index, query_indexes))
-                    })
-                    .collect::<Vec<_>>();
+                let matches = {
+                    let matcher = search::PageMatcher::from_page(&page);
+                    captures
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(capture_index, capture)| {
+                            let query_indexes = capture
+                                .queries
+                                .iter()
+                                .zip(&capture.plans)
+                                .enumerate()
+                                .filter_map(|(index, (query, plan))| {
+                                    let options = SearchOptions {
+                                        query: Some(&query.query),
+                                        phrase: query.phrase,
+                                        spacing: query.spacing,
+                                        knowledge_status: None,
+                                        ..Default::default()
+                                    };
+                                    matcher
+                                        .match_query(
+                                            &options,
+                                            &plan.spellings,
+                                            &plan.terms,
+                                            plan.identity.as_deref(),
+                                        )
+                                        .is_some()
+                                        .then_some(index)
+                                })
+                                .collect::<BTreeSet<_>>();
+                            (!query_indexes.is_empty()).then_some((capture_index, query_indexes))
+                        })
+                        .collect::<Vec<_>>()
+                };
                 if let Some(started_at) = started_at {
                     projection_match_duration_us += started_at.elapsed().as_micros() as u64;
                 }
@@ -724,6 +722,7 @@ pub fn discover_queries_controlled(
     );
     search::visit_pages_controlled(root, dirs, false, None, read, |mut page, _| {
         page.projection = Some(page.match_projection().into_owned());
+        let matcher = search::PageMatcher::from_page(&page);
         let mut revision = None;
         for (query, identity, spellings, terms) in &plans {
             let options = SearchOptions {
@@ -733,7 +732,9 @@ pub fn discover_queries_controlled(
                 knowledge_status: None,
                 ..Default::default()
             };
-            if search::match_query(&page, &options, spellings, terms, identity.as_deref()).is_some()
+            if matcher
+                .match_query(&options, spellings, terms, identity.as_deref())
+                .is_some()
             {
                 let revision = revision.get_or_insert_with(|| source_revision(&page.page));
                 result
@@ -775,44 +776,84 @@ fn indexed_queries(
             ))
         })?
         .collect::<Result<BTreeMap<_, _>, _>>()?;
-    let mut revisions = BTreeMap::new();
+    let queries = queries
+        .iter()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let mut candidates = (|| -> Result<_, VaultError> {
+        let mut plans = Vec::new();
+        let mut paths = BTreeMap::<PathBuf, Vec<usize>>::new();
+        for (index, query) in queries.iter().enumerate() {
+            let options = SearchOptions {
+                query: Some(&query.query),
+                phrase: query.phrase,
+                spacing: query.spacing,
+                knowledge_status: None,
+                ..Default::default()
+            };
+            let (plan, candidates) =
+                crate::search_index::query_candidate_paths(&transaction, &options)?;
+            plans.push(plan);
+            for path in candidates {
+                paths.entry(path).or_default().push(index);
+            }
+        }
+        Ok((plans, paths))
+    })();
+    let mut result =
+        BTreeMap::from_iter(queries.iter().map(|query| ((*query).clone(), Vec::new())));
     let mut unchanged = true;
     search::visit_pages(root, dirs, false, |page, _| {
         unchanged &= captured.remove(&page.rel_path).as_deref() == Some(&page.file_revision);
-        revisions.insert(page.rel_path, source_revision(&page.page));
+        if let Ok((plans, paths)) = &mut candidates
+            && let Some(indexes) = paths.remove(&page.rel_path)
+            && unchanged
+        {
+            let matcher = search::PageMatcher::from_page(&page);
+            let mut revision = None;
+            for index in indexes {
+                let query = queries[index];
+                let plan = &plans[index];
+                let options = SearchOptions {
+                    query: Some(&query.query),
+                    phrase: query.phrase,
+                    spacing: query.spacing,
+                    knowledge_status: None,
+                    ..Default::default()
+                };
+                if matcher
+                    .match_query(
+                        &options,
+                        &plan.spellings,
+                        &plan.terms,
+                        plan.identity.as_deref(),
+                    )
+                    .is_some()
+                {
+                    let revision = revision.get_or_insert_with(|| source_revision(&page.page));
+                    result
+                        .get_mut(query)
+                        .expect("selected query")
+                        .push(Citation::at_revision(&page.rel_path, revision.clone()));
+                }
+            }
+        }
         Ok(())
     })?;
     if !unchanged || !captured.is_empty() {
         return Ok(None);
     }
-    let mut result = BTreeMap::new();
-    for query in queries.iter().collect::<BTreeSet<_>>() {
-        let options = SearchOptions {
-            query: Some(&query.query),
-            phrase: query.phrase,
-            spacing: query.spacing,
-            knowledge_status: None,
-            ..Default::default()
-        };
-        let mut matches = Vec::new();
-        crate::search_index::visit_query_candidates(
-            &transaction,
-            &options,
-            |page, spellings, terms, identity| {
-                if search::match_query(&page, &options, spellings, terms, identity).is_some() {
-                    let revision = revisions.get(&page.rel_path).ok_or_else(|| {
-                        std::io::Error::other(
-                            "indexed discovery candidate is outside the verified scope",
-                        )
-                    })?;
-                    matches.push(Citation::at_revision(&page.rel_path, revision.clone()));
-                }
-                Ok(())
-            },
-        )?;
+    let (_, paths) = candidates?;
+    if !paths.is_empty() {
+        return Err(std::io::Error::other(
+            "indexed discovery candidate is outside the verified scope",
+        )
+        .into());
+    }
+    for matches in result.values_mut() {
         matches.sort();
         matches.dedup();
-        result.insert(query.clone(), matches);
     }
     Ok(Some(result))
 }
@@ -1379,6 +1420,105 @@ mod tests {
             direct.guarded_pages()[Path::new("wiki/documents/owner.md")].as_str(),
             raw
         );
+    }
+
+    #[test]
+    fn overlapping_indexed_queries_preserve_live_citation_bytes() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        write(
+            root.path(),
+            "wiki/concepts/budget.md",
+            "---\ntype: concept\ntitle: Retry budget\naliases: [재시도 정책]\n---\nRetries follow policies and use tokens.\n",
+        );
+        write(
+            root.path(),
+            "wiki/documents/current.md",
+            &format!(
+                "---\ntype: document\n---\n{}\n재시도 정책으로 처리한다.\n",
+                "Retries policies tokens. ".repeat(40)
+            ),
+        );
+        write(
+            root.path(),
+            "wiki/documents/retired.md",
+            "---\ntype: document\nknowledge_status: retired\n---\nTokens covered policies for retries.\n",
+        );
+        let numeric = "wiki/documents/numeric.md";
+        write(
+            root.path(),
+            numeric,
+            "---\ntype: document\n---\nretry2 policy2 token2\n",
+        );
+        let queries = [
+            ("retry", false, false),
+            ("policy", false, false),
+            ("token", false, false),
+            ("retry policy", false, false),
+            ("retry policy", true, false),
+            ("재시도정책", false, true),
+            ("retry", false, false),
+        ]
+        .map(|(query, phrase, spacing)| DiscoveryQuery {
+            query: query.into(),
+            phrase,
+            spacing,
+        });
+        let live = discover_queries(root.path(), &dirs, &queries).unwrap();
+        assert_eq!(live[&queries[0]].len(), 3);
+        assert!(
+            live.values()
+                .flatten()
+                .all(|citation| citation.path != numeric)
+        );
+        let session = crate::MutationSession::acquire(root.path()).unwrap();
+        crate::prepare_search(&session, &dirs).unwrap();
+        let database = root.path().join(crate::search_index::INDEX_PATH);
+        let before = std::fs::read(&database).unwrap();
+        assert_eq!(
+            indexed_queries(root.path(), &dirs, &queries).unwrap(),
+            Some(live.clone())
+        );
+        assert_eq!(
+            discover_queries(root.path(), &dirs, &queries).unwrap(),
+            live
+        );
+        assert_eq!(std::fs::read(database).unwrap(), before);
+    }
+
+    #[test]
+    fn stale_capture_precedes_candidate_query_failure() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let subject = "wiki/documents/retry.md";
+        write(
+            root.path(),
+            subject,
+            "---\ntype: document\n---\nRetries follow policy.\n",
+        );
+        let query = DiscoveryQuery {
+            query: "retry".into(),
+            phrase: false,
+            spacing: false,
+        };
+        let session = crate::MutationSession::acquire(root.path()).unwrap();
+        crate::prepare_search(&session, &dirs).unwrap();
+        let database = Connection::open(root.path().join(crate::search_index::INDEX_PATH)).unwrap();
+        database.execute_batch("DROP TABLE terms").unwrap();
+        drop(database);
+        assert!(indexed_queries(root.path(), &dirs, std::slice::from_ref(&query)).is_err());
+        write(
+            root.path(),
+            subject,
+            "---\ntype: document\n---\nRetries follow the new policy.\n",
+        );
+        assert!(
+            indexed_queries(root.path(), &dirs, std::slice::from_ref(&query))
+                .unwrap()
+                .is_none()
+        );
+        let live = discover_queries(root.path(), &dirs, std::slice::from_ref(&query)).unwrap();
+        assert_eq!(live[&query].len(), 1);
     }
 
     #[test]
