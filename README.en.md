@@ -168,12 +168,12 @@ Fatal or unknown errors, cancellation and holds without qualifying progress stop
 Some publication can succeed while the overall job remains incomplete. Check results and remaining state;
 do not repeat an unchanged hold without diagnosing it or adopt an old answer by replacing its revisions.
 
-If review creation or repair changes a bounded audit's inputs, it replans and rereads once within the same call budget.
+If review creation or repair changes a native audit's inputs, it replans and rereads once within the same call budget.
 Further changes defer that subject. Predecessor observations remain intact; an old assessment cannot complete new inputs.
 
 Generate schedule definitions with `lore schedule`, then register them with the OS using the [scheduling procedure](skills/lore-ingest/references/scheduling.md).
 With `execution.automation`, queue draining gets its own schedule; collection and audit schedules share the same UTC-day invocation allowance and run-duration policy.
-Reservations survive restarts. Fatal errors pause that scheduled operation; repair the cause, then use `lore run OPERATION --scheduled --resume` to continue.
+`lore status` shows reservations and pauses. Fatal inference errors pause that operation's semantic phase; repair the cause, then use `lore run OPERATION --scheduled --resume` to continue.
 Start manual writing agents **before reading evidence** with `lore workflow -- claude` or `lore workflow -- codex`.
 Native jobs own the same protection themselves; configuration and vault selection stay pinned during execution.
 An execution admitted while waiting with `--wait` gets the lease after the current batch, ahead of a new batch.

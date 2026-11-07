@@ -35,13 +35,21 @@ vault's UTC-day usage ledger. Reservations are durable before host launch and su
 restart/config changes; they count outer agent attempts, not internal model requests,
 tokens or billing. Duration limits bound workflow waiting and new-call admission,
 not completion of an active host, source collection or paid-result recording.
-Unknown/corrupt accounting refuses execution. Fatal scheduled failures pause that
-operation across restarts and day rollover. After repairing the reported cause,
+Unknown/corrupt accounting refuses semantic execution. Fatal inference failures pause
+that operation's semantic phase across restarts and day rollover. Daily source
+collection still runs before this pause check. After repairing the reported cause,
 explicit `lore run OPERATION --scheduled --resume --json` clears only its pause;
 it preserves usage, rejected proposals and exact semantic holds. Unchanged holds
 spend no calls. An exhausted allowance waits for a later UTC day or an explicitly
 changed configured limit; a new process never grants a fresh allowance.
 Without this policy, schedules and the one-batch defaults remain unchanged.
+Ordinary manual `lore run` without `--scheduled` uses its normal batch/work budgets
+outside this shared allowance and pause. Use `--scheduled` for a policy-controlled
+manual trigger too; add `--wait` when it should wait for the workflow lease.
+`lore status --json` reports the current UTC-day reservations, remaining configured
+allowance and paused operations without changing the ledger. Unreadable accounting
+is unavailable, never a zero-use success. This snapshot does not verify OS registration
+or guarantee progress while the computer is off, asleep or out of agent allowance.
 
 Queue-mode scheduled jobs require an explicit execution profile. Selection is CLI
 `--profile`, then `execution.operations`, then `execution.default_profile`.

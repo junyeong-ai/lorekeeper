@@ -2,7 +2,7 @@ use clap::ValueEnum;
 use serde::Serialize;
 
 #[cfg(unix)]
-mod automation;
+pub(super) mod automation;
 #[cfg(unix)]
 mod scheduler;
 

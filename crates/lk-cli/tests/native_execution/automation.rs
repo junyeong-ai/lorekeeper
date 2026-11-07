@@ -45,6 +45,26 @@ fn usage(fixture: &Fixture) -> serde_json::Value {
     .unwrap()
 }
 
+fn status(fixture: &Fixture) -> serde_json::Value {
+    let path = fixture
+        .root()
+        .join("vault/.lorekeeper/automation-usage.json");
+    let before = std::fs::read(&path).unwrap();
+    let output = fixture
+        .command()
+        .args(["status", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(std::fs::read(path).unwrap(), before);
+    serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()["data"]["automation"]
+        .clone()
+}
+
 #[test]
 fn scheduled_invocation_limit_survives_completed_audit_batch_boundaries() {
     let fixture = Fixture::new("codex", 30, RECORD_AUDIT);
@@ -78,6 +98,10 @@ fn scheduled_jobs_share_allowance_across_restarts_and_operations() {
         let first = run(&fixture, "knowledge", false);
         assert_eq!(calls(&first), 2, "{first}");
         assert_eq!(usage(&fixture)["reserved_calls"], 2);
+        let snapshot = status(&fixture);
+        assert_eq!(snapshot["state"], "available");
+        assert_eq!(snapshot["usage"]["reserved_calls"], 2);
+        assert_eq!(snapshot["usage"]["remaining_calls"], 0);
         fixture.ingest();
         let second = run(&fixture, "process", false);
         assert_eq!(calls(&second), 0, "{second}");
@@ -95,6 +119,7 @@ fn scheduled_host_failure_requires_explicit_resume_without_refunding_calls() {
     assert_eq!(calls(&first), 1, "{first}");
     assert_eq!(first["stop_reason"], "failed");
     assert!(usage(&fixture)["paused"]["knowledge"].is_string());
+    assert!(status(&fixture)["usage"]["paused"]["knowledge"].is_string());
     let before = usage(&fixture);
     let config = std::fs::read_to_string(&fixture.config)
         .unwrap()
@@ -140,6 +165,9 @@ fn corrupt_automation_usage_stops_without_model_calls_or_replacement() {
     assert_eq!(report["stop_reason"], "failed");
     assert!(report["runs"][0]["automation"]["reserved_calls"].is_null());
     assert_eq!(std::fs::read(path).unwrap(), bytes);
+    let snapshot = status(&fixture);
+    assert_eq!(snapshot["state"], "unavailable");
+    assert!(snapshot["usage"].is_null());
 }
 
 #[test]

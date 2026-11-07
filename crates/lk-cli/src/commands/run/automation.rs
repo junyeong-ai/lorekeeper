@@ -121,6 +121,34 @@ fn today() -> Date {
         .date()
 }
 
+#[derive(Serialize)]
+pub(in crate::commands) struct Status {
+    pub utc_date: Date,
+    pub reserved_calls: usize,
+    pub max_calls_per_day: usize,
+    pub remaining_calls: usize,
+    pub max_run_seconds: u64,
+    pub paused: BTreeMap<ExecutionOperation, jiff::Timestamp>,
+}
+
+pub(in crate::commands) fn status(
+    root: &Path,
+    policy: &AutomationConfig,
+) -> miette::Result<Status> {
+    let usage = Usage::load(root, today())?;
+    Ok(Status {
+        utc_date: usage.utc_date,
+        reserved_calls: usage.reserved_calls,
+        max_calls_per_day: policy.max_calls_per_day.get(),
+        remaining_calls: policy
+            .max_calls_per_day
+            .get()
+            .saturating_sub(usage.reserved_calls),
+        max_run_seconds: policy.max_run_seconds.get(),
+        paused: usage.paused,
+    })
+}
+
 impl Control {
     pub fn new(
         policy: AutomationConfig,

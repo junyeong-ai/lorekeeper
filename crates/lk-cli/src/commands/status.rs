@@ -93,6 +93,23 @@ pub async fn run(opts: &super::GlobalOptions, json: bool) -> miette::Result<()> 
         next,
     });
 
+    #[cfg(unix)]
+    let automation = config.execution.automation.as_ref().map(|policy| {
+        let (row, snapshot) = automation_row(&vault_root, policy);
+        subsystems.push(row);
+        snapshot
+    });
+    #[cfg(not(unix))]
+    let automation = config.execution.automation.as_ref().map(|_| {
+        subsystems.push(Subsystem {
+            name: "automation",
+            ok: false,
+            state: "native jobs require Unix".into(),
+            next: "lore schedule --help",
+        });
+        serde_json::json!({"state":"unsupported"})
+    });
+
     let in_flight = super::queue::work_in_flight(&vault_root);
     let audit = super::doctor::audit(
         &super::doctor::managed_roots(&vault_root, &config.vault.dirs),
@@ -158,7 +175,7 @@ pub async fn run(opts: &super::GlobalOptions, json: bool) -> miette::Result<()> 
     }
 
     if json {
-        let envelope = serde_json::json!({
+        let mut envelope = serde_json::json!({
             "ok": true,
             "data": {
                 "version": env!("CARGO_PKG_VERSION"),
@@ -166,6 +183,9 @@ pub async fn run(opts: &super::GlobalOptions, json: bool) -> miette::Result<()> 
                 "subsystems": subsystems,
             }
         });
+        if let Some(automation) = automation {
+            envelope["data"]["automation"] = automation;
+        }
         println!(
             "{}",
             serde_json::to_string_pretty(&envelope).map_err(|e| miette::miette!("{e}"))?
@@ -181,6 +201,61 @@ pub async fn run(opts: &super::GlobalOptions, json: bool) -> miette::Result<()> 
         }
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn automation_row(
+    root: &std::path::Path,
+    policy: &lk_core::execution::AutomationConfig,
+) -> (Subsystem, serde_json::Value) {
+    use lk_core::execution::ExecutionOperation;
+    match super::run::automation::status(root, policy) {
+        Ok(status) => {
+            let mut state = format!(
+                "{}/{} reservations · UTC {}",
+                status.reserved_calls, status.max_calls_per_day, status.utc_date
+            );
+            if !status.paused.is_empty() {
+                let operations = status
+                    .paused
+                    .keys()
+                    .map(|operation| match operation {
+                        ExecutionOperation::Daily => "daily",
+                        ExecutionOperation::Process => "process",
+                        ExecutionOperation::Knowledge => "knowledge",
+                    })
+                    .collect::<Vec<_>>();
+                let _ = write!(state, " · paused: {}", operations.join(", "));
+            } else if status.remaining_calls == 0 {
+                state.push_str(" · day limit reached");
+            }
+            (
+                Subsystem {
+                    name: "automation",
+                    ok: status.paused.is_empty(),
+                    state,
+                    next: if status.paused.is_empty() {
+                        "lore schedule"
+                    } else {
+                        "lore run OPERATION --scheduled --resume --json"
+                    },
+                },
+                serde_json::json!({"state":"available","usage":status}),
+            )
+        }
+        Err(error) => {
+            let reason = error.to_string();
+            (
+                Subsystem {
+                    name: "automation",
+                    ok: false,
+                    state: format!("unavailable: {reason}"),
+                    next: "inspect .lorekeeper/automation-usage.json",
+                },
+                serde_json::json!({"state":"unavailable","usage":null,"reason":reason}),
+            )
+        }
+    }
 }
 
 /// The verdict `lore queue check` exits on. An interrupted publication, a staged result or an
