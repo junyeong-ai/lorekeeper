@@ -275,8 +275,27 @@ pub fn resolve_batch_subjects(
     batch: &[AuditCandidate],
     workflow_id: &lk_core::execution::WorkflowId,
 ) -> Result<Vec<AuditCandidate>, GraphError> {
-    let (_, receipts) = load(root)?;
-    let candidates = inputs(root, dirs, pages, &receipts)?
+    resolve_batch_subjects_controlled(
+        root,
+        dirs,
+        pages,
+        batch,
+        workflow_id,
+        &lk_vault::ReadControl::default(),
+    )
+}
+
+pub fn resolve_batch_subjects_controlled(
+    root: &Path,
+    dirs: &VaultDirs,
+    pages: &[ScannedPage],
+    batch: &[AuditCandidate],
+    workflow_id: &lk_core::execution::WorkflowId,
+    read: &lk_vault::ReadControl,
+) -> Result<Vec<AuditCandidate>, GraphError> {
+    read.check().map_err(GraphError::from)?;
+    let (_, receipts) = load_controlled(root, read)?;
+    let candidates = inputs_controlled(root, dirs, pages, &receipts, read)?
         .into_iter()
         .map(|candidate| (candidate.path.clone(), candidate))
         .collect::<BTreeMap<_, _>>();
@@ -299,10 +318,34 @@ pub fn verify_batch_with_guard(
     batch: &[AuditCandidate],
     workflow_id: &lk_core::execution::WorkflowId,
     max_input_bytes: u64,
-    mut guard: impl FnMut(&AuditAssessment, &mut MutationPlan) -> Result<AuditReadCoverage, GraphError>,
+    guard: impl FnMut(&AuditAssessment, &mut MutationPlan) -> Result<AuditReadCoverage, GraphError>,
 ) -> Result<AuditVerification, GraphError> {
-    let (_, receipts) = load(root)?;
-    let candidates = inputs(root, dirs, pages, &receipts)?
+    verify_batch_with_guard_controlled(
+        root,
+        dirs,
+        pages,
+        batch,
+        workflow_id,
+        max_input_bytes,
+        guard,
+        &lk_vault::ReadControl::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn verify_batch_with_guard_controlled(
+    root: &Path,
+    dirs: &VaultDirs,
+    pages: &[ScannedPage],
+    batch: &[AuditCandidate],
+    workflow_id: &lk_core::execution::WorkflowId,
+    max_input_bytes: u64,
+    mut guard: impl FnMut(&AuditAssessment, &mut MutationPlan) -> Result<AuditReadCoverage, GraphError>,
+    read: &lk_vault::ReadControl,
+) -> Result<AuditVerification, GraphError> {
+    read.check().map_err(GraphError::from)?;
+    let (_, receipts) = load_controlled(root, read)?;
+    let candidates = inputs_controlled(root, dirs, pages, &receipts, read)?
         .into_iter()
         .map(|candidate| (candidate.path.clone(), candidate))
         .collect::<BTreeMap<_, _>>();
@@ -332,23 +375,27 @@ pub fn verify_batch_with_guard(
         });
         assessed.insert(candidate.path.clone(), (candidate.clone(), receipt.clone()));
     }
-    let complete = measure_inputs(
+    let complete = measure_inputs_controlled(
         root,
         assessed.values().map(|(candidate, _)| candidate),
         max_input_bytes,
+        read,
     )?;
     let mut scratch = MutationPlan::default();
     let mut whole_inputs = Vec::new();
     for (candidate, receipt) in assessed.values() {
+        read.check().map_err(GraphError::from)?;
         if guard(receipt, &mut scratch)? == AuditReadCoverage::WholeInput {
             whole_inputs.push(candidate);
         }
+        read.check().map_err(GraphError::from)?;
     }
     if whole_inputs.len() == assessed.len() {
         complete.ensure_ready()?;
     } else {
-        measure_inputs(root, whole_inputs, max_input_bytes)?.ensure_ready()?;
+        measure_inputs_controlled(root, whole_inputs, max_input_bytes, read)?.ensure_ready()?;
     }
+    read.check().map_err(GraphError::from)?;
     Ok(AuditVerification {
         completed: verified,
         coverage: AuditCoverage::build(
@@ -581,6 +628,7 @@ impl AuditInputBound {
 
 #[derive(Clone, Default)]
 struct InputResources {
+    read: lk_vault::ReadControl,
     pages: BTreeMap<PathBuf, (String, u64)>,
     rss_payloads: BTreeMap<(String, String), u64>,
 }
@@ -593,9 +641,13 @@ impl InputResources {
         expected_file: Option<&str>,
         expected_source: Option<&str>,
     ) -> Result<(), GraphError> {
+        self.read.check().map_err(GraphError::from)?;
         let absolute = lk_vault::page_path(root, Path::new(path)).map_err(error)?;
         let canonical = absolute.canonicalize().map_err(error)?;
-        let raw = std::fs::read_to_string(&absolute).map_err(error)?;
+        let raw = self
+            .read
+            .read_to_string(&absolute)
+            .map_err(GraphError::from)?;
         let revision = file_revision(&raw);
         let source_matches = match expected_source {
             Some(expected) => {
@@ -624,7 +676,9 @@ impl InputResources {
         concept: &str,
         citation: &Citation,
     ) -> Result<(), GraphError> {
+        self.read.check().map_err(GraphError::from)?;
         lk_vault::validate_rss_citation(root, Path::new(concept), citation).map_err(error)?;
+        self.read.check().map_err(GraphError::from)?;
         let selector = citation.rss_event.as_ref().expect("validated RSS citation");
         let relative = format!(
             "{}/events/{}.json",
@@ -633,6 +687,7 @@ impl InputResources {
         );
         let bytes = std::fs::read(lk_vault::page_path(root, Path::new(&relative)).map_err(error)?)
             .map_err(error)?;
+        self.read.check().map_err(GraphError::from)?;
         if lk_core::rss_original::digest(&bytes) != citation.revision {
             return Err(error("RSS payload changed during audit input measurement"));
         }
@@ -668,12 +723,13 @@ impl InputResources {
             } else if review.state == AuditReviewState::Invalid && exact_page_address(&review.path)
             {
                 // Unreadable selected documents cannot masquerade as a zero-byte input.
-                load_page_input(root, &review.path)?;
+                load_page_input_controlled(root, &review.path, &self.read)?;
             }
             for evidence in &review.evidence {
                 if evidence.current.is_none()
                     && exact_page_address(&evidence.recorded.path)
-                    && load_page_input(root, &evidence.recorded.path)?.is_some()
+                    && load_page_input_controlled(root, &evidence.recorded.path, &self.read)?
+                        .is_some()
                 {
                     return Err(error(format!(
                         "audit review evidence appeared during input measurement: {}",
@@ -722,15 +778,34 @@ impl InputResources {
     }
 }
 
+#[cfg(test)]
 fn measure_inputs<'a>(
     root: &Path,
     candidates: impl IntoIterator<Item = &'a AuditCandidate>,
     max_input_bytes: u64,
 ) -> Result<AuditInputBound, GraphError> {
+    measure_inputs_controlled(
+        root,
+        candidates,
+        max_input_bytes,
+        &lk_vault::ReadControl::default(),
+    )
+}
+
+fn measure_inputs_controlled<'a>(
+    root: &Path,
+    candidates: impl IntoIterator<Item = &'a AuditCandidate>,
+    max_input_bytes: u64,
+    read: &lk_vault::ReadControl,
+) -> Result<AuditInputBound, GraphError> {
+    read.check().map_err(GraphError::from)?;
     if max_input_bytes == 0 {
         return Err(error("audit max_input_bytes must be positive"));
     }
-    let mut resources = InputResources::default();
+    let mut resources = InputResources {
+        read: read.clone(),
+        ..InputResources::default()
+    };
     for candidate in candidates {
         resources.include_candidate(root, candidate)?;
     }
@@ -738,16 +813,26 @@ fn measure_inputs<'a>(
 }
 
 fn load(root: &Path) -> Result<(Option<String>, Receipts), GraphError> {
+    load_controlled(root, &lk_vault::ReadControl::default())
+}
+
+fn load_controlled(
+    root: &Path,
+    read: &lk_vault::ReadControl,
+) -> Result<(Option<String>, Receipts), GraphError> {
+    read.check().map_err(GraphError::from)?;
     let path = lk_vault::page_path(root, Path::new(STATE)).map_err(error)?;
-    match std::fs::read_to_string(path) {
+    match read.read_to_string(&path) {
         Ok(raw) => {
             let state = serde_json::from_str(&raw).map_err(error)?;
             Ok((Some(raw), state))
         }
-        Err(failure) if failure.kind() == std::io::ErrorKind::NotFound => {
+        Err(lk_vault::VaultError::Io(failure))
+            if failure.kind() == std::io::ErrorKind::NotFound =>
+        {
             Ok((None, Receipts::default()))
         }
-        Err(failure) => Err(error(failure)),
+        Err(failure) => Err(GraphError::from(failure)),
     }
 }
 
@@ -767,42 +852,61 @@ fn page_input(path: &str, raw: &str) -> AuditPageInput {
     }
 }
 
-fn load_page_input(
+fn load_page_input_controlled(
     root: &Path,
     path: &str,
+    read: &lk_vault::ReadControl,
 ) -> Result<Option<(String, AuditPageInput)>, GraphError> {
-    let raw = match lk_vault::page_path(root, Path::new(path)).and_then(std::fs::read_to_string) {
+    read.check().map_err(GraphError::from)?;
+    let absolute = lk_vault::page_path(root, Path::new(path));
+    read.check().map_err(GraphError::from)?;
+    let raw = match absolute
+        .map_err(lk_vault::VaultError::from)
+        .and_then(|path| read.read_to_string(&path))
+    {
         Ok(raw) => raw,
-        Err(failure) if failure.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(failure) => return Err(error(failure)),
+        Err(lk_vault::VaultError::Io(failure))
+            if failure.kind() == std::io::ErrorKind::NotFound =>
+        {
+            return Ok(None);
+        }
+        Err(failure) => return Err(GraphError::from(failure)),
     };
     let input = page_input(path, &raw);
+    read.check().map_err(GraphError::from)?;
     Ok(Some((raw, input)))
 }
 
-enum ReviewReports {
+enum ReviewReports<'a> {
     Evaluated(BTreeMap<String, lk_vault::ReviewReport>),
     Scoped {
-        inventory: lk_vault::ReviewInventory,
+        inventory: &'a mut lk_vault::ReviewInventory,
         paths: BTreeMap<String, String>,
     },
 }
 
-struct ReviewDependencyIndex {
-    reports: ReviewReports,
+struct ReviewDependencyIndex<'a> {
+    reports: ReviewReports<'a>,
     subjects: BTreeMap<String, Vec<String>>,
     by_subject: BTreeMap<String, BTreeSet<String>>,
     dependencies: BTreeMap<(String, bool), AuditReviewDependency>,
+    read: lk_vault::ReadControl,
 }
 
-impl ReviewDependencyIndex {
-    fn load(root: &Path, dirs: &VaultDirs) -> Result<Self, GraphError> {
-        let mut inventory = lk_vault::ReviewInventory::load(root, dirs).map_err(error)?;
+impl<'a> ReviewDependencyIndex<'a> {
+    fn from_inventory(
+        root: &Path,
+        inventory: &'a mut lk_vault::ReviewInventory,
+        read: &lk_vault::ReadControl,
+    ) -> Result<Self, GraphError> {
+        read.check().map_err(GraphError::from)?;
+        inventory.validate_root(root).map_err(GraphError::from)?;
         let paths = inventory.paths().map(str::to_owned).collect::<Vec<_>>();
         let mut subjects = BTreeMap::new();
         let mut by_subject: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         let mut owners = BTreeMap::new();
         for path in paths {
+            read.check().map_err(GraphError::from)?;
             let declared = inventory
                 .subjects(&path)
                 .expect("captured review path")
@@ -812,13 +916,18 @@ impl ReviewDependencyIndex {
                 .collect::<Vec<_>>();
             let mut resolved = Vec::new();
             for subject in declared {
-                match lk_vault::find_page_owner(root, Path::new(&subject)) {
+                read.check().map_err(GraphError::from)?;
+                let owner = lk_vault::find_page_owner(root, Path::new(&subject));
+                read.check().map_err(GraphError::from)?;
+                match owner {
                     Ok(Some(owner)) => resolved.push(owner.to_string_lossy().into_owned()),
                     Ok(None) => {}
                     Err(failure) => {
                         if !inventory.has_errors(&path).expect("captured review path") {
-                            let report =
-                                inventory.load_report(&path).expect("captured review path");
+                            let report = inventory
+                                .load_report_controlled(&path, read)
+                                .map_err(GraphError::from)?
+                                .expect("captured review path");
                             if report.effective_state != lk_vault::ReviewEffectiveState::Invalid {
                                 return Err(error(failure));
                             }
@@ -847,15 +956,22 @@ impl ReviewDependencyIndex {
             subjects,
             by_subject,
             dependencies: BTreeMap::new(),
+            read: read.clone(),
         })
     }
 
-    fn from_reports(root: &Path, reports: Vec<lk_vault::ReviewReport>) -> Result<Self, GraphError> {
-        let mut subjects = review_subjects(root, &reports)?;
+    fn from_reports(
+        root: &Path,
+        reports: Vec<lk_vault::ReviewReport>,
+        read: &lk_vault::ReadControl,
+    ) -> Result<Self, GraphError> {
+        read.check().map_err(GraphError::from)?;
+        let mut subjects = review_subjects(root, &reports, read)?;
         let mut by_subject: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         let mut indexed_subjects = BTreeMap::new();
         let mut indexed_reports = BTreeMap::new();
         for report in reports {
+            read.check().map_err(GraphError::from)?;
             let owner = lk_vault::resolve_page_owner(root, Path::new(&report.path))
                 .map_err(error)?
                 .to_string_lossy()
@@ -875,6 +991,7 @@ impl ReviewDependencyIndex {
             subjects: indexed_subjects,
             by_subject,
             dependencies: BTreeMap::new(),
+            read: read.clone(),
         })
     }
 
@@ -884,13 +1001,16 @@ impl ReviewDependencyIndex {
         subject: &str,
         path: &str,
     ) -> Result<AuditReviewDependency, GraphError> {
+        self.read.check().map_err(GraphError::from)?;
         let subject = lk_vault::resolve_page_owner(root, Path::new(subject))
             .map_err(error)?
             .to_string_lossy()
             .into_owned();
-        let owner = match lk_vault::find_page_owner(root, Path::new(path)) {
+        let owner = lk_vault::find_page_owner(root, Path::new(path));
+        self.read.check().map_err(GraphError::from)?;
+        let owner = match owner {
             Ok(owner) => owner.map(|owner| owner.to_string_lossy().into_owned()),
-            Err(_) => return review_dependency(root, &subject, path, None, None),
+            Err(_) => return review_dependency(root, &subject, path, None, None, &self.read),
         };
         let lookup = owner.as_deref().unwrap_or(path);
         let declares_subject = self
@@ -903,9 +1023,12 @@ impl ReviewDependencyIndex {
         }
         let report = match &mut self.reports {
             ReviewReports::Evaluated(reports) => reports.get(lookup).cloned(),
-            ReviewReports::Scoped { inventory, paths } => paths
-                .get(lookup)
-                .and_then(|path| inventory.load_report(path)),
+            ReviewReports::Scoped { inventory, paths } => match paths.get(lookup) {
+                Some(path) => inventory
+                    .load_report_controlled(path, &self.read)
+                    .map_err(GraphError::from)?,
+                None => None,
+            },
         };
         let dependency = review_dependency(
             root,
@@ -913,7 +1036,9 @@ impl ReviewDependencyIndex {
             path,
             report.as_ref(),
             self.subjects.get(lookup),
+            &self.read,
         )?;
+        self.read.check().map_err(GraphError::from)?;
         self.dependencies.insert(key, dependency.clone());
         Ok(dependency)
     }
@@ -926,8 +1051,29 @@ pub fn review_dependencies(
     dirs: &VaultDirs,
     pages: &BTreeMap<String, lk_vault::VaultPage>,
 ) -> Result<BTreeMap<String, Vec<AuditReviewDependency>>, GraphError> {
-    let (_, receipts) = load(root)?;
-    let mut index = ReviewDependencyIndex::load(root, dirs)?;
+    review_dependencies_controlled(root, dirs, pages, &lk_vault::ReadControl::default())
+}
+
+pub fn review_dependencies_controlled(
+    root: &Path,
+    dirs: &VaultDirs,
+    pages: &BTreeMap<String, lk_vault::VaultPage>,
+    read: &lk_vault::ReadControl,
+) -> Result<BTreeMap<String, Vec<AuditReviewDependency>>, GraphError> {
+    let mut inventory =
+        lk_vault::ReviewInventory::load_controlled(root, dirs, read).map_err(GraphError::from)?;
+    review_dependencies_with_inventory(root, pages, &mut inventory, read)
+}
+
+pub fn review_dependencies_with_inventory(
+    root: &Path,
+    pages: &BTreeMap<String, lk_vault::VaultPage>,
+    inventory: &mut lk_vault::ReviewInventory,
+    read: &lk_vault::ReadControl,
+) -> Result<BTreeMap<String, Vec<AuditReviewDependency>>, GraphError> {
+    read.check().map_err(GraphError::from)?;
+    let (_, receipts) = load_controlled(root, read)?;
+    let mut index = ReviewDependencyIndex::from_inventory(root, inventory, read)?;
     scoped_review_dependencies(root, pages, &mut index, &receipts)
 }
 
@@ -938,14 +1084,15 @@ pub fn review_dependencies_with_reports(
     reports: Vec<lk_vault::ReviewReport>,
 ) -> Result<BTreeMap<String, Vec<AuditReviewDependency>>, GraphError> {
     let (_, receipts) = load(root)?;
-    let mut index = ReviewDependencyIndex::from_reports(root, reports)?;
+    let mut index =
+        ReviewDependencyIndex::from_reports(root, reports, &lk_vault::ReadControl::default())?;
     scoped_review_dependencies(root, pages, &mut index, &receipts)
 }
 
 fn scoped_review_dependencies(
     root: &Path,
     pages: &BTreeMap<String, lk_vault::VaultPage>,
-    index: &mut ReviewDependencyIndex,
+    index: &mut ReviewDependencyIndex<'_>,
     receipts: &Receipts,
 ) -> Result<BTreeMap<String, Vec<AuditReviewDependency>>, GraphError> {
     pages
@@ -962,22 +1109,27 @@ fn scoped_review_dependencies(
 fn review_subjects(
     root: &Path,
     reviews: &[lk_vault::ReviewReport],
+    read: &lk_vault::ReadControl,
 ) -> Result<BTreeMap<String, Vec<String>>, GraphError> {
     let mut subjects = BTreeMap::new();
     for review in reviews {
+        read.check().map_err(GraphError::from)?;
         let owners = review
             .subjects()
             .iter()
             .filter(|path| exact_page_address(path))
-            .map(
-                |path| match lk_vault::find_page_owner(root, Path::new(path)) {
+            .map(|path| {
+                read.check().map_err(GraphError::from)?;
+                let owner = lk_vault::find_page_owner(root, Path::new(path));
+                read.check().map_err(GraphError::from)?;
+                match owner {
                     Ok(owner) => Ok(owner.map(|owner| owner.to_string_lossy().into_owned())),
                     Err(_) if review.effective_state == lk_vault::ReviewEffectiveState::Invalid => {
                         Ok(None)
                     }
                     Err(failure) => Err(error(failure)),
-                },
-            )
+                }
+            })
             .collect::<Result<Vec<_>, _>>()?
             .into_iter()
             .flatten()
@@ -991,9 +1143,10 @@ fn scoped_reviews(
     root: &Path,
     subject: &Path,
     page: &lk_vault::VaultPage,
-    index: &mut ReviewDependencyIndex,
+    index: &mut ReviewDependencyIndex<'_>,
     receipts: &Receipts,
 ) -> Result<Vec<AuditReviewDependency>, GraphError> {
+    index.read.check().map_err(GraphError::from)?;
     let subject = subject.to_string_lossy();
     let owner = lk_vault::resolve_page_owner(root, Path::new(subject.as_ref()))
         .map_err(error)?
@@ -1022,6 +1175,7 @@ fn scoped_reviews(
         }
     }
     for path in paths {
+        index.read.check().map_err(GraphError::from)?;
         result.push(index.dependency(root, &subject, &path)?);
     }
     result.sort_by(|a, b| a.path.cmp(&b.path));
@@ -1034,7 +1188,9 @@ fn review_dependency(
     path: &str,
     report: Option<&lk_vault::ReviewReport>,
     subjects: Option<&Vec<String>>,
+    read: &lk_vault::ReadControl,
 ) -> Result<AuditReviewDependency, GraphError> {
+    read.check().map_err(GraphError::from)?;
     let mut result = AuditReviewDependency {
         path: path.into(),
         file_revision: None,
@@ -1049,13 +1205,14 @@ fn review_dependency(
             .push("review dependency is not an exact Markdown address".into());
         return Ok(result);
     }
-    let (raw, document) = match load_page_input(root, path) {
+    let (raw, document) = match load_page_input_controlled(root, path, read) {
         Ok(Some(input)) => input,
         Ok(None) => {
             result.state = AuditReviewState::Missing;
             result.errors.push("scoped review is missing".into());
             return Ok(result);
         }
+        Err(GraphError::Cancelled) => return Err(GraphError::Cancelled),
         Err(failure) => {
             result.errors.push(failure.to_string());
             return Ok(result);
@@ -1101,9 +1258,11 @@ fn review_dependency(
         )));
     }
     for citation in &metadata.evidence {
+        read.check().map_err(GraphError::from)?;
         let current = if exact_page_address(&citation.path) {
-            match load_page_input(root, &citation.path) {
+            match load_page_input_controlled(root, &citation.path, read) {
                 Ok(input) => input.map(|(_, input)| input),
+                Err(GraphError::Cancelled) => return Err(GraphError::Cancelled),
                 Err(failure) => {
                     result.state = AuditReviewState::Invalid;
                     result.errors.push(failure.to_string());
@@ -1119,7 +1278,7 @@ fn review_dependency(
         let archived = if current_supplies_recorded {
             None
         } else {
-            match lk_vault::load_archived_evidence(root, &citation.revision) {
+            match lk_vault::load_archived_evidence_controlled(root, &citation.revision, read) {
                 Ok(Some(page)) => {
                     let address =
                         lk_vault::evidence_archive_path(&citation.revision).map_err(error)?;
@@ -1131,6 +1290,7 @@ fn review_dependency(
                     ))
                 }
                 Ok(None) => None,
+                Err(lk_vault::VaultError::Cancelled) => return Err(GraphError::Cancelled),
                 Err(failure) => {
                     result.state = AuditReviewState::Invalid;
                     result.errors.push(failure.to_string());
@@ -1212,24 +1372,45 @@ fn subject_kinds(pages: &[ScannedPage], dirs: &VaultDirs) -> BTreeMap<PathBuf, A
         .collect()
 }
 
+#[cfg(test)]
 fn inputs(
     root: &Path,
     dirs: &VaultDirs,
     pages: &[ScannedPage],
     receipts: &Receipts,
 ) -> Result<Vec<AuditCandidate>, GraphError> {
-    inputs_selected(root, dirs, pages, receipts, None)
+    inputs_controlled(
+        root,
+        dirs,
+        pages,
+        receipts,
+        &lk_vault::ReadControl::default(),
+    )
 }
 
-fn inputs_selected(
+fn inputs_controlled(
+    root: &Path,
+    dirs: &VaultDirs,
+    pages: &[ScannedPage],
+    receipts: &Receipts,
+    read: &lk_vault::ReadControl,
+) -> Result<Vec<AuditCandidate>, GraphError> {
+    inputs_selected_controlled(root, dirs, pages, receipts, None, read)
+}
+
+fn inputs_selected_controlled(
     root: &Path,
     dirs: &VaultDirs,
     pages: &[ScannedPage],
     receipts: &Receipts,
     selection: Option<&BTreeSet<&str>>,
+    read: &lk_vault::ReadControl,
 ) -> Result<Vec<AuditCandidate>, GraphError> {
+    read.check().map_err(GraphError::from)?;
+    let mut inventory =
+        lk_vault::ReviewInventory::load_controlled(root, dirs, read).map_err(GraphError::from)?;
     require_readable_subjects(pages, dirs, selection)?;
-    let mut review_index = ReviewDependencyIndex::load(root, dirs)?;
+    let mut review_index = ReviewDependencyIndex::from_inventory(root, &mut inventory, read)?;
     let evidence = crate::backlinks::concept_evidence(pages, root, dirs)?;
     let kinds = subject_kinds(pages, dirs);
     let selected = |path: &Path| {
@@ -1254,15 +1435,18 @@ fn inputs_selected(
         }
         queries.extend(plan.queries.clone());
     }
-    let discovered = lk_vault::discover_queries(root, dirs, &queries).map_err(error)?;
+    let discovered = lk_vault::discover_queries_controlled(root, dirs, &queries, read)
+        .map_err(GraphError::from)?;
     let mut result = Vec::new();
     for page in pages
         .iter()
         .filter(|page| kinds.contains_key(&page.path) && selected(&page.path))
     {
         let kind = kinds[&page.path];
-        let raw = std::fs::read_to_string(lk_vault::page_path(root, &page.path).map_err(error)?)
-            .map_err(error)?;
+        read.check().map_err(GraphError::from)?;
+        let raw = read
+            .read_to_string(&lk_vault::page_path(root, &page.path).map_err(error)?)
+            .map_err(GraphError::from)?;
         let parsed = lk_vault::parse_page(&raw).map_err(error)?;
         let revision = source_revision(&parsed);
         if page.revision.as_deref() != Some(&revision) {
@@ -1356,6 +1540,7 @@ fn inputs_selected(
         });
     }
     result.sort_by(|a, b| a.path.cmp(&b.path));
+    read.check().map_err(GraphError::from)?;
     Ok(result)
 }
 
@@ -1368,6 +1553,23 @@ pub fn load_selected_inputs(
     pages: &[ScannedPage],
     selection: &[String],
 ) -> Result<Vec<AuditCandidate>, GraphError> {
+    load_selected_inputs_controlled(
+        root,
+        dirs,
+        pages,
+        selection,
+        &lk_vault::ReadControl::default(),
+    )
+}
+
+pub fn load_selected_inputs_controlled(
+    root: &Path,
+    dirs: &VaultDirs,
+    pages: &[ScannedPage],
+    selection: &[String],
+    read: &lk_vault::ReadControl,
+) -> Result<Vec<AuditCandidate>, GraphError> {
+    read.check().map_err(GraphError::from)?;
     let unique = selection
         .iter()
         .map(String::as_str)
@@ -1378,10 +1580,11 @@ pub fn load_selected_inputs(
     if selection.is_empty() {
         return Ok(Vec::new());
     }
-    let (_, receipts) = load(root)?;
-    let candidates = inputs_selected(root, dirs, pages, &receipts, Some(&unique))?;
+    read.check().map_err(GraphError::from)?;
+    let (_, receipts) = load_controlled(root, read)?;
+    let candidates = inputs_selected_controlled(root, dirs, pages, &receipts, Some(&unique), read)?;
     let selected = select_candidates(&candidates, selection, &receipts)?;
-    measure_inputs(root, &selected, u64::MAX)?;
+    measure_inputs_controlled(root, &selected, u64::MAX, read)?;
     Ok(selected)
 }
 
@@ -1509,6 +1712,26 @@ pub fn plan_selected(
     selection: &[String],
     max_input_bytes: u64,
 ) -> Result<AuditPlan, GraphError> {
+    plan_selected_controlled(
+        root,
+        dirs,
+        pages,
+        limit,
+        selection,
+        max_input_bytes,
+        &lk_vault::ReadControl::default(),
+    )
+}
+
+pub fn plan_selected_controlled(
+    root: &Path,
+    dirs: &VaultDirs,
+    pages: &[ScannedPage],
+    limit: usize,
+    selection: &[String],
+    max_input_bytes: u64,
+    read: &lk_vault::ReadControl,
+) -> Result<AuditPlan, GraphError> {
     plan_selected_inner(
         root,
         dirs,
@@ -1517,6 +1740,7 @@ pub fn plan_selected(
         selection,
         max_input_bytes,
         Planning::WholeInput,
+        read,
     )
     .map(|prepared| prepared.plan)
 }
@@ -1541,6 +1765,26 @@ pub fn plan_selected_partitioned(
     selection: &[String],
     max_input_bytes: u64,
 ) -> Result<AuditPlan, GraphError> {
+    plan_selected_partitioned_controlled(
+        root,
+        dirs,
+        pages,
+        limit,
+        selection,
+        max_input_bytes,
+        &lk_vault::ReadControl::default(),
+    )
+}
+
+pub fn plan_selected_partitioned_controlled(
+    root: &Path,
+    dirs: &VaultDirs,
+    pages: &[ScannedPage],
+    limit: usize,
+    selection: &[String],
+    max_input_bytes: u64,
+    read: &lk_vault::ReadControl,
+) -> Result<AuditPlan, GraphError> {
     plan_selected_inner(
         root,
         dirs,
@@ -1549,6 +1793,7 @@ pub fn plan_selected_partitioned(
         selection,
         max_input_bytes,
         Planning::Partitioned,
+        read,
     )
     .map(|prepared| prepared.plan)
 }
@@ -1575,6 +1820,29 @@ pub fn plan_selected_available_partitioned(
     max_input_bytes: u64,
     available: &mut dyn FnMut(&AuditCandidate) -> Result<bool, GraphError>,
 ) -> Result<AuditPlan, GraphError> {
+    plan_selected_available_partitioned_controlled(
+        root,
+        dirs,
+        pages,
+        limit,
+        selection,
+        max_input_bytes,
+        available,
+        &lk_vault::ReadControl::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn plan_selected_available_partitioned_controlled(
+    root: &Path,
+    dirs: &VaultDirs,
+    pages: &[ScannedPage],
+    limit: usize,
+    selection: &[String],
+    max_input_bytes: u64,
+    available: &mut dyn FnMut(&AuditCandidate) -> Result<bool, GraphError>,
+    read: &lk_vault::ReadControl,
+) -> Result<AuditPlan, GraphError> {
     plan_selected_inner(
         root,
         dirs,
@@ -1583,6 +1851,7 @@ pub fn plan_selected_available_partitioned(
         selection,
         max_input_bytes,
         Planning::Available(available),
+        read,
     )
     .map(|prepared| prepared.plan)
 }
@@ -1603,6 +1872,31 @@ pub fn admit_available_partitioned(
     admit: &mut dyn FnMut(&AuditCandidate) -> Result<bool, GraphError>,
     guard: impl FnOnce(&[AuditCandidate], &mut MutationPlan) -> Result<(), GraphError>,
 ) -> Result<AuditPlan, GraphError> {
+    admit_available_partitioned_controlled(
+        session,
+        dirs,
+        pages,
+        limit,
+        max_input_bytes,
+        available,
+        admit,
+        guard,
+        &lk_vault::ReadControl::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn admit_available_partitioned_controlled(
+    session: &MutationSession,
+    dirs: &VaultDirs,
+    pages: &[ScannedPage],
+    limit: usize,
+    max_input_bytes: u64,
+    available: &mut dyn FnMut(&AuditCandidate) -> Result<bool, GraphError>,
+    admit: &mut dyn FnMut(&AuditCandidate) -> Result<bool, GraphError>,
+    guard: impl FnOnce(&[AuditCandidate], &mut MutationPlan) -> Result<(), GraphError>,
+    read: &lk_vault::ReadControl,
+) -> Result<AuditPlan, GraphError> {
     let root = session.root();
     let prepared = plan_selected_inner(
         root,
@@ -1612,11 +1906,13 @@ pub fn admit_available_partitioned(
         &[],
         max_input_bytes,
         Planning::Admission { available, admit },
+        read,
     )?;
     let mut mutation = MutationPlan::default();
+    read.check().map_err(GraphError::from)?;
     guard(&prepared.plan.candidates, &mut mutation)?;
     for candidate in &prepared.plan.candidates {
-        guard_candidate(&mut mutation, root, candidate)?;
+        guard_candidate_controlled(&mut mutation, root, candidate, read)?;
     }
     let after = serde_json::to_string_pretty(&prepared.receipts).map_err(error)? + "\n";
     if prepared.before.as_deref() != Some(&after)
@@ -1626,6 +1922,7 @@ pub fn admit_available_partitioned(
             .publish_expected(root, STATE, prepared.before, after)
             .map_err(error)?;
     }
+    read.check().map_err(GraphError::from)?;
     session.apply(mutation).map_err(error)?;
     Ok(prepared.plan)
 }
@@ -1646,6 +1943,7 @@ struct PreparedAudit {
     receipts: Receipts,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn plan_selected_inner(
     root: &Path,
     dirs: &VaultDirs,
@@ -1654,7 +1952,9 @@ fn plan_selected_inner(
     selection: &[String],
     max_input_bytes: u64,
     mut planning: Planning<'_>,
+    read: &lk_vault::ReadControl,
 ) -> Result<PreparedAudit, GraphError> {
+    read.check().map_err(GraphError::from)?;
     if !(1..=100).contains(&limit) {
         return Err(error("audit limit must be 1..100"));
     }
@@ -1667,22 +1967,24 @@ fn plan_selected_inner(
             "audit selection requires distinct paths within the batch limit",
         ));
     }
-    let (before, mut receipts) = load(root)?;
+    let (before, mut receipts) = load_controlled(root, read)?;
     let coverage_scope = if selection.is_empty() {
         AuditCoverageScope::Corpus
     } else {
         AuditCoverageScope::Selection
     };
-    let candidates = inputs_selected(
+    let candidates = inputs_selected_controlled(
         root,
         dirs,
         pages,
         &receipts,
         (!selection.is_empty()).then_some(&unique),
+        read,
     )?;
     let mut unavailable = BTreeSet::new();
-    if let Planning::Available(available) | Planning::Admission { available, .. } = &mut planning {
+    if let Planning::Available(available) = &mut planning {
         for candidate in &candidates {
+            read.check().map_err(GraphError::from)?;
             if !available(candidate)? {
                 unavailable.insert(candidate.path.clone());
             }
@@ -1712,16 +2014,20 @@ fn plan_selected_inner(
         .into_iter()
         .filter(|candidate| !unavailable.contains(&candidate.path))
         .collect::<Vec<_>>();
-    let mut resources = InputResources::default();
+    let mut resources = InputResources {
+        read: read.clone(),
+        ..InputResources::default()
+    };
     let mut input = if selection.is_empty() {
         resources.bound(max_input_bytes)?
     } else {
-        measure_inputs(root, &candidates, max_input_bytes)?
+        measure_inputs_controlled(root, &candidates, max_input_bytes, read)?
     };
     let mut blocked = Vec::new();
     let mut blocked_count = 0;
     let mut next_class = receipts.next_class;
     while selection.is_empty() && candidates.len() < limit {
+        read.check().map_err(GraphError::from)?;
         let next = match next_class {
             AuditClass::Changed => changed.pop_front().or_else(|| unreviewed.pop_front()),
             AuditClass::Unreviewed => unreviewed.pop_front().or_else(|| changed.pop_front()),
@@ -1730,10 +2036,12 @@ fn plan_selected_inner(
         if unavailable.contains(&candidate.path) {
             continue;
         }
-        if let Planning::Admission { admit, .. } = &mut planning
-            && !admit(&candidate)?
-        {
-            continue;
+        if let Planning::Admission { available, admit } = &mut planning {
+            let ready = available(&candidate)?;
+            read.check().map_err(GraphError::from)?;
+            if !ready || !admit(&candidate)? {
+                continue;
+            }
         }
         let mut prospective = resources.clone();
         prospective.include_candidate(root, &candidate)?;
@@ -1752,7 +2060,7 @@ fn plan_selected_inner(
         let individual = if candidates.is_empty() {
             combined
         } else {
-            measure_inputs(root, std::iter::once(&candidate), max_input_bytes)?
+            measure_inputs_controlled(root, std::iter::once(&candidate), max_input_bytes, read)?
         };
         if individual.status == AuditInputStatus::Ready {
             // This complete input fits a fresh batch. Preserve its position instead
@@ -1770,6 +2078,7 @@ fn plan_selected_inner(
             });
         }
     }
+    read.check().map_err(GraphError::from)?;
     Ok(PreparedAudit {
         plan: AuditPlan {
             coverage_scope,
@@ -1790,12 +2099,22 @@ fn plan_selected_inner(
     })
 }
 
+#[cfg(test)]
 fn guard_page_input(
     plan: &mut MutationPlan,
     root: &Path,
     input: &AuditPageInput,
 ) -> Result<(), GraphError> {
-    let Some((raw, current)) = load_page_input(root, &input.path)? else {
+    guard_page_input_controlled(plan, root, input, &lk_vault::ReadControl::default())
+}
+
+fn guard_page_input_controlled(
+    plan: &mut MutationPlan,
+    root: &Path,
+    input: &AuditPageInput,
+    read: &lk_vault::ReadControl,
+) -> Result<(), GraphError> {
+    let Some((raw, current)) = load_page_input_controlled(root, &input.path, read)? else {
         return Err(error(format!(
             "audit read dependency disappeared: {}",
             input.path
@@ -1817,36 +2136,56 @@ fn guard_page_input(
     Ok(())
 }
 
+#[cfg(test)]
 fn guard_review_dependency(
     plan: &mut MutationPlan,
     root: &Path,
     review: &AuditReviewDependency,
 ) -> Result<(), GraphError> {
+    guard_review_dependency_controlled(plan, root, review, &lk_vault::ReadControl::default())
+}
+
+fn guard_review_dependency_controlled(
+    plan: &mut MutationPlan,
+    root: &Path,
+    review: &AuditReviewDependency,
+    read: &lk_vault::ReadControl,
+) -> Result<(), GraphError> {
     if let Some(document) = review.document() {
-        guard_page_input(plan, root, &document)?;
+        guard_page_input_controlled(plan, root, &document, read)?;
     }
     for evidence in &review.evidence {
         if let Some(current) = &evidence.current {
-            guard_page_input(plan, root, current)?;
+            guard_page_input_controlled(plan, root, current, read)?;
         } else {
             plan.require_absent(&evidence.recorded.path);
         }
         if let Some(archived) = &evidence.archived {
-            guard_page_input(plan, root, archived)?;
+            guard_page_input_controlled(plan, root, archived, read)?;
         }
     }
     Ok(())
 }
 
+#[cfg(test)]
 fn guard_candidate(
     plan: &mut MutationPlan,
     root: &Path,
     candidate: &AuditCandidate,
 ) -> Result<(), GraphError> {
+    guard_candidate_controlled(plan, root, candidate, &lk_vault::ReadControl::default())
+}
+
+fn guard_candidate_controlled(
+    plan: &mut MutationPlan,
+    root: &Path,
+    candidate: &AuditCandidate,
+    read: &lk_vault::ReadControl,
+) -> Result<(), GraphError> {
     for review in &candidate.reviews {
-        guard_review_dependency(plan, root, review)?;
+        guard_review_dependency_controlled(plan, root, review, read)?;
     }
-    guard_page_input(
+    guard_page_input_controlled(
         plan,
         root,
         &AuditPageInput {
@@ -1854,20 +2193,24 @@ fn guard_candidate(
             file_revision: candidate.file_revision.clone(),
             source_revision: None,
         },
+        read,
     )?;
     for citation in candidate.evidence.iter().chain(&candidate.related_pages) {
+        read.check().map_err(GraphError::from)?;
         if citation.rss_event.is_some() {
             lk_vault::guard_rss_citation(plan, root, Path::new(&candidate.path), citation)
                 .map_err(error)?;
+            read.check().map_err(GraphError::from)?;
         } else {
-            let raw = std::fs::read_to_string(
-                lk_vault::page_path(root, Path::new(&citation.path)).map_err(error)?,
-            )
-            .map_err(error)?;
+            let raw = read
+                .read_to_string(
+                    &lk_vault::page_path(root, Path::new(&citation.path)).map_err(error)?,
+                )
+                .map_err(GraphError::from)?;
             if source_revision(&lk_vault::parse_page(&raw).map_err(error)?) != citation.revision {
                 return Err(error("audit dependency changed"));
             }
-            guard_page_input(plan, root, &page_input(&citation.path, &raw))?;
+            guard_page_input_controlled(plan, root, &page_input(&citation.path, &raw), read)?;
         }
     }
     Ok(())
@@ -1896,14 +2239,35 @@ pub fn record_with_guard(
     pages: &[ScannedPage],
     results: AuditResults,
     max_input_bytes: u64,
+    guard: impl FnMut(&AuditAssessment, &mut MutationPlan) -> Result<AuditReadCoverage, GraphError>,
+) -> Result<Vec<String>, GraphError> {
+    record_with_guard_controlled(
+        session,
+        dirs,
+        pages,
+        results,
+        max_input_bytes,
+        guard,
+        &lk_vault::ReadControl::default(),
+    )
+}
+
+pub fn record_with_guard_controlled(
+    session: &MutationSession,
+    dirs: &VaultDirs,
+    pages: &[ScannedPage],
+    results: AuditResults,
+    max_input_bytes: u64,
     mut guard: impl FnMut(&AuditAssessment, &mut MutationPlan) -> Result<AuditReadCoverage, GraphError>,
+    read: &lk_vault::ReadControl,
 ) -> Result<Vec<String>, GraphError> {
     if results.assessments.is_empty() {
         return Err(error("audit results must contain assessments"));
     }
     let root = session.root();
-    let (before, mut receipts) = load(root)?;
-    let candidates = inputs(root, dirs, pages, &receipts)?;
+    read.check().map_err(GraphError::from)?;
+    let (before, mut receipts) = load_controlled(root, read)?;
+    let candidates = inputs_controlled(root, dirs, pages, &receipts, read)?;
     let (work, _) = pending(candidates.clone(), &receipts);
     receipts.pending = work.into_iter().map(|candidate| candidate.path).collect();
     let candidates: BTreeMap<_, _> = candidates
@@ -1928,7 +2292,8 @@ pub fn record_with_guard(
             Ok(candidate)
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let complete = measure_inputs(root, selected.iter().copied(), max_input_bytes)?;
+    let complete =
+        measure_inputs_controlled(root, selected.iter().copied(), max_input_bytes, read)?;
     let mut plan = MutationPlan::default();
     let mut whole_inputs = Vec::new();
     let mut recorded = BTreeSet::new();
@@ -1978,7 +2343,7 @@ pub fn record_with_guard(
         if guard(&assessment, &mut plan)? == AuditReadCoverage::WholeInput {
             whole_inputs.push(candidate);
         }
-        guard_candidate(&mut plan, root, candidate)?;
+        guard_candidate_controlled(&mut plan, root, candidate, read)?;
         receipts.next_class = if receipts.entries.contains_key(&assessment.path) {
             AuditClass::Unreviewed
         } else {
@@ -1989,7 +2354,7 @@ pub fn record_with_guard(
     if whole_inputs.len() == selected.len() {
         complete.ensure_ready()?;
     } else {
-        measure_inputs(root, whole_inputs, max_input_bytes)?.ensure_ready()?;
+        measure_inputs_controlled(root, whole_inputs, max_input_bytes, read)?.ensure_ready()?;
     }
     receipts
         .entries
@@ -2001,6 +2366,7 @@ pub fn record_with_guard(
     let after = serde_json::to_string_pretty(&receipts).map_err(error)? + "\n";
     plan.publish_expected(root, STATE, before, after)
         .map_err(error)?;
+    read.check().map_err(GraphError::from)?;
     session.apply(plan).map_err(error)?;
     Ok(recorded.into_iter().collect())
 }
@@ -2139,6 +2505,122 @@ mod tests {
             serde_json::to_vec(&expected).unwrap(),
             serde_json::to_vec(&actual).unwrap()
         );
+        let read = lk_vault::ReadControl::default();
+        let mut inventory = lk_vault::ReviewInventory::load_controlled(root, dirs, &read).unwrap();
+        let actual =
+            review_dependencies_with_inventory(root, &pages, &mut inventory, &read).unwrap();
+        assert_eq!(
+            serde_json::to_vec(&expected).unwrap(),
+            serde_json::to_vec(&actual).unwrap()
+        );
+        for (path, page) in pages {
+            let actual = review_dependencies_with_inventory(
+                root,
+                &BTreeMap::from([(path.clone(), page)]),
+                &mut inventory,
+                &read,
+            )
+            .unwrap();
+            assert_eq!(
+                serde_json::to_vec(&expected[&path]).unwrap(),
+                serde_json::to_vec(&actual[&path]).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn controlled_audit_cancellation_discards_admission_and_cached_review_reads() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let path = "wiki/documents/a.md";
+        let body = "---\ntype: document\n---\nA claim.\n";
+        write(root.path(), path, body);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let read = lk_vault::ReadControl::new(cancelled.clone());
+        let pages = scan(root.path());
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let result = admit_available_partitioned_controlled(
+            &session,
+            &dirs,
+            &pages,
+            1,
+            u64::MAX,
+            &mut |_| {
+                cancelled.store(true, Ordering::Relaxed);
+                Ok(true)
+            },
+            &mut |_| panic!("cancelled readiness cannot admit work"),
+            |_, _| panic!("cancelled admission cannot publish"),
+            &read,
+        );
+        assert!(matches!(result, Err(GraphError::Cancelled)));
+        assert!(!root.path().join(STATE).exists());
+        assert!(matches!(
+            load_selected_inputs_controlled(root.path(), &dirs, &pages, &[], &read),
+            Err(GraphError::Cancelled)
+        ));
+        assert!(matches!(
+            crate::scan::scan_vault_controlled(root.path(), false, &read),
+            Err(GraphError::Cancelled)
+        ));
+        cancelled.store(false, Ordering::Relaxed);
+        let mut inventory =
+            lk_vault::ReviewInventory::load_controlled(root.path(), &dirs, &read).unwrap();
+        let subjects = BTreeMap::from([(path.into(), lk_vault::parse_page(body).unwrap())]);
+        assert!(
+            review_dependencies_with_inventory(root.path(), &subjects, &mut inventory, &read)
+                .unwrap()[path]
+                .is_empty()
+        );
+        cancelled.store(true, Ordering::Relaxed);
+        assert!(matches!(
+            review_dependencies_with_inventory(root.path(), &subjects, &mut inventory, &read),
+            Err(GraphError::Cancelled)
+        ));
+        assert!(matches!(
+            GraphError::Cancelled.into_vault_error(),
+            lk_vault::VaultError::Cancelled
+        ));
+        cancelled.store(false, Ordering::Relaxed);
+        let foreign = tempfile::tempdir().unwrap();
+        assert!(
+            review_dependencies_with_inventory(
+                foreign.path(),
+                &BTreeMap::new(),
+                &mut inventory,
+                &read
+            )
+            .is_err()
+        );
+        let selected = plan(root.path(), &dirs, &pages, 1, u64::MAX).unwrap();
+        record(
+            &session,
+            &dirs,
+            &pages,
+            AuditResults {
+                assessments: vec![assessment(&selected.candidates[0])],
+            },
+            u64::MAX,
+        )
+        .unwrap();
+        let verification = verify_batch_with_guard_controlled(
+            root.path(),
+            &dirs,
+            &pages,
+            &selected.candidates,
+            &lk_core::execution::WorkflowId::from_bytes([7; 16]),
+            u64::MAX,
+            |_, _| {
+                cancelled.store(true, Ordering::Relaxed);
+                Ok(AuditReadCoverage::WholeInput)
+            },
+            &read,
+        );
+        assert!(matches!(verification, Err(GraphError::Cancelled)));
     }
 
     #[test]
@@ -2466,13 +2948,17 @@ mod tests {
         assert_eq!(ready.candidates[0].path, z);
 
         let mut checked = Vec::new();
+        let mut readiness_checked = Vec::new();
         let admitted = admit_available_partitioned(
             &session,
             &dirs,
             &scan(root.path()),
             1,
             u64::MAX,
-            &mut |_| Ok(true),
+            &mut |candidate| {
+                readiness_checked.push(candidate.path.clone());
+                Ok(true)
+            },
             &mut |candidate| {
                 checked.push(candidate.path.clone());
                 Ok(candidate.path != z)
@@ -2482,6 +2968,7 @@ mod tests {
         .unwrap();
         assert_eq!(admitted.candidates[0].path, zero);
         assert_eq!(checked, [z, zero]);
+        assert_eq!(readiness_checked, [z, zero]);
         let (before, receipts) = load(root.path()).unwrap();
         assert_eq!(receipts.pending, [z, zero, a]);
         assert!(receipts.entries.is_empty());

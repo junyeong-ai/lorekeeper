@@ -79,6 +79,8 @@ and CLI discovery, not a second graph authority.
   Native admission can defer unavailable subjects through a readiness callback;
   preserve complete coverage counts and pending order, and do not consume a class
   turn or create a receipt merely because a subject is deferred.
+  Evaluate admission readiness only along the fair pending prefix needed to fill
+  the batch. Read-only availability plans retain their complete checked scope.
   Whole-input library planning defers individually oversized inputs without consuming
   a class turn, allowing later fitting work. Partitioned CLI/native planning admits
   them fairly and preserves the measured oversized status. Recording/completion then
@@ -95,6 +97,9 @@ and CLI discovery, not a second graph authority.
   an identical archive or bookkeeping-only change does not reopen semantic work.
   Resolve review subject aliases through the shared verified page owner; retain authored
   addresses and keep hard-link entries distinct from symlink aliases.
+  A fresh review inventory may be borrowed within one capture; evaluate only scoped
+  reviews and retain fresh byte guards. Controlled reads propagate cancellation,
+  including cached lookups, instead of classifying it as invalid or missing input.
 - Audit completion follows native merge receipts from the same workflow to a currently
   assessed survivor. Merge receipts join the page mutation journal and retain only
   the latest merging workflow. A correlation ID never authorizes a lease bypass.

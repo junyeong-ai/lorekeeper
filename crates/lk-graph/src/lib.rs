@@ -21,6 +21,8 @@ use std::path::PathBuf;
 
 #[derive(Debug, thiserror::Error)]
 pub enum GraphError {
+    #[error("graph input read cancelled")]
+    Cancelled,
     #[error(transparent)]
     CaptureChanged(#[from] Box<lk_vault::CitationCaptureError>),
     #[error("failed to read page {path}: {error}")]
@@ -51,8 +53,18 @@ pub enum GraphError {
 impl GraphError {
     pub fn into_vault_error(self) -> lk_vault::VaultError {
         match self {
+            Self::Cancelled => lk_vault::VaultError::Cancelled,
             Self::CaptureChanged(change) => lk_vault::VaultError::CitationCapture(change),
             other => std::io::Error::other(other).into(),
+        }
+    }
+}
+
+impl From<lk_vault::VaultError> for GraphError {
+    fn from(error: lk_vault::VaultError) -> Self {
+        match error {
+            lk_vault::VaultError::Cancelled => Self::Cancelled,
+            other => Self::Io(other.to_string()),
         }
     }
 }

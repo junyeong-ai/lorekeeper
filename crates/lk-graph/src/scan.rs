@@ -116,6 +116,23 @@ pub(crate) fn scan_vault_with_revisions(
     root: &Path,
     follow_links: bool,
 ) -> Result<ScannedVault, GraphError> {
+    scan_vault_with_revisions_controlled(root, follow_links, &lk_vault::ReadControl::default())
+}
+
+pub fn scan_vault_controlled(
+    root: &Path,
+    follow_links: bool,
+    read: &lk_vault::ReadControl,
+) -> Result<Vec<ScannedPage>, GraphError> {
+    Ok(scan_vault_with_revisions_controlled(root, follow_links, read)?.pages)
+}
+
+fn scan_vault_with_revisions_controlled(
+    root: &Path,
+    follow_links: bool,
+    read: &lk_vault::ReadControl,
+) -> Result<ScannedVault, GraphError> {
+    read.check().map_err(GraphError::from)?;
     if !root.exists() {
         return Err(GraphError::ScanDirNotFound(root.to_path_buf()));
     }
@@ -136,6 +153,7 @@ pub(crate) fn scan_vault_with_revisions(
 
     let mut file_paths: Vec<PathBuf> = Vec::new();
     for entry in walker {
+        read.check().map_err(GraphError::from)?;
         let entry = match entry {
             Ok(e) => e,
             Err(e) => return Err(GraphError::Io(format!("incomplete vault traversal: {e}"))),
@@ -170,13 +188,15 @@ pub(crate) fn scan_vault_with_revisions(
     let captured: Vec<_> = file_paths
         .par_iter()
         .map(|path| {
+            read.check().map_err(GraphError::from)?;
             let rel = path.strip_prefix(root).unwrap_or(path);
-            let (page, revision) = match std::fs::read_to_string(path) {
+            let (page, revision) = match read.read_to_string(path) {
                 Ok(raw) => (
                     parse_content(path, root, &raw),
                     Some(lk_core::concept::file_revision(&raw)),
                 ),
-                Err(error) => (
+                Err(lk_vault::VaultError::Cancelled) => return Err(GraphError::Cancelled),
+                Err(lk_vault::VaultError::Io(error)) => (
                     ScannedPage {
                         read_error: Some(PageReadError {
                             kind: error.kind(),
@@ -196,12 +216,14 @@ pub(crate) fn scan_vault_with_revisions(
                     },
                     None,
                 ),
+                Err(error) => return Err(GraphError::from(error)),
             };
-            (page, (rel.to_path_buf(), revision))
+            Ok((page, (rel.to_path_buf(), revision)))
         })
-        .collect();
+        .collect::<Result<_, GraphError>>()?;
     let (mut pages, revisions): (Vec<_>, Vec<_>) = captured.into_iter().unzip();
     pages.sort_by(|a, b| a.id.cmp(&b.id));
+    read.check().map_err(GraphError::from)?;
     Ok(ScannedVault {
         pages,
         file_revisions: revisions.into_iter().collect(),
