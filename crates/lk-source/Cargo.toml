@@ -40,6 +40,7 @@ emojis = "0.9"
 tempfile = { workspace = true }
 
 [dev-dependencies]
+flate2 = { workspace = true }
 # Named zones come from the SYSTEM tzdb on Unix (`jiff-tzdb-platform` activates only on
 # Windows/wasm), so tests that assert zone arithmetic fail on an image without `tzdata`.
 # Bundled here rather than skipped, because the arithmetic is what those tests are for —

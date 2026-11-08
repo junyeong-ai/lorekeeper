@@ -609,6 +609,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn gzip_feed_decoding_preserves_integrity_and_the_decoded_response_limit() {
+        use std::io::Write;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let feed = "<feed xmlns=\"http://www.w3.org/2005/Atom\"><entry><title>Compressed evidence</title><id>a</id><updated>2026-05-23T00:00:00Z</updated></entry></feed>";
+        let source = RssSource::new(loopback_client());
+        for mode in ["valid", "corrupt", "exact", "overflow"] {
+            let mut body = feed.as_bytes().to_vec();
+            if matches!(mode, "exact" | "overflow") {
+                body.resize(MAX_FEED_BYTES + usize::from(mode == "overflow"), b' ');
+            }
+            let mut encoder =
+                flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+            encoder.write_all(&body).unwrap();
+            let mut compressed = encoder.finish().unwrap();
+            if mode == "corrupt" {
+                *compressed.last_mut().unwrap() ^= 0xff;
+            }
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    let mut byte = [0];
+                    assert_eq!(stream.read(&mut byte).await.unwrap(), 1);
+                    request.push(byte[0]);
+                }
+                assert!(
+                    String::from_utf8(request)
+                        .unwrap()
+                        .contains("accept-encoding: gzip")
+                );
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/atom+xml\r\nContent-Encoding: gzip\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    compressed.len()
+                );
+                stream.write_all(header.as_bytes()).await.unwrap();
+                stream.write_all(&compressed).await.unwrap();
+                stream.shutdown().await.unwrap();
+            });
+            let result = source.fetch_feed(&format!("http://{address}/feed")).await;
+            server.await.unwrap();
+            match mode {
+                "valid" | "exact" => {
+                    let (feed, _) = result.unwrap();
+                    assert_eq!(feed.entries.len(), 1);
+                    assert_eq!(
+                        feed.entries[0].title.as_ref().unwrap().content,
+                        "Compressed evidence"
+                    );
+                }
+                "corrupt" => assert!(matches!(result, Err(SourceError::Http(_)))),
+                "overflow" => assert!(matches!(
+                    result,
+                    Err(SourceError::ResponseTooLarge {
+                        max_bytes: MAX_FEED_BYTES
+                    })
+                )),
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn a_source_whose_every_feed_is_unreachable_fails_rather_than_reporting_nothing() {
         // Connection-refused on the discard port: no network egress, no timeout wait.
         let params = serde_json::json!({

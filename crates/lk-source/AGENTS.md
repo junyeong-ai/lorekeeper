@@ -118,7 +118,8 @@ uses validated params and context; do not add per-adapter output pipelines.
   then feed ID. Full-text fallback keeps the summary if extraction is absent/shorter.
   Frame feed/entry identity through `RssEntryIdentity`, retaining both parts in
   metadata; delimiter concatenation cannot distinguish arbitrary feed IDs and GUIDs.
-  Feed HTTP bodies are bounded at 16 MiB before parsing, including chunked responses;
+  Feed HTTP bodies are bounded at 16 MiB after HTTP decompression and before parsing,
+  including chunked responses;
   overflow refuses that feed rather than publishing a parseable truncated prefix.
   Preserve inherited XML base separately for content and summary, rooted at the final
   response URI. Decode strictly from the XML declaration/BOM before inspecting scopes;

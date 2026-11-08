@@ -29,7 +29,7 @@ lk-task = { path = "crates/lk-task" }
 tokio = { version = "1", features = ["full"] }
 signal-hook = { version = "0.4.5", default-features = false }
 async-trait = "0.1"
-reqwest = { version = "0.13", features = ["json", "query", "form"] }
+reqwest = { version = "0.13", features = ["json", "query", "form", "gzip"] }
 # Both already in the tree through reqwest; named here because this workspace decodes a
 # fetched page itself rather than through `Response::text`, which cannot be size-capped —
 # `mime` reads the charset the response declares and `encoding_rs` applies it.
