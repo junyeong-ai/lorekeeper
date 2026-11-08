@@ -23,6 +23,13 @@ What is left is what needs a reader:
    field cannot prove that extraction read committed rather than dirty content.
    Without that proof, report freshness as unmeasured and read the source whole.
 
+   Run `lore extract verify --project <project-name> --json` for explicit retained
+   input bindings. Use its entry states to select work: reuse current inputs after
+   checking the declared dependency closure, reread changed inputs, and investigate
+   invalid bindings before replacing provenance. Legacy unmeasured entries require
+   source review, not automatic retagging. Instruction imports and applicable
+   `AGENTS.md`/rules belong in that closure even when a `CLAUDE.md` shim is unchanged.
+
    For a verified baseline, compare each current source and retained evidence
    dependency byte-for-byte with its captured input; check existence and file kind
    too. Use exact source paths, never glob expansion. Deleted or changed input is
@@ -45,3 +52,9 @@ What is left is what needs a reader:
 A project the status command reports as moved is re-scanned (`/lore-extract scan`)
 before it is re-run: the manifest is what `run` reads, so running against a stale
 one harvests the source list as it was.
+
+For moved or deleted paths, use retained captures and exact Git history to distinguish
+renames, retirement and missing evidence. Inventory absence does not authorize
+deleting vault knowledge. Preserve established addresses, creation dates and user
+overrides. Pages owned by configured source ingestion retain that publication owner;
+an extraction manifest does not authorize replacing them as directly authored pages.

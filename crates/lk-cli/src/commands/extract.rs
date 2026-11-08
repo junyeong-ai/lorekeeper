@@ -36,12 +36,23 @@ use serde::Deserialize;
 
 use super::{find_config, load_config};
 
+mod verify;
+
 #[derive(clap::Subcommand)]
 pub enum ExtractCommand {
     /// What each project's extraction manifest declares, and how far its repository has moved
     /// since
     Status {
         /// Emit the report as JSON — the contract a skill reads
+        #[arg(long)]
+        json: bool,
+    },
+    /// Verify retained extraction inputs against their recorded commit and current files
+    Verify {
+        /// Check one manifest directory name instead of every project
+        #[arg(long)]
+        project: Option<String>,
+        /// Emit input verification states as JSON
         #[arg(long)]
         json: bool,
     },
@@ -88,6 +99,17 @@ struct Extracted {
     /// `null` records a deliberate skip, which is coverage rather than a gap.
     #[serde(default)]
     vault_page: Option<String>,
+    #[serde(default)]
+    extracted_at_commit: Option<String>,
+    #[serde(default)]
+    inputs: Vec<RetainedInput>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RetainedInput {
+    path: String,
+    capture: String,
 }
 
 #[derive(Deserialize)]
@@ -238,7 +260,10 @@ impl ProjectState {
 }
 
 pub async fn run(opts: &super::GlobalOptions, cmd: ExtractCommand) -> miette::Result<()> {
-    let ExtractCommand::Status { json } = cmd;
+    let json = match cmd {
+        ExtractCommand::Status { json } => json,
+        ExtractCommand::Verify { project, json } => return verify::run(opts, project, json),
+    };
     let config = load_config(&find_config(opts)?)?;
     let today = jiff::Zoned::now()
         .with_time_zone(config.vault.timezone())

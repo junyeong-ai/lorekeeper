@@ -1,0 +1,16 @@
+---
+source: crates/lk-cli/tests/behaviour.rs
+assertion_line: 662
+expression: "observe(staged.path(), argv)"
+---
+exit: 0
+--- stdout ---
+{
+  "changed": 0,
+  "current": 0,
+  "invalid": 0,
+  "projects": [],
+  "scope": "declared-extraction-inputs",
+  "unmeasured": 0
+}
+--- stderr ---

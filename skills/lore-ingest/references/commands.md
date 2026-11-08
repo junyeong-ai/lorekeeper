@@ -36,6 +36,8 @@
 | `lore wiki context <path> --snapshot ID [--limit N] [--offset N]` | Browse captured links, evidence, declared source relations and scoped reviews together; each group retains its authority, total and pagination |
 | `lore status [--json]` | One row per subsystem — installation, task board, source currency, extraction, the LLM queue, page contracts, the link graph and knowledge reviews — each naming the command that owns it. Reports without gating; the per-source timestamps are `lore health` |
 | `lore health [--strict]` | Warn if any source is overdue vs `ingest.schedule` (2 missed fires; 48h fallback). `--strict` also fails when a source has NEVER ingested, which a first install has and a broken one looks identical to |
+| `lore extract status [--json]` | Compare discovery scans with declared repository paths; this does not verify extracted page inputs |
+| `lore extract verify [--project NAME] [--json]` | Verify explicit retained extraction inputs against their recorded commit and current bytes, without publishing or invoking agents |
 | `lore performance` | Performance category distribution |
 | `lore doctor` | Audit materialized pages against the contracts they must satisfy — text cleanliness, a section whose input was recorded and never answered, and credentials in issuer-published forms. Non-zero on a defect or an unreadable page; a credential is REPORTED and does not gate, because its repair is at the issuer and editing the page would not undo the leak |
 | `lore schedule --format launchd --bin <abs>` | Print native scheduled-task definitions; review and register them explicitly |

@@ -41,6 +41,9 @@ extracted:               # per-document tracking (written by run)
     domain: cloud-platform
     extracted_at: <ISO-date>
     extracted_at_commit: <commit-sha> # verified input commit; otherwise null (see below)
+    inputs:
+      - path: "docs/adr/some-adr.md" # exact repository-relative source or evidence dependency
+        capture: ".lorekeeper/source-snapshots/proj/<revision>/docs/adr/some-adr.md" # vault-relative retained bytes
     transferability: T1
   - source: "README.md"     # a T4 skip is recorded too, so audit coverage is complete
     vault_page: null
@@ -69,6 +72,19 @@ symlink inputs, may still be extracted. Set their entry's commit to null and exp
 the unmeasured baseline in `coverage_note`; retain exact source bytes and digests
 as usual. A commit field without matching retained-input proof is not a usable
 freshness baseline.
+
+Record an `inputs` binding for every source and repository evidence dependency
+actually read, including imported instructions. Each `path` is unique and exact;
+`capture` names its retained regular file inside the vault. Existing entries without
+these bindings remain unmeasured until their actual input closure can be established.
+Do not infer a commit from a capture directory name or substitute a current checkout.
+
+`lore extract verify --project <project-name> --json` verifies these declared bindings
+read-only. It hashes opened bytes as Git blobs with filters disabled, requires exact
+regular-file entries at the full recorded commit, then compares current input bytes.
+`current` covers only those declared inputs; it does not certify prose quality or
+discover omitted dependencies. `changed`, `unmeasured` and `invalid` return nonzero.
+The command never advances a baseline, rewrites a page or invokes an agent.
 
 ## Source retention
 

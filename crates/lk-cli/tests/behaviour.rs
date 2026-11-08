@@ -76,6 +76,7 @@ const SWEEP: &[&[&str]] = &[
     // starts it. A fixture cannot carry the other case — the verdict is a git range against a
     // real repository, and a recorded HEAD is not reproducible from a checked-in tree.
     &["extract", "status"],
+    &["extract", "verify", "--json"],
     &["queue", "status"],
     &["queue", "check"],
     &["queue", "count"],

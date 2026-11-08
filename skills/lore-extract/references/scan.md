@@ -68,8 +68,15 @@ tracks selected knowledge-source populations, not every repository change.
 
 ## Source claims
 
-Read ADRs, learnings, guides, README, CLAUDE.md, rules and module documentation.
+Read ADRs, learnings, guides, README, AGENTS.md, CLAUDE.md, applicable rules and module documentation.
 Compare claims to the implementation evidence above.
+
+Follow imports of selected instruction files and retain the repository files actually
+used as evidence. For example, a `CLAUDE.md` containing `@AGENTS.md` depends on
+`AGENTS.md`; an unchanged shim cannot establish unchanged knowledge. Include those
+owners in discovery when they are knowledge sources, and in the extracted entry's
+`inputs` whenever their content informs the result. Report unresolved or external
+dependencies explicitly rather than claiming a complete repository baseline.
 
 - Search locates candidates; read surviving hits. Use declared boundaries to separate
   shipped/test code and direct/transitive dependencies. A count is not a verdict.

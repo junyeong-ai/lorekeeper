@@ -103,7 +103,10 @@ Extract knowledge using the manifest. Requires a prior scan.
 
    i. **Update manifest** `extracted` list with the new entry. Follow the manifest's
       extraction-baseline contract before recording `extracted_at_commit`; the
-      current HEAD alone does not identify dirty working-tree input.
+      current HEAD alone does not identify dirty working-tree input. Record the
+      exact retained `inputs` bindings and run `lore extract verify --project <project-name> --json`.
+      Resolve invalid bindings before claiming a verified baseline; dirty or
+      otherwise unmeasured inputs retain a null commit and their stated limitation.
 
 6. Persist updated manifest.
 7. **Finalize** — reconcile the graph so machine-owned fields are
