@@ -52,3 +52,10 @@
 default to refusing busy writer access. Add `--wait-for-vault` to wait explicitly;
 changed configuration or cancellation stops before publication. Supported dry runs
 remain read-only and do not wait or recover journals.
+
+`health --json` keeps `last` as the last successful collection, including an empty
+one. `latest_attempt` separately reports its timestamp, status, event count and
+typed `observation` (`observed`, `partial`, `unverified`, or null when unavailable).
+Partial reach never refreshes `last`; retained events do not prove complete collection.
+Legacy counts and error text cannot establish an observation outcome. Maintenance
+preserves each source's latest attempt and collection regardless of retention age.

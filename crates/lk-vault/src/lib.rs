@@ -74,7 +74,7 @@ pub use self::knowledge::{
     curate, preview_curation,
 };
 pub use self::links::{LinkDetail, LinkDetails, LinkOptions, inspect_links};
-pub use self::log::{IngestLog, LogEntry, LogStatus};
+pub use self::log::{IngestLog, LogEntry, LogStatus, SourceIngestState};
 pub use self::manual_original::{
     OriginalOptions, OriginalView, inspect_original, is_manual_original,
     load_manual_original_manifest, publish_manual_original,

@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{collections::BTreeMap, path::PathBuf};
 
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
@@ -14,6 +14,8 @@ pub struct LogEntry {
     pub timestamp: jiff::Timestamp,
     pub source_id: String,
     pub status: LogStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation: Option<lk_core::event::ObservationOutcome>,
     pub event_count: usize,
     pub duration_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -26,6 +28,12 @@ pub enum LogStatus {
     Success,
     Failed,
     Skipped,
+}
+
+#[derive(Default)]
+pub struct SourceIngestState {
+    pub latest_attempt: Option<LogEntry>,
+    pub last_collection: Option<LogEntry>,
 }
 
 impl LogStatus {
@@ -87,26 +95,40 @@ impl IngestLog {
         &self,
         source_id: &str,
     ) -> Result<Option<LogEntry>, VaultError> {
+        Ok(self
+            .load_source_states()
+            .await?
+            .remove(source_id)
+            .and_then(|state| state.last_collection))
+    }
+
+    pub async fn load_source_states(
+        &self,
+    ) -> Result<BTreeMap<String, SourceIngestState>, VaultError> {
         let content = match tokio::fs::read_to_string(&self.path).await {
             Ok(c) => c,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
             Err(e) => return Err(e.into()),
         };
 
-        for line in content.lines().rev() {
+        let mut states = BTreeMap::<String, SourceIngestState>::new();
+        for line in content.lines() {
             if line.trim().is_empty() {
                 continue;
             }
             match serde_json::from_str::<LogEntry>(line) {
-                Ok(e) if e.source_id == source_id && e.status.is_collected() => {
-                    return Ok(Some(e));
+                Ok(entry) => {
+                    let state = states.entry(entry.source_id.clone()).or_default();
+                    if entry.status.is_collected() {
+                        state.last_collection = Some(entry.clone());
+                    }
+                    state.latest_attempt = Some(entry);
                 }
-                Ok(_) => {}
                 // A corrupt line is observable, not silently treated as "no history".
                 Err(e) => tracing::warn!(error = %e, "skipping malformed ingest-log line"),
             }
         }
-        Ok(None)
+        Ok(states)
     }
 }
 
@@ -119,6 +141,7 @@ mod tests {
             timestamp: jiff::Timestamp::from_second(secs).unwrap(),
             source_id: source_id.into(),
             status,
+            observation: None,
             event_count: 0,
             duration_ms: 1,
             error: None,
@@ -163,6 +186,39 @@ mod tests {
         .await;
         let found = log.find_last_collection("jira").await.unwrap().unwrap();
         assert_eq!(found.timestamp.as_second(), 1_000);
+    }
+
+    #[tokio::test]
+    async fn latest_attempt_keeps_typed_partial_reach_separate_from_publication_and_legacy() {
+        use lk_core::event::ObservationOutcome;
+
+        let mut partial = entry("jira", LogStatus::Failed, 2_000);
+        partial.observation = Some(ObservationOutcome::Partial);
+        partial.event_count = 2;
+        let mut legacy = entry("legacy", LogStatus::Failed, 3_000);
+        legacy.event_count = 42;
+        legacy.error = Some("partial observation".into());
+        let (_dir, log) =
+            log_with(&[entry("jira", LogStatus::Success, 1_000), partial, legacy]).await;
+        let states = log.load_source_states().await.unwrap();
+        let jira = &states["jira"];
+        assert_eq!(
+            jira.last_collection.as_ref().unwrap().timestamp.as_second(),
+            1_000
+        );
+        let latest = jira.latest_attempt.as_ref().unwrap();
+        assert_eq!(latest.observation, Some(ObservationOutcome::Partial));
+        assert_eq!(latest.event_count, 2);
+        assert_eq!(latest.status, LogStatus::Failed);
+        assert!(states["legacy"].last_collection.is_none());
+        assert!(
+            states["legacy"]
+                .latest_attempt
+                .as_ref()
+                .unwrap()
+                .observation
+                .is_none()
+        );
     }
 
     #[tokio::test]

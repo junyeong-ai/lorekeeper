@@ -289,13 +289,7 @@ pub enum ObservationScope {
     Unverified,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum ObservationOutcome {
-    Observed,
-    Partial,
-    Unverified,
-}
+pub use lk_core::event::ObservationOutcome;
 
 /// Nonsecret provider namespace and account/resource key observed for collection.
 /// This is query-coverage identity, separate from an individual document's identity.

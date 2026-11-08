@@ -24,6 +24,7 @@ pub(crate) struct SourceFreshness {
     /// `None` for a source that has never been collected — which a first install has, and a
     /// permanently broken one is indistinguishable from without `--strict`.
     pub last: Option<jiff::Timestamp>,
+    pub latest_attempt: Option<lk_vault::LogEntry>,
     pub stale: bool,
 }
 
@@ -74,18 +75,20 @@ pub(crate) async fn freshness(
         }
     };
 
+    let mut states = log
+        .load_source_states()
+        .await
+        .map_err(|e| miette::miette!("read ingest log: {e}"))?;
     let mut sources = Vec::new();
     for (id, sc) in config.enabled_sources() {
-        let last = log
-            .find_last_collection(id)
-            .await
-            .map_err(|e| miette::miette!("read ingest log: {e}"))?
-            .map(|entry| entry.timestamp);
+        let state = states.remove(id).unwrap_or_default();
+        let last = state.last_collection.map(|entry| entry.timestamp);
         sources.push(SourceFreshness {
             id: id.to_string(),
             source_type: sc.source_type,
             stale: last.is_some_and(is_stale),
             last,
+            latest_attempt: state.latest_attempt,
         });
     }
     Ok(Freshness { sources })
@@ -118,6 +121,13 @@ impl Freshness {
                 "last": source.last.map(|at| at.to_string()),
                 "hours_ago": source.hours_ago(now),
                 "stale": source.stale,
+                "latest_attempt": source.latest_attempt.as_ref().map(|entry| serde_json::json!({
+                    "timestamp": entry.timestamp.to_string(),
+                    "hours_ago": (now.as_second() - entry.timestamp.as_second()) / 3600,
+                    "status": entry.status,
+                    "observation": entry.observation,
+                    "event_count": entry.event_count,
+                })),
             })).collect::<Vec<_>>(),
         })
     }
@@ -147,6 +157,23 @@ pub async fn run(opts: &super::GlobalOptions, strict: bool, json: bool) -> miett
             }
             Some(hours) => eprintln!("✓ {} ({}) — {hours}h ago", source.id, source.source_type),
             None => eprintln!("✗ {} ({}) — never ingested", source.id, source.source_type),
+        }
+        if let Some(attempt) = &source.latest_attempt {
+            let observation = match attempt.observation {
+                Some(lk_core::event::ObservationOutcome::Observed) => "observed",
+                Some(lk_core::event::ObservationOutcome::Partial) => "partial",
+                Some(lk_core::event::ObservationOutcome::Unverified) => "unverified",
+                None => "unknown",
+            };
+            let status = match attempt.status {
+                lk_vault::LogStatus::Success => "success",
+                lk_vault::LogStatus::Failed => "failed",
+                lk_vault::LogStatus::Skipped => "skipped",
+            };
+            eprintln!(
+                "  latest attempt: {} · {status} · observation {observation} · {} event(s)",
+                attempt.timestamp, attempt.event_count
+            );
         }
     }
 

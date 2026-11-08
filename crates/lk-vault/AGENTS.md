@@ -75,6 +75,8 @@ canonical; SQLite navigation is derived.
 - `IngestLog` propagates real I/O errors, treats NotFound as empty, warns/skips
   malformed history lines. `find_last_collection` counts successful empty/Skipped
   observations, not Failed. Retention must preserve that latest collected line.
+  Persist the adapter's typed observation separately from publication status; absent
+  legacy observations remain unknown. Preserve the latest attempt as current state too.
 
 ## Reviews and authored evidence (`review.rs`)
 

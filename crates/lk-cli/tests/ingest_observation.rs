@@ -712,6 +712,22 @@ fn partial_daily_refetch_preserves_pages_queue_and_work_observations() {
     let last: serde_json::Value = serde_json::from_str(entries.lines().last().unwrap()).unwrap();
     assert_eq!(last["status"], "failed");
     assert_eq!(last["event_count"], 0);
+    assert_eq!(last["observation"], "partial");
+    let health = run(&config, &["health", "--json"]);
+    assert_success(&health);
+    let health: serde_json::Value = serde_json::from_slice(&health.stdout).unwrap();
+    let source = health["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|source| source["id"] == "issues")
+        .unwrap();
+    let first: serde_json::Value = serde_json::from_str(entries.lines().next().unwrap()).unwrap();
+    assert_eq!(source["last"], first["timestamp"]);
+    assert_eq!(source["latest_attempt"]["timestamp"], last["timestamp"]);
+    assert_eq!(source["latest_attempt"]["status"], "failed");
+    assert_eq!(source["latest_attempt"]["observation"], "partial");
+    assert!(!source["stale"].as_bool().unwrap());
     let state: serde_json::Value = serde_json::from_slice(
         &std::fs::read(vault.join(".lorekeeper/periods/state.json")).unwrap(),
     )

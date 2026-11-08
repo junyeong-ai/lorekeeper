@@ -566,8 +566,15 @@ async fn run_with_identity(
                 eprintln!("  ✗ {id} extract: {error}");
                 had_failure = true;
                 if !dry_run {
-                    record_failure(&log, id, &started_at, &error.to_string(), &mut had_failure)
-                        .await;
+                    record_failure(
+                        &log,
+                        id,
+                        &started_at,
+                        None,
+                        &error.to_string(),
+                        &mut had_failure,
+                    )
+                    .await;
                 }
                 continue;
             }
@@ -587,7 +594,15 @@ async fn run_with_identity(
                 let error = "incomplete source observation cannot replace a daily snapshot; existing pages and task observations were preserved";
                 eprintln!("  ✗ {error}");
                 if !dry_run {
-                    record_failure(&log, id, &started_at, error, &mut had_failure).await;
+                    record_failure(
+                        &log,
+                        id,
+                        &started_at,
+                        Some(observation_outcome),
+                        error,
+                        &mut had_failure,
+                    )
+                    .await;
                 }
                 continue;
             }
@@ -625,7 +640,15 @@ async fn run_with_identity(
                 llm.rollback_source().await;
                 had_failure = true;
                 if !dry_run {
-                    record_failure(&log, id, &started_at, &e.to_string(), &mut had_failure).await;
+                    record_failure(
+                        &log,
+                        id,
+                        &started_at,
+                        Some(observation_outcome),
+                        &e.to_string(),
+                        &mut had_failure,
+                    )
+                    .await;
                 }
                 continue;
             }
@@ -697,6 +720,7 @@ async fn run_with_identity(
                         timestamp: jiff::Timestamp::now(),
                         source_id: id.clone(),
                         status,
+                        observation: Some(observation_outcome),
                         event_count: 0,
                         duration_ms: started_at.elapsed().as_millis() as u64,
                         error: error.map(str::to_owned),
@@ -1011,6 +1035,7 @@ async fn run_with_identity(
                 timestamp: jiff::Timestamp::now(),
                 source_id: p.id.clone(),
                 status,
+                observation: Some(p.observation_outcome),
                 event_count: p.result.events.len(),
                 duration_ms: p.started_at.elapsed().as_millis() as u64,
                 error: error.map(str::to_owned),
@@ -1146,6 +1171,7 @@ async fn record_failure(
     log: &lk_vault::IngestLog,
     source_id: &str,
     start: &std::time::Instant,
+    observation: Option<lk_source::ObservationOutcome>,
     error: &str,
     had_failure: &mut bool,
 ) {
@@ -1155,6 +1181,7 @@ async fn record_failure(
             timestamp: jiff::Timestamp::now(),
             source_id: source_id.into(),
             status: lk_vault::LogStatus::Failed,
+            observation,
             event_count: 0,
             duration_ms: start.elapsed().as_millis() as u64,
             error: Some(error.into()),

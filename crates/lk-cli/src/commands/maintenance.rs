@@ -12,42 +12,25 @@ fn prune_cutoff_secs(now_secs: i64, retention_days: i64) -> i64 {
         .max(0)
 }
 
-/// Line numbers retention must keep whatever their age: each source's newest COLLECTED
-/// entry, which is the exact line `IngestLog::find_last_collection` returns.
-///
-/// The ingest log is two things at once — a HISTORY of runs, and the state store `lore
-/// health` and `lore status` read. A retention horizon may prune the history; pruning the
-/// state would make health's verdict a function of how long a source has been broken.
-///
-/// It has to be the newest COLLECTED entry, not merely the newest one. A source failing
-/// daily has a recent `failed` entry and a much older success, and `find_last_collection`
-/// skips failures — so protecting the newest line protects a `failed` the reader ignores
-/// while the success it actually wants ages past the cutoff and is pruned. The source then
-/// stops reading `stale` (which exits non-zero) and starts reading "never ingested" (which
-/// does not, without `--strict`): the alarm turning itself off precisely as the problem
-/// gets older, which is the whole thing this exists to prevent. A source that has never
-/// been collected has no state to protect, and "never ingested" is then the truth.
-fn newest_collection_per_source(entries: &[(usize, lk_vault::LogEntry)]) -> HashSet<usize> {
-    let mut newest: HashMap<&str, (i64, usize)> = HashMap::new();
+/// Retain the latest attempt and latest collection in append order, matching
+/// `IngestLog::load_source_states`. A failed attempt never replaces a collection.
+fn retained_log_state(entries: &[(usize, lk_vault::LogEntry)]) -> HashSet<usize> {
+    let mut newest: HashMap<&str, (usize, Option<usize>)> = HashMap::new();
     for (line_no, entry) in entries {
-        if !entry.status.is_collected() {
-            continue;
+        let state = newest.entry(&entry.source_id).or_insert((*line_no, None));
+        state.0 = *line_no;
+        if entry.status.is_collected() {
+            state.1 = Some(*line_no);
         }
-        let seen = (entry.timestamp.as_second(), *line_no);
-        newest
-            .entry(entry.source_id.as_str())
-            .and_modify(|held| {
-                if seen > *held {
-                    *held = seen;
-                }
-            })
-            .or_insert(seen);
     }
-    newest.into_values().map(|(_, line_no)| line_no).collect()
+    newest
+        .into_values()
+        .flat_map(|(attempt, collection)| std::iter::once(attempt).chain(collection))
+        .collect()
 }
 
 /// Which lines of the ingest log this run deletes: those older than the horizon that are
-/// not some source's newest collection. Both halves must hold — an expired line that IS
+/// neither a source's latest attempt nor its latest collection. An expired line that IS
 /// state stays, which is the whole rule, and it is decided here rather than inline so the
 /// rule has one testable statement instead of only the helper that feeds it.
 ///
@@ -59,7 +42,7 @@ fn expired_log_lines(lines: &[&str], cutoff_secs: i64) -> HashSet<usize> {
         .enumerate()
         .filter_map(|(i, line)| serde_json::from_str(line).ok().map(|e| (i, e)))
         .collect();
-    let state = newest_collection_per_source(&parsed);
+    let state = retained_log_state(&parsed);
     parsed
         .iter()
         .filter(|(i, e)| e.timestamp.as_second() < cutoff_secs && !state.contains(i))
@@ -196,7 +179,7 @@ pub async fn run(
 
         eprintln!(
             "{prefix}log: pruned {} entries older than {retention_days}d \
-             (kept {} of {}, including each source's latest collection).",
+             (kept {} of {}, including each source's latest attempt and collection).",
             expired.len(),
             kept.len(),
             lines.len()
@@ -350,7 +333,7 @@ pub async fn run(
 
 #[cfg(test)]
 mod tests {
-    use super::{expired_log_lines, newest_collection_per_source, prune_cutoff_secs};
+    use super::{expired_log_lines, prune_cutoff_secs, retained_log_state};
 
     fn line(source_id: &str, secs: i64, status: lk_vault::LogStatus) -> String {
         serde_json::to_string(&entry(source_id, secs, status)).unwrap()
@@ -366,6 +349,7 @@ mod tests {
             line("jira", 100, lk_vault::LogStatus::Skipped), // ancient, but jira's state
             "{ not json".to_owned(),                         // corruption, carried verbatim
             line("jira", 200, lk_vault::LogStatus::Failed),  // ancient history
+            line("jira", 300, lk_vault::LogStatus::Failed),  // latest attempt
             line("gmail", 5_000, lk_vault::LogStatus::Skipped), // inside the horizon
         ];
         let lines: Vec<&str> = owned.iter().map(String::as_str).collect();
@@ -379,8 +363,7 @@ mod tests {
         assert_eq!(
             expired,
             vec![2],
-            "only the ancient failure is history; the ancient collection is jira's state, \
-             the recent line is inside the horizon, and the malformed line is neither"
+            "retain the last collection, latest attempt and malformed line; expire the older failure"
         );
     }
 
@@ -409,6 +392,7 @@ mod tests {
             timestamp: jiff::Timestamp::from_second(secs).unwrap(),
             source_id: source_id.into(),
             status,
+            observation: None,
             event_count: 0,
             duration_ms: 1,
             error: None,
@@ -432,7 +416,7 @@ mod tests {
             (1, collected("jira", 200)),
             (2, collected("gmail", 50)),
         ];
-        let mut state: Vec<usize> = newest_collection_per_source(&entries).into_iter().collect();
+        let mut state: Vec<usize> = retained_log_state(&entries).into_iter().collect();
         state.sort();
         assert_eq!(
             state,
@@ -441,11 +425,6 @@ mod tests {
         );
     }
 
-    /// The line to protect is the one the reader RETURNS. A source failing daily has a
-    /// recent failure and an old success; `find_last_collection` skips the failure, so
-    /// protecting the newest line would protect a line nobody reads and let the success
-    /// age out — turning `stale` (exit 1) into "never ingested" (silent) as the outage
-    /// gets older, which is exactly what this rule exists to prevent.
     #[test]
     fn a_recent_failure_never_shadows_the_older_success_a_health_check_reads() {
         let entries = vec![
@@ -453,12 +432,8 @@ mod tests {
             (1, failed("jira", 200)),
             (2, failed("jira", 300)),
         ];
-        let state = newest_collection_per_source(&entries);
-        assert_eq!(
-            state.into_iter().collect::<Vec<_>>(),
-            vec![0],
-            "the old success is the state; the recent failures are history"
-        );
+        let state = retained_log_state(&entries);
+        assert_eq!(state, [0, 2].into_iter().collect());
     }
 
     #[test]
@@ -468,7 +443,7 @@ mod tests {
             (1, collected("jira", 100)),
             (2, collected("gmail", 100)),
         ];
-        let state = newest_collection_per_source(&entries);
+        let state = retained_log_state(&entries);
         assert_eq!(state.len(), 2, "one line per source: {state:?}");
         assert!(state.contains(&2), "gmail must be represented");
         assert!(
@@ -477,12 +452,13 @@ mod tests {
         );
     }
 
-    /// A source that has never been collected has no state to protect — and then "never
-    /// ingested" is the truth, not a signal that went quiet.
     #[test]
-    fn a_source_with_only_failures_has_no_state_to_protect() {
-        assert!(newest_collection_per_source(&[(0, failed("jira", 100))]).is_empty());
-        assert!(newest_collection_per_source(&[]).is_empty());
+    fn a_source_with_only_failures_retains_its_latest_attempt() {
+        assert_eq!(
+            retained_log_state(&[(0, failed("jira", 100))]),
+            [0].into_iter().collect()
+        );
+        assert!(retained_log_state(&[]).is_empty());
     }
 
     #[test]

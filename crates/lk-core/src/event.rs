@@ -2,6 +2,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::SourceType;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ObservationOutcome {
+    Observed,
+    Partial,
+    Unverified,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Event {
     pub id: EventId,
