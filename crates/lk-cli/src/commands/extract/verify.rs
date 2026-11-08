@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use serde::Serialize;
 
@@ -32,10 +32,8 @@ struct ProjectVerification {
 }
 
 fn git(repo: &Path, args: &[&str]) -> std::io::Result<Vec<u8>> {
-    let output = Command::new("git")
+    let output = super::git_command(repo)
         .arg("--no-replace-objects")
-        .arg("-C")
-        .arg(repo)
         .args(args)
         .output()?;
     if !output.status.success() {
@@ -48,10 +46,8 @@ fn git(repo: &Path, args: &[&str]) -> std::io::Result<Vec<u8>> {
 fn input_blob(repo: &Path, root: &Path, relative: &str) -> std::io::Result<String> {
     let path = lk_vault::page_path(root, Path::new(relative))?;
     let file = lk_core::fs::open_regular_file(&path)?;
-    let output = Command::new("git")
+    let output = super::git_command(repo)
         .arg("--no-replace-objects")
-        .arg("-C")
-        .arg(repo)
         .args(["hash-object", "--no-filters", "--stdin"])
         .stdin(Stdio::from(file))
         .output()?;
@@ -427,5 +423,45 @@ mod tests {
         assert!(fixture.state() == InputState::Current);
         fixture.entry.inputs[0].capture = "../outside.md".into();
         assert!(fixture.state() == InputState::Invalid);
+    }
+
+    #[test]
+    fn missing_promised_trees_are_unmeasured_without_fetching_or_changing_git_files() {
+        fn files(root: &Path) -> BTreeMap<std::path::PathBuf, Vec<u8>> {
+            let mut result = BTreeMap::new();
+            for entry in std::fs::read_dir(root).unwrap() {
+                let entry = entry.unwrap();
+                if entry.file_type().unwrap().is_dir() {
+                    result.extend(files(&entry.path()));
+                } else {
+                    result.insert(entry.path(), std::fs::read(entry.path()).unwrap());
+                }
+            }
+            result
+        }
+        let mut fixture = Fixture::build();
+        git(&fixture.repo, &["config", "uploadpack.allowFilter", "true"]).unwrap();
+        let clone = fixture._directory.path().join("partial");
+        let remote = url::Url::from_file_path(fixture.repo.canonicalize().unwrap()).unwrap();
+        let output = std::process::Command::new("git")
+            .args(["clone", "--quiet", "--no-checkout", "--filter=tree:0"])
+            .arg(remote.as_str())
+            .arg(&clone)
+            .env("GIT_ALLOW_PROTOCOL", "file")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{:?}", output.stderr);
+        fixture.repo = clone;
+        let before = files(&fixture.repo.join(".git"));
+        assert!(fixture.state() == InputState::Unmeasured);
+        assert!(matches!(
+            super::super::repo_state(
+                &fixture.repo,
+                fixture.entry.extracted_at_commit.as_deref(),
+                &["CLAUDE.md".into()]
+            ),
+            super::super::RepoState::Unanswered(_)
+        ));
+        assert_eq!(files(&fixture.repo.join(".git")), before);
     }
 }

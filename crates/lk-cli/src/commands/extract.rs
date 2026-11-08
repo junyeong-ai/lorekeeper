@@ -528,13 +528,21 @@ fn repo_state(repo: &Path, baseline: Option<&str>, declared: &[String]) -> RepoS
     RepoState::Moved { commits, files }
 }
 
-fn git(repo: &Path, args: &[&str]) -> Option<String> {
-    let out = Command::new("git")
+/// Observe local Git state; the empty transport allowlist also protects Git
+/// versions that do not support disabling lazy fetches directly.
+fn git_command(repo: &Path) -> Command {
+    let mut command = Command::new("git");
+    command
+        .env("GIT_NO_LAZY_FETCH", "1")
+        .env("GIT_ALLOW_PROTOCOL", "")
+        .env("GIT_OPTIONAL_LOCKS", "0")
         .arg("-C")
-        .arg(repo)
-        .args(args)
-        .output()
-        .ok()?;
+        .arg(repo);
+    command
+}
+
+fn git(repo: &Path, args: &[&str]) -> Option<String> {
+    let out = git_command(repo).args(args).output().ok()?;
     out.status
         .success()
         .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
