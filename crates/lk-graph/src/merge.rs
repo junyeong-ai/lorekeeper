@@ -272,17 +272,15 @@ fn plan_merge(
     let mut into_updated = None;
     let mut rewritten = Vec::new();
     let mut entries = lk_vault::ExistingEntryResolver::new(vault_root);
+    let resolve_owner = |path: &Path| {
+        lk_vault::resolve_page_owner(vault_root, path)
+            .map_err(|error| GraphError::Io(error.to_string()))
+    };
+    let mut publication_owners =
+        std::collections::BTreeSet::from([resolve_owner(&from_rel)?, resolve_owner(&into_rel)?]);
+    let mut source_inputs = std::collections::BTreeMap::new();
     for page in pages {
         if page.path == from_rel {
-            continue;
-        }
-        let mut cites_from = false;
-        for link in &page.outgoing {
-            cites_from |= entries
-                .same_existing_entry(Path::new(&link.dest), &from_rel)
-                .map_err(|error| GraphError::Io(error.to_string()))?;
-        }
-        if !cites_from && !review_updates.contains_key(&page.path) {
             continue;
         }
         let abs = vault_root.join(&page.path);
@@ -294,6 +292,15 @@ fn plan_merge(
                 (content.clone(), content)
             }
         };
+        let owner = resolve_owner(&page.path)?;
+        if let Some(previous) = source_inputs.insert(owner.clone(), content.clone())
+            && previous != content
+        {
+            return Err(GraphError::Io(format!(
+                "merge source changed during planning: {}",
+                page.path.display()
+            )));
+        }
         let (mut updated, count) = if dry_run && lk_core::frontmatter::body_offset(&typed).is_none()
         {
             tracing::warn!(path = %page.path.display(), "unclosed frontmatter: preview counts diagnostic body links; publication requires repair");
@@ -304,7 +311,19 @@ fn plan_merge(
         } else {
             rewrite_links(&typed, &page.path, &from_rel, &into_rel, &mut entries)?
         };
-        if count > 0 && page.rss_evidence {
+        let rss_evidence = if count > 0 {
+            match lk_core::frontmatter::parse_page(&content) {
+                Ok(page) => page
+                    .frontmatter
+                    .get(lk_core::rss_evidence::CONCEPT_EVIDENCE_FIELD)
+                    .is_some(),
+                Err(_) if dry_run => false,
+                Err(error) => return Err(GraphError::Io(error.to_string())),
+            }
+        } else {
+            false
+        };
+        if rss_evidence {
             lk_vault::rss_concept_citations(vault_root, &page.path, &content)
                 .map_err(|e| GraphError::Io(e.to_string()))?;
             updated = lk_vault::repoint_rss_evidence(
@@ -321,9 +340,8 @@ fn plan_merge(
                 into_updated = Some(updated.clone());
             }
             if page.path != into_rel && updated != content {
+                publication_owners.insert(owner);
                 plan.edit(&page.path, content.clone(), updated.clone());
-            } else if page.path != into_rel {
-                plan.require_unchanged(&page.path, content.clone());
             }
         }
         if count > 0 || updated != content {
@@ -348,6 +366,14 @@ fn plan_merge(
             plan.edit(&into_rel, into_raw, updated);
         }
         plan.remove(&from_rel, from_raw);
+        let mut guarded = lk_vault::MutationPlan::default();
+        for (owner, raw) in source_inputs {
+            if !publication_owners.contains(&owner) {
+                guarded.require_unchanged(owner, raw);
+            }
+        }
+        guarded.extend(plan);
+        plan = guarded;
     }
 
     Ok((
@@ -1143,6 +1169,191 @@ mod tests {
             lk_vault::ReviewEffectiveState::Invalid
         );
         assert!(!root.join(".lorekeeper/evidence").exists());
+    }
+
+    mod current_inputs {
+        use super::*;
+
+        fn build_unciting_fixture() -> TempDir {
+            let tmp = TempDir::new().unwrap();
+            for (name, title) in [("old", "Old"), ("into", "Into")] {
+                write(
+                    tmp.path(),
+                    &format!("wiki/concepts/{name}.md"),
+                    &format!("---\ntype: concept\ntitle: {title}\n---\n## Sources\n"),
+                );
+            }
+            write(
+                tmp.path(),
+                "wiki/documents/source.md",
+                "An unciting source.\n",
+            );
+            tmp
+        }
+
+        #[test]
+        fn merge_repoints_incoming_links_added_after_scanning() {
+            let tmp = build_unciting_fixture();
+            let root = tmp.path();
+            let old = std::fs::read_to_string(root.join("wiki/concepts/old.md")).unwrap();
+            let into = std::fs::read_to_string(root.join("wiki/concepts/into.md")).unwrap();
+            let session = lk_vault::MutationSession::acquire(root).unwrap();
+            let pages = crate::scan::scan_vault(root, false).unwrap();
+            write(
+                root,
+                "wiki/documents/source.md",
+                "New [Old](../concepts/old.md#part).\n",
+            );
+            let from_revision = lk_core::concept::file_revision(&old);
+            let into_revision = lk_core::concept::file_revision(&into);
+            let request = MergeRequest {
+                from: "old",
+                into: "into",
+                revisions: Some(MergeRevisions {
+                    from: &from_revision,
+                    into: &into_revision,
+                }),
+                force: false,
+            };
+            merge_in_session(&pages, &session, "wiki", &request, None).unwrap();
+            assert!(!root.join("wiki/concepts/old.md").exists());
+            assert_eq!(
+                std::fs::read_to_string(root.join("wiki/documents/source.md")).unwrap(),
+                "New [Old](../concepts/into.md#part).\n"
+            );
+        }
+
+        #[test]
+        fn merge_guards_unciting_sources_before_deleting_an_endpoint() {
+            let tmp = build_unciting_fixture();
+            let root = tmp.path();
+            let old = std::fs::read_to_string(root.join("wiki/concepts/old.md")).unwrap();
+            let into = std::fs::read_to_string(root.join("wiki/concepts/into.md")).unwrap();
+            let session = lk_vault::MutationSession::acquire(root).unwrap();
+            let pages = crate::scan::scan_vault(root, false).unwrap();
+            let (_, plan) = plan_merge(
+                &pages,
+                root,
+                "wiki",
+                &MergeRequest {
+                    from: "old",
+                    into: "into",
+                    revisions: None,
+                    force: false,
+                },
+                false,
+            )
+            .unwrap();
+            let changed = "New [Old](../concepts/old.md).\n";
+            write(root, "wiki/documents/source.md", changed);
+            assert!(session.apply(plan).is_err());
+            assert_eq!(
+                std::fs::read_to_string(root.join("wiki/concepts/old.md")).unwrap(),
+                old
+            );
+            assert_eq!(
+                std::fs::read_to_string(root.join("wiki/concepts/into.md")).unwrap(),
+                into
+            );
+            assert_eq!(
+                std::fs::read_to_string(root.join("wiki/documents/source.md")).unwrap(),
+                changed
+            );
+        }
+
+        #[test]
+        fn merge_recovery_rechecks_unciting_sources_before_endpoint_mutation() {
+            let tmp = build_unciting_fixture();
+            let root = tmp.path();
+            let old = std::fs::read_to_string(root.join("wiki/concepts/old.md")).unwrap();
+            let into = std::fs::read_to_string(root.join("wiki/concepts/into.md")).unwrap();
+            let pages = crate::scan::scan_vault(root, false).unwrap();
+            let (_, plan) = plan_merge(
+                &pages,
+                root,
+                "wiki",
+                &MergeRequest {
+                    from: "old",
+                    into: "into",
+                    revisions: None,
+                    force: false,
+                },
+                false,
+            )
+            .unwrap();
+            write(
+                root,
+                ".lorekeeper/mutation/pending.json",
+                &serde_json::json!({"version":1,"plan":plan}).to_string(),
+            );
+            let changed = "New [Old](../concepts/old.md).\n";
+            write(root, "wiki/documents/source.md", changed);
+            assert!(lk_vault::MutationSession::acquire(root).is_err());
+            assert_eq!(
+                std::fs::read_to_string(root.join("wiki/concepts/old.md")).unwrap(),
+                old
+            );
+            assert_eq!(
+                std::fs::read_to_string(root.join("wiki/concepts/into.md")).unwrap(),
+                into
+            );
+            assert!(root.join(".lorekeeper/mutation/pending.json").exists());
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn unciting_survivor_aliases_do_not_conflict_with_owned_merge_edits() {
+            let tmp = TempDir::new().unwrap();
+            let root = tmp.path();
+            for (name, title) in [("old", "Old"), ("into", "Into")] {
+                write(
+                    root,
+                    &format!("wiki/concepts/{name}.md"),
+                    &format!("---\ntype: concept\ntitle: {title}\n---\n## Sources\n"),
+                );
+            }
+            std::os::unix::fs::symlink("concepts/into.md", root.join("wiki/into-alias.md"))
+                .unwrap();
+            let pages = crate::scan::scan_vault(root, true).unwrap();
+            assert!(
+                pages
+                    .iter()
+                    .any(|page| page.path == Path::new("wiki/into-alias.md"))
+            );
+            merge_concepts(&pages, root, "wiki", "old", "into", false, false).unwrap();
+            assert!(!root.join("wiki/concepts/old.md").exists());
+            assert_eq!(
+                std::fs::read_to_string(root.join("wiki/into-alias.md")).unwrap(),
+                std::fs::read_to_string(root.join("wiki/concepts/into.md")).unwrap()
+            );
+        }
+
+        #[test]
+        fn merge_rechecks_rss_declarations_added_after_scanning() {
+            let tmp = build_unciting_fixture();
+            let root = tmp.path();
+            let old = std::fs::read_to_string(root.join("wiki/concepts/old.md")).unwrap();
+            let into = std::fs::read_to_string(root.join("wiki/concepts/into.md")).unwrap();
+            let pages = crate::scan::scan_vault(root, false).unwrap();
+            let changed = format!(
+                "---\ntype: document\n{}: invalid\n---\n[Old](../concepts/old.md)\n",
+                lk_core::rss_evidence::CONCEPT_EVIDENCE_FIELD
+            );
+            write(root, "wiki/documents/source.md", &changed);
+            assert!(merge_concepts(&pages, root, "wiki", "old", "into", false, false).is_err());
+            assert_eq!(
+                std::fs::read_to_string(root.join("wiki/concepts/old.md")).unwrap(),
+                old
+            );
+            assert_eq!(
+                std::fs::read_to_string(root.join("wiki/concepts/into.md")).unwrap(),
+                into
+            );
+            assert_eq!(
+                std::fs::read_to_string(root.join("wiki/documents/source.md")).unwrap(),
+                changed
+            );
+        }
     }
 
     #[test]
