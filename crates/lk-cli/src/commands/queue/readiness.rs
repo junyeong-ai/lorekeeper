@@ -1,11 +1,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+use miette::IntoDiagnostic;
 use strum::IntoEnumIterator;
 
-use super::{QueueTask, TaskStatus, classify_task, read_pending_tasks, resolve_target_path};
+use super::{QueueTask, TaskStatus, read_pending_tasks_controlled, resolve_target_path};
 
 pub(crate) struct InputReadiness {
+    read: lk_vault::ReadControl,
     tasks: BTreeMap<PathBuf, Vec<QueueTask>>,
     staged: BTreeSet<(String, String)>,
     pages: BTreeMap<PathBuf, ApprovedPage>,
@@ -78,16 +80,25 @@ pub(crate) fn unfinished_inputs(
 }
 
 impl InputReadiness {
+    #[cfg(test)]
     pub fn load(root: &Path) -> miette::Result<Self> {
-        let pending = read_pending_tasks(&root.join(".lorekeeper/queue"))?;
+        Self::load_controlled(root, &lk_vault::ReadControl::default())
+    }
+
+    pub fn load_controlled(root: &Path, read: &lk_vault::ReadControl) -> miette::Result<Self> {
+        read.check().into_diagnostic()?;
+        let pending = read_pending_tasks_controlled(&root.join(".lorekeeper/queue"), read);
+        read.check().into_diagnostic()?;
+        let pending = pending?;
         if pending.unparseable != 0 {
             return Err(miette::miette!(
                 "unparseable pending tasks have unknown targets; repair them before assessing knowledge"
             ));
         }
         let queue = root.join(".lorekeeper/queue");
-        let batch = lk_queue::read_results(&queue)
-            .map_err(|error| miette::miette!("semantic staged results: {error}"))?;
+        let batch = lk_queue::read_results(&queue);
+        read.check().into_diagnostic()?;
+        let batch = batch.map_err(|error| miette::miette!("semantic staged results: {error}"))?;
         if !batch.unreadable.is_empty() {
             return Err(miette::miette!(
                 "unreadable staged results have unknown targets; repair them before assessing knowledge"
@@ -95,6 +106,7 @@ impl InputReadiness {
         }
         let mut staged = BTreeSet::new();
         for (_, result) in batch.ready {
+            read.check().into_diagnostic()?;
             staged.insert((result.task_id, result.cache_hash));
         }
         let entries = match std::fs::read_dir(queue.join(lk_queue::RESULTS_SUBDIR)) {
@@ -103,18 +115,19 @@ impl InputReadiness {
             Err(error) => return Err(miette::miette!("semantic staged results: {error}")),
         };
         for entry in entries.into_iter().flatten() {
+            read.check().into_diagnostic()?;
             let path = entry.map_err(|error| miette::miette!("{error}"))?.path();
             let name = path.to_string_lossy();
             let section = name.ends_with(lk_queue::SECTION_RESULT_SUFFIX);
             if !section && !name.ends_with(lk_queue::SYNTHESIS_RESULT_SUFFIX) {
                 continue;
             }
-            let raw = std::fs::read(&path).map_err(|error| miette::miette!("{error}"))?;
+            let raw = read.read_to_string(&path).into_diagnostic()?;
             let identity = if section {
-                serde_json::from_slice::<lk_queue::SectionResult>(&raw)
+                serde_json::from_str::<lk_queue::SectionResult>(&raw)
                     .map(|result| (result.task_id, result.cache_hash))
             } else {
-                serde_json::from_slice::<lk_queue::SynthesisResult>(&raw)
+                serde_json::from_str::<lk_queue::SynthesisResult>(&raw)
                     .map(|result| (result.task_id, result.cache_hash))
             }
             .map_err(|error| {
@@ -132,6 +145,7 @@ impl InputReadiness {
         }
         let mut tasks: BTreeMap<PathBuf, Vec<QueueTask>> = BTreeMap::new();
         for task in pending.tasks.into_values() {
+            read.check().into_diagnostic()?;
             let Some(target) = resolve_target_path(&task.target.vault_path) else {
                 continue;
             };
@@ -150,7 +164,9 @@ impl InputReadiness {
             };
             tasks.entry(owner).or_default().push(task);
         }
+        read.check().into_diagnostic()?;
         Ok(Self {
+            read: read.clone(),
             tasks,
             staged,
             pages: BTreeMap::new(),
@@ -158,17 +174,22 @@ impl InputReadiness {
         })
     }
 
+    pub fn read_control(&self) -> &lk_vault::ReadControl {
+        &self.read
+    }
+
     fn page(&mut self, root: &Path, path: &str) -> miette::Result<Vec<String>> {
+        self.read.check().into_diagnostic()?;
         let full = lk_vault::page_path(root, Path::new(path))
             .map_err(|error| miette::miette!("{error}"))?;
         let owner = full
             .canonicalize()
             .map_err(|error| miette::miette!("{path}: {error}"))?;
+        self.read.check().into_diagnostic()?;
         if let Some(page) = self.pages.get(&owner) {
             return Ok(page.reasons.clone());
         }
-        let raw =
-            std::fs::read_to_string(full).map_err(|error| miette::miette!("{path}: {error}"))?;
+        let raw = read_page(&full, &self.read).into_diagnostic()?;
         let page =
             lk_vault::parse_page(&raw).map_err(|error| miette::miette!("{path}: {error}"))?;
         let mut reasons = BTreeSet::new();
@@ -178,7 +199,31 @@ impl InputReadiness {
             reasons.insert(format!("{path}: {}", reason.describe(key)));
         }
         for task in self.tasks.get(&owner).into_iter().flatten() {
-            let status = classify_task(root, task, &mut self.revisions)?;
+            self.read.check().into_diagnostic()?;
+            let target = resolve_target_path(&task.target.vault_path)
+                .ok_or_else(|| miette::miette!("readiness task target changed"))?;
+            let status = super::classify_with_reader_controlled(
+                root,
+                task,
+                &mut self.revisions,
+                super::Artifact::Task,
+                &mut |relative| {
+                    let absolute = lk_vault::page_path(root, relative)?;
+                    if relative == target {
+                        if absolute.canonicalize()? != owner {
+                            return Err(std::io::Error::other(
+                                "readiness task target owner changed",
+                            )
+                            .into());
+                        }
+                        Ok(raw.clone())
+                    } else {
+                        read_page(&absolute, &self.read)
+                    }
+                },
+                &self.read,
+            )?
+            .status;
             if self
                 .staged
                 .contains(&(task.task_id.clone(), task.cache_hash.clone()))
@@ -193,6 +238,7 @@ impl InputReadiness {
             }
         }
         let reasons = reasons.into_iter().collect::<Vec<_>>();
+        self.read.check().into_diagnostic()?;
         self.pages.insert(
             owner,
             ApprovedPage {
@@ -204,10 +250,12 @@ impl InputReadiness {
     }
 
     pub fn guard(&self, root: &Path, plan: &mut lk_vault::MutationPlan) -> miette::Result<()> {
+        self.read.check().into_diagnostic()?;
         let root = root
             .canonicalize()
             .map_err(|error| miette::miette!("{error}"))?;
         for (owner, approved) in &self.pages {
+            self.read.check().into_diagnostic()?;
             if !approved.reasons.is_empty() {
                 return Err(miette::miette!(
                     "cannot publish an assessment with unfinished inputs"
@@ -216,10 +264,10 @@ impl InputReadiness {
             let relative = owner
                 .strip_prefix(&root)
                 .map_err(|error| miette::miette!("{error}"))?;
-            let raw = std::fs::read_to_string(
-                lk_vault::page_path(&root, relative).map_err(|error| miette::miette!("{error}"))?,
-            )
-            .map_err(|error| miette::miette!("{error}"))?;
+            let raw = self
+                .read
+                .read_to_string(&lk_vault::page_path(&root, relative).into_diagnostic()?)
+                .into_diagnostic()?;
             if lk_core::concept::file_revision(&raw) != approved.revision {
                 return Err(miette::miette!(
                     "audit readiness input changed: {}; reread before assessing",
@@ -228,6 +276,7 @@ impl InputReadiness {
             }
             plan.require_unchanged(relative, raw);
         }
+        self.read.check().into_diagnostic()?;
         Ok(())
     }
 
@@ -236,6 +285,7 @@ impl InputReadiness {
         root: &Path,
         task: &QueueTask,
     ) -> miette::Result<Vec<String>> {
+        self.read.check().into_diagnostic()?;
         let citations: Vec<lk_core::concept::Citation> = serde_json::from_value(
             task.input
                 .get("citations")
@@ -248,6 +298,7 @@ impl InputReadiness {
             .map_err(|error| miette::miette!("synthesis target: {error}"))?;
         let mut reasons = BTreeSet::new();
         for citation in citations {
+            self.read.check().into_diagnostic()?;
             let owner = lk_vault::page_path(root, Path::new(&citation.path))
                 .and_then(|path| path.canonicalize())
                 .map_err(|error| miette::miette!("{}: {error}", citation.path))?;
@@ -255,6 +306,7 @@ impl InputReadiness {
                 reasons.extend(self.page(root, &citation.path)?);
             }
         }
+        self.read.check().into_diagnostic()?;
         Ok(reasons.into_iter().collect())
     }
 
@@ -263,6 +315,7 @@ impl InputReadiness {
         root: &Path,
         candidate: &lk_graph::audit::AuditCandidate,
     ) -> miette::Result<Vec<String>> {
+        self.read.check().into_diagnostic()?;
         let mut paths = BTreeSet::from([candidate.path.as_str()]);
         paths.extend(
             candidate
@@ -283,8 +336,10 @@ impl InputReadiness {
         }
         let mut reasons = BTreeSet::new();
         for path in paths {
+            self.read.check().into_diagnostic()?;
             reasons.extend(self.page(root, path)?);
         }
+        self.read.check().into_diagnostic()?;
         Ok(reasons.into_iter().collect())
     }
 
@@ -303,6 +358,18 @@ impl InputReadiness {
             ))
         }
     }
+}
+
+fn read_page(path: &Path, read: &lk_vault::ReadControl) -> Result<String, lk_vault::VaultError> {
+    read.check()?;
+    #[cfg(test)]
+    PAGE_READS.with_borrow_mut(|paths| paths.push(path.to_path_buf()));
+    read.read_to_string(path)
+}
+
+#[cfg(test)]
+thread_local! {
+    static PAGE_READS: std::cell::RefCell<Vec<PathBuf>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 #[cfg(test)]
@@ -345,6 +412,129 @@ mod tests {
                 },
             },
         )
+    }
+
+    #[test]
+    fn readiness_reuses_captured_target_bytes_and_cancellation_cannot_approve_cached_pages() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+        let root = tempfile::tempdir().unwrap();
+        let path = "wiki/documents/subject.md";
+        let raw = "---\ntype: document\nllm_inputs: {summary: pending-a}\n---\n## Summary\n\n";
+        write(root.path(), path, raw);
+        let client = lk_queue::QueueLlmClient::new(root.path().join(".lorekeeper/queue"));
+        let tasks = ["pending-a", "pending-b"].map(|hash| {
+            client.build_task(
+                hash,
+                lk_queue::TaskKind::Summarize,
+                lk_queue::SummarizeRequest {
+                    text: format!("Source observation {hash}"),
+                    max_sentences: 1,
+                    focus: None,
+                    locale: Default::default(),
+                    source_type: None,
+                    target: lk_queue::TaskTarget {
+                        vault_path: path.into(),
+                        kind: lk_queue::TargetKind::DocumentSummary,
+                        anchor: "## Summary".into(),
+                    },
+                },
+            )
+        });
+        write(
+            root.path(),
+            path,
+            &raw.replace("pending-a", &tasks[0].cache_hash),
+        );
+        write(
+            root.path(),
+            ".lorekeeper/queue/pending.jsonl",
+            &tasks
+                .iter()
+                .map(|task| serde_json::to_string(task).unwrap() + "\n")
+                .collect::<String>(),
+        );
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let read = lk_vault::ReadControl::new(cancelled.clone());
+        let mut readiness = InputReadiness::load_controlled(root.path(), &read).unwrap();
+        PAGE_READS.with_borrow_mut(Vec::clear);
+        let reasons = readiness.page(root.path(), path).unwrap();
+        assert!(
+            reasons
+                .iter()
+                .any(|reason| reason.contains(&tasks[0].task_id))
+        );
+        assert!(
+            !reasons
+                .iter()
+                .any(|reason| reason.contains(&tasks[1].task_id))
+        );
+        assert_eq!(readiness.page(root.path(), path).unwrap(), reasons);
+        PAGE_READS.with_borrow(|paths| assert_eq!(paths, &[root.path().join(path)]));
+        cancelled.store(true, Ordering::Relaxed);
+        assert!(readiness.page(root.path(), path).is_err());
+        assert!(
+            readiness
+                .guard(root.path(), &mut Default::default())
+                .is_err()
+        );
+        assert!(InputReadiness::load_controlled(root.path(), &read).is_err());
+        assert!(super::super::current_tasks_controlled(root.path(), &read).is_err());
+    }
+
+    #[test]
+    fn controlled_classification_cancellation_never_becomes_unreadable_or_a_cached_revision() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+        let root = tempfile::tempdir().unwrap();
+        let target = "wiki/concepts/topic.md";
+        let source = "wiki/documents/source.md";
+        let evidence = "---\ntype: document\n---\nAn observation.\n";
+        let task = synthesis(vec![lk_core::concept::Citation::new(
+            Path::new(source),
+            &lk_vault::parse_page(evidence).unwrap(),
+        )]);
+        let body = format!(
+            "---\ntype: concept\nllm_inputs: {{synthesis: {}}}\n---\n## Synthesis\n\n## Related Concepts\n\n",
+            task.cache_hash
+        );
+        write(root.path(), target, &body);
+        write(root.path(), source, evidence);
+        for cancel_at in [target, source] {
+            let cancelled = Arc::new(AtomicBool::new(false));
+            let read = lk_vault::ReadControl::new(cancelled.clone());
+            let mut revisions = BTreeMap::new();
+            let mut reads = Vec::new();
+            let result = super::super::classify_with_reader_controlled(
+                root.path(),
+                &task,
+                &mut revisions,
+                super::super::Artifact::Task,
+                &mut |path| {
+                    reads.push(path.to_owned());
+                    if path == Path::new(cancel_at) {
+                        cancelled.store(true, Ordering::Relaxed);
+                    }
+                    read.read_to_string(&root.path().join(path))
+                },
+                &read,
+            );
+            assert!(
+                result.is_err(),
+                "cancellation must escape task classification"
+            );
+            assert!(revisions.is_empty());
+            assert_eq!(reads.last().unwrap(), Path::new(cancel_at));
+            cancelled.store(false, Ordering::Relaxed);
+            assert_eq!(
+                super::super::classify_task(root.path(), &task, &mut revisions).unwrap(),
+                TaskStatus::Current
+            );
+        }
     }
 
     #[test]

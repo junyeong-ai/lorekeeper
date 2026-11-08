@@ -142,6 +142,9 @@ deferred subcommands expose their names eagerly for name-only discovery.
   Native discovery reads also check the supervised signal flag between enumeration,
   header lines and body chunks. Cancellation discards incomplete captures; it does not
   interrupt an active kernel I/O call or abandon a journal transition.
+  Carry that same cancellation control through selected review/evidence reads and
+  fresh publication guards. Ephemeral prepared captures may retain the control outside
+  semantic identity; automation duration and call budgets are not cancellation flags.
 - Finalization shares one fresh capture for status and preparation in the same local
   checkpoint. Preparation includes that capture; verification measures sealed-result
   checks separately. Never reuse this capture after a host call or writer wait.
@@ -517,6 +520,9 @@ deferred subcommands expose their names eagerly for name-only discovery.
   projection and immutable raw bytes within that checkpoint while preserving task-local
   recipes, reviews, guards and identities. Unprepared targets remain pending. Empty or
   deferred windows never prove settlement.
+  Check synthesis input readiness only within those fair windows; remove checked
+  blockers from local dispatch keys, retain unexamined keys and continue past blocked
+  windows. Readiness deferral alone never reserves a cursor turn.
 - Planning does not consume cursor turns; reserve actual invocation targets together
   immediately before execution, including every member of a whole-input batch.
   `.lorekeeper/execution-cursor.json` stores the next queue/audit target under a guarded

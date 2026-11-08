@@ -385,10 +385,11 @@ pub fn verify_batch_with_guard_controlled(
     let mut whole_inputs = Vec::new();
     for (candidate, receipt) in assessed.values() {
         read.check().map_err(GraphError::from)?;
-        if guard(receipt, &mut scratch)? == AuditReadCoverage::WholeInput {
+        let coverage = guard(receipt, &mut scratch);
+        read.check().map_err(GraphError::from)?;
+        if coverage? == AuditReadCoverage::WholeInput {
             whole_inputs.push(candidate);
         }
-        read.check().map_err(GraphError::from)?;
     }
     if whole_inputs.len() == assessed.len() {
         complete.ensure_ready()?;
@@ -1910,7 +1911,9 @@ pub fn admit_available_partitioned_controlled(
     )?;
     let mut mutation = MutationPlan::default();
     read.check().map_err(GraphError::from)?;
-    guard(&prepared.plan.candidates, &mut mutation)?;
+    let guarded = guard(&prepared.plan.candidates, &mut mutation);
+    read.check().map_err(GraphError::from)?;
+    guarded?;
     for candidate in &prepared.plan.candidates {
         guard_candidate_controlled(&mut mutation, root, candidate, read)?;
     }
@@ -1985,7 +1988,9 @@ fn plan_selected_inner(
     if let Planning::Available(available) = &mut planning {
         for candidate in &candidates {
             read.check().map_err(GraphError::from)?;
-            if !available(candidate)? {
+            let ready = available(candidate);
+            read.check().map_err(GraphError::from)?;
+            if !ready? {
                 unavailable.insert(candidate.path.clone());
             }
         }
@@ -2037,9 +2042,14 @@ fn plan_selected_inner(
             continue;
         }
         if let Planning::Admission { available, admit } = &mut planning {
-            let ready = available(&candidate)?;
+            let ready = available(&candidate);
             read.check().map_err(GraphError::from)?;
-            if !ready || !admit(&candidate)? {
+            if !ready? {
+                continue;
+            }
+            let admitted = admit(&candidate);
+            read.check().map_err(GraphError::from)?;
+            if !admitted? {
                 continue;
             }
         }
@@ -2340,7 +2350,9 @@ pub fn record_with_guard_controlled(
             .iter()
             .map(|review| review.path.clone())
             .collect();
-        if guard(&assessment, &mut plan)? == AuditReadCoverage::WholeInput {
+        let coverage = guard(&assessment, &mut plan);
+        read.check().map_err(GraphError::from)?;
+        if coverage? == AuditReadCoverage::WholeInput {
             whole_inputs.push(candidate);
         }
         guard_candidate_controlled(&mut plan, root, candidate, read)?;
@@ -2621,6 +2633,21 @@ mod tests {
             &read,
         );
         assert!(matches!(verification, Err(GraphError::Cancelled)));
+        cancelled.store(false, Ordering::Relaxed);
+        let rejected = verify_batch_with_guard_controlled(
+            root.path(),
+            &dirs,
+            &pages,
+            &selected.candidates,
+            &lk_core::execution::WorkflowId::from_bytes([7; 16]),
+            u64::MAX,
+            |_, _| {
+                cancelled.store(true, Ordering::Relaxed);
+                Err(error("guard failed"))
+            },
+            &read,
+        );
+        assert!(matches!(rejected, Err(GraphError::Cancelled)));
     }
 
     #[test]

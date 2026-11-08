@@ -5,24 +5,29 @@ impl Runner<'_> {
         &self,
         batch: &[lk_graph::audit::AuditCandidate],
     ) -> miette::Result<Vec<lk_graph::audit::AuditCandidate>> {
-        let pages = lk_graph::scan::scan_vault(&self.root, self.config.graph.scope.follow_links)
-            .map_err(|error| miette::miette!("{error}"))?;
+        let pages = lk_graph::scan::scan_vault_controlled(
+            &self.root,
+            self.config.graph.scope.follow_links,
+            self.supervisor.read_control(),
+        )
+        .map_err(|error| miette::miette!("{error}"))?;
         let workflow = self
             .lease
             .as_ref()
             .ok_or_else(|| miette::miette!("audit has no workflow lease"))?;
-        lk_graph::audit::resolve_batch_subjects(
+        lk_graph::audit::resolve_batch_subjects_controlled(
             &self.root,
             &self.config.vault.dirs,
             &pages,
             batch,
             workflow.id(),
+            self.supervisor.read_control(),
         )
         .map_err(|error| miette::miette!("{error}"))
     }
 
     pub(super) async fn whole_audit(&mut self, batch: &[lk_graph::audit::AuditCandidate]) {
-        use crate::commands::work::audit::{capture, whole_request};
+        use crate::commands::work::audit::{capture_controlled, whole_request};
         use execution::audit::Judgment;
         let mut pending = (0..batch.len()).collect::<std::collections::BTreeSet<_>>();
         let mut replanned = std::collections::BTreeSet::new();
@@ -41,7 +46,10 @@ impl Runner<'_> {
                     return;
                 }
             };
-            let mut readiness = match InputAvailability::load(&self.root) {
+            let mut readiness = match InputAvailability::load_controlled(
+                &self.root,
+                self.supervisor.read_control(),
+            ) {
                 Ok(readiness) => readiness,
                 Err(error) => {
                     self.failure("audit input readiness", error);
@@ -81,14 +89,19 @@ impl Runner<'_> {
                     slots[position].push(index);
                     continue;
                 }
-                let subject =
-                    match capture(&self.root, &self.config, &self.config_revision, &candidate) {
-                        Ok(subject) => subject,
-                        Err(error) => {
-                            self.failure("audit input capture", error);
-                            return;
-                        }
-                    };
+                let subject = match capture_controlled(
+                    &self.root,
+                    &self.config,
+                    &self.config_revision,
+                    &candidate,
+                    self.supervisor.read_control(),
+                ) {
+                    Ok(subject) => subject,
+                    Err(error) => {
+                        self.failure("audit input capture", error);
+                        return;
+                    }
+                };
                 if let Some(reason) = subject.hold() {
                     self.deferred(
                         "whole audit action",
@@ -115,35 +128,40 @@ impl Runner<'_> {
                 .iter()
                 .map(|subject| subject.candidate.path.clone())
                 .collect::<Vec<_>>();
-            let selected =
-                match lk_graph::scan::scan_vault(&self.root, self.config.graph.scope.follow_links)
-                    .map_err(|error| miette::miette!("{error}"))
-                    .and_then(|pages| {
-                        lk_graph::audit::plan_selected_partitioned(
-                            &self.root,
-                            &self.config.vault.dirs,
-                            &pages,
-                            paths.len(),
-                            &paths,
-                            self.config.graph.audit.max_input_bytes,
-                        )
-                        .map_err(|error| miette::miette!("{error}"))
-                    }) {
-                    Ok(selected) => selected,
-                    Err(error) => {
-                        self.failure("audit current input bound", error);
-                        return;
-                    }
-                };
+            let selected = match lk_graph::scan::scan_vault_controlled(
+                &self.root,
+                self.config.graph.scope.follow_links,
+                self.supervisor.read_control(),
+            )
+            .map_err(|error| miette::miette!("{error}"))
+            .and_then(|pages| {
+                lk_graph::audit::plan_selected_partitioned_controlled(
+                    &self.root,
+                    &self.config.vault.dirs,
+                    &pages,
+                    paths.len(),
+                    &paths,
+                    self.config.graph.audit.max_input_bytes,
+                    self.supervisor.read_control(),
+                )
+                .map_err(|error| miette::miette!("{error}"))
+            }) {
+                Ok(selected) => selected,
+                Err(error) => {
+                    self.failure("audit current input bound", error);
+                    return;
+                }
+            };
             let mut bounded = selected.input.ensure_ready().is_err();
             let required = subjects
                 .iter()
                 .map(|subject| {
-                    crate::commands::work::audit_needs_work(
+                    crate::commands::work::audit_needs_work_controlled(
                         &self.root,
                         &self.config,
                         &self.config_revision,
                         &subject.candidate,
+                        self.supervisor.read_control(),
                     )
                 })
                 .collect::<miette::Result<Vec<_>>>();
@@ -314,7 +332,10 @@ impl Runner<'_> {
                     return;
                 }
             };
-            let mut readiness = match InputAvailability::load(&self.root) {
+            let mut readiness = match InputAvailability::load_controlled(
+                &self.root,
+                self.supervisor.read_control(),
+            ) {
                 Ok(readiness) => readiness,
                 Err(error) => {
                     self.record_work_step(metrics);
@@ -322,7 +343,10 @@ impl Runner<'_> {
                     return;
                 }
             };
-            let mut action_readiness = match InputAvailability::load(&self.root) {
+            let mut action_readiness = match InputAvailability::load_controlled(
+                &self.root,
+                self.supervisor.read_control(),
+            ) {
                 Ok(readiness) => readiness,
                 Err(error) => {
                     self.record_work_step(metrics);
@@ -336,15 +360,20 @@ impl Runner<'_> {
             for (((subject, indices), candidate), judgment) in
                 subjects.iter().zip(&slots).zip(fresh).zip(judgments)
             {
-                let fresh =
-                    match capture(&self.root, &self.config, &self.config_revision, &candidate) {
-                        Ok(fresh) => fresh,
-                        Err(error) => {
-                            self.record_work_step(metrics);
-                            self.failure("audit input revalidation", error);
-                            return;
-                        }
-                    };
+                let fresh = match capture_controlled(
+                    &self.root,
+                    &self.config,
+                    &self.config_revision,
+                    &candidate,
+                    self.supervisor.read_control(),
+                ) {
+                    Ok(fresh) => fresh,
+                    Err(error) => {
+                        self.record_work_step(metrics);
+                        self.failure("audit input revalidation", error);
+                        return;
+                    }
+                };
                 if !subject.same_input(&fresh) {
                     for index in indices {
                         if !replanned.insert(*index) {
@@ -426,7 +455,7 @@ impl Runner<'_> {
                         .map(|(assessment, _, _)| assessment.clone())
                         .collect(),
                 };
-                let recorded = crate::commands::audit::record(
+                let recorded = crate::commands::audit::record_controlled(
                     &session,
                     &self.config,
                     &self.config_revision,
@@ -440,6 +469,7 @@ impl Runner<'_> {
                             .guard(mutation);
                         Ok(())
                     },
+                    self.supervisor.read_control(),
                 );
                 if let Err(error) = recorded {
                     self.record_work_step(metrics);

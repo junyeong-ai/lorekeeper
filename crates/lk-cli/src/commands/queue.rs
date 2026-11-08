@@ -12,6 +12,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use lk_queue::{QueueFile, QueueTask};
+use miette::IntoDiagnostic;
 
 use super::{find_config, load_config, load_config_with_revision};
 
@@ -274,6 +275,14 @@ pub(super) fn current_task(root: &Path, task_id: &str) -> miette::Result<QueueTa
     select_task(root, task_id, TaskSelection::Current)
 }
 
+pub(super) fn current_task_controlled(
+    root: &Path,
+    task_id: &str,
+    read: &lk_vault::ReadControl,
+) -> miette::Result<QueueTask> {
+    select_task_controlled(root, task_id, TaskSelection::Current, read)
+}
+
 /// Called under vault then queue claims; retain the exact request during replay.
 #[cfg(unix)]
 pub(super) fn guard_current_task(
@@ -335,8 +344,14 @@ pub(super) enum TaskSelection {
     CurrentOrDoneExtraction,
 }
 
-pub(super) fn current_tasks(root: &Path) -> miette::Result<Vec<QueueTask>> {
-    let pending = read_pending_tasks(&root.join(".lorekeeper/queue"))?;
+pub(super) fn current_tasks_controlled(
+    root: &Path,
+    read: &lk_vault::ReadControl,
+) -> miette::Result<Vec<QueueTask>> {
+    read.check().into_diagnostic()?;
+    let pending = read_pending_tasks_controlled(&root.join(".lorekeeper/queue"), read);
+    read.check().into_diagnostic()?;
+    let pending = pending?;
     if pending.unparseable != 0 {
         return Err(miette::miette!(
             "unparseable pending tasks prevent selecting semantic work"
@@ -346,13 +361,23 @@ pub(super) fn current_tasks(root: &Path) -> miette::Result<Vec<QueueTask>> {
     let mut revisions = BTreeMap::new();
     let mut selected = Vec::new();
     for task in pending.tasks.into_values() {
+        read.check().into_diagnostic()?;
         if !seen.insert(task.task_id.clone()) {
             return Err(miette::miette!(
                 "ambiguous pending task id: {}",
                 task.task_id
             ));
         }
-        match classify_task(root, &task, &mut revisions)? {
+        match classify_with_reader_controlled(
+            root,
+            &task,
+            &mut revisions,
+            Artifact::Task,
+            &mut |path| read.read_to_string(&lk_vault::page_path(root, path)?),
+            read,
+        )?
+        .status
+        {
             TaskStatus::Current => selected.push(task),
             TaskStatus::Unreadable => {
                 return Err(miette::miette!(
@@ -363,6 +388,7 @@ pub(super) fn current_tasks(root: &Path) -> miette::Result<Vec<QueueTask>> {
             TaskStatus::Done | TaskStatus::Stale | TaskStatus::MissingTarget => {}
         }
     }
+    read.check().into_diagnostic()?;
     Ok(selected)
 }
 
@@ -381,7 +407,17 @@ pub(super) fn select_task(
     task_id: &str,
     selection: TaskSelection,
 ) -> miette::Result<QueueTask> {
-    let pending = read_pending_tasks(&root.join(".lorekeeper/queue"))?;
+    select_task_controlled(root, task_id, selection, &lk_vault::ReadControl::default())
+}
+
+pub(super) fn select_task_controlled(
+    root: &Path,
+    task_id: &str,
+    selection: TaskSelection,
+    control: &lk_vault::ReadControl,
+) -> miette::Result<QueueTask> {
+    control.check().into_diagnostic()?;
+    let pending = read_pending_tasks_controlled(&root.join(".lorekeeper/queue"), control)?;
     if pending.unparseable != 0 && matches!(selection, TaskSelection::Current) {
         return Err(miette::miette!(
             "unparseable pending tasks prevent selecting semantic work"
@@ -397,7 +433,15 @@ pub(super) fn select_task(
     if selected.next().is_some() {
         return Err(miette::miette!("ambiguous pending task id: {task_id}"));
     }
-    let status = classify_task(root, &task, &mut BTreeMap::new())?;
+    let status = classify_with_reader_controlled(
+        root,
+        &task,
+        &mut BTreeMap::new(),
+        Artifact::Task,
+        &mut |path| control.read_to_string(&lk_vault::page_path(root, path)?),
+        control,
+    )?
+    .status;
     let mut allowed = status == TaskStatus::Current
         || (matches!(selection, TaskSelection::CurrentOrDoneExtraction)
             && status == TaskStatus::Done
@@ -405,13 +449,14 @@ pub(super) fn select_task(
     if allowed && status == TaskStatus::Done {
         let target = resolve_target_path(&task.target.vault_path)
             .ok_or_else(|| miette::miette!("invalid extraction target"))?;
-        allowed = classify_against_page(
+        allowed = classify_against_page_controlled(
             root,
             &target,
             task.target.kind,
             &task.cache_hash,
             &task.anchors(),
             Artifact::Result,
+            control,
         )? == TaskStatus::Current;
     }
     if !allowed {
@@ -424,6 +469,7 @@ pub(super) fn select_task(
         .map_err(|e| miette::miette!("{e}"))?;
     task.generation_policy()
         .map_err(|e| miette::miette!("{e}"))?;
+    control.check().into_diagnostic()?;
     Ok(task)
 }
 
@@ -456,12 +502,23 @@ struct PendingTasks {
 }
 
 fn read_pending_tasks(queue: &Path) -> miette::Result<PendingTasks> {
+    read_pending_tasks_controlled(queue, &lk_vault::ReadControl::default())
+}
+
+fn read_pending_tasks_controlled(
+    queue: &Path,
+    control: &lk_vault::ReadControl,
+) -> miette::Result<PendingTasks> {
+    control.check().into_diagnostic()?;
     let mut pending = PendingTasks {
         tasks: BTreeMap::new(),
         unparseable: 0,
     };
     for file in pending_queue_files(queue)? {
-        let read = match read_tasks(&file) {
+        control.check().into_diagnostic()?;
+        let captured = read_tasks(&file);
+        control.check().into_diagnostic()?;
+        let read = match captured {
             Ok(read) => read,
             Err(error) => match std::fs::metadata(&file) {
                 Err(io_error) if io_error.kind() == std::io::ErrorKind::NotFound => continue,
@@ -470,6 +527,7 @@ fn read_pending_tasks(queue: &Path) -> miette::Result<PendingTasks> {
         };
         pending.unparseable += read.unparseable;
         for task in read.tasks {
+            control.check().into_diagnostic()?;
             let key = (task.task_id.clone(), task.cache_hash.clone());
             if pending.tasks.insert(key, task).is_some() {
                 return Err(miette::miette!("duplicate task identity in pending queue"));
@@ -1913,6 +1971,25 @@ fn classify_with_reader(
     artifact: Artifact,
     read: &mut impl FnMut(&Path) -> std::io::Result<String>,
 ) -> miette::Result<TaskClassification> {
+    classify_with_reader_controlled(
+        root,
+        task,
+        revisions,
+        artifact,
+        &mut |path| read(path).map_err(lk_vault::VaultError::from),
+        &lk_vault::ReadControl::default(),
+    )
+}
+
+fn classify_with_reader_controlled(
+    root: &Path,
+    task: &QueueTask,
+    revisions: &mut BTreeMap<PathBuf, Result<String, TaskStatus>>,
+    artifact: Artifact,
+    read: &mut impl FnMut(&Path) -> Result<String, lk_vault::VaultError>,
+    control: &lk_vault::ReadControl,
+) -> miette::Result<TaskClassification> {
+    control.check().into_diagnostic()?;
     let mut dependencies = Vec::new();
     let mut target_status = None;
     let status = (|| -> miette::Result<TaskStatus> {
@@ -1923,10 +2000,17 @@ fn classify_with_reader(
             return Ok(TaskStatus::Unreadable);
         }
         dependencies.push(target.clone());
-        let raw = match read(&target) {
+        let captured = read(&target);
+        control.check().into_diagnostic()?;
+        let raw = match captured {
             Ok(raw) => raw,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Err(lk_vault::VaultError::Io(error))
+                if error.kind() == std::io::ErrorKind::NotFound =>
+            {
                 return Ok(TaskStatus::MissingTarget);
+            }
+            Err(lk_vault::VaultError::Cancelled) => {
+                return Err(lk_vault::VaultError::Cancelled).into_diagnostic();
             }
             Err(_) => return Ok(TaskStatus::Unreadable),
         };
@@ -1976,25 +2060,38 @@ fn classify_with_reader(
             return Ok(TaskStatus::Unreadable);
         }
         for citation in citations {
+            control.check().into_diagnostic()?;
             let Some(path) = resolve_target_path(&citation.path) else {
                 return Ok(TaskStatus::Unreadable);
             };
             dependencies.push(path.clone());
             if citation.rss_event.is_some() {
-                let raw = match read(&path) {
+                let captured = read(&path);
+                control.check().into_diagnostic()?;
+                let raw = match captured {
                     Ok(raw) => raw,
+                    Err(lk_vault::VaultError::Cancelled) => {
+                        return Err(lk_vault::VaultError::Cancelled).into_diagnostic();
+                    }
                     Err(_) => return Ok(TaskStatus::Unreadable),
                 };
-                match lk_vault::has_rss_citation_in_page(root, &target, &citation, &raw) {
+                let selected = lk_vault::has_rss_citation_in_page(root, &target, &citation, &raw);
+                control.check().into_diagnostic()?;
+                match selected {
                     Ok(true) => {}
                     Ok(false) => return Ok(TaskStatus::Stale),
                     Err(_) => return Ok(TaskStatus::Unreadable),
                 }
                 continue;
             }
-            let revision = revisions
-                .entry(path.clone())
-                .or_insert_with(|| read_source_revision_with_reader(&path, read));
+            if let std::collections::btree_map::Entry::Vacant(entry) = revisions.entry(path.clone())
+            {
+                entry.insert(read_source_revision_with_reader_controlled(
+                    &path, read, control,
+                )?);
+            }
+            control.check().into_diagnostic()?;
+            let revision = revisions.get(&path).expect("captured citation revision");
             match revision {
                 Ok(revision) if *revision == citation.revision => {}
                 Ok(_) => return Ok(TaskStatus::Stale),
@@ -2003,6 +2100,7 @@ fn classify_with_reader(
         }
         Ok(status)
     })()?;
+    control.check().into_diagnostic()?;
     Ok(TaskClassification {
         status,
         task_status: if artifact == Artifact::Task {
@@ -2026,15 +2124,40 @@ fn read_source_revision_with_reader(
     path: &Path,
     read: &mut impl FnMut(&Path) -> std::io::Result<String>,
 ) -> Result<String, TaskStatus> {
-    let content = read(path).map_err(|e| {
-        tracing::warn!(path = %path.display(), error = %e, "cannot read synthesis source");
-        TaskStatus::Unreadable
-    })?;
-    let page = lk_core::frontmatter::parse_page(&content).map_err(|e| {
-        tracing::warn!(path = %path.display(), error = %e, "cannot parse synthesis source");
-        TaskStatus::Unreadable
-    })?;
-    Ok(lk_core::concept::source_revision(&page))
+    read_source_revision_with_reader_controlled(
+        path,
+        &mut |path| read(path).map_err(lk_vault::VaultError::from),
+        &lk_vault::ReadControl::default(),
+    )
+    .expect("default source revision read cannot be cancelled")
+}
+
+fn read_source_revision_with_reader_controlled(
+    path: &Path,
+    read: &mut impl FnMut(&Path) -> Result<String, lk_vault::VaultError>,
+    control: &lk_vault::ReadControl,
+) -> miette::Result<Result<String, TaskStatus>> {
+    control.check().into_diagnostic()?;
+    let captured = read(path);
+    control.check().into_diagnostic()?;
+    let content = match captured {
+        Ok(content) => content,
+        Err(lk_vault::VaultError::Cancelled) => {
+            return Err(lk_vault::VaultError::Cancelled).into_diagnostic();
+        }
+        Err(error) => {
+            tracing::warn!(path = %path.display(), error = %error, "cannot read synthesis source");
+            return Ok(Err(TaskStatus::Unreadable));
+        }
+    };
+    let parsed = lk_core::frontmatter::parse_page(&content);
+    control.check().into_diagnostic()?;
+    Ok(parsed
+        .map(|page| lk_core::concept::source_revision(&page))
+        .map_err(|error| {
+            tracing::warn!(path = %path.display(), error = %error, "cannot parse synthesis source");
+            TaskStatus::Unreadable
+        }))
 }
 
 /// Resolve a task or result `target.vault_path` to the vault-relative path it addresses,
@@ -2056,19 +2179,48 @@ fn classify_against_page(
     anchors: &[&str],
     artifact: Artifact,
 ) -> miette::Result<TaskStatus> {
+    classify_against_page_controlled(
+        vault_root,
+        rel_path,
+        kind,
+        cache_hash,
+        anchors,
+        artifact,
+        &lk_vault::ReadControl::default(),
+    )
+}
+
+fn classify_against_page_controlled(
+    vault_root: &Path,
+    rel_path: &Path,
+    kind: lk_queue::TargetKind,
+    cache_hash: &str,
+    anchors: &[&str],
+    artifact: Artifact,
+    control: &lk_vault::ReadControl,
+) -> miette::Result<TaskStatus> {
+    control.check().into_diagnostic()?;
     if lk_vault::writable_page_path(vault_root, rel_path).is_err() {
         return Ok(TaskStatus::Unreadable);
     }
-    let content = match read_page(vault_root, rel_path) {
+    let captured = lk_vault::page_path(vault_root, rel_path)
+        .map_err(lk_vault::VaultError::from)
+        .and_then(|path| control.read_to_string(&path));
+    control.check().into_diagnostic()?;
+    let content = match captured {
         Ok(c) => c,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+        Err(lk_vault::VaultError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
             return Ok(TaskStatus::MissingTarget);
+        }
+        Err(lk_vault::VaultError::Cancelled) => {
+            return Err(lk_vault::VaultError::Cancelled).into_diagnostic();
         }
         Err(_) => return Ok(TaskStatus::Unreadable),
     };
     let Ok(page) = lk_core::frontmatter::parse_page(&content) else {
         return Ok(TaskStatus::Unreadable);
     };
+    control.check().into_diagnostic()?;
     classify_parsed_page(&page, kind, cache_hash, anchors, artifact)
 }
 

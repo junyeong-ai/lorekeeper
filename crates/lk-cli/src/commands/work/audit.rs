@@ -149,13 +149,14 @@ impl WholeSubject {
     }
 }
 
-pub(in crate::commands) fn capture(
+pub(in crate::commands) fn capture_controlled(
     root: &std::path::Path,
     config: &lk_core::config::Config,
     config_revision: &str,
     candidate: &lk_graph::audit::AuditCandidate,
+    read: &lk_vault::ReadControl,
 ) -> miette::Result<WholeSubject> {
-    let prepared = super::resources::audit_candidate(root, config, candidate)?;
+    let prepared = super::resources::audit_candidate_controlled(root, config, candidate, read)?;
     capture_prepared(root, config_revision, candidate, prepared)
 }
 

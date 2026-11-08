@@ -331,19 +331,20 @@ pub(in crate::commands) fn plan_prune(
     GENERATION.plan_prune(root, pending, plan)
 }
 
-pub(in crate::commands) fn finish_selected(
+pub(in crate::commands) fn finish_selected_controlled(
     session: &lk_vault::MutationSession,
     config: &lk_core::config::Config,
     config_revision: &str,
     request: &Value,
     input: &Value,
     reply: Value,
+    read: &lk_vault::ReadControl,
 ) -> miette::Result<SelectedFinish> {
     let root = session.root();
     let task_id = input["task"]["task_id"]
         .as_str()
         .ok_or_else(|| miette::miette!("missing selected task"))?;
-    let task = crate::commands::queue::current_task(root, task_id)?;
+    let task = crate::commands::queue::current_task_controlled(root, task_id, read)?;
     if task.kind == TaskKind::ExtractConcepts {
         let queries: Vec<lk_core::discovery::DiscoveryQuery> =
             serde_json::from_value(input["context"]["purpose"]["discovery"]["queries"].clone())
@@ -352,7 +353,13 @@ pub(in crate::commands) fn finish_selected(
             return Ok(SelectedFinish::ScopeChanged);
         }
     }
-    let prepared = super::resources::refresh(root, config, config_revision, &input["context"])?;
+    let prepared = super::resources::refresh_controlled(
+        root,
+        config,
+        config_revision,
+        &input["context"],
+        read,
+    )?;
     let work = super::expected(root, &prepared, config, config_revision)?;
     let owner =
         lk_vault::resolve_page_owner(root, Path::new(&task.target.vault_path)).into_diagnostic()?;
@@ -411,13 +418,14 @@ pub(in crate::commands) fn finish_selected(
         }
         Outcome::Complete(result) => {
             prepared.guard_pages(&mut plan);
-            super::guard_queue(
+            super::guard_queue_controlled(
                 root,
                 config,
                 config_revision,
                 &task.task_id,
                 result.clone(),
                 &mut plan,
+                prepared.read_control(),
             )?;
             let destination = super::queue_result_path(task.kind, &result)?;
             let raw = serde_json::to_string(&result).into_diagnostic()?;

@@ -379,7 +379,28 @@ pub(super) fn guard_queue(
     result: Value,
     mutation: &mut lk_vault::MutationPlan,
 ) -> miette::Result<bool> {
-    let guard = prepare_queue_publication(root, config, config_revision, task_id, result)?;
+    guard_queue_controlled(
+        root,
+        config,
+        config_revision,
+        task_id,
+        result,
+        mutation,
+        &lk_vault::ReadControl::default(),
+    )
+}
+
+pub(super) fn guard_queue_controlled(
+    root: &Path,
+    config: &lk_core::config::Config,
+    config_revision: &str,
+    task_id: &str,
+    result: Value,
+    mutation: &mut lk_vault::MutationPlan,
+    read: &lk_vault::ReadControl,
+) -> miette::Result<bool> {
+    let guard =
+        prepare_queue_publication_controlled(root, config, config_revision, task_id, result, read)?;
     let owned = guard
         .pages
         .iter()
@@ -396,8 +417,26 @@ pub(super) fn prepare_queue_publication(
     task_id: &str,
     result: Value,
 ) -> miette::Result<QueuePublicationGuard> {
+    prepare_queue_publication_controlled(
+        root,
+        config,
+        config_revision,
+        task_id,
+        result,
+        &lk_vault::ReadControl::default(),
+    )
+}
+
+pub(super) fn prepare_queue_publication_controlled(
+    root: &Path,
+    config: &lk_core::config::Config,
+    config_revision: &str,
+    task_id: &str,
+    result: Value,
+    read: &lk_vault::ReadControl,
+) -> miette::Result<QueuePublicationGuard> {
     let root = root.canonicalize().into_diagnostic()?;
-    let mut prepared = resources::task_for_publication(&root, config, task_id)?;
+    let mut prepared = resources::task_for_publication_controlled(&root, config, task_id, read)?;
     let mut selection_guards = lk_vault::MutationPlan::default();
     let mut owned_pages = std::collections::BTreeSet::new();
     let scoped_extraction = prepared.context["purpose"]["task_kind"]
@@ -412,7 +451,7 @@ pub(super) fn prepare_queue_publication(
             ));
         }
         let selected_owners = if let Some(selection) = &typed.selection {
-            let (selected, owners) = selected_task(
+            let (selected, owners) = selected_task_controlled(
                 &root,
                 config,
                 config_revision,
@@ -420,11 +459,18 @@ pub(super) fn prepare_queue_publication(
                 &typed.discovery,
                 selection,
                 &mut selection_guards,
+                read,
             )?;
             prepared = selected;
             Some(owners)
         } else {
-            prepared = resources::with_discovery(&root, config, prepared, &typed.discovery)?;
+            prepared = resources::with_discovery_controlled(
+                &root,
+                config,
+                prepared,
+                &typed.discovery,
+                read,
+            )?;
             None
         };
         for concept in &typed.concepts {
@@ -475,7 +521,7 @@ pub(super) fn prepare_queue_publication(
         let section: lk_queue::SectionResult =
             serde_json::from_value(result.clone()).into_diagnostic()?;
         if let Some(revision) = section.context_revision {
-            let scope = resources::section_task(&root, config, task_id)?;
+            let scope = resources::section_task_controlled(&root, config, task_id, read)?;
             if revision != scope.revision(config_revision)?
                 && revision != scope.legacy_revision(config_revision)?
             {
@@ -514,7 +560,7 @@ pub(super) fn prepare_queue_publication(
     if scoped_extraction && !prepared.context["purpose"]["source_observations"].is_null() {
         let typed: lk_queue::TaskResult =
             serde_json::from_value(result.clone()).into_diagnostic()?;
-        let source = resources::source_task(&root, config, task_id)?;
+        let source = resources::source_task_controlled(&root, config, task_id, read)?;
         let source_work = expected(&root, &source, config, config_revision)?;
         if prepared.context["purpose"]["source_observations"]["work_id"] != source_work.plan.id {
             return Err(publication_rejection(
@@ -1030,17 +1076,34 @@ fn current_screening(
     config_revision: &str,
     task_id: &str,
 ) -> miette::Result<ScreeningPreparation> {
-    let task = super::queue::select_task(
+    current_screening_controlled(
+        root,
+        config,
+        config_revision,
+        task_id,
+        &lk_vault::ReadControl::default(),
+    )
+}
+
+fn current_screening_controlled(
+    root: &Path,
+    config: &lk_core::config::Config,
+    config_revision: &str,
+    task_id: &str,
+    read: &lk_vault::ReadControl,
+) -> miette::Result<ScreeningPreparation> {
+    let task = super::queue::select_task_controlled(
         root,
         task_id,
         super::queue::TaskSelection::CurrentOrDoneExtraction,
+        read,
     )?;
     let queries = discovery::current(root, &task)?.ok_or_else(|| {
         miette::miette!(
             "candidate screening requires current explicit discovery; record work discover first"
         )
     })?;
-    screening(root, config, config_revision, task_id, &queries)
+    screening_controlled(root, config, config_revision, task_id, &queries, read)
 }
 
 impl ScreeningPreparation {
@@ -1183,12 +1246,13 @@ fn map_current_screenings<T>(
             })
         })
         .collect::<miette::Result<Vec<_>>>()?;
-    let reports = lk_vault::list_reviews(root, &config.vault.dirs).into_diagnostic()?;
-    let (captures, metrics) = lk_vault::capture_discovery_batch_controlled(
+    let mut reviews = lk_vault::ReviewInventory::load_controlled(root, &config.vault.dirs, read)
+        .into_diagnostic()?;
+    let (captures, metrics) = lk_vault::capture_discovery_batch_with_inventory(
         root,
         &config.vault.dirs,
         &queries,
-        Some(&reports),
+        &mut reviews,
         read,
     )
     .into_diagnostic()?;
@@ -1205,7 +1269,8 @@ fn map_current_screenings<T>(
                     config,
                     task_id,
                     capture,
-                    reports.clone(),
+                    &mut reviews,
+                    read,
                 )?;
                 screening_with_inventory(root, config, config_revision, inventory)?
                     .into_candidates()
@@ -1364,7 +1429,8 @@ fn record_screening(
         .completed_batches)
 }
 
-fn selected_task(
+#[allow(clippy::too_many_arguments)]
+fn selected_task_controlled(
     root: &Path,
     config: &lk_core::config::Config,
     config_revision: &str,
@@ -1372,10 +1438,11 @@ fn selected_task(
     queries: &[lk_core::discovery::DiscoveryQuery],
     binding: &lk_queue::ExtractionSelection,
     mutation: &mut lk_vault::MutationPlan,
+    read: &lk_vault::ReadControl,
 ) -> miette::Result<(Prepared, std::collections::BTreeSet<String>)> {
     selected_task_with_screening(
         root,
-        screening(root, config, config_revision, task_id, queries)?,
+        screening_controlled(root, config, config_revision, task_id, queries, read)?,
         binding,
         mutation,
     )
@@ -1439,19 +1506,20 @@ fn load_discovery(path: &Path) -> miette::Result<Vec<lk_core::discovery::Discove
     Ok(value.queries)
 }
 
-pub(super) fn guard_audit(
+pub(super) fn guard_audit_controlled(
     root: &Path,
     config: &lk_core::config::Config,
     config_revision: &str,
     assessment: &lk_graph::audit::AuditAssessment,
     mutation: &mut lk_vault::MutationPlan,
+    read: &lk_vault::ReadControl,
 ) -> miette::Result<bool> {
     let root = root.canonicalize().into_diagnostic()?;
     guard_prepared(
         &root,
         config,
         config_revision,
-        resources::audit(&root, config, &assessment.path)?,
+        resources::audit_controlled(&root, config, &assessment.path, read)?,
         json!({"assessments":[assessment]}),
         mutation,
     )
@@ -1663,14 +1731,40 @@ fn finish_with_preparation(
     }
 }
 
+#[cfg(test)]
 pub(super) fn prepare_task(
     session: &lk_vault::MutationSession,
     config: &lk_core::config::Config,
     config_revision: &str,
     task_id: &str,
 ) -> miette::Result<TaskPreparation> {
-    let task = super::queue::current_task(session.root(), task_id)?;
-    prepare_task_in_session(session, config, config_revision, &task, None, None, None)
+    prepare_task_controlled(
+        session,
+        config,
+        config_revision,
+        task_id,
+        &lk_vault::ReadControl::default(),
+    )
+}
+
+pub(super) fn prepare_task_controlled(
+    session: &lk_vault::MutationSession,
+    config: &lk_core::config::Config,
+    config_revision: &str,
+    task_id: &str,
+    read: &lk_vault::ReadControl,
+) -> miette::Result<TaskPreparation> {
+    let task = super::queue::current_task_controlled(session.root(), task_id, read)?;
+    prepare_task_in_session(
+        session,
+        config,
+        config_revision,
+        &task,
+        None,
+        None,
+        None,
+        read,
+    )
 }
 
 pub(super) fn prepare_tasks_with_audit(
@@ -1699,19 +1793,25 @@ pub(super) fn prepare_tasks_with_audit(
             }
         }
     }
-    let reports = if recipes.is_empty() {
-        Vec::new()
+    let mut reviews = if recipes.is_empty() {
+        None
     } else {
-        lk_vault::list_reviews(root, &config.vault.dirs).into_diagnostic()?
+        Some(
+            lk_vault::ReviewInventory::load_controlled(root, &config.vault.dirs, read)
+                .into_diagnostic()?,
+        )
     };
-    let (captures, metrics) = lk_vault::capture_discovery_batch_controlled(
-        root,
-        &config.vault.dirs,
-        &recipes,
-        Some(&reports),
-        read,
-    )
-    .into_diagnostic()?;
+    let (captures, metrics) = match reviews.as_mut() {
+        Some(reviews) => lk_vault::capture_discovery_batch_with_inventory(
+            root,
+            &config.vault.dirs,
+            &recipes,
+            reviews,
+            read,
+        )
+        .into_diagnostic()?,
+        None => (Vec::new(), lk_vault::DiscoveryCaptureMetrics::default()),
+    };
     let mut captures = positions.into_iter().zip(captures).peekable();
     #[cfg(unix)]
     let native_contract = config
@@ -1727,7 +1827,7 @@ pub(super) fn prepare_tasks_with_audit(
         .enumerate()
         .map(|(index, task)| {
             read.check().into_diagnostic()?;
-            let task = super::queue::current_task(root, &task.task_id)?;
+            let task = super::queue::current_task_controlled(root, &task.task_id, read)?;
             let inventory = if captures.peek().is_some_and(|(at, _)| *at == index) {
                 let (_, capture) = captures.next().expect("indexed capture");
                 Some(resources::selection_inventory_with_capture(
@@ -1735,7 +1835,10 @@ pub(super) fn prepare_tasks_with_audit(
                     config,
                     &task.task_id,
                     capture,
-                    reports.clone(),
+                    reviews
+                        .as_mut()
+                        .expect("discovery capture has a review inventory"),
+                    read,
                 )?)
             } else {
                 None
@@ -1750,6 +1853,7 @@ pub(super) fn prepare_tasks_with_audit(
                 native_contract
                     .as_deref()
                     .map(|contract| (contract, &mut reused)),
+                read,
             )
         })
         .collect::<miette::Result<Vec<_>>>()?;
@@ -1757,6 +1861,7 @@ pub(super) fn prepare_tasks_with_audit(
     Ok((work, metrics, reused))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn prepare_task_in_session(
     session: &lk_vault::MutationSession,
     config: &lk_core::config::Config,
@@ -1765,6 +1870,7 @@ fn prepare_task_in_session(
     audit: Option<&lk_graph::audit::AuditCandidate>,
     inventory: Option<resources::SelectionInventory>,
     native_contract: Option<(&str, &mut usize)>,
+    read: &lk_vault::ReadControl,
 ) -> miette::Result<TaskPreparation> {
     let root = session.root();
     let prepared = if task.kind == lk_queue::TaskKind::ExtractConcepts
@@ -1773,7 +1879,9 @@ fn prepare_task_in_session(
     {
         let selected = match inventory {
             Some(inventory) => screening_with_inventory(root, config, config_revision, inventory)?,
-            None => current_screening(root, config, config_revision, &task.task_id)?,
+            None => {
+                current_screening_controlled(root, config, config_revision, &task.task_id, read)?
+            }
         };
         match selected {
             ScreeningPreparation::SourceBlocked { work_id, .. } => {
@@ -1828,7 +1936,7 @@ fn prepare_task_in_session(
             }
         }
     } else {
-        resources::task_with_audit(root, config, &task.task_id, audit)?
+        resources::task_with_audit_controlled(root, config, &task.task_id, audit, read)?
     };
     let work = expected(root, &prepared, config, config_revision)?;
     let stored = root
@@ -2037,28 +2145,30 @@ fn inspection_admission(
     }
 }
 
-pub(super) fn prepare_audit(
+pub(super) fn prepare_audit_controlled(
     session: &lk_vault::MutationSession,
     config: &lk_core::config::Config,
     config_revision: &str,
     candidate: &lk_graph::audit::AuditCandidate,
+    read: &lk_vault::ReadControl,
 ) -> miette::Result<String> {
     #[cfg(unix)]
     audit::validate_result_capacity(candidate, limits(config)?.max_result_bytes)?;
     let root = session.root();
-    let prepared = resources::audit_candidate(root, config, candidate)?;
+    let prepared = resources::audit_candidate_controlled(root, config, candidate, read)?;
     let work = persist_prepared(session, config, config_revision, &prepared)?;
     Ok(work.plan.id)
 }
 
-pub(super) fn audit_needs_work(
+pub(super) fn audit_needs_work_controlled(
     root: &Path,
     config: &lk_core::config::Config,
     config_revision: &str,
     candidate: &lk_graph::audit::AuditCandidate,
+    read: &lk_vault::ReadControl,
 ) -> miette::Result<bool> {
     let root = root.canonicalize().into_diagnostic()?;
-    let prepared = resources::audit_candidate(&root, config, candidate)?;
+    let prepared = resources::audit_candidate_controlled(&root, config, candidate, read)?;
     let work = expected(&root, &prepared, config, config_revision)?;
     if work.plan.parts.len() > 1 || work.is_planned(&root)? {
         return Ok(true);
@@ -2080,11 +2190,12 @@ pub(super) fn audit_needs_work(
 }
 
 #[cfg(unix)]
-pub(super) fn audit_processing_hold(
+pub(super) fn audit_processing_hold_controlled(
     root: &Path,
     config: &lk_core::config::Config,
     config_revision: &str,
     candidate: &lk_graph::audit::AuditCandidate,
+    read: &lk_vault::ReadControl,
 ) -> miette::Result<Option<String>> {
     if let Err(error) = audit::validate_result_capacity(candidate, limits(config)?.max_result_bytes)
     {
@@ -2096,7 +2207,7 @@ pub(super) fn audit_processing_hold(
     if candidate.discovery.is_none() {
         return Ok(None);
     }
-    let prepared = resources::audit_candidate(root, config, candidate)?;
+    let prepared = resources::audit_candidate_controlled(root, config, candidate, read)?;
     let work = expected(root, &prepared, config, config_revision)?;
     let planned = work.is_planned(root)?;
     if planned && is_finished_prepared(root, &work, &prepared)? {
@@ -2942,7 +3053,7 @@ fn prepare_finalization_from_capture(
             },
         )));
     };
-    let task = super::queue::current_task(root, task_id)?;
+    let task = super::queue::current_task_controlled(root, task_id, prepared.read_control())?;
     if !super::execution::finalization::supports(task.kind) {
         let request = match native::finalization_request(
             config,
@@ -2983,7 +3094,7 @@ fn prepare_finalization_from_capture(
             },
         )));
     }
-    let scope = resources::section_task(root, config, task_id)?;
+    let scope = resources::section_task_controlled(root, config, task_id, prepared.read_control())?;
     let result = lk_queue::SectionResult {
         context_revision: Some(scope.revision(config_revision)?),
         task_id: task_id.clone(),

@@ -905,7 +905,10 @@ mod native {
             }
             if !state.staged_results.is_empty()
                 && let Err(error) =
-                    crate::commands::queue::readiness::InputReadiness::load(&self.root)
+                    crate::commands::queue::readiness::InputReadiness::load_controlled(
+                        &self.root,
+                        self.supervisor.read_control(),
+                    )
             {
                 return self.failure(name, error);
             }
@@ -2618,13 +2621,14 @@ mod native {
             let mut staged = false;
             let mut recovered = false;
             for (input, reply) in inputs.iter().zip(replies) {
-                match crate::commands::work::generation::finish_selected(
+                match crate::commands::work::generation::finish_selected_controlled(
                     &session,
                     &self.config,
                     &self.config_revision,
                     &request,
                     input,
                     reply,
+                    self.supervisor.read_control(),
                 ) {
                     Ok(crate::commands::work::generation::SelectedFinish::DiscoveryRecorded) => {
                         self.result
@@ -2688,11 +2692,12 @@ mod native {
         async fn whole_section_step(&mut self, task: &lk_queue::QueueTask) -> WorkStep {
             let mut metrics = WorkStepMetrics::new(WorkRole::Finalizer);
             let started = Instant::now();
-            let prepared = crate::commands::work::section::prepare(
+            let prepared = crate::commands::work::section::prepare_controlled(
                 &self.root,
                 &self.config,
                 &self.config_revision,
                 &task.task_id,
+                self.supervisor.read_control(),
             );
             metrics.preparation_duration_ms = Some(started.elapsed().as_millis() as u64);
             let section = match prepared {
@@ -3777,12 +3782,16 @@ mod native {
                 .mutation_session("queue planning")
                 .await
                 .ok_or_else(|| miette::miette!("queue planning did not acquire writer access"))?;
-            let mut tasks = crate::commands::queue::current_tasks(session.root())?;
+            let mut tasks = crate::commands::queue::current_tasks_controlled(
+                session.root(),
+                self.supervisor.read_control(),
+            )?;
             tasks.sort_by(|left, right| {
                 (left.created_at, &left.task_id).cmp(&(right.created_at, &right.task_id))
             });
             let mut owners = std::collections::BTreeMap::new();
             for task in tasks {
+                self.supervisor.read_control().check().into_diagnostic()?;
                 let owner = lk_vault::page_path(session.root(), Path::new(&task.target.vault_path))
                     .and_then(|path| path.canonicalize())
                     .map_err(|error| miette::miette!("queue target: {error}"))?;
@@ -3791,7 +3800,12 @@ mod native {
             let mut readiness = owners
                 .values()
                 .any(|task| task.kind == lk_queue::TaskKind::SynthesizeConcept)
-                .then(|| super::super::queue::readiness::InputReadiness::load(session.root()))
+                .then(|| {
+                    super::super::queue::readiness::InputReadiness::load_controlled(
+                        session.root(),
+                        self.supervisor.read_control(),
+                    )
+                })
                 .transpose()?;
             let budget = self
                 .config
@@ -3819,16 +3833,6 @@ mod native {
                     needs_application |= rejection.needs_revalidation;
                     deferred.insert(target, vec![rejection.reason.clone()]);
                     continue;
-                }
-                if task.kind == lk_queue::TaskKind::SynthesizeConcept {
-                    let reasons = readiness
-                        .as_mut()
-                        .expect("synthesis readiness was loaded")
-                        .unfinished_synthesis(session.root(), &task)?;
-                    if !reasons.is_empty() {
-                        deferred.insert(target, reasons);
-                        continue;
-                    }
                 }
                 targets.insert(target, task);
             }
@@ -3874,6 +3878,17 @@ mod native {
                 let mut materialize = Vec::new();
                 for target in window {
                     let task = &targets[target];
+                    if task.kind == lk_queue::TaskKind::SynthesizeConcept {
+                        let reasons = readiness
+                            .as_mut()
+                            .expect("synthesis readiness was loaded")
+                            .unfinished_synthesis(session.root(), task)?;
+                        if !reasons.is_empty() {
+                            keys.remove(target);
+                            deferred.insert(target.clone(), reasons);
+                            continue;
+                        }
+                    }
                     if crate::commands::work::needs_discovery(
                         session.root(),
                         &self.config,
@@ -3898,16 +3913,18 @@ mod native {
                 } else {
                     self.result.queue_planning.synthesis_subjects += synthesis_paths.len();
                     self.result.queue_planning.audit_captures += 1;
-                    let pages = lk_graph::scan::scan_vault(
+                    let pages = lk_graph::scan::scan_vault_controlled(
                         session.root(),
                         self.config.graph.scope.follow_links,
+                        self.supervisor.read_control(),
                     )
                     .map_err(|error| miette::miette!("{error}"))?;
-                    lk_graph::audit::load_selected_inputs(
+                    lk_graph::audit::load_selected_inputs_controlled(
                         session.root(),
                         &self.config.vault.dirs,
                         &pages,
                         &synthesis_paths,
+                        self.supervisor.read_control(),
                     )
                     .map_err(|error| miette::miette!("{error}"))?
                     .into_iter()
@@ -3952,11 +3969,12 @@ mod native {
                             if execution::finalization::supports(task.kind) =>
                         {
                             flush(&mut batch, &mut jobs);
-                            match crate::commands::work::section::prepare(
+                            match crate::commands::work::section::prepare_controlled(
                                 session.root(),
                                 &self.config,
                                 &self.config_revision,
                                 &task.task_id,
+                                self.supervisor.read_control(),
                             )? {
                                 crate::commands::work::section::Preparation::Ready(_) => {
                                     jobs.insert(target.clone(), QueueDispatch::Section { task });
@@ -4110,11 +4128,12 @@ mod native {
                     || current.created_at != task.created_at
                     || !crate::commands::work::has_current_discovery(root, &current)?
                     || !matches!(
-                        crate::commands::work::prepare_task(
+                        crate::commands::work::prepare_task_controlled(
                             &session,
                             &self.config,
                             &self.config_revision,
                             &current.task_id,
+                            self.supervisor.read_control(),
                         )?
                         .work,
                         crate::commands::work::TaskWork::Partitioned { .. }
@@ -4626,11 +4645,15 @@ mod native {
         }
 
         fn audit_plan(&mut self, paths: &[String]) -> miette::Result<lk_graph::audit::AuditPlan> {
-            let pages =
-                lk_graph::scan::scan_vault(&self.root, self.config.graph.scope.follow_links)
-                    .map_err(|e| miette::miette!("{e}"))?;
-            let mut readiness = InputAvailability::load(&self.root)?;
-            let plan = lk_graph::audit::plan_selected_available_partitioned(
+            let pages = lk_graph::scan::scan_vault_controlled(
+                &self.root,
+                self.config.graph.scope.follow_links,
+                self.supervisor.read_control(),
+            )
+            .map_err(|e| miette::miette!("{e}"))?;
+            let mut readiness =
+                InputAvailability::load_controlled(&self.root, self.supervisor.read_control())?;
+            let plan = lk_graph::audit::plan_selected_available_partitioned_controlled(
                 &self.root,
                 &self.config.vault.dirs,
                 &pages,
@@ -4638,6 +4661,7 @@ mod native {
                 paths,
                 self.config.graph.audit.max_input_bytes,
                 &mut |candidate| readiness.check(candidate),
+                self.supervisor.read_control(),
             )
             .map_err(|e| miette::miette!("{e}"))?;
             self.result.audit_deferred = readiness.deferred().to_vec();
@@ -4657,11 +4681,12 @@ mod native {
             let mut jobs = std::collections::BTreeMap::new();
             for candidate in candidates {
                 let (session, _) = self.mutation_session("bounded audit planning").await?;
-                match crate::commands::work::prepare_audit(
+                match crate::commands::work::prepare_audit_controlled(
                     &session,
                     &self.config,
                     &self.config_revision,
                     candidate,
+                    self.supervisor.read_control(),
                 ) {
                     Ok(id) => {
                         jobs.insert(candidate.path.clone(), id);
@@ -4730,15 +4755,19 @@ mod native {
                 .mutation_session("audit admission")
                 .await
                 .ok_or_else(|| miette::miette!("audit admission did not acquire writer access"))?;
-            let pages =
-                lk_graph::scan::scan_vault(&self.root, self.config.graph.scope.follow_links)
-                    .map_err(|error| miette::miette!("{error}"))?;
+            let pages = lk_graph::scan::scan_vault_controlled(
+                &self.root,
+                self.config.graph.scope.follow_links,
+                self.supervisor.read_control(),
+            )
+            .map_err(|error| miette::miette!("{error}"))?;
             let _queue =
                 super::super::queue::claim_writer(&self.root.join(".lorekeeper/queue"), false)?;
-            let mut readiness = InputAvailability::load(&self.root)?;
+            let mut readiness =
+                InputAvailability::load_controlled(&self.root, self.supervisor.read_control())?;
             let mut processing_deferred = Vec::new();
             let mut processing_deferred_count = 0;
-            let plan = lk_graph::audit::admit_available_partitioned(
+            let plan = lk_graph::audit::admit_available_partitioned_controlled(
                 &session,
                 &self.config.vault.dirs,
                 &pages,
@@ -4749,18 +4778,19 @@ mod native {
                     self.supervisor
                         .read_control()
                         .check()
-                        .map_err(|error| lk_graph::GraphError::Io(error.to_string()))?;
-                    let hold = crate::commands::work::audit_processing_hold(
+                        .map_err(lk_graph::GraphError::from)?;
+                    let hold = crate::commands::work::audit_processing_hold_controlled(
                         &self.root,
                         &self.config,
                         &self.config_revision,
                         candidate,
+                        self.supervisor.read_control(),
                     )
                     .map_err(|error| lk_graph::GraphError::Io(error.to_string()))?;
                     self.supervisor
                         .read_control()
                         .check()
-                        .map_err(|error| lk_graph::GraphError::Io(error.to_string()))?;
+                        .map_err(lk_graph::GraphError::from)?;
                     let Some(reason) = hold else {
                         return Ok(true);
                     };
@@ -4777,8 +4807,11 @@ mod native {
                     Ok(false)
                 },
                 |candidates, mutation| {
-                    let mut selected = InputAvailability::load(&self.root)
-                        .map_err(|error| lk_graph::GraphError::Io(error.to_string()))?;
+                    let mut selected = InputAvailability::load_controlled(
+                        &self.root,
+                        self.supervisor.read_control(),
+                    )
+                    .map_err(|error| lk_graph::GraphError::Io(error.to_string()))?;
                     for candidate in candidates {
                         selected
                             .require_ready(candidate)
@@ -4788,6 +4821,7 @@ mod native {
                         .guard(mutation)
                         .map_err(|error| lk_graph::GraphError::Io(error.to_string()))
                 },
+                self.supervisor.read_control(),
             )
             .map_err(|error| miette::miette!("{error}"))?;
             self.result.audit_deferred = readiness.deferred().to_vec();
@@ -4804,14 +4838,17 @@ mod native {
             &self,
             batch: &[lk_graph::audit::AuditCandidate],
         ) -> miette::Result<lk_graph::audit::AuditVerification> {
-            let pages =
-                lk_graph::scan::scan_vault(&self.root, self.config.graph.scope.follow_links)
-                    .map_err(|e| miette::miette!("{e}"))?;
+            let pages = lk_graph::scan::scan_vault_controlled(
+                &self.root,
+                self.config.graph.scope.follow_links,
+                self.supervisor.read_control(),
+            )
+            .map_err(|e| miette::miette!("{e}"))?;
             let workflow = self
                 .lease
                 .as_ref()
                 .ok_or_else(|| miette::miette!("audit has no workflow lease"))?;
-            let verified = lk_graph::audit::verify_batch_with_guard(
+            let verified = lk_graph::audit::verify_batch_with_guard_controlled(
                 &self.root,
                 &self.config.vault.dirs,
                 &pages,
@@ -4819,12 +4856,13 @@ mod native {
                 workflow.id(),
                 self.config.graph.audit.max_input_bytes,
                 |assessment, mutation| {
-                    crate::commands::work::guard_audit(
+                    crate::commands::work::guard_audit_controlled(
                         &self.root,
                         &self.config,
                         &self.config_revision,
                         assessment,
                         mutation,
+                        self.supervisor.read_control(),
                     )
                     .map(|completed| {
                         if completed {
@@ -4835,6 +4873,7 @@ mod native {
                     })
                     .map_err(|error| lk_graph::GraphError::Io(error.to_string()))
                 },
+                self.supervisor.read_control(),
             )
             .map_err(|e| miette::miette!("{e}"))?;
             let paths = verified
@@ -4844,16 +4883,20 @@ mod native {
                 .collect::<std::collections::BTreeSet<_>>()
                 .into_iter()
                 .collect::<Vec<_>>();
-            let selected = lk_graph::audit::plan_selected_partitioned(
+            let selected = lk_graph::audit::plan_selected_partitioned_controlled(
                 &self.root,
                 &self.config.vault.dirs,
                 &pages,
                 paths.len(),
                 &paths,
                 self.config.graph.audit.max_input_bytes,
+                self.supervisor.read_control(),
             )
             .map_err(|error| miette::miette!("{error}"))?;
-            let mut readiness = super::super::queue::readiness::InputReadiness::load(&self.root)?;
+            let mut readiness = super::super::queue::readiness::InputReadiness::load_controlled(
+                &self.root,
+                self.supervisor.read_control(),
+            )?;
             for candidate in &selected.candidates {
                 readiness.require_ready(&self.root, candidate)?;
             }
@@ -4865,7 +4908,11 @@ mod native {
                 return false;
             }
             self.result.review_health = None;
-            let reports = match lk_vault::list_reviews(&self.root, &self.config.vault.dirs) {
+            let reports = match lk_vault::list_reviews_controlled(
+                &self.root,
+                &self.config.vault.dirs,
+                self.supervisor.read_control(),
+            ) {
                 Ok(reports) => reports,
                 Err(error) => return self.failure("knowledge review health", error),
             };
@@ -5062,11 +5109,12 @@ mod native {
             }
             let mut bounded = plan.input.ensure_ready().is_err();
             for candidate in &plan.candidates {
-                match crate::commands::work::audit_needs_work(
+                match crate::commands::work::audit_needs_work_controlled(
                     &self.root,
                     &self.config,
                     &self.config_revision,
                     candidate,
+                    self.supervisor.read_control(),
                 ) {
                     Ok(required) => bounded |= required,
                     Err(error) => {

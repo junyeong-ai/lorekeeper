@@ -2990,6 +2990,77 @@ fn blocked_synthesis_reports_dependencies_without_planning_or_launching_a_host()
     assert!(planned_queue_subjects(&fixture).is_empty());
 }
 
+#[test]
+fn native_queue_checks_synthesis_readiness_only_inside_the_fair_preparation_window() {
+    for engine in ["claude-code", "codex"] {
+        let fixture = Fixture::new(engine, 30, "exit 0");
+        let config = std::fs::read_to_string(&fixture.config).unwrap()
+            .replace("concept_policy: supported-new", "concept_policy: disabled")
+            .replace("  default_profile: primary\n", "  default_profile: primary\n  work: {max_input_bytes: 262144, max_result_bytes: 1024, max_calls: 1, max_parallel: 1}\n");
+        std::fs::write(&fixture.config, config).unwrap();
+        std::fs::write(
+            fixture.root().join("vault/inbox/first.md"),
+            "# First\n\nOne observation.\n",
+        )
+        .unwrap();
+        assert!(
+            fixture
+                .command()
+                .arg("ingest")
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
+        write_synthesis_pair(&fixture, "z-later", None, 1);
+        let later = fixture
+            .root()
+            .join("vault/wiki/documents/z-later-source.md");
+        let raw = std::fs::read_to_string(&later).unwrap().replace(
+            "title: z-later source\n",
+            "title: z-later source\nllm_inputs: invalid\n",
+        );
+        std::fs::write(later, raw).unwrap();
+        std::fs::write(
+            fixture
+                .root()
+                .join("vault/.lorekeeper/execution-cursor.json"),
+            r#"{"queue":"wiki/documents/first.md","audit":null}"#,
+        )
+        .unwrap();
+        let (output, report) = fixture.run("process");
+        assert!(!output.status.success(), "mock publishes nothing: {report}");
+        assert_eq!(report["semantic_calls"], 1, "{engine}: {report}");
+        assert_eq!(report["queue_planning"]["prepared_targets"], 1);
+        assert_eq!(report["queue_planning"]["synthesis_subjects"], 0);
+        assert!(planned_queue_subjects(&fixture).is_empty());
+        let cursor: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(
+                fixture
+                    .root()
+                    .join("vault/.lorekeeper/execution-cursor.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(cursor["queue"], "wiki/concepts/z-later.md");
+        let (_, next) = fixture.run("process");
+        assert_eq!(
+            next["semantic_calls"], 0,
+            "the later invalid input must still refuse: {next}"
+        );
+        assert_eq!(next["halted"], true);
+        assert!(
+            next["stages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|stage| { stage["name"] == "queue planning" && stage["state"] == "failed" })
+        );
+        assert!(planned_queue_subjects(&fixture).is_empty());
+    }
+}
+
 fn build_extraction_behavior(discovery_handler: &str) -> String {
     let mut behavior = RECORD_BOUNDED_AUDIT.replace(
         "    if match is None:\n        raise SystemExit('expected an exact bounded native request')",
@@ -5897,6 +5968,31 @@ fn queue_window_fixture(entries: usize, large: bool) -> Fixture {
         String::from_utf8_lossy(&result.stderr)
     );
     fixture
+}
+
+#[test]
+fn native_queue_continues_from_a_blocked_synthesis_window_to_a_ready_section() {
+    let fixture = queue_window_fixture(1, false);
+    write_synthesis_pair(&fixture, "a-blocked", Some("pending"), 1);
+    let (_, report) = fixture.run("process");
+    assert_eq!(report["semantic_calls"], 1, "{report}");
+    assert_eq!(report["queue_planning"]["prepared_targets"], 1);
+    assert_eq!(report["queue_planning"]["synthesis_subjects"], 0);
+    assert!(
+        planned_queue_subjects(&fixture)
+            .iter()
+            .all(|subject| subject["target"] == "wiki/documents/source-000.md")
+    );
+    let cursor: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(
+            fixture
+                .root()
+                .join("vault/.lorekeeper/execution-cursor.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(cursor["queue"], "wiki/documents/source-000.md");
 }
 
 #[test]

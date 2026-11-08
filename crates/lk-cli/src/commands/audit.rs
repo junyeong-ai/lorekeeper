@@ -12,26 +12,49 @@ pub(super) fn record(
     config: &lk_core::config::Config,
     config_revision: &str,
     results: lk_graph::audit::AuditResults,
-    mut guard: impl FnMut(
+    guard: impl FnMut(
         &lk_graph::audit::AuditAssessment,
         &mut lk_vault::MutationPlan,
     ) -> miette::Result<()>,
 ) -> miette::Result<Vec<String>> {
+    record_controlled(
+        session,
+        config,
+        config_revision,
+        results,
+        guard,
+        &lk_vault::ReadControl::default(),
+    )
+}
+
+pub(super) fn record_controlled(
+    session: &lk_vault::MutationSession,
+    config: &lk_core::config::Config,
+    config_revision: &str,
+    results: lk_graph::audit::AuditResults,
+    mut guard: impl FnMut(
+        &lk_graph::audit::AuditAssessment,
+        &mut lk_vault::MutationPlan,
+    ) -> miette::Result<()>,
+    read: &lk_vault::ReadControl,
+) -> miette::Result<Vec<String>> {
+    read.check().map_err(|error| miette::miette!("{error}"))?;
     let root = session.root();
-    let pages = lk_graph::scan::scan_vault(root, config.graph.scope.follow_links)
+    let pages = lk_graph::scan::scan_vault_controlled(root, config.graph.scope.follow_links, read)
         .map_err(|error| miette::miette!("{error}"))?;
     let selection = results
         .assessments
         .iter()
         .map(|assessment| assessment.path.clone())
         .collect::<Vec<_>>();
-    let selected = lk_graph::audit::plan_selected_partitioned(
+    let selected = lk_graph::audit::plan_selected_partitioned_controlled(
         root,
         &config.vault.dirs,
         &pages,
         selection.len(),
         &selection,
         config.graph.audit.max_input_bytes,
+        read,
     )
     .map_err(|error| miette::miette!("{error}"))?;
     if selected
@@ -44,12 +67,12 @@ pub(super) fn record(
         ));
     }
     let _queue_claim = super::queue::claim_writer(&root.join(".lorekeeper/queue"), false)?;
-    let mut readiness = InputReadiness::load(root)?;
+    let mut readiness = InputReadiness::load_controlled(root, read)?;
     for candidate in &selected.candidates {
         readiness.require_ready(root, candidate)?;
     }
     let mut readiness = Some(readiness);
-    lk_graph::audit::record_with_guard(
+    lk_graph::audit::record_with_guard_controlled(
         session,
         &config.vault.dirs,
         &pages,
@@ -57,24 +80,32 @@ pub(super) fn record(
         config.graph.audit.max_input_bytes,
         |assessment, mutation| {
             if let Some(readiness) = readiness.take() {
-                readiness
-                    .guard(root, mutation)
-                    .map_err(|error| lk_graph::GraphError::Io(error.to_string()))?;
+                let guarded = readiness.guard(root, mutation);
+                read.check().map_err(lk_graph::GraphError::from)?;
+                guarded.map_err(|error| lk_graph::GraphError::Io(error.to_string()))?;
             }
             guard(assessment, mutation)
                 .map_err(|error| lk_graph::GraphError::Io(error.to_string()))?;
             action::guard_completed(root, &assessment.path, mutation)
                 .map_err(|error| lk_graph::GraphError::Io(error.to_string()))?;
-            super::work::guard_audit(root, config, config_revision, assessment, mutation)
-                .map(|completed| {
-                    if completed {
-                        lk_graph::audit::AuditReadCoverage::CompletedWork
-                    } else {
-                        lk_graph::audit::AuditReadCoverage::WholeInput
-                    }
-                })
-                .map_err(|error| lk_graph::GraphError::Io(error.to_string()))
+            super::work::guard_audit_controlled(
+                root,
+                config,
+                config_revision,
+                assessment,
+                mutation,
+                read,
+            )
+            .map(|completed| {
+                if completed {
+                    lk_graph::audit::AuditReadCoverage::CompletedWork
+                } else {
+                    lk_graph::audit::AuditReadCoverage::WholeInput
+                }
+            })
+            .map_err(|error| lk_graph::GraphError::Io(error.to_string()))
         },
+        read,
     )
     .map_err(|error| miette::miette!("{error}"))
 }
@@ -99,19 +130,25 @@ pub(super) struct InputAvailability {
 
 impl InputAvailability {
     pub fn load(root: &Path) -> miette::Result<Self> {
+        Self::load_controlled(root, &lk_vault::ReadControl::default())
+    }
+
+    pub fn load_controlled(root: &Path, read: &lk_vault::ReadControl) -> miette::Result<Self> {
         Ok(Self {
             root: root.to_path_buf(),
-            readiness: InputReadiness::load(root)?,
+            readiness: InputReadiness::load_controlled(root, read)?,
             deferred: Vec::new(),
             deferred_count: 0,
         })
     }
 
     pub fn check(&mut self, candidate: &AuditCandidate) -> Result<bool, lk_graph::GraphError> {
-        let reasons = self
-            .readiness
-            .unfinished(&self.root, candidate)
-            .map_err(|error| lk_graph::GraphError::Io(error.to_string()))?;
+        let captured = self.readiness.unfinished(&self.root, candidate);
+        self.readiness
+            .read_control()
+            .check()
+            .map_err(lk_graph::GraphError::from)?;
+        let reasons = captured.map_err(|error| lk_graph::GraphError::Io(error.to_string()))?;
         if reasons.is_empty() {
             return Ok(true);
         }

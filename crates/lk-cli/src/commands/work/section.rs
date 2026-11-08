@@ -41,25 +41,42 @@ pub(in crate::commands) fn plan_prune(
     SECTION.plan_prune(root, pending, plan)
 }
 
+#[cfg(test)]
 pub(in crate::commands) fn prepare(
     root: &Path,
     config: &lk_core::config::Config,
     config_revision: &str,
     task_id: &str,
 ) -> miette::Result<Preparation> {
+    prepare_controlled(
+        root,
+        config,
+        config_revision,
+        task_id,
+        &lk_vault::ReadControl::default(),
+    )
+}
+
+pub(in crate::commands) fn prepare_controlled(
+    root: &Path,
+    config: &lk_core::config::Config,
+    config_revision: &str,
+    task_id: &str,
+    read: &lk_vault::ReadControl,
+) -> miette::Result<Preparation> {
     let root = root.canonicalize().into_diagnostic()?;
-    let task = crate::commands::queue::current_task(&root, task_id)?;
+    let task = crate::commands::queue::current_task_controlled(&root, task_id, read)?;
     if !crate::commands::execution::finalization::supports(task.kind) {
         return Err(miette::miette!("task requires interactive processing"));
     }
-    let original = super::resources::task(&root, config, task_id)?;
+    let original = super::resources::task_controlled(&root, config, task_id, read)?;
     let work = super::expected(&root, &original, config, config_revision)?;
     if work.plan.parts.len() != 1 || work.is_planned(&root)? {
         return Err(miette::miette!(
             "existing or partitioned work requires its guarded Work protocol"
         ));
     }
-    let prepared = super::resources::section_task(&root, config, task_id)?;
+    let prepared = super::resources::section_task_controlled(&root, config, task_id, read)?;
     let result = lk_queue::SectionResult {
         task_id: task.task_id.clone(),
         cache_hash: task.cache_hash.clone(),
@@ -124,7 +141,14 @@ pub(in crate::commands) fn finish(
     response: crate::commands::execution::finalization::SectionResponse,
 ) -> miette::Result<Option<String>> {
     let root = session.root();
-    let current = prepare(root, config, config_revision, &section.result.task_id)?;
+    let read = section.prepared.read_control().clone();
+    let current = prepare_controlled(
+        root,
+        config,
+        config_revision,
+        &section.result.task_id,
+        &read,
+    )?;
     let Preparation::Ready(current) = current else {
         return Err(miette::miette!(
             "section requires a fresh action before publication"
@@ -157,6 +181,7 @@ pub(in crate::commands) fn finish(
                 serde_json::to_string(&action).into_diagnostic()?,
             )
             .into_diagnostic()?;
+            read.check().into_diagnostic()?;
             session.apply(plan).into_diagnostic()?;
             Ok(Some(reason))
         }
@@ -173,13 +198,14 @@ pub(in crate::commands) fn finish(
                 ));
             }
             let value = serde_json::to_value(&result).into_diagnostic()?;
-            super::guard_queue(
+            super::guard_queue_controlled(
                 root,
                 config,
                 config_revision,
                 &result.task_id,
                 value.clone(),
                 &mut plan,
+                &read,
             )?;
             let destination = super::queue_result_path(
                 crate::commands::queue::current_task(root, &result.task_id)?.kind,
@@ -190,6 +216,7 @@ pub(in crate::commands) fn finish(
             if let Some(before) = before {
                 plan.remove(path, before);
             }
+            read.check().into_diagnostic()?;
             session.apply(plan).into_diagnostic()?;
             Ok(None)
         }
