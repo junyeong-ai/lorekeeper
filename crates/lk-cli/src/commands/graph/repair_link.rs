@@ -77,7 +77,7 @@ fn prepare(
     let mut replacements = 0;
     let body = link::rewrite_links_outside_code(&before[offset..], |inline| {
         let (dest, anchor) = link::split_dest_anchor(inline.destination);
-        if link::is_external(dest)
+        if link::is_external_reference(dest)
             || link::resolve_dest(origin, &link::decode_dest(dest)).as_deref() != Some(*from)
         {
             return None;

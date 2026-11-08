@@ -450,7 +450,7 @@ fn rewrite_links(
         // counts as citations (`../concepts/from.md`, `./from.md`, the OKF absolute
         // form, actual filesystem aliases) are rewritten, no more and no fewer.
         let (dest, anchor) = link::split_dest_anchor(inline.destination);
-        if link::is_external(dest) {
+        if link::is_external_reference(dest) {
             return None;
         }
         let decoded = link::decode_dest(dest);

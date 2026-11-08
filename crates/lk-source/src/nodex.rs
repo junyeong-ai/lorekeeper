@@ -718,10 +718,13 @@ pub fn repoint_document_links(
     let dir = Path::new(doc_path).parent().unwrap_or(Path::new(""));
     lk_core::link::rewrite_links_outside_code(body, |inline| {
         let (dest, anchor) = lk_core::link::split_dest_anchor(inline.destination);
-        if dest.is_empty() || lk_core::link::is_external(dest) {
+        if dest.is_empty() || lk_core::link::is_external_reference(dest) {
             return None;
         }
         let decoded = lk_core::link::decode_dest(dest);
+        if lk_core::link::resolve_dest(Path::new(doc_path), &decoded).is_none() {
+            return Some(inline.raw_text.to_owned());
+        }
         let held = [dir.join(&decoded), PathBuf::from(&decoded)]
             .into_iter()
             .filter_map(|candidate| normalize(&candidate))
@@ -2044,6 +2047,43 @@ exit "$rc"
 
     /// What must NOT be rewritten: a link that already names its own host, and one addressing
     /// the document itself.
+    #[test]
+    fn network_references_and_encoded_literal_percent_paths_keep_their_identity() {
+        let external = "[Docs](//docs.example.org/guide.md#part)";
+        assert_eq!(
+            repoint_document_links(
+                external,
+                "docs/source.md",
+                Some("https://host/repo"),
+                |_| true
+            ),
+            external
+        );
+        assert_eq!(
+            repoint_document_links(
+                "[Literal](topic%255Cname.md)",
+                "docs/source.md",
+                Some("https://host/repo"),
+                |path| path == "docs/topic%5Cname.md"
+            ),
+            "[Literal](https://host/repo/docs/topic%255Cname.md)"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn literal_uri_backslashes_do_not_project_to_different_repository_files() {
+        assert_eq!(
+            repoint_document_links(
+                "[Literal](topics%5Ctarget.md)",
+                "docs/source.md",
+                Some("https://host/repo"),
+                |path| path == "docs/topics/target.md"
+            ),
+            "Literal"
+        );
+    }
+
     #[test]
     fn an_external_or_anchor_only_link_is_left_alone() {
         let repo = repo_with(&[]);

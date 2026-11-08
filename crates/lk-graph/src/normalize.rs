@@ -203,7 +203,7 @@ fn repoint_renamed_links(
         .ok_or_else(|| GraphError::Io("cannot rewrite links in unclosed frontmatter".into()))?;
     let updated = link::rewrite_links_outside_code(&content[body_offset..], |inline| {
         let (dest, anchor) = link::split_dest_anchor(inline.destination);
-        if link::is_external(dest) {
+        if link::is_external_reference(dest) {
             return None;
         }
         let decoded = link::decode_dest(dest);

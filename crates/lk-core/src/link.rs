@@ -44,9 +44,8 @@ pub fn split_dest_anchor(dest: &str) -> (&str, &str) {
     }
 }
 
-/// Whether a destination is external — it carries an RFC 3986 scheme
-/// (`https:`, `mailto:`, …). External destinations are never vault pages, so they are
-/// invisible to extraction and rewriting.
+/// Whether a destination carries an RFC 3986 scheme (`https:`, `mailto:`, …).
+/// Vault-page consumers use [`is_external_reference`] to include authority references.
 pub fn is_external(dest: &str) -> bool {
     let mut chars = dest.chars();
     match chars.next() {
@@ -61,6 +60,11 @@ pub fn is_external(dest: &str) -> bool {
         }
     }
     false
+}
+
+/// Whether a CommonMark destination is a scheme-bearing or network-path URI reference.
+pub fn is_external_reference(dest: &str) -> bool {
+    dest.starts_with("//") || is_external(dest)
 }
 
 /// Percent-encode a destination path: the characters that would break an inline
@@ -176,9 +180,12 @@ pub fn relative_dest(from_page: &Path, to_page: &Path) -> String {
 /// vault-root-relative (the OKF absolute form); anything else is relative to the
 /// page's directory. Destinations are `/`-separated (a backslash is a literal path
 /// character, as in CommonMark and POSIX). Purely lexical (`.` and `..` are folded);
-/// `None` when the destination escapes the vault root — such a link can't address a
-/// vault page.
+/// `None` when the destination escapes the vault root or has no native path representation.
 pub fn resolve_dest(from_page: &Path, dest: &str) -> Option<PathBuf> {
+    #[cfg(windows)]
+    if dest.contains('\\') {
+        return None;
+    }
     let (base, dest) = match dest.strip_prefix('/') {
         Some(rooted) => (Path::new(""), rooted),
         None => (from_page.parent().unwrap_or(Path::new("")), dest),
@@ -393,12 +400,7 @@ pub fn extract_dests(body: &str) -> Vec<String> {
         .collect()
 }
 
-/// The destination of the first EXTERNAL inline link in `text`.
-///
-/// The mirror of what [`extract_dests`] gates out. A task carries where it came from as an
-/// absolute URL in its own title, precisely so the graph never sees it — which means the graph's
-/// extraction cannot answer where a task came from either, and a caller reaching for the URL
-/// would otherwise re-parse markdown by hand. One vocabulary, both directions.
+/// The first scheme-bearing inline destination, suitable as an absolute task origin.
 pub fn first_external_dest(text: &str) -> Option<String> {
     let mut found = None;
     visit_inline_links(text, |link, _| {
@@ -413,7 +415,7 @@ pub fn first_external_dest(text: &str) -> Option<String> {
 /// external/empty/anchor-only destinations.
 fn internal_page_link(link: &InlineLink<'_>) -> Option<PageLink> {
     let (page, _anchor) = split_dest_anchor(link.destination);
-    if page.is_empty() || is_external(page) {
+    if page.is_empty() || is_external_reference(page) {
         return None;
     }
     Some(PageLink {
@@ -845,6 +847,38 @@ Inline `[span](c.md)` and [live2](d.md).
             extract_dests(text)
         );
         assert_eq!(extract_dests(text), vec!["../wiki/concepts/a.md", "b.md"]);
+    }
+
+    #[test]
+    fn network_references_are_external_without_becoming_absolute_origins() {
+        let body = "[Docs](//docs.example.org/guide.md) [Root](/wiki/topic.md) [Origin](https://example.org/entry)";
+        assert_eq!(extract_dests(body), ["/wiki/topic.md"]);
+        assert!(!is_external("//docs.example.org/guide.md"));
+        assert_eq!(
+            first_external_dest(body).as_deref(),
+            Some("https://example.org/entry")
+        );
+        assert_eq!(
+            resolve_dest(Path::new("daily/day.md"), "/wiki/topic.md"),
+            Some(PathBuf::from("wiki/topic.md"))
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn literal_uri_backslashes_cannot_resolve_as_native_separators() {
+        let from = Path::new("wiki/source.md");
+        for dest in [
+            r"concepts\topic.md",
+            r"..\concepts\topic.md",
+            r"/concepts\topic.md",
+        ] {
+            assert_eq!(resolve_dest(from, dest), None);
+        }
+        assert_eq!(
+            resolve_dest(from, &decode_dest("concepts%255Ctopic.md")),
+            Some(PathBuf::from("wiki/concepts%5Ctopic.md"))
+        );
     }
 
     #[test]

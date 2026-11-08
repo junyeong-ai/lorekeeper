@@ -45,7 +45,7 @@ pub fn relocate_markdown_links(
         ) = &mut event
         {
             let (destination, anchor) = lk_core::link::split_dest_anchor(dest_url);
-            if !destination.is_empty() && !lk_core::link::is_external(destination) {
+            if !destination.is_empty() && !lk_core::link::is_external_reference(destination) {
                 let target = lk_core::link::resolve_dest(
                     from_page,
                     &lk_core::link::decode_dest(destination),
@@ -53,7 +53,7 @@ pub fn relocate_markdown_links(
                 .ok_or_else(|| {
                     Error::new(
                         ErrorKind::InvalidOperation,
-                        "relocated Markdown destination escapes the vault",
+                        "relocated Markdown destination cannot address a vault page",
                     )
                 })?;
                 let relocated =
@@ -289,6 +289,7 @@ mod tests {
     #[test]
     fn relocation_preserves_bytes_when_destinations_do_not_move() {
         for source in [
+            "[Docs](//docs.example.org/guide.md#part)\r\n![Image](//images.example.org/a.png)\r\n",
             "[Web](https://example.com)\r\n\r\n[Here](#local)\r\n",
             "```text\r\n[Literal](relative.md)\r\n```\r\n",
             "<div>\n[Literal](relative.md)\n</div>\n",

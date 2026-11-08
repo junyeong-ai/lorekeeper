@@ -1487,6 +1487,29 @@ mod tests {
     }
 
     #[test]
+    fn network_references_are_not_vault_edges() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("source.md");
+        std::fs::write(
+            &path,
+            "[Docs](//docs.example.org/guide.md) [Local](/wiki/topic.md)",
+        )
+        .unwrap();
+        let page = parse_file(&path, root.path()).unwrap();
+        assert_eq!(dests(&page), ["wiki/topic.md"]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn literal_uri_backslashes_never_create_an_edge_to_a_nested_page() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("source.md");
+        std::fs::write(&path, "[Literal](concepts%5Ctopic.md)").unwrap();
+        let page = parse_file(&path, root.path()).unwrap();
+        assert_eq!(page.outgoing, [Link::outside(r"concepts\topic.md")]);
+    }
+
+    #[test]
     fn parse_file_resolves_links_against_page_location() {
         let tmp = tempfile::tempdir().unwrap();
         let daily = tmp.path().join("daily/x");
