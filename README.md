@@ -160,6 +160,8 @@ DOCX·XLSX·PDF·이미지는 [전처리 설정](skills/lore-setup/references/co
 | 준비된 지식 감사 한 배치와 후속 큐 처리 | `lore run knowledge` |
 | 남은 작업·미게시 결과·중단된 게시 | `lore queue status --json`, `lore queue check` |
 | 링크 구조 / 판단 재검토 / 감사 준비 상태 | `lore graph lint`, `lore wiki reviews --check`, `lore wiki audit-plan --ready` |
+| 마지막 수집 성공과 최근 부분 수집·실패 구분 | `lore health --json` |
+| 저장소 탐색 변경 / 보존된 추출 입력 검증 | `lore extract status --json`, `lore extract verify --json` |
 
 `process --batches N`과 `knowledge --batches N`은 명시적 배치 상한입니다.
 `process`는 호출 예산 소진 뒤 새로 저장한 진척이 있을 때 다음 배치로 진행합니다.

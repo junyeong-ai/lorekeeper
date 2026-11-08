@@ -463,6 +463,13 @@ The repository must permit the selected version and already hold an index curren
 it. Binary selection does not override a project version pin or rebuild its index.
 The repository owner prepares it with the selected binary's `nodex build --full`;
 upgrading the binary requires rebuilding even when the graph schema is unchanged.
+Read the typed state from `nodex -C /absolute/repo status`; exit0 alone does not
+mean the index is current. Coordinate refresh with the owner's document publication
+workflow so later edits do not immediately invalidate it again. Lore never rebuilds
+another repository's index during collection.
+After an outage longer than the configured date window, ordinary collection does
+not prove the gap recovered. Explicit bounded `reconcile: true` batches can recover
+selected current documents; they cannot reconstruct retired or historical revisions.
 `scope_coverage` warnings and invalid first-match rules refuse collection. Optional
 excludes that legitimately match nothing need the repository owner's explicit
 `may_be_empty = true`; Lore does not suppress warnings or rewrite source configuration.

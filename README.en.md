@@ -160,6 +160,8 @@ These reads revalidate current inputs and leave existing observations and comple
 | Audit one ready knowledge batch, then process dependent queue work | `lore run knowledge` |
 | Check pending work, staged results and interrupted publication | `lore queue status --json`, `lore queue check` |
 | Check links / review reassessment / audit readiness | `lore graph lint`, `lore wiki reviews --check`, `lore wiki audit-plan --ready` |
+| Distinguish last collection success from recent partial reach or failure | `lore health --json` |
+| Check discovery changes / verify retained extraction inputs | `lore extract status --json`, `lore extract verify --json` |
 
 `process --batches N` and `knowledge --batches N` are explicit batch ceilings.
 `process` continues after call-budget exhaustion with newly retained progress.
