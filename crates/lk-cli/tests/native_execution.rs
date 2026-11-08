@@ -949,7 +949,9 @@ fn current_authored_assessment_does_not_hide_unfinished_bookkeeping_or_force_a_r
         !second.status.success(),
         "an unchanged receipt must not hide unfinished inputs: {report}"
     );
+    assert_eq!(report["halted"], false);
     assert_eq!(report["semantic_calls"], 0);
+    assert_eq!(report["audit_progress"]["after"]["reviewed_current"], 1);
     assert!(
         report["audit_deferred"]
             .as_array()

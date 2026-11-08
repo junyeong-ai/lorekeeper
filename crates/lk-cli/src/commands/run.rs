@@ -4987,6 +4987,15 @@ mod native {
                         if let Some(progress) = &mut self.result.audit_progress {
                             progress.after = Some(plan.coverage());
                         }
+                        if self.result.audit_deferred_count > 0 {
+                            self.deferred(
+                                "audit final dependencies",
+                                format!(
+                                    "{} checked audit subjects have unfinished inputs; retained for later assessment",
+                                    self.result.audit_deferred_count,
+                                ),
+                            );
+                        }
                     }
                     Err(error) => {
                         self.failure("audit final coverage", error);

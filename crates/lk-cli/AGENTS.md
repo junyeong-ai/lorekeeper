@@ -170,6 +170,8 @@ deferred subcommands expose their names eagerly for name-only discovery.
   uses the same readiness owner without reserving work; automatic plans skip blockers,
   while exact selections retain them with bounded diagnostics and a complete count for
   that checked scope.
+  An empty audit settles only after fresh corpus readiness succeeds. Unfinished recorded
+  inputs remain deferred without invalidating current semantic receipts.
 - Grant each temporary selection manifest's directory explicitly to the selected host;
   keep it alive through the foreground consumer and remove it afterward.
 - A tool-enabled native audit finalizer may legitimately create reviews or repair
