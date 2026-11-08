@@ -127,11 +127,28 @@ fn open(vault_root: &Path, create: bool) -> Result<std::fs::File, Unholdable> {
         Ok(())
     }
     .and_then(|()| {
-        std::fs::OpenOptions::new()
+        #[cfg(unix)]
+        let file = {
+            use rustix::fs::{Mode, OFlags};
+            let mut flags = OFlags::WRONLY | OFlags::CLOEXEC | OFlags::NONBLOCK;
+            if create {
+                flags |= OFlags::CREATE;
+            }
+            std::fs::File::from(rustix::fs::open(&path, flags, Mode::from_raw_mode(0o666))?)
+        };
+        #[cfg(not(unix))]
+        let file = std::fs::OpenOptions::new()
             .create(create)
             .truncate(false)
             .write(true)
-            .open(&path)
+            .open(&path)?;
+        if !file.metadata()?.is_file() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "lock is not a regular file",
+            ));
+        }
+        Ok(file)
     })
     .map_err(|e| Unholdable::Path(TaskError::io(format!("open {}", path.display()), e)))
 }
@@ -193,5 +210,89 @@ mod tests {
         let held = PlaneLock::hold(tmp.path()).unwrap();
         assert!(PlaneLock::is_holdable(tmp.path()).is_ok());
         drop(held);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn regular_aliases_preserve_bytes_and_dangling_aliases_create_only_on_write() {
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().unwrap();
+        let lock = path(tmp.path());
+        std::fs::create_dir_all(lock.parent().unwrap()).unwrap();
+        let target = tmp.path().join("target");
+        symlink(&target, &lock).unwrap();
+        PlaneLock::is_holdable(tmp.path()).unwrap();
+        assert!(!target.exists());
+        drop(PlaneLock::hold(tmp.path()).unwrap());
+        std::fs::write(&target, b"retained").unwrap();
+        PlaneLock::is_holdable(tmp.path()).unwrap();
+        drop(PlaneLock::hold(tmp.path()).unwrap());
+        assert_eq!(std::fs::read(&target).unwrap(), b"retained");
+        assert!(std::fs::symlink_metadata(&lock).unwrap().is_symlink());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn special_files_and_their_aliases_are_path_failures_without_waiting() {
+        use std::os::unix::fs::symlink;
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let tmp = tempfile::tempdir().unwrap();
+        let lock = path(tmp.path());
+        std::fs::create_dir_all(lock.parent().unwrap()).unwrap();
+        let fifo = tmp.path().join("fifo");
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .unwrap()
+                .success()
+        );
+        for alias in [false, true] {
+            if alias {
+                symlink(&fifo, &lock).unwrap();
+            } else {
+                std::fs::rename(&fifo, &lock).unwrap();
+            }
+            let (done, receiver) = mpsc::channel();
+            std::thread::scope(|scope| {
+                let lock = &lock;
+                scope.spawn(move || {
+                    if receiver.recv_timeout(Duration::from_secs(5)).is_err() {
+                        let _reader = std::fs::File::options()
+                            .read(true)
+                            .write(true)
+                            .open(lock)
+                            .unwrap();
+                        receiver.recv().unwrap();
+                        panic!("lock open waited for a FIFO reader");
+                    }
+                });
+                let held = PlaneLock::hold(tmp.path());
+                let holdable = PlaneLock::is_holdable(tmp.path());
+                done.send(()).unwrap();
+                assert!(matches!(held, Err(Unholdable::Path(_))));
+                assert!(matches!(holdable, Err(Unholdable::Path(_))));
+            });
+            if alias {
+                std::fs::remove_file(&lock).unwrap();
+            } else {
+                std::fs::rename(&lock, &fifo).unwrap();
+            }
+        }
+        let _reader = std::fs::File::options()
+            .read(true)
+            .write(true)
+            .open(&fifo)
+            .unwrap();
+        symlink(&fifo, &lock).unwrap();
+        assert!(matches!(
+            PlaneLock::hold(tmp.path()),
+            Err(Unholdable::Path(_))
+        ));
+        assert!(matches!(
+            PlaneLock::is_holdable(tmp.path()),
+            Err(Unholdable::Path(_))
+        ));
     }
 }

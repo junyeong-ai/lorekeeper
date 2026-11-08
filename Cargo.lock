@@ -1717,6 +1717,7 @@ dependencies = [
  "blake3",
  "jiff",
  "lk-core",
+ "rustix",
  "serde",
  "serde_json",
  "tempfile",
