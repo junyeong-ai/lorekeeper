@@ -59,7 +59,8 @@ pub use self::discovery::{
     DiscoveryCapture, DiscoveryCaptureMetrics, DiscoveryHeading, DiscoveryMatch, DiscoveryPreview,
     DiscoveryQuery, DiscoveryReadMetrics, DiscoveryText, capture_discovery,
     capture_discovery_batch, capture_discovery_batch_controlled, capture_discovery_batch_measured,
-    capture_discovery_with_reviews, discover_queries, discover_queries_controlled,
+    capture_discovery_batch_with_inventory, capture_discovery_with_reviews, discover_queries,
+    discover_queries_controlled,
 };
 pub use self::document::{
     DocumentContent, DocumentOptions, DocumentSection, DocumentView, inspect_document,
@@ -91,9 +92,9 @@ pub use self::read::{ReadControl, VerifiedFileRevision};
 pub use self::review::{
     EvidenceReport, KnowledgeReview, ReviewEffectiveState, ReviewHealth, ReviewInventory,
     ReviewReport, ReviewStatus, archive_evidence, evidence_archive_path, inspect_evidence,
-    is_archived_evidence, list_reviews, load_archived_evidence, plan_document_publication,
-    plan_review_repointing, publish_document, publish_document_expected,
-    publish_document_expected_with_plan,
+    is_archived_evidence, list_reviews, list_reviews_controlled, load_archived_evidence,
+    load_archived_evidence_controlled, plan_document_publication, plan_review_repointing,
+    publish_document, publish_document_expected, publish_document_expected_with_plan,
 };
 pub use self::rss_evidence::{
     RssEvidencePreview, accumulate_rss_evidence, guard_rss_citation, guard_rss_evidence,

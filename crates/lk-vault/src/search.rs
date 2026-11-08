@@ -1380,13 +1380,12 @@ pub(super) fn attach_reviews(
     dirs: &VaultDirs,
     pages: &mut [Page],
 ) -> Result<(), VaultError> {
-    let reviews = crate::review::review_previews(root, dirs)?;
+    let mut reviews = crate::ReviewInventory::load(root, dirs)?;
+    let read = crate::ReadControl::default();
+    reviews.prepare_previews(&read)?;
     for page in pages {
         let owner = crate::resolve_page_owner(root, &page.rel_path)?;
-        page.reviews = reviews
-            .get(owner.to_string_lossy().as_ref())
-            .cloned()
-            .unwrap_or_default();
+        page.reviews = reviews.previews_for_owner(&owner.to_string_lossy(), &read)?;
         page.review_states = crate::ReviewCounts::default();
         for review in &page.reviews {
             page.review_states.record(review.effective_state, 1);

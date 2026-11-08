@@ -42,15 +42,19 @@ impl ReadControl {
         }
     }
 
-    pub(crate) fn read_to_string(&self, path: &Path) -> Result<String, VaultError> {
+    pub fn read_to_string(&self, path: &Path) -> Result<String, VaultError> {
         use std::io::Read;
         self.check()?;
-        let mut file = std::fs::File::open(path)?;
+        let file = std::fs::File::open(path);
+        self.check()?;
+        let mut file = file?;
         let mut bytes = Vec::new();
         let mut buffer = [0; 65536];
         loop {
             self.check()?;
-            let size = match file.read(&mut buffer) {
+            let result = file.read(&mut buffer);
+            self.check()?;
+            let size = match result {
                 Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
                 result => result?,
             };

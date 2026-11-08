@@ -187,6 +187,33 @@ struct CapturePlan {
     plans: Vec<QueryPlan>,
     guarded_pages: BTreeMap<PathBuf, Arc<String>>,
     roster: BTreeMap<String, DiscoveryCandidate>,
+    reviews: BTreeMap<String, Vec<crate::review::ReviewPreview>>,
+}
+
+enum ReviewCapture<'a> {
+    Reports(&'a [crate::ReviewReport]),
+    Inventory(&'a mut crate::ReviewInventory),
+}
+
+enum ReviewPreviews<'a> {
+    Empty,
+    Reports(BTreeMap<String, Vec<crate::review::ReviewPreview>>),
+    Inventory(&'a mut crate::ReviewInventory),
+}
+
+impl ReviewPreviews<'_> {
+    fn for_owner(
+        &mut self,
+        owner: &str,
+        read: &crate::ReadControl,
+    ) -> Result<Vec<crate::review::ReviewPreview>, VaultError> {
+        read.check()?;
+        match self {
+            Self::Empty => Ok(Vec::new()),
+            Self::Reports(reports) => Ok(reports.get(owner).cloned().unwrap_or_default()),
+            Self::Inventory(inventory) => inventory.previews_for_owner(owner, read),
+        }
+    }
 }
 
 /// Capture every lexical candidate, including retired knowledge, without ranking or
@@ -222,7 +249,7 @@ fn capture_discovery_inner(
         root,
         dirs,
         &[queries],
-        reports,
+        reports.map(ReviewCapture::Reports),
         None,
         &crate::ReadControl::default(),
     )?
@@ -245,7 +272,7 @@ pub fn capture_discovery_batch(
         root,
         dirs,
         &query_sets,
-        reviews,
+        reviews.map(ReviewCapture::Reports),
         None,
         &crate::ReadControl::default(),
     )
@@ -276,8 +303,36 @@ pub fn capture_discovery_batch_controlled(
 ) -> Result<(Vec<DiscoveryCapture>, DiscoveryCaptureMetrics), VaultError> {
     let mut metrics = DiscoveryCaptureMetrics::default();
     let query_sets = query_sets.iter().map(Vec::as_slice).collect::<Vec<_>>();
-    let captures =
-        capture_discovery_batch_inner(root, dirs, &query_sets, reviews, Some(&mut metrics), read)?;
+    let captures = capture_discovery_batch_inner(
+        root,
+        dirs,
+        &query_sets,
+        reviews.map(ReviewCapture::Reports),
+        Some(&mut metrics),
+        read,
+    )?;
+    metrics.captures = usize::from(query_sets.iter().any(|queries| !queries.is_empty()));
+    Ok((captures, metrics))
+}
+
+/// Share one fresh review inventory with dependency selection in this checkpoint.
+pub fn capture_discovery_batch_with_inventory(
+    root: &Path,
+    dirs: &VaultDirs,
+    query_sets: &[Vec<DiscoveryQuery>],
+    reviews: &mut crate::ReviewInventory,
+    read: &crate::ReadControl,
+) -> Result<(Vec<DiscoveryCapture>, DiscoveryCaptureMetrics), VaultError> {
+    let mut metrics = DiscoveryCaptureMetrics::default();
+    let query_sets = query_sets.iter().map(Vec::as_slice).collect::<Vec<_>>();
+    let captures = capture_discovery_batch_inner(
+        root,
+        dirs,
+        &query_sets,
+        Some(ReviewCapture::Inventory(reviews)),
+        Some(&mut metrics),
+        read,
+    )?;
     metrics.captures = usize::from(query_sets.iter().any(|queries| !queries.is_empty()));
     Ok((captures, metrics))
 }
@@ -286,7 +341,7 @@ fn capture_discovery_batch_inner(
     root: &Path,
     dirs: &VaultDirs,
     query_sets: &[&[DiscoveryQuery]],
-    reports: Option<&[crate::ReviewReport]>,
+    reviews: Option<ReviewCapture<'_>>,
     mut metrics: Option<&mut DiscoveryCaptureMetrics>,
     read: &crate::ReadControl,
 ) -> Result<Vec<DiscoveryCapture>, VaultError> {
@@ -336,16 +391,31 @@ fn capture_discovery_batch_inner(
                 plans,
                 guarded_pages: BTreeMap::new(),
                 roster: BTreeMap::new(),
+                reviews: BTreeMap::new(),
             }
         })
         .collect::<Vec<_>>();
     drop(vocabulary);
-    let reviews = if !has_queries {
-        BTreeMap::new()
-    } else if let Some(reports) = reports {
-        crate::review::review_previews_from_reports(&root, reports)?
-    } else {
-        crate::review::review_previews(&root, dirs)?
+    let mut owned_reviews;
+    let mut reviews = match reviews {
+        Some(ReviewCapture::Inventory(inventory)) => {
+            inventory.validate_root(&root)?;
+            if has_queries {
+                inventory.prepare_previews(read)?;
+                ReviewPreviews::Inventory(inventory)
+            } else {
+                ReviewPreviews::Empty
+            }
+        }
+        Some(ReviewCapture::Reports(reports)) if has_queries => ReviewPreviews::Reports(
+            crate::review::review_previews_from_reports_controlled(&root, reports, read)?,
+        ),
+        None if has_queries => {
+            owned_reviews = crate::ReviewInventory::load_controlled(&root, dirs, read)?;
+            owned_reviews.prepare_previews(read)?;
+            ReviewPreviews::Inventory(&mut owned_reviews)
+        }
+        _ => ReviewPreviews::Empty,
     };
     let mut guarded_pages = BTreeMap::<PathBuf, Arc<String>>::new();
     let mut matched_rereads = DiscoveryReadMetrics::default();
@@ -442,14 +512,14 @@ fn capture_discovery_batch_inner(
                     .to_owned();
                 let authored = source_revision(&page.page);
                 let mut counts = crate::ReviewCounts::default();
-                if let Some(previews) = reviews.get(&owner) {
-                    for review in previews {
-                        counts.record(review.effective_state, 1);
-                    }
+                let previews = reviews.for_owner(&owner, read)?;
+                for review in &previews {
+                    counts.record(review.effective_state, 1);
                 }
                 let outline = crate::document::outline(&page.page.body);
                 for (capture_index, mut query_indexes) in matches {
                     let capture = &mut captures[capture_index];
+                    capture.reviews.insert(owner.clone(), previews.clone());
                     capture
                         .guarded_pages
                         .insert(owner_path.clone(), Arc::clone(&raw));
@@ -504,16 +574,7 @@ fn capture_discovery_batch_inner(
         .into_iter()
         .map(|capture| {
             read.check()?;
-            let review_identity = capture
-                .roster
-                .keys()
-                .map(|owner| {
-                    (
-                        owner.clone(),
-                        reviews.get(owner).cloned().unwrap_or_default(),
-                    )
-                })
-                .collect::<BTreeMap<_, _>>();
+            let review_identity = capture.reviews;
             let candidates = capture.roster.into_values().collect::<Vec<_>>();
             let revision = file_revision(&serialized(&(
                 DISCOVERY_CAPTURE_POLICY,
@@ -699,7 +760,7 @@ pub fn discover_queries_controlled(
     if queries.is_empty() {
         return Ok(BTreeMap::new());
     }
-    if let Some(matches) = indexed_queries(root, dirs, queries)? {
+    if let Some(matches) = indexed_queries(root, dirs, queries, read)? {
         read.check()?;
         return Ok(matches);
     }
@@ -725,6 +786,7 @@ pub fn discover_queries_controlled(
         let matcher = search::PageMatcher::from_page(&page);
         let mut revision = None;
         for (query, identity, spellings, terms) in &plans {
+            read.check()?;
             let options = SearchOptions {
                 query: Some(&query.query),
                 phrase: query.phrase,
@@ -756,26 +818,36 @@ fn indexed_queries(
     root: &Path,
     dirs: &VaultDirs,
     queries: &[DiscoveryQuery],
+    read: &crate::ReadControl,
 ) -> Result<Option<BTreeMap<DiscoveryQuery, Vec<Citation>>>, VaultError> {
-    let snapshot = match crate::search_index::inspect_search_snapshot(root, dirs) {
+    read.check()?;
+    let snapshot = crate::search_index::inspect_search_snapshot(root, dirs);
+    read.check()?;
+    let snapshot = match snapshot {
         Ok(snapshot) => snapshot,
+        Err(VaultError::Cancelled) => return Err(VaultError::Cancelled),
         Err(_) => return Ok(None),
     };
     let path = crate::page_path(root, Path::new(crate::search_index::INDEX_PATH))?;
     let mut connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     let transaction = connection.transaction()?;
     crate::search_index::verify_snapshot(&transaction, root, dirs, &snapshot.snapshot)?;
+    read.check()?;
     let mut statement = transaction.prepare(
         "SELECT path, json_extract(metadata, '$.file_revision') FROM pages WHERE knowledge = 1",
     )?;
-    let mut captured = statement
-        .query_map([], |row| {
-            Ok((
-                PathBuf::from(row.get::<_, String>(0)?),
-                row.get::<_, String>(1)?,
-            ))
-        })?
-        .collect::<Result<BTreeMap<_, _>, _>>()?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            PathBuf::from(row.get::<_, String>(0)?),
+            row.get::<_, String>(1)?,
+        ))
+    })?;
+    let mut captured = BTreeMap::new();
+    for row in rows {
+        read.check()?;
+        let (path, revision) = row?;
+        captured.insert(path, revision);
+    }
     let queries = queries
         .iter()
         .collect::<BTreeSet<_>>()
@@ -785,6 +857,7 @@ fn indexed_queries(
         let mut plans = Vec::new();
         let mut paths = BTreeMap::<PathBuf, Vec<usize>>::new();
         for (index, query) in queries.iter().enumerate() {
+            read.check()?;
             let options = SearchOptions {
                 query: Some(&query.query),
                 phrase: query.phrase,
@@ -796,15 +869,20 @@ fn indexed_queries(
                 crate::search_index::query_candidate_paths(&transaction, &options)?;
             plans.push(plan);
             for path in candidates {
+                read.check()?;
                 paths.entry(path).or_default().push(index);
             }
         }
         Ok((plans, paths))
     })();
+    read.check()?;
+    if matches!(candidates, Err(VaultError::Cancelled)) {
+        return Err(VaultError::Cancelled);
+    }
     let mut result =
         BTreeMap::from_iter(queries.iter().map(|query| ((*query).clone(), Vec::new())));
     let mut unchanged = true;
-    search::visit_pages(root, dirs, false, |page, _| {
+    search::visit_pages_controlled(root, dirs, false, None, read, |page, _| {
         unchanged &= captured.remove(&page.rel_path).as_deref() == Some(&page.file_revision);
         if let Ok((plans, paths)) = &mut candidates
             && let Some(indexes) = paths.remove(&page.rel_path)
@@ -813,6 +891,7 @@ fn indexed_queries(
             let matcher = search::PageMatcher::from_page(&page);
             let mut revision = None;
             for index in indexes {
+                read.check()?;
                 let query = queries[index];
                 let plan = &plans[index];
                 let options = SearchOptions {
@@ -852,6 +931,7 @@ fn indexed_queries(
         .into());
     }
     for matches in result.values_mut() {
+        read.check()?;
         matches.sort();
         matches.dedup();
     }
@@ -876,6 +956,19 @@ mod tests {
         let reports = crate::list_reviews(root, dirs).unwrap();
         let batch = capture_discovery_batch(root, dirs, query_sets, None).unwrap();
         let shared = capture_discovery_batch(root, dirs, query_sets, Some(&reports)).unwrap();
+        let mut inventory = crate::ReviewInventory::load(root, dirs).unwrap();
+        let (borrowed, _) = capture_discovery_batch_with_inventory(
+            root,
+            dirs,
+            query_sets,
+            &mut inventory,
+            &crate::ReadControl::default(),
+        )
+        .unwrap();
+        assert_eq!(serialized(&batch).unwrap(), serialized(&borrowed).unwrap());
+        for (actual, expected) in borrowed.iter().zip(&batch) {
+            assert_eq!(actual.guarded_pages(), expected.guarded_pages());
+        }
         assert_eq!(batch.len(), query_sets.len());
         assert_eq!(shared.len(), query_sets.len());
         for ((queries, capture), shared) in query_sets.iter().zip(&batch).zip(&shared) {
@@ -889,6 +982,24 @@ mod tests {
             assert_eq!(capture.guarded_pages(), shared.guarded_pages());
         }
         batch
+    }
+
+    #[test]
+    fn shared_review_inventory_refuses_a_different_physical_vault() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let mut inventory = crate::ReviewInventory::load(first.path(), &dirs).unwrap();
+        assert!(
+            capture_discovery_batch_with_inventory(
+                second.path(),
+                &dirs,
+                &[],
+                &mut inventory,
+                &crate::ReadControl::default()
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -1466,6 +1577,13 @@ mod tests {
         });
         let live = discover_queries(root.path(), &dirs, &queries).unwrap();
         assert_eq!(live[&queries[0]].len(), 3);
+        let cancelled = crate::ReadControl::new(std::sync::Arc::new(
+            std::sync::atomic::AtomicBool::new(true),
+        ));
+        assert!(matches!(
+            indexed_queries(root.path(), &dirs, &queries, &cancelled),
+            Err(VaultError::Cancelled)
+        ));
         assert!(
             live.values()
                 .flatten()
@@ -1475,8 +1593,12 @@ mod tests {
         crate::prepare_search(&session, &dirs).unwrap();
         let database = root.path().join(crate::search_index::INDEX_PATH);
         let before = std::fs::read(&database).unwrap();
+        assert!(matches!(
+            indexed_queries(root.path(), &dirs, &queries, &cancelled),
+            Err(VaultError::Cancelled)
+        ));
         assert_eq!(
-            indexed_queries(root.path(), &dirs, &queries).unwrap(),
+            indexed_queries(root.path(), &dirs, &queries, &crate::ReadControl::default()).unwrap(),
             Some(live.clone())
         );
         assert_eq!(
@@ -1506,16 +1628,29 @@ mod tests {
         let database = Connection::open(root.path().join(crate::search_index::INDEX_PATH)).unwrap();
         database.execute_batch("DROP TABLE terms").unwrap();
         drop(database);
-        assert!(indexed_queries(root.path(), &dirs, std::slice::from_ref(&query)).is_err());
+        assert!(
+            indexed_queries(
+                root.path(),
+                &dirs,
+                std::slice::from_ref(&query),
+                &crate::ReadControl::default()
+            )
+            .is_err()
+        );
         write(
             root.path(),
             subject,
             "---\ntype: document\n---\nRetries follow the new policy.\n",
         );
         assert!(
-            indexed_queries(root.path(), &dirs, std::slice::from_ref(&query))
-                .unwrap()
-                .is_none()
+            indexed_queries(
+                root.path(),
+                &dirs,
+                std::slice::from_ref(&query),
+                &crate::ReadControl::default()
+            )
+            .unwrap()
+            .is_none()
         );
         let live = discover_queries(root.path(), &dirs, std::slice::from_ref(&query)).unwrap();
         assert_eq!(live[&query].len(), 1);
@@ -1574,7 +1709,7 @@ mod tests {
         let database = root.path().join(crate::search_index::INDEX_PATH);
         let before = std::fs::read(&database).unwrap();
         assert_eq!(
-            indexed_queries(root.path(), &dirs, &queries).unwrap(),
+            indexed_queries(root.path(), &dirs, &queries, &crate::ReadControl::default()).unwrap(),
             Some(live.clone())
         );
         assert_eq!(
@@ -1599,7 +1734,7 @@ mod tests {
             .set_modified(modified)
             .unwrap();
         assert!(
-            indexed_queries(root.path(), &dirs, &queries)
+            indexed_queries(root.path(), &dirs, &queries, &crate::ReadControl::default())
                 .unwrap()
                 .is_none(),
             "same-size, same-mtime changes invalidate capture reuse"
@@ -1608,14 +1743,14 @@ mod tests {
         assert_ne!(changed[&queries[1]], live[&queries[1]]);
         crate::prepare_search(&session, &dirs).unwrap();
         assert_eq!(
-            indexed_queries(root.path(), &dirs, &queries).unwrap(),
+            indexed_queries(root.path(), &dirs, &queries, &crate::ReadControl::default()).unwrap(),
             Some(changed)
         );
 
         let added = "wiki/documents/new.md";
         write(root.path(), added, body);
         assert!(
-            indexed_queries(root.path(), &dirs, &queries)
+            indexed_queries(root.path(), &dirs, &queries, &crate::ReadControl::default())
                 .unwrap()
                 .is_none()
         );
@@ -1628,7 +1763,7 @@ mod tests {
         crate::prepare_search(&session, &dirs).unwrap();
         std::fs::remove_file(root.path().join(added)).unwrap();
         assert!(
-            indexed_queries(root.path(), &dirs, &queries)
+            indexed_queries(root.path(), &dirs, &queries, &crate::ReadControl::default())
                 .unwrap()
                 .is_none()
         );
@@ -1644,7 +1779,7 @@ mod tests {
             "---\ntype: concept\ntitle: Retention policy\naliases: [A different name]\n---\nA production order retention policy.\n",
         );
         assert!(
-            indexed_queries(root.path(), &dirs, &queries)
+            indexed_queries(root.path(), &dirs, &queries, &crate::ReadControl::default())
                 .unwrap()
                 .is_none()
         );

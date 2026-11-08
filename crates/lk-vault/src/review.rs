@@ -355,62 +355,83 @@ pub struct ReviewPreview {
     pub relation: String,
 }
 
-pub(crate) fn review_previews(
-    root: &Path,
-    dirs: &VaultDirs,
-) -> Result<BTreeMap<String, Vec<ReviewPreview>>, VaultError> {
-    review_previews_from_reports(root, &list_reviews(root, dirs)?)
-}
-
-pub(crate) fn review_previews_from_reports(
+pub(crate) fn review_previews_from_reports_controlled(
     root: &Path,
     reports: &[ReviewReport],
+    read: &crate::ReadControl,
 ) -> Result<BTreeMap<String, Vec<ReviewPreview>>, VaultError> {
     let mut result: BTreeMap<String, Vec<ReviewPreview>> = BTreeMap::new();
+    let mut owners = BTreeMap::new();
     for report in reports {
-        let mut subjects = BTreeSet::new();
-        let mut evidence = BTreeSet::new();
-        for (address, subject) in report.subjects().iter().map(|path| (path, true)).chain(
-            report
-                .review
-                .iter()
-                .flat_map(|review| &review.evidence)
-                .map(|citation| (&citation.path, false)),
-        ) {
-            let Some(path) = lk_core::link::resolve_dest(Path::new(""), address).filter(|path| {
-                path.to_string_lossy() == *address
-                    && path.extension().is_some_and(|extension| extension == "md")
-            }) else {
-                continue;
-            };
-            let owner = match crate::find_page_owner(root, &path) {
-                Ok(owner) => owner,
-                Err(_) if report.effective_state == ReviewEffectiveState::Invalid => continue,
-                Err(error) => return Err(error),
-            };
-            let Some(owner) = owner else {
-                continue;
-            };
-            let owner = owner.to_string_lossy().into_owned();
-            if subject {
-                subjects.insert(owner);
-            } else {
-                evidence.insert(owner);
-            }
-        }
-        for path in subjects.union(&evidence) {
-            result.entry(path.clone()).or_default().push(ReviewPreview {
+        let evidence = report
+            .review
+            .iter()
+            .flat_map(|review| &review.evidence)
+            .map(|citation| citation.path.clone())
+            .collect::<Vec<_>>();
+        let associations = review_associations(
+            root,
+            report.subjects(),
+            &evidence,
+            &mut owners,
+            || Ok(report.effective_state == ReviewEffectiveState::Invalid),
+            read,
+        )?;
+        for (path, subject) in associations {
+            result.entry(path).or_default().push(ReviewPreview {
                 path: report.path.clone(),
                 effective_state: report.effective_state,
-                relation: if subjects.contains(path) {
-                    "subject"
-                } else {
-                    "evidence"
-                }
-                .into(),
+                relation: if subject { "subject" } else { "evidence" }.into(),
             });
         }
     }
+    read.check()?;
+    Ok(result)
+}
+
+fn review_associations(
+    root: &Path,
+    subjects: &[String],
+    evidence: &[String],
+    owners: &mut BTreeMap<String, Option<String>>,
+    mut is_invalid: impl FnMut() -> Result<bool, VaultError>,
+    read: &crate::ReadControl,
+) -> Result<BTreeMap<String, bool>, VaultError> {
+    let mut result = BTreeMap::new();
+    for (address, subject) in subjects
+        .iter()
+        .map(|path| (path, true))
+        .chain(evidence.iter().map(|path| (path, false)))
+    {
+        read.check()?;
+        let Some(path) = lk_core::link::resolve_dest(Path::new(""), address).filter(|path| {
+            path.to_string_lossy() == *address
+                && path.extension().is_some_and(|extension| extension == "md")
+        }) else {
+            continue;
+        };
+        let owner = match owners.get(address) {
+            Some(owner) => owner.clone(),
+            None => {
+                let found = crate::find_page_owner(root, &path);
+                read.check()?;
+                let owner = match found {
+                    Ok(owner) => owner.map(|path| path.to_string_lossy().into_owned()),
+                    Err(_) if is_invalid()? => continue,
+                    Err(error) => return Err(error),
+                };
+                owners.insert(address.clone(), owner.clone());
+                owner
+            }
+        };
+        if let Some(owner) = owner {
+            result
+                .entry(owner)
+                .and_modify(|is_subject| *is_subject |= subject)
+                .or_insert(subject);
+        }
+    }
+    read.check()?;
     Ok(result)
 }
 
@@ -512,17 +533,23 @@ pub struct EvidenceReport {
 }
 
 fn read_source_snapshot(root: &Path, path: &str) -> Result<(String, crate::VaultPage), VaultError> {
-    #[cfg(test)]
-    tests::record_source_read();
-    let path = lk_core::link::resolve_dest(Path::new(""), path)
-        .ok_or_else(|| VaultError::Frontmatter("invalid evidence path".into()))?;
-    let text = std::fs::read_to_string(crate::page_path(root, &path)?)?;
-    let page = parse_page(&text).map_err(|e| VaultError::Frontmatter(e.to_string()))?;
-    Ok((text, page))
+    read_source_snapshot_controlled(root, path, &crate::ReadControl::default())
 }
 
-fn read_source(root: &Path, path: &str) -> Result<crate::VaultPage, VaultError> {
-    read_source_snapshot(root, path).map(|(_, page)| page)
+fn read_source_snapshot_controlled(
+    root: &Path,
+    path: &str,
+    read: &crate::ReadControl,
+) -> Result<(String, crate::VaultPage), VaultError> {
+    #[cfg(test)]
+    tests::record_source_read();
+    read.check()?;
+    let path = lk_core::link::resolve_dest(Path::new(""), path)
+        .ok_or_else(|| VaultError::Frontmatter("invalid evidence path".into()))?;
+    let text = read.read_to_string(&crate::page_path(root, &path)?)?;
+    let page = parse_page(&text).map_err(|e| VaultError::Frontmatter(e.to_string()));
+    read.check()?;
+    Ok((text, page?))
 }
 
 pub fn evidence_archive_path(revision: &str) -> Result<std::path::PathBuf, VaultError> {
@@ -555,26 +582,40 @@ pub fn load_archived_evidence(
     root: &Path,
     revision: &str,
 ) -> Result<Option<crate::VaultPage>, VaultError> {
+    load_archived_evidence_controlled(root, revision, &crate::ReadControl::default())
+}
+
+pub fn load_archived_evidence_controlled(
+    root: &Path,
+    revision: &str,
+    read: &crate::ReadControl,
+) -> Result<Option<crate::VaultPage>, VaultError> {
     #[cfg(test)]
     tests::record_archive_read();
+    read.check()?;
     let path = evidence_archive_path(revision)?;
-    let raw = match std::fs::read_to_string(crate::page_path(root, &path)?) {
+    let raw = match read.read_to_string(&crate::page_path(root, &path)?) {
         Ok(raw) => raw,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error.into()),
+        Err(VaultError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
     };
     let page = parse_page(&raw).map_err(|error| {
         VaultError::Frontmatter(format!(
             "corrupt evidence archive {}: {error}",
             path.display()
         ))
-    })?;
+    });
+    read.check()?;
+    let page = page?;
     if lk_core::concept::source_revision(&page) != revision {
         return Err(VaultError::Frontmatter(format!(
             "corrupt evidence archive {}: authored revision mismatch",
             path.display()
         )));
     }
+    read.check()?;
     Ok(Some(page))
 }
 
@@ -807,30 +848,55 @@ pub struct ReviewInventory {
     entries: BTreeMap<String, ReviewEntry>,
     revisions: BTreeMap<String, Result<String, VaultError>>,
     archives: BTreeMap<String, Result<bool, String>>,
+    associations: Option<BTreeMap<String, Vec<(String, bool)>>>,
 }
 
 impl ReviewInventory {
     pub fn load(root: &Path, dirs: &VaultDirs) -> Result<Self, VaultError> {
-        let inventory =
-            crate::load_markdown_inventory(root, &lk_core::vault_path::explorations_dir(dirs))?;
-        let entries = inventory
-            .owners
-            .into_iter()
-            .filter_map(|path| {
-                load_review_metadata(root, &path).map(|metadata| {
-                    (
-                        path.to_string_lossy().into_owned(),
-                        ReviewEntry::Metadata(metadata),
-                    )
-                })
-            })
-            .collect();
+        Self::load_controlled(root, dirs, &crate::ReadControl::default())
+    }
+
+    pub fn load_controlled(
+        root: &Path,
+        dirs: &VaultDirs,
+        read: &crate::ReadControl,
+    ) -> Result<Self, VaultError> {
+        read.check()?;
+        let root = root.canonicalize()?;
+        let inventory = crate::store::load_markdown_inventory_controlled(
+            &root,
+            &lk_core::vault_path::explorations_dir(dirs),
+            read,
+        )?;
+        let mut entries = BTreeMap::new();
+        for path in inventory.owners {
+            read.check()?;
+            if let Some(metadata) = load_review_metadata(&root, &path, read)? {
+                entries.insert(
+                    path.to_string_lossy().into_owned(),
+                    ReviewEntry::Metadata(metadata),
+                );
+            }
+        }
+        read.check()?;
         Ok(Self {
-            root: root.to_path_buf(),
+            root,
             entries,
             revisions: BTreeMap::new(),
             archives: BTreeMap::new(),
+            associations: None,
         })
+    }
+
+    pub fn validate_root(&self, root: &Path) -> Result<(), VaultError> {
+        if root.canonicalize()? != self.root {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "review inventory belongs to another vault",
+            )
+            .into());
+        }
+        Ok(())
     }
 
     pub fn paths(&self) -> impl Iterator<Item = &str> {
@@ -852,44 +918,150 @@ impl ReviewInventory {
     }
 
     pub fn load_report(&mut self, path: &str) -> Option<ReviewReport> {
-        let entry = self.entries.get_mut(path)?;
+        self.load_report_controlled(path, &crate::ReadControl::default())
+            .expect("default review evaluation cannot be cancelled")
+    }
+
+    pub fn load_report_controlled(
+        &mut self,
+        path: &str,
+        read: &crate::ReadControl,
+    ) -> Result<Option<ReviewReport>, VaultError> {
+        read.check()?;
+        let Some(entry) = self.entries.get_mut(path) else {
+            return Ok(None);
+        };
         if let ReviewEntry::Metadata(metadata) = entry {
-            *entry = ReviewEntry::Evaluated(evaluate_review(
+            let report = evaluate_review(
                 &self.root,
                 path,
                 metadata,
                 &mut self.revisions,
                 &mut self.archives,
-            ));
+                read,
+            )?;
+            read.check()?;
+            *entry = ReviewEntry::Evaluated(report);
         }
-        match entry {
+        read.check()?;
+        Ok(match entry {
             ReviewEntry::Evaluated(report) => Some(report.clone()),
             ReviewEntry::Metadata(_) => unreachable!("review was evaluated"),
+        })
+    }
+
+    pub(crate) fn prepare_previews(&mut self, read: &crate::ReadControl) -> Result<(), VaultError> {
+        read.check()?;
+        if self.associations.is_some() {
+            return Ok(());
         }
+        let root = self.root.clone();
+        let paths = self.paths().map(str::to_owned).collect::<Vec<_>>();
+        let mut owners = BTreeMap::new();
+        let mut result: BTreeMap<String, Vec<(String, bool)>> = BTreeMap::new();
+        for path in paths {
+            let (subjects, evidence) = match &self.entries[&path] {
+                ReviewEntry::Metadata(metadata) => {
+                    (metadata.scope.subjects.clone(), metadata.review.as_ref())
+                }
+                ReviewEntry::Evaluated(report) => {
+                    (report.subjects().to_vec(), report.review.as_ref())
+                }
+            };
+            let evidence = evidence
+                .iter()
+                .flat_map(|review| &review.evidence)
+                .map(|citation| citation.path.clone())
+                .collect::<Vec<_>>();
+            let associations = review_associations(
+                &root,
+                &subjects,
+                &evidence,
+                &mut owners,
+                || {
+                    if self.has_errors(&path) == Some(true) {
+                        return Ok(true);
+                    }
+                    Ok(self
+                        .load_report_controlled(&path, read)?
+                        .expect("captured review path")
+                        .effective_state
+                        == ReviewEffectiveState::Invalid)
+                },
+                read,
+            )?;
+            for (owner, subject) in associations {
+                result
+                    .entry(owner)
+                    .or_default()
+                    .push((path.clone(), subject));
+            }
+        }
+        read.check()?;
+        self.associations = Some(result);
+        Ok(())
+    }
+
+    pub(crate) fn previews_for_owner(
+        &mut self,
+        owner: &str,
+        read: &crate::ReadControl,
+    ) -> Result<Vec<ReviewPreview>, VaultError> {
+        self.prepare_previews(read)?;
+        let paths = self
+            .associations
+            .as_ref()
+            .expect("prepared review associations")
+            .get(owner)
+            .cloned()
+            .unwrap_or_default();
+        paths
+            .into_iter()
+            .map(|(path, subject)| {
+                let report = self
+                    .load_report_controlled(&path, read)?
+                    .expect("captured review path");
+                Ok(ReviewPreview {
+                    path,
+                    effective_state: report.effective_state,
+                    relation: if subject { "subject" } else { "evidence" }.into(),
+                })
+            })
+            .collect()
     }
 }
 
-fn load_review_metadata(root: &Path, path: &Path) -> Option<ReviewMetadata> {
+fn load_review_metadata(
+    root: &Path,
+    path: &Path,
+    read: &crate::ReadControl,
+) -> Result<Option<ReviewMetadata>, VaultError> {
+    read.check()?;
     let mut metadata = ReviewMetadata {
         review: None,
         errors: Vec::new(),
         scope: ReviewScope::default(),
     };
     let page = match crate::page_path(root, path)
-        .and_then(std::fs::read_to_string)
         .map_err(VaultError::from)
+        .and_then(|path| read.read_to_string(&path))
         .and_then(|content| {
             parse_page(&content).map_err(|error| VaultError::Frontmatter(error.to_string()))
         }) {
         Ok(page) => page,
+        Err(VaultError::Cancelled) => return Err(VaultError::Cancelled),
         Err(error) => {
+            read.check()?;
             metadata.errors.push(error.to_string());
-            return Some(metadata);
+            return Ok(Some(metadata));
         }
     };
-    let value = page.frontmatter.get("review")?;
+    let Some(value) = page.frontmatter.get("review") else {
+        return Ok(None);
+    };
     metadata.scope = ReviewScope::from_metadata(value);
     for subject in &metadata.scope.subjects {
+        read.check()?;
         if let Err(error) = crate::find_page_owner(root, Path::new(subject)) {
             metadata.errors.push(format!("{subject}: {error}"));
         }
@@ -903,7 +1075,8 @@ fn load_review_metadata(root: &Path, path: &Path) -> Option<ReviewMetadata> {
             metadata.review = Some(review);
         }
     }
-    Some(metadata)
+    read.check()?;
+    Ok(Some(metadata))
 }
 
 fn evaluate_review(
@@ -912,7 +1085,9 @@ fn evaluate_review(
     metadata: &ReviewMetadata,
     revisions: &mut BTreeMap<String, Result<String, VaultError>>,
     archives: &mut BTreeMap<String, Result<bool, String>>,
-) -> ReviewReport {
+    read: &crate::ReadControl,
+) -> Result<ReviewReport, VaultError> {
+    read.check()?;
     let mut report = ReviewReport {
         path: path.into(),
         review: metadata.review.clone(),
@@ -925,6 +1100,7 @@ fn evaluate_review(
     };
     if let Some(review) = &metadata.review {
         for citation in &review.evidence {
+            read.check()?;
             if lk_core::link::resolve_dest(Path::new(""), &citation.path).as_deref()
                 == Some(Path::new(path))
             {
@@ -933,13 +1109,21 @@ fn evaluate_review(
                     .push("a review cannot serve as its own evidence".into());
                 continue;
             }
+            if let std::collections::btree_map::Entry::Vacant(entry) =
+                archives.entry(citation.revision.clone())
+            {
+                let value = match load_archived_evidence_controlled(root, &citation.revision, read)
+                {
+                    Err(VaultError::Cancelled) => return Err(VaultError::Cancelled),
+                    result => result,
+                }
+                .map(|archive| archive.is_some())
+                .map_err(|error| error.to_string());
+                entry.insert(value);
+            }
             let archived = archives
-                .entry(citation.revision.clone())
-                .or_insert_with(|| {
-                    load_archived_evidence(root, &citation.revision)
-                        .map(|archive| archive.is_some())
-                        .map_err(|error| error.to_string())
-                });
+                .get(&citation.revision)
+                .expect("captured archive result");
             let archived = match archived {
                 Ok(true) => {
                     report.archived_evidence.push(citation.path.clone());
@@ -951,10 +1135,19 @@ fn evaluate_review(
                     false
                 }
             };
-            let revision = revisions.entry(citation.path.clone()).or_insert_with(|| {
-                read_source(root, &citation.path)
-                    .map(|page| lk_core::concept::source_revision(&page))
-            });
+            if let std::collections::btree_map::Entry::Vacant(entry) =
+                revisions.entry(citation.path.clone())
+            {
+                let value = match read_source_snapshot_controlled(root, &citation.path, read) {
+                    Err(VaultError::Cancelled) => return Err(VaultError::Cancelled),
+                    result => result,
+                }
+                .map(|(_, page)| lk_core::concept::source_revision(&page));
+                entry.insert(value);
+            }
+            let revision = revisions
+                .get(&citation.path)
+                .expect("captured source result");
             match revision {
                 Ok(revision) if *revision != citation.revision => {
                     report.changed_evidence.push(citation.path.clone())
@@ -974,17 +1167,30 @@ fn evaluate_review(
         }
     }
     report.effective_state = report.classify();
-    report
+    read.check()?;
+    Ok(report)
 }
 
 /// Report open assessments and evidence drift without changing a recorded judgment.
 pub fn list_reviews(root: &Path, dirs: &VaultDirs) -> Result<Vec<ReviewReport>, VaultError> {
-    let mut inventory = ReviewInventory::load(root, dirs)?;
+    list_reviews_controlled(root, dirs, &crate::ReadControl::default())
+}
+
+pub fn list_reviews_controlled(
+    root: &Path,
+    dirs: &VaultDirs,
+    read: &crate::ReadControl,
+) -> Result<Vec<ReviewReport>, VaultError> {
+    let mut inventory = ReviewInventory::load_controlled(root, dirs, read)?;
     let paths = inventory.paths().map(str::to_owned).collect::<Vec<_>>();
-    Ok(paths
+    paths
         .iter()
-        .map(|path| inventory.load_report(path).expect("captured review path"))
-        .collect())
+        .map(|path| {
+            inventory
+                .load_report_controlled(path, read)
+                .map(|report| report.expect("captured review path"))
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -994,6 +1200,9 @@ mod tests {
     std::thread_local! {
         static REVIEW_READS: std::cell::Cell<(usize, usize)> = const {
             std::cell::Cell::new((0, 0))
+        };
+        static CANCEL_ARCHIVE_READ: std::cell::RefCell<Option<std::sync::Arc<std::sync::atomic::AtomicBool>>> = const {
+            std::cell::RefCell::new(None)
         };
     }
 
@@ -1009,6 +1218,172 @@ mod tests {
             let (sources, archives) = reads.get();
             reads.set((sources, archives + 1));
         });
+        CANCEL_ARCHIVE_READ.with(|flag| {
+            if let Some(flag) = flag.borrow_mut().take() {
+                flag.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        });
+    }
+
+    fn discovery_review_fixture() -> (tempfile::TempDir, VaultDirs) {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let concepts = lk_core::vault_path::concepts_dir(&dirs);
+        let reviews = lk_core::vault_path::explorations_dir(&dirs);
+        std::fs::create_dir_all(root.path().join(&concepts)).unwrap();
+        std::fs::create_dir_all(root.path().join(&reviews)).unwrap();
+        for (name, body) in [
+            ("selected", "Focus evidence."),
+            ("unrelated", "Other evidence."),
+        ] {
+            let path = concepts.join(format!("{name}.md"));
+            std::fs::write(
+                root.path().join(&path),
+                format!("---\ntype: concept\ntitle: {name}\n---\n{body}\n"),
+            )
+            .unwrap();
+            let evidence =
+                archive_evidence(root.path(), &[path.to_string_lossy().into_owned()]).unwrap();
+            let review = serde_json::json!({"status":"open", "subjects":[path], "evidence":evidence.citations});
+            std::fs::write(
+                root.path().join(&reviews).join(format!("{name}.md")),
+                format!("---\ntype: exploration\nreview: {review}\n---\nA scoped assessment.\n"),
+            )
+            .unwrap();
+        }
+        (root, dirs)
+    }
+
+    #[test]
+    fn discovery_hydrates_only_matching_review_evidence_with_exact_capture_parity() {
+        let (root, dirs) = discovery_review_fixture();
+        let queries = vec![vec![crate::DiscoveryQuery {
+            query: "Focus".into(),
+            phrase: false,
+            spacing: false,
+        }]];
+        REVIEW_READS.with(|reads| reads.set((0, 0)));
+        let (actual, _) = crate::capture_discovery_batch_controlled(
+            root.path(),
+            &dirs,
+            &queries,
+            None,
+            &crate::ReadControl::default(),
+        )
+        .unwrap();
+        assert_eq!(actual[0].candidates.len(), 1);
+        assert_eq!(REVIEW_READS.with(std::cell::Cell::get), (1, 1));
+        let reports = list_reviews(root.path(), &dirs).unwrap();
+        let (expected, _) = crate::capture_discovery_batch_controlled(
+            root.path(),
+            &dirs,
+            &queries,
+            Some(&reports),
+            &crate::ReadControl::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(&actual).unwrap(),
+            serde_json::to_value(&expected).unwrap()
+        );
+        assert_eq!(actual[0].guarded_pages(), expected[0].guarded_pages());
+    }
+
+    #[test]
+    fn controlled_discovery_stops_review_reads_at_cancellation() {
+        let (root, dirs) = discovery_review_fixture();
+        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let read = crate::ReadControl::new(cancelled.clone());
+        CANCEL_ARCHIVE_READ.with(|flag| *flag.borrow_mut() = Some(cancelled));
+        REVIEW_READS.with(|reads| reads.set((0, 0)));
+        let queries = vec![vec![crate::DiscoveryQuery {
+            query: "Focus".into(),
+            phrase: false,
+            spacing: false,
+        }]];
+        let result =
+            crate::capture_discovery_batch_controlled(root.path(), &dirs, &queries, None, &read);
+        assert!(matches!(result, Err(VaultError::Cancelled)));
+        assert_eq!(REVIEW_READS.with(std::cell::Cell::get), (0, 1));
+    }
+
+    #[test]
+    fn cancelled_review_evaluation_never_becomes_a_cached_invalid_report() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+        let (root, dirs) = discovery_review_fixture();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let read = crate::ReadControl::new(cancelled.clone());
+        let mut inventory = ReviewInventory::load_controlled(root.path(), &dirs, &read).unwrap();
+        let path = lk_core::vault_path::explorations_dir(&dirs)
+            .join("selected.md")
+            .to_string_lossy()
+            .into_owned();
+        REVIEW_READS.with(|reads| reads.set((0, 0)));
+        CANCEL_ARCHIVE_READ.with(|flag| *flag.borrow_mut() = Some(cancelled.clone()));
+        assert!(matches!(
+            inventory.load_report_controlled(&path, &read),
+            Err(VaultError::Cancelled)
+        ));
+        assert_eq!(REVIEW_READS.with(std::cell::Cell::get), (0, 1));
+        cancelled.store(false, Ordering::Relaxed);
+        assert_eq!(
+            inventory
+                .load_report_controlled(&path, &read)
+                .unwrap()
+                .unwrap()
+                .effective_state,
+            ReviewEffectiveState::Open
+        );
+        assert_eq!(REVIEW_READS.with(std::cell::Cell::get), (1, 2));
+        cancelled.store(true, Ordering::Relaxed);
+        assert!(matches!(
+            inventory.load_report_controlled(&path, &read),
+            Err(VaultError::Cancelled)
+        ));
+        assert!(matches!(
+            inventory.load_report_controlled("missing.md", &read),
+            Err(VaultError::Cancelled)
+        ));
+        assert!(matches!(
+            ReviewInventory::load_controlled(root.path(), &dirs, &read),
+            Err(VaultError::Cancelled)
+        ));
+        assert_eq!(REVIEW_READS.with(std::cell::Cell::get), (1, 2));
+    }
+
+    #[test]
+    fn unrelated_corrupt_archives_stay_unread_until_selected_or_globally_checked() {
+        let (root, dirs) = discovery_review_fixture();
+        let path = lk_core::vault_path::explorations_dir(&dirs).join("unrelated.md");
+        let page = parse_page(&std::fs::read_to_string(root.path().join(&path)).unwrap()).unwrap();
+        let review: KnowledgeReview =
+            serde_json::from_value(page.frontmatter.get("review").unwrap().clone()).unwrap();
+        std::fs::write(
+            root.path()
+                .join(evidence_archive_path(&review.evidence[0].revision).unwrap()),
+            "Corrupt retained evidence.",
+        )
+        .unwrap();
+        let query = |query: &str| crate::DiscoveryQuery {
+            query: query.into(),
+            phrase: false,
+            spacing: false,
+        };
+        REVIEW_READS.with(|reads| reads.set((0, 0)));
+        let selected = crate::capture_discovery(root.path(), &dirs, &[query("Focus")]).unwrap();
+        assert_eq!(selected.candidates[0].card.reviews.open, 1);
+        assert_eq!(REVIEW_READS.with(std::cell::Cell::get), (1, 1));
+        let unrelated = crate::capture_discovery(root.path(), &dirs, &[query("Other")]).unwrap();
+        assert_eq!(unrelated.candidates[0].card.reviews.invalid, 1);
+        assert!(
+            list_reviews(root.path(), &dirs)
+                .unwrap()
+                .iter()
+                .any(|report| report.effective_state == ReviewEffectiveState::Invalid)
+        );
     }
 
     #[test]
