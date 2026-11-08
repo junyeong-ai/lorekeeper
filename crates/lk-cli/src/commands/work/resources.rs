@@ -166,7 +166,7 @@ impl<'a> Capture<'a> {
         if citation.rss_event.is_some() {
             if self.rss.is_none() {
                 self.rss = Some(
-                    lk_vault::RssEvidenceCapture::new(self.root, &self.read).into_diagnostic()?,
+                    lk_vault::RssEvidenceCapture::build(self.root, &self.read).into_diagnostic()?,
                 );
             }
             let input = self

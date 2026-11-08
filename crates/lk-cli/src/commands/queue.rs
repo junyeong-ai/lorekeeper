@@ -2123,7 +2123,7 @@ fn classify_with_reader_controlled(
             dependencies.push(path.clone());
             if citation.rss_event.is_some() {
                 if rss.is_none() {
-                    let captured = lk_vault::RssEvidenceCapture::new(root, control);
+                    let captured = lk_vault::RssEvidenceCapture::build(root, control);
                     control.check().into_diagnostic()?;
                     rss = Some(match captured {
                         Ok(capture) => capture,

@@ -249,7 +249,7 @@ pub fn rss_concept_citations_controlled(
     raw: &str,
     read: &crate::ReadControl,
 ) -> Result<BTreeMap<String, Vec<Citation>>, VaultError> {
-    let mut originals = capture::Originals::new(root, read)?;
+    let mut originals = capture::Originals::build(root, read)?;
     let mut entries = crate::ExistingEntryResolver::new(root);
     rss_concept_citations_captured(&mut originals, &mut entries, origin, raw, true)
 }
@@ -261,7 +261,7 @@ fn rss_concept_citations_mode(
     raw: &str,
     payloads: bool,
 ) -> Result<BTreeMap<String, Vec<Citation>>, VaultError> {
-    let mut originals = capture::Originals::new(root, &crate::ReadControl::default())?;
+    let mut originals = capture::Originals::build(root, &crate::ReadControl::default())?;
     rss_concept_citations_captured(&mut originals, entries, origin, raw, payloads)
 }
 
@@ -404,7 +404,7 @@ pub fn validate_rss_citation_controlled(
     citation: &Citation,
     read: &crate::ReadControl,
 ) -> Result<(), VaultError> {
-    RssEvidenceCapture::new(root, read)?.validate_citation(concept, citation)
+    RssEvidenceCapture::build(root, read)?.validate_citation(concept, citation)
 }
 
 pub fn has_rss_citation(
@@ -412,7 +412,7 @@ pub fn has_rss_citation(
     concept: &Path,
     citation: &Citation,
 ) -> Result<bool, VaultError> {
-    RssEvidenceCapture::new(root, &crate::ReadControl::default())?.has_citation(concept, citation)
+    RssEvidenceCapture::build(root, &crate::ReadControl::default())?.has_citation(concept, citation)
 }
 
 /// Check the supplied origin snapshot; its caller owns currentness and publication guards.
@@ -422,7 +422,7 @@ pub fn has_rss_citation_in_page(
     citation: &Citation,
     raw: &str,
 ) -> Result<bool, VaultError> {
-    RssEvidenceCapture::new(root, &crate::ReadControl::default())?
+    RssEvidenceCapture::build(root, &crate::ReadControl::default())?
         .has_citation_in_page(concept, citation, raw)
 }
 
@@ -501,12 +501,17 @@ pub fn accumulate_rss_evidence(
     let page = crate::parse_page(raw).map_err(err)?;
     let mut declarations = bindings(&page).map_err(err)?;
     let mut entries = crate::ExistingEntryResolver::new(root);
+    let mut manifest_reference = None;
     for (concept, events) in selections.iter().filter(|(_, events)| !events.is_empty()) {
         let provided =
             manifest.ok_or_else(|| err("RSS selections require versioned task manifest"))?;
-        let (_, current) = scope(root, raw)?;
-        if current.reference().map_err(err)? != provided.reference().map_err(err)? {
-            return Err(err("RSS extraction manifest changed"));
+        if manifest_reference.is_none() {
+            let (_, current) = scope(root, raw)?;
+            let reference = provided.reference().map_err(err)?;
+            if current.reference().map_err(err)? != reference {
+                return Err(err("RSS extraction manifest changed"));
+            }
+            manifest_reference = Some(reference);
         }
         for event in events {
             load_rss_selected_payload(root, provided, event)?;
@@ -523,7 +528,10 @@ pub fn accumulate_rss_evidence(
             declarations.push(ConceptEvidence {
                 schema: RSS_EVIDENCE_SCHEMA.into(),
                 concept: concept.clone(),
-                manifest: provided.reference().map_err(err)?,
+                manifest: manifest_reference
+                    .as_ref()
+                    .expect("verified task manifest")
+                    .clone(),
                 events,
             });
         }
@@ -653,7 +661,7 @@ pub fn guard_rss_citation_controlled(
     citation: &Citation,
     read: &crate::ReadControl,
 ) -> Result<(), VaultError> {
-    RssEvidenceCapture::new(root, read)?.guard_citation(plan, concept, citation)
+    RssEvidenceCapture::build(root, read)?.guard_citation(plan, concept, citation)
 }
 
 #[derive(serde::Serialize)]

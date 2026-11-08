@@ -104,9 +104,21 @@ pub(super) fn run(
                 .ok_or_else(|| miette::miette!("missing citations"))?,
         )
         .map_err(|e| miette::miette!("{e}"))?;
+        let mut rss = None;
         for citation in citations {
             if citation.rss_event.is_some() {
-                lk_vault::validate_rss_citation(&root, &target, &citation)
+                if rss.is_none() {
+                    rss = Some(
+                        lk_vault::RssEvidenceCapture::build(
+                            &root,
+                            &lk_vault::ReadControl::default(),
+                        )
+                        .map_err(|e| miette::miette!("{e}"))?,
+                    );
+                }
+                rss.as_mut()
+                    .expect("RSS capture initialized")
+                    .validate_citation(&target, &citation)
                     .map_err(|e| miette::miette!("{e}"))?;
                 continue;
             }

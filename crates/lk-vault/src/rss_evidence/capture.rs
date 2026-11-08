@@ -31,7 +31,7 @@ pub(super) struct Originals {
 }
 
 impl Originals {
-    pub(super) fn new(root: &Path, read: &crate::ReadControl) -> Result<Self, VaultError> {
+    pub(super) fn build(root: &Path, read: &crate::ReadControl) -> Result<Self, VaultError> {
         read.check()?;
         let root = root.canonicalize()?;
         read.check()?;
@@ -167,9 +167,9 @@ pub struct RssEvidenceCapture {
 }
 
 impl RssEvidenceCapture {
-    pub fn new(root: &Path, read: &crate::ReadControl) -> Result<Self, VaultError> {
+    pub fn build(root: &Path, read: &crate::ReadControl) -> Result<Self, VaultError> {
         Ok(Self {
-            originals: Originals::new(root, read)?,
+            originals: Originals::build(root, read)?,
             origins: BTreeMap::new(),
             dependencies: BTreeMap::new(),
         })
@@ -461,7 +461,7 @@ mod tests {
         let mut invalid_schema = citations[0].clone();
         invalid_schema.rss_event.as_mut().unwrap().schema = "unknown".into();
         let mut capture =
-            RssEvidenceCapture::new(root.path(), &crate::ReadControl::default()).unwrap();
+            RssEvidenceCapture::build(root.path(), &crate::ReadControl::default()).unwrap();
         let mut reads = 0;
         for citation in [missing, invalid_revision, invalid_schema] {
             assert!(
@@ -478,12 +478,60 @@ mod tests {
     }
 
     #[test]
+    fn rss_accumulation_compares_the_current_manifest_once_before_final_validation() {
+        let (root, raw, citations, reference) = fixture();
+        let manifest = crate::load_rss_manifest(root.path(), &reference).unwrap();
+        let raw = write_bindings(&raw, &[]).unwrap() + "- [Other](../wiki/concepts/other.md)\n";
+        let groups = ["wiki/concepts/topic.md", "wiki/concepts/other.md"]
+            .into_iter()
+            .zip(&citations)
+            .map(|(concept, citation)| {
+                (
+                    concept.to_owned(),
+                    vec![RssEventSelection {
+                        event_id: citation.rss_event.as_ref().unwrap().event_id.clone(),
+                        revision: citation.revision.clone(),
+                    }],
+                )
+            })
+            .collect::<Vec<_>>();
+        for count in [1, 2] {
+            let observation = crate::original_io::read_tests::observe();
+            let updated = accumulate_rss_evidence(
+                root.path(),
+                Path::new("daily/rss.md"),
+                &raw,
+                Some(&manifest),
+                &groups[..count],
+            )
+            .unwrap();
+            let page = crate::parse_page(&updated).unwrap();
+            assert_eq!(bindings(&page).unwrap().len(), count);
+            let reads = observation.paths();
+            assert_eq!(
+                reads
+                    .iter()
+                    .filter(|path| path.ends_with(Path::new(&reference.manifest_path)))
+                    .count(),
+                2,
+                "one current-input comparison and one fresh rewritten-origin validation"
+            );
+            assert_eq!(reads.len(), 2 + 2 * count);
+        }
+        assert_eq!(
+            accumulate_rss_evidence(root.path(), Path::new("daily/rss.md"), &raw, None, &[])
+                .unwrap(),
+            raw
+        );
+    }
+
+    #[test]
     fn rss_capture_shares_exact_original_reads_and_preserves_publication_guards() {
         let (root, raw, citations, reference) = fixture();
         let concept = Path::new("wiki/concepts/topic.md");
         let observation = crate::original_io::read_tests::observe();
         let mut capture =
-            RssEvidenceCapture::new(root.path(), &crate::ReadControl::default()).unwrap();
+            RssEvidenceCapture::build(root.path(), &crate::ReadControl::default()).unwrap();
         for citation in citations.iter().chain(&citations) {
             assert!(
                 capture
@@ -521,7 +569,7 @@ mod tests {
         let session = crate::MutationSession::acquire(root.path()).unwrap();
         assert!(session.apply(plan).is_err());
         let mut fresh =
-            RssEvidenceCapture::new(root.path(), &crate::ReadControl::default()).unwrap();
+            RssEvidenceCapture::build(root.path(), &crate::ReadControl::default()).unwrap();
         assert!(
             fresh
                 .has_citation_in_page(concept, &citations[0], &raw)
@@ -536,7 +584,7 @@ mod tests {
         let concept = Path::new("wiki/concepts/topic.md");
         let cancelled = Arc::new(AtomicBool::new(false));
         let read = crate::ReadControl::new(cancelled.clone());
-        let mut capture = RssEvidenceCapture::new(root.path(), &read).unwrap();
+        let mut capture = RssEvidenceCapture::build(root.path(), &read).unwrap();
         crate::original_io::read_tests::CANCEL_READ
             .with_borrow_mut(|flag| *flag = Some(cancelled.clone()));
         assert!(matches!(
@@ -563,7 +611,7 @@ mod tests {
         unrelated.concept = "wiki/concepts/unrelated.md".into();
         declarations.push(unrelated);
         let invalid = write_bindings(&raw, &declarations).unwrap();
-        let mut fresh = RssEvidenceCapture::new(root.path(), &read).unwrap();
+        let mut fresh = RssEvidenceCapture::build(root.path(), &read).unwrap();
         assert!(
             fresh
                 .has_citation_in_page(concept, &citations[0], &invalid)
@@ -583,7 +631,7 @@ mod tests {
         let (root, raw, citations, _) = fixture();
         let concept = Path::new("wiki/concepts/topic.md");
         let mut capture =
-            RssEvidenceCapture::new(root.path(), &crate::ReadControl::default()).unwrap();
+            RssEvidenceCapture::build(root.path(), &crate::ReadControl::default()).unwrap();
         assert!(
             capture
                 .has_citation_in_page(concept, &citations[0], &raw)

@@ -681,7 +681,7 @@ impl InputResources {
         self.read.check().map_err(GraphError::from)?;
         if self.rss.is_none() {
             self.rss = Some(
-                lk_vault::RssEvidenceCapture::new(root, &self.read).map_err(GraphError::from)?,
+                lk_vault::RssEvidenceCapture::build(root, &self.read).map_err(GraphError::from)?,
             );
         }
         let input = self
@@ -2223,8 +2223,9 @@ fn guard_candidate_controlled(
         read.check().map_err(GraphError::from)?;
         if citation.rss_event.is_some() {
             if rss.is_none() {
-                rss =
-                    Some(lk_vault::RssEvidenceCapture::new(root, read).map_err(GraphError::from)?);
+                rss = Some(
+                    lk_vault::RssEvidenceCapture::build(root, read).map_err(GraphError::from)?,
+                );
             }
             rss.as_mut()
                 .expect("RSS capture initialized")

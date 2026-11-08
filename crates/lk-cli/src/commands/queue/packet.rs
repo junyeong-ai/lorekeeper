@@ -196,6 +196,7 @@ fn build(root: &Path, task_ids: &[String], include_content: bool) -> miette::Res
     let mut source_index_by_path = BTreeMap::<String, usize>::new();
     let mut exported = Vec::new();
     let mut event_evidence = Vec::new();
+    let mut rss = None;
     for task in &tasks {
         let target = if let Some(raw) = snapshots.get(&task.target.vault_path) {
             raw.clone()
@@ -214,13 +215,32 @@ fn build(root: &Path, task_ids: &[String], include_content: bool) -> miette::Res
         let mut source_indices = BTreeSet::new();
         let mut event_evidence_indices = Vec::new();
         for citation in citations {
+            if !snapshots.contains_key(&citation.path) {
+                let raw = read_snapshot(&root, &citation.path)?;
+                snapshots.insert(citation.path.clone(), raw);
+            }
             if let Some(selector) = &citation.rss_event {
-                lk_vault::validate_rss_citation(
-                    &root,
-                    Path::new(&task.target.vault_path),
-                    &citation,
-                )
-                .map_err(|e| miette::miette!("RSS evidence: {e}"))?;
+                if rss.is_none() {
+                    rss = Some(
+                        lk_vault::RssEvidenceCapture::build(
+                            &root,
+                            &lk_vault::ReadControl::default(),
+                        )
+                        .map_err(|e| miette::miette!("RSS evidence: {e}"))?,
+                    );
+                }
+                let selected = rss
+                    .as_mut()
+                    .expect("RSS capture initialized")
+                    .has_citation_in_page(
+                        Path::new(&task.target.vault_path),
+                        &citation,
+                        &snapshots[&citation.path],
+                    )
+                    .map_err(|e| miette::miette!("RSS evidence: {e}"))?;
+                if !selected {
+                    return Err(miette::miette!("RSS evidence membership changed"));
+                }
                 event_evidence_indices.push(event_evidence.len());
                 event_evidence.push(PacketEventEvidence {
                     citation: citation.clone(),
@@ -259,13 +279,7 @@ fn build(root: &Path, task_ids: &[String], include_content: bool) -> miette::Res
                 continue;
             }
             let source_path = citation.path.clone();
-            let raw = if let Some(raw) = snapshots.get(&citation.path) {
-                raw.clone()
-            } else {
-                let raw = read_snapshot(&root, &citation.path)?;
-                snapshots.insert(citation.path.clone(), raw.clone());
-                raw
-            };
+            let raw = snapshots[&citation.path].clone();
             let page = lk_core::frontmatter::parse_page(&raw)
                 .map_err(|e| miette::miette!("{}: {e}", citation.path))?;
             let authored_revision = source_revision(&page);

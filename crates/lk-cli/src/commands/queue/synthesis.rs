@@ -386,9 +386,18 @@ fn guard_citations(
     target: &Path,
     citations: &[lk_core::concept::Citation],
 ) -> miette::Result<()> {
+    let mut rss = None;
     for citation in citations {
         if citation.rss_event.is_some() {
-            lk_vault::guard_rss_citation(plan, root, target, citation)
+            if rss.is_none() {
+                rss = Some(
+                    lk_vault::RssEvidenceCapture::build(root, &lk_vault::ReadControl::default())
+                        .map_err(|error| miette::miette!("{error}"))?,
+                );
+            }
+            rss.as_mut()
+                .expect("RSS capture initialized")
+                .load_citation(target, citation)
                 .map_err(|error| miette::miette!("{error}"))?;
         } else {
             let path = resolve_target_path(&citation.path)
@@ -405,6 +414,10 @@ fn guard_citations(
             }
             plan.require_unchanged(path, content);
         }
+    }
+    if let Some(rss) = rss {
+        rss.guard(plan)
+            .map_err(|error| miette::miette!("{error}"))?;
     }
     Ok(())
 }
@@ -494,6 +507,89 @@ mod tests {
         assert!(
             matches!(error.downcast_ref::<super::super::application::PublicationRejection>(), Some(rejection) if rejection.kind == super::super::application::RejectionKind::InvalidResultLink)
         );
+    }
+
+    #[test]
+    fn rss_citation_batch_guards_unique_dependencies_and_rejects_changed_payload() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let origin = Path::new("daily/rss.md");
+        let target = Path::new("wiki/concepts/topic.md");
+        let before = "---\ntype: concept\n---\nA scoped claim.\n";
+        let events = (0..2)
+            .map(|index| {
+                serde_json::from_value::<lk_core::event::Event>(serde_json::json!({
+                    "id": format!("rss:2026-10-18:{index:016x}"),
+                    "source_id": "rss", "source_type": "rss",
+                    "timestamp": "2026-10-18T00:00:00Z", "date": "2026-10-18",
+                    "title": format!("Article {index}"), "body": format!("Evidence {index}."),
+                    "url": null, "author": null, "labels": [], "category": null,
+                    "performance_category": null, "is_self": false, "is_personal": false,
+                    "metadata": {},
+                }))
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let capture = lk_core::rss_original::RssOriginalCapture::from_events(
+            &events.iter().collect::<Vec<_>>(),
+        )
+        .unwrap();
+        let session = lk_vault::MutationSession::acquire(root).unwrap();
+        let reference = lk_vault::publish_rss_original(&session, &capture).unwrap();
+        drop(session);
+        let bindings = serde_json::json!([{
+            "schema": lk_core::rss_evidence::RSS_EVIDENCE_SCHEMA,
+            "concept": "wiki/concepts/topic.md", "manifest": reference,
+            "events": capture.manifest.events.iter().map(|event| serde_json::json!({
+                "event_id": event.event_id, "revision": event.revision,
+            })).collect::<Vec<_>>(),
+        }]);
+        let raw = format!(
+            "---\ntype: daily\nsource: rss\ncreated: 2026-10-18\nsource_record: {{rss_original: {}}}\nconcept_evidence: {bindings}\n---\n## Related Concepts\n- [Topic](../wiki/concepts/topic.md)\n",
+            serde_json::to_string(&reference).unwrap()
+        );
+        std::fs::create_dir_all(root.join("daily")).unwrap();
+        std::fs::create_dir_all(root.join("wiki/concepts")).unwrap();
+        std::fs::write(root.join(origin), &raw).unwrap();
+        std::fs::write(root.join(target), before).unwrap();
+        let citations = lk_vault::rss_concept_citations(root, origin, &raw)
+            .unwrap()
+            .remove("wiki/concepts/topic.md")
+            .unwrap();
+        assert_eq!(citations.len(), 2);
+        let mut plan = lk_vault::MutationPlan::default();
+        guard_citations(&mut plan, root, target, &citations).unwrap();
+        let encoded = serde_json::to_value(&plan).unwrap();
+        let steps = encoded["steps"].as_array().unwrap();
+        assert_eq!(
+            steps.len(),
+            4,
+            "one origin, one manifest and two selected payloads"
+        );
+        let paths = steps
+            .iter()
+            .map(|step| Path::new(step["path"].as_str().unwrap()).to_path_buf())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(paths.len(), 4);
+        assert!(paths.contains(origin));
+        assert!(paths.contains(Path::new(&reference.manifest_path)));
+        plan.edit(
+            target,
+            before.into(),
+            format!("{before}Published synthesis.\n"),
+        );
+        let session = lk_vault::MutationSession::acquire(root).unwrap();
+        std::fs::write(
+            root.join(format!(
+                "{}/events/{}.json",
+                lk_core::rss_original::RSS_ORIGINAL_STORE,
+                citations[1].revision,
+            )),
+            "changed selected payload",
+        )
+        .unwrap();
+        assert!(session.apply(plan).is_err());
+        assert_eq!(std::fs::read_to_string(root.join(target)).unwrap(), before);
     }
 
     #[test]
