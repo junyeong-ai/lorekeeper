@@ -322,7 +322,6 @@ impl Pipeline {
                 source_id,
                 events,
                 options.target_date,
-                options.dry_run,
                 self.ctx
                     .input_limits
                     .max_source_bytes
@@ -347,13 +346,16 @@ impl Pipeline {
         let mut rss_originals = std::collections::BTreeMap::new();
         if config.source_type == lk_core::config::SourceType::Rss {
             let mut raw_days: BTreeMap<_, Vec<&Event>> = BTreeMap::new();
-            for event in events.iter().filter(|e| e.date <= options.today) {
+            for event in &events {
                 raw_days.entry(event.date).or_default().push(event);
             }
             let mut bytes = 0usize;
             for (date, raw) in raw_days {
                 let capture = lk_core::rss_original::RssOriginalCapture::from_events(&raw)
                     .map_err(PipelineError::Render)?;
+                if date > options.today {
+                    continue;
+                }
                 bytes += capture.payloads.iter().map(Vec::len).sum::<usize>();
                 if bytes > lk_core::rss_original::MAX_RSS_CAPTURE_BYTES {
                     return Err(PipelineError::Render(
@@ -363,6 +365,16 @@ impl Pipeline {
                 rss_originals.insert(date, capture);
             }
             input_budgets.admit_rss_originals(bytes)?;
+        }
+
+        if config.source_type.descriptor().streaming && !options.dry_run {
+            let mut raw_days: BTreeMap<_, Vec<&Event>> = BTreeMap::new();
+            for event in &events {
+                raw_days.entry(event.date).or_default().push(event);
+            }
+            for (date, raw) in raw_days {
+                self.event_log.write(source_id, date, &raw)?;
+            }
         }
 
         // Classification is a render-time derivation of current config — re-applied to the
@@ -754,15 +766,14 @@ impl Pipeline {
     }
 
     /// Union this run's freshly-fetched events with the durable per-date event log, per
-    /// date, and return the full merged set the page will project. Persists the merged log
-    /// (unless `dry_run`). `target_date` is folded in so a `--date` repair run reads the
+    /// date, and return the full merged set the page will project.
+    /// `target_date` is folded in so a `--date` repair run reads the
     /// log for that day even when the fetch returned nothing for it.
     fn accumulate_with_log(
         &self,
         source_id: &str,
         fresh: Vec<Event>,
         target_date: Option<jiff::civil::Date>,
-        dry_run: bool,
         max_input_bytes: usize,
     ) -> Result<Vec<Event>, PipelineError> {
         let mut fresh_by_date: BTreeMap<jiff::civil::Date, Vec<Event>> = BTreeMap::new();
@@ -780,9 +791,6 @@ impl Pipeline {
             let fresh_for_date = fresh_by_date.remove(&date).unwrap_or_default();
             let merged = event_log::merge_streaming_events(stored, fresh_for_date)?;
             input_budget.admit_all(&merged)?;
-            if !dry_run && !merged.is_empty() {
-                self.event_log.write(source_id, date, &merged)?;
-            }
             merged_all.extend(merged);
         }
         Ok(merged_all)
@@ -1645,6 +1653,71 @@ mod input_admission_tests {
             target_date: None,
             today: jiff::civil::date(2026, 10, 21),
             dry_run: true,
+        }
+    }
+
+    #[tokio::test]
+    async fn rejected_rss_originals_leave_logs_replayable_for_fitting_retries() {
+        for rejected_day in [20, 22] {
+            let root = tempfile::tempdir().unwrap();
+            let queue = Arc::new(lk_queue::QueueLlmClient::new(root.path().join("queue")));
+            let mut pipeline = pipeline(root.path(), queue);
+            let mut options = options();
+            options.dry_run = false;
+            pipeline
+                .plan("feed", &source(), vec![item(32)], &options)
+                .await
+                .unwrap();
+            let log = root.path().join(".lorekeeper/events/feed/2026-10-20.jsonl");
+            let retained = std::fs::read(&log).unwrap();
+            let mut oversize = item(lk_core::rss_original::MAX_RSS_EVENT_BYTES);
+            oversize.timestamp = format!("2026-10-{rejected_day}T12:00:00Z").parse().unwrap();
+            let mut earlier = item(32);
+            earlier.external_id = Some("earlier".into());
+            earlier.timestamp = "2026-10-19T12:00:00Z".parse().unwrap();
+            let error = pipeline
+                .plan("feed", &source(), vec![earlier, oversize], &options)
+                .await
+                .err()
+                .unwrap();
+            assert!(error.to_string().contains("oversize RSS original"));
+            assert!(
+                std::fs::read(&log).unwrap() == retained,
+                "accepted log changed"
+            );
+            assert!(
+                !root
+                    .path()
+                    .join(".lorekeeper/events/feed/2026-10-19.jsonl")
+                    .exists()
+            );
+            assert!(
+                !root
+                    .path()
+                    .join(".lorekeeper/events/feed/2026-10-22.jsonl")
+                    .exists()
+            );
+            options.target_date = Some(jiff::civil::date(2026, 10, 20));
+            assert_eq!(
+                pipeline
+                    .plan("feed", &source(), Vec::new(), &options)
+                    .await
+                    .unwrap()
+                    .events
+                    .len(),
+                1
+            );
+            let mut next = item(32);
+            next.external_id = Some("next".into());
+            assert_eq!(
+                pipeline
+                    .plan("feed", &source(), vec![next], &options)
+                    .await
+                    .unwrap()
+                    .events
+                    .len(),
+                2
+            );
         }
     }
 

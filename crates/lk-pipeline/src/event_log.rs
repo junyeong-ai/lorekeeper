@@ -1,3 +1,4 @@
+use std::borrow::Borrow;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
@@ -111,7 +112,7 @@ impl EventLog {
         &self,
         source_id: &str,
         date: jiff::civil::Date,
-        events: &[Event],
+        events: &[impl Borrow<Event>],
     ) -> Result<(), PipelineError> {
         let path = self.path(source_id, date);
         let dir = path.parent().expect("log path always has a parent");
@@ -120,7 +121,8 @@ impl EventLog {
 
         let mut buf = String::with_capacity(events.len() * 256);
         for ev in events {
-            let line = serde_json::to_string(ev)
+            let event: &Event = ev.borrow();
+            let line = serde_json::to_string(event)
                 .map_err(|e| PipelineError::EventLog(format!("serialize event: {e}")))?;
             buf.push_str(&line);
             buf.push('\n');
