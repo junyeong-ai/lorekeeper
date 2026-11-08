@@ -156,6 +156,11 @@ jobs:
           else
             cp "target/${TARGET}/release/lore" "$stage/"
           fi
+          binary="$stage/lore"
+          if [ "$ARCHIVE_EXT" = "zip" ]; then binary="${binary}.exe"; fi
+          actual=$("$binary" --version)
+          [ "$actual" = "lore $VERSION" ] || { echo "unexpected binary version: $actual" >&2; exit 1; }
+          "$binary" --help > /dev/null
           # The binary carries the templates, the runtime skills and the config
           # example, and `lore self deploy` writes them — so an archive holding copies would
           # publish a second set that nothing installs and that could disagree with the first.

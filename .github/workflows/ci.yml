@@ -200,6 +200,12 @@ jobs:
         run: cargo test --locked -p lk-core --lib fs::lock
       - name: Verify task publication and recovery on Windows
         run: cargo test --locked -p lore --test plane_lock
+      - name: Verify gzip feed decoding on Windows
+        run: cargo test --locked -p lk-source --lib rss::tests::gzip_feed_decoding_preserves_integrity_and_the_decoded_response_limit -- --exact
+      - name: Verify typed collection history on Windows
+        run: cargo test --locked -p lk-vault --lib log::tests::latest_attempt_keeps_typed_partial_reach_separate_from_publication_and_legacy -- --exact
+      - name: Verify retained extraction inputs on Windows
+        run: cargo test --locked -p lore --lib commands::extract::verify::tests
 
   # Bootstrap scripts and workflow definitions are checked independently of Rust.
   shell:
