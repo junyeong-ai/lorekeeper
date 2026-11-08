@@ -630,6 +630,7 @@ impl AuditInputBound {
 #[derive(Clone, Default)]
 struct InputResources {
     read: lk_vault::ReadControl,
+    rss: Option<lk_vault::RssEvidenceCapture>,
     pages: BTreeMap<PathBuf, (String, u64)>,
     rss_payloads: BTreeMap<(String, String), u64>,
 }
@@ -678,23 +679,36 @@ impl InputResources {
         citation: &Citation,
     ) -> Result<(), GraphError> {
         self.read.check().map_err(GraphError::from)?;
-        lk_vault::validate_rss_citation(root, Path::new(concept), citation).map_err(error)?;
-        self.read.check().map_err(GraphError::from)?;
-        let selector = citation.rss_event.as_ref().expect("validated RSS citation");
-        let relative = format!(
-            "{}/events/{}.json",
-            lk_core::rss_original::RSS_ORIGINAL_STORE,
-            citation.revision,
-        );
-        let bytes = std::fs::read(lk_vault::page_path(root, Path::new(&relative)).map_err(error)?)
-            .map_err(error)?;
-        self.read.check().map_err(GraphError::from)?;
-        if lk_core::rss_original::digest(&bytes) != citation.revision {
-            return Err(error("RSS payload changed during audit input measurement"));
+        if self.rss.is_none() {
+            self.rss = Some(
+                lk_vault::RssEvidenceCapture::new(root, &self.read).map_err(GraphError::from)?,
+            );
         }
+        let input = self
+            .rss
+            .as_mut()
+            .expect("RSS capture initialized")
+            .load_citation(Path::new(concept), citation)
+            .map_err(GraphError::from)?;
+        let owner = root
+            .canonicalize()
+            .map_err(error)?
+            .join(&input.origin_owner);
+        let revision = file_revision(&input.origin);
+        if self
+            .pages
+            .get(&owner)
+            .is_some_and(|(prior, _)| prior != &revision)
+        {
+            return Err(error("RSS origin changed during audit input measurement"));
+        }
+        self.pages
+            .insert(owner, (revision, input.origin.len() as u64));
+        let selector = citation.rss_event.as_ref().expect("validated RSS citation");
+        self.read.check().map_err(GraphError::from)?;
         self.rss_payloads.insert(
             (selector.event_id.clone(), citation.revision.clone()),
-            bytes.len() as u64,
+            input.payload.len() as u64,
         );
         Ok(())
     }
@@ -707,7 +721,6 @@ impl InputResources {
         self.page(root, &candidate.path, Some(&candidate.file_revision), None)?;
         for citation in candidate.evidence.iter().chain(&candidate.related_pages) {
             if citation.rss_event.is_some() {
-                self.page(root, &citation.path, None, None)?;
                 self.rss_payload(root, &candidate.path, citation)?;
             } else {
                 self.page(root, &citation.path, None, Some(&citation.revision))?;
@@ -1412,7 +1425,7 @@ fn inputs_selected_controlled(
         lk_vault::ReviewInventory::load_controlled(root, dirs, read).map_err(GraphError::from)?;
     require_readable_subjects(pages, dirs, selection)?;
     let mut review_index = ReviewDependencyIndex::from_inventory(root, &mut inventory, read)?;
-    let evidence = crate::backlinks::concept_evidence(pages, root, dirs)?;
+    let evidence = crate::backlinks::concept_evidence_controlled(pages, root, dirs, read)?;
     let kinds = subject_kinds(pages, dirs);
     let selected = |path: &Path| {
         selection.is_none_or(|selection| selection.contains(path.to_string_lossy().as_ref()))
@@ -2205,11 +2218,18 @@ fn guard_candidate_controlled(
         },
         read,
     )?;
+    let mut rss = None;
     for citation in candidate.evidence.iter().chain(&candidate.related_pages) {
         read.check().map_err(GraphError::from)?;
         if citation.rss_event.is_some() {
-            lk_vault::guard_rss_citation(plan, root, Path::new(&candidate.path), citation)
-                .map_err(error)?;
+            if rss.is_none() {
+                rss =
+                    Some(lk_vault::RssEvidenceCapture::new(root, read).map_err(GraphError::from)?);
+            }
+            rss.as_mut()
+                .expect("RSS capture initialized")
+                .load_citation(Path::new(&candidate.path), citation)
+                .map_err(GraphError::from)?;
             read.check().map_err(GraphError::from)?;
         } else {
             let raw = read
@@ -2222,6 +2242,9 @@ fn guard_candidate_controlled(
             }
             guard_page_input_controlled(plan, root, &page_input(&citation.path, &raw), read)?;
         }
+    }
+    if let Some(rss) = rss {
+        rss.guard(plan).map_err(GraphError::from)?;
     }
     Ok(())
 }

@@ -49,6 +49,7 @@ struct Receipt {
     reason: String,
 }
 
+#[cfg(any(unix, test))]
 pub(in crate::commands) struct BlockedTask {
     pub owner: String,
     pub reason: String,
@@ -109,8 +110,19 @@ fn decode(path: &Path, raw: &str) -> miette::Result<Receipt> {
 }
 
 fn read_optional(root: &Path, path: &Path) -> miette::Result<Option<String>> {
+    read_optional_controlled(root, path, &lk_vault::ReadControl::default())
+}
+
+fn read_optional_controlled(
+    root: &Path,
+    path: &Path,
+    read: &lk_vault::ReadControl,
+) -> miette::Result<Option<String>> {
+    read.check().into_diagnostic()?;
     let full = lk_vault::page_path(root, path).into_diagnostic()?;
-    match std::fs::symlink_metadata(&full) {
+    let metadata = std::fs::symlink_metadata(&full);
+    read.check().into_diagnostic()?;
+    match metadata {
         Ok(metadata) if !metadata.is_file() || metadata.file_type().is_symlink() => {
             return Err(miette::miette!(
                 "rejection receipts must be direct regular files"
@@ -120,12 +132,22 @@ fn read_optional(root: &Path, path: &Path) -> miette::Result<Option<String>> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error).into_diagnostic(),
     }
-    std::fs::read_to_string(full).map(Some).into_diagnostic()
+    read.read_to_string(&full).map(Some).into_diagnostic()
 }
 
 fn inventory(root: &Path) -> miette::Result<Vec<(PathBuf, String, Receipt)>> {
+    inventory_controlled(root, &lk_vault::ReadControl::default())
+}
+
+fn inventory_controlled(
+    root: &Path,
+    read: &lk_vault::ReadControl,
+) -> miette::Result<Vec<(PathBuf, String, Receipt)>> {
+    read.check().into_diagnostic()?;
     let directory = lk_vault::page_path(root, Path::new(DIRECTORY)).into_diagnostic()?;
-    let metadata = match std::fs::symlink_metadata(&directory) {
+    let metadata = std::fs::symlink_metadata(&directory);
+    read.check().into_diagnostic()?;
+    let metadata = match metadata {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => return Err(error).into_diagnostic(),
@@ -135,21 +157,26 @@ fn inventory(root: &Path) -> miette::Result<Vec<(PathBuf, String, Receipt)>> {
             "rejection store must be a direct directory"
         ));
     }
-    let mut entries = std::fs::read_dir(directory)
-        .into_diagnostic()?
-        .collect::<Result<Vec<_>, _>>()
-        .into_diagnostic()?;
+    let directory_entries = std::fs::read_dir(directory);
+    read.check().into_diagnostic()?;
+    let mut entries = Vec::new();
+    for entry in directory_entries.into_diagnostic()? {
+        read.check().into_diagnostic()?;
+        entries.push(entry.into_diagnostic()?);
+    }
     entries.sort_by_key(std::fs::DirEntry::file_name);
     entries
         .into_iter()
         .map(|entry| {
+            read.check().into_diagnostic()?;
             let path = Path::new(DIRECTORY).join(entry.file_name());
             if path.extension().is_none_or(|extension| extension != "json") {
                 return Err(miette::miette!("unknown rejection receipt artifact"));
             }
-            let raw = read_optional(root, &path)?
+            let raw = read_optional_controlled(root, &path, read)?
                 .ok_or_else(|| miette::miette!("rejection receipt disappeared"))?;
             let receipt = decode(&path, &raw)?;
+            read.check().into_diagnostic()?;
             Ok((path, raw, receipt))
         })
         .collect()
@@ -166,11 +193,31 @@ pub(super) fn observe_scope(
     task: &lk_queue::QueueTask,
     snapshots: &[ProposalSnapshot],
 ) -> miette::Result<(RejectionScope, BTreeMap<PathBuf, String>)> {
+    observe_scope_controlled(
+        root,
+        config,
+        config_revision,
+        task,
+        snapshots,
+        &lk_vault::ReadControl::default(),
+    )
+}
+
+fn observe_scope_controlled(
+    root: &Path,
+    config: &lk_core::config::Config,
+    config_revision: &str,
+    task: &lk_queue::QueueTask,
+    snapshots: &[ProposalSnapshot],
+    read: &lk_vault::ReadControl,
+) -> miette::Result<(RejectionScope, BTreeMap<PathBuf, String>)> {
+    read.check().into_diagnostic()?;
     let canonical_root = root.canonicalize().into_diagnostic()?;
     let root = canonical_root.as_path();
     let mut recipes = BTreeMap::new();
     let mut destinations = BTreeSet::new();
     for snapshot in snapshots {
+        read.check().into_diagnostic()?;
         let (queries, bodies) = if snapshot
             .proposal
             .path
@@ -198,6 +245,7 @@ pub(super) fn observe_scope(
             (result.discovery, Vec::new())
         };
         for body in bodies {
+            read.check().into_diagnostic()?;
             destinations.extend(lk_core::link::extract_dests(&body));
         }
         recipes.insert(serde_json::to_vec(&queries).into_diagnostic()?, queries);
@@ -206,12 +254,14 @@ pub(super) fn observe_scope(
     let mut owners = BTreeSet::new();
     let mut pages = BTreeMap::new();
     for (recipe, queries) in recipes {
-        let scope = crate::commands::work::publication_scope(
+        read.check().into_diagnostic()?;
+        let scope = crate::commands::work::publication_scope_controlled(
             root,
             config,
             config_revision,
             &task.task_id,
             &queries,
+            read,
         )?;
         revisions.push((recipe, scope.revision));
         for owner in scope.owners {
@@ -235,6 +285,7 @@ pub(super) fn observe_scope(
     }
     let mut links = Vec::new();
     for destination in destinations {
+        read.check().into_diagnostic()?;
         let Some(path) =
             lk_core::link::resolve_dest(Path::new(&task.target.vault_path), &destination)
                 .filter(|path| !path.as_os_str().is_empty())
@@ -262,6 +313,7 @@ pub(super) fn observe_scope(
         };
         links.push((destination, Some(path), state));
     }
+    read.check().into_diagnostic()?;
     Ok((
         RejectionScope {
             revision: digest(&(revisions, links))?,
@@ -423,13 +475,30 @@ fn prune(root: &Path, session: Option<&lk_vault::MutationSession>) -> miette::Re
     Ok(removed)
 }
 
+#[cfg(test)]
 pub(in crate::commands) fn blocked_tasks(
     root: &Path,
     config: &lk_core::config::Config,
     config_revision: &str,
 ) -> miette::Result<BTreeMap<(String, String), BlockedTask>> {
+    blocked_tasks_controlled(
+        root,
+        config,
+        config_revision,
+        &lk_vault::ReadControl::default(),
+    )
+}
+
+#[cfg(any(unix, test))]
+pub(in crate::commands) fn blocked_tasks_controlled(
+    root: &Path,
+    config: &lk_core::config::Config,
+    config_revision: &str,
+    read: &lk_vault::ReadControl,
+) -> miette::Result<BTreeMap<(String, String), BlockedTask>> {
+    read.check().into_diagnostic()?;
     let root = root.canonicalize().into_diagnostic()?;
-    let pending = super::read_pending_tasks(&root.join(".lorekeeper/queue"))?;
+    let pending = super::read_pending_tasks_controlled(&root.join(".lorekeeper/queue"), read)?;
     if pending.unparseable != 0 {
         return Err(miette::miette!(
             "unknown pending task targets prevent rejection inspection"
@@ -445,11 +514,12 @@ pub(in crate::commands) fn blocked_tasks(
             "ambiguous pending task id prevents rejection inspection"
         ));
     }
-    let active = active_proposals(&root)?;
+    let active = active_proposals_controlled(&root, read)?;
     let validation_policy = validation_policy();
     let mut blocked = BTreeMap::new();
     let mut revisions = BTreeMap::new();
-    for (_, _, receipt) in inventory(&root)? {
+    for (_, _, receipt) in inventory_controlled(&root, read)? {
+        read.check().into_diagnostic()?;
         let key = (
             receipt.identity.task_id.clone(),
             receipt.identity.cache_hash.clone(),
@@ -463,7 +533,7 @@ pub(in crate::commands) fn blocked_tasks(
         if super::resolve_target_path(&task.target.vault_path).is_none() {
             return Err(miette::miette!("invalid retained task target"));
         }
-        match super::classify_task(&root, task, &mut revisions)? {
+        match super::classify_task_controlled(&root, task, &mut revisions, read)? {
             super::TaskStatus::Current => {}
             super::TaskStatus::Done
             | super::TaskStatus::Stale
@@ -475,8 +545,11 @@ pub(in crate::commands) fn blocked_tasks(
                 ));
             }
         }
-        let current = TaskIdentity::capture(&root, task)?;
-        let (scope, _) = observe_scope(&root, config, config_revision, task, snapshots)?;
+        let current = TaskIdentity::capture(&root, task);
+        read.check().into_diagnostic()?;
+        let current = current?;
+        let (scope, _) =
+            observe_scope_controlled(&root, config, config_revision, task, snapshots, read)?;
         let proposals = snapshots
             .iter()
             .map(|snapshot| snapshot.proposal.clone())
@@ -496,6 +569,7 @@ pub(in crate::commands) fn blocked_tasks(
             },
         );
     }
+    read.check().into_diagnostic()?;
     Ok(blocked)
 }
 
@@ -507,7 +581,14 @@ pub(super) struct ProposalInventory {
 fn active_proposals(
     root: &Path,
 ) -> miette::Result<BTreeMap<(String, String), Vec<ProposalSnapshot>>> {
-    let inventory = load_proposals(root)?;
+    active_proposals_controlled(root, &lk_vault::ReadControl::default())
+}
+
+fn active_proposals_controlled(
+    root: &Path,
+    read: &lk_vault::ReadControl,
+) -> miette::Result<BTreeMap<(String, String), Vec<ProposalSnapshot>>> {
+    let inventory = load_proposals_controlled(root, read)?;
     if !inventory.unreadable.is_empty() {
         return Err(miette::miette!(
             "unreadable staged results have unknown task identities"
@@ -517,8 +598,18 @@ fn active_proposals(
 }
 
 pub(super) fn load_proposals(root: &Path) -> miette::Result<ProposalInventory> {
+    load_proposals_controlled(root, &lk_vault::ReadControl::default())
+}
+
+fn load_proposals_controlled(
+    root: &Path,
+    read: &lk_vault::ReadControl,
+) -> miette::Result<ProposalInventory> {
+    read.check().into_diagnostic()?;
     let directory = root.join(".lorekeeper/queue/results");
-    let entries = match std::fs::read_dir(directory) {
+    let entries = std::fs::read_dir(directory);
+    read.check().into_diagnostic()?;
+    let entries = match entries {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Ok(ProposalInventory {
@@ -531,18 +622,23 @@ pub(super) fn load_proposals(root: &Path) -> miette::Result<ProposalInventory> {
     let mut groups: BTreeMap<_, Vec<ProposalSnapshot>> = BTreeMap::new();
     let mut unreadable = Vec::new();
     for entry in entries {
+        read.check().into_diagnostic()?;
         let entry = entry.into_diagnostic()?;
         let path = entry.path();
         if path.extension().is_none_or(|extension| extension != "json") {
             continue;
         }
-        let metadata = std::fs::symlink_metadata(&path).into_diagnostic()?;
+        let metadata = std::fs::symlink_metadata(&path);
+        read.check().into_diagnostic()?;
+        let metadata = metadata.into_diagnostic()?;
         if !metadata.is_file() || metadata.file_type().is_symlink() {
             return Err(miette::miette!(
                 "staged proposals must be direct regular files"
             ));
         }
-        let raw = std::fs::read(&path).into_diagnostic()?;
+        let raw = std::fs::read(&path);
+        read.check().into_diagnostic()?;
+        let raw = raw.into_diagnostic()?;
         let key = if path
             .to_string_lossy()
             .ends_with(lk_queue::SECTION_RESULT_SUFFIX)
@@ -559,6 +655,7 @@ pub(super) fn load_proposals(root: &Path) -> miette::Result<ProposalInventory> {
             serde_json::from_slice::<lk_queue::TaskResult>(&raw)
                 .map(|result| (result.task_id, result.cache_hash))
         };
+        read.check().into_diagnostic()?;
         let key = match key {
             Ok(key) => key,
             Err(error) => {
@@ -566,7 +663,9 @@ pub(super) fn load_proposals(root: &Path) -> miette::Result<ProposalInventory> {
                 continue;
             }
         };
-        let snapshot = super::application::proposal_snapshot(root, &path)?;
+        let snapshot = super::application::proposal_snapshot(root, &path);
+        read.check().into_diagnostic()?;
+        let snapshot = snapshot?;
         if snapshot.raw.as_bytes() != raw {
             return Err(miette::miette!(
                 "staged result changed during identity inspection"
@@ -575,8 +674,10 @@ pub(super) fn load_proposals(root: &Path) -> miette::Result<ProposalInventory> {
         groups.entry(key).or_default().push(snapshot);
     }
     for snapshots in groups.values_mut() {
+        read.check().into_diagnostic()?;
         snapshots.sort_by(|left, right| left.proposal.cmp(&right.proposal));
     }
+    read.check().into_diagnostic()?;
     Ok(ProposalInventory { groups, unreadable })
 }
 
@@ -738,6 +839,15 @@ mod tests {
         .unwrap();
         let key = (task.task_id.clone(), task.cache_hash.clone());
         assert!(!blocked_tasks(&root, &config, &config_revision).unwrap()[&key].needs_revalidation);
+        let receipt_before = std::fs::read(root.join(&receipt_path)).unwrap();
+        let read = lk_vault::ReadControl::new(std::sync::Arc::new(
+            std::sync::atomic::AtomicBool::new(true),
+        ));
+        assert!(blocked_tasks_controlled(&root, &config, &config_revision, &read).is_err());
+        assert_eq!(
+            std::fs::read(root.join(&receipt_path)).unwrap(),
+            receipt_before
+        );
         std::fs::write(
             root.join("wiki/documents/missing.md"),
             "---\ntype: document\n---\nDetails.\n",

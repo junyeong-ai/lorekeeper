@@ -45,13 +45,113 @@ pub(crate) fn store_path(
     Ok(full)
 }
 pub(crate) fn read_bytes(path: &Path, limit: usize) -> Result<Vec<u8>, VaultError> {
-    let mut file = lk_core::fs::open_regular_file(path)?;
+    read_bytes_controlled(path, limit, &crate::ReadControl::default())
+}
+
+pub(crate) fn read_bytes_controlled(
+    path: &Path,
+    limit: usize,
+    read: &crate::ReadControl,
+) -> Result<Vec<u8>, VaultError> {
+    read.check()?;
+    let file = lk_core::fs::open_regular_file(path);
+    read.check()?;
+    let mut file = file?.take(limit as u64 + 1);
+    #[cfg(test)]
+    read_tests::record_read(path);
     let mut bytes = Vec::new();
-    (&mut file).take(limit as u64 + 1).read_to_end(&mut bytes)?;
+    let mut buffer = [0; 65536];
+    loop {
+        read.check()?;
+        let result = file.read(&mut buffer);
+        read.check()?;
+        let count = match result {
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            result => result?,
+        };
+        if count == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&buffer[..count]);
+    }
     if bytes.len() > limit {
         return Err(error("original exceeds supported byte limit"));
     }
+    read.check()?;
     Ok(bytes)
+}
+
+#[cfg(test)]
+pub(crate) mod read_tests {
+    use super::*;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    thread_local! {
+        static READS: std::cell::RefCell<Option<Vec<PathBuf>>> = const { std::cell::RefCell::new(None) };
+        pub(crate) static CANCEL_READ: std::cell::RefCell<Option<Arc<AtomicBool>>> = const { std::cell::RefCell::new(None) };
+    }
+
+    pub(crate) struct ReadObservation;
+
+    pub(crate) fn observe() -> ReadObservation {
+        READS.with_borrow_mut(|paths| {
+            assert!(
+                paths.is_none(),
+                "original read observation is already active"
+            );
+            *paths = Some(Vec::new());
+        });
+        ReadObservation
+    }
+
+    impl ReadObservation {
+        pub(crate) fn paths(&self) -> Vec<PathBuf> {
+            READS.with_borrow(|paths| paths.as_ref().expect("active read observation").clone())
+        }
+    }
+
+    impl Drop for ReadObservation {
+        fn drop(&mut self) {
+            READS.with_borrow_mut(|paths| *paths = None);
+            CANCEL_READ.with_borrow_mut(|flag| *flag = None);
+        }
+    }
+
+    pub(super) fn record_read(path: &Path) {
+        READS.with_borrow_mut(|paths| {
+            if let Some(paths) = paths {
+                paths.push(path.to_owned());
+            }
+        });
+        CANCEL_READ.with_borrow_mut(|flag| {
+            if let Some(flag) = flag.take() {
+                flag.store(true, Ordering::Relaxed);
+            }
+        });
+    }
+
+    #[test]
+    fn controlled_original_reads_preserve_bounds_missing_and_cancellation() {
+        let _observation = observe();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("original");
+        std::fs::write(&path, [0, 255, 1]).unwrap();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let read = crate::ReadControl::new(cancelled.clone());
+        assert_eq!(read_bytes_controlled(&path, 3, &read).unwrap(), [0, 255, 1]);
+        assert!(read_bytes_controlled(&path, 2, &read).is_err());
+        assert!(
+            matches!(read_bytes_controlled(&directory.path().join("missing"), 3, &read), Err(VaultError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound)
+        );
+        CANCEL_READ.with_borrow_mut(|flag| *flag = Some(cancelled));
+        assert!(matches!(
+            read_bytes_controlled(&path, 3, &read),
+            Err(VaultError::Cancelled)
+        ));
+    }
 }
 
 #[cfg(all(test, unix))]

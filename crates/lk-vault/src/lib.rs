@@ -97,11 +97,13 @@ pub use self::review::{
     publish_document, publish_document_expected, publish_document_expected_with_plan,
 };
 pub use self::rss_evidence::{
-    RssEvidencePreview, accumulate_rss_evidence, guard_rss_citation, guard_rss_evidence,
-    has_rss_citation, has_rss_citation_in_page, inspect_rss_citation,
-    inspect_rss_evidence_inventory, load_rss_manifest, load_rss_selected_payload,
-    repoint_rss_evidence, rss_concept_citations, rss_link_previews, validate_rss_citation,
-    write_bindings,
+    RssCitationInput, RssEvidenceCapture, RssEvidencePreview, accumulate_rss_evidence,
+    guard_rss_citation, guard_rss_citation_controlled, guard_rss_evidence, has_rss_citation,
+    has_rss_citation_in_page, inspect_rss_citation, inspect_rss_evidence_inventory,
+    load_rss_manifest, load_rss_manifest_controlled, load_rss_selected_payload,
+    load_rss_selected_payload_controlled, repoint_rss_evidence, rss_concept_citations,
+    rss_concept_citations_controlled, rss_link_previews, validate_rss_citation,
+    validate_rss_citation_controlled, write_bindings,
 };
 pub use self::rss_original::{
     RssOriginalOptions, RssOriginalView, guard_rss_original, inspect_rss_original,

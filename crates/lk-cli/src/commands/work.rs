@@ -24,7 +24,7 @@ mod source;
 pub(crate) mod state;
 pub(super) mod workload;
 
-pub(super) use publication::publication_scope;
+pub(super) use publication::publication_scope_controlled;
 #[cfg(unix)]
 pub(super) use selection::ScreeningDecision;
 pub(super) use selection::ScreeningRejection;

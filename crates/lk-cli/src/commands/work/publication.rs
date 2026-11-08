@@ -18,8 +18,7 @@ pub(in crate::commands) struct PublicationScope {
     pub pages: BTreeMap<PathBuf, String>,
 }
 
-/// Current inputs for retry admission, including an unplanned replacement selection.
-/// This observation never authorizes publication or replaces deterministic application.
+#[cfg(test)]
 pub(in crate::commands) fn publication_scope(
     root: &Path,
     config: &Config,
@@ -27,11 +26,33 @@ pub(in crate::commands) fn publication_scope(
     task_id: &str,
     queries: &[DiscoveryQuery],
 ) -> miette::Result<PublicationScope> {
+    publication_scope_controlled(
+        root,
+        config,
+        config_revision,
+        task_id,
+        queries,
+        &lk_vault::ReadControl::default(),
+    )
+}
+
+/// Current inputs for retry admission, including an unplanned replacement selection.
+/// This observation never authorizes publication or replaces deterministic application.
+pub(in crate::commands) fn publication_scope_controlled(
+    root: &Path,
+    config: &Config,
+    config_revision: &str,
+    task_id: &str,
+    queries: &[DiscoveryQuery],
+    read: &lk_vault::ReadControl,
+) -> miette::Result<PublicationScope> {
+    read.check().into_diagnostic()?;
     let root = root.canonicalize().into_diagnostic()?;
-    let task = super::super::queue::select_task(
+    let task = super::super::queue::select_task_controlled(
         &root,
         task_id,
         super::super::queue::TaskSelection::CurrentOrDoneExtraction,
+        read,
     )?;
     let supplied = discovery::validate_queries(queries)?;
     let recorded = if task.kind == lk_queue::TaskKind::ExtractConcepts {
@@ -42,11 +63,12 @@ pub(in crate::commands) fn publication_scope(
     let (prepared, owners, pages, phase) = if task.kind == lk_queue::TaskKind::ExtractConcepts
         && is_progressive(config)?
     {
-        let inventory = resources::selection_inventory(
+        let inventory = resources::selection_inventory_controlled(
             &root,
             config,
             task_id,
             recorded.as_deref().unwrap_or(&supplied),
+            read,
         )?;
         let inventory_revision = inventory.revision.clone();
         let mut owners = inventory.pages.keys().cloned().collect::<BTreeSet<_>>();
@@ -56,7 +78,7 @@ pub(in crate::commands) fn publication_scope(
             .is_some_and(|queries| *queries != supplied)
         {
             let supplied_inventory =
-                resources::selection_inventory(&root, config, task_id, &supplied)?;
+                resources::selection_inventory_controlled(&root, config, task_id, &supplied, read)?;
             owners.extend(supplied_inventory.pages.keys().cloned());
             merge_pages(&mut pages, supplied_inventory.pages)?;
             Some(supplied_inventory.revision)
@@ -148,15 +170,17 @@ pub(in crate::commands) fn publication_scope(
         }
     } else {
         let prepared = if task.kind == lk_queue::TaskKind::ExtractConcepts {
-            resources::task_with_discovery(&root, config, task_id, &supplied)?
+            resources::task_with_discovery_controlled(&root, config, task_id, &supplied, read)?
         } else {
-            resources::task_for_publication(&root, config, task_id)?
+            resources::task_for_publication_controlled(&root, config, task_id, read)?
         };
         let mut owners = prepared.pages.keys().cloned().collect::<BTreeSet<_>>();
         let mut pages = prepared.pages.clone();
         let recorded_revision = match &recorded {
             Some(queries) if *queries != supplied => {
-                let current = resources::task_with_discovery(&root, config, task_id, queries)?;
+                let current = resources::task_with_discovery_controlled(
+                    &root, config, task_id, queries, read,
+                )?;
                 owners.extend(current.pages.keys().cloned());
                 let revision = current.revision(config_revision)?;
                 merge_pages(&mut pages, current.pages)?;
@@ -171,6 +195,7 @@ pub(in crate::commands) fn publication_scope(
             json!({"recorded_context_revision":recorded_revision}),
         )
     };
+    read.check().into_diagnostic()?;
     let guards = pages
         .iter()
         .map(|(path, raw)| (path, file_revision(raw)))
@@ -188,6 +213,7 @@ pub(in crate::commands) fn publication_scope(
         ))
         .into_diagnostic()?,
     );
+    read.check().into_diagnostic()?;
     Ok(PublicationScope {
         revision,
         owners,
@@ -319,6 +345,46 @@ mod tests {
                 .unwrap(),
             )
             .unwrap();
+        }
+    }
+
+    #[test]
+    fn controlled_publication_scope_preserves_current_inputs_and_cancellation() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+
+        for mode in ["progressive", "full-context"] {
+            let fixture = Fixture::build(mode);
+            let expected = fixture.scope();
+            let cancelled = Arc::new(AtomicBool::new(false));
+            let read = lk_vault::ReadControl::new(cancelled.clone());
+            let current = publication_scope_controlled(
+                &fixture.root,
+                &fixture.config,
+                &fixture.config_revision,
+                &fixture.task.task_id,
+                &fixture.queries,
+                &read,
+            )
+            .unwrap();
+            assert_eq!(current.revision, expected.revision);
+            assert_eq!(current.owners, expected.owners);
+            assert_eq!(current.pages, expected.pages);
+            cancelled.store(true, Ordering::Relaxed);
+            assert!(
+                publication_scope_controlled(
+                    &fixture.root,
+                    &fixture.config,
+                    &fixture.config_revision,
+                    &fixture.task.task_id,
+                    &fixture.queries,
+                    &read,
+                )
+                .is_err()
+            );
+            assert_eq!(fixture.scope().pages, expected.pages);
         }
     }
 

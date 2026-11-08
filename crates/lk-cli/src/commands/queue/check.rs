@@ -1,6 +1,8 @@
 use std::path::{Path, PathBuf};
 
-use super::{queue_load, resolve_vault_root};
+use miette::IntoDiagnostic;
+
+use super::{queue_load_controlled, resolve_vault_root};
 
 /// Shared read-only update/check boundary. Inspecting never recovers a journal or
 /// removes a result, including when a caller explicitly permits outstanding work.
@@ -24,14 +26,25 @@ impl QueueSettlement {
 }
 
 pub(crate) fn inspect(root: &Path) -> miette::Result<QueueSettlement> {
-    let load = queue_load(root)?;
+    inspect_controlled(root, &lk_vault::ReadControl::default())
+}
+
+pub(crate) fn inspect_controlled(
+    root: &Path,
+    read: &lk_vault::ReadControl,
+) -> miette::Result<QueueSettlement> {
+    read.check().into_diagnostic()?;
+    let load = queue_load_controlled(root, read)?;
     let results = root
         .join(".lorekeeper/queue")
         .join(lk_queue::RESULTS_SUBDIR);
     let mut staged = Vec::new();
-    match std::fs::read_dir(&results) {
+    let entries = std::fs::read_dir(&results);
+    read.check().into_diagnostic()?;
+    match entries {
         Ok(entries) => {
             for entry in entries {
+                read.check().into_diagnostic()?;
                 let path = entry
                     .map_err(|e| miette::miette!("read results: {e}"))?
                     .path();
@@ -43,13 +56,16 @@ pub(crate) fn inspect(root: &Path) -> miette::Result<QueueSettlement> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(miette::miette!("read results: {error}")),
     }
+    read.check().into_diagnostic()?;
     staged.sort();
-    let pending_mutation =
-        match std::fs::symlink_metadata(root.join(".lorekeeper/mutation/pending.json")) {
-            Ok(_) => true,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-            Err(error) => return Err(miette::miette!("inspect mutation journal: {error}")),
-        };
+    let pending = std::fs::symlink_metadata(root.join(".lorekeeper/mutation/pending.json"));
+    read.check().into_diagnostic()?;
+    let pending_mutation = match pending {
+        Ok(_) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(miette::miette!("inspect mutation journal: {error}")),
+    };
+    read.check().into_diagnostic()?;
     Ok(QueueSettlement {
         current: load.work,
         unreadable: load.unreadable,
@@ -80,4 +96,20 @@ pub(super) fn run(
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cancelled_inspection_never_reports_an_empty_queue_as_settled() {
+        use std::sync::{Arc, atomic::AtomicBool};
+
+        let directory = tempfile::tempdir().unwrap();
+        assert!(inspect(directory.path()).unwrap().is_settled());
+        let read = lk_vault::ReadControl::new(Arc::new(AtomicBool::new(true)));
+        assert!(inspect_controlled(directory.path(), &read).is_err());
+        assert!(!directory.path().join(".lorekeeper").exists());
+    }
 }

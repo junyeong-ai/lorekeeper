@@ -392,13 +392,20 @@ pub(super) fn current_tasks_controlled(
     Ok(selected)
 }
 
-pub(super) fn tasks_completed(root: &Path, tasks: &[QueueTask]) -> miette::Result<bool> {
+#[cfg(any(unix, test))]
+pub(super) fn tasks_completed_controlled(
+    root: &Path,
+    tasks: &[QueueTask],
+    read: &lk_vault::ReadControl,
+) -> miette::Result<bool> {
+    read.check().into_diagnostic()?;
     let mut revisions = BTreeMap::new();
     for task in tasks {
-        if classify_task(root, task, &mut revisions)? != TaskStatus::Done {
+        if classify_task_controlled(root, task, &mut revisions, read)? != TaskStatus::Done {
             return Ok(false);
         }
     }
+    read.check().into_diagnostic()?;
     Ok(true)
 }
 
@@ -476,19 +483,33 @@ pub(super) fn select_task_controlled(
 /// Pending queue files, sorted by name (run-id order). `.jsonl` only — skips the
 /// `processed/` subdir and any `.jsonl.tmp`.
 fn pending_queue_files(queue_dir: &Path) -> miette::Result<Vec<PathBuf>> {
-    let entries = match std::fs::read_dir(queue_dir) {
+    pending_queue_files_controlled(queue_dir, &lk_vault::ReadControl::default())
+}
+
+fn pending_queue_files_controlled(
+    queue_dir: &Path,
+    control: &lk_vault::ReadControl,
+) -> miette::Result<Vec<PathBuf>> {
+    control.check().into_diagnostic()?;
+    let entries = std::fs::read_dir(queue_dir);
+    control.check().into_diagnostic()?;
+    let entries = match entries {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => return Err(miette::miette!("read {}: {error}", queue_dir.display())),
     };
-    let mut files: Vec<PathBuf> = entries
-        .map(|entry| entry.map(|entry| entry.path()))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| miette::miette!("read {}: {error}", queue_dir.display()))?
-        .into_iter()
-        .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("jsonl"))
-        .collect();
+    let mut files = Vec::new();
+    for entry in entries {
+        control.check().into_diagnostic()?;
+        let path = entry
+            .map_err(|error| miette::miette!("read {}: {error}", queue_dir.display()))?
+            .path();
+        if path.extension().and_then(|suffix| suffix.to_str()) == Some("jsonl") {
+            files.push(path);
+        }
+    }
     files.sort();
+    control.check().into_diagnostic()?;
     Ok(files)
 }
 
@@ -514,16 +535,20 @@ fn read_pending_tasks_controlled(
         tasks: BTreeMap::new(),
         unparseable: 0,
     };
-    for file in pending_queue_files(queue)? {
+    for file in pending_queue_files_controlled(queue, control)? {
         control.check().into_diagnostic()?;
         let captured = read_tasks(&file);
         control.check().into_diagnostic()?;
         let read = match captured {
             Ok(read) => read,
-            Err(error) => match std::fs::metadata(&file) {
-                Err(io_error) if io_error.kind() == std::io::ErrorKind::NotFound => continue,
-                _ => return Err(error),
-            },
+            Err(error) => {
+                let metadata = std::fs::metadata(&file);
+                control.check().into_diagnostic()?;
+                match metadata {
+                    Err(io_error) if io_error.kind() == std::io::ErrorKind::NotFound => continue,
+                    _ => return Err(error),
+                }
+            }
         };
         pending.unparseable += read.unparseable;
         for task in read.tasks {
@@ -534,6 +559,7 @@ fn read_pending_tasks_controlled(
             }
         }
     }
+    control.check().into_diagnostic()?;
     Ok(pending)
 }
 
@@ -1484,6 +1510,14 @@ pub(crate) struct QueueLoad {
 }
 
 pub(crate) fn queue_load(vault_root: &Path) -> miette::Result<QueueLoad> {
+    queue_load_controlled(vault_root, &lk_vault::ReadControl::default())
+}
+
+pub(crate) fn queue_load_controlled(
+    vault_root: &Path,
+    control: &lk_vault::ReadControl,
+) -> miette::Result<QueueLoad> {
+    control.check().into_diagnostic()?;
     let mut revisions = BTreeMap::new();
     let queue_dir = vault_root.join(".lorekeeper").join("queue");
     let mut load = QueueLoad {
@@ -1491,17 +1525,21 @@ pub(crate) fn queue_load(vault_root: &Path) -> miette::Result<QueueLoad> {
         unreadable: 0,
         unparseable: 0,
     };
-    for file in pending_queue_files(&queue_dir)? {
-        let read = read_tasks(&file)?;
+    for file in pending_queue_files_controlled(&queue_dir, control)? {
+        control.check().into_diagnostic()?;
+        let captured = read_tasks(&file);
+        control.check().into_diagnostic()?;
+        let read = captured?;
         load.unparseable += read.unparseable;
         for task in read.tasks {
-            match classify_task(vault_root, &task, &mut revisions)? {
+            match classify_task_controlled(vault_root, &task, &mut revisions, control)? {
                 s if s.is_work() => load.work += 1,
                 TaskStatus::Unreadable => load.unreadable += 1,
                 _ => {}
             }
         }
     }
+    control.check().into_diagnostic()?;
     Ok(load)
 }
 
@@ -1958,6 +1996,23 @@ fn classify_task(
     )
 }
 
+fn classify_task_controlled(
+    root: &Path,
+    task: &QueueTask,
+    revisions: &mut BTreeMap<PathBuf, Result<String, TaskStatus>>,
+    read: &lk_vault::ReadControl,
+) -> miette::Result<TaskStatus> {
+    Ok(classify_with_reader_controlled(
+        root,
+        task,
+        revisions,
+        Artifact::Task,
+        &mut |path| read.read_to_string(&lk_vault::page_path(root, path)?),
+        read,
+    )?
+    .status)
+}
+
 struct TaskClassification {
     status: TaskStatus,
     task_status: TaskStatus,
@@ -2059,6 +2114,7 @@ fn classify_with_reader_controlled(
             tracing::warn!(task_id = %task.task_id, "synthesis citations do not match cache identity");
             return Ok(TaskStatus::Unreadable);
         }
+        let mut rss = None;
         for citation in citations {
             control.check().into_diagnostic()?;
             let Some(path) = resolve_target_path(&citation.path) else {
@@ -2075,11 +2131,28 @@ fn classify_with_reader_controlled(
                     }
                     Err(_) => return Ok(TaskStatus::Unreadable),
                 };
-                let selected = lk_vault::has_rss_citation_in_page(root, &target, &citation, &raw);
+                if rss.is_none() {
+                    let captured = lk_vault::RssEvidenceCapture::new(root, control);
+                    control.check().into_diagnostic()?;
+                    rss = Some(match captured {
+                        Ok(capture) => capture,
+                        Err(lk_vault::VaultError::Cancelled) => {
+                            return Err(lk_vault::VaultError::Cancelled).into_diagnostic();
+                        }
+                        Err(_) => return Ok(TaskStatus::Unreadable),
+                    });
+                }
+                let selected = rss
+                    .as_mut()
+                    .expect("selected RSS citation has a capture")
+                    .has_citation_in_page(&target, &citation, &raw);
                 control.check().into_diagnostic()?;
                 match selected {
                     Ok(true) => {}
                     Ok(false) => return Ok(TaskStatus::Stale),
+                    Err(lk_vault::VaultError::Cancelled) => {
+                        return Err(lk_vault::VaultError::Cancelled).into_diagnostic();
+                    }
                     Err(_) => return Ok(TaskStatus::Unreadable),
                 }
                 continue;
@@ -2630,6 +2703,62 @@ mod tests {
                 anchor: "## 요약".into(),
             },
         }
+    }
+
+    #[test]
+    fn controlled_queue_reads_never_report_cancelled_work_as_complete() {
+        use std::sync::{Arc, atomic::AtomicBool};
+
+        let directory = TempDir::new().unwrap();
+        assert!(
+            tasks_completed_controlled(directory.path(), &[], &lk_vault::ReadControl::default())
+                .unwrap()
+        );
+        assert_eq!(queue_load(directory.path()).unwrap().work, 0);
+        let read = lk_vault::ReadControl::new(Arc::new(AtomicBool::new(true)));
+        assert!(tasks_completed_controlled(directory.path(), &[], &read).is_err());
+        assert!(queue_load_controlled(directory.path(), &read).is_err());
+    }
+
+    #[test]
+    fn classification_preserves_cancellation_observed_during_a_page_read() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+
+        let directory = TempDir::new().unwrap();
+        let task = task("daily/source.md", "captured input");
+        write_page(
+            directory.path(),
+            &task.target.vault_path,
+            &format!("id: source\nllm_inputs:\n  summary: {}\n", task.cache_hash),
+        );
+        assert_eq!(
+            classify_task(directory.path(), &task).unwrap(),
+            TaskStatus::Current
+        );
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let control = lk_vault::ReadControl::new(cancelled.clone());
+        let mut revisions = BTreeMap::new();
+        let result = classify_with_reader_controlled(
+            directory.path(),
+            &task,
+            &mut revisions,
+            Artifact::Task,
+            &mut |path| {
+                let raw = read_page(directory.path(), path).map_err(Into::into);
+                cancelled.store(true, Ordering::Relaxed);
+                raw
+            },
+            &control,
+        );
+        assert!(result.is_err());
+        assert!(revisions.is_empty());
+        assert_eq!(
+            classify_task(directory.path(), &task).unwrap(),
+            TaskStatus::Current
+        );
     }
 
     /// One marker answers for both sections a `synthesize-concept` task fills, so the task

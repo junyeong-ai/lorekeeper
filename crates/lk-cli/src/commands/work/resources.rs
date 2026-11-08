@@ -88,6 +88,7 @@ impl Prepared {
 }
 
 struct Capture<'a> {
+    rss: Option<lk_vault::RssEvidenceCapture>,
     read: lk_vault::ReadControl,
     root: &'a Path,
     pages: BTreeMap<PathBuf, String>,
@@ -98,6 +99,7 @@ impl<'a> Capture<'a> {
     fn new(root: &'a Path, read: &lk_vault::ReadControl) -> Self {
         Self {
             root,
+            rss: None,
             read: read.clone(),
             pages: BTreeMap::new(),
             resources: BTreeMap::new(),
@@ -162,29 +164,27 @@ impl<'a> Capture<'a> {
     fn citation(&mut self, subject: &str, citation: &Citation) -> miette::Result<()> {
         self.read.check().into_diagnostic()?;
         if citation.rss_event.is_some() {
-            lk_vault::validate_rss_citation(self.root, Path::new(subject), citation)
+            if self.rss.is_none() {
+                self.rss = Some(
+                    lk_vault::RssEvidenceCapture::new(self.root, &self.read).into_diagnostic()?,
+                );
+            }
+            let input = self
+                .rss
+                .as_mut()
+                .expect("RSS capture initialized")
+                .load_citation(Path::new(subject), citation)
                 .into_diagnostic()?;
-            self.page(&citation.path, None, None, SemanticAuthority::Page)?;
-            let path = format!(
-                "{}/events/{}.json",
-                lk_core::rss_original::RSS_ORIGINAL_STORE,
-                citation.revision
-            );
-            let raw = self.page(
-                &path,
-                Some(&citation.revision),
-                None,
+            self.insert_page(
+                input.origin_owner,
+                input.origin.as_str().to_owned(),
+                SemanticAuthority::Page,
+            )?;
+            self.insert_page(
+                input.payload_path,
+                input.payload.as_str().to_owned(),
                 SemanticAuthority::RssEvent,
             )?;
-            let payload: lk_core::rss_original::RssEventPayload =
-                serde_json::from_str(&raw).into_diagnostic()?;
-            if citation
-                .rss_event
-                .as_ref()
-                .is_none_or(|event| event.event_id != payload.event_id)
-            {
-                return Err(miette::miette!("semantic RSS event identity changed"));
-            }
         } else {
             self.page(
                 &citation.path,
@@ -296,6 +296,7 @@ pub(super) fn section_task_controlled(
         lk_graph::audit::review_dependencies_controlled(root, &config.vault.dirs, &subjects, read)
             .into_diagnostic()?;
     let mut captured = Capture {
+        rss: None,
         read: read.clone(),
         root,
         pages: std::mem::take(&mut prepared.pages),
@@ -366,7 +367,7 @@ pub(super) fn task_with_discovery(
     )
 }
 
-fn task_with_discovery_controlled(
+pub(super) fn task_with_discovery_controlled(
     root: &Path,
     config: &Config,
     task_id: &str,
@@ -416,6 +417,7 @@ pub(super) fn source_task_controlled(
     Ok(prepared)
 }
 
+#[cfg(test)]
 pub(super) fn selection_inventory(
     root: &Path,
     config: &Config,
@@ -524,6 +526,7 @@ pub(super) fn selection_inventory_with_capture(
         reviews.get(&target).cloned().unwrap_or_default(),
     )]);
     let mut source_capture = Capture {
+        rss: None,
         read: read.clone(),
         root,
         pages: std::mem::take(&mut source.pages),
@@ -541,6 +544,7 @@ pub(super) fn selection_inventory_with_capture(
     source.context["purpose"]["extraction_scope"] = json!({"policy":"source-proposals-v1"});
     source = source_capture.finish(source.subject, source.context, config);
     let mut guarded = Capture {
+        rss: None,
         read: read.clone(),
         root,
         pages: source.pages.clone(),
@@ -753,6 +757,7 @@ pub(super) fn with_discovery_controlled(
     selected.sort();
     selected.dedup();
     let mut captured = Capture {
+        rss: None,
         read: read.clone(),
         root,
         pages: std::mem::take(&mut prepared.pages),
@@ -798,14 +803,6 @@ pub(super) fn with_discovery_controlled(
         "match_revision":lk_core::concept::citation_digest(&selected),
     });
     Ok(captured.finish(prepared.subject, prepared.context, config))
-}
-
-pub(super) fn task_for_publication(
-    root: &Path,
-    config: &Config,
-    task_id: &str,
-) -> miette::Result<Prepared> {
-    task_for_publication_controlled(root, config, task_id, &lk_vault::ReadControl::default())
 }
 
 pub(super) fn task_for_publication_controlled(

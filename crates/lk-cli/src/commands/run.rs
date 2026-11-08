@@ -896,7 +896,10 @@ mod native {
         }
 
         fn check_queue(&mut self, name: &str) -> bool {
-            let state = match crate::commands::queue::check::inspect(&self.root) {
+            let state = match crate::commands::queue::check::inspect_controlled(
+                &self.root,
+                self.supervisor.read_control(),
+            ) {
                 Ok(state) => state,
                 Err(error) => return self.failure(name, error),
             };
@@ -3814,10 +3817,11 @@ mod native {
                 .map_err(|error| miette::miette!("{error}"))?;
             let mut deferred = std::collections::BTreeMap::new();
             let mut targets = std::collections::BTreeMap::new();
-            let rejected = crate::commands::queue::rejections::blocked_tasks(
+            let rejected = crate::commands::queue::rejections::blocked_tasks_controlled(
                 session.root(),
                 &self.config,
                 &self.config_revision,
+                self.supervisor.read_control(),
             )?;
             let mut needs_application = false;
             for task in owners.into_values() {
@@ -4113,14 +4117,22 @@ mod native {
             let root = session.root();
             let mut unfinished = false;
             for task in tasks {
-                if crate::commands::queue::tasks_completed(root, std::slice::from_ref(task))? {
+                if crate::commands::queue::tasks_completed_controlled(
+                    root,
+                    std::slice::from_ref(task),
+                    self.supervisor.read_control(),
+                )? {
                     continue;
                 }
                 unfinished = true;
                 if task.kind != lk_queue::TaskKind::ExtractConcepts {
                     return Ok(false);
                 }
-                let current = crate::commands::queue::current_task(root, &task.task_id)?;
+                let current = crate::commands::queue::current_task_controlled(
+                    root,
+                    &task.task_id,
+                    self.supervisor.read_control(),
+                )?;
                 if current.kind != task.kind
                     || current.cache_hash != task.cache_hash
                     || current.target != task.target
@@ -4401,9 +4413,10 @@ mod native {
                     };
                     let mut unfinished = Vec::new();
                     for task in tasks {
-                        match crate::commands::queue::tasks_completed(
+                        match crate::commands::queue::tasks_completed_controlled(
                             &self.root,
                             std::slice::from_ref(task),
+                            self.supervisor.read_control(),
                         ) {
                             Ok(true) => {
                                 self.result
@@ -4441,16 +4454,18 @@ mod native {
                         return false;
                     }
                     if !unfinished.is_empty() {
-                        let rejected = match crate::commands::queue::rejections::blocked_tasks(
-                            &self.root,
-                            &self.config,
-                            &self.config_revision,
-                        ) {
-                            Ok(rejected) => rejected,
-                            Err(error) => {
-                                return self.failure("selected queue rejection", error);
-                            }
-                        };
+                        let rejected =
+                            match crate::commands::queue::rejections::blocked_tasks_controlled(
+                                &self.root,
+                                &self.config,
+                                &self.config_revision,
+                                self.supervisor.read_control(),
+                            ) {
+                                Ok(rejected) => rejected,
+                                Err(error) => {
+                                    return self.failure("selected queue rejection", error);
+                                }
+                            };
                         if unfinished.iter().all(|task| {
                             rejected.contains_key(&(task.task_id.clone(), task.cache_hash.clone()))
                         }) {
@@ -4482,7 +4497,10 @@ mod native {
             if self.result.halted || self.result.cancelled {
                 return false;
             }
-            let state = match crate::commands::queue::check::inspect(&self.root) {
+            let state = match crate::commands::queue::check::inspect_controlled(
+                &self.root,
+                self.supervisor.read_control(),
+            ) {
                 Ok(state) => state,
                 Err(error) => return self.failure("queue inspection", error),
             };
@@ -4493,7 +4511,10 @@ mod native {
                 {
                     return false;
                 }
-                match crate::commands::queue::check::inspect(&self.root) {
+                match crate::commands::queue::check::inspect_controlled(
+                    &self.root,
+                    self.supervisor.read_control(),
+                ) {
                     Ok(state) => state,
                     Err(error) => return self.failure("queue inspection", error),
                 }

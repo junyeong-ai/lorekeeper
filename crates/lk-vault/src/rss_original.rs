@@ -1,7 +1,7 @@
 //! Immutable RSS collection text and explicitly unbound legacy log discovery.
 use crate::{
     MutationSession, VaultError,
-    original_io::{read_bytes, store_path},
+    original_io::{read_bytes, read_bytes_controlled, store_path},
 };
 use lk_core::rss_original::{
     MAX_RSS_CAPTURE_BYTES, MAX_RSS_EVENT_BYTES, MAX_RSS_EVENTS, MAX_RSS_MANIFEST_BYTES,
@@ -119,15 +119,25 @@ pub(crate) fn read_manifest(
     root: &Path,
     reference: &RssOriginalReference,
 ) -> Result<RssOriginalManifest, VaultError> {
+    read_manifest_controlled(root, reference, &crate::ReadControl::default())
+}
+pub(crate) fn read_manifest_controlled(
+    root: &Path,
+    reference: &RssOriginalReference,
+    read: &crate::ReadControl,
+) -> Result<RssOriginalManifest, VaultError> {
+    read.check()?;
     reference.validate().map_err(err)?;
-    let bytes = read_bytes(
+    let bytes = read_bytes_controlled(
         &path(root, &reference.manifest_path, false)?,
         MAX_RSS_MANIFEST_BYTES,
+        read,
     )?;
     let m: RssOriginalManifest = serde_json::from_slice(&bytes).map_err(err)?;
     if m.reference().map_err(err)? != *reference || canonical_bytes(&m).map_err(err)? != bytes {
         return Err(err("RSS manifest digest/address mismatch"));
     }
+    read.check()?;
     Ok(m)
 }
 /// Metadata-first: validates the manifest, not all unselected payloads. A selected

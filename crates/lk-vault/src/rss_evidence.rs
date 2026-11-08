@@ -1,7 +1,7 @@
 //! Explicit RSS concept selections, independently guarded from daily interpretation.
 use std::{collections::BTreeMap, path::Path};
 
-use crate::{VaultError, original_io::read_bytes};
+use crate::VaultError;
 use lk_core::{
     concept::Citation,
     rss_evidence::{
@@ -13,6 +13,9 @@ use lk_core::{
         RssOriginalManifest, RssOriginalReference, verify_payload,
     },
 };
+
+mod capture;
+pub use capture::{RssCitationInput, RssEvidenceCapture};
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct RssEvidencePreview {
@@ -160,6 +163,14 @@ pub fn load_rss_manifest(
     crate::rss_original::read_manifest(root, reference)
 }
 
+pub fn load_rss_manifest_controlled(
+    root: &Path,
+    reference: &RssOriginalReference,
+    read: &crate::ReadControl,
+) -> Result<RssOriginalManifest, VaultError> {
+    crate::rss_original::read_manifest_controlled(root, reference, read)
+}
+
 fn scope(root: &Path, raw: &str) -> Result<(crate::VaultPage, RssOriginalManifest), VaultError> {
     let page = crate::parse_page(raw).map_err(err)?;
     if page.frontmatter.get("type").and_then(|v| v.as_str()) != Some("daily") {
@@ -188,6 +199,16 @@ pub fn load_rss_selected_payload(
     manifest: &RssOriginalManifest,
     selection: &RssEventSelection,
 ) -> Result<RssEventPayload, VaultError> {
+    load_rss_selected_payload_controlled(root, manifest, selection, &crate::ReadControl::default())
+}
+
+pub fn load_rss_selected_payload_controlled(
+    root: &Path,
+    manifest: &RssOriginalManifest,
+    selection: &RssEventSelection,
+    read: &crate::ReadControl,
+) -> Result<RssEventPayload, VaultError> {
+    read.check()?;
     manifest.validate().map_err(err)?;
     let entry = manifest
         .events
@@ -197,8 +218,10 @@ pub fn load_rss_selected_payload(
     let relative = format!("{RSS_ORIGINAL_STORE}/events/{}.json", entry.revision);
     let path =
         crate::original_io::store_path(root, Path::new(&relative), RSS_ORIGINAL_STORE, false)?;
-    let bytes = read_bytes(&path, MAX_RSS_EVENT_BYTES)?;
-    verify_payload(manifest, entry, &bytes).map_err(err)
+    let bytes = crate::original_io::read_bytes_controlled(&path, MAX_RSS_EVENT_BYTES, read)?;
+    let payload = verify_payload(manifest, entry, &bytes).map_err(err)?;
+    read.check()?;
+    Ok(payload)
 }
 
 /// All bindings must have real standalone generated links. Other occurrences keep page evidence.
@@ -207,8 +230,18 @@ pub fn rss_concept_citations(
     origin: &Path,
     raw: &str,
 ) -> Result<BTreeMap<String, Vec<Citation>>, VaultError> {
+    rss_concept_citations_controlled(root, origin, raw, &crate::ReadControl::default())
+}
+
+pub fn rss_concept_citations_controlled(
+    root: &Path,
+    origin: &Path,
+    raw: &str,
+    read: &crate::ReadControl,
+) -> Result<BTreeMap<String, Vec<Citation>>, VaultError> {
+    let mut originals = capture::Originals::new(root, read)?;
     let mut entries = crate::ExistingEntryResolver::new(root);
-    rss_concept_citations_mode(root, &mut entries, origin, raw, true)
+    rss_concept_citations_captured(&mut originals, &mut entries, origin, raw, true)
 }
 
 fn rss_concept_citations_mode(
@@ -218,12 +251,55 @@ fn rss_concept_citations_mode(
     raw: &str,
     payloads: bool,
 ) -> Result<BTreeMap<String, Vec<Citation>>, VaultError> {
+    let mut originals = capture::Originals::new(root, &crate::ReadControl::default())?;
+    rss_concept_citations_captured(&mut originals, entries, origin, raw, payloads)
+}
+
+fn rss_concept_citations_captured(
+    originals: &mut capture::Originals,
+    entries: &mut crate::ExistingEntryResolver,
+    origin: &Path,
+    raw: &str,
+    payloads: bool,
+) -> Result<BTreeMap<String, Vec<Citation>>, VaultError> {
+    let read = originals.read.clone();
+    read.check()?;
     let parsed = crate::parse_page(raw).map_err(err)?;
     let declarations = bindings(&parsed).map_err(err)?;
     if declarations.is_empty() {
         return Ok(BTreeMap::new());
     }
-    let (_, current) = scope(root, raw)?;
+    if parsed
+        .frontmatter
+        .get("type")
+        .and_then(|value| value.as_str())
+        != Some("daily")
+    {
+        return Err(err("RSS evidence requires a daily page"));
+    }
+    let reference: RssOriginalReference = serde_json::from_value(
+        parsed
+            .frontmatter
+            .get("source_record")
+            .and_then(|record| record.get(RSS_ORIGINAL_FIELD))
+            .cloned()
+            .ok_or_else(|| err("RSS evidence requires a bound original"))?,
+    )
+    .map_err(err)?;
+    let current = originals.manifest(&reference)?;
+    if parsed
+        .frontmatter
+        .get("source")
+        .and_then(|value| value.as_str())
+        != Some(current.source_id.as_str())
+        || parsed
+            .frontmatter
+            .get("created")
+            .and_then(|value| value.as_str())
+            != Some(current.date.to_string().as_str())
+    {
+        return Err(err("RSS evidence source/date differs from bound original"));
+    }
     let section = crate::resolve_section(raw, |s| s.related_concepts)
         .ok_or_else(|| err("RSS concept evidence lacks generated links section"))?;
     let start = section.body.as_ptr() as usize - raw.as_ptr() as usize;
@@ -231,11 +307,13 @@ fn rss_concept_citations_mode(
     let mut lines = Vec::new();
     let mut offset = 0;
     for line in lk_core::markdown::lines_with_endings(raw) {
+        read.check()?;
         lines.push((offset, line.trim_end_matches(['\r', '\n'])));
         offset += line.len();
     }
     let mut occurrences: BTreeMap<std::path::PathBuf, (usize, bool)> = BTreeMap::new();
     for occurrence in page_link_occurrences(raw)? {
+        read.check()?;
         let Some(target) = lk_core::link::resolve_dest(origin, &occurrence.link.dest) else {
             continue;
         };
@@ -250,30 +328,17 @@ fn rss_concept_citations_mode(
             *other = true;
         }
     }
-    let mut manifests = BTreeMap::new();
-    let mut verified: BTreeMap<
-        String,
-        (
-            String,
-            jiff::civil::Date,
-            lk_core::rss_original::RssEventEntry,
-        ),
-    > = BTreeMap::new();
     let mut result: BTreeMap<String, Vec<Citation>> = BTreeMap::new();
     for binding in declarations {
-        if !manifests.contains_key(&binding.manifest.revision) {
-            manifests.insert(
-                binding.manifest.revision.clone(),
-                load_rss_manifest(root, &binding.manifest)?,
-            );
-        }
-        let historical = &manifests[&binding.manifest.revision];
+        read.check()?;
+        let historical = originals.manifest(&binding.manifest)?;
         if historical.source_id != current.source_id || historical.date != current.date {
             return Err(err("RSS evidence original source/date changed"));
         }
         let mut generated = 0;
         let mut other = false;
         for (target, (count, extra)) in &occurrences {
+            read.check()?;
             if is_same_concept_address(entries, &binding.concept, target)? {
                 generated += *count;
                 other |= *extra;
@@ -286,17 +351,10 @@ fn rss_concept_citations_mode(
         }
         let citations = result.entry(binding.concept.clone()).or_default();
         for selection in &binding.events {
-            let entry = historical
-                .events
-                .iter()
-                .find(|e| e.event_id == selection.event_id && e.revision == selection.revision)
-                .ok_or_else(|| err("RSS selection absent from declared original"))?;
+            read.check()?;
+            originals.entry(&binding.manifest, selection)?;
             if payloads {
-                let proof = (historical.source_id.clone(), historical.date, entry.clone());
-                if verified.get(&selection.revision) != Some(&proof) {
-                    load_rss_selected_payload(root, historical, selection)?;
-                    verified.insert(selection.revision.clone(), proof);
-                }
+                originals.payload(&binding.manifest, selection)?;
             }
             citations.push(Citation {
                 path: origin
@@ -317,6 +375,7 @@ fn rss_concept_citations_mode(
         citations.sort();
         citations.dedup();
     }
+    read.check()?;
     Ok(result)
 }
 
@@ -326,10 +385,16 @@ pub fn validate_rss_citation(
     concept: &Path,
     citation: &Citation,
 ) -> Result<(), VaultError> {
-    if !has_rss_citation(root, concept, citation)? {
-        return Err(err("RSS concept evidence membership changed"));
-    }
-    Ok(())
+    validate_rss_citation_controlled(root, concept, citation, &crate::ReadControl::default())
+}
+
+pub fn validate_rss_citation_controlled(
+    root: &Path,
+    concept: &Path,
+    citation: &Citation,
+    read: &crate::ReadControl,
+) -> Result<(), VaultError> {
+    RssEvidenceCapture::new(root, read)?.validate_citation(concept, citation)
 }
 
 pub fn has_rss_citation(
@@ -337,14 +402,7 @@ pub fn has_rss_citation(
     concept: &Path,
     citation: &Citation,
 ) -> Result<bool, VaultError> {
-    citation
-        .rss_event
-        .as_ref()
-        .ok_or_else(|| err("expected RSS citation"))?
-        .validate(&citation.revision)
-        .map_err(err)?;
-    let raw = std::fs::read_to_string(crate::page_path(root, Path::new(&citation.path))?)?;
-    has_rss_citation_in_page(root, concept, citation, &raw)
+    RssEvidenceCapture::new(root, &crate::ReadControl::default())?.has_citation(concept, citation)
 }
 
 /// Check the supplied origin snapshot; its caller owns currentness and publication guards.
@@ -354,32 +412,10 @@ pub fn has_rss_citation_in_page(
     citation: &Citation,
     raw: &str,
 ) -> Result<bool, VaultError> {
-    let selector = citation
-        .rss_event
-        .as_ref()
-        .ok_or_else(|| err("expected RSS citation"))?;
-    selector.validate(&citation.revision).map_err(err)?;
-    let origin = Path::new(&citation.path);
-    let mut entries = crate::ExistingEntryResolver::new(root);
-    let map = rss_concept_citations_mode(root, &mut entries, origin, raw, false)?;
-    let found = has_selected_membership(&mut entries, &map, concept, citation)?;
-    if found {
-        let page = crate::parse_page(raw).map_err(err)?;
-        let selection = RssEventSelection {
-            event_id: selector.event_id.clone(),
-            revision: citation.revision.clone(),
-        };
-        let declaration = find_binding(&mut entries, &page, concept, &selection)?;
-        load_rss_selected_payload(
-            root,
-            &load_rss_manifest(root, &declaration.manifest)?,
-            &selection,
-        )?;
-    }
-    Ok(found)
+    RssEvidenceCapture::new(root, &crate::ReadControl::default())?
+        .has_citation_in_page(concept, citation, raw)
 }
 
-/// Bounded read of a declared historical selection, even after the current manifest moves.
 pub fn inspect_rss_citation(
     root: &Path,
     concept: &Path,
@@ -579,47 +615,23 @@ pub fn guard_rss_citation(
     concept: &Path,
     citation: &Citation,
 ) -> Result<(), VaultError> {
-    validate_rss_citation(root, concept, citation)?;
-    let origin = Path::new(&citation.path);
-    let raw = std::fs::read_to_string(crate::page_path(root, origin)?)?;
-    let mut entries = crate::ExistingEntryResolver::new(root);
-    let map = rss_concept_citations_mode(root, &mut entries, origin, &raw, false)?;
-    if !has_selected_membership(&mut entries, &map, concept, citation)? {
-        return Err(err("RSS membership changed before publication"));
-    }
-    let page = crate::parse_page(&raw).map_err(err)?;
-    let selector = citation.rss_event.as_ref().expect("validated selector");
-    let selection = RssEventSelection {
-        event_id: selector.event_id.clone(),
-        revision: citation.revision.clone(),
-    };
-    let binding = find_binding(&mut entries, &page, concept, &selection)?;
-    let manifest = load_rss_manifest(root, &binding.manifest)?;
-    let payload = load_rss_selected_payload(root, &manifest, &selection)?;
-    let current: RssOriginalReference = serde_json::from_value(
-        page.frontmatter
-            .get("source_record")
-            .and_then(|v| v.get(RSS_ORIGINAL_FIELD))
-            .cloned()
-            .ok_or_else(|| err("missing current manifest"))?,
+    guard_rss_citation_controlled(
+        plan,
+        root,
+        concept,
+        citation,
+        &crate::ReadControl::default(),
     )
-    .map_err(err)?;
-    for reference in [&current, &binding.manifest] {
-        let manifest = load_rss_manifest(root, reference)?;
-        plan.require_unchanged(
-            &reference.manifest_path,
-            String::from_utf8(lk_core::rss_original::canonical_bytes(&manifest).map_err(err)?)
-                .map_err(err)?,
-        );
-    }
-    let relative = format!("{RSS_ORIGINAL_STORE}/events/{}.json", selection.revision);
-    plan.require_unchanged(
-        relative,
-        String::from_utf8(lk_core::rss_original::canonical_bytes(&payload).map_err(err)?)
-            .map_err(err)?,
-    );
-    plan.require_unchanged(origin, raw);
-    Ok(())
+}
+
+pub fn guard_rss_citation_controlled(
+    plan: &mut crate::MutationPlan,
+    root: &Path,
+    concept: &Path,
+    citation: &Citation,
+    read: &crate::ReadControl,
+) -> Result<(), VaultError> {
+    RssEvidenceCapture::new(root, read)?.guard_citation(plan, concept, citation)
 }
 
 #[derive(serde::Serialize)]

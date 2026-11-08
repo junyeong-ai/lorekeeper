@@ -350,6 +350,7 @@ fn rss_evidence(
     root: &Path,
     dirs: &VaultDirs,
     target_owners: &BTreeMap<&str, PathBuf>,
+    read: &lk_vault::ReadControl,
 ) -> Result<BTreeMap<String, BTreeMap<PathBuf, Vec<Citation>>>, GraphError> {
     let concept_owners: BTreeSet<&PathBuf> = pages
         .iter()
@@ -364,16 +365,19 @@ fn rss_evidence(
         .map(|source| source.page)
         .filter(|page| page.rss_evidence)
     {
-        let raw = std::fs::read_to_string(
-            lk_vault::page_path(root, &source.path).map_err(|e| GraphError::Io(e.to_string()))?,
-        )
-        .map_err(|e| GraphError::Io(e.to_string()))?;
+        read.check().map_err(GraphError::from)?;
+        let raw = read
+            .read_to_string(
+                &lk_vault::page_path(root, &source.path)
+                    .map_err(|e| GraphError::Io(e.to_string()))?,
+            )
+            .map_err(GraphError::from)?;
         let page = frontmatter::parse_page(&raw).map_err(|e| GraphError::Io(e.to_string()))?;
         if source.revision.as_deref() != Some(lk_core::concept::source_revision(&page).as_str()) {
             return Err(GraphError::Io("RSS source changed during scan".into()));
         }
-        let evidence = lk_vault::rss_concept_citations(root, &source.path, &raw)
-            .map_err(|e| GraphError::Io(e.to_string()))?;
+        let evidence = lk_vault::rss_concept_citations_controlled(root, &source.path, &raw, read)
+            .map_err(GraphError::from)?;
         let mut resolved: BTreeMap<PathBuf, Vec<Citation>> = BTreeMap::new();
         for (concept, citations) in evidence {
             let owner = lk_vault::resolve_page_owner(root, Path::new(&concept))
@@ -428,8 +432,19 @@ struct CitationGraph<'a> {
 
 impl<'a> CitationGraph<'a> {
     fn build(pages: &'a [ScannedPage], root: &Path, dirs: &VaultDirs) -> Result<Self, GraphError> {
+        Self::build_controlled(pages, root, dirs, &lk_vault::ReadControl::default())
+    }
+
+    fn build_controlled(
+        pages: &'a [ScannedPage],
+        root: &Path,
+        dirs: &VaultDirs,
+        read: &lk_vault::ReadControl,
+    ) -> Result<Self, GraphError> {
+        read.check().map_err(GraphError::from)?;
         let existence = VaultExistence::build_at(root, pages, dirs)?;
         let sources = citation_sources(pages, root, dirs, &existence)?;
+        read.check().map_err(GraphError::from)?;
         // Link occurrences keep their exact addresses. Evidence belongs to the verified
         // target entry, shared by symlink spellings but not distinct hard-link entries.
         let target_owners = pages
@@ -442,7 +457,7 @@ impl<'a> CitationGraph<'a> {
             .collect::<Result<BTreeMap<_, _>, _>>()?;
         Ok(Self {
             incoming: incoming_citations(&sources, &existence, &target_owners),
-            rss: rss_evidence(pages, &sources, root, dirs, &target_owners)?,
+            rss: rss_evidence(pages, &sources, root, dirs, &target_owners, read)?,
             target_owners,
             by_id: pages.iter().map(|page| (page.id.as_str(), page)).collect(),
             sources: sources
@@ -499,11 +514,22 @@ pub fn concept_evidence(
     root: &Path,
     dirs: &VaultDirs,
 ) -> Result<BTreeMap<PathBuf, Vec<Citation>>, GraphError> {
-    Ok(CitationGraph::build(pages, root, dirs)?
+    concept_evidence_controlled(pages, root, dirs, &lk_vault::ReadControl::default())
+}
+
+pub fn concept_evidence_controlled(
+    pages: &[ScannedPage],
+    root: &Path,
+    dirs: &VaultDirs,
+    read: &lk_vault::ReadControl,
+) -> Result<BTreeMap<PathBuf, Vec<Citation>>, GraphError> {
+    let result = CitationGraph::build_controlled(pages, root, dirs, read)?
         .concepts(pages, dirs)
         .into_iter()
         .map(|concept| (concept.path, concept.citations))
-        .collect())
+        .collect();
+    read.check().map_err(GraphError::from)?;
+    Ok(result)
 }
 
 /// Graph captures its whole existence universe independently of selected search scope.
