@@ -127,12 +127,17 @@ fn has_selected_membership(
     map: &BTreeMap<String, Vec<Citation>>,
     concept: &Path,
     citation: &Citation,
+    read: &crate::ReadControl,
 ) -> Result<bool, VaultError> {
+    read.check()?;
     for (declared, set) in map {
+        read.check()?;
         if set.contains(citation) && is_same_concept_address(entries, declared, concept)? {
+            read.check()?;
             return Ok(true);
         }
     }
+    read.check()?;
     Ok(false)
 }
 
@@ -141,14 +146,19 @@ fn find_binding(
     page: &crate::VaultPage,
     concept: &Path,
     selection: &RssEventSelection,
+    read: &crate::ReadControl,
 ) -> Result<ConceptEvidence, VaultError> {
+    read.check()?;
     for binding in bindings(page).map_err(err)? {
+        read.check()?;
         if binding.events.contains(selection)
             && is_same_concept_address(entries, &binding.concept, concept)?
         {
+            read.check()?;
             return Ok(binding);
         }
     }
+    read.check()?;
     Err(err("RSS selection membership changed"))
 }
 
@@ -431,7 +441,13 @@ pub fn inspect_rss_citation(
     let mut entries = crate::ExistingEntryResolver::new(root);
     let map =
         rss_concept_citations_mode(root, &mut entries, Path::new(&citation.path), &raw, false)?;
-    if !has_selected_membership(&mut entries, &map, concept, citation)? {
+    if !has_selected_membership(
+        &mut entries,
+        &map,
+        concept,
+        citation,
+        &crate::ReadControl::default(),
+    )? {
         return Err(err("RSS membership changed during read"));
     }
     let page = crate::parse_page(&raw).map_err(err)?;
@@ -440,7 +456,13 @@ pub fn inspect_rss_citation(
         event_id: event.event_id.clone(),
         revision: citation.revision.clone(),
     };
-    let binding = find_binding(&mut entries, &page, concept, &selection)?;
+    let binding = find_binding(
+        &mut entries,
+        &page,
+        concept,
+        &selection,
+        &crate::ReadControl::default(),
+    )?;
     let manifest = load_rss_manifest(root, &binding.manifest)?;
     let payload = load_rss_selected_payload(root, &manifest, &selection)?;
     let normalized = format!("{}\n\n{}", payload.title, payload.body);

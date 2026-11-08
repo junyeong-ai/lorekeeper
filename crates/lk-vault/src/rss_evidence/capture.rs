@@ -214,6 +214,32 @@ impl RssEvidenceCapture {
         Ok(())
     }
 
+    /// Reuse an exact authored origin snapshot across selectors in one read phase.
+    /// Cached origins still revalidate their physical owner and cancellation state.
+    pub fn has_citation_with_reader(
+        &mut self,
+        concept: &Path,
+        citation: &Citation,
+        reader: &mut impl FnMut(&Path) -> Result<String, VaultError>,
+    ) -> Result<bool, VaultError> {
+        self.originals.read.check()?;
+        citation
+            .rss_event
+            .as_ref()
+            .ok_or_else(|| err("expected RSS citation"))?
+            .validate(&citation.revision)
+            .map_err(err)?;
+        if self.origins.contains_key(&citation.path) {
+            return self.has_citation(concept, citation);
+        }
+        let path = lk_core::link::resolve_dest(Path::new(""), &citation.path)
+            .ok_or_else(|| err("invalid RSS origin address"))?;
+        let captured = reader(&path);
+        self.originals.read.check()?;
+        let raw = captured?;
+        self.has_citation_in_page(concept, citation, &raw)
+    }
+
     pub fn has_citation_in_page(
         &mut self,
         concept: &Path,
@@ -245,7 +271,13 @@ impl RssEvidenceCapture {
         self.origin(&citation.path, None)?;
         let origin = &self.origins[&citation.path];
         let mut entries = crate::ExistingEntryResolver::new(&self.originals.root);
-        if !has_selected_membership(&mut entries, &origin.citations, concept, citation)? {
+        if !has_selected_membership(
+            &mut entries,
+            &origin.citations,
+            concept,
+            citation,
+            &self.originals.read,
+        )? {
             self.originals.read.check()?;
             return Ok(false);
         }
@@ -253,7 +285,13 @@ impl RssEvidenceCapture {
             event_id: selector.event_id.clone(),
             revision: citation.revision.clone(),
         };
-        let binding = find_binding(&mut entries, &origin.page, concept, &selection)?;
+        let binding = find_binding(
+            &mut entries,
+            &origin.page,
+            concept,
+            &selection,
+            &self.originals.read,
+        )?;
         self.originals.payload(&binding.manifest, &selection)?;
         self.originals.read.check()?;
         Ok(true)
@@ -283,7 +321,13 @@ impl RssEvidenceCapture {
             event_id: selector.event_id.clone(),
             revision: citation.revision.clone(),
         };
-        let binding = find_binding(&mut entries, &origin.page, concept, &selection)?;
+        let binding = find_binding(
+            &mut entries,
+            &origin.page,
+            concept,
+            &selection,
+            &self.originals.read,
+        )?;
         let current: RssOriginalReference = serde_json::from_value(
             origin
                 .page
@@ -404,6 +448,33 @@ mod tests {
             .collect();
         drop(session);
         (root, raw, citations, reference)
+    }
+
+    #[test]
+    fn rss_capture_rejects_invalid_selectors_before_invoking_the_origin_reader() {
+        let (root, raw, citations, _) = fixture();
+        let concept = Path::new("wiki/concepts/topic.md");
+        let mut missing = citations[0].clone();
+        missing.rss_event = None;
+        let mut invalid_revision = citations[0].clone();
+        invalid_revision.revision = "invalid".into();
+        let mut invalid_schema = citations[0].clone();
+        invalid_schema.rss_event.as_mut().unwrap().schema = "unknown".into();
+        let mut capture =
+            RssEvidenceCapture::new(root.path(), &crate::ReadControl::default()).unwrap();
+        let mut reads = 0;
+        for citation in [missing, invalid_revision, invalid_schema] {
+            assert!(
+                capture
+                    .has_citation_with_reader(concept, &citation, &mut |_| {
+                        reads += 1;
+                        Ok(raw.clone())
+                    })
+                    .is_err()
+            );
+        }
+        assert_eq!(reads, 0);
+        assert!(capture.origins.is_empty());
     }
 
     #[test]

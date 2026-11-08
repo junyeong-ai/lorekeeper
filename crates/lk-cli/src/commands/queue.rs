@@ -2122,15 +2122,6 @@ fn classify_with_reader_controlled(
             };
             dependencies.push(path.clone());
             if citation.rss_event.is_some() {
-                let captured = read(&path);
-                control.check().into_diagnostic()?;
-                let raw = match captured {
-                    Ok(raw) => raw,
-                    Err(lk_vault::VaultError::Cancelled) => {
-                        return Err(lk_vault::VaultError::Cancelled).into_diagnostic();
-                    }
-                    Err(_) => return Ok(TaskStatus::Unreadable),
-                };
                 if rss.is_none() {
                     let captured = lk_vault::RssEvidenceCapture::new(root, control);
                     control.check().into_diagnostic()?;
@@ -2145,7 +2136,7 @@ fn classify_with_reader_controlled(
                 let selected = rss
                     .as_mut()
                     .expect("selected RSS citation has a capture")
-                    .has_citation_in_page(&target, &citation, &raw);
+                    .has_citation_with_reader(&target, &citation, read);
                 control.check().into_diagnostic()?;
                 match selected {
                     Ok(true) => {}
@@ -2703,6 +2694,122 @@ mod tests {
                 anchor: "## 요약".into(),
             },
         }
+    }
+
+    #[test]
+    fn rss_classification_reuses_each_authored_origin_and_propagates_cancellation() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+
+        let directory = TempDir::new().unwrap();
+        let root = directory.path();
+        let origin = "daily/rss.md";
+        let concept = "wiki/concepts/topic.md";
+        let date = jiff::civil::date(2026, 10, 18);
+        let events = (0..2)
+            .map(|index| lk_core::event::Event {
+                id: lk_core::event::EventId::new("rss", date, &format!("article {index}")),
+                source_id: "rss".into(),
+                source_type: lk_core::config::SourceType::Rss,
+                timestamp: "2026-10-18T00:00:00Z".parse().unwrap(),
+                date,
+                title: format!("Article {index}"),
+                body: format!("Evidence {index}."),
+                url: None,
+                author: None,
+                labels: vec![],
+                category: None,
+                performance_category: None,
+                is_self: false,
+                is_personal: false,
+                metadata: serde_json::Value::Null,
+            })
+            .collect::<Vec<_>>();
+        let capture = lk_core::rss_original::RssOriginalCapture::from_events(
+            &events.iter().collect::<Vec<_>>(),
+        )
+        .unwrap();
+        let session = lk_vault::MutationSession::acquire(root).unwrap();
+        let reference = lk_vault::publish_rss_original(&session, &capture).unwrap();
+        drop(session);
+        let bindings = serde_json::json!([{
+            "schema": lk_core::rss_evidence::RSS_EVIDENCE_SCHEMA,
+            "concept": concept,
+            "manifest": reference,
+            "events": capture.manifest.events.iter().map(|event| serde_json::json!({
+                "event_id": event.event_id,
+                "revision": event.revision,
+            })).collect::<Vec<_>>(),
+        }]);
+        let raw = format!(
+            "---\ntype: daily\nsource: rss\ncreated: 2026-10-18\nsource_record: {{rss_original: {}}}\nconcept_evidence: {bindings}\n---\n## Related Concepts\n- [Topic](../wiki/concepts/topic.md)\n",
+            serde_json::to_string(&reference).unwrap()
+        );
+        std::fs::create_dir_all(root.join("daily")).unwrap();
+        std::fs::create_dir_all(root.join("wiki/concepts")).unwrap();
+        std::fs::write(root.join(origin), &raw).unwrap();
+        std::fs::write(root.join(concept), "---\ntype: concept\n---\n").unwrap();
+        let citations = lk_vault::rss_concept_citations(root, Path::new(origin), &raw)
+            .unwrap()
+            .remove(concept)
+            .unwrap();
+        assert_eq!(citations.len(), 2);
+        let task = lk_queue::QueueLlmClient::new(root.join(".lorekeeper/queue")).build_task(
+            "rss",
+            TaskKind::SynthesizeConcept,
+            lk_queue::ConceptSynthesisRequest {
+                citations,
+                locale: lk_core::i18n::Locale::En,
+                related_anchor: Some("## Related Concepts".into()),
+                target: TaskTarget {
+                    vault_path: concept.into(),
+                    kind: TargetKind::ConceptSynthesis,
+                    anchor: "## Synthesis".into(),
+                },
+            },
+        );
+        std::fs::write(
+            root.join(concept),
+            format!("---\ntype: concept\nllm_inputs: {{synthesis: {}}}\n---\n## Synthesis\n\n## Related Concepts\n", task.cache_hash),
+        )
+        .unwrap();
+        let mut reads = BTreeMap::<PathBuf, usize>::new();
+        let classified = classify_with_reader_controlled(
+            root,
+            &task,
+            &mut BTreeMap::new(),
+            Artifact::Task,
+            &mut |path| {
+                *reads.entry(path.to_path_buf()).or_default() += 1;
+                read_page(root, path).map_err(Into::into)
+            },
+            &lk_vault::ReadControl::default(),
+        )
+        .unwrap();
+        assert_eq!(classified.status, TaskStatus::Current);
+        assert_eq!(reads[Path::new(origin)], 1);
+        assert_eq!(reads[Path::new(concept)], 1);
+
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let control = lk_vault::ReadControl::new(cancelled.clone());
+        let result = classify_with_reader_controlled(
+            root,
+            &task,
+            &mut BTreeMap::new(),
+            Artifact::Task,
+            &mut |path| {
+                let captured = read_page(root, path).map_err(Into::into);
+                if path == Path::new(origin) {
+                    cancelled.store(true, Ordering::Relaxed);
+                }
+                captured
+            },
+            &control,
+        );
+        assert!(result.is_err());
+        assert_eq!(std::fs::read_to_string(root.join(origin)).unwrap(), raw);
     }
 
     #[test]
