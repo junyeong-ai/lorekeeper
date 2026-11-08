@@ -84,7 +84,7 @@ config loading and the shared filesystem primitives intentionally perform I/O.
   preserving original bytes and physical line positions. Body parsers do not infer YAML.
 - Use `link` for construction, extraction, rewrite and resolution. Links are
   CommonMark relative `.md` destinations; escape/percent-encode through shared
-  helpers. Extraction excludes code/images/external schemes; preserving a link
+  helpers. Extraction excludes code/images/external URI references; preserving a link
   requires its label/destination pair. Read destination identity from CommonMark's
   parsed value, not its raw spelling; repoint with the shared label/title renderer.
   Resolution folds dot segments and accepts vault-absolute OKF addresses without
