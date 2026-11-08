@@ -213,7 +213,7 @@ jobs:
       - name: Verify literal URI graph addresses on Windows
         run: cargo test --locked -p lk-graph --lib scan::tests::literal_uri_backslashes_never_create_an_edge_to_a_nested_page -- --exact
       - name: Verify literal URI Nodex projections on Windows
-        run: cargo test --locked -p lk-source --lib nodex::tests::literal_uri_backslashes_do_not_project_to_different_repository_files -- --exact
+        run: cargo test --locked -p lk-source --lib nodex::tests::repository_uri_
       - name: Verify merge input guards and recovery on Windows
         run: cargo test --locked -p lk-graph --lib merge::tests::current_inputs
 

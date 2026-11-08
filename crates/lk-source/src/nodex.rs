@@ -709,23 +709,24 @@ fn repoint_links(body: &str, repo: &Path, doc_path: &str, base_url: Option<&str>
 
 /// Canonical nodex link projection with explicit repository membership. Historical
 /// readers supply immutable tree membership instead of consulting the live checkout.
+/// Repository paths use `/` on every platform; backslashes remain literal characters.
 pub fn repoint_document_links(
     body: &str,
     doc_path: &str,
     base_url: Option<&str>,
     held: impl Fn(&str) -> bool,
 ) -> String {
-    let dir = Path::new(doc_path).parent().unwrap_or(Path::new(""));
+    let dir = doc_path.rfind('/').map_or("", |index| &doc_path[..=index]);
     lk_core::link::rewrite_links_outside_code(body, |inline| {
         let (dest, anchor) = lk_core::link::split_dest_anchor(inline.destination);
         if dest.is_empty() || lk_core::link::is_external_reference(dest) {
             return None;
         }
         let decoded = lk_core::link::decode_dest(dest);
-        if lk_core::link::resolve_dest(Path::new(doc_path), &decoded).is_none() {
+        if decoded.starts_with('/') {
             return Some(inline.raw_text.to_owned());
         }
-        let held = [dir.join(&decoded), PathBuf::from(&decoded)]
+        let held = [format!("{dir}{decoded}"), decoded]
             .into_iter()
             .filter_map(|candidate| normalize(&candidate))
             .find(|rel| held(rel));
@@ -754,6 +755,9 @@ pub fn repoint_document_links(
 /// name. Both become plain text, which is the safe direction: the alternative is a URL that may
 /// or may not resolve at a host this cannot ask.
 fn holds(repo: &Path, rel: &str) -> bool {
+    if lk_core::link::resolve_dest(Path::new(""), rel).is_none() {
+        return false;
+    }
     let (Ok(real), Ok(root)) = (repo.join(rel).canonicalize(), repo.canonicalize()) else {
         return false;
     };
@@ -762,27 +766,21 @@ fn holds(repo: &Path, rel: &str) -> bool {
 
 /// A repository-relative path with `.` and `..` resolved, or `None` where it leaves the
 /// repository — a destination above the root has no address under `base_url` to be rewritten to.
-fn normalize(path: &Path) -> Option<String> {
-    use std::path::Component;
-
-    let mut parts: Vec<&std::ffi::OsStr> = Vec::new();
-    for component in path.components() {
+fn normalize(path: &str) -> Option<String> {
+    if path.starts_with('/') {
+        return None;
+    }
+    let mut parts = Vec::new();
+    for component in path.split('/') {
         match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
+            "" | "." => {}
+            ".." => {
                 parts.pop()?;
             }
-            Component::Normal(part) => parts.push(part),
-            Component::RootDir | Component::Prefix(_) => return None,
+            part => parts.push(part),
         }
     }
-    Some(
-        parts
-            .iter()
-            .map(|p| p.to_string_lossy())
-            .collect::<Vec<_>>()
-            .join("/"),
-    )
+    Some(parts.join("/"))
 }
 
 /// Refuse a path that does not stay inside the repository it is relative to.
@@ -2070,17 +2068,102 @@ exit "$rc"
         );
     }
 
-    #[cfg(windows)]
     #[test]
-    fn literal_uri_backslashes_do_not_project_to_different_repository_files() {
+    fn repository_uri_backslashes_use_exact_tree_membership() {
+        for (members, expected) in [
+            (
+                &["docs/topics\\target.md"][..],
+                "[Literal](https://host/repo/docs/topics%5Ctarget.md)",
+            ),
+            (&["docs/topics/target.md"][..], "Literal"),
+            (
+                &["docs/topics\\target.md", "docs/topics/target.md"][..],
+                "[Literal](https://host/repo/docs/topics%5Ctarget.md)",
+            ),
+        ] {
+            assert_eq!(
+                repoint_document_links(
+                    "[Literal](topics%5Ctarget.md)",
+                    "docs/source.md",
+                    Some("https://host/repo"),
+                    |path| members.contains(&path)
+                ),
+                expected
+            );
+        }
+        for (document, member) in [
+            ("docs\\source.md", "target.md"),
+            ("docs\\archive/source.md", "docs\\archive/target.md"),
+        ] {
+            assert_eq!(
+                repoint_document_links(
+                    "[Target](target.md)",
+                    document,
+                    Some("https://host/repo"),
+                    |path| path == member
+                ),
+                format!(
+                    "[Target](https://host/repo/{})",
+                    lk_core::link::encode_dest(member)
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn repository_uri_resolution_preserves_relative_order_and_bounds() {
+        for (destination, members, expected) in [
+            (
+                "./topics/../target.md",
+                &["docs/target.md", "target.md"][..],
+                "[Target](https://host/repo/docs/target.md)",
+            ),
+            (
+                "target.md",
+                &["target.md"][..],
+                "[Target](https://host/repo/target.md)",
+            ),
+            ("/target.md", &["docs/target.md", "target.md"][..], "Target"),
+            ("../../target.md", &["target.md"][..], "Target"),
+        ] {
+            assert_eq!(
+                repoint_document_links(
+                    &format!("[Target]({destination})"),
+                    "docs/source.md",
+                    Some("https://host/repo"),
+                    |path| members.contains(&path)
+                ),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn repository_uri_backslashes_never_match_nested_live_files() {
+        let repo = repo_with(&["docs/topics/target.md"]);
         assert_eq!(
-            repoint_document_links(
+            repoint_links(
                 "[Literal](topics%5Ctarget.md)",
+                repo.path(),
                 "docs/source.md",
-                Some("https://host/repo"),
-                |path| path == "docs/topics/target.md"
+                Some("https://host/repo")
             ),
             "Literal"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repository_uri_backslashes_preserve_literal_live_files() {
+        let repo = repo_with(&["docs/topics\\target.md"]);
+        assert_eq!(
+            repoint_links(
+                "[Literal](topics%5Ctarget.md)",
+                repo.path(),
+                "docs/source.md",
+                Some("https://host/repo")
+            ),
+            "[Literal](https://host/repo/docs/topics%5Ctarget.md)"
         );
     }
 
