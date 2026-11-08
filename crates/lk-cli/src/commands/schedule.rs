@@ -847,7 +847,7 @@ mod tests {
         config.execution.automation = Some(lk_core::execution::AutomationConfig {
             process_schedule: "0,15,30,45 * * * *".into(),
             knowledge_schedule: Some("5,20,35,50 * * * *".into()),
-            max_calls_per_day: 256.try_into().unwrap(),
+            max_calls_per_day: Some(256.try_into().unwrap()),
             max_run_seconds: 900.try_into().unwrap(),
         });
         let jobs = build_jobs(&config, &["--config".into(), "/tmp/config.yaml".into()]);

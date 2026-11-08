@@ -36,7 +36,12 @@ Keep automatic timing changes in this policy to preserve new-policy Work identit
 Stagger process and knowledge opportunities when both need progress; shared usage
 does not reserve an operation's share. Every batch releases
 the workflow lease. All scheduled jobs share `max_calls_per_day` in the physical
-vault's UTC-day usage ledger. Reservations are durable before host launch and survive
+vault's UTC-day usage ledger. This required field accepts a positive integer or YAML
+null for no daily cap. Unlimited daily usage still observes per-run calls, duration
+and failure pauses; reservations remain recorded. Changing the cap preserves usage
+and pauses. Persistent OS schedules offer later runs after an incomplete batch or
+process interruption, subject to OS registration and host availability.
+Reservations are durable before host launch and survive
 restart/config changes; they count outer agent attempts, not internal model requests,
 tokens or billing. Duration limits bound workflow waiting and new-call admission,
 not completion of an active host, source collection or paid-result recording.

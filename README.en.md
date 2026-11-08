@@ -172,7 +172,7 @@ If review creation or repair changes a native audit's inputs, it replans and rer
 Further changes defer that subject. Predecessor observations remain intact; an old assessment cannot complete new inputs.
 
 Generate schedule definitions with `lore schedule`, then register them with the OS using the [scheduling procedure](skills/lore-ingest/references/scheduling.md).
-With `execution.automation`, queue draining gets its own schedule; collection and audit schedules share the same UTC-day invocation allowance and run-duration policy.
+With `execution.automation`, queue draining gets its own schedule; collection and audit schedules share the same UTC-day invocation allowance and run-duration policy. Set the required `max_calls_per_day` to `null` for no daily cap; per-run limits and failure pauses still apply.
 `lore status` shows reservations and pauses. Fatal inference errors pause that operation's semantic phase; repair the cause, then use `lore run OPERATION --scheduled --resume` to continue.
 Start manual writing agents **before reading evidence** with `lore workflow -- claude` or `lore workflow -- codex`.
 Native jobs own the same protection themselves; configuration and vault selection stay pinned during execution.

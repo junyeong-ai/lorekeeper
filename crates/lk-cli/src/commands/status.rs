@@ -211,10 +211,16 @@ fn automation_row(
     use lk_core::execution::ExecutionOperation;
     match super::run::automation::status(root, policy) {
         Ok(status) => {
-            let mut state = format!(
-                "{}/{} reservations · UTC {}",
-                status.reserved_calls, status.max_calls_per_day, status.utc_date
-            );
+            let mut state = match status.max_calls_per_day {
+                Some(limit) => format!(
+                    "{}/{} reservations · UTC {}",
+                    status.reserved_calls, limit, status.utc_date
+                ),
+                None => format!(
+                    "{} reservations · daily limit unlimited · UTC {}",
+                    status.reserved_calls, status.utc_date
+                ),
+            };
             if !status.paused.is_empty() {
                 let operations = status
                     .paused
@@ -226,7 +232,7 @@ fn automation_row(
                     })
                     .collect::<Vec<_>>();
                 let _ = write!(state, " · paused: {}", operations.join(", "));
-            } else if status.remaining_calls == 0 {
+            } else if status.remaining_calls == Some(0) {
                 state.push_str(" · day limit reached");
             }
             (

@@ -1846,6 +1846,17 @@ mod tests {
             original.semantic_work_revision(),
             Config::load(&path).unwrap().semantic_work_revision()
         );
+        std::fs::write(
+            &path,
+            knowledge.replace("max_calls_per_day: 256", "max_calls_per_day: null"),
+        )
+        .unwrap();
+        let (unlimited, unlimited_bytes) = Config::load_with_revision(&path).unwrap();
+        assert_ne!(bytes, unlimited_bytes);
+        assert_eq!(
+            original.semantic_work_revision(),
+            unlimited.semantic_work_revision()
+        );
         for invalid in [
             knowledge.replace("5,20,35,50 * * * *", "60 * * * *"),
             knowledge.replace("default_profile: main", "operations: {process: main}"),

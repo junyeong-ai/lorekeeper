@@ -114,8 +114,15 @@ pub struct ExecutionConfig {
 pub struct AutomationConfig {
     pub process_schedule: String,
     pub knowledge_schedule: Option<String>,
-    pub max_calls_per_day: NonZeroUsize,
+    #[serde(deserialize_with = "required_daily_call_limit")]
+    pub max_calls_per_day: Option<NonZeroUsize>,
     pub max_run_seconds: NonZeroU64,
+}
+
+fn required_daily_call_limit<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<NonZeroUsize>, D::Error> {
+    Option::deserialize(deserializer)
 }
 
 fn stage_profiles<'de, D: serde::Deserializer<'de>>(
@@ -490,22 +497,40 @@ mod tests {
     use super::*;
 
     #[test]
-    fn automation_policy_requires_explicit_positive_limits_and_known_fields() {
+    fn automation_policy_requires_a_declared_daily_limit_and_positive_run_duration() {
         let policy = "automation: {process_schedule: '0,15,30,45 * * * *', max_calls_per_day: 256, max_run_seconds: 900}\n";
         let config: ExecutionConfig = crate::yaml::from_str(policy).unwrap();
-        assert_eq!(config.automation.unwrap().max_calls_per_day.get(), 256);
+        assert_eq!(
+            config.automation.unwrap().max_calls_per_day.unwrap().get(),
+            256
+        );
+        let unlimited = policy.replace("max_calls_per_day: 256", "max_calls_per_day: null");
+        let config: ExecutionConfig = crate::yaml::from_str(&unlimited).unwrap();
+        assert!(config.automation.unwrap().max_calls_per_day.is_none());
+        let quoted = policy.replace("max_calls_per_day: 256", "max_calls_per_day: '256'");
+        let config: ExecutionConfig = crate::yaml::from_str(&quoted).unwrap();
+        assert_eq!(
+            config.automation.unwrap().max_calls_per_day.unwrap().get(),
+            256
+        );
         for invalid in [
+            policy.replace(", max_calls_per_day: 256", ""),
             policy.replace("max_calls_per_day: 256", "max_calls_per_day: 0"),
             policy.replace("max_run_seconds: 900", "max_run_seconds: 0"),
             policy.replace("max_calls_per_day: 256", "max_calls_per_day: -1"),
             policy.replace("max_calls_per_day: 256", "max_calls_per_day: 2.5"),
+            policy.replace("max_calls_per_day: 256", "max_calls_per_day: false"),
+            policy.replace("max_calls_per_day: 256", "max_calls_per_day: unlimited"),
             policy.replace(", max_run_seconds: 900", ""),
             policy.replace(
                 "max_run_seconds: 900",
                 "max_run_seconds: 900, retry_everything: true",
             ),
         ] {
-            assert!(crate::yaml::from_str::<ExecutionConfig>(&invalid).is_err());
+            assert!(
+                crate::yaml::from_str::<ExecutionConfig>(&invalid).is_err(),
+                "{invalid}"
+            );
         }
     }
 

@@ -1,6 +1,7 @@
 use super::*;
 
-fn configure(fixture: &Fixture, calls: usize, seconds: u64) {
+fn configure(fixture: &Fixture, calls: Option<usize>, seconds: u64) {
+    let calls = calls.map_or_else(|| "null".to_owned(), |calls| calls.to_string());
     let config = std::fs::read_to_string(&fixture.config).unwrap().replace(
         "execution:\n",
         &format!("execution:\n  automation: {{process_schedule: '0,15,30,45 * * * *', max_calls_per_day: {calls}, max_run_seconds: {seconds}}}\n"),
@@ -67,34 +68,49 @@ fn status(fixture: &Fixture) -> serde_json::Value {
 
 #[test]
 fn scheduled_invocation_limit_survives_completed_audit_batch_boundaries() {
-    let fixture = Fixture::new("codex", 30, RECORD_AUDIT);
-    let config = std::fs::read_to_string(&fixture.config).unwrap().replace(
-        "  default_profile: primary\n",
-        "  default_profile: primary\n  work: {max_calls: 1}\n",
-    ) + "graph:\n  audit:\n    batch_size: 1\n";
-    std::fs::write(&fixture.config, config).unwrap();
-    for name in ["first", "second"] {
-        write_audit_concept(&fixture, name);
-        record_discovery(&fixture, &format!("wiki/concepts/{name}.md"));
+    for daily_limit in [Some(256), None] {
+        let fixture = Fixture::new("codex", 30, RECORD_AUDIT);
+        let config = std::fs::read_to_string(&fixture.config).unwrap().replace(
+            "  default_profile: primary\n",
+            "  default_profile: primary\n  work: {max_calls: 1}\n",
+        ) + "graph:\n  audit:\n    batch_size: 1\n";
+        std::fs::write(&fixture.config, config).unwrap();
+        for name in ["first", "second"] {
+            write_audit_concept(&fixture, name);
+            record_discovery(&fixture, &format!("wiki/concepts/{name}.md"));
+        }
+        configure(&fixture, daily_limit, 60);
+        let report = run(&fixture, "knowledge", false);
+        assert_eq!(calls(&report), 1, "{report}");
+        assert_eq!(report["stop_reason"], "automation-limit", "{report}");
+        let runs = report["runs"].as_array().unwrap();
+        assert_eq!(runs.len(), 2, "{report}");
+        assert_eq!(runs[0]["audit"].as_array().unwrap().len(), 1);
+        assert_eq!(runs[1]["automation"]["stop"], "run-limit");
+        assert_eq!(runs[1]["halted"], false);
+        assert_eq!(usage(&fixture)["reserved_calls"], 1);
+        assert!(usage(&fixture)["paused"].as_object().unwrap().is_empty());
+        let snapshot = status(&fixture);
+        assert_eq!(
+            snapshot["usage"]["max_calls_per_day"],
+            serde_json::json!(daily_limit)
+        );
+        assert_eq!(
+            snapshot["usage"]["remaining_calls"],
+            serde_json::json!(daily_limit.map(|limit| limit - 1))
+        );
+        assert_eq!(
+            runs[0]["automation"]["max_calls_per_day"],
+            serde_json::json!(daily_limit)
+        );
     }
-    configure(&fixture, 256, 60);
-    let report = run(&fixture, "knowledge", false);
-    assert_eq!(calls(&report), 1, "{report}");
-    assert_eq!(report["stop_reason"], "automation-limit", "{report}");
-    let runs = report["runs"].as_array().unwrap();
-    assert_eq!(runs.len(), 2, "{report}");
-    assert_eq!(runs[0]["audit"].as_array().unwrap().len(), 1);
-    assert_eq!(runs[1]["automation"]["stop"], "run-limit");
-    assert_eq!(runs[1]["halted"], false);
-    assert_eq!(usage(&fixture)["reserved_calls"], 1);
-    assert!(usage(&fixture)["paused"].as_object().unwrap().is_empty());
 }
 
 #[test]
 fn scheduled_jobs_share_allowance_across_restarts_and_operations() {
     for engine in ["codex", "claude-code"] {
         let fixture = bounded_audit_fixture(engine, 64, RECORD_BOUNDED_AUDIT);
-        configure(&fixture, 2, 60);
+        configure(&fixture, Some(2), 60);
         let first = run(&fixture, "knowledge", false);
         assert_eq!(calls(&first), 2, "{first}");
         assert_eq!(usage(&fixture)["reserved_calls"], 2);
@@ -114,7 +130,7 @@ fn scheduled_jobs_share_allowance_across_restarts_and_operations() {
 #[test]
 fn scheduled_host_failure_requires_explicit_resume_without_refunding_calls() {
     let fixture = bounded_audit_fixture("codex", 64, "exit 7");
-    configure(&fixture, 4, 60);
+    configure(&fixture, Some(4), 60);
     let first = run(&fixture, "knowledge", false);
     assert_eq!(calls(&first), 1, "{first}");
     assert_eq!(first["stop_reason"], "failed");
@@ -143,7 +159,7 @@ fn scheduled_parallel_observers_reserve_only_the_available_allowance() {
             .unwrap()
             .replace("max_calls: 64}", "max_calls: 64, max_parallel: 6}");
         std::fs::write(&fixture.config, config).unwrap();
-        configure(&fixture, 3, 60);
+        configure(&fixture, Some(3), 60);
         let report = run(&fixture, "knowledge", false);
         assert_eq!(calls(&report), 3, "{report}");
         assert_eq!(usage(&fixture)["reserved_calls"], 3);
@@ -154,7 +170,7 @@ fn scheduled_parallel_observers_reserve_only_the_available_allowance() {
 #[test]
 fn corrupt_automation_usage_stops_without_model_calls_or_replacement() {
     let fixture = bounded_audit_fixture("codex", 64, RECORD_BOUNDED_AUDIT);
-    configure(&fixture, 4, 60);
+    configure(&fixture, Some(4), 60);
     let path = fixture
         .root()
         .join("vault/.lorekeeper/automation-usage.json");
@@ -174,7 +190,7 @@ fn corrupt_automation_usage_stops_without_model_calls_or_replacement() {
 fn scheduled_workflow_wait_is_bounded_without_starting_a_model() {
     use std::io::{BufRead, Write};
     let fixture = bounded_audit_fixture("codex", 64, RECORD_BOUNDED_AUDIT);
-    configure(&fixture, 4, 1);
+    configure(&fixture, Some(4), 1);
     let mut holder = fixture
         .command()
         .args([

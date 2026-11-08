@@ -128,7 +128,9 @@ deferred subcommands expose their names eagerly for name-only discovery.
   including waiting, config validation and recovery; queue-planning duration excludes
   it. Child-command waits are not in that metric.
 - Scheduled runs share `execution.automation`'s UTC-day invocation allowance in the
-  physical vault. Under an acquired workflow lease, synchronously reserve complete
+  physical vault. Its required daily cap may be null for unlimited daily usage;
+  per-run calls, duration, pauses and durable accounting still apply. Cap changes
+  never reset usage or pauses. Under an acquired workflow lease, synchronously reserve complete
   waves in the atomic operational usage ledger before spawning; a prepared but unlocked
   lease grants no ownership. Never refund ambiguous launches, reset usage on config
   changes, recover corrupt accounting as zero, or detach its writer. This ledger is

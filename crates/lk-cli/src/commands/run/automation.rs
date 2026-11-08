@@ -98,7 +98,7 @@ pub(super) enum Stop {
 pub(super) struct Report {
     pub utc_date: Option<Date>,
     pub reserved_calls: Option<usize>,
-    pub max_calls_per_day: usize,
+    pub max_calls_per_day: Option<usize>,
     pub max_calls_per_run: usize,
     pub run_reservations: usize,
     pub stop: Option<Stop>,
@@ -125,8 +125,8 @@ fn today() -> Date {
 pub(in crate::commands) struct Status {
     pub utc_date: Date,
     pub reserved_calls: usize,
-    pub max_calls_per_day: usize,
-    pub remaining_calls: usize,
+    pub max_calls_per_day: Option<usize>,
+    pub remaining_calls: Option<usize>,
     pub max_run_seconds: u64,
     pub paused: BTreeMap<ExecutionOperation, jiff::Timestamp>,
 }
@@ -139,11 +139,10 @@ pub(in crate::commands) fn status(
     Ok(Status {
         utc_date: usage.utc_date,
         reserved_calls: usage.reserved_calls,
-        max_calls_per_day: policy.max_calls_per_day.get(),
+        max_calls_per_day: policy.max_calls_per_day.map(|limit| limit.get()),
         remaining_calls: policy
             .max_calls_per_day
-            .get()
-            .saturating_sub(usage.reserved_calls),
+            .map(|limit| limit.get().saturating_sub(usage.reserved_calls)),
         max_run_seconds: policy.max_run_seconds.get(),
         paused: usage.paused,
     })
@@ -163,7 +162,7 @@ impl Control {
             report: Report {
                 utc_date: None,
                 reserved_calls: None,
-                max_calls_per_day: policy.max_calls_per_day.get(),
+                max_calls_per_day: policy.max_calls_per_day.map(|limit| limit.get()),
                 max_calls_per_run,
                 run_reservations: 0,
                 stop: None,
@@ -180,19 +179,19 @@ impl Control {
     }
 
     pub fn available(&self) -> usize {
+        let reserved = self
+            .report
+            .reserved_calls
+            .expect("usage read under owned workflow");
+        let run_remaining = self
+            .report
+            .max_calls_per_run
+            .saturating_sub(self.report.run_reservations);
         self.policy
             .max_calls_per_day
-            .get()
-            .saturating_sub(
-                self.report
-                    .reserved_calls
-                    .expect("usage read under owned workflow"),
-            )
-            .min(
-                self.report
-                    .max_calls_per_run
-                    .saturating_sub(self.report.run_reservations),
-            )
+            .map_or(run_remaining, |limit| {
+                limit.get().saturating_sub(reserved).min(run_remaining)
+            })
     }
 
     pub fn check_duration(&mut self) -> bool {
@@ -240,7 +239,11 @@ impl Control {
             .reserved_calls
             .checked_add(count)
             .ok_or_else(|| miette::miette!("automation invocation counter overflow"))?;
-        if reserved > self.policy.max_calls_per_day.get() {
+        if self
+            .policy
+            .max_calls_per_day
+            .is_some_and(|limit| reserved > limit.get())
+        {
             self.report.stop = Some(Stop::DayLimit);
             return Ok(false);
         }
@@ -262,9 +265,9 @@ impl Control {
 
     pub fn stop_for_limit(&mut self) {
         self.report.stop = Some(
-            if self.report.reserved_calls.expect("admitted usage")
-                >= self.policy.max_calls_per_day.get()
-            {
+            if self.policy.max_calls_per_day.is_some_and(|limit| {
+                self.report.reserved_calls.expect("admitted usage") >= limit.get()
+            }) {
                 Stop::DayLimit
             } else {
                 Stop::RunLimit
@@ -296,7 +299,7 @@ mod tests {
         AutomationConfig {
             process_schedule: "0,15,30,45 * * * *".into(),
             knowledge_schedule: None,
-            max_calls_per_day: limit.try_into().unwrap(),
+            max_calls_per_day: Some(limit.try_into().unwrap()),
             max_run_seconds: 60.try_into().unwrap(),
         }
     }
@@ -392,5 +395,60 @@ mod tests {
         assert!(!control.reserve(root, 1).unwrap());
         assert_eq!(control.report.stop, Some(Stop::RunLimit));
         assert_eq!(Usage::load(root, today()).unwrap().reserved_calls, 2);
+    }
+
+    #[test]
+    fn unlimited_daily_policy_preserves_run_limits_usage_and_pauses_across_policy_changes() {
+        let directory = fixture();
+        let root = directory.path();
+        let mut capped = Control::new(policy(2), ExecutionOperation::Knowledge, false, 2).unwrap();
+        assert!(capped.enter(root).unwrap());
+        assert!(capped.reserve(root, 2).unwrap());
+        let mut unlimited = policy(2);
+        unlimited.max_calls_per_day = None;
+        let mut control =
+            Control::new(unlimited.clone(), ExecutionOperation::Knowledge, false, 2).unwrap();
+        assert!(control.enter(root).unwrap());
+        assert_eq!(control.available(), 2);
+        assert!(control.reserve(root, 2).unwrap());
+        assert_eq!(control.available(), 0);
+        control.stop_for_limit();
+        assert_eq!(control.report.stop, Some(Stop::RunLimit));
+        let snapshot = status(root, &unlimited).unwrap();
+        assert_eq!(snapshot.reserved_calls, 4);
+        assert!(snapshot.max_calls_per_day.is_none());
+        assert!(snapshot.remaining_calls.is_none());
+        control.pause(root).unwrap();
+        let before = std::fs::read(path(root).unwrap()).unwrap();
+        let mut restarted =
+            Control::new(unlimited, ExecutionOperation::Knowledge, false, 2).unwrap();
+        assert!(!restarted.enter(root).unwrap());
+        assert_eq!(restarted.report.stop, Some(Stop::Paused));
+        assert_eq!(std::fs::read(path(root).unwrap()).unwrap(), before);
+        let mut recapped = Control::new(policy(3), ExecutionOperation::Knowledge, true, 2).unwrap();
+        assert!(recapped.enter(root).unwrap());
+        assert_eq!(recapped.available(), 0);
+        assert!(!recapped.reserve(root, 1).unwrap());
+        assert_eq!(recapped.report.stop, Some(Stop::DayLimit));
+        let usage = Usage::load(root, today()).unwrap();
+        assert_eq!(usage.reserved_calls, 4);
+        assert!(usage.paused.is_empty());
+    }
+
+    #[test]
+    fn unlimited_daily_policy_refuses_counter_overflow_without_replacing_usage() {
+        let directory = fixture();
+        let root = directory.path();
+        let mut usage = Usage::load(root, today()).unwrap();
+        usage.reserved_calls = usize::MAX;
+        usage.save(root).unwrap();
+        let before = std::fs::read(path(root).unwrap()).unwrap();
+        let mut unlimited = policy(2);
+        unlimited.max_calls_per_day = None;
+        let mut control = Control::new(unlimited, ExecutionOperation::Process, false, 2).unwrap();
+        assert!(control.enter(root).unwrap());
+        assert_eq!(control.available(), 2);
+        assert!(control.reserve(root, 1).is_err());
+        assert_eq!(std::fs::read(path(root).unwrap()).unwrap(), before);
     }
 }
