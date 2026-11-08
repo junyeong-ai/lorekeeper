@@ -6,7 +6,7 @@ description: Guides initial Lorekeeper setup or edits source configuration using
   when adding or changing a Slack, Jira, Confluence, Gmail, Google Drive, Google Calendar,
   RSS, inbox or repository source in config.yaml.
 metadata:
-  version: 0.128.0
+  version: 0.128.1
 ---
 
 # lore-setup — Interactive config builder
