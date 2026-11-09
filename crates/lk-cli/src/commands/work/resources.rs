@@ -32,12 +32,14 @@ pub(super) struct Prepared {
     pub context: Value,
     pub resources: Vec<SemanticResource>,
     pub pages: BTreeMap<PathBuf, String>,
+    pub(super) absent_pages: BTreeSet<PathBuf>,
 }
 
 pub(super) struct SelectionInventory {
     pub revision: String,
     pub capture: lk_vault::DiscoveryCapture,
     pub pages: BTreeMap<PathBuf, String>,
+    pub(super) absent_pages: BTreeSet<PathBuf>,
     pub source: Prepared,
     resources: BTreeMap<String, SemanticResource>,
     review_resources: BTreeMap<String, BTreeSet<String>>,
@@ -84,6 +86,9 @@ impl Prepared {
         for (path, content) in &self.pages {
             plan.require_unchanged(path, content.clone());
         }
+        for path in &self.absent_pages {
+            plan.require_absent(path);
+        }
     }
 }
 
@@ -92,6 +97,7 @@ struct Capture<'a> {
     read: lk_vault::ReadControl,
     root: &'a Path,
     pages: BTreeMap<PathBuf, String>,
+    absent_pages: BTreeSet<PathBuf>,
     resources: BTreeMap<String, SemanticResource>,
 }
 
@@ -102,6 +108,7 @@ impl<'a> Capture<'a> {
             rss: None,
             read: read.clone(),
             pages: BTreeMap::new(),
+            absent_pages: BTreeSet::new(),
             resources: BTreeMap::new(),
         }
     }
@@ -237,6 +244,7 @@ impl<'a> Capture<'a> {
             context,
             resources: self.resources.into_values().collect(),
             pages: self.pages,
+            absent_pages: self.absent_pages,
         }
     }
 }
@@ -300,6 +308,7 @@ pub(super) fn section_task_controlled(
         read: read.clone(),
         root,
         pages: std::mem::take(&mut prepared.pages),
+        absent_pages: std::mem::take(&mut prepared.absent_pages),
         resources: std::mem::take(&mut prepared.resources)
             .into_iter()
             .map(|resource| (resource.address.clone(), resource))
@@ -518,6 +527,17 @@ pub(super) fn selection_inventory_with_capture(
         }
         subjects.insert(candidate.owner.clone(), page);
     }
+    let card_reviews = lk_graph::audit::review_card_dependencies_with_inventory(
+        root,
+        &capture
+            .candidates
+            .iter()
+            .map(|candidate| candidate.owner.clone())
+            .collect(),
+        reviews,
+        read,
+    )
+    .into_diagnostic()?;
     let reviews =
         lk_graph::audit::review_dependencies_with_inventory(root, &subjects, reviews, read)
             .into_diagnostic()?;
@@ -530,6 +550,7 @@ pub(super) fn selection_inventory_with_capture(
         read: read.clone(),
         root,
         pages: std::mem::take(&mut source.pages),
+        absent_pages: std::mem::take(&mut source.absent_pages),
         resources: std::mem::take(&mut source.resources)
             .into_iter()
             .map(|resource| (resource.address.clone(), resource))
@@ -548,6 +569,7 @@ pub(super) fn selection_inventory_with_capture(
         read: read.clone(),
         root,
         pages: source.pages.clone(),
+        absent_pages: source.absent_pages.clone(),
         resources: source
             .resources
             .iter()
@@ -562,6 +584,27 @@ pub(super) fn selection_inventory_with_capture(
         }
         guarded.insert_page(owner, raw.as_str().to_owned(), SemanticAuthority::Context)?;
     }
+    let mut card_capture = Capture::new(root, read);
+    for review in &card_reviews {
+        card_capture.review(review)?;
+        for evidence in &review.evidence {
+            if evidence.current.is_none() {
+                card_capture
+                    .absent_pages
+                    .insert(PathBuf::from(&evidence.recorded.path));
+            }
+        }
+    }
+    for (path, content) in card_capture.pages {
+        if guarded
+            .pages
+            .insert(path, content.clone())
+            .is_some_and(|before| before != content)
+        {
+            return Err(miette::miette!("card review input changed during capture"));
+        }
+    }
+    guarded.absent_pages.extend(card_capture.absent_pages);
     let mut review_resources = BTreeMap::new();
     let mut seen_reviews = BTreeSet::new();
     for (subject, dependencies) in &reviews {
@@ -608,6 +651,7 @@ pub(super) fn selection_inventory_with_capture(
         revision,
         capture,
         pages: guarded.pages,
+        absent_pages: guarded.absent_pages,
         source,
         resources: guarded.resources,
         review_resources,
@@ -673,6 +717,7 @@ pub(super) fn task_with_selection(
     }
     let mut prepared = inventory.source.clone();
     prepared.pages.clone_from(&inventory.pages);
+    prepared.absent_pages.clone_from(&inventory.absent_pages);
     prepared.resources = resources.into_values().collect();
     prepared.context["purpose"]["discovery"] = json!({
         "queries":inventory.capture.queries,
@@ -760,6 +805,7 @@ pub(super) fn with_discovery_controlled(
         read: read.clone(),
         root,
         pages: std::mem::take(&mut prepared.pages),
+        absent_pages: std::mem::take(&mut prepared.absent_pages),
         resources: std::mem::take(&mut prepared.resources)
             .into_iter()
             .map(|resource| (resource.address.clone(), resource))
@@ -1190,6 +1236,225 @@ mod tests {
             .unwrap()
         };
         assert_eq!(encoded(expected), encoded(actual));
+    }
+
+    #[test]
+    fn progressive_card_review_inputs_guard_recording_and_selected_publication() {
+        for native in [false, true] {
+            for change in ["review", "evidence", "restore"] {
+                let directory = tempfile::tempdir().unwrap();
+                let root = directory.path().canonicalize().unwrap();
+                let config_path = root.join("config.yaml");
+                std::fs::write(&config_path, "vault: {root: ., locale: en}\nidentity: {name: Test, email: test@example.com}\nsources:\n  notes: {type: manual, params: {inbox_dir: inbox}, concept_policy: supported-new}\n").unwrap();
+                let config = Config::load(&config_path).unwrap();
+                let target = "wiki/documents/source.md";
+                let candidate = "wiki/concepts/candidate.md";
+                let evidence = "wiki/documents/evidence.md";
+                let other = "wiki/documents/other.md";
+                let review = "wiki/explorations/evidence-review.md";
+                let task = lk_queue::QueueLlmClient::new(root.join(".lorekeeper/queue")).build_task(
+                    "ext", lk_queue::TaskKind::ExtractConcepts,
+                    serde_json::from_value::<lk_queue::ExtractConceptsRequest>(json!({
+                        "text":"A retained source statement.","source_id":"notes","source_type":"manual",
+                        "date":"2026-10-22","locale":"en","concept_policy":"supported-new",
+                        "target":{"vault_path":target,"kind":"document-concepts","anchor":"## Related Concepts"}
+                    })).unwrap(),
+                );
+                write(
+                    &root,
+                    target,
+                    &format!(
+                        "---\ntype: document\nllm_inputs: {{concepts: {}}}\n---\n## Content\nSource.\n\n## Related Concepts\n",
+                        task.cache_hash
+                    ),
+                );
+                write(
+                    &root,
+                    candidate,
+                    "---\ntype: concept\ntitle: Candidate\n---\nA declared scope.\n",
+                );
+                let evidence_raw = "---\ntype: document\ntitle: Supporting source\n---\nAn independent condition.\n";
+                write(&root, evidence, evidence_raw);
+                write(
+                    &root,
+                    other,
+                    "---\ntype: document\ntitle: Other subject\n---\nA different claim.\n",
+                );
+                let candidate_raw = std::fs::read_to_string(root.join(candidate)).unwrap();
+                let candidate_revision =
+                    source_revision(&lk_vault::parse_page(&candidate_raw).unwrap());
+                let evidence_revision =
+                    source_revision(&lk_vault::parse_page(evidence_raw).unwrap());
+                let review_raw = format!(
+                    "---\ntype: exploration\ntitle: Evidence association\nreview:\n  status: open\n  subjects: [{other}]\n  evidence: [{{path: {candidate}, revision: {candidate_revision}}}, {{path: {evidence}, revision: {evidence_revision}}}]\n  resolution: The declared question was resolved.\n---\nA scoped assessment.\n"
+                );
+                write(&root, review, &review_raw);
+                if change == "restore" {
+                    lk_vault::archive_evidence(&root, &[evidence.into()]).unwrap();
+                    std::fs::remove_file(root.join(evidence)).unwrap();
+                }
+                write(
+                    &root,
+                    ".lorekeeper/queue/fixture.jsonl",
+                    &serde_json::to_string(&task).unwrap(),
+                );
+                let inventory = selection_inventory(
+                    &root,
+                    &config,
+                    &task.task_id,
+                    &[lk_core::discovery::DiscoveryQuery {
+                        query: "Candidate".into(),
+                        phrase: true,
+                        spacing: false,
+                    }],
+                )
+                .unwrap();
+                assert_eq!(inventory.capture.candidates.len(), 1);
+                assert!(
+                    inventory.reviews[candidate].is_empty(),
+                    "evidence association is not subject authority"
+                );
+                let screening = super::super::screening_with_inventory(
+                    &root,
+                    &config,
+                    "config-revision",
+                    inventory,
+                )
+                .unwrap()
+                .into_candidates()
+                .unwrap();
+                let session = lk_vault::MutationSession::acquire(&root).unwrap();
+                let contract = "a".repeat(64);
+                if native {
+                    screening
+                        .selection
+                        .create_native(&session, &screening.inventory.pages, &contract)
+                        .unwrap();
+                } else {
+                    screening
+                        .selection
+                        .create(&session, &screening.inventory.pages)
+                        .unwrap();
+                }
+                let request = screening.selection.prepare(&root).unwrap().1.unwrap();
+                let output: super::super::selection::ScreeningOutput = serde_json::from_value(json!({
+                    "selection_id":request["selection_id"],"batch_id":request["batch_id"],"input_revision":request["input_revision"],
+                    "decisions":request["candidates"].as_array().unwrap().iter().map(|card| json!({
+                        "candidate_key":card["candidate_key"],"decision":"inspect","reason":"Inspect the declared scope."
+                    })).collect::<Vec<_>>()
+                })).unwrap();
+                if native {
+                    screening
+                        .selection
+                        .record_native(
+                            &session,
+                            &screening.inventory.pages,
+                            output.clone(),
+                            &contract,
+                        )
+                        .unwrap();
+                } else {
+                    screening
+                        .selection
+                        .record(&session, &screening.inventory.pages, output.clone(), None)
+                        .unwrap();
+                }
+                let binding = screening
+                    .selection
+                    .ledger(&root)
+                    .unwrap()
+                    .binding()
+                    .unwrap();
+                let mut publication = lk_vault::MutationPlan::default();
+                let ledger = screening
+                    .selection
+                    .guard(&root, &mut publication, &binding)
+                    .unwrap();
+                let admitted =
+                    task_with_selection(&screening.inventory, &binding, &ledger.selected_owners)
+                        .unwrap();
+                for path in [review, evidence] {
+                    assert!(
+                        !admitted
+                            .resources
+                            .iter()
+                            .any(|resource| resource.address == path),
+                        "card guards must not become semantic subject inputs"
+                    );
+                }
+                assert_eq!(
+                    admitted.context["purpose"]["review_dependencies"]["review_count"],
+                    0
+                );
+                let refreshed = refresh_controlled(
+                    &root,
+                    &config,
+                    "config-revision",
+                    &admitted.context,
+                    &lk_vault::ReadControl::default(),
+                )
+                .unwrap();
+                refreshed.guard_pages(&mut publication);
+                publication.create(
+                    "card-review-publication.md",
+                    "This must remain unpublished.".into(),
+                );
+                let paid = screening
+                    .selection
+                    .ledger(&root)
+                    .unwrap()
+                    .progress
+                    .receipts
+                    .into_iter()
+                    .map(|receipt| {
+                        let path = root.join(receipt.path);
+                        (path.clone(), std::fs::read(path).unwrap())
+                    })
+                    .collect::<Vec<_>>();
+                match change {
+                    "review" => write(
+                        &root,
+                        review,
+                        &review_raw.replace("status: open", "status: resolved"),
+                    ),
+                    "evidence" => write(
+                        &root,
+                        evidence,
+                        &format!("{evidence_raw}\nA changed condition.\n"),
+                    ),
+                    "restore" => write(&root, evidence, evidence_raw),
+                    _ => unreachable!(),
+                }
+                let recorded = if native {
+                    screening.selection.record_native(
+                        &session,
+                        &screening.inventory.pages,
+                        output,
+                        &contract,
+                    )
+                } else {
+                    screening
+                        .selection
+                        .record(&session, &screening.inventory.pages, output, None)
+                };
+                assert!(
+                    recorded.is_err(),
+                    "{native}: {change} changed after exact screening capture"
+                );
+                assert!(
+                    session.apply(publication).is_err(),
+                    "{native}: {change} changed after publication capture"
+                );
+                assert!(!root.join("card-review-publication.md").exists());
+                assert_eq!(
+                    std::fs::read_to_string(root.join(candidate)).unwrap(),
+                    candidate_raw
+                );
+                for (path, raw) in paid {
+                    assert_eq!(std::fs::read(path).unwrap(), raw);
+                }
+            }
+        }
     }
 
     #[test]

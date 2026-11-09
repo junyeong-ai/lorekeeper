@@ -340,6 +340,7 @@ fn candidate_input(
     for path in paths {
         dependencies.push(reviews.dependency(root, owner, &path)?);
     }
+    dependencies.extend(reviews.card_dependencies(root, owner)?);
     let identities = dependencies
         .iter()
         .map(AuditReviewDependency::identity)
@@ -747,7 +748,11 @@ fn capture_cards(
     Ok(CardCapture {
         cards,
         pages: capture.guarded_pages().clone(),
-        reviews: reviews.dependencies.into_values().collect(),
+        reviews: reviews
+            .dependencies
+            .into_values()
+            .chain(reviews.card_dependencies.into_values())
+            .collect(),
     })
 }
 

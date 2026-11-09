@@ -1092,7 +1092,7 @@ fn screening_with_inventory(
         };
         if retained.is_planned(root)? {
             return Ok(ScreeningPreparation::Candidates(Box::new(Screening {
-                selection: retained,
+                selection: retained.with_absent_pages(&inventory.absent_pages),
                 inventory,
             })));
         }
@@ -1181,7 +1181,7 @@ fn screening_with_inventory(
         }
     };
     Ok(ScreeningPreparation::Candidates(Box::new(Screening {
-        selection,
+        selection: selection.with_absent_pages(&inventory.absent_pages),
         inventory,
     })))
 }

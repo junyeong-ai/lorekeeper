@@ -115,6 +115,7 @@ pub(super) struct Selection {
     directory: PathBuf,
     manifest: Manifest,
     captured_pages: BTreeMap<PathBuf, String>,
+    captured_absent_pages: BTreeSet<PathBuf>,
 }
 
 #[derive(Debug, Serialize)]
@@ -259,6 +260,11 @@ fn source_role(context: &Value, has_candidates: bool) -> miette::Result<&str> {
 }
 
 impl Selection {
+    pub fn with_absent_pages(mut self, paths: &BTreeSet<PathBuf>) -> Self {
+        self.captured_absent_pages.clone_from(paths);
+        self
+    }
+
     pub fn prefer_saved_configuration(
         mut self,
         root: &Path,
@@ -504,6 +510,7 @@ impl Selection {
                 max_reason_json_bytes: 256,
                 batches: Vec::new(),
             },
+            captured_absent_pages: BTreeSet::new(),
             captured_pages: capture
                 .guarded_pages()
                 .iter()
@@ -693,6 +700,9 @@ impl Selection {
         }
         for (path, raw) in captured {
             plan.require_unchanged(path, raw);
+        }
+        for path in &self.captured_absent_pages {
+            plan.require_absent(path);
         }
         Ok(())
     }
@@ -1012,6 +1022,9 @@ impl Selection {
         for (path, raw) in captured.raw.into_iter().chain(captured.dependencies) {
             plan.require_unchanged(path, raw);
         }
+        for path in &self.captured_absent_pages {
+            plan.require_absent(path);
+        }
         Ok(captured.ledger)
     }
 }
@@ -1082,6 +1095,7 @@ fn retention_selection(root: &Path, directory: &Path) -> miette::Result<Selectio
         directory: directory.into(),
         manifest,
         captured_pages: BTreeMap::new(),
+        captured_absent_pages: BTreeSet::new(),
     };
     for batch in &selection.manifest.batches {
         if !selection.fits(batch)? {

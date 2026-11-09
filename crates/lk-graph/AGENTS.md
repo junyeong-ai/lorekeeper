@@ -60,6 +60,8 @@ and CLI discovery, not a second graph authority.
   authored revision, matched query semantics and scoped reviews. Unknown or deferred
   candidates prevent assessment. Excluding discovery context never excludes mandatory
   evidence or direct links; excluded candidate bytes remain publication guards.
+  Evidence-associated card reviews bind identity and input guards without becoming
+  assessment subject reviews.
   Absent selection metadata retains the exact legacy full-context derivation.
   Retention roots are current discovery, latest assessment and retained Work states;
   states directly retain their packet rows. Reassessment tokens guard concurrency,

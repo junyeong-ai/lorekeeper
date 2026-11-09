@@ -782,6 +782,208 @@ fn changed_effective_query_spellings_reopen_only_affected_candidate_inputs() {
     );
 }
 
+fn write_evidence_only_card_review(fixture: &Fixture) -> String {
+    let subject = "wiki/documents/review-subject.md";
+    let evidence = "wiki/documents/review-evidence.md";
+    let review = "wiki/explorations/card-review.md";
+    fixture.write(
+        subject,
+        "---\ntype: document\n---\nAnother declared subject.\n",
+    );
+    fixture.write(
+        evidence,
+        "---\ntype: document\n---\nIndependent observation.\n",
+    );
+    let archived = lk_vault::archive_evidence(
+        &fixture.root,
+        &["wiki/documents/candidate-000.md".into(), evidence.into()],
+    )
+    .unwrap();
+    let metadata = serde_json::json!({
+        "status": "open", "subjects": [subject], "evidence": archived.citations,
+    });
+    let raw = format!(
+        "---\ntype: exploration\ntitle: Scoped review\nreview: {metadata}\n---\nA recorded uncertainty.\n"
+    );
+    fixture.write(review, &raw);
+    raw
+}
+
+#[test]
+fn card_review_changes_reopen_only_the_affected_paid_decision() {
+    let fixture = Fixture::new(2);
+    let first = fixture.packet(20, false);
+    fixture
+        .record(output(&first, ScreeningDecision::NotSelected))
+        .unwrap();
+    let paid = fixture
+        .snapshot()
+        .into_iter()
+        .filter(|(path, _)| path.starts_with(DIRECTORY))
+        .collect::<BTreeMap<_, _>>();
+    write_evidence_only_card_review(&fixture);
+    let capture = lk_vault::capture_discovery(
+        &fixture.root,
+        &fixture.dirs,
+        &first.request.as_ref().unwrap().candidates[0].input.queries,
+    )
+    .unwrap();
+    let card = capture
+        .candidates
+        .iter()
+        .find(|card| card.path == "wiki/documents/candidate-000.md")
+        .unwrap();
+    assert_eq!(card.card.reviews.open, 1);
+    let next = fixture.packet(20, false);
+    assert_eq!(next.progress.unknown, 1);
+    assert_eq!(next.progress.not_selected, 1);
+    let request = next.request.unwrap();
+    assert_eq!(request.candidates.len(), 1);
+    assert_eq!(request.candidates[0].candidate.path, card.path);
+    assert!(fixture.candidate().reviews.is_empty());
+    for (path, raw) in paid {
+        assert_eq!(std::fs::read(fixture.root.join(path)).unwrap(), raw);
+    }
+}
+
+#[test]
+fn card_review_binding_preserves_no_review_and_subject_only_identities() {
+    for has_review in [false, true] {
+        let fixture = Fixture::new(1);
+        let owner = "wiki/documents/candidate-000.md";
+        if has_review {
+            let raw = std::fs::read_to_string(fixture.root.join(owner)).unwrap();
+            let metadata = serde_json::json!({
+                "status": "open", "subjects": [owner],
+                "evidence": [{"path": owner, "revision": lk_core::concept::source_revision(&lk_vault::parse_page(&raw).unwrap())}],
+            });
+            fixture.write(
+                "wiki/explorations/subject-review.md",
+                &format!("---\ntype: exploration\nreview: {metadata}\n---\nA scoped assessment.\n"),
+            );
+        }
+        let packet = fixture.packet(20, false);
+        let request = packet.request.as_ref().unwrap();
+        let assigned = &request.candidates[0];
+        let mut inventory = lk_vault::ReviewInventory::load(&fixture.root, &fixture.dirs).unwrap();
+        let mut index = ReviewDependencyIndex::from_inventory(
+            &fixture.root,
+            &mut inventory,
+            &ReadControl::default(),
+        )
+        .unwrap();
+        let identities = index
+            .by_subject
+            .get(owner)
+            .cloned()
+            .unwrap_or_default()
+            .iter()
+            .map(|path| {
+                index
+                    .dependency(&fixture.root, owner, path)
+                    .unwrap()
+                    .identity()
+            })
+            .collect::<Vec<_>>();
+        let mut original = assigned.input.clone();
+        original.review_revision = revision(&identities).unwrap();
+        assert_eq!(assigned.input, original);
+        assert_eq!(
+            assigned.candidate_key,
+            original.key(&request.purpose_revision).unwrap()
+        );
+        fixture
+            .record(output(&packet, ScreeningDecision::NotSelected))
+            .unwrap();
+        assert!(fixture.packet(20, false).progress.is_ready());
+    }
+}
+
+#[test]
+fn card_review_guards_reject_review_and_other_evidence_drift() {
+    let mut accepted = Vec::new();
+    for change in ["review", "evidence", "missing-evidence"] {
+        let fixture = Fixture::new(1);
+        let review = write_evidence_only_card_review(&fixture);
+        let candidate_before =
+            std::fs::read(fixture.root.join("wiki/documents/candidate-000.md")).unwrap();
+        let evidence_before =
+            std::fs::read(fixture.root.join("wiki/documents/review-evidence.md")).unwrap();
+        if change == "missing-evidence" {
+            std::fs::remove_file(fixture.root.join("wiki/documents/review-evidence.md")).unwrap();
+        }
+        let mut inventory = lk_vault::ReviewInventory::load(&fixture.root, &fixture.dirs).unwrap();
+        let dependencies = crate::audit::review_card_dependencies_with_inventory(
+            &fixture.root,
+            &BTreeSet::from(["wiki/documents/candidate-000.md".into()]),
+            &mut inventory,
+            &ReadControl::default(),
+        )
+        .unwrap();
+        assert_eq!(dependencies.len(), 1);
+        assert_eq!(dependencies[0].state, crate::audit::AuditReviewState::Open);
+        fixture
+            .record(output(
+                &fixture.packet(20, false),
+                ScreeningDecision::NotSelected,
+            ))
+            .unwrap();
+        let candidate = fixture.candidate();
+        assert!(candidate.reviews.is_empty());
+        let mut mutation = MutationPlan::default();
+        guard_ready(
+            &fixture.root,
+            &fixture.dirs,
+            &candidate,
+            &mut mutation,
+            &ReadControl::default(),
+        )
+        .unwrap();
+        mutation.create("sentinel.md", "This transition must refuse.".into());
+        if change == "review" {
+            let page = lk_vault::parse_page(&review).unwrap();
+            let mut metadata = page.frontmatter.get("review").unwrap().clone();
+            metadata["status"] = "resolved".into();
+            metadata["resolution"] = "The recorded condition is resolved.".into();
+            fixture.write("wiki/explorations/card-review.md", &format!(
+                "---\ntype: exploration\ntitle: Scoped review\nreview: {metadata}\n---\nA recorded uncertainty.\n"
+            ));
+        } else if change == "missing-evidence" {
+            std::fs::write(
+                fixture.root.join("wiki/documents/review-evidence.md"),
+                evidence_before,
+            )
+            .unwrap();
+        } else {
+            fixture.write(
+                "wiki/documents/review-evidence.md",
+                "---\ntype: document\n---\nA changed observation.\n",
+            );
+            assert_eq!(
+                std::fs::read_to_string(fixture.root.join("wiki/explorations/card-review.md"))
+                    .unwrap(),
+                review
+            );
+        }
+        assert_eq!(
+            std::fs::read(fixture.root.join("wiki/documents/candidate-000.md")).unwrap(),
+            candidate_before
+        );
+        if MutationSession::acquire(&fixture.root)
+            .unwrap()
+            .apply(mutation)
+            .is_ok()
+            || fixture.root.join("sentinel.md").exists()
+        {
+            accepted.push(change);
+        }
+    }
+    assert!(
+        accepted.is_empty(),
+        "accepted stale card dependencies: {accepted:?}"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn subject_aliases_exclude_their_owner_but_keep_distinct_hard_links() {

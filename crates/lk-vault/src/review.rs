@@ -922,6 +922,25 @@ impl ReviewInventory {
         })
     }
 
+    /// Reviews associated through evidence alone, preserving declared-subject precedence.
+    pub fn evidence_review_paths_controlled(
+        &mut self,
+        owner: &str,
+        read: &crate::ReadControl,
+    ) -> Result<Vec<String>, VaultError> {
+        self.prepare_previews(read)?;
+        Ok(self
+            .associations
+            .as_ref()
+            .expect("prepared review associations")
+            .get(owner)
+            .into_iter()
+            .flatten()
+            .filter(|(_, subject)| !subject)
+            .map(|(path, _)| path.clone())
+            .collect())
+    }
+
     pub fn load_report(&mut self, path: &str) -> Option<ReviewReport> {
         self.load_report_controlled(path, &crate::ReadControl::default())
             .expect("default review evaluation cannot be cancelled")

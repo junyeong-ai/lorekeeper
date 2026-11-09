@@ -936,6 +936,7 @@ struct ReviewDependencyIndex<'a> {
     subjects: BTreeMap<String, Vec<String>>,
     by_subject: BTreeMap<String, BTreeSet<String>>,
     dependencies: BTreeMap<(String, bool), AuditReviewDependency>,
+    card_dependencies: BTreeMap<String, AuditReviewDependency>,
     read: lk_vault::ReadControl,
 }
 
@@ -1000,6 +1001,7 @@ impl<'a> ReviewDependencyIndex<'a> {
             subjects,
             by_subject,
             dependencies: BTreeMap::new(),
+            card_dependencies: BTreeMap::new(),
             read: read.clone(),
         })
     }
@@ -1034,6 +1036,7 @@ impl<'a> ReviewDependencyIndex<'a> {
             subjects: indexed_subjects,
             by_subject,
             dependencies: BTreeMap::new(),
+            card_dependencies: BTreeMap::new(),
             read: read.clone(),
         })
     }
@@ -1062,15 +1065,7 @@ impl<'a> ReviewDependencyIndex<'a> {
         if let Some(dependency) = self.dependencies.get(&key) {
             return Ok(dependency.clone());
         }
-        let report = match &mut self.reports {
-            ReviewReports::Evaluated(reports) => reports.get(lookup).cloned(),
-            ReviewReports::Scoped { inventory, paths } => match paths.get(lookup) {
-                Some(path) => inventory
-                    .load_report_controlled(path, &self.read)
-                    .map_err(GraphError::from)?,
-                None => None,
-            },
-        };
+        let report = self.load_report(lookup)?;
         let dependency = review_dependency(
             root,
             &subject,
@@ -1082,6 +1077,58 @@ impl<'a> ReviewDependencyIndex<'a> {
         self.read.check().map_err(GraphError::from)?;
         self.dependencies.insert(key, dependency.clone());
         Ok(dependency)
+    }
+
+    fn load_report(&mut self, owner: &str) -> Result<Option<lk_vault::ReviewReport>, GraphError> {
+        match &mut self.reports {
+            ReviewReports::Evaluated(reports) => Ok(reports.get(owner).cloned()),
+            ReviewReports::Scoped { inventory, paths } => match paths.get(owner) {
+                Some(path) => inventory
+                    .load_report_controlled(path, &self.read)
+                    .map_err(GraphError::from),
+                None => Ok(None),
+            },
+        }
+    }
+
+    fn card_dependencies(
+        &mut self,
+        root: &Path,
+        owner: &str,
+    ) -> Result<Vec<AuditReviewDependency>, GraphError> {
+        let paths = match &mut self.reports {
+            ReviewReports::Scoped { inventory, .. } => inventory
+                .evidence_review_paths_controlled(owner, &self.read)
+                .map_err(GraphError::from)?,
+            ReviewReports::Evaluated(_) => {
+                return Err(error(
+                    "audit card capture requires a fresh review inventory",
+                ));
+            }
+        };
+        let mut dependencies = Vec::new();
+        for path in paths {
+            self.read.check().map_err(GraphError::from)?;
+            if let Some(dependency) = self.card_dependencies.get(&path) {
+                dependencies.push(dependency.clone());
+                continue;
+            }
+            let owner = lk_vault::find_page_owner(root, Path::new(&path)).map_err(error)?;
+            self.read.check().map_err(GraphError::from)?;
+            let owner = owner.as_ref().map(|owner| page_address(owner));
+            let report = self.load_report(owner.as_deref().unwrap_or(&path))?;
+            let dependency = capture_review_dependency(
+                root,
+                &path,
+                report.as_ref(),
+                ReviewDependencyScope::Card,
+                &self.read,
+            )?;
+            self.card_dependencies.insert(path, dependency.clone());
+            dependencies.push(dependency);
+        }
+        self.read.check().map_err(GraphError::from)?;
+        Ok(dependencies)
     }
 }
 
@@ -1116,6 +1163,23 @@ pub fn review_dependencies_with_inventory(
     let (_, receipts) = load_controlled(root, read)?;
     let mut index = ReviewDependencyIndex::from_inventory(root, inventory, read)?;
     scoped_review_dependencies(root, pages, &mut index, &receipts)
+}
+
+/// Capture evidence-only card review inputs, separately from assessment subject scope.
+/// Owners are verified canonical vault-relative addresses.
+pub fn review_card_dependencies_with_inventory(
+    root: &Path,
+    owners: &BTreeSet<String>,
+    inventory: &mut lk_vault::ReviewInventory,
+    read: &lk_vault::ReadControl,
+) -> Result<Vec<AuditReviewDependency>, GraphError> {
+    read.check().map_err(GraphError::from)?;
+    let mut index = ReviewDependencyIndex::from_inventory(root, inventory, read)?;
+    for owner in owners {
+        index.card_dependencies(root, owner)?;
+    }
+    read.check().map_err(GraphError::from)?;
+    Ok(index.card_dependencies.into_values().collect())
 }
 
 /// Reuse freshly read reports within one capture, retaining current review/evidence guards.
@@ -1229,6 +1293,30 @@ fn review_dependency(
     subjects: Option<&Vec<String>>,
     read: &lk_vault::ReadControl,
 ) -> Result<AuditReviewDependency, GraphError> {
+    capture_review_dependency(
+        root,
+        path,
+        report,
+        ReviewDependencyScope::Subject { subject, subjects },
+        read,
+    )
+}
+
+enum ReviewDependencyScope<'a> {
+    Subject {
+        subject: &'a str,
+        subjects: Option<&'a Vec<String>>,
+    },
+    Card,
+}
+
+fn capture_review_dependency(
+    root: &Path,
+    path: &str,
+    report: Option<&lk_vault::ReviewReport>,
+    scope: ReviewDependencyScope<'_>,
+    read: &lk_vault::ReadControl,
+) -> Result<AuditReviewDependency, GraphError> {
     read.check().map_err(GraphError::from)?;
     let mut result = AuditReviewDependency {
         path: path.into(),
@@ -1272,7 +1360,9 @@ fn review_dependency(
         lk_vault::ReviewEffectiveState::NeedsReassessment => AuditReviewState::NeedsReassessment,
         lk_vault::ReviewEffectiveState::Invalid => AuditReviewState::Invalid,
     };
-    if !subjects.is_some_and(|subjects| subjects.iter().any(|declared| declared == subject)) {
+    if let ReviewDependencyScope::Subject { subject, subjects } = scope
+        && !subjects.is_some_and(|subjects| subjects.iter().any(|declared| declared == subject))
+    {
         result.state = AuditReviewState::Invalid;
         result
             .errors
