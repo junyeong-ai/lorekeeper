@@ -57,10 +57,10 @@ pub use self::context::{
 pub use self::discovery::{
     DISCOVERY_CAPTURE_POLICY, DISCOVERY_CARD_MAX_BYTES, DiscoveryCandidate, DiscoveryCandidateCard,
     DiscoveryCapture, DiscoveryCaptureMetrics, DiscoveryHeading, DiscoveryMatch, DiscoveryPreview,
-    DiscoveryQuery, DiscoveryReadMetrics, DiscoveryText, capture_discovery,
+    DiscoveryQuery, DiscoveryQueryMatches, DiscoveryReadMetrics, DiscoveryText, capture_discovery,
     capture_discovery_batch, capture_discovery_batch_controlled, capture_discovery_batch_measured,
     capture_discovery_batch_with_inventory, capture_discovery_with_reviews, discover_queries,
-    discover_queries_controlled,
+    discover_queries_controlled, discover_query_matches_controlled,
 };
 pub use self::document::{
     DocumentContent, DocumentOptions, DocumentSection, DocumentView, inspect_document,

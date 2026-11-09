@@ -156,12 +156,24 @@ pub struct DiscoveryCandidate {
     pub card: DiscoveryCandidateCard,
 }
 
+impl DiscoveryCandidate {
+    pub fn preferred_path<'a>(owner: &str, left: &'a str, right: &'a str) -> &'a str {
+        if left == owner || right != owner && left < right {
+            left
+        } else {
+            right
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct DiscoveryCapture {
     pub policy: String,
     pub revision: String,
     pub queries: Vec<DiscoveryQuery>,
     pub candidates: Vec<DiscoveryCandidate>,
+    #[serde(skip)]
+    pub query_revisions: BTreeMap<DiscoveryQuery, String>,
     #[serde(skip)]
     guarded_pages: BTreeMap<PathBuf, Arc<String>>,
 }
@@ -530,9 +542,8 @@ fn capture_discovery_batch_inner(
                         {
                             return Err(invalid("discovery owner changed during capture"));
                         }
-                        if path != owner && (previous.path == owner || previous.path < path) {
-                            path.clone_from(&previous.path);
-                        }
+                        path = DiscoveryCandidate::preferred_path(&owner, &previous.path, &path)
+                            .to_owned();
                         query_indexes.extend(previous.query_indexes.iter().copied());
                         if path == previous.path
                             && query_indexes.len() == previous.query_indexes.len()
@@ -584,11 +595,23 @@ fn capture_discovery_batch_inner(
                 &candidates,
                 &review_identity,
             ))?);
+            let query_revisions = capture
+                .queries
+                .iter()
+                .zip(&capture.plans)
+                .map(|(query, plan)| {
+                    Ok((
+                        query.clone(),
+                        query_revision(query, plan.identity.as_deref(), &plan.spellings)?,
+                    ))
+                })
+                .collect::<Result<_, VaultError>>()?;
             Ok(DiscoveryCapture {
                 policy: DISCOVERY_CAPTURE_POLICY.into(),
                 revision,
                 queries: capture.queries,
                 candidates,
+                query_revisions,
                 guarded_pages: capture.guarded_pages,
             })
         })
@@ -747,18 +770,49 @@ pub fn discover_queries(
     discover_queries_controlled(root, dirs, queries, &crate::ReadControl::default())
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DiscoveryQueryMatches {
+    pub matches: BTreeMap<DiscoveryQuery, Vec<Citation>>,
+    pub query_revisions: BTreeMap<DiscoveryQuery, String>,
+}
+
+fn query_revision(
+    query: &DiscoveryQuery,
+    identity: Option<&str>,
+    spellings: &[String],
+) -> Result<String, VaultError> {
+    Ok(file_revision(&serialized(&(
+        DISCOVERY_CAPTURE_POLICY,
+        query,
+        identity,
+        spellings.iter().collect::<BTreeSet<_>>(),
+    ))?))
+}
+
 pub fn discover_queries_controlled(
     root: &Path,
     dirs: &VaultDirs,
     queries: &[DiscoveryQuery],
     read: &crate::ReadControl,
 ) -> Result<BTreeMap<DiscoveryQuery, Vec<Citation>>, VaultError> {
+    Ok(discover_query_matches_controlled(root, dirs, queries, read)?.matches)
+}
+
+pub fn discover_query_matches_controlled(
+    root: &Path,
+    dirs: &VaultDirs,
+    queries: &[DiscoveryQuery],
+    read: &crate::ReadControl,
+) -> Result<DiscoveryQueryMatches, VaultError> {
     read.check()?;
     for query in queries {
         query.validate().map_err(std::io::Error::other)?;
     }
     if queries.is_empty() {
-        return Ok(BTreeMap::new());
+        return Ok(DiscoveryQueryMatches {
+            matches: BTreeMap::new(),
+            query_revisions: BTreeMap::new(),
+        });
     }
     if let Some(matches) = indexed_queries(root, dirs, queries, read)? {
         read.check()?;
@@ -811,7 +865,19 @@ pub fn discover_queries_controlled(
         matches.sort();
         matches.dedup();
     }
-    Ok(result)
+    let query_revisions = plans
+        .iter()
+        .map(|(query, identity, spellings, _)| {
+            Ok((
+                (*query).clone(),
+                query_revision(query, identity.as_deref(), spellings)?,
+            ))
+        })
+        .collect::<Result<_, VaultError>>()?;
+    Ok(DiscoveryQueryMatches {
+        matches: result,
+        query_revisions,
+    })
 }
 
 fn indexed_queries(
@@ -819,7 +885,7 @@ fn indexed_queries(
     dirs: &VaultDirs,
     queries: &[DiscoveryQuery],
     read: &crate::ReadControl,
-) -> Result<Option<BTreeMap<DiscoveryQuery, Vec<Citation>>>, VaultError> {
+) -> Result<Option<DiscoveryQueryMatches>, VaultError> {
     read.check()?;
     let snapshot = crate::search_index::inspect_search_snapshot(root, dirs);
     read.check()?;
@@ -923,7 +989,7 @@ fn indexed_queries(
     if !unchanged || !captured.is_empty() {
         return Ok(None);
     }
-    let (_, paths) = candidates?;
+    let (plans, paths) = candidates?;
     if !paths.is_empty() {
         return Err(std::io::Error::other(
             "indexed discovery candidate is outside the verified scope",
@@ -935,7 +1001,20 @@ fn indexed_queries(
         matches.sort();
         matches.dedup();
     }
-    Ok(Some(result))
+    let query_revisions = queries
+        .iter()
+        .zip(plans)
+        .map(|(query, plan)| {
+            Ok((
+                (*query).clone(),
+                query_revision(query, plan.identity.as_deref(), &plan.spellings)?,
+            ))
+        })
+        .collect::<Result<_, VaultError>>()?;
+    Ok(Some(DiscoveryQueryMatches {
+        matches: result,
+        query_revisions,
+    }))
 }
 
 #[cfg(test)]
@@ -1576,6 +1655,21 @@ mod tests {
             spacing,
         });
         let live = discover_queries(root.path(), &dirs, &queries).unwrap();
+        let live_capture = discover_query_matches_controlled(
+            root.path(),
+            &dirs,
+            &queries,
+            &crate::ReadControl::default(),
+        )
+        .unwrap();
+        assert_eq!(live_capture.matches, live);
+        assert_eq!(
+            capture_discovery(root.path(), &dirs, &queries)
+                .unwrap()
+                .query_revisions,
+            live_capture.query_revisions
+        );
+
         assert_eq!(live[&queries[0]].len(), 3);
         let cancelled = crate::ReadControl::new(std::sync::Arc::new(
             std::sync::atomic::AtomicBool::new(true),
@@ -1593,12 +1687,20 @@ mod tests {
         crate::prepare_search(&session, &dirs).unwrap();
         let database = root.path().join(crate::search_index::INDEX_PATH);
         let before = std::fs::read(&database).unwrap();
+        let indexed_capture =
+            indexed_queries(root.path(), &dirs, &queries, &crate::ReadControl::default())
+                .unwrap()
+                .unwrap();
+        assert_eq!(indexed_capture, live_capture);
+
         assert!(matches!(
             indexed_queries(root.path(), &dirs, &queries, &cancelled),
             Err(VaultError::Cancelled)
         ));
         assert_eq!(
-            indexed_queries(root.path(), &dirs, &queries, &crate::ReadControl::default()).unwrap(),
+            indexed_queries(root.path(), &dirs, &queries, &crate::ReadControl::default())
+                .unwrap()
+                .map(|capture| capture.matches),
             Some(live.clone())
         );
         assert_eq!(
@@ -1709,7 +1811,9 @@ mod tests {
         let database = root.path().join(crate::search_index::INDEX_PATH);
         let before = std::fs::read(&database).unwrap();
         assert_eq!(
-            indexed_queries(root.path(), &dirs, &queries, &crate::ReadControl::default()).unwrap(),
+            indexed_queries(root.path(), &dirs, &queries, &crate::ReadControl::default())
+                .unwrap()
+                .map(|capture| capture.matches),
             Some(live.clone())
         );
         assert_eq!(
@@ -1743,7 +1847,9 @@ mod tests {
         assert_ne!(changed[&queries[1]], live[&queries[1]]);
         crate::prepare_search(&session, &dirs).unwrap();
         assert_eq!(
-            indexed_queries(root.path(), &dirs, &queries, &crate::ReadControl::default()).unwrap(),
+            indexed_queries(root.path(), &dirs, &queries, &crate::ReadControl::default())
+                .unwrap()
+                .map(|capture| capture.matches),
             Some(changed)
         );
 

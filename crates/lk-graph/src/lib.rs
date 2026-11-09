@@ -21,6 +21,14 @@ use std::path::PathBuf;
 
 #[derive(Debug, thiserror::Error)]
 pub enum GraphError {
+    #[error(
+        "audit screening requires {required} {boundary} bytes, above the complete configured bound {maximum}"
+    )]
+    AuditScreeningCapacity {
+        boundary: audit::selection::CapacityBoundary,
+        required: usize,
+        maximum: usize,
+    },
     #[error("graph input read cancelled")]
     Cancelled,
     #[error(transparent)]

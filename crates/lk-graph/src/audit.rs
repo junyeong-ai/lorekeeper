@@ -14,6 +14,8 @@ const STATE: &str = ".lorekeeper/knowledge-audit.json";
 const CONCEPT_POLICY: &str = "concept-audit-v3";
 const DOCUMENT_POLICY: &str = "document-audit-v2";
 
+pub mod selection;
+
 fn error(message: impl std::fmt::Display) -> GraphError {
     GraphError::Io(message.to_string())
 }
@@ -68,6 +70,8 @@ struct Receipts {
     discovery: BTreeMap<String, DiscoveryPlan>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     last_merges: Option<WorkflowMerges>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    selection_assessments: BTreeMap<String, selection::StateReference>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -75,6 +79,8 @@ struct Receipts {
 struct DiscoveryPlan {
     subject_revision: String,
     queries: Vec<lk_vault::DiscoveryQuery>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    selection: Option<selection::SelectionPlan>,
 }
 
 #[derive(Deserialize)]
@@ -89,6 +95,8 @@ pub struct AuditDiscoveryRequest {
 pub struct AuditDiscovery {
     pub queries: Vec<lk_vault::DiscoveryQuery>,
     pub matches: Vec<Citation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selection: Option<selection::SelectionProgress>,
 }
 
 pub fn record_discovery(
@@ -129,6 +137,7 @@ pub fn record_discovery(
         DiscoveryPlan {
             subject_revision: revision,
             queries,
+            selection: None,
         },
     );
     let mut plan = MutationPlan::default();
@@ -1449,7 +1458,7 @@ fn inputs_selected_controlled(
         }
         queries.extend(plan.queries.clone());
     }
-    let discovered = lk_vault::discover_queries_controlled(root, dirs, &queries, read)
+    let discovered = lk_vault::discover_query_matches_controlled(root, dirs, &queries, read)
         .map_err(GraphError::from)?;
     let mut result = Vec::new();
     for page in pages
@@ -1492,27 +1501,6 @@ fn inputs_selected_controlled(
         }
         related_pages.sort();
         related_pages.dedup();
-        let discovery = receipts
-            .discovery
-            .get(&page.path.to_string_lossy().into_owned())
-            .filter(|plan| plan.subject_revision == revision)
-            .map(|plan| {
-                let mut matches = plan
-                    .queries
-                    .iter()
-                    .flat_map(|query| discovered[query].clone())
-                    .filter(|citation| citation.path != page.path.to_string_lossy())
-                    .collect::<Vec<_>>();
-                matches.sort();
-                matches.dedup();
-                related_pages.extend(matches.clone());
-                related_pages.sort();
-                related_pages.dedup();
-                AuditDiscovery {
-                    queries: plan.queries.clone(),
-                    matches,
-                }
-            });
         // A document is the subject being read, not evidence for itself. Its outgoing
         // links supply context only; concepts retain the shared backlink authority.
         let citations = match kind {
@@ -1525,6 +1513,76 @@ fn inputs_selected_controlled(
             .iter()
             .map(AuditReviewDependency::identity)
             .collect::<Vec<_>>();
+        let discovery = if let Some(plan) = receipts
+            .discovery
+            .get(&page.path.to_string_lossy().into_owned())
+            .filter(|plan| plan.subject_revision == revision)
+        {
+            let mut matches = plan
+                .queries
+                .iter()
+                .flat_map(|query| discovered.matches[query].clone())
+                .filter(|citation| citation.path != page.path.to_string_lossy())
+                .collect::<Vec<_>>();
+            if plan.selection.is_some() {
+                let owner = lk_vault::resolve_page_owner(root, &page.path).map_err(error)?;
+                let mut distinct = Vec::new();
+                for citation in matches {
+                    if lk_vault::resolve_page_owner(root, Path::new(&citation.path))
+                        .map_err(error)?
+                        != owner
+                    {
+                        distinct.push(citation);
+                    }
+                }
+                matches = distinct;
+            }
+            matches.sort();
+            matches.dedup();
+            let selection = plan
+                .selection
+                .as_ref()
+                .map(|selection| {
+                    selection::project(
+                        root,
+                        selection::SelectionInputs {
+                            subject: &page.path.to_string_lossy(),
+                            subject_revision: &revision,
+                            queries: &plan.queries,
+                            matches: &matches,
+                            evidence: &citations,
+                            direct: &related_pages,
+                            scoped_reviews: &scoped_reviews,
+                        },
+                        selection,
+                        &discovered,
+                        &mut review_index,
+                        read,
+                    )
+                })
+                .transpose()?;
+            if let Some(progress) = &selection {
+                let selected = progress.selected_owners()?;
+                for citation in &matches {
+                    let owner = lk_vault::resolve_page_owner(root, Path::new(&citation.path))
+                        .map_err(error)?;
+                    if selected.contains(owner.to_string_lossy().as_ref()) {
+                        related_pages.push(citation.clone());
+                    }
+                }
+            } else {
+                related_pages.extend(matches.clone());
+            }
+            related_pages.sort();
+            related_pages.dedup();
+            Some(AuditDiscovery {
+                queries: plan.queries.clone(),
+                matches,
+                selection,
+            })
+        } else {
+            None
+        };
         let input_revision = file_revision(
             &serde_json::to_string(&(
                 match kind {
@@ -2205,6 +2263,15 @@ fn guard_candidate_controlled(
     candidate: &AuditCandidate,
     read: &lk_vault::ReadControl,
 ) -> Result<(), GraphError> {
+    if let Some(progress) = candidate
+        .discovery
+        .as_ref()
+        .and_then(|discovery| discovery.selection.as_ref())
+    {
+        for (path, raw) in &progress.guards {
+            plan.require_unchanged(path, raw.as_ref().clone());
+        }
+    }
     for review in &candidate.reviews {
         guard_review_dependency_controlled(plan, root, review, read)?;
     }
@@ -2374,6 +2441,14 @@ pub fn record_with_guard_controlled(
             .iter()
             .map(|review| review.path.clone())
             .collect();
+        selection::guard_ready(root, dirs, candidate, &mut plan, read)?;
+        if let Some(reference) = selection::state_reference(candidate)? {
+            receipts
+                .selection_assessments
+                .insert(assessment.path.clone(), reference);
+        } else {
+            receipts.selection_assessments.remove(&assessment.path);
+        }
         let coverage = guard(&assessment, &mut plan);
         read.check().map_err(GraphError::from)?;
         if coverage? == AuditReadCoverage::WholeInput {
@@ -2397,6 +2472,9 @@ pub fn record_with_guard_controlled(
         .retain(|path, _| candidates.contains_key(path));
     receipts
         .discovery
+        .retain(|path, _| candidates.contains_key(path));
+    receipts
+        .selection_assessments
         .retain(|path, _| candidates.contains_key(path));
     receipts.pending.retain(|path| !recorded.contains(path));
     let after = serde_json::to_string_pretty(&receipts).map_err(error)? + "\n";
@@ -2740,6 +2818,7 @@ mod tests {
                     .clone()
                     .unwrap(),
                 queries: Vec::new(),
+                selection: None,
             },
         );
         write(
@@ -3166,6 +3245,7 @@ mod tests {
                     phrase: false,
                     spacing: false,
                 }],
+                selection: None,
             },
         );
         write(

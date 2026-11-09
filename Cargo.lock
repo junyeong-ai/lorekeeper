@@ -1622,6 +1622,7 @@ name = "lk-graph"
 version = "0.128.2"
 dependencies = [
  "globset",
+ "jiff",
  "lk-core",
  "lk-vault",
  "petgraph",

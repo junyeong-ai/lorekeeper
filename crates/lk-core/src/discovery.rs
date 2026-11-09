@@ -1,5 +1,13 @@
 use serde::{Deserialize, Serialize};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ScreeningDecision {
+    Inspect,
+    NotSelected,
+    Defer,
+}
+
 /// Explicit lexical discovery instructions, never semantic identity or support.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]

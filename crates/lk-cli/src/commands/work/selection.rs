@@ -72,13 +72,7 @@ pub(super) struct SelectionBinding {
     pub inventory_revision: String,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub(in crate::commands) enum ScreeningDecision {
-    Inspect,
-    NotSelected,
-    Defer,
-}
+pub(in crate::commands) use lk_core::discovery::ScreeningDecision;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

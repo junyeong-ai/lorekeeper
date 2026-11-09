@@ -54,6 +54,14 @@ and CLI discovery, not a second graph authority.
 
 ## Incremental semantic maintenance (`audit.rs`)
 
+- Screened discovery keeps immutable candidate states and bounded decision packets.
+  Global planning uses complete compact inventories; selected boundaries capture cards
+  and exact bytes. Reuse binds the subject purpose, verified owner/public address,
+  authored revision, matched query semantics and scoped reviews. Unknown or deferred
+  candidates prevent assessment. Excluding discovery context never excludes mandatory
+  evidence or direct links; excluded candidate bytes remain publication guards.
+  Absent selection metadata retains the exact legacy full-context derivation.
+
 - Audit candidates explicitly distinguish concepts from declared source documents
   under the configured wiki documents collection, including nested addresses.
   Concept evidence retains the shared backlink authority and existing input identity.

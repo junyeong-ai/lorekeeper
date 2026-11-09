@@ -170,6 +170,11 @@ canonical; SQLite navigation is derived.
   Learned concepts carry opening lines, revisited names only; resolver metadata
   verifies real addresses without reading every concept body.
 
+Discovery query fingerprints derive from the effective live/indexed matcher plans,
+including resolved spellings. Card capture returns the same fingerprints and shares
+preferred public-address selection. These local identities do not alter legacy
+capture serialization or replace full candidate-byte publication guards.
+
 ## Navigation (`search_index.rs`, `navigation.rs`)
 
 - `prepare_search` atomically commits a reconstructible FTS5 snapshot; failed reads
