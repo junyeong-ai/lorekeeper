@@ -902,8 +902,8 @@ fn capture_task_with_audit_controlled(
     }
     if task.kind == lk_queue::TaskKind::SynthesizeConcept {
         let scoped = match audit_input {
-            Some(candidate) => audit_candidate_controlled(root, config, candidate, read)?,
-            None => audit_controlled(root, config, &task.target.vault_path, read)?,
+            Some(candidate) => knowledge_candidate_controlled(root, config, candidate, read)?,
+            None => knowledge_scope_controlled(root, config, &task.target.vault_path, read)?,
         };
         for resource in scoped.resources {
             captured
@@ -940,6 +940,16 @@ pub(super) fn audit_controlled(
     path: &str,
     read: &lk_vault::ReadControl,
 ) -> miette::Result<Prepared> {
+    let candidate = load_audit_candidate_controlled(root, config, path, read)?;
+    audit_candidate_controlled(root, config, &candidate, read)
+}
+
+fn load_audit_candidate_controlled(
+    root: &Path,
+    config: &Config,
+    path: &str,
+    read: &lk_vault::ReadControl,
+) -> miette::Result<lk_graph::audit::AuditCandidate> {
     let pages = lk_graph::scan::scan_vault_controlled(root, config.graph.scope.follow_links, read)
         .into_diagnostic()?;
     let plan = lk_graph::audit::plan_selected_controlled(
@@ -957,7 +967,32 @@ pub(super) fn audit_controlled(
         .into_iter()
         .next()
         .ok_or_else(|| miette::miette!("audit subject not found: {path}"))?;
-    audit_candidate_controlled(root, config, &candidate, read)
+    Ok(candidate)
+}
+
+fn knowledge_scope_controlled(
+    root: &Path,
+    config: &Config,
+    path: &str,
+    read: &lk_vault::ReadControl,
+) -> miette::Result<Prepared> {
+    let candidate = load_audit_candidate_controlled(root, config, path, read)?;
+    knowledge_candidate_controlled(root, config, &candidate, read)
+}
+
+fn knowledge_candidate_controlled(
+    root: &Path,
+    config: &Config,
+    candidate: &lk_graph::audit::AuditCandidate,
+    read: &lk_vault::ReadControl,
+) -> miette::Result<Prepared> {
+    let mut related = candidate.related_pages.clone();
+    if let Some(discovery) = &candidate.discovery {
+        related.extend(discovery.matches.iter().cloned());
+    }
+    related.sort();
+    related.dedup();
+    capture_audit_scope_controlled(root, config, candidate, &related, None, read)
 }
 
 /// Preliminary capture from the controller's selected plan; publication rederives scope.
@@ -976,9 +1011,27 @@ pub(super) fn audit_candidate_controlled(
     candidate: &lk_graph::audit::AuditCandidate,
     read: &lk_vault::ReadControl,
 ) -> miette::Result<Prepared> {
-    let path = candidate.path.as_str();
     let selection = lk_graph::audit::selection::state_reference(candidate)
         .map_err(|error| miette::miette!("{error}"))?;
+    capture_audit_scope_controlled(
+        root,
+        config,
+        candidate,
+        &candidate.related_pages,
+        selection,
+        read,
+    )
+}
+
+fn capture_audit_scope_controlled(
+    root: &Path,
+    config: &Config,
+    candidate: &lk_graph::audit::AuditCandidate,
+    related: &[Citation],
+    selection: Option<lk_graph::audit::selection::StateReference>,
+    read: &lk_vault::ReadControl,
+) -> miette::Result<Prepared> {
+    let path = candidate.path.as_str();
     let mut captured = Capture::new(root, read);
     captured.page(
         path,
@@ -989,7 +1042,7 @@ pub(super) fn audit_candidate_controlled(
     for citation in &candidate.evidence {
         captured.citation(path, citation)?;
     }
-    for related in &candidate.related_pages {
+    for related in related {
         captured.page(
             &related.path,
             None,
@@ -1085,7 +1138,11 @@ pub(super) fn refresh_controlled(
                 task_controlled(root, config, task_id, read)?
             }
         }
-        Subject::Audit { path, .. } => {
+        Subject::Audit {
+            path,
+            file_revision,
+            input_revision,
+        } => {
             let target = lk_vault::page_path(root, Path::new(path)).into_diagnostic()?;
             match std::fs::symlink_metadata(target) {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -1097,7 +1154,16 @@ pub(super) fn refresh_controlled(
                 Err(error) => return Err(error).into_diagnostic(),
                 Ok(_) => {}
             }
-            audit_controlled(root, config, path, read)?
+            let candidate = load_audit_candidate_controlled(root, config, path, read)?;
+            if candidate.file_revision != *file_revision
+                || candidate.input_revision != *input_revision
+            {
+                return Err(super::publication_rejection(
+                    super::RejectionKind::SemanticContextChanged,
+                    "audit subject inputs changed; replan and reread its current scope",
+                ));
+            }
+            audit_candidate_controlled(root, config, &candidate, read)?
         }
     };
     read.check().into_diagnostic()?;
@@ -1639,6 +1705,158 @@ mod tests {
         assert_same_prepared(
             &prepared,
             &refresh(&root, &config, "config-revision", &prepared.context).unwrap(),
+        );
+    }
+    #[test]
+    fn synthesis_keeps_full_context_without_waiting_for_audit_candidate_decisions() {
+        let (directory, config, tasks, _) = synthesis_batch_fixture();
+        let root = directory.path().canonicalize().unwrap();
+        let task = &tasks[0];
+        let path = task.target.vault_path.as_str();
+        let discovered = "wiki/documents/discovered.md";
+        let discovered_raw = "---\ntype: document\ntitle: Discovered scope\n---\nScreen candidate has a distinct condition.\n";
+        write(&root, discovered, discovered_raw);
+        let pages = || lk_graph::scan::scan_vault(&root, false).unwrap();
+        let candidate = || {
+            lk_graph::audit::load_selected_inputs(
+                &root,
+                &config.vault.dirs,
+                &pages(),
+                &[path.into()],
+            )
+            .unwrap()
+            .remove(0)
+        };
+        let raw = std::fs::read_to_string(root.join(path)).unwrap();
+        lk_graph::audit::record_discovery(
+            &lk_vault::MutationSession::acquire(&root).unwrap(),
+            &config.vault.dirs,
+            &pages(),
+            lk_graph::audit::AuditDiscoveryRequest {
+                path: path.into(),
+                file_revision: file_revision(&raw),
+                queries: vec![lk_core::discovery::DiscoveryQuery {
+                    query: "screen candidate".into(),
+                    phrase: true,
+                    spacing: false,
+                }],
+            },
+        )
+        .unwrap();
+        let pending = candidate();
+        assert_eq!(
+            pending
+                .discovery
+                .as_ref()
+                .unwrap()
+                .selection
+                .as_ref()
+                .unwrap()
+                .unknown,
+            1
+        );
+        assert!(audit_candidate(&root, &config, &pending).is_err());
+        let mut readiness = crate::commands::audit::InputAvailability::load_controlled(
+            &root,
+            &lk_vault::ReadControl::default(),
+        )
+        .unwrap();
+        assert!(
+            !readiness.check(&pending).unwrap(),
+            "the synthesis prerequisite blocks audit"
+        );
+        let before = task_with_audit(&root, &config, &task.task_id, Some(&pending)).unwrap();
+        assert_same_prepared(
+            &before,
+            &task_with_audit(&root, &config, &task.task_id, None).unwrap(),
+        );
+        assert!(
+            before
+                .resources
+                .iter()
+                .any(|resource| resource.address == discovered)
+        );
+        assert_eq!(before.pages[Path::new(discovered)], discovered_raw);
+        assert!(
+            before.context["purpose"]["parameters"]["knowledge_scope"]
+                .get("audit_selection")
+                .is_none()
+        );
+        let limits = lk_graph::audit::selection::ScreeningLimits {
+            max_input_bytes: 65536,
+            max_result_bytes: 32768,
+            max_candidates: 20,
+            max_batches: None,
+        };
+        let packet = lk_graph::audit::selection::candidates(
+            &root,
+            &config.vault.dirs,
+            &pages(),
+            path,
+            limits,
+            false,
+            &lk_vault::ReadControl::default(),
+        )
+        .unwrap();
+        let request = packet.request.unwrap();
+        assert_eq!(request.candidates.len(), 1);
+        lk_graph::audit::selection::record(
+            &lk_vault::MutationSession::acquire(&root).unwrap(),
+            &config.vault.dirs,
+            &pages(),
+            lk_graph::audit::selection::ScreeningOutput::Record {
+                path: path.into(),
+                purpose_revision: request.purpose_revision,
+                packet_revision: packet.request_revision.unwrap(),
+                reassess: false,
+                decisions: request
+                    .candidates
+                    .iter()
+                    .map(|card| lk_graph::audit::selection::CandidateDecision {
+                        candidate_key: card.candidate_key.clone(),
+                        decision: lk_core::discovery::ScreeningDecision::NotSelected,
+                        reason: "The declared condition is outside this audit.".into(),
+                    })
+                    .collect(),
+            },
+            limits,
+            &lk_vault::ReadControl::default(),
+        )
+        .unwrap();
+        let ready = candidate();
+        let audit = audit_candidate(&root, &config, &ready).unwrap();
+        assert!(
+            !audit
+                .resources
+                .iter()
+                .any(|resource| resource.address == discovered)
+        );
+        assert_same_prepared(
+            &before,
+            &task_with_audit(&root, &config, &task.task_id, Some(&ready)).unwrap(),
+        );
+        write(
+            &root,
+            discovered,
+            &(discovered_raw.to_owned() + "\nA changed condition.\n"),
+        );
+        let changed = task_with_audit(&root, &config, &task.task_id, None).unwrap();
+        assert_ne!(
+            before.revision("policy").unwrap(),
+            changed.revision("policy").unwrap()
+        );
+        let error = refresh_controlled(
+            &root,
+            &config,
+            "policy",
+            &audit.context,
+            &lk_vault::ReadControl::default(),
+        )
+        .err()
+        .unwrap();
+        assert!(
+            matches!(error.downcast_ref::<crate::commands::queue::application::PublicationRejection>(),
+            Some(rejection) if rejection.kind == crate::commands::queue::application::RejectionKind::SemanticContextChanged)
         );
     }
 }

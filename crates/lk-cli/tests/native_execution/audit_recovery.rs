@@ -225,7 +225,6 @@ fn review_during_finalization(repeated: bool) -> String {
         path.write_text(json.dumps({{'evidence':[{{'path':subject['path'],'revision':fingerprint['file_revision']}}],'concepts':[],'reviews':[{{'path':review,'revision':None,'content':content}}]}}))
         cli('wiki','curate','--file',str(path))
         marker.write_text('review published')
-        cli('work','plan','--path',subject['path'])
         with (root/'bounded-calls.jsonl').open('a') as stream:
             stream.write(json.dumps({{'action':'changed-input','work_id':work_id}})+'\n')
         respond({{'results':[{{'status':'needs-action','disposition':None,'reason':'Scoped repair changed the selected inputs.'}}]}})
