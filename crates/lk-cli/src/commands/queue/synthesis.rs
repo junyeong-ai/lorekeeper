@@ -236,6 +236,7 @@ pub(super) fn apply(
                 serde_json::to_value(result)
             }
             .map_err(|e| miette::miette!("{e}"))?;
+            let content = prepare_content(root, &target, &original, task, result)?;
             super::super::work::guard_queue(
                 root,
                 config,
@@ -244,52 +245,6 @@ pub(super) fn apply(
                 value,
                 &mut plan,
             )?;
-            if !section && result.synthesis.trim().is_empty() {
-                return Err(super::application::rejection(
-                    super::application::RejectionKind::InvalidSection,
-                    "synthesis must state the evidence or its limits",
-                ));
-            }
-            if task.kind == lk_queue::TaskKind::RefineEvents {
-                let heading = task
-                    .target
-                    .anchor
-                    .strip_prefix("## ")
-                    .ok_or_else(|| miette::miette!("invalid section anchor"))?;
-                let previous = lk_vault::section_body(&original, heading)
-                    .ok_or_else(|| miette::miette!("missing event section"))?;
-                if event_headings(previous) != event_headings(&result.synthesis) {
-                    return Err(super::application::rejection(
-                        super::application::RejectionKind::InvalidSection,
-                        "refinement must preserve the event heading sequence",
-                    ));
-                }
-            }
-            let mut content = original.clone();
-            let anchors = task.anchors();
-            if (anchors.len() == 2) != result.related.is_some() {
-                return Err(super::application::rejection(
-                    super::application::RejectionKind::InvalidSection,
-                    "related section must match the task's anchors",
-                ));
-            }
-            for (anchor, body) in anchors
-                .iter()
-                .zip(std::iter::once(&result.synthesis).chain(result.related.iter()))
-            {
-                lk_core::markdown::validate_section_body(body).map_err(|error| {
-                    super::application::rejection(
-                        super::application::RejectionKind::InvalidSection,
-                        error.to_string(),
-                    )
-                })?;
-                validate_links(root, &target, body)?;
-                let heading = anchor
-                    .strip_prefix("## ")
-                    .ok_or_else(|| miette::miette!("invalid section anchor"))?;
-                content = lk_vault::replace_section_checked(&content, heading, body)
-                    .map_err(|error| miette::miette!("{error}"))?;
-            }
             task.generation_policy()
                 .map_err(|e| miette::miette!("{e}"))?;
             let content = lk_vault::set_llm_input(
@@ -378,6 +333,62 @@ pub(super) fn apply(
         }
     }
     Ok(report)
+}
+
+pub(super) fn prepare_content(
+    root: &Path,
+    target: &Path,
+    original: &str,
+    task: &lk_queue::QueueTask,
+    result: &SynthesisResult,
+) -> miette::Result<String> {
+    if task.kind == lk_queue::TaskKind::SynthesizeConcept && result.synthesis.trim().is_empty() {
+        return Err(super::application::rejection(
+            super::application::RejectionKind::InvalidSection,
+            "synthesis must state the evidence or its limits",
+        ));
+    }
+    if task.kind == lk_queue::TaskKind::RefineEvents {
+        let heading = task
+            .target
+            .anchor
+            .strip_prefix("## ")
+            .ok_or_else(|| miette::miette!("invalid section anchor"))?;
+        let previous = lk_vault::section_body(original, heading)
+            .ok_or_else(|| miette::miette!("missing event section"))?;
+        if event_headings(previous) != event_headings(&result.synthesis) {
+            return Err(super::application::rejection(
+                super::application::RejectionKind::InvalidSection,
+                "refinement must preserve the event heading sequence",
+            ));
+        }
+    }
+    let mut content = original.to_owned();
+    let anchors = task.anchors();
+    if (anchors.len() == 2) != result.related.is_some() {
+        return Err(super::application::rejection(
+            super::application::RejectionKind::InvalidSection,
+            "related section must match the task's anchors",
+        ));
+    }
+    for (anchor, body) in anchors
+        .iter()
+        .zip(std::iter::once(&result.synthesis).chain(result.related.iter()))
+    {
+        lk_core::markdown::validate_section_body(body).map_err(|error| {
+            super::application::rejection(
+                super::application::RejectionKind::InvalidSection,
+                error.to_string(),
+            )
+        })?;
+        validate_links(root, target, body)?;
+        let heading = anchor
+            .strip_prefix("## ")
+            .ok_or_else(|| miette::miette!("invalid section anchor"))?;
+        content = lk_vault::replace_section_checked(&content, heading, body)
+            .map_err(|error| miette::miette!("{error}"))?;
+    }
+    Ok(content)
 }
 
 fn guard_citations(

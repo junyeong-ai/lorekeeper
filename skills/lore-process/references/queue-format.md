@@ -256,10 +256,15 @@ The pending task supplies the destination, target kind, anchor and completion ke
 never add these fields to this strict result contract. `queue status --json` reports
 `target_revision` for every readable target. Only `queue apply` publishes the body
 and marker together after exact revision validation. No worker writes target pages.
-Native whole-input section generation also supplies an optional `context_revision`
-binding the source and scoped reviews. Keep that binding unchanged; apply revalidates
-it. Existing results without it retain the legacy contract. Do not invent a revision
-or remove one to bypass changed evidence.
+Before drafting, capture `lore work context --task-id TASK` and copy its
+`context_revision` into the result. Read its source and scoped reviews; apply
+revalidates that binding. `source_context_revision` identifies retained source Work,
+not the current finalizer's review scope. Existing results without a context binding
+retain the legacy contract. Never invent, replace or remove a revision on old prose.
+Native processing archives and withdraws an otherwise valid stale scoped proposal
+once per current task/input/context, then drafts against fresh reviews. It preserves
+paid observations and prior completion bytes. Conflicts, invalid bodies, legacy plans
+and semantic holds require explicit resolution.
 Refinement may change bodies but must preserve the original sequence of `###` event
 headings. Section bodies must remain beneath their H2: no root H1/H2 headings
 (including Setext) or HTML/code blocks consuming the next section. Valid HTML and

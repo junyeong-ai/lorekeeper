@@ -9,6 +9,9 @@ use super::application::{
 };
 
 mod history;
+mod recovery;
+#[cfg(unix)]
+pub(in crate::commands) use recovery::recover_sections_controlled;
 
 const DIRECTORY: &str = ".lorekeeper/queue/rejections";
 const SCHEMA: &str = "queue-application-rejection-v1";
@@ -390,7 +393,7 @@ pub(super) fn plan_prune(
 ) -> miette::Result<usize> {
     let root = root.canonicalize().into_diagnostic()?;
     let receipts = inventory(&root)?;
-    if receipts.is_empty() {
+    if receipts.is_empty() && !recovery::has_store(&root)? {
         return Ok(0);
     }
     let retained = retained
@@ -427,7 +430,7 @@ pub(super) fn plan_prune(
             plan.require_unchanged(&snapshot.proposal.path, snapshot.raw.clone());
         }
     }
-    let mut removed = 0;
+    let mut removed = recovery::plan_prune(&root, &identities, &active, &mut plan)?;
     for (path, raw, receipt) in receipts {
         let key = (receipt.identity.task_id, receipt.identity.cache_hash);
         if !identities.contains(&key) && !active.contains_key(&key) {

@@ -242,6 +242,14 @@ deferred subcommands expose their names eagerly for name-only discovery.
   Work; guard the complete final request after the host and its context again at apply.
   Do not incorporate reviews into old Work identities or rewrite paid nodes to acquire
   that scope.
+- Scoped section completion and restaging share the same fresh review-context check.
+  Native recovery withdraws only a singleton, current, otherwise valid section proposal
+  with an exact fresh semantic-context rejection. Journal its proposal, rejection and
+  prior completion bytes before withdrawal, under vault then queue claims. Prefix task
+  and scope guards for replay. Admit one withdrawal per task/input/current context;
+  unchanged retries remain held. Published completions, legacy plans, unscoped results,
+  conflicting or invalid proposals and semantic actions never gain recovery authority.
+  Retain recovery receipts with pending, staged and processed queue references.
 - New work fixes reduction topology from the exact envelope plus each child's authored
   result allowance; every child and its evidence mapping participates. A reduction can
   retain unchanged inherited questions in a self-contained versioned node snapshot. Its

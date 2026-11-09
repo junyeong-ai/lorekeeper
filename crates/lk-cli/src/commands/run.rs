@@ -545,6 +545,7 @@ mod native {
         execution: Option<ExecutionInfo>,
         workflow_id: Option<lk_core::execution::WorkflowId>,
         semantic_calls: usize,
+        recovered_section_proposals: usize,
         budget_exhausted: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         automation: Option<automation::Report>,
@@ -588,6 +589,7 @@ mod native {
                 execution: None,
                 workflow_id: None,
                 semantic_calls: 0,
+                recovered_section_proposals: 0,
                 budget_exhausted: false,
                 automation: None,
                 work_telemetry: WorkTelemetry::default(),
@@ -626,7 +628,9 @@ mod native {
                 } else if self.ok {
                     CampaignStop::Settled
                 } else if self.budget_exhausted {
-                    if self.work_telemetry.retained_progress.has_progress() {
+                    if self.work_telemetry.retained_progress.has_progress()
+                        || self.recovered_section_proposals != 0
+                    {
                         CampaignStop::BatchLimit
                     } else {
                         CampaignStop::NoProgress
@@ -3801,6 +3805,13 @@ mod native {
                 .mutation_session("queue planning")
                 .await
                 .ok_or_else(|| miette::miette!("queue planning did not acquire writer access"))?;
+            let recovered = crate::commands::queue::rejections::recover_sections_controlled(
+                &session,
+                &self.config,
+                &self.config_revision,
+                self.supervisor.read_control(),
+            )?;
+            self.result.recovered_section_proposals += recovered;
             let mut tasks = crate::commands::queue::current_tasks_controlled(
                 session.root(),
                 self.supervisor.read_control(),

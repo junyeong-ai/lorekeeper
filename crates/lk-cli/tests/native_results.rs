@@ -26,6 +26,14 @@ def encode(output):
 if mode in ['host-failure','host-envelope-error']:
     print(json.dumps({'type':'result','subtype':'error_during_execution','is_error':True,'errors':['PRIVATE_CANARY_ERROR']}))
     raise SystemExit(1 if mode=='host-failure' else 0)
+if request.get('kind') in ['whole-section','finalize-section']:
+    assert 'New scoped issue' in json.dumps(request), 'fresh section must contain the current review'
+    response={'status':'complete','body':'The source remains a proposal with a current scoped review.','reason':None}
+    if engine=='codex' and '--output-last-message' in sys.argv:
+        Path(sys.argv[sys.argv.index('--output-last-message')+1]).write_text(json.dumps(response))
+    if engine=='claude-code':
+        response={'type':'result','subtype':'success','is_error':False,'structured_output':response}
+    print(json.dumps(response)); raise SystemExit()
 if request.get('schema') in ['native-selected-results-v3','native-finalize-results-v4','native-finalize-frontier-v4']:
     assert '--safe-mode' not in sys.argv
     assert '--output-schema' in sys.argv or '--json-schema' in sys.argv
@@ -636,6 +644,115 @@ fn native_invalid_bodies_hold_selected_root_and_frontier_work_on_both_hosts() {
                         .extension()
                         .is_none_or(|ext| ext != "json"))
             );
+        }
+    }
+}
+
+#[test]
+fn native_recovers_stale_scoped_sections_without_repeating_paid_inspections_on_both_hosts() {
+    for engine in ["codex", "claude-code"] {
+        for bounded in [false, true] {
+            let fixture = Fixture::new(engine);
+            let root = fixture.root().join("vault");
+            let task = lk_queue::QueueLlmClient::new(root.join(".lorekeeper/queue")).build_task(
+                "summary", lk_queue::TaskKind::Summarize,
+                serde_json::from_value::<lk_queue::SummarizeRequest>(json!({
+                    "text":"An explicit protocol proposal; deployment is unknown.", "max_sentences":3, "locale":"en", "source_type":"manual",
+                    "target":{"vault_path":"wiki/documents/summary.md","kind":"document-summary","anchor":"## Summary"}
+                })).unwrap());
+            let target = root.join(&task.target.vault_path);
+            std::fs::write(&target, format!("---\ntype: document\ntitle: Source\nllm_inputs:\n  summary: {}\n---\n# Source\n\n## Summary\n\n## Content\nA protocol proposal.\n", task.cache_hash)).unwrap();
+            std::fs::create_dir_all(root.join(".lorekeeper/queue")).unwrap();
+            lk_queue::write_tasks_atomic(
+                &root.join(".lorekeeper/queue/tasks.jsonl"),
+                std::slice::from_ref(&task),
+            )
+            .unwrap();
+            let context = fixture.json(&["work", "context", "--task-id", &task.task_id]);
+            let result = json!({"task_id":task.task_id, "cache_hash":task.cache_hash,
+                "target_revision":lk_core::concept::file_revision(&std::fs::read_to_string(&target).unwrap()),
+                "context_revision":context["context_revision"], "body":"The source proposes a protocol."});
+            let plan = bounded.then(|| fixture.json(&["work", "plan", "--task-id", &task.task_id]));
+            let staged = if let Some(plan) = &plan {
+                assert_eq!(fixture.record_ready_inspections(plan), 1);
+                let file = fixture.root().join("prior.json");
+                std::fs::write(&file, serde_json::to_vec(&result).unwrap()).unwrap();
+                let finished = fixture.json(&[
+                    "work",
+                    "finish",
+                    plan["work_id"].as_str().unwrap(),
+                    "--file",
+                    file.to_str().unwrap(),
+                ]);
+                root.join(finished["staged_result"].as_str().unwrap())
+            } else {
+                let path = root.join(".lorekeeper/queue/results/prior.section.json");
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(&path, serde_json::to_vec(&result).unwrap()).unwrap();
+                path
+            };
+            let paid = plan.as_ref().map(|plan| {
+                let directory = root
+                    .join(".lorekeeper/work")
+                    .join(plan["work_id"].as_str().unwrap());
+                walkdir::WalkDir::new(directory)
+                    .into_iter()
+                    .map(Result::unwrap)
+                    .filter(|entry| {
+                        entry.file_type().is_file()
+                            && (entry.path().parent().unwrap().file_name().unwrap() == "nodes"
+                                || entry.file_name() == "plan.json")
+                    })
+                    .map(|entry| {
+                        (
+                            entry.path().to_owned(),
+                            std::fs::read(entry.path()).unwrap(),
+                        )
+                    })
+                    .collect::<std::collections::BTreeMap<_, _>>()
+            });
+            let prior = std::fs::read_to_string(&staged).unwrap();
+            let config = std::fs::read(&fixture.config).unwrap();
+            std::fs::create_dir_all(root.join("wiki/explorations")).unwrap();
+            let evidence = lk_core::concept::source_revision(
+                &lk_vault::parse_page(&std::fs::read_to_string(&target).unwrap()).unwrap(),
+            );
+            let metadata = json!({"status":"open","subjects":[task.target.vault_path],"evidence":[{"path":task.target.vault_path,"revision":evidence}]});
+            std::fs::write(root.join("wiki/explorations/review.md"), format!("---\ntype: exploration\ntitle: Review\nreview: {metadata}\n---\n# Review\nNew scoped issue.\n")).unwrap();
+            let current = fixture.json(&["work", "context", "--task-id", &task.task_id]);
+            assert_ne!(current["context_revision"], context["context_revision"]);
+            assert_eq!(
+                current["source_context_revision"],
+                context["source_context_revision"]
+            );
+            let report = fixture.run();
+            assert_eq!(report["halted"], false, "{engine}/{bounded}: {report}");
+            assert_eq!(report["recovered_section_proposals"], 1, "{report}");
+            assert_eq!(report["semantic_calls"], 1, "{report}");
+            assert!(fixture.done(&task), "{report}");
+            assert!(!staged.exists());
+            let receipt = std::fs::read_dir(root.join(".lorekeeper/queue/recovery"))
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap()
+                .path();
+            let archived: Value = serde_json::from_slice(&std::fs::read(receipt).unwrap()).unwrap();
+            assert_eq!(archived["proposal_raw"], prior);
+            assert_eq!(
+                archived["completions"].as_object().unwrap().len(),
+                if bounded { 2 } else { 0 }
+            );
+            if let Some(paid) = paid {
+                assert!(!paid.is_empty());
+                for (path, raw) in paid {
+                    assert_eq!(std::fs::read(path).unwrap(), raw);
+                }
+            }
+            let calls = fixture.calls();
+            assert_eq!(fixture.run()["semantic_calls"], 0);
+            assert_eq!(fixture.calls(), calls);
+            assert_eq!(std::fs::read(&fixture.config).unwrap(), config);
         }
     }
 }

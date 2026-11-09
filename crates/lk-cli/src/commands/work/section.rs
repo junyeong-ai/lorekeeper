@@ -231,12 +231,13 @@ mod tests {
     #[test]
     fn staged_sections_reject_new_scoped_reviews_without_retagging() {
         for bounded in [false, true] {
-            assert_staged_review_scope(bounded);
+            assert_staged_review_scope(bounded, false);
         }
+        assert_staged_review_scope(true, true);
     }
 
     #[cfg(unix)]
-    fn assert_staged_review_scope(bounded: bool) {
+    fn assert_staged_review_scope(bounded: bool, published: bool) {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().canonicalize().unwrap();
         let config_path = root.join("config.yaml");
@@ -359,7 +360,93 @@ mod tests {
             super::super::queue_result_path(task.kind, &serde_json::to_value(&result).unwrap())
                 .unwrap();
         let retained: lk_queue::SectionResult =
-            serde_json::from_slice(&std::fs::read(root.join(path)).unwrap()).unwrap();
+            serde_json::from_slice(&std::fs::read(root.join(&path)).unwrap()).unwrap();
         assert_eq!(retained.context_revision, result.context_revision);
+        if bounded {
+            let prepared = super::super::resources::task(&root, &config, &task.task_id).unwrap();
+            let work = super::super::expected(&root, &prepared, &config, &revision).unwrap();
+            let nodes = root
+                .join(".lorekeeper/work")
+                .join(&work.plan.id)
+                .join("nodes");
+            let paid = std::fs::read_dir(&nodes)
+                .unwrap()
+                .map(|entry| {
+                    let path = entry.unwrap().path();
+                    (path.clone(), std::fs::read(path).unwrap())
+                })
+                .collect::<Vec<_>>();
+            assert!(!super::super::is_finished(&root, &config, &revision, &work.plan.id).unwrap());
+            let session = lk_vault::MutationSession::acquire(&root).unwrap();
+            assert!(
+                super::super::restage_finished(
+                    &session,
+                    &config,
+                    &revision,
+                    &work.plan.id,
+                    &lk_vault::ReadControl::default()
+                )
+                .is_err()
+            );
+            if published {
+                let mut publication = lk_vault::MutationPlan::default();
+                work.plan_publication(
+                    &mut publication,
+                    &root,
+                    &serde_json::to_value(&result).unwrap(),
+                )
+                .unwrap();
+                session.apply(publication).unwrap();
+                assert!(
+                    super::super::is_finished(&root, &config, &revision, &work.plan.id).is_err()
+                );
+            } else {
+                let mut guards = lk_vault::MutationPlan::default();
+                let (_, completions) = super::super::plan_section_recovery(
+                    &root,
+                    &config,
+                    &revision,
+                    &task,
+                    &result,
+                    &mut guards,
+                    &lk_vault::ReadControl::default(),
+                )
+                .unwrap()
+                .unwrap();
+                assert_eq!(completions.len(), 2);
+                let final_path = Path::new(".lorekeeper/work")
+                    .join(&work.plan.id)
+                    .join("final.json");
+                assert_eq!(
+                    serde_json::from_str::<Value>(&completions[&final_path]).unwrap(),
+                    serde_json::to_value(&result).unwrap()
+                );
+                session.apply(guards).unwrap();
+                std::fs::remove_file(root.join(&path)).unwrap();
+                let super::super::FinalizationPreparation::Ready(fresh) =
+                    super::super::prepare_finalization(&root, &config, &revision, &work.plan.id)
+                        .unwrap()
+                else {
+                    panic!("fresh section");
+                };
+                assert_ne!(fresh.result.context_revision, result.context_revision);
+                super::super::finish_section(
+                    &session,
+                    &config,
+                    &revision,
+                    &work.plan.id,
+                    *fresh,
+                    "A summary of the source with the current review.".into(),
+                    &lk_vault::ReadControl::default(),
+                )
+                .unwrap();
+                assert!(
+                    super::super::is_finished(&root, &config, &revision, &work.plan.id).unwrap()
+                );
+            }
+            for (path, raw) in paid {
+                assert_eq!(std::fs::read(path).unwrap(), raw);
+            }
+        }
     }
 }

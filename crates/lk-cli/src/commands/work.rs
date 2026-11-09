@@ -588,6 +588,110 @@ pub(super) fn prepare_queue_publication_controlled(
     })
 }
 
+fn guard_section_context(
+    root: &Path,
+    config: &lk_core::config::Config,
+    config_revision: &str,
+    prepared: &Prepared,
+    result: &Value,
+    mutation: &mut lk_vault::MutationPlan,
+) -> miette::Result<()> {
+    let Subject::Queue { task_id, .. } = &prepared.subject else {
+        return Ok(());
+    };
+    let kind: lk_queue::TaskKind =
+        serde_json::from_value(prepared.context["purpose"]["task_kind"].clone())
+            .into_diagnostic()?;
+    if matches!(
+        kind,
+        lk_queue::TaskKind::ExtractConcepts | lk_queue::TaskKind::SynthesizeConcept
+    ) {
+        return Ok(());
+    }
+    let result: lk_queue::SectionResult =
+        serde_json::from_value(result.clone()).into_diagnostic()?;
+    let Some(revision) = &result.context_revision else {
+        return Ok(());
+    };
+    let scope = resources::section_task_controlled(root, config, task_id, prepared.read_control())?;
+    if *revision != scope.revision(config_revision)?
+        && *revision != scope.legacy_revision(config_revision)?
+    {
+        return Err(publication_rejection(
+            RejectionKind::SemanticContextChanged,
+            "section review/read scope changed; reread and regenerate the result",
+        ));
+    }
+    scope.guard_pages(mutation);
+    Ok(())
+}
+
+#[cfg(unix)]
+pub(super) fn plan_section_recovery(
+    root: &Path,
+    config: &lk_core::config::Config,
+    config_revision: &str,
+    task: &lk_queue::QueueTask,
+    result: &lk_queue::SectionResult,
+    mutation: &mut lk_vault::MutationPlan,
+    read: &lk_vault::ReadControl,
+) -> miette::Result<Option<(String, std::collections::BTreeMap<PathBuf, String>)>> {
+    let Some(revision) = &result.context_revision else {
+        return Ok(None);
+    };
+    let scope = resources::section_task_controlled(root, config, &task.task_id, read)?;
+    let current = scope.revision(config_revision)?;
+    if *revision == current || *revision == scope.legacy_revision(config_revision)? {
+        return Ok(None);
+    }
+    let prepared = resources::task_controlled(root, config, &task.task_id, read)?;
+    let work = expected(root, &prepared, config, config_revision)?;
+    let mut completions = std::collections::BTreeMap::new();
+    if work.is_planned(root)? {
+        if work.plan.max_part_characters.is_none() {
+            return Ok(None);
+        }
+        let directory = Path::new(".lorekeeper/work").join(&work.plan.id);
+        let publication = directory.join("publication.json");
+        if state::read_optional(root, &publication)?.is_some() {
+            return Ok(None);
+        }
+        mutation.require_absent(publication);
+        match work.guard_completion(
+            mutation,
+            root,
+            &prepared.resources,
+            &serde_json::to_value(result).into_diagnostic()?,
+        ) {
+            Ok(()) => {}
+            Err(error) if error.downcast_ref::<state::CompletionRefusal>().is_some() => {
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        }
+        for name in ["final.json", "seal.json", "frontier-seal.json"] {
+            let path = directory.join(name);
+            if let Some(raw) = state::read_optional(root, &path)? {
+                mutation.require_unchanged(&path, raw.clone());
+                completions.insert(path, raw);
+            }
+        }
+        let final_path = directory.join("final.json");
+        let final_raw = completions
+            .get(&final_path)
+            .ok_or_else(|| miette::miette!("sealed recovery requires its exact final result"))?;
+        if super::json::decode_object(final_raw.as_bytes()).into_diagnostic()?
+            != serde_json::to_value(result).into_diagnostic()?
+        {
+            return Err(miette::miette!(
+                "recovery proposal differs from its sealed final result"
+            ));
+        }
+    }
+    scope.guard_pages(mutation);
+    Ok(Some((current, completions)))
+}
+
 pub(super) fn task_context(
     root: &Path,
     config: &lk_core::config::Config,
@@ -654,6 +758,17 @@ pub(super) fn task_context(
     };
     let work = expected(&root, &prepared, config, config_revision)?;
     let requires_bounded_work = work.plan.parts.len() > 1;
+    let (prepared, context_revision) = if matches!(
+        task.kind,
+        lk_queue::TaskKind::ExtractConcepts | lk_queue::TaskKind::SynthesizeConcept
+    ) {
+        (prepared, work.plan.subject_revision.clone())
+    } else {
+        let scope =
+            resources::section_task_controlled(&root, config, task_id, prepared.read_control())?;
+        let revision = scope.revision(config_revision)?;
+        (scope, revision)
+    };
     let plan_command = if requires_bounded_work {
         let mut command = vec![
             json!("lore"),
@@ -683,7 +798,8 @@ pub(super) fn task_context(
         "status":"ready",
         "requires_screening":false,
         "selection":prepared.context["purpose"]["extraction_scope"]["selection"],
-        "context_revision": work.plan.subject_revision,
+        "context_revision": context_revision,
+        "source_context_revision": work.plan.subject_revision,
         "subject": prepared.subject,
         "context": prepared.context,
         "resource_count":prepared.resources.len(),
@@ -2210,7 +2326,7 @@ pub(super) fn audit_processing_hold_controlled(
     let prepared = resources::audit_candidate_controlled(root, config, candidate, read)?;
     let work = expected(root, &prepared, config, config_revision)?;
     let planned = work.is_planned(root)?;
-    if planned && is_finished_prepared(root, &work, &prepared)? {
+    if planned && is_finished_prepared(root, config, config_revision, &work, &prepared)? {
         return Ok(None);
     }
     if let Some(reason) = audit::processing_hold(root, config_revision, candidate, &prepared)? {
@@ -2907,7 +3023,7 @@ fn prepare_native_finalization_from_capture(
     frontier: bool,
 ) -> miette::Result<FinalizationCheckpoint> {
     let started_at = std::time::Instant::now();
-    let finished = is_finished_prepared(root, work, prepared)?;
+    let finished = is_finished_prepared(root, config, config_revision, work, prepared)?;
     let verification_duration_ms = started_at.elapsed().as_millis() as u64;
     let started_at = std::time::Instant::now();
     let state = if finished {
@@ -3407,11 +3523,17 @@ fn is_finished(
 ) -> miette::Result<bool> {
     let root = root.canonicalize().into_diagnostic()?;
     let (work, prepared) = load(&root, config, config_revision, id)?;
-    is_finished_prepared(&root, &work, &prepared)
+    is_finished_prepared(&root, config, config_revision, &work, &prepared)
 }
 
 #[cfg(any(unix, test))]
-fn is_finished_prepared(root: &Path, work: &Work, prepared: &Prepared) -> miette::Result<bool> {
+fn is_finished_prepared(
+    root: &Path,
+    config: &lk_core::config::Config,
+    config_revision: &str,
+    work: &Work,
+    prepared: &Prepared,
+) -> miette::Result<bool> {
     let directory = Path::new(".lorekeeper/work").join(&work.plan.id);
     match state::load_result(root, &directory.join("final.json"))? {
         None => {
@@ -3430,7 +3552,41 @@ fn is_finished_prepared(root: &Path, work: &Work, prepared: &Prepared) -> miette
             &prepared.resources,
             &result,
         ) {
-            Ok(()) => Ok(true),
+            Ok(()) => {
+                let mut guards = lk_vault::MutationPlan::default();
+                match guard_section_context(
+                    root,
+                    config,
+                    config_revision,
+                    prepared,
+                    &result,
+                    &mut guards,
+                ) {
+                    Ok(()) => Ok(true),
+                    Err(error)
+                        if error
+                            .downcast_ref::<super::queue::application::PublicationRejection>()
+                            .is_some_and(|error| {
+                                error.kind == RejectionKind::SemanticContextChanged
+                            }) =>
+                    {
+                        if state::read_optional(root, &directory.join("publication.json"))?
+                            .is_some()
+                        {
+                            return Err(miette::miette!(
+                                "published section completion cannot be replaced"
+                            ));
+                        }
+                        if work.plan.max_part_characters.is_none() {
+                            return Err(miette::miette!(
+                                "legacy scoped section completion requires explicit regeneration"
+                            ));
+                        }
+                        Ok(false)
+                    }
+                    Err(error) => Err(error),
+                }
+            }
             Err(error)
                 if matches!(
                     error.downcast_ref::<state::CompletionRefusal>(),
@@ -3472,6 +3628,14 @@ pub(super) fn restage_finished(
         .ok_or_else(|| miette::miette!("work final result is missing"))?;
     let mut mutation = lk_vault::MutationPlan::default();
     work.guard_completion(&mut mutation, root, &prepared.resources, &result)?;
+    guard_section_context(
+        root,
+        config,
+        config_revision,
+        &prepared,
+        &result,
+        &mut mutation,
+    )?;
     prepared.guard_pages(&mut mutation);
     mutation.require_unchanged(final_path, final_raw);
     let path = match &prepared.subject {
@@ -4865,7 +5029,9 @@ mod tests {
             let before = work_snapshot(&root, &work.plan.id);
             if artifact == "final.json" {
                 assert!(verify_finished_prepared(&root, &work, &prepared).is_err());
-                assert!(is_finished_prepared(&root, &work, &prepared).is_err());
+                let (config, revision) =
+                    lk_core::config::Config::load_with_revision(&root.join("config.yaml")).unwrap();
+                assert!(is_finished_prepared(&root, &config, &revision, &work, &prepared).is_err());
             }
             let (config, revision) =
                 lk_core::config::Config::load_with_revision(&root.join("config.yaml")).unwrap();
@@ -5002,7 +5168,9 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
         std::os::unix::fs::symlink(outside.path(), &path).unwrap();
         assert!(verify_finished_prepared(&root, &work, &prepared).is_err());
-        assert!(is_finished_prepared(&root, &work, &prepared).is_err());
+        let (config, revision) =
+            lk_core::config::Config::load_with_revision(&root.join("config.yaml")).unwrap();
+        assert!(is_finished_prepared(&root, &config, &revision, &work, &prepared).is_err());
         assert_eq!(std::fs::read(outside.path()).unwrap(), raw);
         assert!(
             std::fs::symlink_metadata(path)
