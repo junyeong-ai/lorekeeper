@@ -27,6 +27,9 @@ mod audit_recovery;
 #[path = "native_execution/whole_audit.rs"]
 mod whole_audit;
 
+#[path = "native_execution/audit_screening.rs"]
+mod audit_screening;
+
 #[path = "native_execution/automation.rs"]
 mod automation;
 
@@ -49,6 +52,11 @@ impl Fixture {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path();
         std::fs::create_dir_all(root.join("vault/inbox")).unwrap();
+        std::fs::write(
+            root.join("screen-audit-fixture.py"),
+            audit_screening::INSPECT_FIXTURE,
+        )
+        .unwrap();
         let agent = root.join("agent executable");
         let version = if engine == "codex" {
             "codex-cli 0.163.0"
@@ -242,6 +250,7 @@ if '\nNative request:\n' not in prompt:
         path=root/'discovery.json'
         path.write_text(json.dumps(discovery))
         subprocess.run([os.environ['LORE_BIN'],'wiki','audit-discover','--file',str(path)],check=True)
+        subprocess.run(['python3',str(root/'screen-audit-fixture.py'),discovery['path']],check=True)
     raise SystemExit(0)
 request=json.loads(prompt.split('\nNative request:\n',1)[1])
 assert request['schema']=='native-audit-results-v1'
@@ -303,6 +312,25 @@ fn record_discovery(fixture: &Fixture, path: &str) {
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
+    screen_fixture_candidates(fixture, path);
+}
+
+fn screen_fixture_candidates(fixture: &Fixture, path: &str) {
+    let result = Command::new("python3")
+        .arg(fixture.root().join("screen-audit-fixture.py"))
+        .arg(path)
+        .env("TEST_EXECUTION_ROOT", fixture.root())
+        .env("LORE_BIN", env!("CARGO_BIN_EXE_lore"))
+        .env("LORE_CONFIG", &fixture.config)
+        .env("XDG_CONFIG_HOME", fixture.root().join("config"))
+        .env("LORE_INSTALL_DATA_DIR", fixture.root().join("data"))
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
 }
 
 #[test]
@@ -321,6 +349,7 @@ request['queries']=[{'query':candidate['title'],'phrase':True,'spacing':False}]
 path=root/'discovery.json'
 path.write_text(json.dumps(request))
 subprocess.run([os.environ['LORE_BIN'],'wiki','audit-discover','--file',str(path)],check=True)
+subprocess.run(['python3',str(root/'screen-audit-fixture.py'),request['path']],check=True)
 DISCOVERY
     exit $?
 esac
@@ -418,6 +447,7 @@ for candidate in json.loads((root/'plan.json').read_text())['candidates']:
     path=root/'discovery.json'
     path.write_text(json.dumps(request))
     subprocess.run([os.environ['LORE_BIN'],'wiki','audit-discover','--file',str(path)],check=True)
+    subprocess.run(['python3',str(root/'screen-audit-fixture.py'),request['path']],check=True)
 DISCOVERY
     exit $?
 esac
@@ -725,6 +755,7 @@ for subject in paths:
     path=root/'discovery.json'
     path.write_text(json.dumps(request))
     subprocess.run([os.environ['LORE_BIN'],'wiki','audit-discover','--file',str(path)],check=True)
+    subprocess.run(['python3',str(root/'screen-audit-fixture.py'),request['path']],check=True)
 if (root/'corrupt-after-discovery').exists():
     (root/'vault/.lorekeeper/queue/unknown.jsonl').write_text('unparseable task\n')
 DISCOVER

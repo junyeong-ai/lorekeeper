@@ -27,10 +27,12 @@ The scheduler emits native commands:
 With `execution.automation`, schedules add `--scheduled --json` to daily/process/
 knowledge jobs and add one process job at `automation.process_schedule`. Process and
 knowledge repeat ready batches within `max_run_seconds`; daily collects once.
-Execution time starts at the first acquired workflow lease and excludes subsequent
-workflow waiting. Total waiting across the invocation is bounded separately by
-`max_wait_seconds`, which defaults to `max_run_seconds`. Neither budget renews
-at a batch boundary.
+Semantic execution time starts at the controller's first acquired semantic workflow
+lease and excludes its later workflow acquisition waits. Those waits share
+`max_wait_seconds`, which defaults to `max_run_seconds`; neither allowance renews
+at a batch boundary. This waiting allowance does not bound source collection,
+daily ingest's separate publication lease, or short writer-lock waits. Duration
+limits stop new agent calls; returned results remain recordable.
 The selected profile's `execution.work.max_calls` also caps the complete scheduled
 invocation across those batches; a batch boundary cannot renew that allowance.
 Optional `automation.knowledge_schedule` overrides the knowledge job's timing;

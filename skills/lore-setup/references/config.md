@@ -224,7 +224,10 @@ Optional positive `max_screening_batches` limits the complete candidate-card
 selection's packet count. Omission is unlimited; exceeding it preserves the full
 scope and paid decisions, defers that task before invocation and permits independent
 work. Use `lore work cost --task-id ID` to inspect counts/JSON bytes without writes.
-For new Work and candidate selections, call/parallel/consecutive-call/screening-packet limits and
+The same scope limit covers fresh audit discovery; `lore wiki audit-candidates SUBJECT`
+reports its current packet, progress and admission without writes. Existing legacy
+audit recipes retain full-context reading, and completed screening needs no new calls.
+For new Work and extraction candidate selections, call/parallel/consecutive-call/screening-packet limits and
 profile timeouts can change between workflows without discarding paid observations.
 Every configuration byte is still pinned during execution. Model/effort, input/result
 limits and semantic policies remain identity inputs. Legacy byte-bound work requires

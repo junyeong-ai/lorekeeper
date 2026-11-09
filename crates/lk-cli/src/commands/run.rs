@@ -534,6 +534,11 @@ mod native {
         after: Option<lk_graph::audit::AuditCoverage>,
     }
 
+    struct AuditCheckpoint {
+        plan: lk_graph::audit::AuditPlan,
+        candidate: Option<lk_graph::audit::AuditCandidate>,
+    }
+
     #[derive(Serialize)]
     struct JobResult {
         operation: Operation,
@@ -681,6 +686,7 @@ mod native {
         project_protection: Option<crate::commands::installation::Protection>,
         drain_blocked: bool,
         inspection_deferred: std::collections::BTreeMap<String, String>,
+        audit_screening_deferred: std::collections::BTreeMap<String, String>,
         audit_batch: Option<Vec<lk_graph::audit::AuditCandidate>>,
         queue_turn: Option<QueueTurn>,
         queue_admitted: scheduler::AdmittedTurns,
@@ -4693,6 +4699,14 @@ mod native {
         }
 
         fn audit_plan(&mut self, paths: &[String]) -> miette::Result<lk_graph::audit::AuditPlan> {
+            Ok(self.audit_checkpoint(paths, None)?.plan)
+        }
+
+        fn audit_checkpoint(
+            &mut self,
+            paths: &[String],
+            subject: Option<&str>,
+        ) -> miette::Result<AuditCheckpoint> {
             let pages = lk_graph::scan::scan_vault_controlled(
                 &self.root,
                 self.config.graph.scope.follow_links,
@@ -4701,6 +4715,7 @@ mod native {
             .map_err(|e| miette::miette!("{e}"))?;
             let mut readiness =
                 InputAvailability::load_controlled(&self.root, self.supervisor.read_control())?;
+            let mut captured = None;
             let plan = lk_graph::audit::plan_selected_available_partitioned_controlled(
                 &self.root,
                 &self.config.vault.dirs,
@@ -4708,13 +4723,290 @@ mod native {
                 self.config.graph.audit.batch_size,
                 paths,
                 self.config.graph.audit.max_input_bytes,
-                &mut |candidate| readiness.check(candidate),
+                &mut |candidate| {
+                    if subject == Some(candidate.path.as_str()) {
+                        captured = Some(candidate.clone());
+                    }
+                    if let Some(reason) = self.audit_screening_deferred.get(&candidate.path) {
+                        Ok(readiness.defer(candidate, vec![reason.clone()]))
+                    } else {
+                        readiness.check(candidate)
+                    }
+                },
                 self.supervisor.read_control(),
             )
             .map_err(|e| miette::miette!("{e}"))?;
             self.result.audit_deferred = readiness.deferred().to_vec();
             self.result.audit_deferred_count = readiness.deferred_count();
-            Ok(plan)
+            Ok(AuditCheckpoint {
+                plan,
+                candidate: captured,
+            })
+        }
+
+        fn audit_screening_limits(
+            &self,
+        ) -> miette::Result<lk_graph::audit::selection::ScreeningLimits> {
+            let budget = self.config.execution.effective_work().into_diagnostic()?;
+            Ok(lk_graph::audit::selection::ScreeningLimits {
+                max_input_bytes: budget.max_input_bytes,
+                max_result_bytes: budget.max_result_bytes,
+                max_candidates: 20,
+                max_batches: budget.max_screening_batches.map(|value| value.get()),
+            })
+        }
+
+        fn defer_audit_screening(
+            &mut self,
+            candidate: &lk_graph::audit::AuditCandidate,
+            reason: String,
+        ) {
+            self.audit_screening_deferred
+                .insert(candidate.path.clone(), reason.clone());
+            self.deferred(
+                "audit candidate selection",
+                format!("{}: {reason}", candidate.path),
+            );
+        }
+
+        async fn screen_audit_inputs(
+            &mut self,
+            paths: &[String],
+            mut plan: lk_graph::audit::AuditPlan,
+        ) -> Option<lk_graph::audit::AuditPlan> {
+            let limits = match self.audit_screening_limits() {
+                Ok(limits) => limits,
+                Err(error) => {
+                    self.failure("audit screening budget", error);
+                    return None;
+                }
+            };
+            let mut drifted = std::collections::BTreeSet::new();
+            loop {
+                let Some(candidate) = plan
+                    .candidates
+                    .iter()
+                    .find(|candidate| {
+                        candidate
+                            .discovery
+                            .as_ref()
+                            .and_then(|discovery| discovery.selection.as_ref())
+                            .is_some_and(|progress| !progress.is_ready())
+                    })
+                    .cloned()
+                else {
+                    return Some(plan);
+                };
+                let packet = match lk_graph::audit::selection::prepare_candidate_packet(
+                    &self.root,
+                    &self.config.vault.dirs,
+                    &candidate,
+                    limits,
+                    false,
+                    self.supervisor.read_control(),
+                ) {
+                    Ok(packet) => packet,
+                    Err(error @ lk_graph::GraphError::AuditScreeningCapacity { .. }) => {
+                        self.defer_audit_screening(&candidate, error.to_string());
+                        plan = match self.audit_plan(paths) {
+                            Ok(plan) => plan,
+                            Err(error) => {
+                                self.failure("audit screening replanning", error);
+                                return None;
+                            }
+                        };
+                        continue;
+                    }
+                    Err(error) => {
+                        self.failure("audit screening preparation", error);
+                        return None;
+                    }
+                };
+                if let Some(admission) = packet.admission {
+                    self.defer_audit_screening(
+                        &candidate,
+                        format!(
+                            "complete discovery needs {} packets, above max_screening_batches {}",
+                            admission.required_batches, admission.maximum_batches
+                        ),
+                    );
+                    plan = match self.audit_plan(paths) {
+                        Ok(plan) => plan,
+                        Err(error) => {
+                            self.failure("audit screening replanning", error);
+                            return None;
+                        }
+                    };
+                    continue;
+                }
+                if let Some(refresh) = packet.refresh {
+                    let (session, waited) =
+                        self.mutation_session("audit selection refresh").await?;
+                    if waited {
+                        drop(session);
+                        if !drifted.insert(candidate.path.clone()) {
+                            self.defer_audit_screening(
+                                &candidate,
+                                "writer contention repeated during candidate inventory refresh"
+                                    .into(),
+                            );
+                        }
+                        plan = match self.audit_plan(paths) {
+                            Ok(plan) => plan,
+                            Err(error) => {
+                                self.failure("audit selection replanning", error);
+                                return None;
+                            }
+                        };
+                        continue;
+                    }
+                    let result = (|| {
+                        let pages = lk_graph::scan::scan_vault_controlled(
+                            session.root(),
+                            self.config.graph.scope.follow_links,
+                            self.supervisor.read_control(),
+                        )?;
+                        lk_graph::audit::selection::record(
+                            &session,
+                            &self.config.vault.dirs,
+                            &pages,
+                            refresh,
+                            limits,
+                            self.supervisor.read_control(),
+                        )
+                    })();
+                    match result {
+                        Ok(_) => {}
+                        Err(lk_graph::GraphError::AuditScreeningChanged) => {
+                            if !drifted.insert(candidate.path.clone()) {
+                                self.defer_audit_screening(
+                                    &candidate,
+                                    "candidate inputs changed repeatedly during inventory refresh"
+                                        .into(),
+                                );
+                            }
+                        }
+                        Err(error) => {
+                            self.failure("audit selection refresh", error);
+                            return None;
+                        }
+                    }
+                    drop(session);
+                    plan = match self.audit_plan(paths) {
+                        Ok(plan) => plan,
+                        Err(error) => {
+                            self.failure("audit selection replanning", error);
+                            return None;
+                        }
+                    };
+                    continue;
+                }
+                let Some(request) = packet.request else {
+                    self.defer_audit_screening(
+                        &candidate,
+                        "discovery candidates remain deferred for explicit reassessment".into(),
+                    );
+                    plan = match self.audit_plan(paths) {
+                        Ok(plan) => plan,
+                        Err(error) => {
+                            self.failure("audit selection replanning", error);
+                            return None;
+                        }
+                    };
+                    continue;
+                };
+                let directory = match crate::commands::private_directory::temporary(
+                    "lorekeeper-audit-screening-",
+                ) {
+                    Ok(directory) => directory,
+                    Err(error) => {
+                        self.failure("audit screening input", error);
+                        return None;
+                    }
+                };
+                let file = directory.path().join("packet.json");
+                if let Err(error) = std::fs::write(
+                    &file,
+                    serde_json::to_vec(&request).expect("typed audit packet serializes"),
+                ) {
+                    self.failure("audit screening input", error);
+                    return None;
+                }
+                let subject = serde_json::to_string(&candidate.path).expect("subject serializes");
+                let file = serde_json::to_string(&file).expect("path serializes");
+                let packet_revision = packet
+                    .request_revision
+                    .expect("prepared request has a revision");
+                let prompt = format!(
+                    "screen. Read the bounded audit discovery packet at {file} for subject {subject}; its exact packet_revision is {packet_revision}. Read the subject's revision-pinned scope and the necessary source context, then judge every assigned card independently. Record exactly this one packet through wiki audit-select. Use inspect for potentially applicable or uncertain scope, not-selected only for inapplicable scope, and defer for an explicit unresolved prerequisite. Do not reassess old decisions, record other packets, change discovery, curate pages, audit or finalize assessments. Read the lore-wiki screening procedure."
+                );
+                if !self
+                    .consumer(
+                        ExecutionStage::Screening,
+                        "lore-wiki",
+                        &prompt,
+                        Some(directory.path()),
+                    )
+                    .await
+                {
+                    return None;
+                }
+                let checkpoint = match self.audit_checkpoint(paths, Some(&candidate.path)) {
+                    Ok(checkpoint) => checkpoint,
+                    Err(error) => {
+                        self.failure("audit screening verification", error);
+                        return None;
+                    }
+                };
+                let Some(current) = checkpoint.candidate.as_ref() else {
+                    self.failure(
+                        "audit screening verification",
+                        "assigned subject was not captured after screening",
+                    );
+                    return None;
+                };
+                match lk_graph::audit::selection::packet_status(
+                    &self.root,
+                    &self.config.vault.dirs,
+                    current,
+                    &request,
+                    self.supervisor.read_control(),
+                ) {
+                    Ok(lk_graph::audit::selection::PacketStatus::Recorded) => {
+                        self.result
+                            .work_telemetry
+                            .retained_progress
+                            .screening_packets += 1;
+                    }
+                    Ok(lk_graph::audit::selection::PacketStatus::Changed) => {
+                        self.defer_audit_screening(
+                            current,
+                            "assigned candidate inputs changed; recorded judgments remain retained"
+                                .into(),
+                        );
+                        plan = match self.audit_plan(paths) {
+                            Ok(plan) => plan,
+                            Err(error) => {
+                                self.failure("audit selection replanning", error);
+                                return None;
+                            }
+                        };
+                        continue;
+                    }
+                    Ok(lk_graph::audit::selection::PacketStatus::Unrecorded) => {
+                        self.failure(
+                            "audit screening receipt",
+                            "the exact assigned candidate packet was not recorded",
+                        );
+                        return None;
+                    }
+                    Err(error) => {
+                        self.failure("audit screening receipt", error);
+                        return None;
+                    }
+                }
+                plan = checkpoint.plan;
+            }
         }
 
         async fn discover_audit(&mut self, paths: &[String]) -> bool {
@@ -4795,7 +5087,7 @@ mod native {
                     return None;
                 }
             }
-            Some(plan)
+            self.screen_audit_inputs(paths, plan).await
         }
 
         async fn admit_audit(&mut self) -> miette::Result<lk_graph::audit::AuditPlan> {
@@ -5123,46 +5415,12 @@ mod native {
                 .iter()
                 .map(|candidate| candidate.path.clone())
                 .collect::<Vec<_>>();
-            let missing = plan
-                .candidates
-                .iter()
-                .filter(|candidate| candidate.discovery.is_none())
-                .map(|candidate| candidate.path.clone())
-                .collect::<Vec<_>>();
-            if !missing.is_empty() {
-                if !self.discover_audit(&missing).await {
-                    return;
-                }
-                plan = match self.audit_plan(&paths) {
-                    Ok(plan) => plan,
-                    Err(error) => {
-                        self.failure("discovery planning", error);
-                        return;
-                    }
-                };
-                if self.result.audit_deferred_count > 0 {
-                    self.deferred(
-                        "audit discovery dependencies",
-                        format!(
-                            "{} selected audit subjects have unfinished discovered inputs; retained for later assessment",
-                            self.result.audit_deferred_count,
-                        ),
-                    );
-                    if plan.candidates.is_empty() {
-                        return;
-                    }
-                }
-                if plan
-                    .candidates
-                    .iter()
-                    .any(|candidate| candidate.discovery.is_none())
-                {
-                    self.failure(
-                        "related-document discovery",
-                        "selected subjects lack current recorded search queries",
-                    );
-                    return;
-                }
+            let Some(fresh) = self.replan_audit(&paths).await else {
+                return;
+            };
+            plan = fresh;
+            if plan.candidates.is_empty() {
+                return;
             }
             let mut bounded = plan.input.ensure_ready().is_err();
             for candidate in &plan.candidates {
@@ -5520,6 +5778,7 @@ mod native {
             project_protection: None,
             drain_blocked: false,
             inspection_deferred: std::collections::BTreeMap::new(),
+            audit_screening_deferred: std::collections::BTreeMap::new(),
             audit_batch: None,
             queue_turn: None,
             queue_replan: false,

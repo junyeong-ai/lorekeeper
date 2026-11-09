@@ -977,6 +977,8 @@ pub(super) fn audit_candidate_controlled(
     read: &lk_vault::ReadControl,
 ) -> miette::Result<Prepared> {
     let path = candidate.path.as_str();
+    let selection = lk_graph::audit::selection::state_reference(candidate)
+        .map_err(|error| miette::miette!("{error}"))?;
     let mut captured = Capture::new(root, read);
     captured.page(
         path,
@@ -1003,13 +1005,17 @@ pub(super) fn audit_candidate_controlled(
         file_revision: candidate.file_revision.clone(),
         input_revision: candidate.input_revision.clone(),
     };
-    let context = json!({
+    let mut context = json!({
         "subject": subject,
         "purpose": {"operation":"audit", "subject_kind":candidate.kind, "path":path, "title":candidate.title, "locale":config.vault.locale,
             "discovery_queries":candidate.discovery.as_ref().map(|discovery| &discovery.queries),
             "review_dependencies":candidate.reviews.iter().map(|review| &review.path).collect::<Vec<_>>()},
         "authority": "The selected page is the audit subject. Concept citations are evidence; a document is its own subject without a self-citation. Related pages are context, not automatically support. Reviews and historical archives are assessments/history, not independent corroboration. Join source-declared scope, time and attribution before judging contradictions; unknown context stays unknown.",
     });
+    if let Some(reference) = selection {
+        context["purpose"]["audit_selection"] =
+            serde_json::to_value(reference).into_diagnostic()?;
+    }
     Ok(captured.finish(subject, context, config))
 }
 

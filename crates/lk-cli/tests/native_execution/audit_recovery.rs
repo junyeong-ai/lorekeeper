@@ -445,6 +445,7 @@ fn bounded_audit_replans_a_workflow_merge_to_its_current_survivor() {
         path=root/'discovery.json'
         path.write_text(json.dumps(discovery))
         cli('wiki','audit-discover','--file',str(path))
+        subprocess.run(['python3',str(root/'screen-audit-fixture.py'),discovery['path']],check=True)
         (root/'merged-once').write_text('merged')
         respond({'results':[{'status':'needs-action','disposition':None,'reason':'The supported merge changed this audit subject.'}]})
         raise SystemExit(0)

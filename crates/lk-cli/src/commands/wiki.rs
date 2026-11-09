@@ -143,6 +143,22 @@ pub enum WikiCommand {
         #[arg(long)]
         file: PathBuf,
     },
+    /// Read one bounded audit discovery candidate packet without writing (JSON)
+    AuditCandidates {
+        /// Exact vault-relative audit subject
+        path: String,
+        /// Maximum assigned candidates (1..100)
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        /// Explicitly reassess previously deferred candidates
+        #[arg(long)]
+        reassess: bool,
+    },
+    /// Record exact candidate decisions or refresh their immutable inventory (JSON)
+    AuditSelect {
+        #[arg(long)]
+        file: PathBuf,
+    },
     /// Record completed semantic reads with current subject and dependency guards (JSON)
     AuditRecord {
         /// JSON assessments with exact subject and semantic input revisions
@@ -638,6 +654,71 @@ pub async fn run(opts: &super::GlobalOptions, cmd: WikiCommand) -> miette::Resul
             lk_graph::audit::record_discovery(&session, &config.vault.dirs, &pages, request)
                 .map_err(|error| miette::miette!("{error}"))?;
             println!("{}", serde_json::json!({"recorded": true}));
+            Ok(())
+        }
+        WikiCommand::AuditCandidates {
+            path,
+            limit,
+            reassess,
+        } => {
+            let config = load_config(&find_config(opts)?)?;
+            let root = config.vault.root_path();
+            let pages = lk_graph::scan::scan_vault(&root, config.graph.scope.follow_links)
+                .map_err(|error| miette::miette!("{error}"))?;
+            let work = config
+                .execution
+                .effective_work()
+                .map_err(|error| miette::miette!("{error}"))?;
+            let result = lk_graph::audit::selection::candidates(
+                &root,
+                &config.vault.dirs,
+                &pages,
+                &path,
+                lk_graph::audit::selection::ScreeningLimits {
+                    max_input_bytes: work.max_input_bytes,
+                    max_result_bytes: work.max_result_bytes,
+                    max_candidates: limit,
+                    max_batches: work.max_screening_batches.map(|value| value.get()),
+                },
+                reassess,
+                &lk_vault::ReadControl::default(),
+            )
+            .map_err(|error| miette::miette!("{error}"))?;
+            println!(
+                "{}",
+                serde_json::to_string(&result).map_err(|error| miette::miette!("{error}"))?
+            );
+            Ok(())
+        }
+        WikiCommand::AuditSelect { file } => {
+            let config = load_config(&find_config(opts)?)?;
+            let output = serde_json::from_slice(
+                &std::fs::read(file).map_err(|error| miette::miette!("{error}"))?,
+            )
+            .map_err(|error| miette::miette!("{error}"))?;
+            let session =
+                crate::commands::publication::acquire_mutation_now(&config.vault.root_path())?;
+            let pages = lk_graph::scan::scan_vault(session.root(), config.graph.scope.follow_links)
+                .map_err(|error| miette::miette!("{error}"))?;
+            let work = config
+                .execution
+                .effective_work()
+                .map_err(|error| miette::miette!("{error}"))?;
+            let changed = lk_graph::audit::selection::record(
+                &session,
+                &config.vault.dirs,
+                &pages,
+                output,
+                lk_graph::audit::selection::ScreeningLimits {
+                    max_input_bytes: work.max_input_bytes,
+                    max_result_bytes: work.max_result_bytes,
+                    max_candidates: 100,
+                    max_batches: work.max_screening_batches.map(|value| value.get()),
+                },
+                &lk_vault::ReadControl::default(),
+            )
+            .map_err(|error| miette::miette!("{error}"))?;
+            println!("{}", serde_json::json!({"recorded":changed}));
             Ok(())
         }
         WikiCommand::AuditRecord {

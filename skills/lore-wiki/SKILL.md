@@ -5,7 +5,7 @@ description: Searches and maintains a Lorekeeper knowledge wiki. Use for grounde
   auditing knowledge and relationships. Repository-wide extraction uses lore-extract;
   ingest queue processing uses lore-process.
 metadata:
-  version: 0.128.2
+  version: 0.129.0
 ---
 
 # Lorekeeper wiki
@@ -21,6 +21,7 @@ Do not run the other modes as part of a lookup.
 | `capture [topic]` | Record an observed insight from the current conversation or work | [Capture](references/capture.md) |
 | `audit` | Examine structure, relationships, contradictions, coverage and concept identity | [Audit](references/audit.md) |
 | `discover` | Record explicit related-document search queries for selected audit subjects | [Maintenance](references/maintenance.md#related-document-discovery) |
+| `screen` | Judge one bounded packet of audit discovery candidates and retain its exact decisions | [Candidate screening](references/maintenance.md#candidate-screening) |
 | `maintain` | Process one bounded batch of changed and never-reviewed knowledge | [Maintenance](references/maintenance.md) |
 | Native `native-audit-results-v1` | Return judgments for the exact supplied subjects; Rust owns assessment assembly and recording | [Native assessment](references/maintenance.md#native-assessment) |
 | `bounded inspect/finish` | Execute exactly one native partitioned audit unit | [Bounded work](../lore-process/references/bounded-work.md) |

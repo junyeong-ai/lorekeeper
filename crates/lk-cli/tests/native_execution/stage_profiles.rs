@@ -258,6 +258,7 @@ request={{k:candidate[k] for k in ['path','file_revision']}}
 request['queries']=[{{'query':candidate['title'],'phrase':True,'spacing':False}}]
 path=root/'discovery.json';path.write_text(json.dumps(request))
 subprocess.run([lore,'wiki','audit-discover','--file',str(path)],check=True)
+subprocess.run(['python3',str(root/'screen-audit-fixture.py'),request['path']],check=True)
 (root/'discovery-finished').write_text('complete')
 DISCOVER
 exit $?

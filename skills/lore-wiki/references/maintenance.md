@@ -4,6 +4,7 @@
 
 - [Structural preflight and repair](#structural-preflight-and-repair)
 - [Related-document discovery](#related-document-discovery)
+- [Candidate screening](#candidate-screening)
 - [Assessment](#assessment)
 - [Native assessment](#native-assessment)
 - [Operating budget and measurement](#operating-budget-and-measurement)
@@ -47,11 +48,11 @@ Stage JSON under `.lorekeeper/`, then run `lore wiki audit-discover --file FILE`
 }
 ```
 
-Use 1..16 explicit nonblank queries. Native discovery captures every matching knowledge
+Use 1..16 explicit nonblank queries. Discovery captures every matching knowledge
 page, including retired pages, without a top-result cutoff. `wiki audit-plan --path
-SUBJECT` then reports the current query set and complete matched context. Read that
-expanded input through ordinary or bounded work before assessing. If a query is too
-broad, refine it explicitly before assessment; never treat a clipped result as complete.
+SUBJECT` reports the complete match inventory. Fresh recipes require candidate screening
+before full audit reads. An unchanged legacy recipe retains its full-context contract;
+repeating it does not replace existing paid work or opt it into screening.
 Stored queries reopen an assessment when matching pages or their authored revisions
 change. A changed subject needs fresh query selection. Unrelated corpus changes do not
 alone invalidate an assessment. This records the searched scope, not exhaustive semantic
@@ -61,6 +62,49 @@ Discovery does not create citations or semantic graph links. Compare candidates 
 their actual scope/time/attribution and record supported relationships or durable reviews
 through the normal publication contracts. A `discover` session never records completed
 assessments or performs repairs.
+
+## Candidate screening
+
+Run `lore wiki audit-candidates SUBJECT` for the next bounded packet. Copy its top-level
+`request_revision` to the submission's `packet_revision`, and `request.subject` to `path`.
+In native `screen`, read the assigned request file and copy the prompt's supplied
+`packet_revision`; do not fetch another packet. Read the subject's revision-pinned scope
+through `wiki read` and judge
+every assigned card independently. A card is a discovery preview, not evidence of a
+completed source read. Use `inspect` for potentially applicable or uncertain scope,
+`not-selected` for inapplicable scope, or `defer` for an explicit unresolved prerequisite.
+Mandatory evidence and direct links remain required regardless of these decisions.
+
+Submit `lore wiki audit-select --file FILE` with the exact assigned keys and revisions:
+
+```json
+{
+  "action": "record",
+  "path": "wiki/documents/retention-policy.md",
+  "purpose_revision": "FROM_REQUEST",
+  "packet_revision": "FROM_ASSIGNED_PACKET",
+  "decisions": [{
+    "candidate_key": "FROM_ASSIGNED_CARD",
+    "decision": "inspect",
+    "reason": "The candidate addresses the same order-retention condition."
+  }]
+}
+```
+
+Include exactly one reasoned decision per assigned card, preserving order. Keep each
+reason within `max_reason_json_bytes`, including JSON quotes and escapes. Return after
+recording one native packet; the controller verifies its receipt and selects later work.
+Standalone maintenance may request subsequent packets until no unknown candidates remain.
+When `refresh` is returned without a request, submit that exact metadata-only object;
+it refreshes the current inventory without another semantic decision.
+
+Unchanged decisions survive pagination and newly discovered candidates. Changed candidate
+scope, query meaning or subject purpose requires fresh decisions. Unknown and deferred
+candidates prevent completed assessment. Native runs continue later unknown candidates but
+never automatically reassess a defer; use `audit-candidates SUBJECT --reassess` only for an
+explicitly authorized reassessment and copy its `reassess: true` into the submission.
+Configured scope or byte-capacity holds retain the whole inventory and all prior decisions.
+The final audit reads every admitted body; screening creates no citation or completed audit.
 
 ## Assessment
 

@@ -2323,6 +2323,42 @@ pub(super) fn audit_processing_hold_controlled(
     if candidate.discovery.is_none() {
         return Ok(None);
     }
+    if let Some(progress) = candidate
+        .discovery
+        .as_ref()
+        .and_then(|discovery| discovery.selection.as_ref())
+        && !progress.is_ready()
+    {
+        let budget = config.execution.effective_work().into_diagnostic()?;
+        if progress.unknown != 0 {
+            let packet = match lk_graph::audit::selection::prepare_candidate_packet(
+                root,
+                &config.vault.dirs,
+                candidate,
+                lk_graph::audit::selection::ScreeningLimits {
+                    max_input_bytes: budget.max_input_bytes,
+                    max_result_bytes: budget.max_result_bytes,
+                    max_candidates: 20,
+                    max_batches: budget.max_screening_batches.map(|value| value.get()),
+                },
+                false,
+                read,
+            ) {
+                Ok(packet) => packet,
+                Err(error @ lk_graph::GraphError::AuditScreeningCapacity { .. }) => {
+                    return Ok(Some(error.to_string()));
+                }
+                Err(error) => return Err(miette::miette!("{error}")),
+            };
+            if let Some(admission) = packet.admission {
+                return Ok(Some(format!(
+                    "complete audit discovery needs {} packets, above max_screening_batches {}; all candidates remain retained",
+                    admission.required_batches, admission.maximum_batches
+                )));
+            }
+        }
+        return Ok(None);
+    }
     let prepared = resources::audit_candidate_controlled(root, config, candidate, read)?;
     let work = expected(root, &prepared, config, config_revision)?;
     let planned = work.is_planned(root)?;

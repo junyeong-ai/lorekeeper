@@ -551,7 +551,7 @@ execution:
   #   knowledge_schedule: "5,20,35,50 * * * *" # optional; otherwise graph.audit.schedule
   #   max_calls_per_day: 256   # null removes only the shared daily cap; this field is required
   #   max_run_seconds: 900       # stop admitting new calls; retain returned results
-  #   max_wait_seconds: 900      # total workflow waiting; defaults to max_run_seconds
+  #   max_wait_seconds: 900      # semantic workflow acquisition; defaults to max_run_seconds
   # Bounded worker requests/results are compact JSON bytes, not model tokens or cost.
   # Native execution splits evidence and reduces observations in fresh sessions.
   work:

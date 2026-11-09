@@ -22,7 +22,7 @@ deferred subcommands expose their names eagerly for name-only discovery.
   remain valid; another directory or incomplete inherited context refuses. Root context
   validates scope, never lease ownership or reentrancy. Native jobs stop after drift and
   retain unfinished work.
-- New semantic Work and selection identities exclude execution automation policy,
+- New semantic Work and extraction selection identities exclude execution automation policy,
   call/parallel/consecutive-call/screening-packet limits and profile session timeouts.
   Input/result byte limits, extraction policy, model/effort and all other configuration
   remain semantic inputs. The live workflow still pins every configuration byte. Legacy
@@ -136,9 +136,10 @@ deferred subcommands expose their names eagerly for name-only discovery.
   changes, recover corrupt accounting as zero, or detach its writer. This ledger is
   independent of canonical mutation journals; page, Work and cursor writes still use
   `MutationSession`. Execution duration starts with the first owned workflow and
-  excludes later workflow waiting. Total waiting has its own configured bound;
-  neither allowance renews across batches. Duration limits stop new calls, while
-  returned paid results remain recordable. Fatal scheduled failures pause that operation;
+  excludes later controller workflow acquisition waits. Those waits have a separate
+  configured bound; source collection, ingest publication and short writer waits do
+  not use that allowance. Neither allowance renews across batches. Duration limits stop
+  new calls, while returned paid results remain recordable. Fatal scheduled failures pause that operation;
   explicit `--resume` clears its pause without clearing usage or semantic holds.
 - Native writer waiting is cancellable, retries only typed contention and validates the
   same-read config pin before recovery. A pre-host cursor wait discards prepared

@@ -641,11 +641,20 @@ pub struct ScreeningLimits {
     pub max_input_bytes: usize,
     pub max_result_bytes: usize,
     pub max_candidates: usize,
+    pub max_batches: Option<usize>,
+}
+
+#[derive(Serialize)]
+pub struct ScreeningAdmission {
+    pub required_batches: usize,
+    pub maximum_batches: usize,
 }
 
 #[derive(Serialize)]
 pub struct CandidatePacket {
     pub progress: SelectionProgress,
+    pub scope_batches: Option<usize>,
+    pub admission: Option<ScreeningAdmission>,
     pub request_revision: Option<String>,
     pub request: Option<ScreeningRequest>,
     pub refresh: Option<ScreeningOutput>,
@@ -727,16 +736,14 @@ fn capture_cards(
         )?;
         let key = input.key(&progress.purpose_revision)?;
         if !progress.rows.iter().any(|row| row.input == input) {
-            return Err(error("audit candidate scope changed during card capture"));
+            return Err(GraphError::AuditScreeningChanged);
         }
         if cards.insert(key, card.clone()).is_some() {
             return Err(error("duplicate audit candidate owner"));
         }
     }
     if cards.len() != progress.total {
-        return Err(error(
-            "audit candidate membership changed during card capture",
-        ));
+        return Err(GraphError::AuditScreeningChanged);
     }
     Ok(CardCapture {
         cards,
@@ -818,54 +825,24 @@ fn request_for_rows(
     })
 }
 
-pub fn candidates(
-    root: &Path,
-    dirs: &lk_core::config::VaultDirs,
-    pages: &[crate::scan::ScannedPage],
-    path: &str,
+fn build_packet(
+    candidate: &AuditCandidate,
+    eligible: &[StateRow],
+    cards: &BTreeMap<String, lk_vault::DiscoveryCandidate>,
     limits: ScreeningLimits,
     reassess: bool,
-    read: &ReadControl,
-) -> Result<CandidatePacket, GraphError> {
-    if limits.max_candidates == 0 || limits.max_candidates > 100 {
-        return Err(error("audit screening packet requires 1..100 candidates"));
-    }
-    let mut selected =
-        super::load_selected_inputs_controlled(root, dirs, pages, &[path.into()], read)?;
-    let candidate = selected
-        .pop()
-        .ok_or_else(|| error("audit subject is absent"))?;
-    let progress = candidate
-        .discovery
-        .as_ref()
-        .and_then(|discovery| discovery.selection.as_ref())
-        .ok_or_else(|| error("audit subject needs screened discovery"))?;
-    let captured = capture_cards(root, dirs, &candidate, read)?;
+) -> Result<Option<ScreeningRequest>, GraphError> {
     let mut rows = Vec::new();
     let mut request = None;
-    for row in &progress.rows {
-        let key = row.input.key(&progress.purpose_revision)?;
-        let eligible = if reassess {
-            progress.decisions.get(&key) == Some(&ScreeningDecision::Defer)
-        } else {
-            row.decision.is_none()
-        };
-        if !eligible {
-            continue;
-        }
+    for row in eligible {
         let mut next = rows.clone();
         next.push(row);
-        let proposed = match request_for_rows(
-            &candidate,
-            &next,
-            &captured.cards,
-            reassess,
-            limits.max_result_bytes,
-        ) {
-            Ok(request) => request,
-            Err(GraphError::AuditScreeningCapacity { .. }) if request.is_some() => break,
-            Err(error) => return Err(error),
-        };
+        let proposed =
+            match request_for_rows(candidate, &next, cards, reassess, limits.max_result_bytes) {
+                Ok(request) => request,
+                Err(GraphError::AuditScreeningCapacity { .. }) if request.is_some() => break,
+                Err(error) => return Err(error),
+            };
         let bytes = serde_json::to_vec(&proposed).map_err(error)?.len();
         if bytes > limits.max_input_bytes {
             if rows.is_empty() {
@@ -883,14 +860,107 @@ pub fn candidates(
             break;
         }
     }
+    Ok(request)
+}
+
+pub fn candidates(
+    root: &Path,
+    dirs: &lk_core::config::VaultDirs,
+    pages: &[crate::scan::ScannedPage],
+    path: &str,
+    limits: ScreeningLimits,
+    reassess: bool,
+    read: &ReadControl,
+) -> Result<CandidatePacket, GraphError> {
+    let mut selected =
+        super::load_selected_inputs_controlled(root, dirs, pages, &[path.into()], read)?;
+    let candidate = selected
+        .pop()
+        .ok_or_else(|| error("audit subject is absent"))?;
+    prepare_candidate_packet(root, dirs, &candidate, limits, reassess, read)
+}
+
+pub fn prepare_candidate_packet(
+    root: &Path,
+    dirs: &lk_core::config::VaultDirs,
+    candidate: &AuditCandidate,
+    limits: ScreeningLimits,
+    reassess: bool,
+    read: &ReadControl,
+) -> Result<CandidatePacket, GraphError> {
+    if limits.max_candidates == 0 || limits.max_candidates > 100 {
+        return Err(error("audit screening packet requires 1..100 candidates"));
+    }
+    let progress = candidate
+        .discovery
+        .as_ref()
+        .and_then(|discovery| discovery.selection.as_ref())
+        .ok_or_else(|| error("audit subject needs screened discovery"))?;
+    let needs_cards = progress.unknown != 0 || reassess && progress.deferred != 0;
+    let (request, planned_batches) = if needs_cards {
+        let captured = capture_cards(root, dirs, candidate, read)?;
+        let planned_batches = if progress.unknown != 0 && limits.max_batches.is_some() {
+            let fresh = progress
+                .rows
+                .iter()
+                .map(|row| StateRow {
+                    input: row.input.clone(),
+                    decision: None,
+                })
+                .collect::<Vec<_>>();
+            let mut remaining = fresh.as_slice();
+            let mut batches = 0;
+            while !remaining.is_empty() {
+                let packet = build_packet(candidate, remaining, &captured.cards, limits, false)?
+                    .expect("a nonempty fitting inventory yields a packet");
+                remaining = &remaining[packet.candidates.len()..];
+                batches += 1;
+            }
+            Some(batches)
+        } else {
+            None
+        };
+        let eligible = progress
+            .rows
+            .iter()
+            .filter_map(|row| match row.input.key(&progress.purpose_revision) {
+                Ok(key)
+                    if if reassess {
+                        progress.decisions.get(&key) == Some(&ScreeningDecision::Defer)
+                    } else {
+                        row.decision.is_none()
+                    } =>
+                {
+                    Some(Ok(row.clone()))
+                }
+                Ok(_) => None,
+                Err(error) => Some(Err(error)),
+            })
+            .collect::<Result<Vec<_>, GraphError>>()?;
+        (
+            build_packet(candidate, &eligible, &captured.cards, limits, reassess)?,
+            planned_batches,
+        )
+    } else {
+        (None, None)
+    };
+    let admission = planned_batches
+        .zip(limits.max_batches)
+        .filter(|(required, maximum)| required > maximum)
+        .map(|(required_batches, maximum_batches)| ScreeningAdmission {
+            required_batches,
+            maximum_batches,
+        });
     let request_revision = request.as_ref().map(revision).transpose()?;
     let refresh = (request.is_none() && progress.needs_refresh).then(|| ScreeningOutput::Refresh {
-        path: path.into(),
+        path: candidate.path.clone(),
         purpose_revision: progress.purpose_revision.clone(),
         inventory_revision: progress.inventory_revision.clone(),
     });
     Ok(CandidatePacket {
         progress: progress.clone(),
+        scope_batches: planned_batches,
+        admission,
         request_revision,
         request,
         refresh,
@@ -915,6 +985,81 @@ pub fn state_reference(candidate: &AuditCandidate) -> Result<Option<StateReferen
         .clone()
         .map(Some)
         .ok_or_else(|| error("ready audit selection has no retained state"))
+}
+
+pub enum PacketStatus {
+    Recorded,
+    Changed,
+    Unrecorded,
+}
+
+pub fn packet_status(
+    root: &Path,
+    dirs: &lk_core::config::VaultDirs,
+    candidate: &AuditCandidate,
+    expected: &ScreeningRequest,
+    read: &ReadControl,
+) -> Result<PacketStatus, GraphError> {
+    let Some(progress) = candidate
+        .discovery
+        .as_ref()
+        .and_then(|discovery| discovery.selection.as_ref())
+    else {
+        return Ok(PacketStatus::Changed);
+    };
+    if progress.purpose_revision != expected.purpose_revision {
+        return Ok(PacketStatus::Changed);
+    }
+    let mut recorded = true;
+    for card in &expected.candidates {
+        let Some(row) = progress.rows.iter().find(|row| row.input == card.input) else {
+            return Ok(PacketStatus::Changed);
+        };
+        let Some(reference) = &row.decision else {
+            recorded = false;
+            continue;
+        };
+        let path = packet_path(&candidate.path, &reference.packet_revision)?;
+        let raw = progress
+            .guards
+            .get(&path)
+            .ok_or_else(|| error("captured audit packet is absent"))?;
+        let packet: PacketReceipt = serde_json::from_str(raw).map_err(error)?;
+        if revision(&packet.request)? != revision(expected)? {
+            recorded = false;
+        }
+    }
+    if recorded {
+        return Ok(PacketStatus::Recorded);
+    }
+    let captured = match capture_cards(root, dirs, candidate, read) {
+        Ok(captured) => captured,
+        Err(GraphError::AuditScreeningChanged) => return Ok(PacketStatus::Changed),
+        Err(error) => return Err(error),
+    };
+    let mut rows = Vec::new();
+    for card in &expected.candidates {
+        let Some(row) = progress.rows.iter().find(|row| row.input == card.input) else {
+            return Ok(PacketStatus::Changed);
+        };
+        rows.push(StateRow {
+            input: row.input.clone(),
+            decision: card.previous.clone(),
+        });
+    }
+    let rows = rows.iter().collect::<Vec<_>>();
+    let current = request_for_rows(
+        candidate,
+        &rows,
+        &captured.cards,
+        expected.reassess,
+        expected.max_result_bytes,
+    )?;
+    if revision(&current)? != revision(expected)? {
+        Ok(PacketStatus::Changed)
+    } else {
+        Ok(PacketStatus::Unrecorded)
+    }
 }
 
 pub fn guard_ready(
@@ -979,7 +1124,7 @@ pub fn record(
         .and_then(|discovery| discovery.selection.as_ref())
         .ok_or_else(|| error("audit subject has no screened discovery"))?;
     if supplied_purpose != &progress.purpose_revision {
-        return Err(error("audit screening purpose changed"));
+        return Err(GraphError::AuditScreeningChanged);
     }
     let captured = capture_cards(root, dirs, &candidate, read)?;
     let mut mutation = MutationPlan::default();
@@ -991,7 +1136,7 @@ pub fn record(
             inventory_revision, ..
         } => {
             if inventory_revision != &progress.inventory_revision {
-                return Err(error("audit discovery inventory changed"));
+                return Err(GraphError::AuditScreeningChanged);
             }
             if !progress.needs_refresh {
                 return Ok(false);

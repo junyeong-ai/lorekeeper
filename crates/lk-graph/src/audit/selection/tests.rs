@@ -1,5 +1,159 @@
 use super::*;
 
+#[test]
+fn fresh_discovery_selects_candidates_while_exact_legacy_recipes_keep_their_identity() {
+    let fixture = Fixture::new(2);
+    let (_, mut receipts) = crate::audit::load(&fixture.root).unwrap();
+    receipts.discovery.get_mut(SUBJECT).unwrap().selection = None;
+    fixture.write(
+        crate::audit::STATE,
+        &serde_json::to_string(&receipts).unwrap(),
+    );
+    let legacy = fixture.candidate();
+    let record_query = |query: &str| {
+        let raw = std::fs::read_to_string(fixture.root.join(SUBJECT)).unwrap();
+        crate::audit::record_discovery(
+            &MutationSession::acquire(&fixture.root).unwrap(),
+            &fixture.dirs,
+            &fixture.pages(),
+            crate::audit::AuditDiscoveryRequest {
+                path: SUBJECT.into(),
+                file_revision: file_revision(&raw),
+                queries: vec![DiscoveryQuery {
+                    query: query.into(),
+                    phrase: false,
+                    spacing: false,
+                }],
+            },
+        )
+        .unwrap();
+    };
+    record_query("screen protocol");
+    let repeated = fixture.candidate();
+    assert!(repeated.discovery.as_ref().unwrap().selection.is_none());
+    assert_eq!(repeated.input_revision, legacy.input_revision);
+    record_query("declared scope");
+    assert_eq!(
+        fixture
+            .candidate()
+            .discovery
+            .unwrap()
+            .selection
+            .unwrap()
+            .unknown,
+        2
+    );
+    let (_, mut receipts) = crate::audit::load(&fixture.root).unwrap();
+    receipts.discovery.clear();
+    fixture.write(
+        crate::audit::STATE,
+        &serde_json::to_string(&receipts).unwrap(),
+    );
+    record_query("screen protocol");
+    assert_eq!(
+        fixture
+            .candidate()
+            .discovery
+            .unwrap()
+            .selection
+            .unwrap()
+            .unknown,
+        2
+    );
+}
+
+#[test]
+fn packet_status_requires_the_exact_assigned_receipt_and_distinguishes_input_drift() {
+    let fixture = Fixture::new(3);
+    let first = fixture.packet(1, false);
+    let request = first.request.as_ref().unwrap();
+    let status = |candidate: &AuditCandidate| {
+        packet_status(
+            &fixture.root,
+            &fixture.dirs,
+            candidate,
+            request,
+            &ReadControl::default(),
+        )
+        .unwrap()
+    };
+    assert!(matches!(
+        status(&fixture.candidate()),
+        PacketStatus::Unrecorded
+    ));
+    fixture
+        .record(output(&first, ScreeningDecision::Defer))
+        .unwrap();
+    assert!(matches!(
+        status(&fixture.candidate()),
+        PacketStatus::Recorded
+    ));
+    let next = fixture.packet(20, false);
+    assert_eq!(next.request.as_ref().unwrap().candidates.len(), 2);
+    fixture
+        .record(output(&next, ScreeningDecision::NotSelected))
+        .unwrap();
+    assert!(fixture.packet(20, false).request.is_none());
+    assert!(
+        !fixture
+            .candidate()
+            .discovery
+            .unwrap()
+            .selection
+            .unwrap()
+            .is_ready()
+    );
+    let address = &request.candidates[0].input.path;
+    let raw = std::fs::read_to_string(fixture.root.join(address)).unwrap();
+    fixture.write(address, &(raw + "\nAn authored change.\n"));
+    assert!(matches!(
+        status(&fixture.candidate()),
+        PacketStatus::Changed
+    ));
+}
+
+#[test]
+fn scope_capacity_counts_the_complete_roster_without_discarding_paid_decisions() {
+    let fixture = Fixture::new(5);
+    let mut limits = fixture.limits();
+    limits.max_candidates = 2;
+    limits.max_batches = Some(2);
+    let preview = || {
+        candidates(
+            &fixture.root,
+            &fixture.dirs,
+            &fixture.pages(),
+            SUBJECT,
+            limits,
+            false,
+            &ReadControl::default(),
+        )
+        .unwrap()
+    };
+    let first = preview();
+    assert_eq!(first.scope_batches, Some(3));
+    assert_eq!(first.admission.as_ref().unwrap().required_batches, 3);
+    fixture
+        .record(output(&first, ScreeningDecision::NotSelected))
+        .unwrap();
+    let partial = preview();
+    assert_eq!(partial.progress.not_selected, 2);
+    assert_eq!(partial.scope_batches, Some(3));
+    assert!(partial.admission.is_some());
+    while fixture.packet(20, false).request.is_some() {
+        fixture
+            .record(output(
+                &fixture.packet(20, false),
+                ScreeningDecision::NotSelected,
+            ))
+            .unwrap();
+    }
+    let complete = preview();
+    assert!(complete.progress.is_ready());
+    assert!(complete.request.is_none());
+    assert!(complete.admission.is_none());
+}
+
 fn retained_generations() -> (Fixture, StateReference, StateReference, StateReference) {
     let fixture = Fixture::new(1);
     fixture
@@ -266,6 +420,7 @@ impl Fixture {
             max_input_bytes: 65536,
             max_result_bytes: 32768,
             max_candidates: 20,
+            max_batches: None,
         }
     }
     fn packet(&self, limit: usize, reassess: bool) -> CandidatePacket {

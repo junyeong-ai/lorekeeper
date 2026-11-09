@@ -151,6 +151,10 @@ See [bounded work](skills/lore-process/references/bounded-work.md) for status an
 Bounded finalizers can reread necessary retained-source ranges when observations omit required evidence.
 These reads revalidate current inputs and leave existing observations and completion records unchanged.
 
+Fresh audit discovery screens the complete match inventory in bounded packets and reuses unchanged decisions.
+Only admitted context receives full reads; mandatory evidence and direct links remain required.
+Unknown or explicitly deferred candidates prevent completion. See [candidate screening](skills/lore-wiki/references/maintenance.md#candidate-screening).
+
 ## Operations and completion
 
 | Goal | Command |

@@ -105,6 +105,22 @@ pub fn record_discovery(
     pages: &[ScannedPage],
     request: AuditDiscoveryRequest,
 ) -> Result<(), GraphError> {
+    record_discovery_with_policy(
+        session,
+        dirs,
+        pages,
+        request,
+        Some(selection::SelectionPlan::default()),
+    )
+}
+
+fn record_discovery_with_policy(
+    session: &MutationSession,
+    dirs: &VaultDirs,
+    pages: &[ScannedPage],
+    request: AuditDiscoveryRequest,
+    policy: Option<selection::SelectionPlan>,
+) -> Result<(), GraphError> {
     let root = session.root();
     let (before, mut receipts) = load(root)?;
     require_readable_subjects(pages, dirs, Some(&BTreeSet::from([request.path.as_str()])))?;
@@ -132,12 +148,18 @@ pub fn record_discovery(
     {
         return Err(error("discovery subject changed during recording"));
     }
+    let selection = receipts
+        .discovery
+        .get(&request.path)
+        .filter(|plan| plan.subject_revision == revision && plan.queries == queries)
+        .map(|plan| plan.selection.clone())
+        .unwrap_or(policy);
     receipts.discovery.insert(
         request.path.clone(),
         DiscoveryPlan {
             subject_revision: revision,
             queries,
-            selection: None,
+            selection,
         },
     );
     let mut plan = MutationPlan::default();
@@ -2490,6 +2512,15 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn record_legacy_discovery(
+        session: &MutationSession,
+        dirs: &VaultDirs,
+        pages: &[ScannedPage],
+        request: AuditDiscoveryRequest,
+    ) -> Result<(), GraphError> {
+        record_discovery_with_policy(session, dirs, pages, request, None)
+    }
+
     fn write(root: &Path, path: &str, body: &str) {
         let destination = root.join(path);
         std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
@@ -2784,7 +2815,7 @@ mod tests {
             .unwrap()
             .candidates
             .remove(0);
-        record_discovery(
+        record_legacy_discovery(
             &session,
             &dirs,
             &pages,
@@ -3214,7 +3245,7 @@ mod tests {
         let session = MutationSession::acquire(root.path()).unwrap();
         let files = scan(root.path());
         let initial = plan_selected(root.path(), &dirs, &files, 1, &[a.into()], u64::MAX).unwrap();
-        record_discovery(
+        record_legacy_discovery(
             &session,
             &dirs,
             &files,
@@ -3326,7 +3357,7 @@ mod tests {
         assert!(initial.related_pages.is_empty());
         assert!(initial.discovery.is_none());
         let session = MutationSession::acquire(root.path()).unwrap();
-        record_discovery(
+        record_legacy_discovery(
             &session,
             &dirs,
             &scan(root.path()),
@@ -3398,7 +3429,7 @@ mod tests {
         );
         assert!(selected().discovery.is_none());
         assert!(
-            record_discovery(
+            record_legacy_discovery(
                 &session,
                 &dirs,
                 &scan(root.path()),

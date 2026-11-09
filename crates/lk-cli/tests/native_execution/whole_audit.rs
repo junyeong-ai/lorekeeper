@@ -125,6 +125,7 @@ request={key:candidate[key] for key in ['path','file_revision']}
 request['queries']=[{'query':'private absent capacity fixture','phrase':True,'spacing':False}]
 path=root/'discovery.json';path.write_text(json.dumps(request))
 cli('wiki','audit-discover','--file',str(path))
+subprocess.run(['python3',str(root/'screen-audit-fixture.py'),request['path']],check=True)
 DISCOVER
 "#;
     for during_discovery in [false, true] {

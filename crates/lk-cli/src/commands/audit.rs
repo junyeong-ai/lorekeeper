@@ -148,10 +148,26 @@ impl InputAvailability {
             .read_control()
             .check()
             .map_err(lk_graph::GraphError::from)?;
-        let reasons = captured.map_err(|error| lk_graph::GraphError::Io(error.to_string()))?;
+        let mut reasons = captured.map_err(|error| lk_graph::GraphError::Io(error.to_string()))?;
+        if let Some(progress) = candidate
+            .discovery
+            .as_ref()
+            .and_then(|discovery| discovery.selection.as_ref())
+            && progress.unknown == 0
+            && progress.deferred != 0
+        {
+            reasons.push(format!(
+                "{} audit discovery candidates require explicit reassessment",
+                progress.deferred
+            ));
+        }
         if reasons.is_empty() {
             return Ok(true);
         }
+        Ok(self.defer(candidate, reasons))
+    }
+
+    pub fn defer(&mut self, candidate: &AuditCandidate, reasons: Vec<String>) -> bool {
         self.deferred_count += 1;
         if self.deferred.len() < MAX_DEFERRED_DETAILS {
             self.deferred.push(DeferredAudit {
@@ -162,7 +178,7 @@ impl InputAvailability {
                 reasons,
             });
         }
-        Ok(false)
+        false
     }
 
     #[cfg(unix)]
