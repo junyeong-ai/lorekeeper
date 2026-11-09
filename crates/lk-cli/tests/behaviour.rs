@@ -260,6 +260,14 @@ const EXEMPT: &[(&[&str], &str)] = &[
         "graph audit tests bounded incremental coverage and dependency revisions; wiki_curation exercises the CLI with guarded receipts",
     ),
     (
+        &["wiki", "audit-candidates"],
+        "requires a recorded revision-bound discovery selection; graph selection tests packet bounds and currentness, while native_execution::audit_screening covers partial resumption, deferred decisions and capacity",
+    ),
+    (
+        &["wiki", "audit-select"],
+        "requires an exact assigned candidate packet or empty-inventory refresh; graph selection tests receipt guards and native_execution::audit_screening rejects missing or different assigned packet receipts",
+    ),
+    (
         &["wiki", "audit-record"],
         "requires semantic assessment results with exact input revisions; graph audit and wiki_curation test recording and stale refusal",
     ),

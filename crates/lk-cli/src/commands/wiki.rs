@@ -156,6 +156,7 @@ pub enum WikiCommand {
     },
     /// Record exact candidate decisions or refresh their immutable inventory (JSON)
     AuditSelect {
+        /// JSON record or refresh action with exact subject and packet revisions
         #[arg(long)]
         file: PathBuf,
     },

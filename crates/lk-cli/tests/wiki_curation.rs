@@ -143,6 +143,46 @@ fn reviewed_curation_is_read_only_in_preview_guarded_and_discoverable_after_publ
             discovery.to_str().unwrap(),
         ],
     );
+    let packet = ok(&config, &["wiki", "audit-candidates", concept]);
+    let selection = if packet["refresh"].is_null() {
+        let request = &packet["request"];
+        assert_eq!(request["subject"], concept, "{packet}");
+        let reason = "Explicitly inspect the retained curation scope.";
+        assert!(
+            serde_json::to_vec(reason).unwrap().len()
+                <= request["max_reason_json_bytes"].as_u64().unwrap() as usize,
+            "{packet}"
+        );
+        json!({
+            "action": "record",
+            "path": concept,
+            "purpose_revision": request["purpose_revision"],
+            "packet_revision": packet["request_revision"],
+            "reassess": false,
+            "decisions": request["candidates"].as_array().unwrap().iter().map(|card| json!({
+                "candidate_key": card["candidate_key"],
+                "decision": "inspect",
+                "reason": reason,
+            })).collect::<Vec<_>>()
+        })
+    } else {
+        packet["refresh"].clone()
+    };
+    let selection_file = root.path().join("audit-selection.json");
+    std::fs::write(&selection_file, serde_json::to_vec(&selection).unwrap()).unwrap();
+    ok(
+        &config,
+        &[
+            "wiki",
+            "audit-select",
+            "--file",
+            selection_file.to_str().unwrap(),
+        ],
+    );
+    let selected = ok(&config, &["wiki", "audit-candidates", concept]);
+    assert_eq!(selected["progress"]["complete"], true, "{selected}");
+    assert_eq!(selected["progress"]["needs_refresh"], false, "{selected}");
+
     let audit = ok(&config, &["wiki", "audit-plan", "--path", concept]);
     assert_eq!(audit["coverage_scope"], "selection");
     assert_eq!(audit["unreviewed"], 1);
