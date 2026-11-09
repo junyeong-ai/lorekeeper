@@ -687,6 +687,7 @@ mod native {
         drain_blocked: bool,
         inspection_deferred: std::collections::BTreeMap<String, String>,
         audit_screening_deferred: std::collections::BTreeMap<String, String>,
+        audit_deferred_paths: std::collections::BTreeSet<String>,
         audit_batch: Option<Vec<lk_graph::audit::AuditCandidate>>,
         queue_turn: Option<QueueTurn>,
         queue_admitted: scheduler::AdmittedTurns,
@@ -4702,6 +4703,26 @@ mod native {
             Ok(self.audit_checkpoint(paths, None)?.plan)
         }
 
+        fn audit_coverage(&self) -> miette::Result<lk_graph::audit::AuditCoverage> {
+            let pages = lk_graph::scan::scan_vault_controlled(
+                &self.root,
+                self.config.graph.scope.follow_links,
+                self.supervisor.read_control(),
+            )
+            .map_err(|error| miette::miette!("{error}"))?;
+            let plan = lk_graph::audit::plan_selected_partitioned_controlled(
+                &self.root,
+                &self.config.vault.dirs,
+                &pages,
+                self.config.graph.audit.batch_size,
+                &[],
+                self.config.graph.audit.max_input_bytes,
+                self.supervisor.read_control(),
+            )
+            .map_err(|error| miette::miette!("{error}"))?;
+            Ok(plan.coverage())
+        }
+
         fn audit_checkpoint(
             &mut self,
             paths: &[String],
@@ -4716,6 +4737,11 @@ mod native {
             let mut readiness =
                 InputAvailability::load_controlled(&self.root, self.supervisor.read_control())?;
             let mut captured = None;
+            let mut checked_paths = paths
+                .iter()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>();
+            let mut deferred_paths = std::collections::BTreeSet::new();
             let plan = lk_graph::audit::plan_selected_available_partitioned_controlled(
                 &self.root,
                 &self.config.vault.dirs,
@@ -4724,20 +4750,42 @@ mod native {
                 paths,
                 self.config.graph.audit.max_input_bytes,
                 &mut |candidate| {
+                    checked_paths.insert(candidate.path.clone());
                     if subject == Some(candidate.path.as_str()) {
                         captured = Some(candidate.clone());
                     }
-                    if let Some(reason) = self.audit_screening_deferred.get(&candidate.path) {
-                        Ok(readiness.defer(candidate, vec![reason.clone()]))
-                    } else {
-                        readiness.check(candidate)
+                    let available =
+                        if let Some(reason) = self.audit_screening_deferred.get(&candidate.path) {
+                            readiness.defer(candidate, vec![reason.clone()])
+                        } else {
+                            readiness.check(candidate)?
+                        };
+                    if !available {
+                        deferred_paths.insert(candidate.path.clone());
                     }
+                    Ok(available)
                 },
                 self.supervisor.read_control(),
             )
             .map_err(|e| miette::miette!("{e}"))?;
-            self.result.audit_deferred = readiness.deferred().to_vec();
-            self.result.audit_deferred_count = readiness.deferred_count();
+            if paths.is_empty() {
+                self.audit_deferred_paths.clear();
+                self.result.audit_deferred.clear();
+            } else {
+                self.audit_deferred_paths
+                    .retain(|path| !checked_paths.contains(path));
+                self.result
+                    .audit_deferred
+                    .retain(|item| !checked_paths.contains(&item.path));
+            }
+            self.audit_deferred_paths.extend(deferred_paths);
+            self.result
+                .audit_deferred
+                .extend_from_slice(readiness.deferred());
+            self.result
+                .audit_deferred
+                .truncate(super::super::audit::MAX_DEFERRED_DETAILS);
+            self.result.audit_deferred_count = self.audit_deferred_paths.len();
             Ok(AuditCheckpoint {
                 plan,
                 candidate: captured,
@@ -5106,14 +5154,21 @@ mod native {
             let mut readiness =
                 InputAvailability::load_controlled(&self.root, self.supervisor.read_control())?;
             let mut processing_deferred = Vec::new();
-            let mut processing_deferred_count = 0;
+            let mut input_deferred_paths = std::collections::BTreeSet::new();
+            let mut processing_deferred_paths = std::collections::BTreeSet::new();
             let plan = lk_graph::audit::admit_available_partitioned_controlled(
                 &session,
                 &self.config.vault.dirs,
                 &pages,
                 self.config.graph.audit.batch_size,
                 self.config.graph.audit.max_input_bytes,
-                &mut |candidate| readiness.check(candidate),
+                &mut |candidate| {
+                    let available = readiness.check(candidate)?;
+                    if !available {
+                        input_deferred_paths.insert(candidate.path.clone());
+                    }
+                    Ok(available)
+                },
                 &mut |candidate| {
                     self.supervisor
                         .read_control()
@@ -5134,7 +5189,7 @@ mod native {
                     let Some(reason) = hold else {
                         return Ok(true);
                     };
-                    processing_deferred_count += 1;
+                    processing_deferred_paths.insert(candidate.path.clone());
                     if processing_deferred.len() < super::super::audit::MAX_DEFERRED_DETAILS {
                         processing_deferred.push(DeferredAudit {
                             kind: candidate.kind,
@@ -5169,8 +5224,9 @@ mod native {
             self.result
                 .audit_deferred
                 .truncate(super::super::audit::MAX_DEFERRED_DETAILS);
-            self.result.audit_deferred_count =
-                readiness.deferred_count() + processing_deferred_count;
+            self.audit_deferred_paths = input_deferred_paths;
+            self.audit_deferred_paths.extend(processing_deferred_paths);
+            self.result.audit_deferred_count = self.audit_deferred_paths.len();
             Ok(plan)
         }
 
@@ -5322,10 +5378,10 @@ mod native {
                     }
                 }
             } else if self.result.audit.as_ref().is_some_and(Vec::is_empty) {
-                match self.audit_plan(&[]) {
-                    Ok(plan) => {
+                match self.audit_coverage() {
+                    Ok(coverage) => {
                         if let Some(progress) = &mut self.result.audit_progress {
-                            progress.after = Some(plan.coverage());
+                            progress.after = Some(coverage);
                         }
                         if self.result.audit_deferred_count > 0 {
                             self.deferred(
@@ -5392,7 +5448,7 @@ mod native {
                 );
             }
             if plan.candidates.is_empty() {
-                if !self.result.audit_deferred.is_empty() {
+                if self.result.audit_deferred_count > 0 {
                     self.deferred("audit dependencies", "pending subjects have unfinished inputs or require processing action; retained for later assessment");
                     return;
                 }
@@ -5419,7 +5475,25 @@ mod native {
                 return;
             };
             plan = fresh;
+            let selected_deferred = paths
+                .iter()
+                .filter(|path| self.audit_deferred_paths.contains(*path))
+                .count();
+            if selected_deferred > 0 {
+                self.deferred(
+                    "audit discovery dependencies",
+                    format!("{selected_deferred} selected subjects have unfinished inputs or deferred candidate decisions; retained for later assessment"),
+                );
+            }
             if plan.candidates.is_empty() {
+                if selected_deferred == 0 {
+                    self.result.audit = Some(Vec::new());
+                    self.record(
+                        "knowledge audit",
+                        StageState::Skipped,
+                        Some("selected subjects are already current".into()),
+                    );
+                }
                 return;
             }
             let mut bounded = plan.input.ensure_ready().is_err();
@@ -5779,6 +5853,7 @@ mod native {
             drain_blocked: false,
             inspection_deferred: std::collections::BTreeMap::new(),
             audit_screening_deferred: std::collections::BTreeMap::new(),
+            audit_deferred_paths: std::collections::BTreeSet::new(),
             audit_batch: None,
             queue_turn: None,
             queue_replan: false,

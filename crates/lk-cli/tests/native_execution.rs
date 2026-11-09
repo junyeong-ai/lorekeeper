@@ -809,7 +809,7 @@ esac
                 );
                 assert!(
                     result["stages"].as_array().unwrap().iter().any(|stage| {
-                        stage["name"] == "discovery planning" && stage["state"] == "failed"
+                        stage["name"] == "audit discovery replanning" && stage["state"] == "failed"
                     }),
                     "{result}"
                 );
