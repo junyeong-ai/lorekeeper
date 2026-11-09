@@ -109,9 +109,7 @@ impl Citation {
 
     pub fn at_revision(path: &std::path::Path, revision: String) -> Self {
         Self {
-            path: path
-                .to_string_lossy()
-                .replace(std::path::MAIN_SEPARATOR, "/"),
+            path: crate::vault_path::address(path),
             revision,
             rss_event: None,
         }

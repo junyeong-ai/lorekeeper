@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use lk_core::concept::{Citation, file_revision};
 use lk_core::discovery::{DiscoveryQuery, ScreeningDecision};
+use lk_core::vault_path::address as page_address;
 use lk_vault::{MutationPlan, MutationSession, ReadControl};
 use serde::{Deserialize, Serialize};
 
@@ -397,10 +398,9 @@ pub(super) fn project(
     let mut roster = BTreeMap::new();
     for citation in matches {
         read.check().map_err(GraphError::from)?;
-        let owner = lk_vault::resolve_page_owner(root, Path::new(&citation.path))
-            .map_err(error)?
-            .to_string_lossy()
-            .into_owned();
+        let owner = page_address(
+            &lk_vault::resolve_page_owner(root, Path::new(&citation.path)).map_err(error)?,
+        );
         let entry = roster.entry(owner.clone()).or_insert_with(|| {
             (
                 citation.path.clone(),
@@ -709,10 +709,9 @@ fn capture_cards(
     let capture = captures.pop().expect("one selected audit recipe");
     let mut reviews = ReviewDependencyIndex::from_inventory(root, &mut inventory, read)?;
     let mut cards = BTreeMap::new();
-    let subject_owner = lk_vault::resolve_page_owner(root, Path::new(&candidate.path))
-        .map_err(error)?
-        .to_string_lossy()
-        .into_owned();
+    let subject_owner = page_address(
+        &lk_vault::resolve_page_owner(root, Path::new(&candidate.path)).map_err(error)?,
+    );
     for card in &capture.candidates {
         if card.owner == subject_owner {
             continue;

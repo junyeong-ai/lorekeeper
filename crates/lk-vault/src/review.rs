@@ -77,7 +77,7 @@ impl KnowledgeReview {
         }
         let valid_address = |address: &str| {
             lk_core::link::resolve_dest(Path::new(""), address).is_some_and(|resolved| {
-                resolved.to_string_lossy() == address
+                lk_core::vault_path::address(&resolved) == address
                     && resolved
                         .extension()
                         .is_some_and(|extension| extension == "md")
@@ -181,7 +181,7 @@ pub fn plan_review_repointing(
     fn address(value: &str) -> Result<PathBuf, VaultError> {
         lk_core::link::resolve_dest(Path::new(""), value)
             .filter(|path| {
-                path.to_string_lossy() == value
+                lk_core::vault_path::address(path) == value
                     && path.extension().is_some_and(|extension| extension == "md")
             })
             .ok_or_else(|| {
@@ -250,11 +250,15 @@ pub fn plan_review_repointing(
             pointer_subjects
                 .entry(review_path)
                 .or_default()
-                .insert(path.to_string_lossy().into_owned());
+                .insert(lk_core::vault_path::address(path));
         }
         if moved_subject.is_some() || moved_review.is_some() {
             let after = match moved_review {
-                Some(review) => set(&raw, "knowledge_review", &review.to_string_lossy())?,
+                Some(review) => set(
+                    &raw,
+                    "knowledge_review",
+                    &lk_core::vault_path::address(&review),
+                )?,
                 None => raw.clone(),
             };
             updates.insert(path.clone(), (raw, after));
@@ -293,7 +297,7 @@ pub fn plan_review_repointing(
         for subject in &review.subjects {
             let target = match address(subject) {
                 Ok(path) => destination(&mut resolver, &path, &destinations)?
-                    .map(|path| path.to_string_lossy().into_owned())
+                    .map(|path| lk_core::vault_path::address(&path))
                     .unwrap_or_else(|| subject.clone()),
                 Err(_) => subject.clone(),
             };
@@ -405,7 +409,7 @@ fn review_associations(
     {
         read.check()?;
         let Some(path) = lk_core::link::resolve_dest(Path::new(""), address).filter(|path| {
-            path.to_string_lossy() == *address
+            lk_core::vault_path::address(path) == *address
                 && path.extension().is_some_and(|extension| extension == "md")
         }) else {
             continue;
@@ -416,7 +420,7 @@ fn review_associations(
                 let found = crate::find_page_owner(root, &path);
                 read.check()?;
                 let owner = match found {
-                    Ok(owner) => owner.map(|path| path.to_string_lossy().into_owned()),
+                    Ok(owner) => owner.map(|path| lk_core::vault_path::address(&path)),
                     Err(_) if is_invalid()? => continue,
                     Err(error) => return Err(error),
                 };
@@ -759,8 +763,9 @@ pub fn plan_document_publication(
                 let address = path
                     .to_str()
                     .ok_or_else(|| VaultError::Frontmatter("document path is not UTF-8".into()))?;
-                let report = archive_evidence(session.root(), &[address.to_owned()])?;
-                if report.file_revisions.get(address)
+                let address = lk_core::vault_path::address(Path::new(address));
+                let report = archive_evidence(session.root(), std::slice::from_ref(&address))?;
+                if report.file_revisions.get(&address)
                     != Some(&lk_core::concept::file_revision(&before))
                 {
                     return Err(VaultError::Frontmatter(format!(
@@ -873,7 +878,7 @@ impl ReviewInventory {
             read.check()?;
             if let Some(metadata) = load_review_metadata(&root, &path, read)? {
                 entries.insert(
-                    path.to_string_lossy().into_owned(),
+                    lk_core::vault_path::address(&path),
                     ReviewEntry::Metadata(metadata),
                 );
             }
@@ -1242,9 +1247,9 @@ mod tests {
                 format!("---\ntype: concept\ntitle: {name}\n---\n{body}\n"),
             )
             .unwrap();
-            let evidence =
-                archive_evidence(root.path(), &[path.to_string_lossy().into_owned()]).unwrap();
-            let review = serde_json::json!({"status":"open", "subjects":[path], "evidence":evidence.citations});
+            let address = lk_core::vault_path::address(&path);
+            let evidence = archive_evidence(root.path(), std::slice::from_ref(&address)).unwrap();
+            let review = serde_json::json!({"status":"open", "subjects":[address], "evidence":evidence.citations});
             std::fs::write(
                 root.path().join(&reviews).join(format!("{name}.md")),
                 format!("---\ntype: exploration\nreview: {review}\n---\nA scoped assessment.\n"),
@@ -1317,10 +1322,9 @@ mod tests {
         let cancelled = Arc::new(AtomicBool::new(false));
         let read = crate::ReadControl::new(cancelled.clone());
         let mut inventory = ReviewInventory::load_controlled(root.path(), &dirs, &read).unwrap();
-        let path = lk_core::vault_path::explorations_dir(&dirs)
-            .join("selected.md")
-            .to_string_lossy()
-            .into_owned();
+        let path = lk_core::vault_path::address(
+            &lk_core::vault_path::explorations_dir(&dirs).join("selected.md"),
+        );
         REVIEW_READS.with(|reads| reads.set((0, 0)));
         CANCEL_ARCHIVE_READ.with(|flag| *flag.borrow_mut() = Some(cancelled.clone()));
         assert!(matches!(
@@ -1428,15 +1432,14 @@ mod tests {
         assert_eq!(inventory.paths().count(), expected_count);
         #[cfg(unix)]
         assert_eq!(
-            inventory.has_errors(&directory.join("invalid-subject.md").to_string_lossy()),
+            inventory.has_errors(&lk_core::vault_path::address(
+                &directory.join("invalid-subject.md")
+            )),
             Some(true)
         );
         assert_eq!(REVIEW_READS.with(std::cell::Cell::get), (0, 0));
         for name in ["a", "b", "a"] {
-            let path = directory
-                .join(format!("{name}.md"))
-                .to_string_lossy()
-                .into_owned();
+            let path = lk_core::vault_path::address(&directory.join(format!("{name}.md")));
             assert_eq!(inventory.subjects(&path).unwrap(), ["source.md"]);
             let report = inventory.load_report(&path).unwrap();
             assert_eq!(report.effective_state, ReviewEffectiveState::Open);
@@ -1465,7 +1468,7 @@ mod tests {
         let metadata = serde_json::json!({
             "status":"open","subjects":["source.md"],"evidence":evidence.citations
         });
-        let review = directory.join("review.md").to_string_lossy().into_owned();
+        let review = lk_core::vault_path::address(&directory.join("review.md"));
         std::fs::write(
             root.path().join(&review),
             format!("---\ntype: exploration\nreview: {metadata}\n---\nReview.\n"),
@@ -2115,7 +2118,7 @@ mod tests {
             format!("---\ntype: exploration\nreview: {review}\n---\nOriginal judgment.\n");
         std::fs::write(root.path().join(&review_path), &old_review).unwrap();
         let prior =
-            archive_evidence(root.path(), &[review_path.to_string_lossy().into_owned()]).unwrap();
+            archive_evidence(root.path(), &[lk_core::vault_path::address(&review_path)]).unwrap();
         let prior_revision = &prior.citations[0].revision;
         std::fs::write(
             root.path().join("source.md"),

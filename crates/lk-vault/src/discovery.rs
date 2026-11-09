@@ -515,13 +515,13 @@ fn capture_discovery_batch_inner(
                 let owner_path = owner;
                 let owner = owner_path
                     .to_str()
-                    .ok_or_else(|| invalid("discovery owner address is not UTF-8"))?
-                    .to_owned();
+                    .ok_or_else(|| invalid("discovery owner address is not UTF-8"))?;
+                let owner = lk_core::vault_path::address(Path::new(owner));
                 let path = page
                     .rel_path
                     .to_str()
-                    .ok_or_else(|| invalid("discovery candidate address is not UTF-8"))?
-                    .to_owned();
+                    .ok_or_else(|| invalid("discovery candidate address is not UTF-8"))?;
+                let path = lk_core::vault_path::address(Path::new(path));
                 let authored = source_revision(&page.page);
                 let mut counts = crate::ReviewCounts::default();
                 let previews = reviews.for_owner(&owner, read)?;

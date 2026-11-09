@@ -147,7 +147,7 @@ impl<'a> Capture<'a> {
                 relative.display()
             ));
         }
-        let address = relative.to_string_lossy().into_owned();
+        let address = lk_core::vault_path::address(&relative);
         let exact = file_revision(&raw);
         self.pages.insert(relative, raw.clone());
         self.resources
@@ -579,13 +579,12 @@ pub(super) fn selection_inventory_with_capture(
                         .map(|current| current.path.as_str())
                 }),
             ) {
-                owners.insert(
-                    lk_vault::resolve_page_owner(root, Path::new(path))
-                        .into_diagnostic()?
-                        .to_str()
-                        .ok_or_else(|| miette::miette!("review owner is not UTF-8"))?
-                        .to_owned(),
-                );
+                let owner =
+                    lk_vault::resolve_page_owner(root, Path::new(path)).into_diagnostic()?;
+                let owner = owner
+                    .to_str()
+                    .ok_or_else(|| miette::miette!("review owner is not UTF-8"))?;
+                owners.insert(lk_core::vault_path::address(Path::new(owner)));
             }
         }
         review_resources.insert(subject.clone(), owners);
@@ -1447,7 +1446,7 @@ mod tests {
         }));
         let archived = lk_vault::evidence_archive_path(&archive.citations[0].revision).unwrap();
         assert!(shared.source.resources.iter().any(|resource| {
-            resource.address == archived.to_string_lossy()
+            resource.address == lk_core::vault_path::address(&archived)
                 && resource.authority == SemanticAuthority::Archive
         }));
         let binding = lk_queue::ExtractionSelection {

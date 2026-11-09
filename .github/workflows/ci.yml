@@ -216,6 +216,12 @@ jobs:
         run: cargo test --locked -p lk-source --lib nodex::tests::repository_uri_
       - name: Verify merge input guards and recovery on Windows
         run: cargo test --locked -p lk-graph --lib merge::tests::current_inputs
+      - name: Verify portable vault addresses on Windows
+        run: cargo test --locked -p lk-core --lib vault_path::tests
+      - name: Verify audit candidate decisions and retention on Windows
+        run: cargo test --locked -p lk-graph --lib audit::selection::tests
+      - name: Verify synthesis and audit resource boundaries on Windows
+        run: cargo test --locked -p lore --lib commands::work::resources::tests
 
   # Bootstrap scripts and workflow definitions are checked independently of Rust.
   shell:

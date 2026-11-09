@@ -55,6 +55,13 @@ pub const EXPLORATIONS_SUBDIR: &str = "explorations";
 pub const WORK_LOG_SUBDIR: &str = "work-log";
 pub const PROJECTION_CACHE_DIR: &str = ".lorekeeper/cache/projections";
 
+/// Render a filesystem path with vault address separators, preserving literal Unix backslashes.
+/// This does not validate or resolve the address.
+pub fn address(path: &Path) -> String {
+    path.to_string_lossy()
+        .replace(std::path::MAIN_SEPARATOR, "/")
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VaultPath(PathBuf);
 
@@ -160,7 +167,7 @@ impl AsRef<Path> for VaultPath {
 
 impl std::fmt::Display for VaultPath {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0.display())
+        write!(f, "{}", address(&self.0))
     }
 }
 
@@ -222,6 +229,22 @@ fn join_segments(segments: impl Iterator<Item = String>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn addresses_use_wire_separators_without_rewriting_literal_unix_backslashes() {
+        let path = Path::new("wiki").join("documents").join("중첩 🙂.md");
+        assert_eq!(address(&path), "wiki/documents/중첩 🙂.md");
+        #[cfg(unix)]
+        assert_eq!(
+            address(Path::new(r"wiki/documents/literal\name.md")),
+            r"wiki/documents/literal\name.md"
+        );
+        #[cfg(windows)]
+        assert_eq!(
+            address(Path::new(r"wiki\documents\중첩 🙂.md")),
+            "wiki/documents/중첩 🙂.md"
+        );
+    }
 
     #[test]
     fn daily_path() {

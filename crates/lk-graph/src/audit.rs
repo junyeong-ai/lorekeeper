@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use lk_core::concept::{Citation, file_revision, source_revision};
 use lk_core::config::VaultDirs;
 use lk_core::frontmatter::KnowledgeStatus;
+use lk_core::vault_path::address as page_address;
 use lk_vault::{MutationPlan, MutationSession};
 use serde::{Deserialize, Serialize};
 
@@ -221,9 +222,9 @@ pub(crate) fn record_merge(
         .expect("initialized merge context")
         .concepts
         .insert(
-            from.to_string_lossy().into_owned(),
+            page_address(from),
             ConceptRetirement {
-                into: into.to_string_lossy().into_owned(),
+                into: page_address(into),
                 from_revision: file_revision(original),
             },
         );
@@ -883,7 +884,7 @@ fn load_controlled(
 
 fn exact_page_address(path: &str) -> bool {
     lk_core::link::resolve_dest(Path::new(""), path).is_some_and(|resolved| {
-        resolved.to_string_lossy() == path && resolved.extension().is_some_and(|ext| ext == "md")
+        page_address(&resolved) == path && resolved.extension().is_some_and(|ext| ext == "md")
     })
 }
 
@@ -965,7 +966,7 @@ impl<'a> ReviewDependencyIndex<'a> {
                 let owner = lk_vault::find_page_owner(root, Path::new(&subject));
                 read.check().map_err(GraphError::from)?;
                 match owner {
-                    Ok(Some(owner)) => resolved.push(owner.to_string_lossy().into_owned()),
+                    Ok(Some(owner)) => resolved.push(page_address(&owner)),
                     Ok(None) => {}
                     Err(failure) => {
                         if !inventory.has_errors(&path).expect("captured review path") {
@@ -980,10 +981,8 @@ impl<'a> ReviewDependencyIndex<'a> {
                     }
                 }
             }
-            let owner = lk_vault::resolve_page_owner(root, Path::new(&path))
-                .map_err(error)?
-                .to_string_lossy()
-                .into_owned();
+            let owner =
+                page_address(&lk_vault::resolve_page_owner(root, Path::new(&path)).map_err(error)?);
             for subject in &resolved {
                 by_subject
                     .entry(subject.clone())
@@ -1017,10 +1016,9 @@ impl<'a> ReviewDependencyIndex<'a> {
         let mut indexed_reports = BTreeMap::new();
         for report in reports {
             read.check().map_err(GraphError::from)?;
-            let owner = lk_vault::resolve_page_owner(root, Path::new(&report.path))
-                .map_err(error)?
-                .to_string_lossy()
-                .into_owned();
+            let owner = page_address(
+                &lk_vault::resolve_page_owner(root, Path::new(&report.path)).map_err(error)?,
+            );
             let declared = subjects.remove(&report.path).unwrap_or_default();
             for subject in &declared {
                 by_subject
@@ -1047,14 +1045,12 @@ impl<'a> ReviewDependencyIndex<'a> {
         path: &str,
     ) -> Result<AuditReviewDependency, GraphError> {
         self.read.check().map_err(GraphError::from)?;
-        let subject = lk_vault::resolve_page_owner(root, Path::new(subject))
-            .map_err(error)?
-            .to_string_lossy()
-            .into_owned();
+        let subject =
+            page_address(&lk_vault::resolve_page_owner(root, Path::new(subject)).map_err(error)?);
         let owner = lk_vault::find_page_owner(root, Path::new(path));
         self.read.check().map_err(GraphError::from)?;
         let owner = match owner {
-            Ok(owner) => owner.map(|owner| owner.to_string_lossy().into_owned()),
+            Ok(owner) => owner.map(|owner| page_address(&owner)),
             Err(_) => return review_dependency(root, &subject, path, None, None, &self.read),
         };
         let lookup = owner.as_deref().unwrap_or(path);
@@ -1168,7 +1164,7 @@ fn review_subjects(
                 let owner = lk_vault::find_page_owner(root, Path::new(path));
                 read.check().map_err(GraphError::from)?;
                 match owner {
-                    Ok(owner) => Ok(owner.map(|owner| owner.to_string_lossy().into_owned())),
+                    Ok(owner) => Ok(owner.map(|owner| page_address(&owner))),
                     Err(_) if review.effective_state == lk_vault::ReviewEffectiveState::Invalid => {
                         Ok(None)
                     }
@@ -1192,14 +1188,12 @@ fn scoped_reviews(
     receipts: &Receipts,
 ) -> Result<Vec<AuditReviewDependency>, GraphError> {
     index.read.check().map_err(GraphError::from)?;
-    let subject = subject.to_string_lossy();
-    let owner = lk_vault::resolve_page_owner(root, Path::new(subject.as_ref()))
-        .map_err(error)?
-        .to_string_lossy()
-        .into_owned();
+    let subject = page_address(subject);
+    let owner =
+        page_address(&lk_vault::resolve_page_owner(root, Path::new(&subject)).map_err(error)?);
     let mut paths = index.by_subject.get(&owner).cloned().unwrap_or_default();
     // Preserve dependencies recorded by earlier assessments, including now missing reviews.
-    if let Some(receipt) = receipts.entries.get(subject.as_ref()) {
+    if let Some(receipt) = receipts.entries.get(&subject) {
         paths.extend(receipt.reviews.iter().cloned());
     }
     let mut result = Vec::new();
@@ -1328,7 +1322,7 @@ fn review_dependency(
                     let address =
                         lk_vault::evidence_archive_path(&citation.revision).map_err(error)?;
                     Some(page_input(
-                        &address.to_string_lossy(),
+                        &page_address(&address),
                         page.original
                             .as_deref()
                             .expect("parsed archive retains exact bytes"),
@@ -1385,7 +1379,7 @@ fn require_readable_subjects(
     for page in pages.iter().filter(|page| {
         is_subject_address(&page.path, dirs)
             && selection
-                .is_none_or(|selection| selection.contains(page.path.to_string_lossy().as_ref()))
+                .is_none_or(|selection| selection.contains(page_address(&page.path).as_str()))
     }) {
         page.require_readable()?;
     }
@@ -1459,7 +1453,7 @@ fn inputs_selected_controlled(
     let evidence = crate::backlinks::concept_evidence_controlled(pages, root, dirs, read)?;
     let kinds = subject_kinds(pages, dirs);
     let selected = |path: &Path| {
-        selection.is_none_or(|selection| selection.contains(path.to_string_lossy().as_ref()))
+        selection.is_none_or(|selection| selection.contains(page_address(path).as_str()))
     };
     let by_id: BTreeMap<_, _> = pages.iter().map(|page| (page.id.as_str(), page)).collect();
     let by_path = pages
@@ -1537,14 +1531,14 @@ fn inputs_selected_controlled(
             .collect::<Vec<_>>();
         let discovery = if let Some(plan) = receipts
             .discovery
-            .get(&page.path.to_string_lossy().into_owned())
+            .get(&page_address(&page.path))
             .filter(|plan| plan.subject_revision == revision)
         {
             let mut matches = plan
                 .queries
                 .iter()
                 .flat_map(|query| discovered.matches[query].clone())
-                .filter(|citation| citation.path != page.path.to_string_lossy())
+                .filter(|citation| citation.path != page_address(&page.path))
                 .collect::<Vec<_>>();
             if plan.selection.is_some() {
                 let owner = lk_vault::resolve_page_owner(root, &page.path).map_err(error)?;
@@ -1568,7 +1562,7 @@ fn inputs_selected_controlled(
                     selection::project(
                         root,
                         selection::SelectionInputs {
-                            subject: &page.path.to_string_lossy(),
+                            subject: &page_address(&page.path),
                             subject_revision: &revision,
                             queries: &plan.queries,
                             matches: &matches,
@@ -1588,7 +1582,7 @@ fn inputs_selected_controlled(
                 for citation in &matches {
                     let owner = lk_vault::resolve_page_owner(root, Path::new(&citation.path))
                         .map_err(error)?;
-                    if selected.contains(owner.to_string_lossy().as_ref()) {
+                    if selected.contains(&page_address(&owner)) {
                         related_pages.push(citation.clone());
                     }
                 }
@@ -1621,7 +1615,7 @@ fn inputs_selected_controlled(
         );
         result.push(AuditCandidate {
             kind,
-            path: page.path.to_string_lossy().into_owned(),
+            path: page_address(&page.path),
             title: page.title.clone(),
             file_revision: file_revision(&raw),
             input_revision,
