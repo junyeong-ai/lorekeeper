@@ -4703,23 +4703,49 @@ mod native {
             Ok(self.audit_checkpoint(paths, None)?.plan)
         }
 
-        fn audit_coverage(&self) -> miette::Result<lk_graph::audit::AuditCoverage> {
+        fn inspect_audit_coverage(&mut self) -> miette::Result<lk_graph::audit::AuditCoverage> {
             let pages = lk_graph::scan::scan_vault_controlled(
                 &self.root,
                 self.config.graph.scope.follow_links,
                 self.supervisor.read_control(),
             )
             .map_err(|error| miette::miette!("{error}"))?;
-            let plan = lk_graph::audit::plan_selected_partitioned_controlled(
+            let mut readiness =
+                InputAvailability::load_controlled(&self.root, self.supervisor.read_control())?;
+            let mut deferred_paths = std::collections::BTreeSet::new();
+            let plan = lk_graph::audit::plan_selected_available_partitioned_controlled(
                 &self.root,
                 &self.config.vault.dirs,
                 &pages,
                 self.config.graph.audit.batch_size,
                 &[],
                 self.config.graph.audit.max_input_bytes,
+                &mut |candidate| {
+                    let available = readiness.check(candidate)?;
+                    if !available {
+                        deferred_paths.insert(candidate.path.clone());
+                    }
+                    Ok(available)
+                },
                 self.supervisor.read_control(),
             )
             .map_err(|error| miette::miette!("{error}"))?;
+            self.audit_deferred_paths.extend(deferred_paths);
+            for deferred in readiness.deferred() {
+                if let Some(previous) = self
+                    .result
+                    .audit_deferred
+                    .iter_mut()
+                    .find(|item| item.path == deferred.path)
+                {
+                    *previous = deferred.clone();
+                } else if self.result.audit_deferred.len()
+                    < super::super::audit::MAX_DEFERRED_DETAILS
+                {
+                    self.result.audit_deferred.push(deferred.clone());
+                }
+            }
+            self.result.audit_deferred_count = self.audit_deferred_paths.len();
             Ok(plan.coverage())
         }
 
@@ -5378,7 +5404,7 @@ mod native {
                     }
                 }
             } else if self.result.audit.as_ref().is_some_and(Vec::is_empty) {
-                match self.audit_coverage() {
+                match self.inspect_audit_coverage() {
                     Ok(coverage) => {
                         if let Some(progress) = &mut self.result.audit_progress {
                             progress.after = Some(coverage);

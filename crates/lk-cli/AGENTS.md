@@ -76,7 +76,7 @@ deferred subcommands expose their names eagerly for name-only discovery.
   identity before ready-only audit capture so valid scope drift remains a typed replan.
   Deferral counts track encountered subject paths independently of bounded details.
   Selected replans replace those subjects while retaining other observed holds;
-  coverage-only refreshes never clear the run's deferral observations.
+  final coverage checks add current readiness observations without clearing earlier holds.
 
 - Bounded native finalizers receive RSS article selectors separately from semantic
   observations. Match the retained manifest revision and every event's authority,
