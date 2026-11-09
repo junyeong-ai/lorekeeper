@@ -64,27 +64,30 @@ pub async fn run(
         .try_exists()
         .map_err(|error| miette::miette!("inspect work store: {error}"))?;
     let audit_actions_present = super::audit::action::present(&vault_root)?;
+    let audit_selections_present = lk_graph::audit::selection::present(&vault_root)
+        .map_err(|error| miette::miette!("{error}"))?;
     #[cfg(unix)]
-    let work_lease = if (work_present || audit_actions_present) && !dry_run {
-        let lease = super::workflow::WorkflowLease::prepare_selected(
-            opts,
-            &config,
-            &vault_root,
-            config_path.clone(),
-            config_revision.clone(),
-        )?;
-        lease.root_pin().validate()?;
-        match lease.try_lock() {
-            Ok(()) => {
-                lease.root_pin().validate()?;
-                Some(lease)
+    let work_lease =
+        if (work_present || audit_actions_present || audit_selections_present) && !dry_run {
+            let lease = super::workflow::WorkflowLease::prepare_selected(
+                opts,
+                &config,
+                &vault_root,
+                config_path.clone(),
+                config_revision.clone(),
+            )?;
+            lease.root_pin().validate()?;
+            match lease.try_lock() {
+                Ok(()) => {
+                    lease.root_pin().validate()?;
+                    Some(lease)
+                }
+                Err(std::fs::TryLockError::WouldBlock) => None,
+                Err(error) => return Err(miette::miette!("work retention lease: {error}")),
             }
-            Err(std::fs::TryLockError::WouldBlock) => None,
-            Err(error) => return Err(miette::miette!("work retention lease: {error}")),
-        }
-    } else {
-        None
-    };
+        } else {
+            None
+        };
     #[cfg(unix)]
     let work_available = dry_run || work_lease.is_some();
     #[cfg(not(unix))]
@@ -128,6 +131,8 @@ pub async fn run(
     let cutoff_secs = prune_cutoff_secs(jiff::Timestamp::now().as_second(), retention_days);
     let prefix = if dry_run { "[dry-run] " } else { "" };
 
+    let mut selection_references = std::collections::BTreeSet::new();
+    let mut selection_guards = lk_vault::MutationPlan::default();
     if work_present {
         if work_available {
             let report =
@@ -136,8 +141,30 @@ pub async fn run(
                 "{prefix}work: pruned {} published work(s), {} bytes; retained {} unpublished, referenced, unexpired or unowned work(s); cleared {} empty work directories.",
                 report.removed, report.bytes, report.retained, report.empty_directories
             );
+            selection_references = report.selection_references;
+            selection_guards = report.selection_guards;
         } else {
             eprintln!("{prefix}work: retained; exclusive Unix workflow access is unavailable.");
+        }
+    }
+    if audit_selections_present {
+        if work_available {
+            let report = lk_graph::audit::selection::prune(
+                &vault_root,
+                _mutation.as_ref(),
+                &selection_references,
+                selection_guards,
+                cutoff_secs,
+            )
+            .map_err(|error| miette::miette!("{error}"))?;
+            eprintln!(
+                "{prefix}audit selection: pruned {} expired unreferenced states, {} packets, {} bytes; cleared {} empty directories.",
+                report.states, report.packets, report.bytes, report.empty_directories
+            );
+        } else {
+            eprintln!(
+                "{prefix}audit selection: retained; exclusive Unix workflow access is unavailable."
+            );
         }
     }
     if audit_actions_present {

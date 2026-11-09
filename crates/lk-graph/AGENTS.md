@@ -61,6 +61,10 @@ and CLI discovery, not a second graph authority.
   candidates prevent assessment. Excluding discovery context never excludes mandatory
   evidence or direct links; excluded candidate bytes remain publication guards.
   Absent selection metadata retains the exact legacy full-context derivation.
+  Retention roots are current discovery, latest assessment and retained Work states;
+  states directly retain their packet rows. Reassessment tokens guard concurrency,
+  not predecessor retention. Prune expired unreferenced artifacts by typed creation
+  time under workflow/mutation claims, guarding the captured audit and Work roots.
 
 - Audit candidates explicitly distinguish concepts from declared source documents
   under the configured wiki documents collection, including nested addresses.

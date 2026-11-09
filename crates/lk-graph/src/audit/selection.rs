@@ -17,8 +17,10 @@ const PACKET_SCHEMA: &str = "audit-selection-packet-v1";
 const MAX_REASON_JSON_BYTES: usize = 256;
 const INSTRUCTIONS: &str = "Judge each candidate independently for this audit subject. Cards are bounded discovery previews, not full evidence. Inspect a potentially applicable or uncertain candidate. Use not-selected only when its declared scope is inapplicable. Defer only when an explicit unresolved prerequisite prevents deciding; later unknown candidates still require decisions. Every assigned key needs exactly one reasoned decision. Mandatory evidence and direct links remain required regardless of this selection.";
 
+mod retention;
 #[cfg(test)]
 mod tests;
+pub use retention::{PruneReport, present, prune};
 
 fn revision(value: &impl Serialize) -> Result<String, GraphError> {
     serde_json::to_string(value)
@@ -601,27 +603,37 @@ fn load_packets(
             let (raw, packet): (_, PacketReceipt) =
                 read_artifact(root, &path, &reference.packet_revision, read)?;
             validate_packet(&packet)?;
-            if packet.request.subject != state.subject
-                || packet.request.purpose_revision != state.purpose_revision
-            {
-                return Err(error(
-                    "audit decision packet differs from its state purpose",
-                ));
-            }
             guards.insert(path, raw);
             packets.insert(reference.packet_revision.clone(), packet);
         }
         let packet = &packets[&reference.packet_revision];
-        let assigned = packet
-            .request
-            .candidates
-            .get(reference.row)
-            .ok_or_else(|| error("audit decision row is absent"))?;
-        if assigned.input != row.input {
-            return Err(error("audit decision row differs from its candidate"));
-        }
+        validate_decision_reference(state, row, reference, packet)?;
     }
     Ok(packets)
+}
+
+fn validate_decision_reference(
+    state: &SelectionState,
+    row: &StateRow,
+    reference: &DecisionReference,
+    packet: &PacketReceipt,
+) -> Result<(), GraphError> {
+    if packet.request.subject != state.subject
+        || packet.request.purpose_revision != state.purpose_revision
+    {
+        return Err(error(
+            "audit decision packet differs from its state purpose",
+        ));
+    }
+    let assigned = packet
+        .request
+        .candidates
+        .get(reference.row)
+        .ok_or_else(|| error("audit decision row is absent"))?;
+    if assigned.input != row.input {
+        return Err(error("audit decision row differs from its candidate"));
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy)]

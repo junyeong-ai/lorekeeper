@@ -1,4 +1,210 @@
 use super::*;
+
+fn retained_generations() -> (Fixture, StateReference, StateReference, StateReference) {
+    let fixture = Fixture::new(1);
+    fixture
+        .record(output(
+            &fixture.packet(20, false),
+            ScreeningDecision::NotSelected,
+        ))
+        .unwrap();
+    let first = state_reference(&fixture.candidate()).unwrap().unwrap();
+    fixture.write(
+        "wiki/documents/added.md",
+        "---\ntype: document\ntitle: Added\n---\nScreen protocol has another scoped claim.\n",
+    );
+    fixture
+        .record(output(
+            &fixture.packet(20, false),
+            ScreeningDecision::NotSelected,
+        ))
+        .unwrap();
+    let second = state_reference(&fixture.candidate()).unwrap().unwrap();
+    let path = "wiki/documents/candidate-000.md";
+    let raw = std::fs::read_to_string(fixture.root.join(path)).unwrap();
+    fixture.write(path, &(raw + "\nAn authored scope change.\n"));
+    fixture
+        .record(output(
+            &fixture.packet(20, false),
+            ScreeningDecision::NotSelected,
+        ))
+        .unwrap();
+    let current = state_reference(&fixture.candidate()).unwrap().unwrap();
+    (fixture, first, second, current)
+}
+
+#[test]
+fn selection_retention_keeps_current_assessed_and_work_references() {
+    let (fixture, first, second, current) = retained_generations();
+    let cutoff = jiff::Timestamp::now().as_second() + 3600;
+    let (_, mut receipts) = crate::audit::load(&fixture.root).unwrap();
+    receipts
+        .selection_assessments
+        .insert(SUBJECT.into(), second.clone());
+    fixture.write(
+        crate::audit::STATE,
+        &serde_json::to_string(&receipts).unwrap(),
+    );
+    let session = MutationSession::acquire(&fixture.root).unwrap();
+    let protected = BTreeSet::from([first.clone()]);
+    let report = prune(
+        &fixture.root,
+        Some(&session),
+        &protected,
+        MutationPlan::default(),
+        cutoff,
+    )
+    .unwrap();
+    assert_eq!((report.states, report.packets), (0, 0));
+    assert!(fixture.root.join(first.path().unwrap()).exists());
+    let before = fixture.snapshot();
+    let dry = prune(
+        &fixture.root,
+        None,
+        &BTreeSet::new(),
+        MutationPlan::default(),
+        cutoff,
+    )
+    .unwrap();
+    assert_eq!((dry.states, dry.packets), (1, 0));
+    assert_eq!(fixture.snapshot(), before);
+    let report = prune(
+        &fixture.root,
+        Some(&session),
+        &BTreeSet::new(),
+        MutationPlan::default(),
+        cutoff,
+    )
+    .unwrap();
+    assert_eq!((report.states, report.packets), (1, 0));
+    assert!(!fixture.root.join(first.path().unwrap()).exists());
+    assert!(fixture.root.join(second.path().unwrap()).exists());
+    let (_, mut receipts) = crate::audit::load(&fixture.root).unwrap();
+    receipts.selection_assessments.clear();
+    fixture.write(
+        crate::audit::STATE,
+        &serde_json::to_string(&receipts).unwrap(),
+    );
+    let report = prune(
+        &fixture.root,
+        Some(&session),
+        &BTreeSet::new(),
+        MutationPlan::default(),
+        cutoff,
+    )
+    .unwrap();
+    assert_eq!((report.states, report.packets), (1, 1));
+    assert!(fixture.root.join(current.path().unwrap()).exists());
+    let (_, mut receipts) = crate::audit::load(&fixture.root).unwrap();
+    receipts.discovery.clear();
+    fixture.write(
+        crate::audit::STATE,
+        &serde_json::to_string(&receipts).unwrap(),
+    );
+    let young = prune(
+        &fixture.root,
+        Some(&session),
+        &BTreeSet::new(),
+        MutationPlan::default(),
+        jiff::Timestamp::now().as_second() - 3600,
+    )
+    .unwrap();
+    assert_eq!((young.states, young.packets), (0, 0));
+    let report = prune(
+        &fixture.root,
+        Some(&session),
+        &BTreeSet::new(),
+        MutationPlan::default(),
+        cutoff,
+    )
+    .unwrap();
+    assert_eq!((report.states, report.packets), (1, 2));
+    assert!(!fixture.root.join(DIRECTORY).exists());
+}
+
+#[test]
+fn unknown_or_missing_selection_references_refuse_before_retention_deletes() {
+    for defect in [
+        "missing-reference",
+        "unknown-artifact",
+        "changed-artifact",
+        "pending-journal",
+    ] {
+        let (fixture, first, _, _) = retained_generations();
+        let mut references = BTreeSet::new();
+        match defect {
+            "missing-reference" => {
+                references.insert(StateReference {
+                    subject: SUBJECT.into(),
+                    revision: "0".repeat(64),
+                });
+            }
+            "unknown-artifact" => {
+                fixture.write(&format!("{DIRECTORY}/unknown.txt"), "Unknown owner.")
+            }
+            "changed-artifact" => fixture.write(first.path().unwrap().to_str().unwrap(), "{}"),
+            "pending-journal" => fixture.write(".lorekeeper/mutation/pending.json", "{}"),
+            _ => unreachable!(),
+        }
+        let before = fixture.snapshot();
+        assert!(
+            prune(
+                &fixture.root,
+                None,
+                &references,
+                MutationPlan::default(),
+                jiff::Timestamp::now().as_second() + 3600
+            )
+            .is_err(),
+            "{defect}"
+        );
+        assert_eq!(fixture.snapshot(), before);
+    }
+}
+
+#[test]
+fn retained_work_manifest_and_audit_root_guards_precede_retention_replay() {
+    for changed in ["work", "audit"] {
+        let (fixture, _, _, _) = retained_generations();
+        fixture.write("work-reference.json", "Original retained manifest.");
+        let mut guards = MutationPlan::default();
+        guards.require_unchanged("work-reference.json", "Original retained manifest.".into());
+        let planned = super::retention::plan_prune(
+            &fixture.root,
+            &BTreeSet::new(),
+            guards,
+            jiff::Timestamp::now().as_second() + 3600,
+        )
+        .unwrap();
+        match changed {
+            "work" => fixture.write("work-reference.json", "Externally changed manifest."),
+            "audit" => {
+                let (_, mut receipts) = crate::audit::load(&fixture.root).unwrap();
+                receipts.discovery.clear();
+                fixture.write(
+                    crate::audit::STATE,
+                    &serde_json::to_string(&receipts).unwrap(),
+                );
+            }
+            _ => unreachable!(),
+        }
+        let artifacts = fixture
+            .snapshot()
+            .into_iter()
+            .filter(|(path, _)| path.starts_with(DIRECTORY))
+            .collect::<BTreeMap<_, _>>();
+        let journal = serde_json::json!({"version":1,"plan":planned.mutation}).to_string();
+        fixture.write(".lorekeeper/mutation/pending.json", &journal);
+        assert!(
+            MutationSession::acquire(&fixture.root).is_err(),
+            "{changed}"
+        );
+        for (path, raw) in artifacts {
+            assert_eq!(std::fs::read(fixture.root.join(path)).unwrap(), raw);
+        }
+    }
+}
+
 use crate::audit::{AuditAssessment, AuditDisposition, AuditResults, DiscoveryPlan, Receipts};
 
 const SUBJECT: &str = "wiki/documents/subject.md";

@@ -15,6 +15,8 @@ pub(crate) struct WorkRetention {
     pub retained: usize,
     pub bytes: usize,
     pub empty_directories: usize,
+    pub selection_references: BTreeSet<lk_graph::audit::selection::StateReference>,
+    pub selection_guards: MutationPlan,
 }
 
 fn is_empty_work_directory(directory: &Path) -> miette::Result<bool> {
@@ -38,6 +40,7 @@ struct RetentionCapture {
     references: BTreeSet<String>,
     queue_subject: Option<(String, String)>,
     expired: bool,
+    selection: Option<lk_graph::audit::selection::StateReference>,
 }
 
 #[derive(Default)]
@@ -134,6 +137,21 @@ fn capture_retention(root: &Path, id: &str, cutoff: i64) -> miette::Result<Reten
         } => Some((task_id.clone(), cache_hash.clone())),
         Subject::Audit { .. } => None,
     };
+    let selection = work
+        .context
+        .get("purpose")
+        .and_then(|purpose| purpose.get("audit_selection"))
+        .map(|value| {
+            serde_json::from_value::<lk_graph::audit::selection::StateReference>(value.clone())
+                .map_err(fail)
+        })
+        .transpose()?;
+    if let Some(reference) = &selection {
+        reference.validate().map_err(fail)?;
+        if !matches!(&subject, Subject::Audit { path, .. } if path == &reference.subject) {
+            return Err(fail("work audit selection belongs to another subject"));
+        }
+    }
     let directory = work_path(id, "")?;
     let mut known = [
         "plan.json",
@@ -303,6 +321,7 @@ fn capture_retention(root: &Path, id: &str, cutoff: i64) -> miette::Result<Reten
         references,
         queue_subject,
         expired,
+        selection,
     })
 }
 
@@ -410,8 +429,15 @@ pub(crate) fn prune_published(
     for work in captures.values() {
         if retained.contains(&work.id) {
             report.retained += 1;
+            report
+                .selection_references
+                .extend(work.selection.iter().cloned());
             for (path, digest) in &work.revisions {
-                mutation.require_unchanged(path, read_captured(root, path, digest)?);
+                let raw = read_captured(root, path, digest)?;
+                if path.file_name().is_some_and(|name| name == "plan.json") {
+                    report.selection_guards.require_unchanged(path, raw.clone());
+                }
+                mutation.require_unchanged(path, raw);
             }
             continue;
         }
@@ -467,6 +493,42 @@ mod tests {
             input_revision: "captured-input".into(),
         });
         context
+    }
+
+    #[test]
+    fn retained_audit_selection_references_carry_exact_manifest_guards() {
+        for published in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let session = MutationSession::acquire(root.path()).unwrap();
+            let source = resources();
+            let reference = lk_graph::audit::selection::StateReference {
+                subject: "wiki/concepts/selected.md".into(),
+                revision: "a".repeat(64),
+            };
+            let mut selected = context("selected");
+            selected["purpose"]["audit_selection"] = serde_json::to_value(&reference).unwrap();
+            let work = Work::create(&session, &source, "selected", selected, limits()).unwrap();
+            if published {
+                finish(&work, &session, &source);
+                publish(&work, &session, &source);
+            }
+            let report = prune_published(root.path(), None, i64::MAX).unwrap();
+            if published {
+                assert_eq!(report.removed, 1);
+                assert!(report.selection_references.is_empty());
+            } else {
+                assert_eq!(report.selection_references, BTreeSet::from([reference]));
+                let path = root
+                    .path()
+                    .join(work_path(&work.plan.id, "plan.json").unwrap());
+                let original = std::fs::read_to_string(&path).unwrap();
+                std::fs::write(path, original + "\n").unwrap();
+                let mut plan = report.selection_guards;
+                plan.create("sentinel.md", "This transition must refuse.".into());
+                assert!(session.apply(plan).is_err());
+                assert!(!root.path().join("sentinel.md").exists());
+            }
+        }
     }
 
     fn pending_task(root: &Path) -> lk_queue::QueueTask {
