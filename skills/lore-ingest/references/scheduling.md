@@ -27,6 +27,10 @@ The scheduler emits native commands:
 With `execution.automation`, schedules add `--scheduled --json` to daily/process/
 knowledge jobs and add one process job at `automation.process_schedule`. Process and
 knowledge repeat ready batches within `max_run_seconds`; daily collects once.
+Execution time starts at the first acquired workflow lease and excludes subsequent
+workflow waiting. Total waiting across the invocation is bounded separately by
+`max_wait_seconds`, which defaults to `max_run_seconds`. Neither budget renews
+at a batch boundary.
 The selected profile's `execution.work.max_calls` also caps the complete scheduled
 invocation across those batches; a batch boundary cannot renew that allowance.
 Optional `automation.knowledge_schedule` overrides the knowledge job's timing;
@@ -43,7 +47,7 @@ and pauses. Persistent OS schedules offer later runs after an incomplete batch o
 process interruption, subject to OS registration and host availability.
 Reservations are durable before host launch and survive
 restart/config changes; they count outer agent attempts, not internal model requests,
-tokens or billing. Duration limits bound workflow waiting and new-call admission,
+tokens or billing. Separate waiting and execution limits bound acquisition and new-call admission,
 not completion of an active host, source collection or paid-result recording.
 Unknown/corrupt accounting refuses semantic execution. Fatal inference failures pause
 that operation's semantic phase across restarts and day rollover. Daily source

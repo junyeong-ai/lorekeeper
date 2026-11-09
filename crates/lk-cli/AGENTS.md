@@ -135,7 +135,9 @@ deferred subcommands expose their names eagerly for name-only discovery.
   lease grants no ownership. Never refund ambiguous launches, reset usage on config
   changes, recover corrupt accounting as zero, or detach its writer. This ledger is
   independent of canonical mutation journals; page, Work and cursor writes still use
-  `MutationSession`. Duration limits stop new calls and bound workflow waiting, while
+  `MutationSession`. Execution duration starts with the first owned workflow and
+  excludes later workflow waiting. Total waiting has its own configured bound;
+  neither allowance renews across batches. Duration limits stop new calls, while
   returned paid results remain recordable. Fatal scheduled failures pause that operation;
   explicit `--resume` clears its pause without clearing usage or semantic holds.
 - Native writer waiting is cancellable, retries only typed contention and validates the

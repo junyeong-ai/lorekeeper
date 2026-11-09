@@ -91,6 +91,7 @@ pub(super) enum Stop {
     DayLimit,
     RunLimit,
     RunDuration,
+    WaitDuration,
     Paused,
 }
 
@@ -101,6 +102,7 @@ pub(super) struct Report {
     pub max_calls_per_day: Option<usize>,
     pub max_calls_per_run: usize,
     pub run_reservations: usize,
+    pub workflow_wait_ms: u64,
     pub stop: Option<Stop>,
 }
 
@@ -111,7 +113,8 @@ pub(super) struct Control {
     policy: AutomationConfig,
     operation: ExecutionOperation,
     resume: bool,
-    deadline: Instant,
+    deadline: Option<Instant>,
+    wait_remaining: Duration,
     pub report: Report,
 }
 
@@ -128,6 +131,7 @@ pub(in crate::commands) struct Status {
     pub max_calls_per_day: Option<usize>,
     pub remaining_calls: Option<usize>,
     pub max_run_seconds: u64,
+    pub max_wait_seconds: u64,
     pub paused: BTreeMap<ExecutionOperation, jiff::Timestamp>,
 }
 
@@ -144,6 +148,7 @@ pub(in crate::commands) fn status(
             .max_calls_per_day
             .map(|limit| limit.get().saturating_sub(usage.reserved_calls)),
         max_run_seconds: policy.max_run_seconds.get(),
+        max_wait_seconds: policy.wait_duration().as_secs(),
         paused: usage.paused,
     })
 }
@@ -155,9 +160,13 @@ impl Control {
         resume: bool,
         max_calls_per_run: usize,
     ) -> miette::Result<Self> {
-        let deadline = Instant::now()
+        let wait_remaining = policy.wait_duration();
+        Instant::now()
             .checked_add(Duration::from_secs(policy.max_run_seconds.get()))
             .ok_or_else(|| miette::miette!("automation duration exceeds the monotonic clock"))?;
+        Instant::now().checked_add(wait_remaining).ok_or_else(|| {
+            miette::miette!("automation waiting duration exceeds the monotonic clock")
+        })?;
         Ok(Self {
             report: Report {
                 utc_date: None,
@@ -165,17 +174,52 @@ impl Control {
                 max_calls_per_day: policy.max_calls_per_day.map(|limit| limit.get()),
                 max_calls_per_run,
                 run_reservations: 0,
+                workflow_wait_ms: 0,
                 stop: None,
             },
             policy,
             operation,
             resume,
-            deadline,
+            deadline: None,
+            wait_remaining,
         })
     }
 
-    pub fn deadline(&self) -> Instant {
-        self.deadline
+    pub fn wait_deadline(&mut self) -> miette::Result<Option<Instant>> {
+        if !self.check_duration() {
+            return Ok(None);
+        }
+        if self.wait_remaining.is_zero() {
+            self.report.stop = Some(Stop::WaitDuration);
+            return Ok(None);
+        }
+        Instant::now()
+            .checked_add(self.wait_remaining)
+            .map(Some)
+            .ok_or_else(|| {
+                miette::miette!("automation waiting duration exceeds the monotonic clock")
+            })
+    }
+
+    pub fn record_wait(&mut self, elapsed: Duration) -> miette::Result<()> {
+        if elapsed >= self.wait_remaining {
+            self.report.stop = Some(Stop::WaitDuration);
+        }
+        self.wait_remaining = self.wait_remaining.saturating_sub(elapsed);
+        self.report.workflow_wait_ms = self
+            .report
+            .workflow_wait_ms
+            .saturating_add(elapsed.as_millis().try_into().unwrap_or(u64::MAX));
+        if let Some(deadline) = self.deadline {
+            self.deadline = Some(deadline.checked_add(elapsed).ok_or_else(|| {
+                miette::miette!("automation duration exceeds the monotonic clock")
+            })?);
+        }
+        Ok(())
+    }
+
+    pub fn stop_waiting(&mut self) {
+        self.report.stop = Some(Stop::WaitDuration);
     }
 
     pub fn available(&self) -> usize {
@@ -195,7 +239,11 @@ impl Control {
     }
 
     pub fn check_duration(&mut self) -> bool {
-        if self.report.stop.is_none() && Instant::now() >= self.deadline {
+        if self.report.stop.is_none()
+            && self
+                .deadline
+                .is_some_and(|deadline| Instant::now() >= deadline)
+        {
             self.report.stop = Some(Stop::RunDuration);
         }
         self.report.stop.is_none()
@@ -204,6 +252,15 @@ impl Control {
     pub fn enter(&mut self, root: &Path) -> miette::Result<bool> {
         if !self.check_duration() {
             return Ok(false);
+        }
+        if self.deadline.is_none() {
+            self.deadline = Some(
+                Instant::now()
+                    .checked_add(Duration::from_secs(self.policy.max_run_seconds.get()))
+                    .ok_or_else(|| {
+                        miette::miette!("automation duration exceeds the monotonic clock")
+                    })?,
+            );
         }
         let mut usage = Usage::load(root, today())?;
         if self.resume && usage.paused.remove(&self.operation).is_some() {
@@ -301,6 +358,7 @@ mod tests {
             knowledge_schedule: None,
             max_calls_per_day: Some(limit.try_into().unwrap()),
             max_run_seconds: 60.try_into().unwrap(),
+            max_wait_seconds: None,
         }
     }
 
@@ -321,7 +379,7 @@ mod tests {
         assert_eq!(resumed.available(), 1);
         assert!(!resumed.reserve(root, 2).unwrap());
         assert_eq!(resumed.report.stop, Some(Stop::DayLimit));
-        resumed.deadline = Instant::now();
+        resumed.deadline = Some(Instant::now());
         assert!(!resumed.check_duration());
         assert_eq!(resumed.report.stop, Some(Stop::DayLimit));
         let mut other = Control::new(policy(3), ExecutionOperation::Knowledge, false, 64).unwrap();
@@ -375,10 +433,47 @@ mod tests {
         control.enter(root).unwrap();
         control.reserve(root, 1).unwrap();
         let before = std::fs::read(path(root).unwrap()).unwrap();
-        control.deadline = Instant::now();
+        control.deadline = Some(Instant::now());
         assert!(!control.reserve(root, 1).unwrap());
         assert_eq!(control.report.stop, Some(Stop::RunDuration));
         assert_eq!(std::fs::read(path(root).unwrap()).unwrap(), before);
+    }
+
+    #[test]
+    fn workflow_waiting_preserves_execution_time_and_accumulates_across_batches() {
+        let directory = fixture();
+        let mut control = Control::new(policy(8), ExecutionOperation::Process, false, 4).unwrap();
+        control.record_wait(Duration::from_secs(20)).unwrap();
+        assert!(control.deadline.is_none());
+        assert!(control.enter(directory.path()).unwrap());
+        assert!(control.reserve(directory.path(), 1).unwrap());
+        let deadline = control.deadline.unwrap();
+        control.record_wait(Duration::from_secs(10)).unwrap();
+        assert_eq!(control.deadline, Some(deadline + Duration::from_secs(10)));
+        assert!(control.enter(directory.path()).unwrap());
+        assert_eq!(control.deadline, Some(deadline + Duration::from_secs(10)));
+        assert_eq!(control.report.run_reservations, 1);
+        assert_eq!(control.report.workflow_wait_ms, 30_000);
+        assert_eq!(control.wait_remaining, Duration::from_secs(30));
+        assert!(control.wait_deadline().unwrap().is_some());
+    }
+
+    #[test]
+    fn exhausted_waiting_does_not_reserve_calls_or_change_the_usage_ledger() {
+        let directory = fixture();
+        let mut control = Control::new(policy(8), ExecutionOperation::Knowledge, false, 4).unwrap();
+        assert!(control.enter(directory.path()).unwrap());
+        assert!(control.reserve(directory.path(), 1).unwrap());
+        let before = std::fs::read(path(directory.path()).unwrap()).unwrap();
+        control.record_wait(Duration::from_secs(60)).unwrap();
+        assert!(control.wait_deadline().unwrap().is_none());
+        assert_eq!(control.report.stop, Some(Stop::WaitDuration));
+        assert!(!control.reserve(directory.path(), 1).unwrap());
+        assert_eq!(control.report.run_reservations, 1);
+        assert_eq!(
+            std::fs::read(path(directory.path()).unwrap()).unwrap(),
+            before
+        );
     }
 
     #[test]

@@ -233,7 +233,90 @@ fn scheduled_workflow_wait_is_bounded_without_starting_a_model() {
     let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(calls(&report), 0, "{report}");
     assert_eq!(report["stop_reason"], "automation-limit");
-    assert_eq!(report["runs"][0]["automation"]["stop"], "run-duration");
+    assert_eq!(report["runs"][0]["automation"]["stop"], "wait-duration");
     assert!(report["runs"][0]["automation"]["reserved_calls"].is_null());
     assert!(!fixture.root().join("bounded-calls.jsonl").exists());
+}
+
+#[test]
+fn scheduled_execution_retains_its_duration_after_waiting_for_the_workflow() {
+    use std::io::{BufRead, Write};
+    use std::time::{Duration, Instant};
+
+    let fixture = Fixture::new("codex", 30, RECORD_AUDIT);
+    write_audit_concept(&fixture, "waiting");
+    record_discovery(&fixture, "wiki/concepts/waiting.md");
+    configure(&fixture, None, 3);
+    let config = std::fs::read_to_string(&fixture.config).unwrap().replace(
+        "max_run_seconds: 3",
+        "max_run_seconds: 3, max_wait_seconds: 15",
+    );
+    std::fs::write(&fixture.config, config).unwrap();
+    let mut holder = fixture
+        .command()
+        .args([
+            "workflow",
+            "--",
+            "/bin/sh",
+            "-c",
+            "printf 'ready\\n'; read task_release",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut ready = String::new();
+    std::io::BufReader::new(holder.stdout.take().unwrap())
+        .read_line(&mut ready)
+        .unwrap();
+    assert_eq!(ready, "ready\n");
+    let waiter = fixture
+        .command()
+        .args(["run", "knowledge", "--scheduled", "--wait", "--json"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let admission = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(
+            fixture
+                .root()
+                .join("vault/.lorekeeper/workflow-admission.lock"),
+        )
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let waiting = loop {
+        match admission.try_lock() {
+            Ok(()) => admission.unlock().unwrap(),
+            Err(std::fs::TryLockError::WouldBlock) => break true,
+            Err(error) => panic!("{error}"),
+        }
+        if Instant::now() >= deadline {
+            break false;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    if waiting {
+        std::thread::sleep(Duration::from_millis(3500));
+    }
+    holder
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"release\n")
+        .unwrap();
+    assert!(holder.wait().unwrap().success());
+    let output = waiter.wait_with_output().unwrap();
+    assert!(waiting, "scheduled job did not reach workflow admission");
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(calls(&report) > 0, "{report}");
+    assert!(
+        report["runs"][0]["automation"]["workflow_wait_ms"]
+            .as_u64()
+            .unwrap()
+            >= 3000,
+        "{report}"
+    );
 }

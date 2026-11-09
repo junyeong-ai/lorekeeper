@@ -117,6 +117,14 @@ pub struct AutomationConfig {
     #[serde(deserialize_with = "required_daily_call_limit")]
     pub max_calls_per_day: Option<NonZeroUsize>,
     pub max_run_seconds: NonZeroU64,
+    #[serde(default)]
+    pub max_wait_seconds: Option<NonZeroU64>,
+}
+
+impl AutomationConfig {
+    pub fn wait_duration(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.max_wait_seconds.unwrap_or(self.max_run_seconds).get())
+    }
 }
 
 fn required_daily_call_limit<'de, D: serde::Deserializer<'de>>(
@@ -501,6 +509,10 @@ mod tests {
         let policy = "automation: {process_schedule: '0,15,30,45 * * * *', max_calls_per_day: 256, max_run_seconds: 900}\n";
         let config: ExecutionConfig = crate::yaml::from_str(policy).unwrap();
         assert_eq!(
+            config.automation.as_ref().unwrap().wait_duration(),
+            std::time::Duration::from_secs(900)
+        );
+        assert_eq!(
             config.automation.unwrap().max_calls_per_day.unwrap().get(),
             256
         );
@@ -513,10 +525,23 @@ mod tests {
             config.automation.unwrap().max_calls_per_day.unwrap().get(),
             256
         );
+        let separate_wait = policy.replace(
+            "max_run_seconds: 900",
+            "max_run_seconds: 900, max_wait_seconds: 120",
+        );
+        let config: ExecutionConfig = crate::yaml::from_str(&separate_wait).unwrap();
+        assert_eq!(
+            config.automation.unwrap().wait_duration(),
+            std::time::Duration::from_secs(120)
+        );
         for invalid in [
             policy.replace(", max_calls_per_day: 256", ""),
             policy.replace("max_calls_per_day: 256", "max_calls_per_day: 0"),
             policy.replace("max_run_seconds: 900", "max_run_seconds: 0"),
+            policy.replace(
+                "max_run_seconds: 900",
+                "max_run_seconds: 900, max_wait_seconds: 0",
+            ),
             policy.replace("max_calls_per_day: 256", "max_calls_per_day: -1"),
             policy.replace("max_calls_per_day: 256", "max_calls_per_day: 2.5"),
             policy.replace("max_calls_per_day: 256", "max_calls_per_day: false"),

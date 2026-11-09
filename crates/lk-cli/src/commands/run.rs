@@ -616,7 +616,8 @@ mod native {
                     automation::Stop::Paused => CampaignStop::Blocked,
                     automation::Stop::DayLimit
                     | automation::Stop::RunLimit
-                    | automation::Stop::RunDuration => CampaignStop::AutomationLimit,
+                    | automation::Stop::RunDuration
+                    | automation::Stop::WaitDuration => CampaignStop::AutomationLimit,
                 };
             }
             if matches!(self.operation, Operation::Process) {
@@ -1009,6 +1010,15 @@ mod native {
             if self.result.halted || self.result.cancelled || !self.configuration_is_current() {
                 return false;
             }
+            let wait_deadline = if let Some(control) = &mut self.automation {
+                match control.wait_deadline() {
+                    Ok(Some(deadline)) => Some(deadline),
+                    Ok(None) => return self.record_automation_stop(),
+                    Err(error) => return self.failure("workflow waiting", error),
+                }
+            } else {
+                None
+            };
             let acquisition = self.supervisor.acquire(
                 self.opts,
                 &self.config,
@@ -1016,14 +1026,20 @@ mod native {
                 &self.config_revision,
                 wait,
             );
-            let acquired = if let Some(control) = &self.automation {
-                match tokio::time::timeout_at(control.deadline().into(), acquisition).await {
+            let acquired = if let Some(deadline) = wait_deadline {
+                let started = Instant::now();
+                let acquired = tokio::time::timeout_at(deadline.into(), acquisition).await;
+                let control = self.automation.as_mut().expect("scheduled run");
+                if let Err(error) = control.record_wait(started.elapsed()) {
+                    return self.failure("workflow waiting", error);
+                }
+                match acquired {
                     Ok(acquired) => acquired,
                     Err(_) => {
                         self.automation
                             .as_mut()
                             .expect("scheduled run")
-                            .check_duration();
+                            .stop_waiting();
                         return self.record_automation_stop();
                     }
                 }

@@ -849,6 +849,7 @@ mod tests {
             knowledge_schedule: Some("5,20,35,50 * * * *".into()),
             max_calls_per_day: Some(256.try_into().unwrap()),
             max_run_seconds: 900.try_into().unwrap(),
+            max_wait_seconds: None,
         });
         let jobs = build_jobs(&config, &["--config".into(), "/tmp/config.yaml".into()]);
         for (name, operation) in [
