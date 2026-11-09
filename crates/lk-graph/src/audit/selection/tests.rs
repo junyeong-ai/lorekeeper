@@ -211,6 +211,7 @@ fn selection_retention_keeps_current_assessed_and_work_references() {
     .unwrap();
     assert_eq!((report.states, report.packets), (0, 0));
     assert!(fixture.root.join(first.path().unwrap()).exists());
+    drop(session);
     let before = fixture.snapshot();
     let dry = prune(
         &fixture.root,
@@ -222,6 +223,7 @@ fn selection_retention_keeps_current_assessed_and_work_references() {
     .unwrap();
     assert_eq!((dry.states, dry.packets), (1, 0));
     assert_eq!(fixture.snapshot(), before);
+    let session = MutationSession::acquire(&fixture.root).unwrap();
     let report = prune(
         &fixture.root,
         Some(&session),
