@@ -152,6 +152,12 @@ deferred subcommands expose their names eagerly for name-only discovery.
   not use that allowance. Neither allowance renews across batches. Duration limits stop
   new calls, while returned paid results remain recordable. Fatal scheduled failures pause that operation;
   explicit `--resume` clears its pause without clearing usage or semantic holds.
+  Confirmed tool-free Inspect/Reduce session timeouts retain one automatic retry per
+  exact request/contract, then hold only that node. Persist counts separately from
+  observations and semantic actions through the mutation journal; they are not retained
+  semantic progress. Process cleanup failure, unknown errors and tool-enabled failures
+  remain fatal. `work retry` resets only an exhausted current timeout allowance, with
+  fresh Work/input guards; dry runs publish/recover nothing and invoke no host.
 - Native writer waiting is cancellable, retries only typed contention and validates the
   same-read config pin before recovery. A pre-host cursor wait discards prepared
   requests and replans before invocation; post-host recording reloads fresh inputs.

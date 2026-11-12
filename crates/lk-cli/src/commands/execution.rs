@@ -23,6 +23,18 @@ pub(super) struct ChildResult {
     pub detail: Option<String>,
     pub stdout: Vec<u8>,
     pub stdout_capture: StdoutCapture,
+    pub termination: ChildTermination,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(super) enum ChildTermination {
+    Exited,
+    TimedOut,
+    Cancelled,
+    SupervisionFailed,
+    IoFailed,
+    CleanupFailed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -263,18 +275,21 @@ impl RunningChild {
         })
     }
 
-    async fn stop(&mut self, detail: &mut String) {
+    async fn stop(&mut self, detail: &mut String) -> bool {
         use rustix::process::Signal;
         if self.cleaned {
-            return;
+            return true;
         }
+        let mut clean = true;
         if let Err(error) = signal_group(self.group, Signal::TERM) {
+            clean = false;
             detail.push_str(&format!("; {error}"));
         }
         // Allow foreground children to finish their atomic writes before forced termination.
         let reaped = match tokio::time::timeout(Duration::from_secs(5), self.child.wait()).await {
             Ok(Ok(_)) => true,
             Ok(Err(error)) => {
+                clean = false;
                 detail.push_str(&format!("; reap child: {error}"));
                 false
             }
@@ -283,13 +298,18 @@ impl RunningChild {
         match signal_group(self.group, Signal::KILL) {
             Ok(()) if !reaped => {
                 if let Err(error) = self.child.wait().await {
+                    clean = false;
                     detail.push_str(&format!("; reap child: {error}"));
                 }
             }
-            Err(error) => detail.push_str(&format!("; {error}")),
+            Err(error) => {
+                clean = false;
+                detail.push_str(&format!("; {error}"));
+            }
             Ok(()) => {}
         }
         self.cleaned = true;
+        clean
     }
 }
 
@@ -354,7 +374,7 @@ async fn run_child(
             None => std::future::pending::<()>().await,
         }
     };
-    let (cancelled, mut detail) = tokio::select! {
+    let (cancelled, mut termination, mut detail) = tokio::select! {
         result = async { tokio::try_join!(child.wait(), output, send) } => {
             match result {
                 Ok((status, stdout, ())) => {
@@ -364,15 +384,18 @@ async fn run_child(
                         success: status.success(), exit_code: status.code(), cancelled: false,
                         detail: (!status.success()).then(|| format!("child {status}")), stdout,
                         stdout_capture: if capture_limit.is_some() {StdoutCapture::Complete} else {StdoutCapture::NotCaptured},
+                        termination: ChildTermination::Exited,
                     });
                 },
-                Err(error) => (false, format!("child IO: {error}")),
+                Err(error) => (false, ChildTermination::IoFailed, format!("child IO: {error}")),
             }
         }
-        reason = cancellation => (reason.is_user_cancelled(), reason.detail().to_string()),
-        _ = deadline => (false, "session deadline exceeded".to_string()),
+        reason = cancellation => (reason.is_user_cancelled(), if reason.is_user_cancelled() {ChildTermination::Cancelled} else {ChildTermination::SupervisionFailed}, reason.detail().to_string()),
+        _ = deadline => (false, ChildTermination::TimedOut, "session deadline exceeded".to_string()),
     };
-    running.stop(&mut detail).await;
+    if !running.stop(&mut detail).await {
+        termination = ChildTermination::CleanupFailed;
+    }
     Ok(ChildResult {
         success: false,
         exit_code: None,
@@ -380,6 +403,7 @@ async fn run_child(
         detail: Some(detail),
         stdout: Vec::new(),
         stdout_capture: StdoutCapture::Unavailable,
+        termination,
     })
 }
 
@@ -460,7 +484,7 @@ async fn run_children(
                             let mut detail = format!("supervised child task: {error}");
                             running.lock().await.stop(&mut detail).await;
                             let result = if cancelled.is_some_and(ChildCancellation::is_user_cancelled) {
-                                Ok(ChildResult {success:false,exit_code:None,cancelled:true,detail:Some(detail),stdout:Vec::new(),stdout_capture:StdoutCapture::Unavailable})
+                                Ok(ChildResult {success:false,exit_code:None,cancelled:true,detail:Some(detail),stdout:Vec::new(),stdout_capture:StdoutCapture::Unavailable,termination:ChildTermination::Cancelled})
                             } else {
                                 Err(miette::miette!("{detail}"))
                             };
@@ -490,6 +514,7 @@ async fn run_children(
                     detail: Some(detail),
                     stdout: Vec::new(),
                     stdout_capture: StdoutCapture::Unavailable,
+                    termination: ChildTermination::Cancelled,
                 })
             } else {
                 Err(miette::miette!("{detail}"))

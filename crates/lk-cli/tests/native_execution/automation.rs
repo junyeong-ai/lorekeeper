@@ -1,5 +1,120 @@
 use super::*;
 
+#[test]
+fn inspection_timeouts_retry_once_across_runs_and_require_an_exact_explicit_retry() {
+    for engine in ["codex", "claude-code"] {
+        let fixture = bounded_audit_fixture(engine, 1, "sleep 3");
+        let config = std::fs::read_to_string(&fixture.config)
+            .unwrap()
+            .replace("timeout_seconds: 30", "timeout_seconds: 1");
+        std::fs::write(&fixture.config, config).unwrap();
+        configure(&fixture, Some(20), 60);
+        for expected in [1, 2] {
+            let report = run(&fixture, "knowledge", false);
+            assert_eq!(calls(&report), 1, "{report}");
+            assert_eq!(report["runs"][0]["halted"], false, "{report}");
+            assert_eq!(
+                report["runs"][0]["work_steps"][0]["host_failure"]["termination"], "timed-out",
+                "{report}"
+            );
+            assert_eq!(usage(&fixture)["reserved_calls"], expected);
+            assert!(usage(&fixture)["paused"].as_object().unwrap().is_empty());
+        }
+        let path = walkdir::WalkDir::new(fixture.root().join("vault/.lorekeeper/work"))
+            .into_iter()
+            .map(Result::unwrap)
+            .find(|entry| entry.file_name() == "inspection-timeouts.json")
+            .unwrap()
+            .into_path();
+        let before = std::fs::read(&path).unwrap();
+        let held: serde_json::Value = serde_json::from_slice(&before).unwrap();
+        let work = held["work_id"].as_str().unwrap();
+        let node = held["entries"].as_object().unwrap().keys().next().unwrap();
+        let plan = std::fs::read(path.parent().unwrap().join("plan.json")).unwrap();
+        let report = run(&fixture, "knowledge", true);
+        assert_eq!(
+            calls(&report),
+            0,
+            "operation resume must not reset node holds: {report}"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        for dry in [true, false] {
+            let mut command = fixture.command();
+            command.args(["work", "retry", work, node]);
+            if dry {
+                command.arg("--dry-run");
+            }
+            let output = command.output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            if dry {
+                assert_eq!(std::fs::read(&path).unwrap(), before);
+            }
+        }
+        assert_eq!(
+            std::fs::read(path.parent().unwrap().join("plan.json")).unwrap(),
+            plan
+        );
+        assert_eq!(usage(&fixture)["reserved_calls"], 2);
+        let agent = fixture.root().join("agent executable");
+        let behavior = std::fs::read_to_string(&agent)
+            .unwrap()
+            .replace("sleep 3", RECORD_BOUNDED_AUDIT);
+        std::fs::write(agent, behavior).unwrap();
+        let report = run(&fixture, "knowledge", false);
+        assert_eq!(calls(&report), 1, "{report}");
+        assert_eq!(
+            report["runs"][0]["retained_progress"]["evidence_nodes"], 1,
+            "{report}"
+        );
+        assert_eq!(usage(&fixture)["reserved_calls"], 3);
+        assert_eq!(
+            std::fs::read(path.parent().unwrap().join("plan.json")).unwrap(),
+            plan
+        );
+    }
+}
+
+#[test]
+fn a_parallel_inspection_timeout_does_not_pause_or_discard_independent_audits() {
+    for engine in ["codex", "claude-code"] {
+        let behavior = RECORD_BOUNDED_AUDIT.replacen("if action=='inspect':", r#"if action=='inspect':
+    subject=json.loads((root/'vault/.lorekeeper/work'/work_id/'plan.json').read_text())['context']['subject']['path']
+    if subject=='wiki/concepts/large.md':
+        import time
+        time.sleep(5)
+"#, 1);
+        let fixture = bounded_audit_fixture(engine, 64, &behavior);
+        let config = std::fs::read_to_string(&fixture.config)
+            .unwrap()
+            .replace("timeout_seconds: 30", "timeout_seconds: 2")
+            .replace("max_calls: 64}", "max_calls: 64, max_parallel: 2}")
+            .replace("batch_size: 1", "batch_size: 2");
+        std::fs::write(&fixture.config, config).unwrap();
+        write_audit_concept(&fixture, "healthy");
+        record_discovery(&fixture, "wiki/concepts/healthy.md");
+        configure(&fixture, Some(20), 60);
+        let report = run(&fixture, "knowledge", false);
+        let runs = report["runs"].as_array().unwrap();
+        assert!(runs.iter().all(|run| run["halted"] == false), "{report}");
+        assert!(
+            runs.iter()
+                .filter_map(|run| run["audit"].as_array())
+                .flatten()
+                .any(|audit| audit["assessed_path"] == "wiki/concepts/healthy.md"),
+            "{report}"
+        );
+        assert!(usage(&fixture)["paused"].as_object().unwrap().is_empty());
+        let reserved = usage(&fixture)["reserved_calls"].clone();
+        let held = run(&fixture, "knowledge", false);
+        assert_eq!(calls(&held), 0, "{held}");
+        assert_eq!(usage(&fixture)["reserved_calls"], reserved);
+    }
+}
+
 fn configure(fixture: &Fixture, calls: Option<usize>, seconds: u64) {
     let calls = calls.map_or_else(|| "null".to_owned(), |calls| calls.to_string());
     let config = std::fs::read_to_string(&fixture.config).unwrap().replace(

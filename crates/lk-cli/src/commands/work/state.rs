@@ -17,6 +17,7 @@ mod inspection;
 mod output;
 mod refinement;
 mod retention;
+mod timeouts;
 pub(crate) use evidence::ObservationEvidenceError;
 use evidence::validate_output_evidence;
 pub(super) use frontier::FrontierCapture;
@@ -34,6 +35,8 @@ pub(crate) use output::retention_overhead as question_retention_overhead;
 #[cfg(unix)]
 pub(super) use refinement::RefinementPreview;
 pub(crate) use retention::prune_published;
+#[cfg(unix)]
+pub(crate) use timeouts::TimeoutUpdate;
 
 #[derive(Debug)]
 pub(super) enum CompletionRefusal {

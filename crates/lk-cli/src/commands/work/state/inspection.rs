@@ -259,10 +259,16 @@ impl Work {
         {
             return Ok(Some(action.reason));
         }
-        let Some(actions) = actions else {
-            return Ok(None);
-        };
-        actions.reason(self, request, contract, InspectionActionUse::Admission)
+        if let Some(actions) = actions
+            && let Some(reason) =
+                actions.reason(self, request, contract, InspectionActionUse::Admission)?
+        {
+            return Ok(Some(reason));
+        }
+        super::timeouts::InspectionTimeouts::load(root, self, &captured.nodes)?
+            .map(|timeouts| timeouts.reason(request, contract))
+            .transpose()
+            .map(Option::flatten)
     }
 
     pub fn prepare_inspection_admission(
@@ -281,6 +287,7 @@ impl Work {
             .map(|raw| ObservationRejections::decode(raw, self, &evaluated.nodes))
             .transpose()?;
         let progress = evaluated.progress()?;
+        let timeouts = super::timeouts::InspectionTimeouts::load(root, self, &evaluated.nodes)?;
         for id in &progress.ready {
             if progress.ready.first() != Some(id)
                 && !actions
@@ -293,6 +300,9 @@ impl Work {
                 && !rejected
                     .as_ref()
                     .is_some_and(|rejected| rejected.has_node(id))
+                && !timeouts
+                    .as_ref()
+                    .is_some_and(|timeouts| timeouts.has_node(id))
             {
                 continue;
             }
@@ -321,6 +331,11 @@ impl Work {
                     &contract(&request)?,
                     InspectionActionUse::Admission,
                 )?
+            {
+                return Ok((progress, Some(reason)));
+            }
+            if let Some(timeouts) = &timeouts
+                && let Some(reason) = timeouts.reason(&request, &contract(&request)?)?
             {
                 return Ok((progress, Some(reason)));
             }

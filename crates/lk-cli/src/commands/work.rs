@@ -147,6 +147,14 @@ pub enum WorkCommand {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Reset only an exhausted native inspection timeout allowance after diagnosing its host
+    Retry {
+        work_id: String,
+        node_id: String,
+        /// Validate the exact retry without publishing or recovering state
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Read the bounded completed root observation for final publication
     Result {
         /// Work identifier whose complete root observation is required
@@ -2485,6 +2493,7 @@ pub(super) fn inspection_action(
 
 #[cfg(unix)]
 pub(super) enum InspectionResponse {
+    TimedOut,
     Complete(Box<state::ObservationCandidate>),
     NeedsAction(String),
     SmallerInspection {
@@ -2504,6 +2513,7 @@ pub(super) struct InspectionReply {
 
 #[cfg(unix)]
 pub(super) enum InspectionRecordOutcome {
+    TimedOut { remaining: usize },
     Recorded(state::WorkProgress),
     Refined { added_nodes: usize },
     Deferred(String),
@@ -2751,6 +2761,16 @@ fn record_prepared_inspections(
                         let revision =
                             super::execution::observation::contract_revision(&reply.request)?;
                         let (mut plan, outcome) = match response {
+                            InspectionResponse::TimedOut => {
+                                let (plan, remaining) = work.plan_inspection_timeout(
+                                    root,
+                                    &prepared.resources,
+                                    &reply.request,
+                                    &revision,
+                                    state::TimeoutUpdate::Record,
+                                )?;
+                                (plan, InspectionRecordOutcome::TimedOut { remaining })
+                            }
                             InspectionResponse::SmallerInspection { reason, response } => {
                                 match work.plan_native_refinement(
                                     root,
@@ -3952,6 +3972,41 @@ pub async fn run(opts: &GlobalOptions, command: WorkCommand) -> miette::Result<(
         WorkCommand::Refine { .. } => {
             return Err(miette::miette!(
                 "inspection refinement requires Unix native execution"
+            ));
+        }
+        #[cfg(unix)]
+        WorkCommand::Retry {
+            work_id,
+            node_id,
+            dry_run,
+        } => {
+            let prepare = |root: &Path| -> miette::Result<lk_vault::MutationPlan> {
+                let (work, prepared) = load(root, &config, &config_revision, &work_id)?;
+                let request = work.input(root, &node_id, &prepared.resources)?;
+                let (mut plan, _) = work.plan_inspection_timeout(
+                    root,
+                    &prepared.resources,
+                    &request,
+                    &super::execution::observation::contract_revision(&request)?,
+                    state::TimeoutUpdate::Retry,
+                )?;
+                prepared.guard_pages(&mut plan);
+                Ok(plan)
+            };
+            if dry_run {
+                prepare(&root)?
+                    .validate_addresses(&root)
+                    .into_diagnostic()?;
+            } else {
+                let session = super::publication::acquire_mutation_now(&root)?;
+                session.apply(prepare(session.root())?).into_diagnostic()?;
+            }
+            json!({"work_id":work_id,"node_id":node_id,"dry_run":dry_run})
+        }
+        #[cfg(not(unix))]
+        WorkCommand::Retry { .. } => {
+            return Err(miette::miette!(
+                "inspection retries require Unix native execution"
             ));
         }
         WorkCommand::Result { work_id } => {

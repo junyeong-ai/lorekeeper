@@ -164,6 +164,7 @@ fn capture_retention(root: &Path, id: &str, cutoff: i64) -> miette::Result<Reten
         "finalization-action.json",
         "finalization-action-history.json",
         "inspection-actions.json",
+        "inspection-timeouts.json",
         "observation-rejections.json",
         "inspection-refinements.json",
     ]
@@ -229,6 +230,12 @@ fn capture_retention(root: &Path, id: &str, cutoff: i64) -> miette::Result<Reten
             .is_some_and(|name| name == "inspection-actions.json")
         {
             super::inspection::InspectionActions::decode(&raw, &work)?;
+        }
+        if path
+            .file_name()
+            .is_some_and(|name| name == "inspection-timeouts.json")
+        {
+            super::timeouts::InspectionTimeouts::decode(&raw, &work, &nodes)?;
         }
         if path
             .file_name()
@@ -493,6 +500,47 @@ mod tests {
             input_revision: "captured-input".into(),
         });
         context
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn published_timeout_records_are_validated_and_retired_with_their_work() {
+        let root = tempfile::tempdir().unwrap();
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let source = resources();
+        let work =
+            Work::create(&session, &source, "timeout", context("timeout"), limits()).unwrap();
+        let request = work
+            .prepare_inspection(root.path(), &source)
+            .unwrap()
+            .1
+            .unwrap();
+        let (plan, _) = work
+            .plan_inspection_timeout(
+                root.path(),
+                &source,
+                &request,
+                "contract",
+                super::super::TimeoutUpdate::Record,
+            )
+            .unwrap();
+        session.apply(plan).unwrap();
+        publish(&work, &session, &source);
+        let path = root
+            .path()
+            .join(super::super::timeouts::path(&work).unwrap());
+        let original = std::fs::read(&path).unwrap();
+        std::fs::write(&path, b"{}").unwrap();
+        assert!(prune_published(root.path(), Some(&session), i64::MAX).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"{}");
+        std::fs::write(&path, original).unwrap();
+        assert_eq!(
+            prune_published(root.path(), Some(&session), i64::MAX)
+                .unwrap()
+                .removed,
+            1
+        );
+        assert!(!path.exists());
     }
 
     #[test]

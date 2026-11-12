@@ -2,7 +2,7 @@ use lk_core::execution::AgentEngine;
 use serde::Serialize;
 use serde_json::Value;
 
-use super::{ChildResult, StdoutCapture};
+use super::{ChildResult, ChildTermination, StdoutCapture};
 
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -74,6 +74,7 @@ pub(in crate::commands) struct HostFailure {
     phase: Phase,
     engine: AgentEngine,
     exit_code: Option<i32>,
+    termination: Option<ChildTermination>,
     stdout_capture: StdoutCapture,
     stdout_bytes: Option<usize>,
     stdout_format: Option<OutputFormat>,
@@ -91,13 +92,15 @@ pub(in crate::commands) struct HostFailure {
 
 impl HostFailure {
     pub fn from_child(engine: AgentEngine, phase: Phase, child: &ChildResult) -> Self {
-        Self::from_output(
+        let mut failure = Self::from_output(
             engine,
             phase,
             child.exit_code,
             child.stdout_capture,
             &child.stdout,
-        )
+        );
+        failure.termination = Some(child.termination);
+        failure
     }
 
     pub fn from_response(engine: AgentEngine, bytes: &[u8]) -> Self {
@@ -138,6 +141,7 @@ impl HostFailure {
             phase,
             engine,
             exit_code,
+            termination: None,
             stdout_capture: capture,
             stdout_bytes: (capture == StdoutCapture::Complete).then_some(bytes.len()),
             stdout_format: format,
@@ -226,6 +230,7 @@ mod tests {
                 detail: None,
                 stdout: b"SECRET".to_vec(),
                 stdout_capture: capture,
+                termination: ChildTermination::Exited,
             };
             let out = serde_json::to_value(HostFailure::from_child(
                 AgentEngine::Codex,

@@ -56,7 +56,11 @@ that operation's semantic phase across restarts and day rollover. Daily source
 collection still runs before this pause check. After repairing the reported cause,
 explicit `lore run OPERATION --scheduled --resume --json` clears only its pause;
 it preserves usage, rejected proposals and exact semantic holds. Unchanged holds
-spend no calls. An exhausted allowance waits for a later UTC day or an explicitly
+spend no calls, including exhausted per-node timeout allowances. Tool-free Inspect/Reduce
+session timeouts receive one automatic retry per exact request and native contract;
+repeated timeouts defer that node without pausing independent work. Diagnose its host
+before using `lore work retry WORK NODE` to reset only that timeout allowance.
+An exhausted daily allowance waits for a later UTC day or an explicitly
 changed configured limit; a new process never grants a fresh allowance.
 Without this policy, schedules and the one-batch defaults remain unchanged.
 Ordinary manual `lore run` without `--scheduled` uses its normal batch/work budgets

@@ -263,14 +263,18 @@ mod native {
         }
     }
 
-    struct ObservationReply {
-        engine: lk_core::execution::AgentEngine,
-        bytes: Vec<u8>,
-        limit: usize,
+    enum ObservationReply {
+        Output {
+            engine: lk_core::execution::AgentEngine,
+            bytes: Vec<u8>,
+            limit: usize,
+        },
+        TimedOut,
     }
 
     enum ObservationStep {
         Recorded,
+        Retry,
         Refined,
         Deferred(String),
         Failed,
@@ -1537,6 +1541,18 @@ mod native {
                 }
             };
             if !child.success {
+                if child.termination == execution::ChildTermination::TimedOut
+                    && matches!(metrics.role, WorkRole::Evidence)
+                    && self.configuration_is_current()
+                {
+                    metrics.outcome = WorkOutcome::Failed;
+                    metrics.host_failure = Some(execution::diagnostic::HostFailure::from_child(
+                        invocation.engine,
+                        execution::diagnostic::Phase::Invocation,
+                        &child,
+                    ));
+                    return Some(ObservationReply::TimedOut);
+                }
                 self.result.halted |= !child.cancelled;
                 if !child.cancelled {
                     metrics.host_failure = Some(execution::diagnostic::HostFailure::from_child(
@@ -1565,7 +1581,7 @@ mod native {
             if !self.configuration_is_current() {
                 return None;
             }
-            Some(ObservationReply {
+            Some(ObservationReply::Output {
                 engine: invocation.engine,
                 bytes: child.stdout,
                 limit: budget.max_result_bytes,
@@ -1593,21 +1609,24 @@ mod native {
             reply: ObservationReply,
             metrics: &mut WorkStepMetrics,
         ) -> Option<crate::commands::work::InspectionResponse> {
-            let output = match execution::observation::decode_response(
-                reply.engine,
-                &reply.bytes,
-                reply.limit,
-            ) {
+            let ObservationReply::Output {
+                engine,
+                bytes,
+                limit,
+            } = reply
+            else {
+                return Some(crate::commands::work::InspectionResponse::TimedOut);
+            };
+            let output = match execution::observation::decode_response(engine, &bytes, limit) {
                 Ok(output) => output,
                 Err(error) => {
                     if let Some(capacity) =
                         error.downcast_ref::<crate::commands::work::state::OutputCapacity>()
                     {
                         metrics.result_json_bytes = Some(capacity.actual_bytes);
-                        if let Err(error) = execution::observation::validate_evidence_response(
-                            reply.engine,
-                            &reply.bytes,
-                        ) {
+                        if let Err(error) =
+                            execution::observation::validate_evidence_response(engine, &bytes)
+                        {
                             self.failure("bounded work receipt", error);
                             return None;
                         }
@@ -1616,8 +1635,7 @@ mod native {
                         ));
                     }
                     metrics.host_failure = Some(execution::diagnostic::HostFailure::from_response(
-                        reply.engine,
-                        &reply.bytes,
+                        engine, &bytes,
                     ));
                     self.failure("bounded work receipt", error);
                     return None;
@@ -1628,7 +1646,7 @@ mod native {
                     .expect("decoded observation serializes")
                     .len(),
             );
-            let decoded = execution::observation::decode_observation(output, request, reply.limit);
+            let decoded = execution::observation::decode_observation(output, request, limit);
             if (decoded.is_ok()
                 || decoded.as_ref().err().is_some_and(|error| {
                     error
@@ -1636,7 +1654,7 @@ mod native {
                         .is_some()
                 }))
                 && let Err(error) =
-                    execution::observation::validate_evidence_response(reply.engine, &reply.bytes)
+                    execution::observation::validate_evidence_response(engine, &bytes)
             {
                 self.failure("bounded work receipt", error);
                 return None;
@@ -1646,7 +1664,7 @@ mod native {
                     Box::new(crate::commands::work::state::ObservationCandidate {
                         output,
                         text_violation,
-                        response_revision: lk_core::rss_original::digest(&reply.bytes),
+                        response_revision: lk_core::rss_original::digest(&bytes),
                         response_json_bytes: metrics
                             .result_json_bytes
                             .expect("decoded observation size"),
@@ -1668,7 +1686,7 @@ mod native {
                     crate::commands::work::InspectionResponse::SmallerInspection {
                         reason,
                         response: crate::commands::work::state::RefinementResponse {
-                            response_revision: lk_core::rss_original::digest(&reply.bytes),
+                            response_revision: lk_core::rss_original::digest(&bytes),
                             response_json_bytes: metrics
                                 .result_json_bytes
                                 .expect("decoded response size"),
@@ -1736,6 +1754,22 @@ mod native {
         ) -> ObservationStep {
             use crate::commands::work::InspectionRecordOutcome;
             match result {
+                Ok(InspectionRecordOutcome::TimedOut { remaining }) => {
+                    metrics.outcome = WorkOutcome::Failed;
+                    if remaining > 0 {
+                        self.record("bounded inspection timeout", StageState::Skipped, Some(format!("{node}: session timed out; {remaining} automatic retry remains; no observation recorded")));
+                        ObservationStep::Retry
+                    } else {
+                        let reason = format!(
+                            "inspection {node} exhausted its timeout allowance; diagnose the host, then use lore work retry {id} {node}"
+                        );
+                        self.inspection_deferred.insert(id.into(), reason.clone());
+                        self.queue_replan = true;
+                        self.queue_admitted.clear();
+                        self.deferred("bounded inspection timeout", &reason);
+                        ObservationStep::Deferred(reason)
+                    }
+                }
                 Ok(InspectionRecordOutcome::Refined { added_nodes }) => {
                     metrics.outcome = WorkOutcome::Refined;
                     self.result.work_telemetry.retained_progress.action_receipts += 1;
@@ -1777,6 +1811,7 @@ mod native {
                             ("bounded observation evidence", reason)
                         }
                         InspectionRecordOutcome::Recorded(_)
+                        | InspectionRecordOutcome::TimedOut { .. }
                         | InspectionRecordOutcome::Refined { .. } => unreachable!(),
                     };
                     self.result.work_telemetry.retained_progress.action_receipts += 1;
@@ -2221,6 +2256,23 @@ mod native {
                 }
                 let child = match attempt.result {
                     Ok(child) if child.success => child,
+                    Ok(child) if child.termination == execution::ChildTermination::TimedOut => {
+                        turn.metrics.host_failure =
+                            Some(execution::diagnostic::HostFailure::from_child(
+                                engine,
+                                execution::diagnostic::Phase::Invocation,
+                                &child,
+                            ));
+                        turn.metrics.outcome = WorkOutcome::Failed;
+                        replies.push(crate::commands::work::InspectionReply {
+                            work_id: turn.work_id.clone(),
+                            node_id: turn.node_id.clone(),
+                            request: turn.request.clone(),
+                            response: crate::commands::work::InspectionResponse::TimedOut,
+                        });
+                        returned.push(turn);
+                        continue;
+                    }
                     Ok(child) => {
                         accepted = false;
                         self.result.halted = true;
@@ -2250,7 +2302,7 @@ mod native {
                 }
                 let Some(response) = self.decode_observation_reply(
                     &turn.request,
-                    ObservationReply {
+                    ObservationReply::Output {
                         engine,
                         bytes: child.stdout,
                         limit: result_limit,
@@ -2761,23 +2813,20 @@ mod native {
             section: crate::commands::work::section::Section,
             metrics: &mut WorkStepMetrics,
         ) -> WorkStep {
-            let Some(reply) = self
+            let Some(ObservationReply::Output { engine, bytes, .. }) = self
                 .request_observation(section.request.clone(), metrics)
                 .await
             else {
                 return WorkStep::Failed;
             };
-            let (response, bytes) = match execution::finalization::decode(
-                reply.engine,
-                &reply.bytes,
-                section.max_response_bytes,
-            ) {
-                Ok(response) => response,
-                Err(error) => {
-                    self.failure("whole-section response", error);
-                    return WorkStep::Failed;
-                }
-            };
+            let (response, bytes) =
+                match execution::finalization::decode(engine, &bytes, section.max_response_bytes) {
+                    Ok(response) => response,
+                    Err(error) => {
+                        self.failure("whole-section response", error);
+                        return WorkStep::Failed;
+                    }
+                };
             metrics.result_json_bytes = Some(bytes);
             let started = Instant::now();
             let Some((session, _)) = self.mutation_session("whole-section publication").await
@@ -2953,7 +3002,9 @@ mod native {
                     .bounded_observation_step(id, progress, request, preparation_duration_ms)
                     .await
                 {
-                    ObservationStep::Recorded | ObservationStep::Refined => WorkStep::Pending,
+                    ObservationStep::Recorded
+                    | ObservationStep::Refined
+                    | ObservationStep::Retry => WorkStep::Pending,
                     ObservationStep::Deferred(reason) => WorkStep::Deferred(reason),
                     ObservationStep::Failed => WorkStep::Failed,
                 },
