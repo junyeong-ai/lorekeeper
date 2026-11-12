@@ -3,10 +3,10 @@ use super::*;
 #[test]
 fn inspection_timeouts_retry_once_across_runs_and_require_an_exact_explicit_retry() {
     for engine in ["codex", "claude-code"] {
-        let fixture = bounded_audit_fixture(engine, 1, "sleep 3");
+        let fixture = bounded_audit_fixture(engine, 1, "exec sleep 30");
         let config = std::fs::read_to_string(&fixture.config)
             .unwrap()
-            .replace("timeout_seconds: 30", "timeout_seconds: 1");
+            .replace("timeout_seconds: 30", "timeout_seconds: 3");
         std::fs::write(&fixture.config, config).unwrap();
         configure(&fixture, Some(20), 60);
         for expected in [1, 2] {
@@ -62,7 +62,7 @@ fn inspection_timeouts_retry_once_across_runs_and_require_an_exact_explicit_retr
         let agent = fixture.root().join("agent executable");
         let behavior = std::fs::read_to_string(&agent)
             .unwrap()
-            .replace("sleep 3", RECORD_BOUNDED_AUDIT);
+            .replace("exec sleep 30", RECORD_BOUNDED_AUDIT);
         std::fs::write(agent, behavior).unwrap();
         let report = run(&fixture, "knowledge", false);
         assert_eq!(calls(&report), 1, "{report}");
