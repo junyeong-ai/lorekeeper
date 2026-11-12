@@ -254,6 +254,8 @@ if '\nNative request:\n' not in prompt:
     raise SystemExit(0)
 request=json.loads(prompt.split('\nNative request:\n',1)[1])
 assert request['schema']=='native-audit-results-v1'
+assert {item['source'] for item in request['contracts']} == {'lore-wiki/references/maintenance.md','lore-wiki/references/curation.md'}
+assert all(item['body'] for item in request['contracts'])
 assert all('resources' in subject and 'work' not in subject for subject in request['subjects'])
 (root/'maintain-command').write_text(json.dumps([subject['context']['subject']['path'] for subject in request['subjects']],separators=(',',':')))
 value={'results':[{'subject_ref':subject['subject_ref'],'status':'complete','disposition':'reviewed','reason':'Read the exact supplied subject and its scoped evidence.'} for subject in request['subjects']]}
@@ -1418,6 +1420,8 @@ def respond(value):
         value={'type':'result','subtype':'success','is_error':False,'structured_output':value}
     print(json.dumps(value))
 if audit_final:
+    assert {item['source'] for item in prepared_input['contracts']} == {'lore-wiki/references/maintenance.md','lore-wiki/references/curation.md'}
+    assert all(item['body'] for item in prepared_input['contracts'])
     request=prepared_input['subjects'][0]['work']
     action,work_id,node_id='finish',request['work_id'],None
 elif native:

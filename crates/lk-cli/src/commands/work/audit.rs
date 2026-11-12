@@ -63,6 +63,7 @@ pub(super) fn request(
         "max_response_bytes":audit::response_limit(&[assessment(prepared)?], work.plan.max_result_bytes)?,
         "response_schema":audit::schema(),
         "instructions":audit::instructions(),
+        "contracts":audit::contracts()?,
     }))
 }
 
@@ -176,23 +177,8 @@ pub(super) fn capture_prepared(
 }
 
 fn contract_revision() -> miette::Result<String> {
-    let contracts = lk_dist::skill_files_for(lk_core::execution::AgentEngine::Codex, "lore-wiki")
-        .into_iter()
-        .filter(|file| {
-            matches!(
-                file.relative,
-                "references/maintenance.md" | "references/curation.md"
-            )
-        })
-        .map(|file| (file.relative, file.contents))
-        .collect::<Vec<_>>();
-    if contracts.len() != 2 {
-        return Err(miette::miette!(
-            "native audit requires complete maintenance and curation contracts"
-        ));
-    }
     Ok(lk_core::rss_original::digest(
-        &serde_json::to_vec(&(audit::schema(), audit::instructions(), contracts))
+        &serde_json::to_vec(&(audit::schema(), audit::instructions(), audit::contracts()?))
             .into_diagnostic()?,
     ))
 }
@@ -242,5 +228,6 @@ pub(in crate::commands) fn whole_request(
         "max_result_bytes":bounds.max_result_bytes,
         "max_response_bytes":response_limit,
         "response_schema":audit::schema(), "instructions":audit::instructions(),
+        "contracts":audit::contracts()?,
     }))
 }

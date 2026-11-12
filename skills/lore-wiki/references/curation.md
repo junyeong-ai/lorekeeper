@@ -2,6 +2,7 @@
 
 ## Contents
 
+- [Curation criteria](#curation-criteria)
 - [Metadata and review corrections](#metadata-and-review-corrections)
 - [Repair a broken concept address](#repair-a-broken-concept-address)
 - [Merge equivalent concepts](#merge-equivalent-concepts)
@@ -10,6 +11,8 @@ Use this operation to publish directly authored pages and for authorized repairs
 identified by an audit. Read the relevant concept, complete supporting context and any
 existing review under the workflow lease before drafting changes. Counts and lexical
 similarity do not decide meaning.
+
+## Curation criteria
 
 - Keep a durable subject when it answers a useful future question. A single source
   can support a scoped definition; repeated pages do not prove independent confirmation.

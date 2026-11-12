@@ -267,6 +267,7 @@ const RETAINED_RESULT_BOUND: &str = "For this reduction, Rust preserves exactly 
 const EVIDENCE_INSTRUCTION_SUFFIX: &str = "Needs-action records no observation and cannot discharge inherited concerns. Native Rust validates and stores the response; do not run lore work record or write files.";
 
 fn evidence_instruction(request: &Value) -> miette::Result<String> {
+    let references = super::finalization::reference_rules()?;
     let event_goal = if request["context"]["purpose"]["task_kind"]
         == serde_json::to_value(lk_queue::TaskKind::RefineEvents).expect("task kind serializes")
     {
@@ -290,7 +291,7 @@ fn evidence_instruction(request: &Value) -> miette::Result<String> {
         ""
     };
     Ok(format!(
-        "{EVIDENCE_INSTRUCTION_PREFIX}{DECISION_RELEVANCE}{event_goal}{reduction}{refinement}{bound}Plan a faithful concise observation within the native reply allowance before composing it. If the decision-relevant content still cannot fit, use needs-action; never truncate or silently omit material evidence to fit. Summary, finding statements, present scope/time/attribution strings, new questions and resolution reasons must contain a non-whitespace character. Empty findings are valid; unknown optional metadata is null, never blank filler. {EVIDENCE_INSTRUCTION_SUFFIX}"
+        "{EVIDENCE_INSTRUCTION_PREFIX}{DECISION_RELEVANCE}{references}\n{event_goal}{reduction}{refinement}{bound}Plan a faithful concise observation within the native reply allowance before composing it. If the decision-relevant content still cannot fit, use needs-action; never truncate or silently omit material evidence to fit. Summary, finding statements, present scope/time/attribution strings, new questions and resolution reasons must contain a non-whitespace character. Empty findings are valid; unknown optional metadata is null, never blank filler. {EVIDENCE_INSTRUCTION_SUFFIX}"
     ))
 }
 
@@ -1151,6 +1152,9 @@ mod tests {
                     serde_json::from_str::<Value>(delivered).unwrap(),
                     native_request(&request).unwrap()
                 );
+                assert!(
+                    instruction.contains(super::super::finalization::reference_rules().unwrap())
+                );
                 if request["kind"] == "reduce" {
                     assert!(
                         instruction.contains("Compose this node's supplied child observations")
@@ -1159,8 +1163,9 @@ mod tests {
                     assert_ne!(contract_revision(&request).unwrap(), previous_contract);
                 } else {
                     assert!(instruction.starts_with(&format!(
-                        "{EVIDENCE_INSTRUCTION_PREFIX}{DECISION_RELEVANCE}{bound}"
+                        "{EVIDENCE_INSTRUCTION_PREFIX}{DECISION_RELEVANCE}"
                     )));
+                    assert!(instruction.contains(bound));
                     assert!(instruction.contains("must contain a non-whitespace character"));
                     assert_ne!(contract_revision(&request).unwrap(), previous_contract);
                 }

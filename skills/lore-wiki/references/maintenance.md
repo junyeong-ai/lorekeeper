@@ -7,6 +7,7 @@
 - [Candidate screening](#candidate-screening)
 - [Assessment](#assessment)
 - [Native assessment](#native-assessment)
+- [Native processing state](#native-processing-state)
 - [Operating budget and measurement](#operating-budget-and-measurement)
 
 This operation is a complete run of one batch, not a request to audit the entire vault.
@@ -254,17 +255,38 @@ No lint or receipt count certifies that the entire corpus is semantically consis
 
 ## Native assessment
 
-For `native-audit-results-v1`, read the supplied subjects and return one `results`
-entry per `subject_ref`, copying that reference. Use `status: complete`, `disposition: reviewed`
-or `follow-up`, and a nonblank `reason`; unfinished work uses `status: needs-action`,
-null disposition and a concrete reason. Apply the assessment and curation criteria
-above. Whole-input subjects contain their complete guarded resources; a supplied
-completed observation replaces `work result` setup reads.
-Necessary targeted reads and supported repairs remain available. Input-changing
-repairs require fresh scope; the controller rejects the old judgment and controls
-replanning. Rust supplies all subject/revision/review metadata and owns result files,
-Work finish, staging, assessment recording and final global checks. Return judgments
-instead of invoking `work finish` or `audit-record`.
+For `native-audit-results-v1`, return one `results` entry per supplied `subject_ref`,
+copying that reference. Complete judgments use `status: complete`, `disposition: reviewed`
+or `follow-up` and a nonblank reason. Unfinished work uses `status: needs-action`,
+null disposition and a concrete reason. Never infer identity from array position.
+
+Whole-input subjects supply complete guarded resources; completed observations replace
+`work result` setup reads. Compare claims under their subject, definition, conditions,
+effective time and attribution. Concept citations are evidence; a document is its own
+subject without a self-citation. Related pages and reviews are context or judgments,
+not independent corroboration. Inspect declared aliases and relationships under their
+actual scope; similar wording, co-citation, one source or high degree does not decide
+identity or usefulness. Preserve prior evidence, judgments and attributed uncertainty.
+Retain every attributed question and processing blocker; structural read coverage does
+not establish semantic support or verification.
+
+Use `reviewed` only after supported scope and required repairs have been checked.
+`follow-up` requires a current durable open review naming this exact subject, with
+concrete evidence, uncertainty and resolution conditions. Unchanged current open findings
+can remain follow-up. Missing support calls for recovery, a scoped evidence-gap review
+or `needs-action`, never invented support, automatic retirement or fabricated completion.
+Processing blockers and unreadable evidence cannot become successful reads.
+
+Apply the supplied curation criteria. Necessary targeted evidence reads and supported
+repairs remain available; read the relevant curation procedure before a repair. Do not
+collect sources, restart paid inspections, expand this batch or drain unrelated work.
+An input-changing repair requires a fresh guarded read; Rust rejects the old judgment
+and controls replanning. Rust supplies all subject/revision/review metadata and owns
+standalone intake, planning, result files, Work finish, assessment recording and final
+global checks. Return judgments instead of repeating those procedures, reconstructing
+guards, writing result files or invoking `work finish` or `audit-record`.
+
+## Native processing state
 
 An unchanged whole-input `needs-action` is held without another invocation, independent
 of batch peers and response order. Changed input or assessment rules reopen eligibility;

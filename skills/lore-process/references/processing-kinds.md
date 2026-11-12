@@ -3,6 +3,7 @@
 ## Contents
 
 - [Shared relevance and language](#relevance-focus-all-kinds)
+- [Source references](#source-references-all-kinds)
 - [Summaries](#kind-summarize)
 - [Event refinement](#kind-refine-events)
 - [Themes](#kind-identify-themes)
@@ -36,6 +37,20 @@ Two things it does not reach. Source content is never translated — a quoted li
 you preserve, a link stay as they are. And a NAME is not prose: a concept's base name is the form
 the source writes, so an English term keeps its spelling on a page written in Korean and a
 Korean product name keeps its on one written in English (see `kind: extract-concepts`).
+
+## Source references (all kinds)
+
+Preserve a reference's authority and address space. A source repository path, filename,
+document ID or successor identity written as code or plain text remains code or plain
+text; mentioning it does not establish a Markdown link or a vault page.
+
+Preserve supplied source URLs and their attribution. Create internal links only from
+verified vault addresses supplied by the request or resolved through the authorized
+read scope, relative to the containing output page. Never infer an address from a
+title, basename or repository path. An uncollected, retired or unresolved reference
+does not authorize inventing a destination, following an unverified successor or
+dropping the source's historical scope. Keep its stated reference as text when no
+verified link is available.
 
 ## `kind: summarize`
 

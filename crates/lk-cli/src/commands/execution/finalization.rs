@@ -14,7 +14,7 @@ fn reference(path: &str) -> miette::Result<&'static str> {
         .ok_or_else(|| miette::miette!("missing section-generation reference: {path}"))
 }
 
-fn instruction_section<'a>(document: &'a str, anchor: &str) -> miette::Result<&'a str> {
+pub(super) fn instruction_section<'a>(document: &'a str, anchor: &str) -> miette::Result<&'a str> {
     let headings = lk_core::markdown::root_headings(document);
     let mut found = headings
         .iter()
@@ -33,6 +33,13 @@ fn instruction_section<'a>(document: &'a str, anchor: &str) -> miette::Result<&'
         .find(|next| next.level <= heading.level)
         .map_or(document.len(), |next| next.range.start);
     Ok(&document[heading.range.end..end])
+}
+
+pub(super) fn reference_rules() -> miette::Result<&'static str> {
+    instruction_section(
+        reference("references/processing-kinds.md")?,
+        "## Source references (all kinds)",
+    )
 }
 
 pub(in crate::commands) fn generation_contracts(
@@ -64,6 +71,7 @@ pub(in crate::commands) fn generation_contracts(
     for heading in [
         "## Relevance focus (all kinds)",
         "## Output language (all kinds)",
+        "## Source references (all kinds)",
         kind_heading,
     ] {
         append(
@@ -195,6 +203,7 @@ fn instructions(
     for anchor in [
         "## Relevance focus (all kinds)",
         "## Output language (all kinds)",
+        "## Source references (all kinds)",
         kind_anchor,
     ] {
         result.push_str(instruction_section(rules, anchor)?);
@@ -390,6 +399,7 @@ mod tests {
                 expected,
                 "## Relevance focus (all kinds)",
                 "## Output language (all kinds)",
+                "## Source references (all kinds)",
                 "## Links",
                 "## Knowledge reviews",
                 "## Concept convergence",
@@ -447,15 +457,18 @@ mod tests {
                     TaskKind::RefineEvents => TargetKind::DailyRefineEvents,
                     _ => TargetKind::WeeklySynthesisThemes,
                 };
-                let rules = instructions(kind, target, source, SectionInput::Observations).unwrap();
-                assert!(rules.contains(publication_rules()));
-                assert!(rules.contains("input.locale"));
-                assert!(rules.contains("input.focus"));
-                assert!(!rules.contains("## `kind: extract-concepts`"));
-                assert!(!rules.contains("## `kind: synthesize-concept`"));
-                assert!(!rules.contains("group the events by topic/project"));
-                assert!(!rules.contains("RESULT FILE"));
-                assert!(!rules.contains("📅"));
+                for input in [SectionInput::Observations, SectionInput::Resources] {
+                    let rules = instructions(kind, target, source, input).unwrap();
+                    assert!(rules.contains(publication_rules()));
+                    assert!(rules.contains(reference_rules().unwrap()));
+                    assert!(rules.contains("input.locale"));
+                    assert!(rules.contains("input.focus"));
+                    assert!(!rules.contains("## `kind: extract-concepts`"));
+                    assert!(!rules.contains("## `kind: synthesize-concept`"));
+                    assert!(!rules.contains("group the events by topic/project"));
+                    assert!(!rules.contains("RESULT FILE"));
+                    assert!(!rules.contains("📅"));
+                }
             }
         }
         assert!(
