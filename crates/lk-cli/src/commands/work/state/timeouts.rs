@@ -2,6 +2,15 @@ use super::*;
 
 const MAX_TIMEOUTS: usize = 2;
 
+fn storage_bound(nodes: &[Node]) -> miette::Result<usize> {
+    // Each entry has two 64-byte identifiers and a one-digit count.
+    nodes
+        .len()
+        .checked_add(1)
+        .and_then(|count| count.checked_mul(256))
+        .ok_or_else(|| fail("inspection timeout storage bound overflow"))
+}
+
 #[cfg(unix)]
 pub(crate) enum TimeoutUpdate {
     Record,
@@ -36,8 +45,11 @@ pub(super) fn path(work: &Work) -> miette::Result<PathBuf> {
 
 impl InspectionTimeouts {
     pub(super) fn decode(raw: &str, work: &Work, nodes: &[Node]) -> miette::Result<Self> {
+        if raw.len() > storage_bound(nodes)? {
+            return Err(fail("inspection timeouts exceed their storage bound"));
+        }
         let value: Self = super::super::receipt::decode(raw).map_err(fail)?;
-        if raw.len() > work.max_input_bytes || value.work_id != work.plan.id {
+        if value.work_id != work.plan.id {
             return Err(fail("invalid inspection timeout identity or bound"));
         }
         for (id, entry) in &value.entries {
@@ -136,7 +148,7 @@ impl Work {
             MAX_TIMEOUTS - count - 1
         };
         let after = encoded(&timeouts)?;
-        if after.len() > self.max_input_bytes {
+        if after.len() > storage_bound(&evaluated.nodes)? {
             return Err(fail("inspection timeouts exceed their storage bound"));
         }
         let mut mutation = MutationPlan::default();
@@ -161,6 +173,40 @@ impl Work {
 mod tests {
     use super::super::tests::{context, limits, resources};
     use super::*;
+
+    #[test]
+    fn timeout_storage_covers_the_declared_tree_independently_of_model_input_limits() {
+        let root = tempfile::tempdir().unwrap();
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let mut source = resources();
+        source[0].text = "Source evidence. ".repeat(10000);
+        let work = Work::create(&session, &source, "large", context("large"), limits()).unwrap();
+        let nodes = work.nodes().unwrap();
+        let timeouts = InspectionTimeouts {
+            schema: Schema::V1,
+            work_id: work.plan.id.clone(),
+            entries: nodes
+                .iter()
+                .map(|node| {
+                    (
+                        node.id.clone(),
+                        Timeout {
+                            request_revision: "a".repeat(64),
+                            count: MAX_TIMEOUTS,
+                        },
+                    )
+                })
+                .collect(),
+        };
+        let raw = encoded(&timeouts).unwrap();
+        assert!(raw.len() > work.max_input_bytes);
+        InspectionTimeouts::decode(&raw, &work, &nodes).unwrap();
+        let oversized = format!("{raw}{}", " ".repeat(storage_bound(&nodes).unwrap()));
+        let error = InspectionTimeouts::decode(&oversized, &work, &nodes)
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("storage bound"));
+    }
 
     #[test]
     fn timeouts_bind_exact_requests_and_retry_preserves_semantic_holds() {

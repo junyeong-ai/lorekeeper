@@ -5321,49 +5321,31 @@ mod native {
                 .lease
                 .as_ref()
                 .ok_or_else(|| miette::miette!("audit has no workflow lease"))?;
-            let mut verified = lk_graph::audit::verify_batch_controlled(
+            let mut readiness =
+                InputAvailability::load_controlled(&self.root, self.supervisor.read_control())?;
+            let mut checked = std::collections::BTreeMap::new();
+            let verified = lk_graph::audit::verify_batch_with_readiness_controlled(
                 &self.root,
                 &self.config.vault.dirs,
                 &pages,
                 batch,
                 workflow.id(),
-                self.supervisor.read_control(),
-            )
-            .map_err(|e| miette::miette!("{e}"))?;
-            let paths = verified
-                .completed
-                .iter()
-                .map(|completed| completed.assessed_path.clone())
-                .chain(verified.pending.iter().cloned())
-                .collect::<std::collections::BTreeSet<_>>()
-                .into_iter()
-                .collect::<Vec<_>>();
-            let selected = lk_graph::audit::plan_selected_partitioned_controlled(
-                &self.root,
-                &self.config.vault.dirs,
-                &pages,
-                paths.len(),
-                &paths,
-                self.config.graph.audit.max_input_bytes,
+                |candidate| {
+                    checked.insert(candidate.path.clone(), candidate.clone());
+                    readiness.check(candidate)
+                },
                 self.supervisor.read_control(),
             )
             .map_err(|error| miette::miette!("{error}"))?;
-            let mut readiness =
-                InputAvailability::load_controlled(&self.root, self.supervisor.read_control())?;
-            for candidate in &selected.candidates {
-                let current = if verified.pending.contains(&candidate.path) {
-                    readiness.defer(candidate, vec!["audit inputs changed after assessment; retained for a fresh assessment".into()])
-                } else {
-                    readiness
-                        .check(candidate)
-                        .map_err(|error| miette::miette!("{error}"))?
-                };
-                if !current {
-                    self.audit_deferred_paths.insert(candidate.path.clone());
-                    verified
-                        .completed
-                        .retain(|completed| completed.assessed_path != candidate.path);
+            for path in &verified.pending {
+                if !readiness
+                    .deferred()
+                    .iter()
+                    .any(|deferred| &deferred.path == path)
+                {
+                    readiness.defer(&checked[path], vec!["audit inputs changed after assessment; retained for a fresh assessment".into()]);
                 }
+                self.audit_deferred_paths.insert(path.clone());
             }
             self.result
                 .audit_deferred

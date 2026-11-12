@@ -149,7 +149,9 @@ pub enum WorkCommand {
     },
     /// Reset only an exhausted native inspection timeout allowance after diagnosing its host
     Retry {
+        /// Exact current Work identifier retaining the timeout allowance
         work_id: String,
+        /// Exact unfinished inspection or reduction node with two confirmed timeouts
         node_id: String,
         /// Validate the exact retry without publishing or recovering state
         #[arg(long)]

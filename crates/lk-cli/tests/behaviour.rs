@@ -212,6 +212,10 @@ const EXEMPT: &[(&[&str], &str)] = &[
         "requires an exact current inspection action; native_execution verifies both-host dry-run, idempotent refinement and paid-byte preservation, while work state tests cover full range coverage, inherited questions, stale reductions, journal recovery and retention",
     ),
     (
+        &["work", "retry"],
+        "requires a runtime Work/node with exhausted exact-request timeout records; native_execution verifies both-host dry-run, explicit reset and call accounting, while work state tests preserve semantic holds and reject stale or corrupt records",
+    ),
+    (
         &["work", "result"],
         "requires a completed runtime reduction; native_execution tests the bounded finalizer and work state tests incomplete/oversized refusal",
     ),

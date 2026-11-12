@@ -349,6 +349,26 @@ pub fn verify_batch_controlled(
     workflow_id: &lk_core::execution::WorkflowId,
     read: &lk_vault::ReadControl,
 ) -> Result<AuditVerification, GraphError> {
+    verify_batch_with_readiness_controlled(
+        root,
+        dirs,
+        pages,
+        batch,
+        workflow_id,
+        |_| Ok(true),
+        read,
+    )
+}
+
+pub fn verify_batch_with_readiness_controlled(
+    root: &Path,
+    dirs: &VaultDirs,
+    pages: &[ScannedPage],
+    batch: &[AuditCandidate],
+    workflow_id: &lk_core::execution::WorkflowId,
+    mut ready: impl FnMut(&AuditCandidate) -> Result<bool, GraphError>,
+    read: &lk_vault::ReadControl,
+) -> Result<AuditVerification, GraphError> {
     read.check().map_err(GraphError::from)?;
     let (_, receipts) = load_controlled(root, read)?;
     let candidates = inputs_controlled(root, dirs, pages, &receipts, read)?
@@ -361,17 +381,29 @@ pub fn verify_batch_controlled(
         .filter(|merges| merges.workflow_id == *workflow_id);
     let mut verified = Vec::new();
     let mut pending = BTreeSet::new();
+    let mut currentness = BTreeMap::new();
     for original in batch {
         read.check().map_err(GraphError::from)?;
         let candidate = resolve_subject(root, original, &candidates, merges)?;
-        let Some(receipt) = receipts
-            .entries
-            .get(&candidate.path)
-            .filter(|receipt| receipt_is_current(receipt, candidate))
-        else {
+        let current = match currentness.get(&candidate.path) {
+            Some(current) => *current,
+            None => {
+                let available = ready(candidate);
+                read.check().map_err(GraphError::from)?;
+                let current = available?
+                    && receipts
+                        .entries
+                        .get(&candidate.path)
+                        .is_some_and(|receipt| receipt_is_current(receipt, candidate));
+                currentness.insert(candidate.path.clone(), current);
+                current
+            }
+        };
+        if !current {
             pending.insert(candidate.path.clone());
             continue;
-        };
+        }
+        let receipt = &receipts.entries[&candidate.path];
         verified.push(AuditCompletion {
             kind: candidate.kind,
             requested_path: original.path.clone(),
@@ -2799,6 +2831,20 @@ mod tests {
             &read,
         );
         assert!(matches!(verification, Err(GraphError::Cancelled)));
+        cancelled.store(false, Ordering::Relaxed);
+        let verification = verify_batch_with_readiness_controlled(
+            root.path(),
+            &dirs,
+            &pages,
+            &selected.candidates,
+            &lk_core::execution::WorkflowId::from_bytes([7; 16]),
+            |_| {
+                cancelled.store(true, Ordering::Relaxed);
+                Err(error("readiness failed"))
+            },
+            &read,
+        );
+        assert!(matches!(verification, Err(GraphError::Cancelled)));
     }
 
     #[test]
@@ -3588,6 +3634,23 @@ mod tests {
         assert_eq!(verified.completed.len(), 2);
         assert!(verified.pending.is_empty());
         let receipt = std::fs::read(root.path().join(STATE)).unwrap();
+        let mut checked = Vec::new();
+        let unavailable = verify_batch_with_readiness_controlled(
+            root.path(),
+            &dirs,
+            &pages,
+            &pair,
+            &workflow,
+            |candidate| {
+                checked.push(candidate.path.clone());
+                Ok(candidate.path != large)
+            },
+            &lk_vault::ReadControl::default(),
+        )
+        .unwrap();
+        assert_eq!(checked.len(), 2);
+        assert_eq!(unavailable.completed.len(), 1);
+        assert_eq!(unavailable.pending, vec![large.to_string()]);
         let original = std::fs::read_to_string(root.path().join(large)).unwrap();
         let bookkeeping =
             original.replacen("type: document", "type: document\nupdated: 2026-11-12", 1);
