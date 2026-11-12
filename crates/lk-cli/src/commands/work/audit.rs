@@ -64,6 +64,7 @@ pub(super) fn request(
         "response_schema":audit::schema(),
         "instructions":audit::instructions(),
         "contracts":audit::contracts()?,
+        "contract_revision":contract_revision()?,
     }))
 }
 
@@ -177,9 +178,34 @@ pub(super) fn capture_prepared(
 }
 
 fn contract_revision() -> miette::Result<String> {
+    let dependencies =
+        lk_dist::skill_files_for(lk_core::execution::AgentEngine::Codex, "lore-wiki")
+            .into_iter()
+            .filter(|file| {
+                matches!(
+                    file.relative,
+                    "references/maintenance.md" | "references/curation.md"
+                )
+            })
+            .map(|file| (file.relative, file.contents))
+            .collect::<Vec<_>>();
+    if dependencies.len() != 2 {
+        return Err(miette::miette!(
+            "native audit requires complete maintenance and curation dependencies"
+        ));
+    }
+    hash_contracts(&dependencies, &audit::contracts()?)
+}
+
+fn hash_contracts(dependencies: &[(&str, &str)], supplied: &[Value]) -> miette::Result<String> {
     Ok(lk_core::rss_original::digest(
-        &serde_json::to_vec(&(audit::schema(), audit::instructions(), audit::contracts()?))
-            .into_diagnostic()?,
+        &serde_json::to_vec(&(
+            audit::schema(),
+            audit::instructions(),
+            dependencies,
+            supplied,
+        ))
+        .into_diagnostic()?,
     ))
 }
 
@@ -229,5 +255,23 @@ pub(in crate::commands) fn whole_request(
         "max_response_bytes":response_limit,
         "response_schema":audit::schema(), "instructions":audit::instructions(),
         "contracts":audit::contracts()?,
+        "contract_revision":contract_revision()?,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn repair_procedure_changes_reopen_the_contract_without_expanding_its_payload() {
+        let supplied = audit::contracts().unwrap();
+        let dependency =
+            "## Curation criteria\nPreserve evidence.\n## Repair\nRead the original.\n";
+        let changed = dependency.replace("Read the original.", "Read both guarded revisions.");
+        assert_ne!(
+            hash_contracts(&[("curation.md", dependency)], &supplied).unwrap(),
+            hash_contracts(&[("curation.md", &changed)], &supplied).unwrap(),
+        );
+    }
 }
