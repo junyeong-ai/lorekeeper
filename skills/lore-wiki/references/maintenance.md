@@ -255,36 +255,30 @@ No lint or receipt count certifies that the entire corpus is semantically consis
 
 ## Native assessment
 
-For `native-audit-results-v1`, return one `results` entry per supplied `subject_ref`,
-copying that reference. Complete judgments use `status: complete`, `disposition: reviewed`
-or `follow-up` and a nonblank reason. Unfinished work uses `status: needs-action`,
-null disposition and a concrete reason. Never infer identity from array position.
+For `native-audit-results-v1`, return exactly one `results` entry per supplied
+`subject_ref`, copied verbatim. Use `complete` with `reviewed` or `follow-up` and a
+nonblank reason; unfinished work uses `needs-action`, null disposition and a concrete reason.
 
 Whole-input subjects supply complete guarded resources; completed observations replace
-`work result` setup reads. Compare claims under their subject, definition, conditions,
-effective time and attribution. Concept citations are evidence; a document is its own
-subject without a self-citation. Related pages and reviews are context or judgments,
-not independent corroboration. Inspect declared aliases and relationships under their
-actual scope; similar wording, co-citation, one source or high degree does not decide
-identity or usefulness. Preserve prior evidence, judgments and attributed uncertainty.
-Retain every attributed question and processing blocker; structural read coverage does
-not establish semantic support or verification.
+setup reads. Compare definitions, conditions, effective time, modality and attribution.
+Citations support concepts; a document is its own subject without self-citation.
+Related context and reviews are not independent corroboration. Judge aliases and
+relationships by actual scope, never wording, co-citation, source count or degree.
+Preserve questions, processing blockers, prior evidence and judgments; read coverage
+is not semantic verification.
 
-Use `reviewed` only after supported scope and required repairs have been checked.
-`follow-up` requires a current durable open review naming this exact subject, with
-concrete evidence, uncertainty and resolution conditions. Unchanged current open findings
-can remain follow-up. Missing support calls for recovery, a scoped evidence-gap review
-or `needs-action`, never invented support, automatic retirement or fabricated completion.
-Processing blockers and unreadable evidence cannot become successful reads.
+Use `reviewed` after checking support and completing required repairs. `follow-up`
+requires a current durable open review naming this subject, its evidence, uncertainty
+and resolution conditions; unchanged current findings may remain follow-up. Missing
+support calls for recovery, an evidence-gap review or `needs-action`, never invented
+support, falsehood claims or automatic retirement. Unreadable evidence and failed
+steps cannot complete an assessment.
 
-Apply the supplied curation criteria. Necessary targeted evidence reads and supported
-repairs remain available; read the relevant curation procedure before a repair. Do not
-collect sources, restart paid inspections, expand this batch or drain unrelated work.
-An input-changing repair requires a fresh guarded read; Rust rejects the old judgment
-and controls replanning. Rust supplies all subject/revision/review metadata and owns
-standalone intake, planning, result files, Work finish, assessment recording and final
-global checks. Return judgments instead of repeating those procedures, reconstructing
-guards, writing result files or invoking `work finish` or `audit-record`.
+Targeted evidence reads and supported repairs remain available; read the repair procedure.
+Input-changing repairs require fresh guarded reads. Source collection, restarting paid
+inspections, unrelated work and batch expansion are outside scope. Rust supplies metadata
+and owns result files, replanning, publication and final checks. Return judgments only:
+no repeated intake, reconstructed guards, result-file writes, `work finish` or `audit-record`.
 
 ## Native processing state
 
