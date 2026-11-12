@@ -241,16 +241,14 @@ pub fn verify_batch(
     pages: &[ScannedPage],
     batch: &[AuditCandidate],
     workflow_id: &lk_core::execution::WorkflowId,
-    max_input_bytes: u64,
 ) -> Result<AuditVerification, GraphError> {
-    verify_batch_with_guard(
+    verify_batch_controlled(
         root,
         dirs,
         pages,
         batch,
         workflow_id,
-        max_input_bytes,
-        |_, _| Ok(AuditReadCoverage::WholeInput),
+        &lk_vault::ReadControl::default(),
     )
 }
 
@@ -341,38 +339,14 @@ pub fn resolve_batch_subjects_controlled(
         .collect()
 }
 
-/// Verify current receipts with per-assessment completed-work checks. The scratch
-/// plan collects read guards without publishing or recovering any mutation.
-pub fn verify_batch_with_guard(
+/// Verify canonical assessments against current semantic inputs. Publication
+/// admission and its disposable Work proofs belong to assessment recording.
+pub fn verify_batch_controlled(
     root: &Path,
     dirs: &VaultDirs,
     pages: &[ScannedPage],
     batch: &[AuditCandidate],
     workflow_id: &lk_core::execution::WorkflowId,
-    max_input_bytes: u64,
-    guard: impl FnMut(&AuditAssessment, &mut MutationPlan) -> Result<AuditReadCoverage, GraphError>,
-) -> Result<AuditVerification, GraphError> {
-    verify_batch_with_guard_controlled(
-        root,
-        dirs,
-        pages,
-        batch,
-        workflow_id,
-        max_input_bytes,
-        guard,
-        &lk_vault::ReadControl::default(),
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-pub fn verify_batch_with_guard_controlled(
-    root: &Path,
-    dirs: &VaultDirs,
-    pages: &[ScannedPage],
-    batch: &[AuditCandidate],
-    workflow_id: &lk_core::execution::WorkflowId,
-    max_input_bytes: u64,
-    mut guard: impl FnMut(&AuditAssessment, &mut MutationPlan) -> Result<AuditReadCoverage, GraphError>,
     read: &lk_vault::ReadControl,
 ) -> Result<AuditVerification, GraphError> {
     read.check().map_err(GraphError::from)?;
@@ -386,51 +360,29 @@ pub fn verify_batch_with_guard_controlled(
         .as_ref()
         .filter(|merges| merges.workflow_id == *workflow_id);
     let mut verified = Vec::new();
-    let mut assessed = BTreeMap::new();
+    let mut pending = BTreeSet::new();
     for original in batch {
+        read.check().map_err(GraphError::from)?;
         let candidate = resolve_subject(root, original, &candidates, merges)?;
-        let receipt = receipts
+        let Some(receipt) = receipts
             .entries
             .get(&candidate.path)
             .filter(|receipt| receipt_is_current(receipt, candidate))
-            .ok_or_else(|| {
-                error(format!(
-                    "audit subject lacks a current assessment: {}",
-                    candidate.path
-                ))
-            })?;
+        else {
+            pending.insert(candidate.path.clone());
+            continue;
+        };
         verified.push(AuditCompletion {
             kind: candidate.kind,
             requested_path: original.path.clone(),
             assessed_path: candidate.path.clone(),
             disposition: receipt.disposition,
         });
-        assessed.insert(candidate.path.clone(), (candidate.clone(), receipt.clone()));
-    }
-    let complete = measure_inputs_controlled(
-        root,
-        assessed.values().map(|(candidate, _)| candidate),
-        max_input_bytes,
-        read,
-    )?;
-    let mut scratch = MutationPlan::default();
-    let mut whole_inputs = Vec::new();
-    for (candidate, receipt) in assessed.values() {
-        read.check().map_err(GraphError::from)?;
-        let coverage = guard(receipt, &mut scratch);
-        read.check().map_err(GraphError::from)?;
-        if coverage? == AuditReadCoverage::WholeInput {
-            whole_inputs.push(candidate);
-        }
-    }
-    if whole_inputs.len() == assessed.len() {
-        complete.ensure_ready()?;
-    } else {
-        measure_inputs_controlled(root, whole_inputs, max_input_bytes, read)?.ensure_ready()?;
     }
     read.check().map_err(GraphError::from)?;
     Ok(AuditVerification {
         completed: verified,
+        pending: pending.into_iter().collect(),
         coverage: AuditCoverage::build(
             counts(candidates.values(), &receipts),
             AuditCoverageScope::Corpus,
@@ -615,6 +567,7 @@ impl AuditPlan {
 #[derive(Debug)]
 pub struct AuditVerification {
     pub completed: Vec<AuditCompletion>,
+    pub pending: Vec<String>,
     pub coverage: AuditCoverage,
 }
 
@@ -2836,35 +2789,16 @@ mod tests {
             u64::MAX,
         )
         .unwrap();
-        let verification = verify_batch_with_guard_controlled(
+        cancelled.store(true, Ordering::Relaxed);
+        let verification = verify_batch_controlled(
             root.path(),
             &dirs,
             &pages,
             &selected.candidates,
             &lk_core::execution::WorkflowId::from_bytes([7; 16]),
-            u64::MAX,
-            |_, _| {
-                cancelled.store(true, Ordering::Relaxed);
-                Ok(AuditReadCoverage::WholeInput)
-            },
             &read,
         );
         assert!(matches!(verification, Err(GraphError::Cancelled)));
-        cancelled.store(false, Ordering::Relaxed);
-        let rejected = verify_batch_with_guard_controlled(
-            root.path(),
-            &dirs,
-            &pages,
-            &selected.candidates,
-            &lk_core::execution::WorkflowId::from_bytes([7; 16]),
-            u64::MAX,
-            |_, _| {
-                cancelled.store(true, Ordering::Relaxed);
-                Err(error("guard failed"))
-            },
-            &read,
-        );
-        assert!(matches!(rejected, Err(GraphError::Cancelled)));
     }
 
     #[test]
@@ -3649,39 +3583,29 @@ mod tests {
         )
         .unwrap();
         let workflow = lk_core::execution::WorkflowId::from_bytes([9; 16]);
-        assert!(
-            verify_batch(
-                root.path(),
-                &dirs,
-                &pages,
-                &pair,
-                &workflow,
-                small.len() as u64
-            )
-            .is_err()
-        );
-        verify_batch_with_guard(
+        std::fs::remove_file(root.path().join(proof)).unwrap();
+        let verified = verify_batch(root.path(), &dirs, &pages, &pair, &workflow).unwrap();
+        assert_eq!(verified.completed.len(), 2);
+        assert!(verified.pending.is_empty());
+        let receipt = std::fs::read(root.path().join(STATE)).unwrap();
+        let original = std::fs::read_to_string(root.path().join(large)).unwrap();
+        let bookkeeping =
+            original.replacen("type: document", "type: document\nupdated: 2026-11-12", 1);
+        write(root.path(), large, &bookkeeping);
+        let verified =
+            verify_batch(root.path(), &dirs, &scan(root.path()), &pair, &workflow).unwrap();
+        assert_eq!(verified.completed.len(), 2);
+        assert!(verified.pending.is_empty());
+        write(
             root.path(),
-            &dirs,
-            &pages,
-            &pair,
-            &workflow,
-            small.len() as u64,
-            coverage,
-        )
-        .unwrap();
-        assert!(
-            verify_batch_with_guard(
-                root.path(),
-                &dirs,
-                &pages,
-                &pair,
-                &workflow,
-                small.len() as u64,
-                |_, _| Err(error("incomplete work"))
-            )
-            .is_err()
+            large,
+            &(bookkeeping + "\nA new authored claim.\n"),
         );
+        let verified =
+            verify_batch(root.path(), &dirs, &scan(root.path()), &pair, &workflow).unwrap();
+        assert_eq!(verified.completed.len(), 1);
+        assert_eq!(verified.pending, vec![large.to_string()]);
+        assert_eq!(std::fs::read(root.path().join(STATE)).unwrap(), receipt);
     }
 
     #[test]
@@ -4134,7 +4058,6 @@ mod tests {
             &scan(root.path()),
             &selected.candidates,
             &workflow,
-            u64::MAX,
         )
         .unwrap();
         assert_eq!(completion.completed[0].kind, AuditSubjectKind::Document);
@@ -4151,7 +4074,6 @@ mod tests {
                 &scan(root.path()),
                 &selected.candidates,
                 &workflow,
-                u64::MAX,
             )
             .err()
             .unwrap();
@@ -4383,17 +4305,16 @@ mod tests {
         );
         assert_eq!(std::fs::read(root.path().join(STATE)).unwrap(), before);
         let workflow = lk_core::execution::WorkflowId::from_bytes([5; 16]);
-        assert!(
-            verify_batch(
-                root.path(),
-                &dirs,
-                &scan(root.path()),
-                &ready.candidates,
-                &workflow,
-                u64::MAX
-            )
-            .is_err()
-        );
+        let verified = verify_batch(
+            root.path(),
+            &dirs,
+            &scan(root.path()),
+            &ready.candidates,
+            &workflow,
+        )
+        .unwrap();
+        assert!(verified.completed.is_empty());
+        assert_eq!(verified.pending, vec![path.to_string()]);
         let oversized = plan(
             root.path(),
             &dirs,
@@ -4776,16 +4697,7 @@ mod tests {
         assert!(record(&session, &dirs, &pages, results(), 1).is_err());
         assert_eq!(std::fs::read(root.path().join(STATE)).unwrap(), before);
         let workflow = lk_core::execution::WorkflowId::from_bytes([1; 16]);
-        assert!(verify_batch(root.path(), &dirs, &pages, &ready.candidates, &workflow, 1).is_err());
-        verify_batch(
-            root.path(),
-            &dirs,
-            &pages,
-            &ready.candidates,
-            &workflow,
-            expected,
-        )
-        .unwrap();
+        verify_batch(root.path(), &dirs, &pages, &ready.candidates, &workflow).unwrap();
         assert!(plan(root.path(), &dirs, &pages, 2, 0).is_err());
     }
 

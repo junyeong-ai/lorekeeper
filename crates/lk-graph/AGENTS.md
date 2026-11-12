@@ -97,9 +97,12 @@ and CLI discovery, not a second graph authority.
   the batch. Read-only availability plans retain their complete checked scope.
   Whole-input library planning defers individually oversized inputs without consuming
   a class turn, allowing later fitting work. Partitioned CLI/native planning admits
-  them fairly and preserves the measured oversized status. Recording/completion then
-  requires exact completed-work proof for each exempted subject in the same guarded
-  publication plan; ordinary subjects retain their combined whole-input bound.
+  them fairly and preserves the measured oversized status. Recording requires exact
+  completed-work proof for each exempted subject in the same guarded publication plan;
+  ordinary subjects retain their combined whole-input bound. Final verification reads
+  canonical assessments against current semantic dependencies, independent of disposable
+  Work or current admission limits. Changed assessments remain pending while current peers
+  retain completion; unreadable or invalid state remains an error.
   Exact selections retain their complete requested scope.
   Selected readiness planning preserves that coverage accounting while measuring only
   ready candidates; it never persists a subset-local pending order or expands the batch.

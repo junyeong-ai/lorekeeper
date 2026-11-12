@@ -5257,7 +5257,7 @@ mod native {
         }
 
         fn verify_audit(
-            &self,
+            &mut self,
             batch: &[lk_graph::audit::AuditCandidate],
         ) -> miette::Result<lk_graph::audit::AuditVerification> {
             let pages = lk_graph::scan::scan_vault_controlled(
@@ -5270,31 +5270,12 @@ mod native {
                 .lease
                 .as_ref()
                 .ok_or_else(|| miette::miette!("audit has no workflow lease"))?;
-            let verified = lk_graph::audit::verify_batch_with_guard_controlled(
+            let mut verified = lk_graph::audit::verify_batch_controlled(
                 &self.root,
                 &self.config.vault.dirs,
                 &pages,
                 batch,
                 workflow.id(),
-                self.config.graph.audit.max_input_bytes,
-                |assessment, mutation| {
-                    crate::commands::work::guard_audit_controlled(
-                        &self.root,
-                        &self.config,
-                        &self.config_revision,
-                        assessment,
-                        mutation,
-                        self.supervisor.read_control(),
-                    )
-                    .map(|completed| {
-                        if completed {
-                            lk_graph::audit::AuditReadCoverage::CompletedWork
-                        } else {
-                            lk_graph::audit::AuditReadCoverage::WholeInput
-                        }
-                    })
-                    .map_err(|error| lk_graph::GraphError::Io(error.to_string()))
-                },
                 self.supervisor.read_control(),
             )
             .map_err(|e| miette::miette!("{e}"))?;
@@ -5302,6 +5283,7 @@ mod native {
                 .completed
                 .iter()
                 .map(|completed| completed.assessed_path.clone())
+                .chain(verified.pending.iter().cloned())
                 .collect::<std::collections::BTreeSet<_>>()
                 .into_iter()
                 .collect::<Vec<_>>();
@@ -5315,13 +5297,30 @@ mod native {
                 self.supervisor.read_control(),
             )
             .map_err(|error| miette::miette!("{error}"))?;
-            let mut readiness = super::super::queue::readiness::InputReadiness::load_controlled(
-                &self.root,
-                self.supervisor.read_control(),
-            )?;
+            let mut readiness =
+                InputAvailability::load_controlled(&self.root, self.supervisor.read_control())?;
             for candidate in &selected.candidates {
-                readiness.require_ready(&self.root, candidate)?;
+                let current = if verified.pending.contains(&candidate.path) {
+                    readiness.defer(candidate, vec!["audit inputs changed after assessment; retained for a fresh assessment".into()])
+                } else {
+                    readiness
+                        .check(candidate)
+                        .map_err(|error| miette::miette!("{error}"))?
+                };
+                if !current {
+                    self.audit_deferred_paths.insert(candidate.path.clone());
+                    verified
+                        .completed
+                        .retain(|completed| completed.assessed_path != candidate.path);
+                }
             }
+            self.result
+                .audit_deferred
+                .extend_from_slice(readiness.deferred());
+            self.result
+                .audit_deferred
+                .truncate(super::super::audit::MAX_DEFERRED_DETAILS);
+            self.result.audit_deferred_count = self.audit_deferred_paths.len();
             Ok(verified)
         }
 
@@ -5397,7 +5396,11 @@ mod native {
                         if let Some(progress) = &mut self.result.audit_progress {
                             progress.after = Some(verified.coverage);
                         }
-                        self.record("audit completion", StageState::Completed, None);
+                        if self.result.audit_deferred_count > 0 {
+                            self.deferred("audit completion", format!("{} checked audit subjects require fresh assessment or completed inputs", self.result.audit_deferred_count));
+                        } else {
+                            self.record("audit completion", StageState::Completed, None);
+                        }
                     }
                     Err(error) => {
                         self.failure("audit completion", error);

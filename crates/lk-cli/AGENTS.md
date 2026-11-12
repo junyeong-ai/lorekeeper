@@ -77,6 +77,9 @@ deferred subcommands expose their names eagerly for name-only discovery.
   Deferral counts track encountered subject paths independently of bounded details.
   Selected replans replace those subjects while retaining other observed holds;
   final coverage checks add current readiness observations without clearing earlier holds.
+  Final completion validates canonical assessments and fresh readiness, not prepublication
+  Work identities. Metadata-only edits preserve current assessments; changed semantic
+  inputs or unfinished dependencies defer their subjects without pausing the operation.
 
 - Bounded native finalizers receive RSS article selectors separately from semantic
   observations. Match the retained manifest revision and every event's authority,
