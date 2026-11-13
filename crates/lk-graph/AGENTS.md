@@ -67,6 +67,7 @@ and CLI discovery, not a second graph authority.
   before enabling screening. It retains queries and required evidence/context;
   unknown candidates still block assessment. Preview publishes and recovers nothing;
   existing assessments and predecessor Work are never rewritten.
+  Callers guard current processing actions separately from capacity-only admission.
   Retention roots are current discovery, latest assessment and retained Work states;
   states directly retain their packet rows. Reassessment tokens guard concurrency,
   not predecessor retention. Prune expired unreferenced artifacts by typed creation

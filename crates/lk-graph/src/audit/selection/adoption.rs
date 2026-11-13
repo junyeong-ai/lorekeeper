@@ -24,9 +24,10 @@ pub fn preview_adoption(
     dirs: &lk_core::config::VaultDirs,
     pages: &[crate::scan::ScannedPage],
     request: AdoptionRequest,
+    guard: impl FnOnce(&AuditCandidate) -> Result<(), GraphError>,
     read: &ReadControl,
 ) -> Result<Adoption, GraphError> {
-    let (mutation, adoption) = build_adoption(root, dirs, pages, request, read)?;
+    let (mutation, adoption) = build_adoption(root, dirs, pages, request, guard, read)?;
     mutation.validate_addresses(root).map_err(error)?;
     Ok(adoption)
 }
@@ -36,9 +37,10 @@ pub fn adopt(
     dirs: &lk_core::config::VaultDirs,
     pages: &[crate::scan::ScannedPage],
     request: AdoptionRequest,
+    guard: impl FnOnce(&AuditCandidate) -> Result<(), GraphError>,
     read: &ReadControl,
 ) -> Result<Adoption, GraphError> {
-    let (mutation, adoption) = build_adoption(session.root(), dirs, pages, request, read)?;
+    let (mutation, adoption) = build_adoption(session.root(), dirs, pages, request, guard, read)?;
     if mutation.has_changes() {
         session.apply(mutation).map_err(error)?;
     }
@@ -50,6 +52,7 @@ pub(super) fn build_adoption(
     dirs: &lk_core::config::VaultDirs,
     pages: &[crate::scan::ScannedPage],
     request: AdoptionRequest,
+    guard: impl FnOnce(&AuditCandidate) -> Result<(), GraphError>,
     read: &ReadControl,
 ) -> Result<(MutationPlan, Adoption), GraphError> {
     match std::fs::symlink_metadata(root.join(".lorekeeper/mutation/pending.json")) {
@@ -104,6 +107,7 @@ pub(super) fn build_adoption(
             "current assessments do not require discovery adoption",
         ));
     }
+    guard(&candidate)?;
     let mut mutation = MutationPlan::default();
     super::super::guard_candidate_controlled(&mut mutation, root, &candidate, read)?;
     receipts

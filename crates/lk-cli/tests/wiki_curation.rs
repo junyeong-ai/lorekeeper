@@ -25,10 +25,14 @@ fn ok(config: &Path, args: &[&str]) -> Value {
 }
 
 #[test]
+#[cfg(unix)]
 fn legacy_discovery_adoption_previews_and_guards_scope_without_rewriting_work() {
     let root = tempfile::tempdir().unwrap();
+    let aliases = tempfile::tempdir().unwrap();
+    let vault_alias = aliases.path().join("vault");
+    std::os::unix::fs::symlink(root.path(), &vault_alias).unwrap();
     let config = root.path().join("config.yaml");
-    std::fs::write(&config, format!("vault:\n  root: {}\n  locale: en\nidentity:\n  name: Test\n  email: test@example.com\nsources:\n  notes:\n    type: manual\n    params:\n      inbox_dir: inbox\n", root.path().display())).unwrap();
+    std::fs::write(&config, format!("vault:\n  root: {}\n  locale: en\nidentity:\n  name: Test\n  email: test@example.com\nsources:\n  notes:\n    type: manual\n    params:\n      inbox_dir: inbox\n", vault_alias.display())).unwrap();
     let subject = "wiki/documents/subject.md";
     let context = "wiki/documents/context.md";
     let optional = "wiki/documents/optional.md";
@@ -170,6 +174,33 @@ fn legacy_discovery_adoption_previews_and_guards_scope_without_rewriting_work() 
         .success()
     );
     assert_eq!(std::fs::read(&ledger).unwrap(), after);
+}
+
+#[test]
+#[cfg(not(unix))]
+fn discovery_adoption_refuses_without_native_processing_contracts() {
+    let root = tempfile::tempdir().unwrap();
+    let config = root.path().join("config.yaml");
+    std::fs::write(&config, format!("vault:\n  root: {}\n  locale: en\nidentity:\n  name: Test\n  email: test@example.com\nsources:\n  notes:\n    type: manual\n    params:\n      inbox_dir: inbox\n", root.path().display())).unwrap();
+    let request = root.path().join("adoption.json");
+    std::fs::write(&request, serde_json::to_vec(&json!({"path":"wiki/documents/subject.md","file_revision":"0".repeat(64),"input_revision":"1".repeat(64)})).unwrap()).unwrap();
+    let output = run(
+        &config,
+        &[
+            "wiki",
+            "audit-discover",
+            "--adopt-screening",
+            "--dry-run",
+            "--file",
+            request.to_str().unwrap(),
+        ],
+    );
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("requires Unix native processing contracts")
+    );
+    assert!(!root.path().join(".lorekeeper").exists());
 }
 
 #[test]

@@ -2316,17 +2316,32 @@ pub(super) fn audit_needs_work_controlled(
 }
 
 #[cfg(unix)]
+pub(super) enum AuditProcessingHold {
+    Capacity(String),
+    Action(String),
+}
+
+#[cfg(unix)]
+impl AuditProcessingHold {
+    pub fn into_reason(self) -> String {
+        match self {
+            Self::Capacity(reason) | Self::Action(reason) => reason,
+        }
+    }
+}
+
+#[cfg(unix)]
 pub(super) fn audit_processing_hold_controlled(
     root: &Path,
     config: &lk_core::config::Config,
     config_revision: &str,
     candidate: &lk_graph::audit::AuditCandidate,
     read: &lk_vault::ReadControl,
-) -> miette::Result<Option<String>> {
+) -> miette::Result<Option<AuditProcessingHold>> {
     if let Err(error) = audit::validate_result_capacity(candidate, limits(config)?.max_result_bytes)
     {
         if error.downcast_ref::<generation::ResultCapacity>().is_some() {
-            return Ok(Some(error.to_string()));
+            return Ok(Some(AuditProcessingHold::Capacity(error.to_string())));
         }
         return Err(error);
     }
@@ -2356,15 +2371,15 @@ pub(super) fn audit_processing_hold_controlled(
             ) {
                 Ok(packet) => packet,
                 Err(error @ lk_graph::GraphError::AuditScreeningCapacity { .. }) => {
-                    return Ok(Some(error.to_string()));
+                    return Ok(Some(AuditProcessingHold::Capacity(error.to_string())));
                 }
                 Err(error) => return Err(miette::miette!("{error}")),
             };
             if let Some(admission) = packet.admission {
-                return Ok(Some(format!(
+                return Ok(Some(AuditProcessingHold::Capacity(format!(
                     "complete audit discovery needs {} packets, above max_screening_batches {}; all candidates remain retained",
                     admission.required_batches, admission.maximum_batches
-                )));
+                ))));
             }
         }
         return Ok(None);
@@ -2376,7 +2391,7 @@ pub(super) fn audit_processing_hold_controlled(
         return Ok(None);
     }
     if let Some(reason) = audit::processing_hold(root, config_revision, candidate, &prepared)? {
-        return Ok(Some(reason));
+        return Ok(Some(AuditProcessingHold::Action(reason)));
     }
     if !planned {
         return Ok(None);
@@ -2388,23 +2403,24 @@ pub(super) fn audit_processing_hold_controlled(
     ) {
         Ok(admission) => admission,
         Err(error) if error.downcast_ref::<state::InputCapacity>().is_some() => {
-            return Ok(Some(error.to_string()));
+            return Ok(Some(AuditProcessingHold::Capacity(error.to_string())));
         }
         Err(error) => return Err(error),
     };
     if hold.is_some() || !progress.complete {
-        return Ok(hold);
+        return Ok(hold.map(AuditProcessingHold::Action));
     }
     match prepare_finalization_from_capture(root, config, config_revision, &work, &prepared)? {
         FinalizationPreparation::Capacity {
             request_bytes,
             max_input_bytes,
-        } => Ok(Some(finalization_capacity_reason(
-            request_bytes,
-            max_input_bytes,
+        } => Ok(Some(AuditProcessingHold::Capacity(
+            finalization_capacity_reason(request_bytes, max_input_bytes),
         ))),
         FinalizationPreparation::Result(_) => Ok(None),
-        FinalizationPreparation::NeedsAction(reason) => Ok(Some(reason)),
+        FinalizationPreparation::NeedsAction(reason) => {
+            Ok(Some(AuditProcessingHold::Action(reason)))
+        }
         FinalizationPreparation::Ready(_) => Err(miette::miette!(
             "audit admission produced a queue finalization state"
         )),

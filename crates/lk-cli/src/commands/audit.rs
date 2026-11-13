@@ -7,6 +7,79 @@ use super::queue::readiness::InputReadiness;
 
 pub(super) mod action;
 
+pub(super) fn adopt_discovery(
+    config: &lk_core::config::Config,
+    config_revision: &str,
+    request: lk_graph::audit::selection::AdoptionRequest,
+    dry_run: bool,
+) -> miette::Result<lk_graph::audit::selection::Adoption> {
+    #[cfg(unix)]
+    {
+        use super::work::AuditProcessingHold;
+
+        let requested_root = config
+            .vault
+            .root_path()
+            .canonicalize()
+            .map_err(|error| miette::miette!("{error}"))?;
+        let session = if dry_run {
+            None
+        } else {
+            Some(super::publication::acquire_mutation_now(&requested_root)?)
+        };
+        let root = session
+            .as_ref()
+            .map_or(requested_root.as_path(), |session| session.root());
+        let read = lk_vault::ReadControl::default();
+        let pages =
+            lk_graph::scan::scan_vault_controlled(root, config.graph.scope.follow_links, &read)
+                .map_err(|error| miette::miette!("{error}"))?;
+        let guard =
+            |candidate: &AuditCandidate| match super::work::audit_processing_hold_controlled(
+                root,
+                config,
+                config_revision,
+                candidate,
+                &read,
+            )
+            .map_err(|error| lk_graph::GraphError::Io(error.to_string()))?
+            {
+                Some(AuditProcessingHold::Action(reason)) => {
+                    Err(lk_graph::GraphError::Io(format!(
+                        "resolve the current processing action before discovery adoption: {reason}"
+                    )))
+                }
+                Some(AuditProcessingHold::Capacity(_)) | None => Ok(()),
+            };
+        match session.as_ref() {
+            Some(session) => lk_graph::audit::selection::adopt(
+                session,
+                &config.vault.dirs,
+                &pages,
+                request,
+                guard,
+                &read,
+            ),
+            None => lk_graph::audit::selection::preview_adoption(
+                root,
+                &config.vault.dirs,
+                &pages,
+                request,
+                guard,
+                &read,
+            ),
+        }
+        .map_err(|error| miette::miette!("{error}"))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (config, config_revision, request, dry_run);
+        Err(miette::miette!(
+            "guarded audit discovery adoption requires Unix native processing contracts"
+        ))
+    }
+}
+
 pub(super) fn record(
     session: &lk_vault::MutationSession,
     config: &lk_core::config::Config,

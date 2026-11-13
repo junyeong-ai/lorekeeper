@@ -5263,7 +5263,7 @@ mod native {
                         .read_control()
                         .check()
                         .map_err(lk_graph::GraphError::from)?;
-                    let Some(reason) = hold else {
+                    let Some(hold) = hold else {
                         return Ok(true);
                     };
                     processing_deferred_paths.insert(candidate.path.clone());
@@ -5273,7 +5273,7 @@ mod native {
                             path: candidate.path.clone(),
                             file_revision: candidate.file_revision.clone(),
                             input_revision: candidate.input_revision.clone(),
-                            reasons: vec![reason],
+                            reasons: vec![hold.into_reason()],
                         });
                     }
                     Ok(false)

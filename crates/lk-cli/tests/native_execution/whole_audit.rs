@@ -82,6 +82,69 @@ fn whole_actions_preserve_independent_progress_and_ignore_batch_peers_on_both_ho
 }
 
 #[test]
+fn legacy_discovery_adoption_preserves_current_actions_without_another_host_call() {
+    for engine in ["codex", "claude-code"] {
+        let fixture = fixture(engine);
+        let subject = "wiki/concepts/a-held.md";
+        let ledger = fixture
+            .root()
+            .join("vault/.lorekeeper/knowledge-audit.json");
+        let mut state: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&ledger).unwrap()).unwrap();
+        state["discovery"][subject]
+            .as_object_mut()
+            .unwrap()
+            .remove("selection");
+        std::fs::write(&ledger, serde_json::to_vec(&state).unwrap()).unwrap();
+        let (_, report) = fixture.run("knowledge");
+        assert_eq!(report["semantic_calls"], 1, "{report}");
+        let action_before = std::fs::read(action(&fixture)).unwrap();
+        let output = fixture
+            .command()
+            .args(["wiki", "audit-plan", "--path", subject])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let plan: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let candidate = &plan["candidates"][0];
+        let request = fixture.root().join("adoption.json");
+        std::fs::write(&request, serde_json::to_vec(&serde_json::json!({"path":subject,"file_revision":candidate["file_revision"],"input_revision":candidate["input_revision"]})).unwrap()).unwrap();
+        let before = std::fs::read(&ledger).unwrap();
+        for preview in [true, false] {
+            let mut command = fixture.command();
+            command
+                .args(["wiki", "audit-discover", "--adopt-screening", "--file"])
+                .arg(&request);
+            if preview {
+                command.arg("--dry-run");
+            }
+            let output = command.output().unwrap();
+            assert!(!output.status.success());
+            assert_eq!(std::fs::read(&ledger).unwrap(), before);
+            assert_eq!(std::fs::read(action(&fixture)).unwrap(), action_before);
+        }
+        let (_, report) = fixture.run("knowledge");
+        assert_eq!(report["semantic_calls"], 0, "{report}");
+        assert_eq!(report["halted"], false, "{report}");
+        std::fs::write(action(&fixture), b"{}").unwrap();
+        let output = fixture
+            .command()
+            .args([
+                "wiki",
+                "audit-discover",
+                "--adopt-screening",
+                "--dry-run",
+                "--file",
+            ])
+            .arg(&request)
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert_eq!(std::fs::read(action(&fixture)).unwrap(), b"{}");
+    }
+}
+
+#[test]
 fn explicit_unfinished_plans_never_bypass_whole_holds_and_corrupt_holds_refuse() {
     let fixture = fixture("codex");
     let (_, report) = fixture.run("knowledge");
@@ -200,5 +263,59 @@ DISCOVER
         let (_, report) = fixture.run("knowledge");
         assert_eq!(report["semantic_calls"], 0, "{report}");
         assert_eq!(report["halted"], false, "{report}");
+        if during_discovery {
+            let ledger = fixture
+                .root()
+                .join("vault/.lorekeeper/knowledge-audit.json");
+            let mut state: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&ledger).unwrap()).unwrap();
+            state["discovery"][subject]
+                .as_object_mut()
+                .unwrap()
+                .remove("selection");
+            std::fs::write(&ledger, serde_json::to_vec(&state).unwrap()).unwrap();
+            let output = fixture
+                .command()
+                .args(["wiki", "audit-plan", "--path", subject])
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            let plan: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            let candidate = &plan["candidates"][0];
+            let request = fixture.root().join("capacity-adoption.json");
+            std::fs::write(&request, serde_json::to_vec(&serde_json::json!({"path":subject,"file_revision":candidate["file_revision"],"input_revision":candidate["input_revision"]})).unwrap()).unwrap();
+            let output = fixture
+                .command()
+                .args([
+                    "wiki",
+                    "audit-discover",
+                    "--adopt-screening",
+                    "--dry-run",
+                    "--file",
+                ])
+                .arg(&request)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let output = fixture
+                .command()
+                .args(["wiki", "audit-discover", "--adopt-screening", "--file"])
+                .arg(&request)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let (_, report) = fixture.run("knowledge");
+            assert_eq!(report["semantic_calls"], 0, "{report}");
+            assert_eq!(report["halted"], false, "{report}");
+            assert!(!fixture.root().join("vault/.lorekeeper/work").exists());
+        }
     }
 }

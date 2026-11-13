@@ -142,7 +142,7 @@ pub enum WikiCommand {
         /// JSON path, file_revision and queries; adoption instead requires input_revision
         #[arg(long)]
         file: PathBuf,
-        /// Explicitly adopt candidate screening for an existing pending discovery scope
+        /// Explicitly adopt candidate screening for a pending discovery scope (Unix)
         #[arg(long)]
         adopt_screening: bool,
         /// Validate discovery adoption without publishing or recovering journals
@@ -651,39 +651,15 @@ pub async fn run(opts: &super::GlobalOptions, cmd: WikiCommand) -> miette::Resul
             adopt_screening,
             dry_run,
         } => {
-            let config = load_config(&find_config(opts)?)?;
+            let (config, config_revision) = super::load_config_with_revision(&find_config(opts)?)?;
             if adopt_screening {
                 let bytes = std::fs::read(&file).map_err(|error| miette::miette!("{error}"))?;
                 let value = super::json::decode_object(&bytes)
                     .map_err(|error| miette::miette!("{error}"))?;
                 let request =
                     serde_json::from_value(value).map_err(|error| miette::miette!("{error}"))?;
-                let root = config.vault.root_path();
-                let read = lk_vault::ReadControl::default();
-                let result = if dry_run {
-                    let pages = lk_graph::scan::scan_vault(&root, config.graph.scope.follow_links)
-                        .map_err(|error| miette::miette!("{error}"))?;
-                    lk_graph::audit::selection::preview_adoption(
-                        &root,
-                        &config.vault.dirs,
-                        &pages,
-                        request,
-                        &read,
-                    )
-                } else {
-                    let session = crate::commands::publication::acquire_mutation_now(&root)?;
-                    let pages =
-                        lk_graph::scan::scan_vault(session.root(), config.graph.scope.follow_links)
-                            .map_err(|error| miette::miette!("{error}"))?;
-                    lk_graph::audit::selection::adopt(
-                        &session,
-                        &config.vault.dirs,
-                        &pages,
-                        request,
-                        &read,
-                    )
-                }
-                .map_err(|error| miette::miette!("{error}"))?;
+                let result =
+                    super::audit::adopt_discovery(&config, &config_revision, request, dry_run)?;
                 let mut output =
                     serde_json::to_value(result).map_err(|error| miette::miette!("{error}"))?;
                 output["dry_run"] = serde_json::json!(dry_run);

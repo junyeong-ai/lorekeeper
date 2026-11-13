@@ -1,6 +1,6 @@
 # Adopt audit candidate screening
 
-Use this procedure for an explicitly requested transition of pending legacy audit
+Use this Unix procedure for an explicitly requested transition of pending legacy audit
 discovery. Native discovery, screening and finalization do not adopt other scopes.
 Coordinate through the workflow lease before reading evidence or publishing.
 
@@ -22,6 +22,9 @@ Review existing Work and processing actions before choosing a new scope: adoptio
 changes semantic input identity, so predecessor Work may no longer be current.
 Existing plans, paid observations, actions and assessments remain unchanged;
 never relabel them or infer that they were reused by the new scope.
+Current semantic processing actions refuse adoption; complete their guarded repair
+or explicit recovery first. Capacity-only admission limits do not authorize a call
+or suppress the preview of a smaller discovery scope.
 
 Publish the reviewed transition by omitting `--dry-run`. Current legacy assessments
 refuse transition. A changed subject or dependency refuses the captured request; inspect

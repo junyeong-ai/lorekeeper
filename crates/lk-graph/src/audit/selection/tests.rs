@@ -93,6 +93,7 @@ fn explicit_adoption_preserves_queries_and_history_and_requires_complete_screeni
         &fixture.dirs,
         &fixture.pages(),
         request.clone(),
+        |_| Ok(()),
         &ReadControl::default(),
     )
     .unwrap();
@@ -106,6 +107,7 @@ fn explicit_adoption_preserves_queries_and_history_and_requires_complete_screeni
         &fixture.dirs,
         &fixture.pages(),
         request.clone(),
+        |_| Ok(()),
         &ReadControl::default(),
     )
     .unwrap();
@@ -142,6 +144,7 @@ fn explicit_adoption_preserves_queries_and_history_and_requires_complete_screeni
             &fixture.dirs,
             &fixture.pages(),
             request,
+            |_| Ok(()),
             &ReadControl::default(),
         )
         .is_err()
@@ -156,6 +159,7 @@ fn explicit_adoption_preserves_queries_and_history_and_requires_complete_screeni
             file_revision: candidate.file_revision,
             input_revision: candidate.input_revision,
         },
+        |_| Ok(()),
         &ReadControl::default(),
     )
     .unwrap();
@@ -192,6 +196,7 @@ fn adoption_keeps_direct_context_and_scoped_reviews_mandatory() {
             file_revision: old.file_revision,
             input_revision: old.input_revision,
         },
+        |_| Ok(()),
         &ReadControl::default(),
     )
     .unwrap();
@@ -223,6 +228,7 @@ fn adoption_rejects_stale_inputs_and_never_recovers_preview_journals() {
                 &fixture.dirs,
                 &fixture.pages(),
                 request,
+                |_| Ok(()),
                 &ReadControl::default(),
             )
             .is_err(),
@@ -240,6 +246,7 @@ fn adoption_guards_dependencies_during_publication_and_preserves_current_assessm
         &fixture.dirs,
         &fixture.pages(),
         request,
+        |_| Ok(()),
         &ReadControl::default(),
     )
     .unwrap();
@@ -284,6 +291,7 @@ fn adoption_guards_dependencies_during_publication_and_preserves_current_assessm
             &fixture.dirs,
             &fixture.pages(),
             request,
+            |_| Ok(()),
             &ReadControl::default(),
         )
         .is_err()
