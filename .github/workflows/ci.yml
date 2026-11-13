@@ -220,6 +220,8 @@ jobs:
         run: cargo test --locked -p lk-core --lib vault_path::tests
       - name: Verify audit candidate decisions and retention on Windows
         run: cargo test --locked -p lk-graph --lib audit::selection::tests
+      - name: Verify guarded discovery adoption refusal on Windows
+        run: cargo test --locked -p lore --test wiki_curation discovery_adoption_refuses_without_native_processing_contracts -- --exact
       - name: Verify synthesis and audit resource boundaries on Windows
         run: cargo test --locked -p lore --lib commands::work::resources::tests
 
