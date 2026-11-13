@@ -18,9 +18,11 @@ const PACKET_SCHEMA: &str = "audit-selection-packet-v1";
 const MAX_REASON_JSON_BYTES: usize = 256;
 const INSTRUCTIONS: &str = "Judge each candidate independently for this audit subject. Cards are bounded discovery previews, not full evidence. Inspect a potentially applicable or uncertain candidate. Use not-selected only when its declared scope is inapplicable. Defer only when an explicit unresolved prerequisite prevents deciding; later unknown candidates still require decisions. Every assigned key needs exactly one reasoned decision. Mandatory evidence and direct links remain required regardless of this selection.";
 
+mod adoption;
 mod retention;
 #[cfg(test)]
 mod tests;
+pub use adoption::{Adoption, AdoptionRequest, adopt, preview_adoption};
 pub use retention::{PruneReport, present, prune};
 
 fn revision(value: &impl Serialize) -> Result<String, GraphError> {

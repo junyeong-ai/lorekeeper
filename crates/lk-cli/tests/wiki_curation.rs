@@ -25,6 +25,154 @@ fn ok(config: &Path, args: &[&str]) -> Value {
 }
 
 #[test]
+fn legacy_discovery_adoption_previews_and_guards_scope_without_rewriting_work() {
+    let root = tempfile::tempdir().unwrap();
+    let config = root.path().join("config.yaml");
+    std::fs::write(&config, format!("vault:\n  root: {}\n  locale: en\nidentity:\n  name: Test\n  email: test@example.com\nsources:\n  notes:\n    type: manual\n    params:\n      inbox_dir: inbox\n", root.path().display())).unwrap();
+    let subject = "wiki/documents/subject.md";
+    let context = "wiki/documents/context.md";
+    let optional = "wiki/documents/optional.md";
+    std::fs::create_dir_all(root.path().join("wiki/documents")).unwrap();
+    let subject_body =
+        "---\ntype: document\ntitle: Subject\n---\nRead the [required context](context.md).\n";
+    std::fs::write(root.path().join(subject), subject_body).unwrap();
+    std::fs::write(
+        root.path().join(context),
+        "---\ntype: document\ntitle: Context\n---\nDeployment procedure for this subject.\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.path().join(optional),
+        "---\ntype: document\ntitle: Optional\n---\nDeployment procedure for another system.\n",
+    )
+    .unwrap();
+    let discovery = root.path().join("discovery.json");
+    std::fs::write(&discovery, serde_json::to_vec(&json!({"path":subject,"file_revision":file_revision(subject_body),"queries":[{"query":"deployment procedure"}]})).unwrap()).unwrap();
+    ok(
+        &config,
+        &[
+            "wiki",
+            "audit-discover",
+            "--file",
+            discovery.to_str().unwrap(),
+        ],
+    );
+    let ledger = root.path().join(".lorekeeper/knowledge-audit.json");
+    let mut state: Value = serde_json::from_slice(&std::fs::read(&ledger).unwrap()).unwrap();
+    state["discovery"][subject]
+        .as_object_mut()
+        .unwrap()
+        .remove("selection");
+    std::fs::write(&ledger, serde_json::to_vec(&state).unwrap()).unwrap();
+    let plan = ok(&config, &["wiki", "audit-plan", "--path", subject]);
+    let candidate = &plan["candidates"][0];
+    let work = ok(&config, &["work", "plan", "--path", subject]);
+    let work_file = root
+        .path()
+        .join(".lorekeeper/work")
+        .join(work["work_id"].as_str().unwrap())
+        .join("plan.json");
+    let work_before = std::fs::read(&work_file).unwrap();
+    let request = root.path().join("adoption.json");
+    let adoption = json!({"path":subject,"file_revision":candidate["file_revision"],"input_revision":candidate["input_revision"]});
+    std::fs::write(&request, serde_json::to_vec(&adoption).unwrap()).unwrap();
+    let ledger_before = std::fs::read(&ledger).unwrap();
+    let preview = ok(
+        &config,
+        &[
+            "wiki",
+            "audit-discover",
+            "--adopt-screening",
+            "--file",
+            request.to_str().unwrap(),
+            "--dry-run",
+        ],
+    );
+    assert_eq!(preview["dry_run"], true);
+    assert_eq!(preview["changed"], true);
+    assert_eq!(preview["previous_context_pages"], 2);
+    assert_eq!(preview["required_context_pages"], 1);
+    assert_eq!(std::fs::read(&ledger).unwrap(), ledger_before);
+    assert_eq!(std::fs::read(&work_file).unwrap(), work_before);
+    let duplicate = root.path().join("duplicate.json");
+    std::fs::write(&duplicate, format!("{{\"path\":{subject:?},\"file_revision\":{},\"input_revision\":{},\"input_revision\":{}}}", candidate["file_revision"], candidate["input_revision"], candidate["input_revision"])).unwrap();
+    assert!(
+        !run(
+            &config,
+            &[
+                "wiki",
+                "audit-discover",
+                "--adopt-screening",
+                "--file",
+                duplicate.to_str().unwrap()
+            ]
+        )
+        .status
+        .success()
+    );
+    assert_eq!(std::fs::read(&ledger).unwrap(), ledger_before);
+    let applied = ok(
+        &config,
+        &[
+            "wiki",
+            "audit-discover",
+            "--adopt-screening",
+            "--file",
+            request.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(applied["dry_run"], false);
+    assert_eq!(applied["input_revision"], preview["input_revision"]);
+    assert_eq!(std::fs::read(&work_file).unwrap(), work_before);
+    assert_eq!(
+        std::fs::read_to_string(root.path().join(subject)).unwrap(),
+        subject_body
+    );
+    let current = ok(&config, &["wiki", "audit-plan", "--path", subject]);
+    assert_eq!(
+        current["candidates"][0]["discovery"]["selection"]["unknown"],
+        2
+    );
+    let related = current["candidates"][0]["related_pages"]
+        .as_array()
+        .unwrap();
+    assert_eq!(related.len(), 1);
+    assert_eq!(related[0]["path"], context);
+    let after = std::fs::read(&ledger).unwrap();
+    assert!(
+        !run(
+            &config,
+            &[
+                "wiki",
+                "audit-discover",
+                "--adopt-screening",
+                "--file",
+                request.to_str().unwrap()
+            ]
+        )
+        .status
+        .success()
+    );
+    assert_eq!(std::fs::read(&ledger).unwrap(), after);
+    let premature = root.path().join("premature-assessment.json");
+    std::fs::write(&premature, serde_json::to_vec(&json!({"assessments":[{"path":subject,"file_revision":current["candidates"][0]["file_revision"],"input_revision":current["candidates"][0]["input_revision"],"disposition":"reviewed","reason":"Unsupported completion claim.","reviews":[]}]})).unwrap()).unwrap();
+    assert!(
+        !run(
+            &config,
+            &[
+                "wiki",
+                "audit-record",
+                "--file",
+                premature.to_str().unwrap()
+            ]
+        )
+        .status
+        .success()
+    );
+    assert_eq!(std::fs::read(&ledger).unwrap(), after);
+}
+
+#[test]
 fn reviewed_curation_is_read_only_in_preview_guarded_and_discoverable_after_publication() {
     let root = tempfile::tempdir().unwrap();
     let config = root.path().join("config.yaml");

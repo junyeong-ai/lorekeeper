@@ -22,6 +22,7 @@ Do not run the other modes as part of a lookup.
 | `audit` | Examine structure, relationships, contradictions, coverage and concept identity | [Audit](references/audit.md) |
 | `discover` | Record explicit related-document search queries for selected audit subjects | [Maintenance](references/maintenance.md#related-document-discovery) |
 | `screen` | Judge one bounded packet of audit discovery candidates and retain its exact decisions | [Candidate screening](references/maintenance.md#candidate-screening) |
+| Adopt legacy audit discovery | Explicitly transition pending discovery to candidate screening without rewriting retained Work | [Discovery adoption](references/discovery-adoption.md) |
 | `maintain` | Process one bounded batch of changed and never-reviewed knowledge | [Maintenance](references/maintenance.md) |
 | Native `native-audit-results-v1` | Return judgments for the exact supplied subjects; Rust owns assessment assembly and recording | [Native assessment](references/maintenance.md#native-assessment) |
 | `bounded inspect/finish` | Execute exactly one native partitioned audit unit | [Bounded work](../lore-process/references/bounded-work.md) |

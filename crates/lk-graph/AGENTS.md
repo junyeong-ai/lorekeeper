@@ -63,6 +63,10 @@ and CLI discovery, not a second graph authority.
   Evidence-associated card reviews bind identity and input guards without becoming
   assessment subject reviews.
   Absent selection metadata retains the exact legacy full-context derivation.
+  Explicit discovery adoption guards the current pending subject and complete input
+  before enabling screening. It retains queries and required evidence/context;
+  unknown candidates still block assessment. Preview publishes and recovers nothing;
+  existing assessments and predecessor Work are never rewritten.
   Retention roots are current discovery, latest assessment and retained Work states;
   states directly retain their packet rows. Reassessment tokens guard concurrency,
   not predecessor retention. Prune expired unreferenced artifacts by typed creation

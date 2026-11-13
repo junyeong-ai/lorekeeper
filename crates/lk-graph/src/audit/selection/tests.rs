@@ -62,6 +62,235 @@ fn fresh_discovery_selects_candidates_while_exact_legacy_recipes_keep_their_iden
     );
 }
 
+fn build_legacy_adoption_fixture() -> (Fixture, AdoptionRequest) {
+    let fixture = Fixture::new(2);
+    let (_, mut receipts) = crate::audit::load(&fixture.root).unwrap();
+    receipts.discovery.get_mut(SUBJECT).unwrap().selection = None;
+    fixture.write(
+        crate::audit::STATE,
+        &serde_json::to_string(&receipts).unwrap(),
+    );
+    let candidate = fixture.candidate();
+    let request = AdoptionRequest {
+        path: SUBJECT.into(),
+        file_revision: candidate.file_revision,
+        input_revision: candidate.input_revision,
+    };
+    (fixture, request)
+}
+
+#[test]
+fn explicit_adoption_preserves_queries_and_history_and_requires_complete_screening() {
+    let (fixture, request) = build_legacy_adoption_fixture();
+    let (_, before_receipts) = crate::audit::load(&fixture.root).unwrap();
+    fixture.write(
+        ".lorekeeper/work/retained/proof.json",
+        "Retained predecessor bytes.\n",
+    );
+    let before = fixture.snapshot();
+    let preview = preview_adoption(
+        &fixture.root,
+        &fixture.dirs,
+        &fixture.pages(),
+        request.clone(),
+        &ReadControl::default(),
+    )
+    .unwrap();
+    assert!(preview.changed);
+    assert_eq!(preview.previous_context_pages, 2);
+    assert_eq!(preview.required_context_pages, 0);
+    assert_eq!(preview.candidates, 2);
+    assert_eq!(fixture.snapshot(), before);
+    let adopted = adopt(
+        &MutationSession::acquire(&fixture.root).unwrap(),
+        &fixture.dirs,
+        &fixture.pages(),
+        request.clone(),
+        &ReadControl::default(),
+    )
+    .unwrap();
+    assert_eq!(adopted.input_revision, preview.input_revision);
+    let candidate = fixture.candidate();
+    assert_ne!(candidate.input_revision, request.input_revision);
+    let progress = candidate
+        .discovery
+        .as_ref()
+        .unwrap()
+        .selection
+        .as_ref()
+        .unwrap();
+    assert_eq!(progress.unknown, 2);
+    assert!(!progress.is_ready());
+    let (_, after_receipts) = crate::audit::load(&fixture.root).unwrap();
+    assert_eq!(
+        serde_json::to_value(&before_receipts.entries).unwrap(),
+        serde_json::to_value(&after_receipts.entries).unwrap()
+    );
+    assert_eq!(before_receipts.pending, after_receipts.pending);
+    assert_eq!(
+        before_receipts.discovery[SUBJECT].queries,
+        after_receipts.discovery[SUBJECT].queries
+    );
+    for (path, bytes) in before {
+        if path != Path::new(crate::audit::STATE) {
+            assert_eq!(std::fs::read(fixture.root.join(path)).unwrap(), bytes);
+        }
+    }
+    assert!(
+        adopt(
+            &MutationSession::acquire(&fixture.root).unwrap(),
+            &fixture.dirs,
+            &fixture.pages(),
+            request,
+            &ReadControl::default(),
+        )
+        .is_err()
+    );
+    let before = fixture.snapshot();
+    let unchanged = adopt(
+        &MutationSession::acquire(&fixture.root).unwrap(),
+        &fixture.dirs,
+        &fixture.pages(),
+        AdoptionRequest {
+            path: SUBJECT.into(),
+            file_revision: candidate.file_revision,
+            input_revision: candidate.input_revision,
+        },
+        &ReadControl::default(),
+    )
+    .unwrap();
+    assert!(!unchanged.changed);
+    assert_eq!(fixture.snapshot(), before);
+}
+
+#[test]
+fn adoption_keeps_direct_context_and_scoped_reviews_mandatory() {
+    let (fixture, _) = build_legacy_adoption_fixture();
+    fixture.write(SUBJECT, "---\ntype: document\ntitle: Subject\n---\nAudit the [declared context](candidate-000.md).\n");
+    let (_, mut receipts) = crate::audit::load(&fixture.root).unwrap();
+    receipts
+        .discovery
+        .get_mut(SUBJECT)
+        .unwrap()
+        .subject_revision = lk_core::concept::source_revision(
+        &lk_vault::parse_page(&std::fs::read_to_string(fixture.root.join(SUBJECT)).unwrap())
+            .unwrap(),
+    );
+    fixture.write(
+        crate::audit::STATE,
+        &serde_json::to_string(&receipts).unwrap(),
+    );
+    fixture.write("wiki/explorations/review.md", &format!("---\ntype: exploration\ntitle: Scope review\nreview:\n  status: open\n  subjects: [{SUBJECT}]\n  evidence:\n    - path: {SUBJECT}\n      revision: {}\n---\n## Question\nThe deployment conditions remain uncertain.\n", receipts.discovery[SUBJECT].subject_revision));
+    let old = fixture.candidate();
+    assert!(!old.reviews.is_empty());
+    adopt(
+        &MutationSession::acquire(&fixture.root).unwrap(),
+        &fixture.dirs,
+        &fixture.pages(),
+        AdoptionRequest {
+            path: SUBJECT.into(),
+            file_revision: old.file_revision,
+            input_revision: old.input_revision,
+        },
+        &ReadControl::default(),
+    )
+    .unwrap();
+    let current = fixture.candidate();
+    assert!(
+        current
+            .related_pages
+            .iter()
+            .any(|page| page.path == "wiki/documents/candidate-000.md")
+    );
+    assert_eq!(current.reviews.len(), old.reviews.len());
+    assert_eq!(current.evidence, old.evidence);
+}
+
+#[test]
+fn adoption_rejects_stale_inputs_and_never_recovers_preview_journals() {
+    for changed in ["subject", "candidate", "journal"] {
+        let (fixture, request) = build_legacy_adoption_fixture();
+        match changed {
+            "subject" => fixture.write(SUBJECT, "---\ntype: document\ntitle: Changed\n---\nNew subject.\n"),
+            "candidate" => fixture.write("wiki/documents/candidate-000.md", "---\ntype: document\ntitle: Changed\n---\nScreen protocol with changed conditions.\n"),
+            "journal" => fixture.write(".lorekeeper/mutation/pending.json", "Unrecovered journal.\n"),
+            _ => unreachable!(),
+        }
+        let before = fixture.snapshot();
+        assert!(
+            preview_adoption(
+                &fixture.root,
+                &fixture.dirs,
+                &fixture.pages(),
+                request,
+                &ReadControl::default(),
+            )
+            .is_err(),
+            "{changed}"
+        );
+        assert_eq!(fixture.snapshot(), before, "{changed}");
+    }
+}
+
+#[test]
+fn adoption_guards_dependencies_during_publication_and_preserves_current_assessments() {
+    let (fixture, request) = build_legacy_adoption_fixture();
+    let (mutation, _) = super::adoption::build_adoption(
+        &fixture.root,
+        &fixture.dirs,
+        &fixture.pages(),
+        request,
+        &ReadControl::default(),
+    )
+    .unwrap();
+    let ledger = std::fs::read(fixture.root.join(crate::audit::STATE)).unwrap();
+    fixture.write(
+        "wiki/documents/candidate-000.md",
+        "---\ntype: document\ntitle: Changed\n---\nScreen protocol changed after preparation.\n",
+    );
+    assert!(
+        MutationSession::acquire(&fixture.root)
+            .unwrap()
+            .apply(mutation)
+            .is_err()
+    );
+    assert_eq!(
+        std::fs::read(fixture.root.join(crate::audit::STATE)).unwrap(),
+        ledger
+    );
+
+    let (fixture, request) = build_legacy_adoption_fixture();
+    let candidate = fixture.candidate();
+    let (_, mut receipts) = crate::audit::load(&fixture.root).unwrap();
+    receipts.entries.insert(
+        SUBJECT.into(),
+        AuditAssessment {
+            path: SUBJECT.into(),
+            file_revision: candidate.file_revision,
+            input_revision: candidate.input_revision,
+            disposition: AuditDisposition::Reviewed,
+            reason: "Completed legacy read.".into(),
+            reviews: vec![],
+        },
+    );
+    fixture.write(
+        crate::audit::STATE,
+        &serde_json::to_string(&receipts).unwrap(),
+    );
+    let before = fixture.snapshot();
+    assert!(
+        preview_adoption(
+            &fixture.root,
+            &fixture.dirs,
+            &fixture.pages(),
+            request,
+            &ReadControl::default(),
+        )
+        .is_err()
+    );
+    assert_eq!(fixture.snapshot(), before);
+}
+
 #[test]
 fn packet_status_requires_the_exact_assigned_receipt_and_distinguishes_input_drift() {
     let fixture = Fixture::new(3);
