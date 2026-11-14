@@ -319,7 +319,11 @@ fn whole_section_failures_are_held_without_repeating_or_creating_semantic_progre
             ("printf 'invalid response'", "invalid-response"),
             ("sleep 3", "timed-out"),
         ] {
-            let fixture = Fixture::new(engine, if kind == "timed-out" { 1 } else { 30 }, behavior);
+            let fixture = Fixture::new(
+                engine,
+                if kind == "timed-out" { 1 } else { 30 },
+                &format!("/bin/cat > /dev/null\n{behavior}"),
+            );
             let config = std::fs::read_to_string(&fixture.config)
                 .unwrap()
                 .replace("concept_policy: supported-new", "concept_policy: disabled");

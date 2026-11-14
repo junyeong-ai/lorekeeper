@@ -51,6 +51,9 @@ paths:
   review completion. Daily retains its strict review checkpoints before period
   resumption.
 - Stop on fatal or unknown state, cancellation, no verified progress, or an empty plan.
+  An input pipe closed by the child may retain a natural numeric nonzero exit only
+  after complete stdout draining, reaping and group cleanup. Closed input with exit zero
+  or an unsettled deadline remains an I/O failure; it never becomes success or an automatic retry.
   Verified selected audits can advance subsequent budgeted batches despite unrelated
   queue rejections; the campaign remains incomplete/nonzero. Batch-limit success does
   not establish full-corpus coverage. Existing receipts resume verified work.

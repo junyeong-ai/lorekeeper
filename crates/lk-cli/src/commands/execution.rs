@@ -344,19 +344,36 @@ async fn run_child(
     cancellation: impl std::future::Future<Output = ChildCancellation>,
 ) -> miette::Result<ChildResult> {
     use rustix::process::Signal;
+    enum InputDelivery {
+        Complete,
+        Closed,
+    }
+
     let child = &mut running.child;
     let mut stdout = child
         .stdout
         .take()
         .ok_or_else(|| miette::miette!("child stdout missing"))?;
     let stdin = child.stdin.take();
+    let mut input_closed = false;
+    let observed_closed = &mut input_closed;
     let send = async move {
         if let (Some(mut stdin), Some(input)) = (stdin, input) {
-            stdin.write_all(input).await?;
-            stdin.shutdown().await?;
+            let delivered = async {
+                stdin.write_all(input).await?;
+                stdin.shutdown().await
+            }
+            .await;
+            match delivered {
+                Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => {
+                    *observed_closed = true;
+                    return Ok(InputDelivery::Closed);
+                }
+                result => result?,
+            }
             drop(stdin);
         }
-        Ok::<_, std::io::Error>(())
+        Ok::<_, std::io::Error>(InputDelivery::Complete)
     };
     let output = async move {
         let mut captured = Vec::new();
@@ -389,14 +406,27 @@ async fn run_child(
     let (cancelled, mut termination, mut detail) = tokio::select! {
         result = async { tokio::try_join!(child.wait(), output, send) } => {
             match result {
-                Ok((status, stdout, ())) => {
+                Ok((status, stdout, delivery)) => {
                     signal_group(running.group, Signal::KILL)?;
                     running.cleaned = true;
+                    let closed = matches!(delivery, InputDelivery::Closed);
+                    let incomplete_success = closed && status.success();
+                    let detail = if incomplete_success {
+                        Some("child IO: request input closed before complete delivery".into())
+                    } else if !status.success() {
+                        Some(if closed {
+                            format!("child {status}; request input closed before complete delivery")
+                        } else {
+                            format!("child {status}")
+                        })
+                    } else {
+                        None
+                    };
                     return Ok(ChildResult {
-                        success: status.success(), exit_code: status.code(), cancelled: false,
-                        detail: (!status.success()).then(|| format!("child {status}")), stdout,
+                        success: status.success() && !closed, exit_code: status.code(), cancelled: false,
+                        detail, stdout,
                         stdout_capture: if capture_limit.is_some() {StdoutCapture::Complete} else {StdoutCapture::NotCaptured},
-                        termination: ChildTermination::Exited,
+                        termination: if incomplete_success {ChildTermination::IoFailed} else {ChildTermination::Exited},
                     });
                 },
                 Err(error) => (false, ChildTermination::IoFailed, format!("child IO: {error}")),
@@ -405,6 +435,12 @@ async fn run_child(
         reason = cancellation => (reason.is_user_cancelled(), if reason.is_user_cancelled() {ChildTermination::Cancelled} else {ChildTermination::SupervisionFailed}, reason.detail().to_string()),
         _ = deadline => (false, ChildTermination::TimedOut, "session deadline exceeded".to_string()),
     };
+    if input_closed && termination == ChildTermination::TimedOut {
+        termination = ChildTermination::IoFailed;
+        detail =
+            "child IO: request input closed before complete delivery; session deadline exceeded"
+                .into();
+    }
     if !running.stop(&mut detail).await {
         termination = ChildTermination::CleanupFailed;
     }
@@ -1116,6 +1152,110 @@ Path(os.environ['TEST_ROOT'],'received.json').write_text(json.dumps(request,ensu
         assert!(!completed.success);
         assert!(!completed.cancelled);
         assert!(completed.detail.unwrap().starts_with("child IO:"));
+    }
+
+    #[cfg(unix)]
+    async fn build_closed_stdin_child(script: &str) -> (RunningChild, tempfile::TempDir) {
+        let directory = tempfile::tempdir().unwrap();
+        let marker = directory.path().join("closed");
+        let mut command = tokio::process::Command::new("/bin/sh");
+        command
+            .args([
+                "-c",
+                &format!("exec 0<&-; printf closed > \"$TEST_CLOSED_INPUT\"; {script}"),
+            ])
+            .env("TEST_CLOSED_INPUT", &marker);
+        let running = RunningChild::spawn(command, true).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !marker.is_file() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        (running, directory)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn closed_stdin_preserves_only_clean_nonzero_exits() {
+        for (script, termination, code) in [
+            ("printf result; exit 51", ChildTermination::Exited, Some(51)),
+            ("printf result; exit 0", ChildTermination::IoFailed, Some(0)),
+            (
+                "printf result; kill -TERM $$",
+                ChildTermination::Exited,
+                None,
+            ),
+        ] {
+            let (mut child, _directory) = build_closed_stdin_child(script).await;
+            let result = run_child(
+                &mut child,
+                Some(Duration::from_secs(1)),
+                Some(1024),
+                Some(b"request"),
+                std::future::pending(),
+            )
+            .await
+            .unwrap();
+            assert!(!result.success);
+            assert!(!result.cancelled);
+            assert_eq!(result.termination, termination, "{result:?}");
+            assert_eq!(result.exit_code, code);
+            assert_eq!(result.stdout, b"result");
+            assert_eq!(result.stdout_capture, StdoutCapture::Complete);
+            assert_eq!(result.failed_exit(), code.filter(|code| *code != 0));
+            assert!(child.cleaned);
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn closed_stdin_never_hides_unsettled_output_or_cancellation() {
+        for (script, reason, termination) in [
+            ("exec sleep 30", None, ChildTermination::IoFailed),
+            ("sleep 30 & exit 51", None, ChildTermination::IoFailed),
+            (
+                "printf '%02048d' 0; exec sleep 30",
+                None,
+                ChildTermination::IoFailed,
+            ),
+            (
+                "exec sleep 30",
+                Some(ChildCancellation::Interrupted),
+                ChildTermination::Cancelled,
+            ),
+            (
+                "exec sleep 30",
+                Some(ChildCancellation::SupervisionFailed),
+                ChildTermination::SupervisionFailed,
+            ),
+        ] {
+            let (mut child, _directory) = build_closed_stdin_child(script).await;
+            let result = run_child(
+                &mut child,
+                Some(Duration::from_secs(1)),
+                Some(1024),
+                Some(b"request"),
+                async {
+                    if let Some(reason) = reason {
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        reason
+                    } else {
+                        std::future::pending().await
+                    }
+                },
+            )
+            .await
+            .unwrap();
+            assert!(!result.success);
+            assert_eq!(result.termination, termination, "{script}: {result:?}");
+            assert_eq!(result.cancelled, termination == ChildTermination::Cancelled);
+            assert_eq!(result.exit_code, None);
+            assert_eq!(result.stdout_capture, StdoutCapture::Unavailable);
+            assert_eq!(result.failed_exit(), None);
+            assert!(child.cleaned);
+        }
     }
 
     #[cfg(unix)]
