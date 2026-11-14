@@ -47,33 +47,43 @@ impl Output {
     }
 }
 
+pub(in crate::commands) struct Contract<'a> {
+    pub schema: &'a Value,
+    pub max_result_bytes: usize,
+    pub access: super::AgentAccess,
+}
+
 pub(in crate::commands) fn build(
     profile: &ExecutionProfile,
     skill: &str,
     installation: &lk_dist::Installation,
     config: &Path,
     request: &Value,
-    schema: &Value,
-    max_result_bytes: usize,
+    contract: Contract<'_>,
 ) -> miette::Result<Invocation> {
+    let Contract {
+        schema,
+        max_result_bytes,
+        access,
+    } = contract;
     let directory =
         crate::commands::private_directory::temporary("lorekeeper-result-").into_diagnostic()?;
     let schema = serde_json::to_string(schema).into_diagnostic()?;
     let schema_path = directory.path().join("result.schema.json");
     std::fs::write(&schema_path, &schema).into_diagnostic()?;
     let result_path = directory.path().join("result.json");
-    let agent = super::agent_invocation_with_output(
+    let agent = super::result_invocation(
         profile,
         skill,
-        "Complete only the supplied native semantic result request.",
         installation,
         config,
-        Some(directory.path()),
-        Some(request),
-        super::AgentOutput::Structured {
+        directory.path(),
+        request,
+        super::ResultContract {
             schema: &schema,
             schema_path: &schema_path,
             result_path: &result_path,
+            access,
         },
     )?;
     // JSON transport includes formatting and host metadata; the decoded semantic

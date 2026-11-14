@@ -248,17 +248,18 @@ fn separated_audit_discovery_and_assessment_use_their_explicit_profiles() {
     let behavior = format!(
         r#"
 if [ ! -f "$TEST_EXECUTION_ROOT/discovery-finished" ]; then
-python3 - <<'DISCOVER'
-import json,os,subprocess
+python3 - "$@" <<'DISCOVER'
+import json,os,sys
 from pathlib import Path
-root=Path(os.environ['TEST_EXECUTION_ROOT']);lore=os.environ['LORE_BIN']
-plan=json.loads(subprocess.check_output([lore,'wiki','audit-plan']))
-candidate=plan['candidates'][0]
-request={{k:candidate[k] for k in ['path','file_revision']}}
-request['queries']=[{{'query':candidate['title'],'phrase':True,'spacing':False}}]
-path=root/'discovery.json';path.write_text(json.dumps(request))
-subprocess.run([lore,'wiki','audit-discover','--file',str(path)],check=True)
-subprocess.run(['python3',str(root/'screen-audit-fixture.py'),request['path']],check=True)
+root=Path(os.environ['TEST_EXECUTION_ROOT'])
+request=json.loads(Path(os.environ['TEST_INTERACTIVE_INPUT']).read_text().split('\nNative request:\n',1)[1])
+assert request['kind']=='audit-discovery'
+value={{'subjects':[]}}
+for subject in request['subjects']:
+    raw=(root/'vault'/subject['path']).read_text()
+    title=next(line.removeprefix('title: ') for line in raw.splitlines() if line.startswith('title: '))
+    value['subjects'].append({{'subject_ref':subject['subject_ref'],'queries':[{{'query':title,'phrase':True,'spacing':False}}]}})
+Path(sys.argv[sys.argv.index('--output-last-message')+1]).write_text(json.dumps(value))
 (root/'discovery-finished').write_text('complete')
 DISCOVER
 exit $?
@@ -304,8 +305,8 @@ fi
         assert_eq!(step["stages"][0], stage);
         assert_eq!(step["execution"]["profile"], profile);
     }
-    assert_eq!(discovery["role"], "interactive");
-    assert_eq!(discovery["outcome"], "returned");
+    assert_eq!(discovery["role"], "discovery");
+    assert_eq!(discovery["outcome"], "recorded");
     assert_eq!(
         report["retained_progress"]["evidence_nodes"]
             .as_u64()

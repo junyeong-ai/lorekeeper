@@ -29,36 +29,37 @@ while True:
 
 const SCREEN: &str = r#"
 python3 - "$@" <<'SCREEN'
-import json, os, subprocess, sys
+import hashlib, json, os, sys
 from pathlib import Path
 root=Path(os.environ['TEST_EXECUTION_ROOT'])
-prompt=Path(os.environ['TEST_INTERACTIVE_INPUT']).read_text() if Path(os.environ['TEST_INTERACTIVE_INPUT']).exists() else ''
-prompt=prompt or '\n'.join(sys.argv[1:])
-prefix='screen. Read the bounded audit discovery packet at '
-if prefix not in prompt: raise SystemExit(100)
-file,_=json.JSONDecoder().raw_decode(prompt.split(prefix,1)[1])
-request=json.loads(Path(file).read_text())
-revision=prompt.split('its exact packet_revision is ',1)[1].split('.',1)[0]
-assert request['schema']=='audit-applicability-v1', request
-assert not request['reassess'], 'automatic screening must not reassess a prior decision'
+file=Path(os.environ['TEST_INTERACTIVE_INPUT'])
+prompt=file.read_text() if file.exists() else ''
+if '\nNative request:\n' not in prompt: raise SystemExit(100)
+request=json.loads(prompt.split('\nNative request:\n',1)[1])
+if request.get('kind')!='audit-screening': raise SystemExit(100)
 mode=(root/'screen-mode').read_text()
 assert mode!='forbid', 'capacity admission must not invoke a screening host'
+assert (root/'vault'/request['subject']['path']).is_file()
+if '--sandbox' in sys.argv:
+    assert sys.argv[sys.argv.index('--sandbox')+1]=='read-only'
+else:
+    assert '--safe-mode' in sys.argv
+    assert sys.argv[sys.argv.index('--tools')+1]=='Read'
+    assert 'Bash(' not in ' '.join(sys.argv)
 with (root/'screen-calls.jsonl').open('a') as stream:
-    stream.write(json.dumps({'packet_revision':revision,'keys':[card['candidate_key'] for card in request['candidates']]})+'\n')
-if mode=='missing': raise SystemExit(0)
-def cli(*args): return json.loads(subprocess.check_output([os.environ['LORE_BIN'],*args]))
-if mode=='other-packet':
-    other=cli('wiki','audit-candidates',request['subject'],'--limit','1')
-    request=other['request']
-    revision=other['request_revision']
-output={'action':'record','path':request['subject'],'purpose_revision':request['purpose_revision'],
-        'packet_revision':revision,'reassess':False,
-        'decisions':[{'candidate_key':card['candidate_key'],
-                      'decision':('defer' if mode=='defer-first' and card['candidate']['path'].endswith('/candidate-00.md') else 'not-selected'),
-                      'reason':'The declared scope is inapplicable, or its explicit prerequisite is unresolved.'}
-                     for card in request['candidates']]}
-file=root/'native-audit-select.json';file.write_text(json.dumps(output))
-cli('wiki','audit-select','--file',str(file))
+    stream.write(json.dumps({'request':hashlib.sha256(json.dumps(request,sort_keys=True).encode()).hexdigest(),
+        'keys':[card['candidate']['path'] for card in request['candidates']]})+'\n')
+response={'decisions':[{'candidate_ref':card['candidate_ref'],
+    'decision':('defer' if mode=='defer-first' and card['candidate']['path'].endswith('/candidate-00.md') else 'not-selected'),
+    'reason':'The declared scope is inapplicable, or its explicit prerequisite is unresolved.'}
+    for card in request['candidates']]}
+if mode=='missing': response['decisions']=[]
+if mode=='other-packet': response['decisions'][0]['candidate_ref']='unassigned'
+if '--output-last-message' in sys.argv:
+    Path(sys.argv[sys.argv.index('--output-last-message')+1]).write_text(json.dumps(response))
+if '--json-schema' in sys.argv:
+    response={'type':'result','subtype':'success','is_error':False,'structured_output':response}
+print(json.dumps(response))
 SCREEN
 screen_status=$?
 if [ "$screen_status" -ne 100 ]; then exit "$screen_status"; fi
@@ -238,7 +239,7 @@ fn native_audit_screening_keeps_defer_and_advances_later_unknown_candidates() {
 }
 
 #[test]
-fn native_audit_screening_requires_the_exact_assigned_packet_receipt() {
+fn native_audit_screening_requires_complete_unique_returned_candidates() {
     for engine in ["codex", "claude-code"] {
         for mode in ["missing", "other-packet"] {
             let fixture = fixture(engine, 3, mode, false, RECORD_AUDIT);
@@ -250,22 +251,16 @@ fn native_audit_screening_requires_the_exact_assigned_packet_receipt() {
                     .as_array()
                     .unwrap()
                     .iter()
-                    .any(|stage| stage["name"] == "audit screening receipt"
+                    .any(|stage| stage["name"] == "audit screening response"
                         && stage["state"] == "failed"),
                 "{report}"
             );
-            assert_eq!(
-                packet(&fixture)["progress"]["unknown"],
-                if mode == "missing" { 3 } else { 2 }
-            );
+            assert_eq!(packet(&fixture)["progress"]["unknown"], 3);
             if mode == "missing" {
                 let (_, repeated) = fixture.run("knowledge");
                 assert_eq!(repeated["halted"], true, "{repeated}");
                 assert_eq!(repeated["semantic_calls"], 1, "{repeated}");
-                assert_eq!(
-                    calls(&fixture)[0]["packet_revision"],
-                    calls(&fixture)[1]["packet_revision"]
-                );
+                assert_eq!(calls(&fixture)[0]["request"], calls(&fixture)[1]["request"]);
             }
         }
     }

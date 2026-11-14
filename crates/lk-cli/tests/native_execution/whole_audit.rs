@@ -178,17 +178,17 @@ from pathlib import Path
 root=Path(os.environ['TEST_EXECUTION_ROOT'])
 prompt=Path(os.environ['TEST_INTERACTIVE_INPUT']).read_text()
 prompt=prompt or '\n'.join(sys.argv[1:])
-assert 'discover.' in prompt, 'fixed output identity must not launch an inspector or finalizer'
+request=json.loads(prompt.split('\nNative request:\n',1)[1])
+assert request['kind']=='audit-discovery', 'fixed output identity must not launch an inspector or finalizer'
 with (root/'discovery-calls').open('a') as stream: stream.write('discovery\n')
 for path in (root/'reviews').glob('*.md'):
     shutil.copyfile(path,root/'vault/wiki/explorations'/path.name)
-def cli(*args): return json.loads(subprocess.check_output([os.environ['LORE_BIN'],*args]))
-candidate=cli('wiki','audit-plan','--path','wiki/concepts/capacity.md')['candidates'][0]
-request={key:candidate[key] for key in ['path','file_revision']}
-request['queries']=[{'query':'private absent capacity fixture','phrase':True,'spacing':False}]
-path=root/'discovery.json';path.write_text(json.dumps(request))
-cli('wiki','audit-discover','--file',str(path))
-subprocess.run(['python3',str(root/'screen-audit-fixture.py'),request['path']],check=True)
+value={'subjects':[{'subject_ref':subject['subject_ref'],'queries':[{'query':'private absent capacity fixture','phrase':True,'spacing':False}]} for subject in request['subjects']]}
+if '--output-last-message' in sys.argv:
+    Path(sys.argv[sys.argv.index('--output-last-message')+1]).write_text(json.dumps(value))
+if '--json-schema' in sys.argv:
+    value={'type':'result','subtype':'success','is_error':False,'structured_output':value}
+print(json.dumps(value))
 DISCOVER
 "#;
     for during_discovery in [false, true] {

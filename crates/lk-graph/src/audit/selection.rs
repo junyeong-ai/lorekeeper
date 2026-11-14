@@ -1199,6 +1199,24 @@ pub fn record(
             if repeated {
                 return Ok(false);
             }
+            let request = request_for_rows(
+                &candidate,
+                &assigned,
+                &captured.cards,
+                *reassess,
+                limits.max_result_bytes,
+            )?;
+            if revision(&request)? != *packet_revision {
+                return Err(GraphError::AuditScreeningChanged);
+            }
+            let bytes = serde_json::to_vec(&request).map_err(error)?.len();
+            if bytes > limits.max_input_bytes {
+                return Err(GraphError::AuditScreeningCapacity {
+                    boundary: CapacityBoundary::Input,
+                    required: bytes,
+                    maximum: limits.max_input_bytes,
+                });
+            }
             for row in &assigned {
                 if row.decision.is_none() && *reassess {
                     return Err(error(
@@ -1214,20 +1232,6 @@ pub fn record(
                         "audit decision is already recorded; deferred reassessment requires its exact current packet",
                     ));
                 }
-            }
-            let request = request_for_rows(
-                &candidate,
-                &assigned,
-                &captured.cards,
-                *reassess,
-                limits.max_result_bytes,
-            )?;
-            if revision(&request)? != *packet_revision
-                || serde_json::to_vec(&request).map_err(error)?.len() > limits.max_input_bytes
-            {
-                return Err(error(
-                    "audit screening request changed or exceeds its complete input bound",
-                ));
             }
             let receipt = PacketReceipt {
                 schema: PACKET_SCHEMA.into(),

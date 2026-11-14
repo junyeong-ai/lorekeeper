@@ -90,6 +90,7 @@ pub async fn run(
 #[cfg(unix)]
 mod native {
     mod audit;
+    mod preparation;
 
     use super::*;
     use super::{automation, scheduler};
@@ -106,10 +107,10 @@ mod native {
     #[derive(Clone, Copy, Serialize)]
     #[serde(rename_all = "kebab-case")]
     enum WorkRole {
+        Discovery,
         Evidence,
         Screening,
         Finalizer,
-        Interactive,
     }
 
     #[derive(Clone, Copy, Serialize)]
@@ -130,7 +131,6 @@ mod native {
         Rejected,
         Failed,
         Cancelled,
-        Returned,
     }
 
     #[derive(Serialize)]
@@ -146,7 +146,7 @@ mod native {
         selection_id: Option<String>,
         batch_id: Option<String>,
         // Compact UTF-8 JSON, excluding prompts and host envelopes. Results measure
-        // the decoded value before recording; interactive finalizers are unobserved.
+        // the decoded value before recording.
         request_json_bytes: Option<usize>,
         result_json_bytes: Option<usize>,
         preparation_duration_ms: Option<u64>,
@@ -435,7 +435,7 @@ mod native {
 
     const MAX_PREPARED_QUEUE_TARGETS: usize = 64;
 
-    fn is_interactive_batch_candidate(
+    fn is_whole_input_batch_candidate(
         kind: lk_queue::TaskKind,
         context: lk_core::execution::ExtractionContext,
     ) -> bool {
@@ -536,11 +536,6 @@ mod native {
     struct AuditProgress {
         before: lk_graph::audit::AuditCoverage,
         after: Option<lk_graph::audit::AuditCoverage>,
-    }
-
-    struct AuditCheckpoint {
-        plan: lk_graph::audit::AuditPlan,
-        candidate: Option<lk_graph::audit::AuditCandidate>,
     }
 
     #[derive(Serialize)]
@@ -1291,82 +1286,6 @@ mod native {
             }
         }
 
-        async fn consumer(
-            &mut self,
-            stage: ExecutionStage,
-            skill: &str,
-            operation: &str,
-            input_directory: Option<&Path>,
-        ) -> bool {
-            let mut metrics = WorkStepMetrics::new(WorkRole::Interactive);
-            metrics.stages.push(stage);
-            let completed = self
-                .consume(skill, operation, input_directory, &mut metrics)
-                .await;
-            if completed {
-                metrics.outcome = WorkOutcome::Returned;
-            }
-            self.record_work_step(metrics);
-            completed
-        }
-
-        async fn consume(
-            &mut self,
-            skill: &str,
-            operation: &str,
-            input_directory: Option<&Path>,
-            metrics: &mut WorkStepMetrics,
-        ) -> bool {
-            if self.result.halted || self.result.cancelled || !self.configuration_is_current() {
-                return false;
-            }
-            if self.config.llm.provider == lk_core::config::LlmProvider::Noop {
-                return self.failure(skill, "semantic execution is disabled by llm.provider");
-            }
-            if !self.call_budget_available() {
-                return false;
-            }
-            if let Err(error) = self.prepare_agent(metrics).await {
-                return self.agent_preflight_failure(skill, error);
-            }
-            let profile = self.agent_profile(metrics);
-            let timeout = profile.timeout();
-            let invocation = execution::agent_invocation(
-                profile,
-                skill,
-                operation,
-                self.installation,
-                self.opts.config.as_ref().expect("resolved config"),
-                input_directory,
-                None,
-            );
-            match invocation {
-                Ok(execution::AgentInvocation { mut command, input }) => {
-                    if !self.reserve_queue_turn().await {
-                        return false;
-                    }
-                    if !self.reserve_calls(1) {
-                        return false;
-                    }
-                    command.current_dir(&self.root);
-                    let started_at = Instant::now();
-                    let completed = self
-                        .child_with_input(skill, command, Some(timeout), input.as_deref())
-                        .await;
-                    let duration = started_at.elapsed().as_millis() as u64;
-                    metrics.agent_duration_ms = Some(duration);
-                    if self.result.cancelled {
-                        metrics.outcome = WorkOutcome::Cancelled;
-                    } else if !completed {
-                        metrics.outcome = WorkOutcome::Failed;
-                    }
-                    self.result.semantic_duration_ms += duration;
-                    completed
-                }
-                Err(error) => self.failure(skill, error),
-            }
-        }
-
         fn observation_invocation(
             &self,
             request: &serde_json::Value,
@@ -1392,9 +1311,9 @@ mod native {
                     budget.max_result_bytes,
                 ),
                 WorkRole::Finalizer => execution::finalization::build_invocation(profile, request),
-                WorkRole::Interactive => {
+                WorkRole::Discovery => {
                     return Err(miette::miette!(
-                        "interactive stages require their tool-enabled adapter"
+                        "discovery stages require the structured result adapter"
                     ));
                 }
             }?;
@@ -1492,8 +1411,8 @@ mod native {
                             .as_str()
                             .expect("prepared finalizer identity")
                     ),
-                    WorkRole::Interactive => {
-                        unreachable!("interactive stages have no observation request")
+                    WorkRole::Discovery => {
+                        unreachable!("discovery stages have no observation request")
                     }
                 };
                 if binding.identity != actual {
@@ -2461,6 +2380,11 @@ mod native {
             }
             let profile = self.agent_profile(metrics);
             let timeout = profile.timeout();
+            let access = if matches!(metrics.role, WorkRole::Discovery | WorkRole::Screening) {
+                execution::AgentAccess::ReadOnly
+            } else {
+                execution::AgentAccess::ReadWrite
+            };
             let invocation = execution::result::build(
                 profile,
                 if metrics.stages == [ExecutionStage::Audit] {
@@ -2471,8 +2395,11 @@ mod native {
                 self.installation,
                 self.opts.config.as_ref().expect("resolved config"),
                 request,
-                schema,
-                budget.max_result_bytes,
+                execution::result::Contract {
+                    schema,
+                    max_result_bytes: budget.max_result_bytes,
+                    access,
+                },
             );
             let execution::result::Invocation { mut agent, output } = match invocation {
                 Ok(invocation) => invocation,
@@ -2496,7 +2423,7 @@ mod native {
                     agent.command,
                     Some(timeout),
                     output.capture_limit,
-                    agent.input.as_deref(),
+                    Some(&agent.input),
                 )
                 .await;
             let duration = started.elapsed().as_millis() as u64;
@@ -2547,6 +2474,7 @@ mod native {
                     Some(value)
                 }
                 Err(error) => {
+                    metrics.outcome = WorkOutcome::Failed;
                     if self.agent_profile(metrics).engine()
                         == lk_core::execution::AgentEngine::ClaudeCode
                         && error
@@ -3943,7 +3871,7 @@ mod native {
             let mut next = 0;
             while next < order.len() {
                 self.supervisor.read_control().check().into_diagnostic()?;
-                let batch = is_interactive_batch_candidate(
+                let batch = is_whole_input_batch_candidate(
                     targets[&order[next]].kind,
                     budget.extraction_context,
                 );
@@ -3956,7 +3884,7 @@ mod native {
                     .iter()
                     .take(limit)
                     .take_while(|target| {
-                        is_interactive_batch_candidate(
+                        is_whole_input_batch_candidate(
                             targets[*target].kind,
                             budget.extraction_context,
                         ) == batch
@@ -4085,7 +4013,7 @@ mod native {
                         }
                         crate::commands::work::TaskWork::WholeInput { native, individual } => {
                             let input =
-                                *native.expect("interactive task has a prepared native input");
+                                *native.expect("whole-input task has a prepared native input");
                             let compatible = if let Some((previous, _)) = batch.last() {
                                 self.config
                                     .execution
@@ -4371,49 +4299,13 @@ mod native {
                             }
                         }
                         QueueDispatch::Discovery { task } => {
-                            let directory = match crate::commands::private_directory::temporary(
-                                "lorekeeper-discovery-",
-                            ) {
-                                Ok(directory) => directory,
-                                Err(error) => {
-                                    return self.failure("extraction discovery selection", error);
-                                }
-                            };
-                            let path = directory.path().join("tasks.json");
-                            if let Err(error) = std::fs::write(
-                                &path,
-                                serde_json::to_vec(&[&task.task_id]).expect("task ids serialize"),
-                            ) {
-                                return self.failure("extraction discovery selection", error);
-                            }
-                            let selection = match serde_json::to_string(&path) {
-                                Ok(selection) => selection,
-                                Err(error) => {
-                                    return self.failure("extraction discovery selection", error);
-                                }
-                            };
-                            if !self
-                                .consumer(
-                                    ExecutionStage::Discovery,
-                                    "lore-process",
-                                    &format!("discover {selection}"),
-                                    Some(directory.path()),
-                                )
-                                .await
-                            {
+                            if !self.discover_extraction(task).await {
                                 if self.queue_replan {
                                     continue 'planning;
                                 }
                                 return false;
                             }
-                            match crate::commands::work::has_current_discovery(&self.root, task) {
-                                Ok(true) => {
-                                    self.result.work_telemetry.retained_progress.discovery_recipes += 1;
-                                    continue 'planning;
-                                }
-                                Ok(false) => return self.failure("extraction discovery receipt", "selected extraction has no current discovery recipe; unfinished work retained"),
-                                Err(error) => return self.failure("extraction discovery receipt", error),
-                            }
+                            continue 'planning;
                         }
                         QueueDispatch::Finalization { id, task } => {
                             let mut metrics = WorkStepMetrics::new(WorkRole::Finalizer);
@@ -4750,10 +4642,6 @@ mod native {
                 .count()
         }
 
-        fn audit_plan(&mut self, paths: &[String]) -> miette::Result<lk_graph::audit::AuditPlan> {
-            Ok(self.audit_checkpoint(paths, None)?.plan)
-        }
-
         fn inspect_audit_coverage(&mut self) -> miette::Result<lk_graph::audit::AuditCoverage> {
             let pages = lk_graph::scan::scan_vault_controlled(
                 &self.root,
@@ -4800,11 +4688,7 @@ mod native {
             Ok(plan.coverage())
         }
 
-        fn audit_checkpoint(
-            &mut self,
-            paths: &[String],
-            subject: Option<&str>,
-        ) -> miette::Result<AuditCheckpoint> {
+        fn audit_plan(&mut self, paths: &[String]) -> miette::Result<lk_graph::audit::AuditPlan> {
             let pages = lk_graph::scan::scan_vault_controlled(
                 &self.root,
                 self.config.graph.scope.follow_links,
@@ -4813,7 +4697,6 @@ mod native {
             .map_err(|e| miette::miette!("{e}"))?;
             let mut readiness =
                 InputAvailability::load_controlled(&self.root, self.supervisor.read_control())?;
-            let mut captured = None;
             let mut checked_paths = paths
                 .iter()
                 .cloned()
@@ -4828,9 +4711,6 @@ mod native {
                 self.config.graph.audit.max_input_bytes,
                 &mut |candidate| {
                     checked_paths.insert(candidate.path.clone());
-                    if subject == Some(candidate.path.as_str()) {
-                        captured = Some(candidate.clone());
-                    }
                     let available =
                         if let Some(reason) = self.audit_screening_deferred.get(&candidate.path) {
                             readiness.defer(candidate, vec![reason.clone()])
@@ -4863,10 +4743,7 @@ mod native {
                 .audit_deferred
                 .truncate(super::super::audit::MAX_DEFERRED_DETAILS);
             self.result.audit_deferred_count = self.audit_deferred_paths.len();
-            Ok(AuditCheckpoint {
-                plan,
-                candidate: captured,
-            })
+            Ok(plan)
         }
 
         fn audit_screening_limits(
@@ -5040,103 +4917,109 @@ mod native {
                     };
                     continue;
                 };
-                let directory = match crate::commands::private_directory::temporary(
-                    "lorekeeper-audit-screening-",
-                ) {
-                    Ok(directory) => directory,
-                    Err(error) => {
-                        self.failure("audit screening input", error);
-                        return None;
-                    }
-                };
-                let file = directory.path().join("packet.json");
-                if let Err(error) = std::fs::write(
-                    &file,
-                    serde_json::to_vec(&request).expect("typed audit packet serializes"),
-                ) {
-                    self.failure("audit screening input", error);
-                    return None;
-                }
-                let subject = serde_json::to_string(&candidate.path).expect("subject serializes");
-                let file = serde_json::to_string(&file).expect("path serializes");
                 let packet_revision = packet
                     .request_revision
                     .expect("prepared request has a revision");
-                let prompt = format!(
-                    "screen. Read the bounded audit discovery packet at {file} for subject {subject}; its exact packet_revision is {packet_revision}. Read the subject's revision-pinned scope and the necessary source context, then judge every assigned card independently. Record exactly this one packet through wiki audit-select. Use inspect for potentially applicable or uncertain scope, not-selected only for inapplicable scope, and defer for an explicit unresolved prerequisite. Do not reassess old decisions, record other packets, change discovery, curate pages, audit or finalize assessments. Read the lore-wiki screening procedure."
-                );
-                if !self
-                    .consumer(
-                        ExecutionStage::Screening,
-                        "lore-wiki",
-                        &prompt,
-                        Some(directory.path()),
-                    )
-                    .await
+                let native =
+                    match execution::preparation::screening_request(&request, &packet_revision) {
+                        Ok(native) => native,
+                        Err(error) => {
+                            self.failure("audit screening request", error);
+                            return None;
+                        }
+                    };
+                if serde_json::to_vec(&native)
+                    .expect("native screening serializes")
+                    .len()
+                    > limits.max_input_bytes
                 {
-                    return None;
+                    self.defer_audit_screening(
+                        &candidate,
+                        "complete native screening request exceeds max_input_bytes".into(),
+                    );
+                    plan = match self.audit_plan(paths) {
+                        Ok(plan) => plan,
+                        Err(error) => {
+                            self.failure("audit screening replanning", error);
+                            return None;
+                        }
+                    };
+                    continue;
                 }
-                let checkpoint = match self.audit_checkpoint(paths, Some(&candidate.path)) {
-                    Ok(checkpoint) => checkpoint,
+                let mut metrics = WorkStepMetrics::new(WorkRole::Screening);
+                let response = self
+                    .request_result(
+                        &native,
+                        &execution::preparation::screening_schema(),
+                        &mut metrics,
+                    )
+                    .await;
+                let Some(response) = response else {
+                    self.record_work_step(metrics);
+                    return None;
+                };
+                let output = match execution::preparation::screening_output(
+                    response,
+                    &request,
+                    packet_revision,
+                ) {
+                    Ok(output) => output,
                     Err(error) => {
-                        self.failure("audit screening verification", error);
+                        self.record_work_step(metrics);
+                        self.failure("audit screening response", error);
                         return None;
                     }
                 };
-                let Some(current) = checkpoint.candidate.as_ref() else {
-                    self.failure(
-                        "audit screening verification",
-                        "assigned subject was not captured after screening",
-                    );
-                    return None;
-                };
-                match lk_graph::audit::selection::packet_status(
-                    &self.root,
-                    &self.config.vault.dirs,
-                    current,
-                    &request,
-                    self.supervisor.read_control(),
-                ) {
-                    Ok(lk_graph::audit::selection::PacketStatus::Recorded) => {
+                let started = Instant::now();
+                let (session, _) = self.mutation_session("audit screening recording").await?;
+                let recorded = (|| {
+                    let pages = lk_graph::scan::scan_vault_controlled(
+                        session.root(),
+                        self.config.graph.scope.follow_links,
+                        self.supervisor.read_control(),
+                    )?;
+                    lk_graph::audit::selection::record(
+                        &session,
+                        &self.config.vault.dirs,
+                        &pages,
+                        output,
+                        limits,
+                        self.supervisor.read_control(),
+                    )
+                })();
+                drop(session);
+                metrics.revalidation_record_duration_ms =
+                    Some(started.elapsed().as_millis() as u64);
+                match recorded {
+                    Ok(changed) => {
+                        metrics.outcome = WorkOutcome::Recorded;
                         self.result
                             .work_telemetry
                             .retained_progress
-                            .screening_packets += 1;
+                            .screening_packets += usize::from(changed);
                     }
-                    Ok(lk_graph::audit::selection::PacketStatus::Changed) => {
+                    Err(lk_graph::GraphError::AuditScreeningChanged) => {
+                        metrics.outcome = WorkOutcome::Rejected;
                         self.defer_audit_screening(
-                            current,
-                            "assigned candidate inputs changed; recorded judgments remain retained"
-                                .into(),
+                            &candidate,
+                            "assigned candidate inputs changed; discard the old judgment".into(),
                         );
-                        plan = match self.audit_plan(paths) {
-                            Ok(plan) => plan,
-                            Err(error) => {
-                                self.failure("audit selection replanning", error);
-                                return None;
-                            }
-                        };
-                        continue;
-                    }
-                    Ok(lk_graph::audit::selection::PacketStatus::Unrecorded) => {
-                        self.failure(
-                            "audit screening receipt",
-                            "the exact assigned candidate packet was not recorded",
-                        );
-                        return None;
                     }
                     Err(error) => {
-                        self.failure("audit screening receipt", error);
+                        self.record_work_step(metrics);
+                        self.failure("audit screening recording", error);
                         return None;
                     }
                 }
-                plan = checkpoint.plan;
+                self.record_work_step(metrics);
+                plan = match self.audit_plan(paths) {
+                    Ok(plan) => plan,
+                    Err(error) => {
+                        self.failure("audit screening replanning", error);
+                        return None;
+                    }
+                };
             }
-        }
-
-        async fn discover_audit(&mut self, paths: &[String]) -> bool {
-            let paths = serde_json::to_string(paths).expect("string paths serialize");
-            self.consumer(ExecutionStage::Discovery, "lore-wiki", &format!("discover. Plan related-document search only for these exact audit subjects: {paths}. Read their names, scope and outline, choose explicit search queries and record each through wiki audit-discover. Do not audit, repair, synthesize or record completed assessments in this discovery session."), None).await
         }
 
         async fn prepare_audit_jobs(

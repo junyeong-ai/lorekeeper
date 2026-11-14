@@ -828,6 +828,23 @@ pub(super) fn has_current_discovery(
     discovery::current(root, task).map(|queries| queries.is_some())
 }
 
+#[cfg(unix)]
+pub(super) fn record_native_discovery(
+    session: &lk_vault::MutationSession,
+    task: &lk_queue::QueueTask,
+    target_revision: String,
+    queries: Vec<lk_core::discovery::DiscoveryQuery>,
+) -> miette::Result<bool> {
+    discovery::record_native(
+        session,
+        task,
+        discovery::DiscoveryRequest {
+            target_revision,
+            queries,
+        },
+    )
+}
+
 pub(super) fn retire_discovery(
     root: &Path,
     task: &lk_queue::QueueTask,

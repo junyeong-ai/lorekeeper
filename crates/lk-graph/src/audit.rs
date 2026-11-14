@@ -122,8 +122,52 @@ fn record_discovery_with_policy(
     request: AuditDiscoveryRequest,
     policy: Option<selection::SelectionPlan>,
 ) -> Result<(), GraphError> {
+    record_discovery_guarded(
+        session,
+        dirs,
+        pages,
+        request,
+        policy,
+        DiscoveryWrite::Replace,
+        &lk_vault::ReadControl::default(),
+    )
+    .map(|_| ())
+}
+
+enum DiscoveryWrite {
+    Replace,
+    IfMissing,
+}
+
+pub fn record_discovery_if_missing(
+    session: &MutationSession,
+    dirs: &VaultDirs,
+    pages: &[ScannedPage],
+    request: AuditDiscoveryRequest,
+    read: &lk_vault::ReadControl,
+) -> Result<bool, GraphError> {
+    record_discovery_guarded(
+        session,
+        dirs,
+        pages,
+        request,
+        Some(selection::SelectionPlan::default()),
+        DiscoveryWrite::IfMissing,
+        read,
+    )
+}
+
+fn record_discovery_guarded(
+    session: &MutationSession,
+    dirs: &VaultDirs,
+    pages: &[ScannedPage],
+    request: AuditDiscoveryRequest,
+    policy: Option<selection::SelectionPlan>,
+    mode: DiscoveryWrite,
+    read: &lk_vault::ReadControl,
+) -> Result<bool, GraphError> {
     let root = session.root();
-    let (before, mut receipts) = load(root)?;
+    let (before, mut receipts) = load_controlled(root, read)?;
     require_readable_subjects(pages, dirs, Some(&BTreeSet::from([request.path.as_str()])))?;
     if !subject_kinds(pages, dirs).contains_key(Path::new(&request.path)) {
         return Err(error("discovery requires an exact audit subject"));
@@ -137,10 +181,8 @@ fn record_discovery_with_policy(
     let mut queries = request.queries;
     queries.sort();
     queries.dedup();
-    let raw = std::fs::read_to_string(
-        lk_vault::page_path(root, Path::new(&request.path)).map_err(error)?,
-    )
-    .map_err(error)?;
+    let path = lk_vault::page_path(root, Path::new(&request.path)).map_err(error)?;
+    let raw = read.read_to_string(&path).map_err(GraphError::from)?;
     let revision = source_revision(&lk_vault::parse_page(&raw).map_err(error)?);
     if file_revision(&raw) != request.file_revision
         || !pages.iter().any(|page| {
@@ -148,6 +190,14 @@ fn record_discovery_with_policy(
         })
     {
         return Err(error("discovery subject changed during recording"));
+    }
+    if matches!(mode, DiscoveryWrite::IfMissing)
+        && receipts
+            .discovery
+            .get(&request.path)
+            .is_some_and(|plan| plan.subject_revision == revision)
+    {
+        return Ok(false);
     }
     let selection = receipts
         .discovery
@@ -172,7 +222,9 @@ fn record_discovery_with_policy(
         serde_json::to_string_pretty(&receipts).map_err(error)? + "\n",
     )
     .map_err(error)?;
-    session.apply(plan).map_err(error)
+    read.check().map_err(GraphError::from)?;
+    session.apply(plan).map_err(error)?;
+    Ok(true)
 }
 
 #[derive(Deserialize, Serialize)]
@@ -3386,6 +3438,70 @@ mod tests {
                 .unwrap()
                 .to_string()
                 .contains("stored discovery")
+        );
+    }
+
+    #[test]
+    fn initial_discovery_preserves_a_current_recipe_and_accepts_a_fresh_subject_revision() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let path = "wiki/documents/subject.md";
+        let original = "---\ntype: document\ntitle: Subject\n---\nAn authored scope.\n";
+        write(root.path(), path, original);
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let request = |raw: &str, query: &str| AuditDiscoveryRequest {
+            path: path.into(),
+            file_revision: file_revision(raw),
+            queries: vec![lk_vault::DiscoveryQuery {
+                query: query.into(),
+                phrase: true,
+                spacing: false,
+            }],
+        };
+        assert!(
+            record_discovery_if_missing(
+                &session,
+                &dirs,
+                &scan(root.path()),
+                request(original, "authored scope"),
+                &lk_vault::ReadControl::default(),
+            )
+            .unwrap()
+        );
+        let before = std::fs::read(root.path().join(STATE)).unwrap();
+        assert!(
+            !record_discovery_if_missing(
+                &session,
+                &dirs,
+                &scan(root.path()),
+                request(original, "another scope"),
+                &lk_vault::ReadControl::default(),
+            )
+            .unwrap()
+        );
+        assert_eq!(std::fs::read(root.path().join(STATE)).unwrap(), before);
+        let changed = original.replace("authored", "changed");
+        write(root.path(), path, &changed);
+        assert!(
+            record_discovery_if_missing(
+                &session,
+                &dirs,
+                &scan(root.path()),
+                request(original, "stale scope"),
+                &lk_vault::ReadControl::default(),
+            )
+            .is_err()
+        );
+        assert_eq!(std::fs::read(root.path().join(STATE)).unwrap(), before);
+        assert!(
+            record_discovery_if_missing(
+                &session,
+                &dirs,
+                &scan(root.path()),
+                request(&changed, "changed scope"),
+                &lk_vault::ReadControl::default(),
+            )
+            .unwrap()
         );
     }
 

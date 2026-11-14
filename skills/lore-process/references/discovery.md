@@ -39,7 +39,8 @@ and choosing the recipes again. Empty recipes are valid for an eventual empty ex
 publishing any concepts requires at least one query. Never invent generic queries merely
 to satisfy that count.
 
-The native `discover <task-ids.json>` operation returns after recording recipes.
+Native runs receive typed discovery queries; Rust revalidates the current task and
+records its recipes. A recipe registered during that read remains authoritative.
 Ordinary selected/manual processing continues with `lore work context --task-id ID`.
 An explicit `--discovery-file FILE` accepts `{"queries":[...]}` for context capture;
 in progressive mode these must equal recipes already recorded with `work discover`.

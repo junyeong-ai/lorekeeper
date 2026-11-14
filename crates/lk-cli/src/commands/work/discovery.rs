@@ -9,8 +9,8 @@ pub(super) mod recovery;
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct DiscoveryRequest {
-    target_revision: String,
-    queries: Vec<DiscoveryQuery>,
+    pub target_revision: String,
+    pub queries: Vec<DiscoveryQuery>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -177,6 +177,24 @@ pub(super) fn record(
     task_id: &str,
     request: DiscoveryRequest,
 ) -> miette::Result<()> {
+    record_selected(session, task_id, request, None).map(|_| ())
+}
+
+#[cfg(unix)]
+pub(super) fn record_native(
+    session: &lk_vault::MutationSession,
+    task: &lk_queue::QueueTask,
+    request: DiscoveryRequest,
+) -> miette::Result<bool> {
+    record_selected(session, &task.task_id, request, Some(task))
+}
+
+fn record_selected(
+    session: &lk_vault::MutationSession,
+    task_id: &str,
+    request: DiscoveryRequest,
+    expected: Option<&lk_queue::QueueTask>,
+) -> miette::Result<bool> {
     let root = session.root();
     let _claim = match lk_queue::claim_queue(&root.join(".lorekeeper/queue")).into_diagnostic()? {
         lk_queue::QueueClaim::Held(claim) => claim,
@@ -188,12 +206,27 @@ pub(super) fn record(
     let task = super::super::queue::select_task(
         root,
         task_id,
-        super::super::queue::TaskSelection::CurrentOrDoneExtraction,
+        if expected.is_some() {
+            super::super::queue::TaskSelection::Current
+        } else {
+            super::super::queue::TaskSelection::CurrentOrDoneExtraction
+        },
     )?;
+    if let Some(expected) = expected
+        && serde_json::to_value(expected).into_diagnostic()?
+            != serde_json::to_value(&task).into_diagnostic()?
+    {
+        return Err(miette::miette!(
+            "selected discovery task changed during execution"
+        ));
+    }
     if task.kind != lk_queue::TaskKind::ExtractConcepts {
         return Err(miette::miette!(
             "discovery recipes require concept extraction"
         ));
+    }
+    if expected.is_some() && current(root, &task)?.is_some() {
+        return Ok(false);
     }
     let queries = validate_queries(&request.queries)?;
     let history = recovery::has_history(root, &task)?;
@@ -226,7 +259,8 @@ pub(super) fn record(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => plan.create(path, after),
         Err(error) => return Err(miette::miette!("read extraction discovery: {error}")),
     }
-    session.apply(plan).into_diagnostic()
+    session.apply(plan).into_diagnostic()?;
+    Ok(true)
 }
 
 #[cfg(test)]

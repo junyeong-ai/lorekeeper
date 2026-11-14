@@ -63,7 +63,7 @@ impl Fixture {
         } else {
             "2.1.303 (Claude Code)"
         };
-        std::fs::write(&agent, format!("#!/bin/sh\nif [ \"$1\" = --version ]; then printf '%s\\n' '{version}'; exit; fi\nprintf '%s\\n' \"$@\" > \"$TEST_EXECUTION_ROOT/arguments\"\nexport TEST_INTERACTIVE_INPUT=\"$TEST_EXECUTION_ROOT/interactive-request-$$.txt\"\ncase \"$*\" in *--output-last-message*) /bin/cat > \"$TEST_INTERACTIVE_INPUT\" ;; *--output-schema*|*--safe-mode*) ;; *) /bin/cat > \"$TEST_INTERACTIVE_INPUT\" ;; esac\nif [ -f \"$TEST_INTERACTIVE_INPUT\" ]; then /bin/cp \"$TEST_INTERACTIVE_INPUT\" \"$TEST_EXECUTION_ROOT/interactive-request.txt\"; fi\n{behavior}\n")).unwrap();
+        std::fs::write(&agent, format!("#!/bin/sh\nif [ \"$1\" = --version ]; then printf '%s\\n' '{version}'; exit; fi\nprintf '%s\\n' \"$@\" > \"$TEST_EXECUTION_ROOT/arguments\"\nexport TEST_INTERACTIVE_INPUT=\"$TEST_EXECUTION_ROOT/interactive-request-$$.txt\"\ncase \"$*\" in *--output-last-message*|*--safe-mode*--tools\\ Read*) /bin/cat > \"$TEST_INTERACTIVE_INPUT\" ;; *--output-schema*|*--safe-mode*) ;; *) /bin/cat > \"$TEST_INTERACTIVE_INPUT\" ;; esac\nif [ -f \"$TEST_INTERACTIVE_INPUT\" ]; then /bin/cp \"$TEST_INTERACTIVE_INPUT\" \"$TEST_EXECUTION_ROOT/interactive-request.txt\"; fi\n{behavior}\n")).unwrap();
         std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o755)).unwrap();
         let config = root.join("config.yaml");
         std::fs::write(&config, format!("vault:\n  root: vault\nidentity:\n  name: Test\n  email: test@example.com\nsources:\n  notes:\n    type: manual\n    params: {{inbox_dir: inbox}}\n    labels: [knowledge]\n    concept_policy: supported-new\nexecution:\n  default_profile: primary\n  profiles:\n    primary:\n      engine: {engine}\n      executable: {}\n      timeout_seconds: {timeout}\n      work: {{extraction_context: full-context}}\n", serde_json::to_string(&agent).unwrap())).unwrap();
@@ -184,7 +184,9 @@ case "$*" in
   *--output-schema*|*--safe-mode*|*--json-schema*)
     export TEST_SECTION_INPUT="$TEST_EXECUTION_ROOT/whole-section-request-$$.txt"
     case "$*" in
-      *--safe-mode*) /bin/cat > "$TEST_SECTION_INPUT" ;;
+      *--safe-mode*)
+        if [ -f "$TEST_INTERACTIVE_INPUT" ]; then /bin/cp "$TEST_INTERACTIVE_INPUT" "$TEST_SECTION_INPUT"; else /bin/cat > "$TEST_SECTION_INPUT"; fi
+        ;;
       *--output-last-message*|*--json-schema*) /bin/cp "$TEST_INTERACTIVE_INPUT" "$TEST_SECTION_INPUT" ;;
       *) /bin/cat > "$TEST_SECTION_INPUT" ;;
     esac
@@ -241,24 +243,24 @@ from pathlib import Path
 root=Path(os.environ['TEST_EXECUTION_ROOT'])
 prompt=Path(os.environ['TEST_INTERACTIVE_INPUT']).read_text() if Path(os.environ['TEST_INTERACTIVE_INPUT']).exists() else ''
 prompt=prompt or '\n'.join(sys.argv[1:])
-if '\nNative request:\n' not in prompt:
-    paths=json.JSONDecoder().raw_decode(prompt.split('these exact audit subjects: ',1)[1])[0]
-    for subject in paths:
-        candidate=json.loads(subprocess.check_output([os.environ['LORE_BIN'],'wiki','audit-plan','--path',subject]))['candidates'][0]
-        discovery={key:candidate[key] for key in ['path','file_revision']}
-        discovery['queries']=[{'query':candidate['title'],'phrase':True,'spacing':False}]
-        path=root/'discovery.json'
-        path.write_text(json.dumps(discovery))
-        subprocess.run([os.environ['LORE_BIN'],'wiki','audit-discover','--file',str(path)],check=True)
-        subprocess.run(['python3',str(root/'screen-audit-fixture.py'),discovery['path']],check=True)
-    raise SystemExit(0)
 request=json.loads(prompt.split('\nNative request:\n',1)[1])
-assert request['schema']=='native-audit-results-v1'
-assert {item['source'] for item in request['contracts']} == {'lore-wiki/references/maintenance.md','lore-wiki/references/curation.md'}
-assert all(item['body'] for item in request['contracts'])
-assert all('resources' in subject and 'work' not in subject for subject in request['subjects'])
-(root/'maintain-command').write_text(json.dumps([subject['context']['subject']['path'] for subject in request['subjects']],separators=(',',':')))
-value={'results':[{'subject_ref':subject['subject_ref'],'status':'complete','disposition':'reviewed','reason':'Read the exact supplied subject and its scoped evidence.'} for subject in request['subjects']]}
+if request.get('kind')=='audit-discovery':
+    rows=[]
+    for subject in request['subjects']:
+        raw=(root/'vault'/subject['path']).read_text()
+        title=next((line.removeprefix('title: ') for line in raw.splitlines() if line.startswith('title: ')),Path(subject['path']).stem)
+        query=(root/'audit-query').read_text() if (root/'audit-query').exists() else title
+        rows.append({'subject_ref':subject['subject_ref'],'queries':[{'query':query,'phrase':True,'spacing':False}]})
+    value={'subjects':rows}
+elif request.get('kind')=='audit-screening':
+    value={'decisions':[{'candidate_ref':card['candidate_ref'],'decision':'inspect','reason':'Explicit fixture decision to inspect the complete candidate scope.'} for card in request['candidates']]}
+else:
+    assert request['schema']=='native-audit-results-v1'
+    assert {item['source'] for item in request['contracts']} == {'lore-wiki/references/maintenance.md','lore-wiki/references/curation.md'}
+    assert all(item['body'] for item in request['contracts'])
+    assert all('resources' in subject and 'work' not in subject for subject in request['subjects'])
+    (root/'maintain-command').write_text(json.dumps([subject['context']['subject']['path'] for subject in request['subjects']],separators=(',',':')))
+    value={'results':[{'subject_ref':subject['subject_ref'],'status':'complete','disposition':'reviewed','reason':'Read the exact supplied subject and its scoped evidence.'} for subject in request['subjects']]}
 if '--output-last-message' in sys.argv:
     Path(sys.argv[sys.argv.index('--output-last-message')+1]).write_text(json.dumps(value))
 if '--json-schema' in sys.argv:
@@ -337,27 +339,8 @@ fn screen_fixture_candidates(fixture: &Fixture, path: &str) {
 
 #[test]
 fn knowledge_reserves_pending_order_before_discovery_across_call_limited_runs() {
-    let discover = r#"
-case "$*" in
-  *"discover."*)
-    "$LORE_BIN" wiki audit-plan > "$TEST_EXECUTION_ROOT/plan.json" || exit 40
-    python3 - <<'DISCOVERY'
-import json, os, subprocess
-from pathlib import Path
-root=Path(os.environ['TEST_EXECUTION_ROOT'])
-candidate=json.loads((root/'plan.json').read_text())['candidates'][0]
-request={key:candidate[key] for key in ['path','file_revision']}
-request['queries']=[{'query':candidate['title'],'phrase':True,'spacing':False}]
-path=root/'discovery.json'
-path.write_text(json.dumps(request))
-subprocess.run([os.environ['LORE_BIN'],'wiki','audit-discover','--file',str(path)],check=True)
-subprocess.run(['python3',str(root/'screen-audit-fixture.py'),request['path']],check=True)
-DISCOVERY
-    exit $?
-esac
-"#;
     for engine in ["claude-code", "codex"] {
-        let fixture = Fixture::new(engine, 30, &format!("{discover}\n{RECORD_AUDIT}"));
+        let fixture = Fixture::new(engine, 30, RECORD_AUDIT);
         let config = std::fs::read_to_string(&fixture.config).unwrap().replace(
             "  default_profile: primary\n",
             "  default_profile: primary\n  work: {max_calls: 1}\n",
@@ -435,27 +418,13 @@ esac
 
 #[test]
 fn knowledge_discovers_unlinked_documents_before_assessment_on_both_hosts() {
-    let discover = r#"
-case "$*" in
-  *"discover."*)
-    "$LORE_BIN" wiki audit-plan > "$TEST_EXECUTION_ROOT/plan.json" || exit 40
-    python3 - <<'DISCOVERY'
-import json, os, subprocess
-from pathlib import Path
-root=Path(os.environ['TEST_EXECUTION_ROOT'])
-for candidate in json.loads((root/'plan.json').read_text())['candidates']:
-    request={key:candidate[key] for key in ['path','file_revision']}
-    request['queries']=[{'query':'production order retention','phrase':False,'spacing':False}]
-    path=root/'discovery.json'
-    path.write_text(json.dumps(request))
-    subprocess.run([os.environ['LORE_BIN'],'wiki','audit-discover','--file',str(path)],check=True)
-    subprocess.run(['python3',str(root/'screen-audit-fixture.py'),request['path']],check=True)
-DISCOVERY
-    exit $?
-esac
-"#;
     for engine in ["claude-code", "codex"] {
-        let fixture = Fixture::new(engine, 30, &format!("{discover}\n{RECORD_AUDIT}"));
+        let fixture = Fixture::new(engine, 30, RECORD_AUDIT);
+        std::fs::write(
+            fixture.root().join("audit-query"),
+            "production order retention",
+        )
+        .unwrap();
         std::fs::write(
             &fixture.config,
             std::fs::read_to_string(&fixture.config).unwrap()
@@ -503,7 +472,7 @@ esac
             result,
             String::from_utf8_lossy(&output.stderr)
         );
-        assert_eq!(result["semantic_calls"], 2);
+        assert_eq!(result["semantic_calls"], 3);
         let selected: serde_json::Value = serde_json::from_slice(
             &fixture
                 .command()
@@ -742,29 +711,27 @@ fn knowledge_audit_progresses_before_unrelated_queue_backlog_and_reports_it_unfi
 #[test]
 fn knowledge_defers_discovery_expansion_without_halting_independent_work() {
     let discovery = r#"
-case "$*" in
-  *"discover."*)
-    python3 - <<'DISCOVER'
-import json, os, subprocess
+python3 - "$@" <<'DISCOVER'
+import json, os, sys
 from pathlib import Path
 root=Path(os.environ['TEST_EXECUTION_ROOT'])
-paths=['wiki/documents/a.md']
-if (root/'select-b').exists(): paths.append('wiki/documents/b.md')
-for subject in paths:
-    candidate=json.loads(subprocess.check_output([os.environ['LORE_BIN'],'wiki','audit-plan','--path',subject]))['candidates'][0]
-    request={key:candidate[key] for key in ['path','file_revision']}
-    request['queries']=[{'query':'transactional outbox' if subject.endswith('/a.md') else 'Independent subject b','phrase':True,'spacing':False}]
-    path=root/'discovery.json'
-    path.write_text(json.dumps(request))
-    subprocess.run([os.environ['LORE_BIN'],'wiki','audit-discover','--file',str(path)],check=True)
-    subprocess.run(['python3',str(root/'screen-audit-fixture.py'),request['path']],check=True)
+prompt=Path(os.environ['TEST_INTERACTIVE_INPUT']).read_text() if Path(os.environ['TEST_INTERACTIVE_INPUT']).exists() else ''
+if '\nNative request:\n' not in prompt: raise SystemExit(100)
+request=json.loads(prompt.split('\nNative request:\n',1)[1])
+if request.get('kind')!='audit-discovery': raise SystemExit(100)
+value={'subjects':[{'subject_ref':subject['subject_ref'],
+    'queries':[{'query':'transactional outbox' if subject['path'].endswith('/a.md') else 'Independent subject b','phrase':True,'spacing':False}]}
+    for subject in request['subjects']]}
 if (root/'corrupt-after-discovery').exists():
     (root/'vault/.lorekeeper/queue/unknown.jsonl').write_text('unparseable task\n')
+if '--output-last-message' in sys.argv:
+    Path(sys.argv[sys.argv.index('--output-last-message')+1]).write_text(json.dumps(value))
+if '--json-schema' in sys.argv:
+    value={'type':'result','subtype':'success','is_error':False,'structured_output':value}
+print(json.dumps(value))
 DISCOVER
-    exit $?
-    ;;
-  *) ;;
-esac
+status=$?
+if [ "$status" -ne 100 ]; then exit "$status"; fi
 "#;
     let assessment = RECORD_AUDIT;
     for engine in ["claude-code", "codex"] {
@@ -784,9 +751,6 @@ esac
                     format!("---\ntype: document\ntitle: {title}\n---\nA complete authored observation for {name}.\n"),
                 )
                 .unwrap();
-            }
-            if batch_size == 2 {
-                std::fs::write(fixture.root().join("select-b"), "").unwrap();
             }
             if corrupt_queue {
                 std::fs::write(fixture.root().join("corrupt-after-discovery"), "").unwrap();
@@ -829,7 +793,7 @@ esac
                 continue;
             }
             assert_eq!(result["halted"], false, "{result}");
-            assert_eq!(result["semantic_calls"], batch_size + 1, "{result}");
+            assert_eq!(result["semantic_calls"], batch_size + 2, "{result}");
             assert!(
                 result["audit_deferred"]
                     .as_array()
@@ -1197,13 +1161,14 @@ fn audit_exit_zero_without_assessments_is_incomplete() {
     assert_eq!(result["audit_progress"]["before"]["unreviewed"], 1);
     assert!(result["audit_progress"]["after"].is_null());
     assert!(
-        result["stages"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(
-                |stage| stage["name"] == "related-document discovery" && stage["state"] == "failed"
-            ),
+        result["work_steps"].as_array().unwrap().iter().any(|step| {
+            step["stages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|stage| stage == "discovery")
+                && step["outcome"] == "failed"
+        }),
         "{}\n{}",
         result,
         String::from_utf8_lossy(&output.stderr)
@@ -3098,12 +3063,27 @@ fn native_queue_checks_synthesis_readiness_only_inside_the_fair_preparation_wind
     }
 }
 
-fn build_extraction_behavior(discovery_handler: &str) -> String {
+fn build_extraction_behavior(whole_input_handler: &str) -> String {
     let mut behavior = RECORD_BOUNDED_AUDIT.replace(
         "    if match is None:\n        raise SystemExit('expected an exact bounded native request')",
-        discovery_handler,
+        whole_input_handler,
     );
-    behavior = behavior.replace("native=('--output-schema'", r#"result_role='--output-last-message' in sys.argv or ('--json-schema' in sys.argv and '--safe-mode' not in sys.argv)
+    behavior = behavior.replace("native=('--output-schema'", r#"prompt=Path(os.environ['TEST_INTERACTIVE_INPUT']).read_text() if Path(os.environ['TEST_INTERACTIVE_INPUT']).exists() else ''
+if '\nNative request:\n' in prompt:
+    prepared=json.loads(prompt.split('\nNative request:\n',1)[1])
+    if prepared.get('kind')=='extraction-discovery':
+        if (root/'require-unplanned-discovery').exists():
+            assert not (root/'vault/.lorekeeper/work').exists(), 'discovery must precede bounded planning'
+        assert (root/'vault'/prepared['subjects'][0]['path']).is_file()
+        value={'subjects':[{'subject_ref':subject['subject_ref'],'queries':[{'query':'transactional outbox','phrase':True,'spacing':False}]} for subject in prepared['subjects']]}
+        (root/'discovery-called').write_text('returned')
+        if '--output-last-message' in sys.argv:
+            Path(sys.argv[sys.argv.index('--output-last-message')+1]).write_text(json.dumps(value))
+        if '--json-schema' in sys.argv:
+            value={'type':'result','subtype':'success','is_error':False,'structured_output':value}
+        print(json.dumps(value))
+        raise SystemExit()
+result_role='--output-last-message' in sys.argv or ('--json-schema' in sys.argv and '--safe-mode' not in sys.argv)
 if result_role:
     prepared=json.loads(Path(os.environ['TEST_INTERACTIVE_INPUT']).read_text().split('\nNative request:\n',1)[1])
     if prepared['schema'] in ['native-finalize-results-v4','native-finalize-frontier-v4']:
@@ -3140,28 +3120,10 @@ native=('--output-schema'"#);
 
 #[test]
 fn oversized_extraction_records_discovery_before_planning_on_both_hosts() {
-    let behavior = build_extraction_behavior(
-        r#"    if match is None:
-        match=re.search(r'discover ("[^"\n]+")', '\n'.join(sys.argv[1:]))
-        assert match is not None
-        assert not (root/'vault/.lorekeeper/work').exists(), 'discovery must precede bounded planning'
-        selection=Path(json.loads(match.group(1)))
-        granted=[Path(sys.argv[index+1]).resolve() for index,arg in enumerate(sys.argv[:-1]) if arg=='--add-dir']
-        assert selection.parent.resolve() in granted, 'discovery selection requires explicit directory access'
-        ids=json.loads(selection.read_text())
-        lore=os.environ['LORE_BIN']
-        rows=json.loads(subprocess.check_output([lore,'queue','status','--json']))['data']['tasks']
-        for task_id in ids:
-            row=next(row for row in rows if row['task_id']==task_id)
-            request={'target_revision':row['target_revision'],'queries':[{'query':'transactional outbox','phrase':True,'spacing':False}]}
-            path=root/'extraction-discovery.json'
-            path.write_text(json.dumps(request))
-            subprocess.run([lore,'work','discover','--task-id',task_id,'--file',str(path)],check=True)
-        (root/'discovery-called').write_text('recorded')
-        raise SystemExit(0)"#,
-    );
+    let behavior = build_extraction_behavior("");
     for engine in ["claude-code", "codex"] {
         let fixture = Fixture::new(engine, 30, &behavior);
+        std::fs::write(fixture.root().join("require-unplanned-discovery"), "").unwrap();
         let config = std::fs::read_to_string(&fixture.config).unwrap().replace(
             "  default_profile: primary\n",
             "  default_profile: primary\n  work: {max_input_bytes: 65536, max_result_bytes: 1024, max_calls: 64}\n",

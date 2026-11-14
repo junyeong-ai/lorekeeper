@@ -380,6 +380,12 @@ deferred subcommands expose their names eagerly for name-only discovery.
 
 ## Native inference roles (`execution/observation.rs`, `execution/finalization.rs`)
 
+- Native extraction/audit discovery and audit candidate screening return typed semantic
+  values through read-only structured hosts. Rust supplies subject/packet identities,
+  revalidates current inputs and journals the recipes/decisions. Workers never publish
+  their own receipts. Preserve revision-pinned subject reads: title-only selection is
+  insufficient. Keep recipes registered during a host read, defer changed packet scope,
+  and count only newly recorded recipes/packets as retained progress.
 - Native inspection/reduction and screening are structured inference roles
   (`execution/observation.rs`); bounded single-section finalization uses
   `execution/finalization.rs`. Rust selects applicable shared generation rules through
@@ -522,12 +528,12 @@ deferred subcommands expose their names eagerly for name-only discovery.
   admission; restart/cancellation retain the already reserved next target.
 - `execution.work.max_parallel` defaults to 1 and bounds simultaneous dependency-ready
   evidence observers and distinct-target candidate screening within remaining calls.
-  Compatible roles share a fair contiguous prefix; serial finalizers and interactive
-  work remain boundaries. Never filter past those boundaries or reserve skipped targets.
+  Compatible roles share a fair contiguous prefix; serial finalizers and discovery
+  remain boundaries. Never filter past those boundaries or reserve skipped targets.
   A later exact evidence action ends the queue read prefix without discarding earlier
   eligible requests. Charge that prefix through its current admission before replanning;
   an empty held prefix invokes no host and reserves no turn.
-- Interactive roles, finalizers and publication remain serial. Supervise every child
+- Discovery, finalizers and publication remain serial. Supervise every child
   through exit and cleanup. Carry prepared screening requests only within their local
   pre-host queue checkpoint; any host call or writer wait invalidates their reuse.
   Capture the complete current recipe/review universe per typed view after hosts return,
@@ -545,7 +551,7 @@ deferred subcommands expose their names eagerly for name-only discovery.
   graph universe for its selected window; discard that view before host execution.
 - Enumerate and validate the complete queue and physical target owners before selecting
   a fair preparation window. Section/progressive windows obey remaining-call and
-  parallel bounds, capped at 64; possible interactive batches retain 64 targets even
+  parallel bounds, capped at 64; possible whole-input batches retain 64 targets even
   when one call remains. Continue bounded preparation across task-kind groups while the
   prepared jobs are compatible reads; stop at validated serial boundaries without
   skipping targets; actual prepared TaskWork remains authoritative, including saved
