@@ -243,7 +243,7 @@ fn later_evidence_actions_preserve_ready_prefix_on_both_hosts() {
 
             let (_, primed) = fixture.run("process");
             assert_eq!(primed["semantic_calls"], 2, "{engine}/{context}: {primed}");
-            assert_eq!(primed["halted"], true);
+            assert_eq!(primed["halted"], false);
             let directory = fixture.root().join("vault/.lorekeeper/work").join(id);
             let actions: serde_json::Value = serde_json::from_slice(
                 &std::fs::read(directory.join("inspection-actions.json")).unwrap(),
@@ -252,6 +252,9 @@ fn later_evidence_actions_preserve_ready_prefix_on_both_hosts() {
             let actions = actions["actions"].as_object().unwrap();
             assert_eq!(actions.len(), 1);
             assert!(actions.contains_key(held));
+            let (_, repeated) = fixture.run("process");
+            assert_eq!(repeated["semantic_calls"], 0, "{repeated}");
+            execution_json(&fixture, &["work", "retry", id, first]);
             let before = work_files(&fixture);
             std::fs::write(fixture.root().join("record-prefix"), "").unwrap();
 

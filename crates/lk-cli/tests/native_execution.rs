@@ -2031,19 +2031,20 @@ fn native_observation_cannot_record_another_selected_node() {
     let (output, result) = fixture.run("knowledge");
     assert!(!output.status.success());
     assert!(result["stages"].as_array().unwrap().iter().any(|stage| {
-        stage["name"] == "bounded work receipt"
+        stage["name"] == "bounded invocation held"
             && stage["state"] == "failed"
-            && stage["detail"]
-                .as_str()
-                .is_some_and(|detail| detail.contains("Rust-owned identity fields: node_id"))
+            && stage["detail"].as_str().is_some_and(|detail| {
+                detail.contains("native invocation returned an unusable response")
+            })
     }));
     let calls = bounded_calls(&fixture);
     let step = &result["work_steps"][0];
     assert_eq!(result["work_steps"].as_array().unwrap().len(), 1);
-    assert_eq!(step["outcome"], "rejected");
+    assert_eq!(step["outcome"], "failed");
+    assert_eq!(result["halted"], false);
     assert_ne!(step["node_id"], "not-selected");
     assert_eq!(step["result_json_bytes"], calls[0]["output_bytes"]);
-    assert!(step["revalidation_record_duration_ms"].is_null());
+    assert!(step["revalidation_record_duration_ms"].as_u64().is_some());
     assert!(step["agent_duration_ms"].as_u64().is_some());
     let id = calls[0]["work_id"].as_str().unwrap();
     let status = fixture
@@ -2095,7 +2096,7 @@ fn bounded_telemetry_reports_failed_invocations_without_inventing_results() {
 }
 
 #[test]
-fn bounded_telemetry_rejects_finalizer_exit_zero_without_a_sealed_result() {
+fn bounded_telemetry_reports_missing_finalizer_response_without_inventing_a_result() {
     let behavior = RECORD_BOUNDED_AUDIT.replace(
         "if audit_final:\n",
         "if audit_final:\n    raise SystemExit(0)\n",
@@ -2106,7 +2107,8 @@ fn bounded_telemetry_rejects_finalizer_exit_zero_without_a_sealed_result() {
     let steps = report["work_steps"].as_array().unwrap();
     let step = steps.last().unwrap();
     assert_eq!(step["role"], "finalizer");
-    assert_eq!(step["outcome"], "rejected");
+    assert_eq!(step["outcome"], "failed");
+    assert_eq!(report["halted"], true);
     assert!(step["agent_duration_ms"].as_u64().is_some());
     assert!(step["verification_duration_ms"].as_u64().is_some());
     assert!(step["request_json_bytes"].as_u64().is_some());
@@ -2513,13 +2515,15 @@ fn process_campaign_continues_budget_progress_with_review_attention_but_stops_in
 #[test]
 fn process_campaign_stops_on_fatal_cancelled_or_changed_configuration_after_progress() {
     let section = WHOLE_SECTION.to_owned();
-    for mode in ["failed", "cancelled", "configuration"] {
+    for mode in ["signal", "cancelled", "configuration"] {
         let behavior = RECORD_BOUNDED_AUDIT.replace(
             "    output={'work_id':work_id",
             &format!(
                 r#"    marker=root/'first-observation'
     if marker.exists():
-        if '{mode}'=='failed': raise SystemExit(23)
+        if '{mode}'=='signal':
+            import signal
+            os.kill(os.getpid(),signal.SIGTERM)
         if '{mode}'=='cancelled':
             import signal,time
             os.kill(os.getppid(),signal.SIGINT)
@@ -2552,6 +2556,10 @@ fn process_campaign_stops_on_fatal_cancelled_or_changed_configuration_after_prog
         );
         assert_eq!(runs[0]["retained_progress"]["evidence_nodes"], 1);
         assert_eq!(runs[1]["retained_progress"]["evidence_nodes"], 0);
+        if mode == "signal" {
+            assert_eq!(runs[1]["halted"], true);
+            assert!(runs[1]["work_steps"][0]["host_failure"]["exit_code"].is_null());
+        }
         assert_eq!(
             runs.iter()
                 .map(|run| run["semantic_calls"].as_u64().unwrap())
@@ -4715,7 +4723,7 @@ fn bounded_audit_resumes_call_budgets_and_exit_zero_cannot_forge_a_receipt() {
         let (output, result) = no_receipt.run("knowledge");
         assert!(!output.status.success());
         assert!(result["stages"].as_array().unwrap().iter().any(|stage| {
-            stage["name"] == "bounded work receipt" && stage["state"] == "failed"
+            stage["name"] == "bounded invocation held" && stage["state"] == "failed"
         }));
         let receipts: serde_json::Value = serde_json::from_slice(
             &std::fs::read(
@@ -4730,11 +4738,12 @@ fn bounded_audit_resumes_call_budgets_and_exit_zero_cannot_forge_a_receipt() {
         assert!(bounded_calls(&no_receipt).is_empty());
         let step = &result["work_steps"][0];
         assert_eq!(result["work_steps"].as_array().unwrap().len(), 1);
-        assert_eq!(step["outcome"], "rejected", "{result}");
+        assert_eq!(step["outcome"], "failed", "{result}");
+        assert_eq!(result["halted"], false, "{result}");
         assert!(step["request_json_bytes"].as_u64().is_some());
         assert!(step["agent_duration_ms"].as_u64().is_some());
         assert!(step["result_json_bytes"].is_null());
-        assert!(step["revalidation_record_duration_ms"].is_null());
+        assert!(step["revalidation_record_duration_ms"].as_u64().is_some());
         let manifests = std::fs::read_dir(no_receipt.root().join("vault/.lorekeeper/work"))
             .unwrap()
             .map(|entry| entry.unwrap().path())
@@ -5184,13 +5193,13 @@ fn deadline_preserves_pending_work_and_releases_the_workflow() {
     let (output, result) = fixture.run("process");
     assert!(!output.status.success());
     assert_eq!(result["cancelled"], false);
+    assert_eq!(result["halted"], false);
     assert!(
         result["stages"].as_array().unwrap().iter().any(|stage| {
-            stage["name"] == "bounded work receipt"
+            stage["name"] == "whole-section invocation held"
                 && stage["state"] == "failed"
                 && stage["detail"].as_str().is_some_and(|detail| {
-                    detail.starts_with("session deadline exceeded")
-                        || detail.starts_with("agent preflight failed: session deadline exceeded")
+                    detail.starts_with("native invocation reached its session timeout")
                 })
         }),
         "result: {result}\nstderr: {}",
@@ -7231,10 +7240,7 @@ fn native_evidence_wave_records_siblings_and_preserves_valid_independent_replies
         assert_eq!(recorded, expected, "{mode}: {report}");
         assert_eq!(
             report["halted"],
-            matches!(
-                mode,
-                "failed" | "malformed" | "changed" | "added" | "unreadable"
-            ),
+            matches!(mode, "changed" | "added" | "unreadable"),
             "{mode}: {report}"
         );
         if mode == "unreadable" {

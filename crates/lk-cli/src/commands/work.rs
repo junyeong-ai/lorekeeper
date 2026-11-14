@@ -80,24 +80,31 @@ pub enum WorkCommand {
     },
     /// Clear only a current candidate packet's operational hold after diagnosing its failure
     SelectRetry {
+        /// Exact retained concept-extraction task identifier
         #[arg(long)]
         task_id: String,
+        /// Exact candidate packet retaining the operational attempt
         #[arg(long)]
         batch_id: String,
+        /// Validate current packet guards without publishing or recovering state
         #[arg(long)]
         dry_run: bool,
     },
     /// Clear one retained preparation hold without invoking an agent
     RetryPreparation {
+        /// Preparation role that owns the retained attempt
         #[arg(long, value_enum)]
         stage: preparation::Stage,
+        /// Exact retained queue task for extraction discovery or a whole section
         #[arg(long, required_unless_present = "path", conflicts_with = "path")]
         task_id: Option<String>,
+        /// Exact vault-relative subject for audit discovery or screening
         #[arg(long, required_unless_present = "task_id", conflicts_with = "task_id")]
         path: Option<String>,
         /// Exact retained preparation input hash reported by the failed run
         #[arg(long)]
         input_revision: String,
+        /// Validate the retained attempt and subject without publishing or recovering state
         #[arg(long)]
         dry_run: bool,
     },
@@ -183,11 +190,14 @@ pub enum WorkCommand {
     },
     /// Suspend an exact unfinished inspection without running an agent or granting refinement
     Hold {
+        /// Exact current Work identifier
         work_id: String,
+        /// Exact unfinished inspection or reduction node
         node_id: String,
         /// Operational reason, at most 256 compact JSON bytes
         #[arg(long)]
         reason: String,
+        /// Validate current input guards without publishing or recovering state
         #[arg(long)]
         dry_run: bool,
     },

@@ -133,7 +133,7 @@ fn authored_text_hold_allows_independent_audit_completion_on_both_hosts() {
 }
 
 #[test]
-fn ambiguous_authored_text_stays_fatal_without_a_local_rejection() {
+fn ambiguous_remote_text_is_held_without_becoming_a_semantic_rejection() {
     for engine in ["codex", "claude-code"] {
         let fixture = parallel_observation_fixture(engine, 2, 2, 1, "good");
         let path = fixture.root().join("agent executable");
@@ -154,13 +154,27 @@ else:
         std::fs::write(path, script.replace(original, replaced)).unwrap();
         let (output, report) = fixture.run("knowledge");
         assert!(!output.status.success());
-        assert_eq!(report["halted"], true, "{report}");
+        assert_eq!(report["halted"], false, "{report}");
         assert_eq!(parallel_receipts(&fixture), 1);
+        let files = inspection_admission::work_files(&fixture);
         assert!(
-            !inspection_admission::work_files(&fixture)
+            !files
                 .keys()
                 .any(|path| path.file_name().unwrap() == "observation-rejections.json")
         );
+        assert!(files.iter().any(|(path, raw)| {
+            if path.file_name().unwrap() != "inspection-timeouts.json" {
+                return false;
+            }
+            let attempts: serde_json::Value = serde_json::from_slice(raw).unwrap();
+            attempts["entries"]
+                .as_object()
+                .unwrap()
+                .values()
+                .any(|entry| {
+                    entry["kind"] == "failed" && entry["failure"]["kind"] == "invalid-response"
+                })
+        }));
         assert_parallel_no_publication(&fixture);
     }
 }

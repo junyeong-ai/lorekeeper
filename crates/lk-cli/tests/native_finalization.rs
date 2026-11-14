@@ -1250,6 +1250,8 @@ fn rejected_structured_finalizers_never_fall_back_or_mark_completion() {
                 let (_, again) = fixture.run();
                 assert_eq!(again["semantic_calls"], 0, "{again}");
                 assert_eq!(fixture.calls().len(), 2);
+            } else if mode != "cancel" {
+                assert_eq!(report["halted"], true, "{report}");
             }
             assert_eq!(fixture.calls().len(), 2);
             let step = report["work_steps"]
@@ -1262,7 +1264,7 @@ fn rejected_structured_finalizers_never_fall_back_or_mark_completion() {
                 step["outcome"],
                 if mode == "cancel" {
                     "cancelled"
-                } else if mode == "exit" {
+                } else if matches!(mode, "exit" | "malformed" | "oversized") {
                     "failed"
                 } else {
                     "rejected"
@@ -1445,7 +1447,11 @@ fn inspection_actions_and_evidence_reject_forged_stale_empty_and_corrupt_states(
             fixture.mode(mode);
             let (_, report) = fixture.run();
             let authored = mode == "empty-inspection-evidence";
-            assert_eq!(report["halted"], !authored, "{engine}/{mode}: {report}");
+            assert_eq!(
+                report["halted"],
+                mode == "inspection-action-drift",
+                "{engine}/{mode}: {report}"
+            );
             assert!(!fixture.work_path(&plan, "inspection-actions.json").exists());
             let rejection = fixture.work_path(&plan, "observation-rejections.json");
             if authored {
@@ -1466,6 +1472,14 @@ fn inspection_actions_and_evidence_reject_forged_stale_empty_and_corrupt_states(
                 assert_eq!(std::fs::read(&rejection).unwrap(), raw);
             } else {
                 assert!(!rejection.exists());
+                if mode == "inspection-action-wrong-id" {
+                    let attempt = fixture.work_path(&plan, "inspection-timeouts.json");
+                    let raw = std::fs::read(&attempt).unwrap();
+                    let (_, held) = fixture.run();
+                    assert_eq!(held["semantic_calls"], 0, "{held}");
+                    assert_eq!(held["halted"], false, "{held}");
+                    assert_eq!(std::fs::read(attempt).unwrap(), raw);
+                }
             }
             if mode != "inspection-action-drift" {
                 let status = fixture.json(&["work", "status", plan["work_id"].as_str().unwrap()]);

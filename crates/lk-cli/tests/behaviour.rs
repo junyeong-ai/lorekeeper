@@ -192,6 +192,14 @@ const EXEMPT: &[(&[&str], &str)] = &[
         "requires exact runtime packet and receipt revisions; selection tests validate assigned coverage and reassessment, and native_execution verifies guarded publication",
     ),
     (
+        &["work", "select-retry"],
+        "requires an exact current failed candidate packet; native_execution verifies dry-run, explicit clearing, retained decisions and call accounting",
+    ),
+    (
+        &["work", "retry-preparation"],
+        "requires a retained preparation input revision; native_execution::preparation verifies guarded clearing, no host invocation and stale subject refusal",
+    ),
+    (
         &["work", "source-plan"],
         "requires an oversized retained source and current discovery; native_execution verifies complete source observations, standalone publication refusal and atomic consumption",
     ),
@@ -213,7 +221,11 @@ const EXEMPT: &[(&[&str], &str)] = &[
     ),
     (
         &["work", "retry"],
-        "requires a runtime Work/node with exhausted exact-request timeout records; native_execution verifies both-host dry-run, explicit reset and call accounting, while work state tests preserve semantic holds and reject stale or corrupt records",
+        "requires a runtime Work/node with an operational hold or exhausted exact-request timeout records; native_execution verifies both-host dry-run, explicit reset and call accounting, while work state tests preserve semantic holds and reject stale or corrupt records",
+    ),
+    (
+        &["work", "hold"],
+        "requires an exact unfinished runtime Work/node; native_execution verifies dry-run, unchanged paid bytes, held resumption and explicit retry",
     ),
     (
         &["work", "result"],
