@@ -1,6 +1,6 @@
 # Lorekeeper
 
-[![Rust](https://img.shields.io/badge/rust-1.99.1%2B-orange?style=flat-square&logo=rust)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/rust-1.100.0%2B-orange?style=flat-square&logo=rust)](https://www.rust-lang.org)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
 [![DeepWiki](https://img.shields.io/badge/DeepWiki-junyeong--ai%2Florekeeper-blue?style=flat-square)](https://deepwiki.com/junyeong-ai/lorekeeper)
 
@@ -196,7 +196,7 @@ and [semantic maintenance](skills/lore-wiki/references/maintenance.md) for state
 
 Use `lore --help` and `lore COMMAND --help` for commands, the [configuration example](config.example.yaml) for all options,
 and [AGENTS.md](AGENTS.md) for code ownership and contribution rules.
-The project uses Rust 2024 edition and build toolchain/MSRV **1.99.1**.
+The project uses Rust 2024 edition and build toolchain/MSRV **1.100.0**.
 
 ```bash
 cargo build --release --locked

@@ -1,6 +1,6 @@
 # Lorekeeper
 
-[![Rust](https://img.shields.io/badge/rust-1.99.1%2B-orange?style=flat-square&logo=rust)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/rust-1.100.0%2B-orange?style=flat-square&logo=rust)](https://www.rust-lang.org)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
 [![DeepWiki](https://img.shields.io/badge/DeepWiki-junyeong--ai%2Florekeeper-blue?style=flat-square)](https://deepwiki.com/junyeong-ai/lorekeeper)
 
@@ -196,7 +196,7 @@ Unix의 `lore self snapshot -- 백업명령 인수...`는 백업 동안 협력 �
 
 명령은 `lore --help`와 `lore COMMAND --help`, 전체 옵션은 [설정 예제](config.example.yaml),
 코드 구조와 기여 규칙은 [AGENTS.md](AGENTS.md)를 참고하세요.
-Rust 2024 edition, 빌드 도구체인·MSRV **1.99.1**을 사용합니다.
+Rust 2024 edition, 빌드 도구체인·MSRV **1.100.0**을 사용합니다.
 
 ```bash
 cargo build --release --locked

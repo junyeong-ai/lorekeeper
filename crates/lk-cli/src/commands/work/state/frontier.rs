@@ -190,14 +190,10 @@ impl Work {
         }
         let kind: lk_queue::TaskKind =
             serde_json::from_value(self.context["purpose"]["task_kind"].clone()).map_err(fail)?;
-        if !matches!(
+        Ok(matches!(
             kind,
             lk_queue::TaskKind::ExtractConcepts | lk_queue::TaskKind::SynthesizeConcept
-        ) || self.context["purpose"]["extraction_scope"]["policy"] == "source-proposals-v1"
-        {
-            return Ok(false);
-        }
-        Ok(true)
+        ) && self.context["purpose"]["extraction_scope"]["policy"] != "source-proposals-v1")
     }
 
     pub(in crate::commands::work) fn capture_frontier(
