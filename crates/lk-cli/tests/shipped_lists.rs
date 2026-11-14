@@ -16,6 +16,32 @@ fn read(path: &Path) -> String {
     std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
 }
 
+#[test]
+fn agent_instructions_fit_the_on_demand_context_limit() {
+    let root = repo_root();
+    let mut instructions = vec![root.join("AGENTS.md")];
+    for entry in std::fs::read_dir(root.join("crates")).unwrap() {
+        let path = entry.unwrap().path().join("AGENTS.md");
+        if path.is_file() {
+            instructions.push(path);
+        }
+    }
+    for entry in std::fs::read_dir(root.join(".claude/rules")).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_some_and(|extension| extension == "md") {
+            instructions.push(path);
+        }
+    }
+    for path in instructions {
+        // https://code.claude.com/docs/en/memory: on-demand files in 200K contexts.
+        assert!(
+            read(&path).chars().count() <= 40_000,
+            "{} exceeds the 40,000-character instruction limit; split its contract by scope",
+            path.display()
+        );
+    }
+}
+
 /// `scripts/check.sh` says a green run there is the same answer CI gives, and nothing compared
 /// the two — so five of ten jobs went unrun while the claim stood, and a release shipped after a
 /// green local run whose shellcheck, actionlint, MSRV and audit had never been asked.
