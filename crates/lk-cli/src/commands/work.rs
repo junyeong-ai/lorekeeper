@@ -1802,6 +1802,18 @@ pub(super) struct TaskPreparation {
     pub admissions: Vec<native::FinalizationAdmission>,
 }
 
+impl TaskPreparation {
+    fn from_result(result: miette::Result<Self>) -> miette::Result<Self> {
+        match result {
+            Err(error) if state::is_input_capacity(&error) => Ok(TaskWork::Admission {
+                reason: error.to_string(),
+            }
+            .into()),
+            result => result,
+        }
+    }
+}
+
 impl From<TaskWork> for TaskPreparation {
     fn from(work: TaskWork) -> Self {
         Self {
@@ -1953,7 +1965,7 @@ pub(super) fn prepare_task_controlled(
     read: &lk_vault::ReadControl,
 ) -> miette::Result<TaskPreparation> {
     let task = super::queue::current_task_controlled(session.root(), task_id, read)?;
-    prepare_task_in_session(
+    TaskPreparation::from_result(prepare_task_in_session(
         session,
         config,
         config_revision,
@@ -1962,7 +1974,7 @@ pub(super) fn prepare_task_controlled(
         None,
         None,
         read,
-    )
+    ))
 }
 
 pub(super) fn prepare_tasks_with_audit(
@@ -2041,7 +2053,7 @@ pub(super) fn prepare_tasks_with_audit(
             } else {
                 None
             };
-            prepare_task_in_session(
+            TaskPreparation::from_result(prepare_task_in_session(
                 session,
                 config,
                 config_revision,
@@ -2052,7 +2064,7 @@ pub(super) fn prepare_tasks_with_audit(
                     .as_deref()
                     .map(|contract| (contract, &mut reused)),
                 read,
-            )
+            ))
         })
         .collect::<miette::Result<Vec<_>>>()?;
     read.check().into_diagnostic()?;
@@ -2477,7 +2489,13 @@ pub(super) fn audit_processing_hold_controlled(
         return Ok(None);
     }
     let prepared = resources::audit_candidate_controlled(root, config, candidate, read)?;
-    let work = expected(root, &prepared, config, config_revision)?;
+    let work = match expected(root, &prepared, config, config_revision) {
+        Ok(work) => work,
+        Err(error) if state::is_input_capacity(&error) => {
+            return Ok(Some(AuditProcessingHold::Capacity(error.to_string())));
+        }
+        Err(error) => return Err(error),
+    };
     let planned = work.is_planned(root)?;
     if planned && is_finished_prepared(root, config, config_revision, &work, &prepared)? {
         return Ok(None);
@@ -2494,7 +2512,7 @@ pub(super) fn audit_processing_hold_controlled(
         super::execution::observation::contract_revision,
     ) {
         Ok(admission) => admission,
-        Err(error) if error.downcast_ref::<state::InputCapacity>().is_some() => {
+        Err(error) if state::is_input_capacity(&error) => {
             return Ok(Some(AuditProcessingHold::Capacity(error.to_string())));
         }
         Err(error) => return Err(error),

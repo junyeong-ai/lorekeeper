@@ -20,6 +20,9 @@ paths:
   Work. `execution.work` limits serialized request/result bytes and agent calls per
   native batch. Scheduled invocations share that call allowance across batches. Exhaustion retains unfinished work and
   fails explicitly, without clipping evidence.
+  Fresh planning capacity reports a minimum byte requirement; completed request capacity
+  reports measured bytes. Keep both local to their admitted target. Stored corruption,
+  invalid evidence and I/O remain strict; shared preparation preserves independent work.
 - Resume current explicit Work plans even when the remaining batch fits whole input;
   validate their exact manifest before using recorded observations.
 - `work source` reuses fresh Work capture to page its unique retained task input.

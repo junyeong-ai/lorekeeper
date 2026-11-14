@@ -106,6 +106,8 @@ config loading and the shared filesystem primitives intentionally perform I/O.
 - Plans bind exact resources, semantic purpose revision and serialized request/result
   bounds. Ranges are half-open Unicode scalar offsets, with Markdown block boundaries
   preferred and oversized blocks explicitly continued. Coverage is not a truth verdict.
+- Fresh planning distinguishes typed minimum-input capacity from invalid evidence or
+  saved structure. Measure the smallest complete assignment; never classify error text.
 - Keep subject, context, retained input, cited pages, immutable events and reviews
   distinguishable. Parts are execution units, never canonical knowledge nodes.
 - Reuse requires identical assigned evidence and purpose; changed revisions invalidate

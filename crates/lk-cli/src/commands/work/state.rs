@@ -613,6 +613,40 @@ impl std::fmt::Display for InputCapacity {
 impl std::error::Error for InputCapacity {}
 impl miette::Diagnostic for InputCapacity {}
 
+#[derive(Debug)]
+pub(crate) struct PlanningCapacity {
+    pub minimum_bytes: usize,
+    pub max_bytes: usize,
+}
+
+impl std::fmt::Display for PlanningCapacity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "work planning requires at least {} input bytes, above its {} byte allowance; complete input retained",
+            self.minimum_bytes, self.max_bytes
+        )
+    }
+}
+
+impl std::error::Error for PlanningCapacity {}
+impl miette::Diagnostic for PlanningCapacity {}
+
+pub(crate) fn is_input_capacity(error: &miette::Report) -> bool {
+    error.downcast_ref::<InputCapacity>().is_some()
+        || error.downcast_ref::<PlanningCapacity>().is_some()
+}
+
+fn planning_capacity(overhead: usize, input: usize, max_bytes: usize) -> miette::Report {
+    match overhead.checked_add(input) {
+        Some(minimum_bytes) => miette::Report::new(PlanningCapacity {
+            minimum_bytes,
+            max_bytes,
+        }),
+        None => fail("work planning byte count overflow"),
+    }
+}
+
 enum NodeInputError {
     Bound(InputCapacity),
     Other(miette::Report),
@@ -841,7 +875,7 @@ impl Work {
             .max_input_bytes
             .checked_sub(overhead)
             .filter(|limit| *limit > 0)
-            .ok_or_else(|| fail("work context and envelope exceed the input bound"))?;
+            .ok_or_else(|| planning_capacity(overhead, 1, limits.max_input_bytes))?;
         let plan = match max_part_characters {
             Some(characters) => SemanticPlan::build_inspection(
                 subject_revision,
@@ -857,7 +891,12 @@ impl Work {
                 limits.max_result_bytes,
             ),
         }
-        .map_err(fail)?;
+        .map_err(|error| match error {
+            lk_core::semantic::SemanticError::InputCapacity { required_bytes, .. } => {
+                planning_capacity(overhead, required_bytes, limits.max_input_bytes)
+            }
+            error => fail(error),
+        })?;
         Ok(Self {
             plan,
             context,

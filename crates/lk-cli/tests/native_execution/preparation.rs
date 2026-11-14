@@ -1,5 +1,107 @@
 use super::*;
 
+#[test]
+fn oversized_work_context_defers_only_its_target_without_truncating_inputs() {
+    for engine in ["codex", "claude-code"] {
+        for extraction in [true, false] {
+            let input_bytes = 65536;
+            let (fixture, original) =
+                progressive_extraction_fixture(engine, WHOLE_SECTION, 0, input_bytes, 16384);
+            let queue = fixture.root().join("vault/.lorekeeper/queue");
+            let client = lk_queue::QueueLlmClient::new(queue.clone());
+            let phrase = "The declared source scope remains complete. ";
+            let focus = phrase.repeat(input_bytes / phrase.len() + 1);
+            let bad = if extraction {
+                let mut input = original.input.clone();
+                input.insert(
+                    "target".into(),
+                    serde_json::to_value(&original.target).unwrap(),
+                );
+                let mut request: lk_queue::ExtractConceptsRequest =
+                    serde_json::from_value(serde_json::Value::Object(input)).unwrap();
+                request.focus = Some(focus);
+                client.build_task("large", lk_queue::TaskKind::ExtractConcepts, request)
+            } else {
+                client.build_task(
+                    "large",
+                    lk_queue::TaskKind::Summarize,
+                    lk_queue::SummarizeRequest {
+                        text: original.input["text"].as_str().unwrap().into(),
+                        max_sentences: 5,
+                        focus: Some(focus),
+                        locale: lk_core::i18n::Locale::En,
+                        source_type: Some(lk_core::config::SourceType::Manual),
+                        target: lk_queue::TaskTarget {
+                            vault_path: original.target.vault_path.clone(),
+                            kind: lk_queue::TargetKind::DocumentSummary,
+                            anchor: "## Summary".into(),
+                        },
+                    },
+                )
+            };
+            let good = client.build_task(
+                "ready",
+                lk_queue::TaskKind::Summarize,
+                lk_queue::SummarizeRequest {
+                    text: "A retained observation supports an independent summary.".into(),
+                    max_sentences: 5,
+                    focus: None,
+                    locale: lk_core::i18n::Locale::En,
+                    source_type: Some(lk_core::config::SourceType::Manual),
+                    target: lk_queue::TaskTarget {
+                        vault_path: "wiki/documents/z-ready.md".into(),
+                        kind: lk_queue::TargetKind::DocumentSummary,
+                        anchor: "## Summary".into(),
+                    },
+                },
+            );
+            let path = fixture.root().join("vault/wiki/documents/source.md");
+            let mut body = std::fs::read_to_string(&path)
+                .unwrap()
+                .replace(&original.cache_hash, &bad.cache_hash);
+            if !extraction {
+                body = body.replace("  concepts:", "  summary:");
+            }
+            std::fs::write(&path, &body).unwrap();
+            std::fs::write(fixture.root().join("vault/wiki/documents/z-ready.md"), format!("---\ntype: document\ntitle: Ready\nllm_inputs:\n  summary: {}\n---\n## Summary\n\n## Content\nA retained observation supports an independent summary.\n",good.cache_hash)).unwrap();
+            std::fs::write(
+                queue.join("fixture.jsonl"),
+                format!(
+                    "{}\n{}\n",
+                    serde_json::to_string(&bad).unwrap(),
+                    serde_json::to_string(&good).unwrap()
+                ),
+            )
+            .unwrap();
+            let config = std::fs::read(&fixture.config).unwrap();
+            let (_, report) = fixture.run("process");
+            assert_eq!(report["halted"], false, "{engine}/{extraction}: {report}");
+            assert_eq!(report["semantic_calls"], 1, "{report}");
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), body);
+            assert_eq!(std::fs::read(&fixture.config).unwrap(), config);
+            let status = execution_json(&fixture, &["queue", "status", "--json"]);
+            let tasks = status["data"]["tasks"].as_array().unwrap();
+            assert_eq!(
+                tasks
+                    .iter()
+                    .find(|task| task["task_id"] == bad.task_id)
+                    .unwrap()["status"],
+                "current"
+            );
+            assert_eq!(
+                tasks
+                    .iter()
+                    .find(|task| task["task_id"] == good.task_id)
+                    .unwrap()["status"],
+                "done"
+            );
+            let (_, repeated) = fixture.run("process");
+            assert_eq!(repeated["semantic_calls"], 0, "{repeated}");
+            assert_eq!(repeated["halted"], false, "{repeated}");
+        }
+    }
+}
+
 const DISCOVERY_ACTION: &str = r#"
 python3 - "$@" <<'ACTION'
 import json,os,sys

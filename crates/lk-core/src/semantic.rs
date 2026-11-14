@@ -273,13 +273,22 @@ impl SemanticInputs<'_> {
 }
 
 #[derive(Debug, thiserror::Error)]
-#[error("semantic evidence plan: {0}")]
-pub struct SemanticError(String);
+pub enum SemanticError {
+    #[error("semantic evidence plan: {0}")]
+    Invalid(String),
+    #[error(
+        "semantic evidence plan: resource metadata and assigned text require {required_bytes} bytes, above input bound {max_bytes}"
+    )]
+    InputCapacity {
+        required_bytes: usize,
+        max_bytes: usize,
+    },
+}
 
 type Result<T> = std::result::Result<T, SemanticError>;
 
 fn error(message: &str) -> SemanticError {
-    SemanticError(message.into())
+    SemanticError::Invalid(message.into())
 }
 
 fn digest(value: &impl Serialize) -> Result<String> {
@@ -631,9 +640,14 @@ impl SemanticPlan {
                         }
                     }
                     if low == start {
-                        return Err(error(
-                            "input bound cannot hold resource metadata and one character",
-                        ));
+                        return Err(SemanticError::InputCapacity {
+                            required_bytes: context.input_bytes(&[SemanticRange {
+                                resource,
+                                start,
+                                end: start + 1,
+                            }])?,
+                            max_bytes: max_input_bytes,
+                        });
                     }
                     active.push(SemanticRange {
                         resource,
@@ -646,7 +660,10 @@ impl SemanticPlan {
                     }
                 }
                 if end == 0 {
-                    return Err(error("input bound cannot hold empty resource metadata"));
+                    return Err(SemanticError::InputCapacity {
+                        required_bytes: context.input_bytes(&[range])?,
+                        max_bytes: max_input_bytes,
+                    });
                 }
             }
         }
@@ -888,6 +905,52 @@ fn part_identity(resources: &[SemanticResourceGuard], ranges: &[SemanticRange]) 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn indivisible_metadata_capacity_is_typed_and_measured_for_both_policies() {
+        for text in ["", "한", "🙂"] {
+            for inspection in [false, true] {
+                let resources = [resource("경로/quoted-\"evidence.md", text)];
+                let build = |bytes| {
+                    if inspection {
+                        SemanticPlan::build_inspection(
+                            "subject",
+                            &resources,
+                            bytes,
+                            1024,
+                            INSPECTION_CHARACTERS,
+                        )
+                    } else {
+                        SemanticPlan::build("subject", &resources, bytes, 1024)
+                    }
+                };
+                let SemanticError::InputCapacity {
+                    required_bytes,
+                    max_bytes,
+                } = build(1).unwrap_err()
+                else {
+                    panic!("expected an indivisible capacity outcome");
+                };
+                assert_eq!(max_bytes, 1);
+                assert!(required_bytes > max_bytes);
+                assert!(matches!(
+                    build(required_bytes - 1),
+                    Err(SemanticError::InputCapacity { .. })
+                ));
+                let plan = build(required_bytes).unwrap();
+                let input = plan.part_input(&plan.parts[0].id, &resources).unwrap();
+                assert_eq!(serde_json::to_vec(&input).unwrap().len(), required_bytes);
+            }
+        }
+        assert!(matches!(
+            SemanticPlan::build("subject", &[], 1, 1024),
+            Err(SemanticError::Invalid(_))
+        ));
+        assert!(matches!(
+            SemanticPlan::build("subject", &[resource("source", "x")], 0, 1024),
+            Err(SemanticError::Invalid(_))
+        ));
+    }
+
     #[test]
     fn inspection_policy_bounds_reading_independently_of_utf8_bytes() {
         for (label, text) in [

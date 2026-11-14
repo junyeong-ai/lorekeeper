@@ -2022,11 +2022,7 @@ mod native {
             for ((id, _), result) in demands.into_iter().zip(captured.turns) {
                 let (progress, requests) = match result {
                     Ok(captured) => captured,
-                    Err(error)
-                        if error
-                            .downcast_ref::<crate::commands::work::state::InputCapacity>()
-                            .is_some() =>
-                    {
+                    Err(error) if crate::commands::work::state::is_input_capacity(&error) => {
                         return None;
                     }
                     Err(error) if semantic_context_changed(&error) => return None,
@@ -3056,10 +3052,7 @@ mod native {
                 Err(error) => {
                     metrics.preparation_duration_ms = Some(started_at.elapsed().as_millis() as u64);
                     self.record_work_step(metrics);
-                    if error
-                        .downcast_ref::<crate::commands::work::state::InputCapacity>()
-                        .is_some()
-                    {
+                    if crate::commands::work::state::is_input_capacity(&error) {
                         let reason = error.to_string();
                         self.deferred("bounded work capacity", &reason);
                         return WorkStep::Deferred(reason);
@@ -3462,11 +3455,7 @@ mod native {
                 for ((id, _), result) in demands.into_iter().zip(captured.turns) {
                     let (progress, requests) = match result {
                         Ok(captured) => captured,
-                        Err(error)
-                            if error
-                                .downcast_ref::<crate::commands::work::state::InputCapacity>()
-                                .is_some() =>
-                        {
+                        Err(error) if crate::commands::work::state::is_input_capacity(&error) => {
                             self.deferred("bounded work capacity", error);
                             self.queue_replan = true;
                             self.queue_admitted.clear();
@@ -4121,12 +4110,21 @@ mod native {
                             continue;
                         }
                     }
-                    if crate::commands::work::needs_discovery(
+                    let needs_discovery = match crate::commands::work::needs_discovery(
                         session.root(),
                         &self.config,
                         &self.config_revision,
                         task,
-                    )? {
+                    ) {
+                        Ok(needs) => needs,
+                        Err(error) if crate::commands::work::state::is_input_capacity(&error) => {
+                            keys.remove(target);
+                            deferred.insert(target.clone(), vec![error.to_string()]);
+                            continue;
+                        }
+                        Err(error) => return Err(error),
+                    };
+                    if needs_discovery {
                         if let Some(reason) = self.extraction_discovery_hold(task)? {
                             keys.remove(target);
                             deferred.insert(target.clone(), vec![reason]);
@@ -5309,7 +5307,8 @@ mod native {
                     Err(error)
                         if error
                             .downcast_ref::<crate::commands::work::generation::ResultCapacity>()
-                            .is_some() =>
+                            .is_some()
+                            || crate::commands::work::state::is_input_capacity(&error) =>
                     {
                         self.deferred(
                             "audit result capacity",
