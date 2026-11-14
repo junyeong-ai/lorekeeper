@@ -14,9 +14,14 @@ fn install_response(fixture: &Fixture, engine: &str, output: &str, exit: i32) {
     std::fs::write(fixture.root().join("agent executable"), script).unwrap();
 }
 
-fn assert_no_semantic_record(fixture: &Fixture, output: &std::process::Output, job: &Value) {
+fn assert_no_semantic_record(
+    fixture: &Fixture,
+    output: &std::process::Output,
+    job: &Value,
+    halted: bool,
+) {
     assert!(!output.status.success());
-    assert_eq!(job["halted"], true, "{job}");
+    assert_eq!(job["halted"], halted, "{job}");
     assert_eq!(job["cancelled"], false, "{job}");
     assert_eq!(job["budget_exhausted"], false, "{job}");
     assert!(
@@ -31,11 +36,24 @@ fn assert_no_semantic_record(fixture: &Fixture, output: &std::process::Output, j
         .root()
         .join("vault/.lorekeeper/work")
         .join(step["work_id"].as_str().unwrap());
-    let files = std::fs::read_dir(directory)
+    let mut files = std::fs::read_dir(&directory)
         .unwrap()
         .map(|entry| entry.unwrap().file_name())
         .collect::<Vec<_>>();
-    assert_eq!(files, vec![std::ffi::OsString::from("plan.json")]);
+    files.sort();
+    let mut expected = vec![std::ffi::OsString::from("plan.json")];
+    if !halted {
+        expected.insert(0, std::ffi::OsString::from("inspection-timeouts.json"));
+        let attempt: Value = serde_json::from_slice(
+            &std::fs::read(directory.join("inspection-timeouts.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            attempt["entries"][step["node_id"].as_str().unwrap()]["kind"],
+            "failed"
+        );
+    }
+    assert_eq!(files, expected);
 }
 
 #[test]
@@ -58,7 +76,7 @@ fn failed_structured_hosts_retain_safe_diagnostics_without_adopting_the_reply() 
             let raw = serde_json::to_string(&response).unwrap();
             install_response(&fixture, engine, &raw, 1);
             let (output, job) = fixture.run("knowledge");
-            assert_no_semantic_record(&fixture, &output, &job);
+            assert_no_semantic_record(&fixture, &output, &job, false);
             assert_eq!(job["semantic_calls"], 1);
             let step = &job["work_steps"][0];
             assert_eq!(step["outcome"], "failed");
@@ -95,7 +113,7 @@ fn invalid_success_exit_responses_are_summarized_without_semantic_results() {
         };
         install_response(&fixture, engine, raw, 0);
         let (output, job) = fixture.run("knowledge");
-        assert_no_semantic_record(&fixture, &output, &job);
+        assert_no_semantic_record(&fixture, &output, &job, false);
         assert_eq!(job["semantic_calls"], 1);
         let failure = &job["work_steps"][0]["host_failure"];
         assert_eq!(failure["phase"], "response");
@@ -128,7 +146,7 @@ fn failed_version_preflight_is_distinct_from_a_semantic_attempt() {
         );
         std::fs::write(path, raw).unwrap();
         let (output, job) = fixture.run("knowledge");
-        assert_no_semantic_record(&fixture, &output, &job);
+        assert_no_semantic_record(&fixture, &output, &job, true);
         assert_eq!(job["semantic_calls"], 0);
         let step = &job["work_steps"][0];
         assert!(step["agent_duration_ms"].is_null());

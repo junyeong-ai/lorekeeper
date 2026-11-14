@@ -2072,10 +2072,11 @@ fn bounded_telemetry_reports_failed_invocations_without_inventing_results() {
     assert_eq!(step["agent_duration_ms"], report["semantic_duration_ms"]);
     assert!(step["request_json_bytes"].as_u64().is_some());
     assert!(step["result_json_bytes"].is_null());
-    assert!(step["revalidation_record_duration_ms"].is_null());
+    assert!(step["revalidation_record_duration_ms"].as_u64().is_some());
     assert!(!step.to_string().contains("Evidence clause"));
     assert!(!step.to_string().contains("test@example.com"));
 
+    let fixture = bounded_audit_fixture("codex", 1, RECORD_BOUNDED_AUDIT);
     std::fs::write(
         fixture.root().join("agent executable"),
         "#!/bin/sh\nexit 23\n",

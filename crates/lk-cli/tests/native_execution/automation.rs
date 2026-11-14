@@ -243,8 +243,9 @@ fn scheduled_jobs_share_allowance_across_restarts_and_operations() {
 }
 
 #[test]
-fn scheduled_host_failure_requires_explicit_resume_without_refunding_calls() {
-    let fixture = bounded_audit_fixture("codex", 64, "exit 7");
+fn scheduled_tool_enabled_failure_requires_explicit_resume_without_refunding_calls() {
+    let fixture = Fixture::new("codex", 30, "exit 7");
+    write_audit_concept(&fixture, "stable");
     configure(&fixture, Some(4), 60);
     let first = run(&fixture, "knowledge", false);
     assert_eq!(calls(&first), 1, "{first}");
@@ -264,6 +265,26 @@ fn scheduled_host_failure_requires_explicit_resume_without_refunding_calls() {
     assert_eq!(calls(&resumed), 1, "{resumed}");
     assert_eq!(usage(&fixture)["reserved_calls"], 2);
     assert!(usage(&fixture)["paused"]["knowledge"].is_string());
+}
+
+#[test]
+fn scheduled_tool_free_failure_holds_its_input_without_pausing_or_refunding_calls() {
+    for engine in ["codex", "claude-code"] {
+        let fixture = bounded_audit_fixture(engine, 64, "exit 7");
+        configure(&fixture, Some(4), 60);
+        let first = run(&fixture, "knowledge", false);
+        assert_eq!(calls(&first), 1, "{first}");
+        assert_eq!(first["stop_reason"], "deferred");
+        assert_eq!(usage(&fixture)["reserved_calls"], 1);
+        assert!(usage(&fixture)["paused"].as_object().unwrap().is_empty());
+        let before = usage(&fixture);
+        for resume in [false, true] {
+            let held = run(&fixture, "knowledge", resume);
+            assert_eq!(calls(&held), 0, "{held}");
+            assert_eq!(held["stop_reason"], "deferred");
+            assert_eq!(usage(&fixture), before);
+        }
+    }
 }
 
 #[test]
