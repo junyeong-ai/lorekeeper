@@ -156,9 +156,14 @@ deferred subcommands expose their names eagerly for name-only discovery.
   Confirmed tool-free Inspect/Reduce session timeouts retain one automatic retry per
   exact request/contract, then hold only that node. Persist counts separately from
   observations and semantic actions through the mutation journal; they are not retained
-  semantic progress. Process cleanup failure, unknown errors and tool-enabled failures
-  remain fatal. `work retry` resets only an exhausted current timeout allowance, with
-  fresh Work/input guards; dry runs publish/recover nothing and invoke no host.
+  semantic progress. Confirmed numeric nonzero exits and unusable remote responses from
+  tool-free Inspect/Reduce hold the exact input across instruction-contract changes.
+  Preserve valid wave peers; a wave with only invocation failures ends the current run
+  without pausing the scheduled operation or counting semantic progress. Signal exits,
+  process cleanup failure, unknown errors and tool-enabled failures remain fatal.
+  `work retry` clears only a current operational hold or exhausted timeout allowance;
+  `work hold` suspends an exact ready node without invoking a host or granting refinement.
+  Both use fresh Work/input guards; dry runs publish/recover nothing and invoke no host.
 - Native writer waiting is cancellable, retries only typed contention and validates the
   same-read config pin before recovery. A pre-host cursor wait discards prepared
   requests and replans before invocation; post-host recording reloads fresh inputs.

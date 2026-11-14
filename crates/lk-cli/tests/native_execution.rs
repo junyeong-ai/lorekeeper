@@ -5692,23 +5692,52 @@ fn parallel_native_observers_respect_remaining_call_budget() {
 
 #[test]
 fn parallel_native_observer_failure_retains_an_independent_good_receipt() {
-    for mode in ["malformed", "failed"] {
-        let fixture = parallel_observation_fixture("codex", 2, 2, 1, mode);
-        let (output, report) = fixture.run("knowledge");
-        assert!(!output.status.success(), "{report}");
-        assert_eq!(report["semantic_calls"], 2);
-        assert_eq!(parallel_starts(&fixture).len(), 2);
-        assert_eq!(parallel_receipts(&fixture), 1, "{mode}: {report}");
+    for engine in ["codex", "claude-code"] {
+        for mode in ["malformed", "failed"] {
+            let fixture = parallel_observation_fixture(engine, 2, 2, 1, mode);
+            let (output, report) = fixture.run("knowledge");
+            assert!(!output.status.success(), "{report}");
+            assert_eq!(report["semantic_calls"], 2);
+            assert_eq!(parallel_starts(&fixture).len(), 2);
+            assert_eq!(parallel_receipts(&fixture), 1, "{mode}: {report}");
+            assert_eq!(
+                report["work_steps"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|step| step["outcome"] == "recorded")
+                    .count(),
+                1
+            );
+            assert_parallel_no_publication(&fixture);
+            assert_eq!(report["halted"], false, "{engine}/{mode}: {report}");
+            assert_eq!(
+                report["retained_progress"]["action_receipts"], 0,
+                "{report}"
+            );
+            let (_, repeated) = fixture.run("knowledge");
+            assert_eq!(repeated["semantic_calls"], 0, "{repeated}");
+            assert_eq!(repeated["halted"], false, "{repeated}");
+            assert_eq!(parallel_receipts(&fixture), 1);
+        }
+    }
+}
+
+#[test]
+fn a_failed_observation_stops_this_run_without_progress_or_a_persistent_operation_pause() {
+    for engine in ["codex", "claude-code"] {
+        let fixture = parallel_observation_fixture(engine, 8, 1, 1, "failed");
+        let (_, report) = fixture.run("knowledge");
+        assert_eq!(report["semantic_calls"], 1, "{report}");
+        assert_eq!(report["halted"], false, "{report}");
+        assert_eq!(parallel_receipts(&fixture), 0);
         assert_eq!(
-            report["work_steps"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .filter(|step| step["outcome"] == "recorded")
-                .count(),
-            1
+            report["retained_progress"]["action_receipts"], 0,
+            "{report}"
         );
-        assert_parallel_no_publication(&fixture);
+        let (_, repeated) = fixture.run("knowledge");
+        assert_eq!(repeated["semantic_calls"], 0, "{repeated}");
+        assert_eq!(repeated["halted"], false, "{repeated}");
     }
 }
 

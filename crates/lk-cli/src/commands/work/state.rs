@@ -10,6 +10,7 @@ use lk_vault::{MutationPlan, MutationSession};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+mod attempts;
 mod evidence;
 mod finalization;
 mod frontier;
@@ -17,7 +18,10 @@ mod inspection;
 mod output;
 mod refinement;
 mod retention;
-mod timeouts;
+#[cfg(unix)]
+pub(crate) use attempts::AttemptUpdate;
+#[cfg(unix)]
+pub(crate) use attempts::InvocationFailure;
 pub(crate) use evidence::ObservationEvidenceError;
 use evidence::validate_output_evidence;
 pub(super) use frontier::FrontierCapture;
@@ -35,8 +39,6 @@ pub(crate) use output::retention_overhead as question_retention_overhead;
 #[cfg(unix)]
 pub(super) use refinement::RefinementPreview;
 pub(crate) use retention::prune_published;
-#[cfg(unix)]
-pub(crate) use timeouts::TimeoutUpdate;
 
 #[derive(Debug)]
 pub(super) enum CompletionRefusal {

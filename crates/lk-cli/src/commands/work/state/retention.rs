@@ -235,7 +235,7 @@ fn capture_retention(root: &Path, id: &str, cutoff: i64) -> miette::Result<Reten
             .file_name()
             .is_some_and(|name| name == "inspection-timeouts.json")
         {
-            super::timeouts::InspectionTimeouts::decode(&raw, &work, &nodes)?;
+            super::attempts::InspectionAttempts::decode(&raw, &work, &nodes)?;
         }
         if path
             .file_name()
@@ -516,19 +516,19 @@ mod tests {
             .1
             .unwrap();
         let (plan, _) = work
-            .plan_inspection_timeout(
+            .plan_inspection_attempt(
                 root.path(),
                 &source,
                 &request,
                 "contract",
-                super::super::TimeoutUpdate::Record,
+                super::super::AttemptUpdate::TimedOut,
             )
             .unwrap();
         session.apply(plan).unwrap();
         publish(&work, &session, &source);
         let path = root
             .path()
-            .join(super::super::timeouts::path(&work).unwrap());
+            .join(super::super::attempts::path(&work).unwrap());
         let original = std::fs::read(&path).unwrap();
         std::fs::write(&path, b"{}").unwrap();
         assert!(prune_published(root.path(), Some(&session), i64::MAX).is_err());

@@ -147,13 +147,23 @@ pub enum WorkCommand {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Reset only an exhausted native inspection timeout allowance after diagnosing its host
+    /// Clear a current inspection's operational hold after diagnosing its failed invocation
     Retry {
-        /// Exact current Work identifier retaining the timeout allowance
+        /// Exact current Work identifier retaining the operational attempt
         work_id: String,
-        /// Exact unfinished inspection or reduction node with two confirmed timeouts
+        /// Exact unfinished inspection or reduction node with a failed or exhausted attempt
         node_id: String,
         /// Validate the exact retry without publishing or recovering state
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Suspend an exact unfinished inspection without running an agent or granting refinement
+    Hold {
+        work_id: String,
+        node_id: String,
+        /// Operational reason, at most 256 compact JSON bytes
+        #[arg(long)]
+        reason: String,
         #[arg(long)]
         dry_run: bool,
     },
@@ -2529,6 +2539,7 @@ pub(super) fn inspection_action(
 #[cfg(unix)]
 pub(super) enum InspectionResponse {
     TimedOut,
+    InvocationFailed(state::InvocationFailure),
     Complete(Box<state::ObservationCandidate>),
     NeedsAction(String),
     SmallerInspection {
@@ -2549,6 +2560,7 @@ pub(super) struct InspectionReply {
 #[cfg(unix)]
 pub(super) enum InspectionRecordOutcome {
     TimedOut { remaining: usize },
+    InvocationFailed(String),
     Recorded(state::WorkProgress),
     Refined { added_nodes: usize },
     Deferred(String),
@@ -2796,13 +2808,24 @@ fn record_prepared_inspections(
                         let revision =
                             super::execution::observation::contract_revision(&reply.request)?;
                         let (mut plan, outcome) = match response {
-                            InspectionResponse::TimedOut => {
-                                let (plan, remaining) = work.plan_inspection_timeout(
+                            InspectionResponse::InvocationFailed(failure) => {
+                                let reason = failure.to_string();
+                                let (plan, _) = work.plan_inspection_attempt(
                                     root,
                                     &prepared.resources,
                                     &reply.request,
                                     &revision,
-                                    state::TimeoutUpdate::Record,
+                                    state::AttemptUpdate::Failed(failure),
+                                )?;
+                                (plan, InspectionRecordOutcome::InvocationFailed(reason))
+                            }
+                            InspectionResponse::TimedOut => {
+                                let (plan, remaining) = work.plan_inspection_attempt(
+                                    root,
+                                    &prepared.resources,
+                                    &reply.request,
+                                    &revision,
+                                    state::AttemptUpdate::TimedOut,
                                 )?;
                                 (plan, InspectionRecordOutcome::TimedOut { remaining })
                             }
@@ -3797,6 +3820,38 @@ fn progress_value(
         "limit":limit,"offset":offset,"next_offset":next_offset})
 }
 
+#[cfg(unix)]
+fn update_inspection_attempt(
+    root: &Path,
+    config: &lk_core::config::Config,
+    config_revision: &str,
+    work_id: &str,
+    node_id: &str,
+    update: state::AttemptUpdate,
+    dry_run: bool,
+) -> miette::Result<()> {
+    let prepare = |root: &Path| -> miette::Result<lk_vault::MutationPlan> {
+        let (work, prepared) = load(root, config, config_revision, work_id)?;
+        let request = work.input(root, node_id, &prepared.resources)?;
+        let (mut plan, _) = work.plan_inspection_attempt(
+            root,
+            &prepared.resources,
+            &request,
+            &super::execution::observation::contract_revision(&request)?,
+            update,
+        )?;
+        prepared.guard_pages(&mut plan);
+        Ok(plan)
+    };
+    if dry_run {
+        prepare(root)?.validate_addresses(root).into_diagnostic()?;
+    } else {
+        let session = super::publication::acquire_mutation_now(root)?;
+        session.apply(prepare(session.root())?).into_diagnostic()?;
+    }
+    Ok(())
+}
+
 pub async fn run(opts: &GlobalOptions, command: WorkCommand) -> miette::Result<()> {
     let (config, config_revision) = load_config_with_revision(&find_config(opts)?)?;
     let root = config.vault.root_path().canonicalize().into_diagnostic()?;
@@ -4015,33 +4070,39 @@ pub async fn run(opts: &GlobalOptions, command: WorkCommand) -> miette::Result<(
             node_id,
             dry_run,
         } => {
-            let prepare = |root: &Path| -> miette::Result<lk_vault::MutationPlan> {
-                let (work, prepared) = load(root, &config, &config_revision, &work_id)?;
-                let request = work.input(root, &node_id, &prepared.resources)?;
-                let (mut plan, _) = work.plan_inspection_timeout(
-                    root,
-                    &prepared.resources,
-                    &request,
-                    &super::execution::observation::contract_revision(&request)?,
-                    state::TimeoutUpdate::Retry,
-                )?;
-                prepared.guard_pages(&mut plan);
-                Ok(plan)
-            };
-            if dry_run {
-                prepare(&root)?
-                    .validate_addresses(&root)
-                    .into_diagnostic()?;
-            } else {
-                let session = super::publication::acquire_mutation_now(&root)?;
-                session.apply(prepare(session.root())?).into_diagnostic()?;
-            }
+            update_inspection_attempt(
+                &root,
+                &config,
+                &config_revision,
+                &work_id,
+                &node_id,
+                state::AttemptUpdate::Retry,
+                dry_run,
+            )?;
+            json!({"work_id":work_id,"node_id":node_id,"dry_run":dry_run})
+        }
+        #[cfg(unix)]
+        WorkCommand::Hold {
+            work_id,
+            node_id,
+            reason,
+            dry_run,
+        } => {
+            update_inspection_attempt(
+                &root,
+                &config,
+                &config_revision,
+                &work_id,
+                &node_id,
+                state::AttemptUpdate::Hold(reason),
+                dry_run,
+            )?;
             json!({"work_id":work_id,"node_id":node_id,"dry_run":dry_run})
         }
         #[cfg(not(unix))]
-        WorkCommand::Retry { .. } => {
+        WorkCommand::Retry { .. } | WorkCommand::Hold { .. } => {
             return Err(miette::miette!(
-                "inspection retries require Unix native execution"
+                "inspection operational holds require Unix native execution"
             ));
         }
         WorkCommand::Result { work_id } => {

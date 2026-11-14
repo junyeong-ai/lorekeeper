@@ -27,6 +27,17 @@ pub(super) struct ChildResult {
     pub termination: ChildTermination,
 }
 
+impl ChildResult {
+    #[cfg(unix)]
+    pub(super) fn failed_exit(&self) -> Option<i32> {
+        if self.termination == ChildTermination::Exited && !self.cancelled && !self.success {
+            self.exit_code.filter(|code| (1..=255).contains(code))
+        } else {
+            None
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub(super) enum ChildTermination {
@@ -837,6 +848,39 @@ pub(super) fn executable_path(path: &Path) -> miette::Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn only_a_confirmed_numeric_exit_can_be_isolated_as_an_input_failure() {
+        for termination in [
+            ChildTermination::Exited,
+            ChildTermination::TimedOut,
+            ChildTermination::Cancelled,
+            ChildTermination::SupervisionFailed,
+            ChildTermination::IoFailed,
+            ChildTermination::CleanupFailed,
+        ] {
+            for exit_code in [None, Some(0), Some(1), Some(255), Some(256)] {
+                let child = ChildResult {
+                    success: false,
+                    exit_code,
+                    cancelled: false,
+                    detail: None,
+                    stdout: Vec::new(),
+                    stdout_capture: StdoutCapture::Complete,
+                    termination,
+                };
+                assert_eq!(
+                    child.failed_exit(),
+                    if termination == ChildTermination::Exited {
+                        exit_code.filter(|code| (1..=255).contains(code))
+                    } else {
+                        None
+                    }
+                );
+            }
+        }
+    }
 
     #[cfg(unix)]
     #[test]

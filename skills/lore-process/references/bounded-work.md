@@ -239,16 +239,20 @@ source read or a complexity estimate. Reduce workloads count child observations 
 claiming another source read. Native evidence steps report the same `workload` beside the
 measured compact `request_json_bytes`; an unprepared status does not invent that byte size.
 
-Tool-free Inspect/Reduce session timeouts receive one automatic retry for the exact request
-and native contract. `inspection-timeouts.json` retains confirmed timeouts across restarts;
-two timeouts hold that node while independent targets continue. A timeout records no
-observation or semantic action and never refunds a call. Run and automation budgets still apply.
-Unknown failures, failed process cleanup and tool-enabled session failures remain fatal.
+Tool-free Inspect/Reduce session timeouts receive one automatic retry per exact request
+and native contract. Two confirmed timeouts hold that node. Confirmed numeric nonzero
+exits and unusable remote responses hold the exact input across contract changes.
+Independent successful wave results remain saved; a wave with only invocation failures
+ends the current run without pausing the scheduled operation. Operational attempts grant
+no semantic progress or refinement authority and never refund calls. Signal exits,
+unknown failures, failed process cleanup and tool-enabled failures remain fatal.
 
-After diagnosing the host, preview `lore work retry WORK NODE --dry-run`, then use
-`lore work retry WORK NODE` to reset only an exhausted current timeout allowance. This
-neither invokes a host nor changes paid observations, configuration, usage or semantic holds.
-Keep timeout records with their Work; ordinary published-Work retention owns their cleanup.
+After diagnosing the failure, preview `lore work retry WORK NODE --dry-run`, then use
+`lore work retry WORK NODE` to clear only its current operational hold or exhausted
+timeout allowance. To suspend a known failed input without another host call, use
+`lore work hold WORK NODE --reason "..."`, optionally with `--dry-run`. Neither command
+changes paid observations, configuration, usage or semantic holds. Keep operational
+records with their Work; published-Work retention owns their cleanup.
 
 On Unix, for queue or audit Work with an exact current inspection action, an operator can explicitly
 refine that unfinished node without changing its canonical plan or configuration.

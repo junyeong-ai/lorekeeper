@@ -270,6 +270,7 @@ mod native {
             limit: usize,
         },
         TimedOut,
+        InvocationFailed(crate::commands::work::state::InvocationFailure),
     }
 
     enum ObservationStep {
@@ -277,6 +278,7 @@ mod native {
         Retry,
         Refined,
         Deferred(String),
+        InvocationFailed,
         Failed,
     }
 
@@ -1472,6 +1474,23 @@ mod native {
                     ));
                     return Some(ObservationReply::TimedOut);
                 }
+                if matches!(metrics.role, WorkRole::Evidence)
+                    && let Some(code) = child.failed_exit()
+                    && self.configuration_is_current()
+                {
+                    metrics.outcome = WorkOutcome::Failed;
+                    metrics.host_failure = Some(execution::diagnostic::HostFailure::from_child(
+                        invocation.engine,
+                        execution::diagnostic::Phase::Invocation,
+                        &child,
+                    ));
+                    return Some(ObservationReply::InvocationFailed(
+                        crate::commands::work::state::InvocationFailure::Exited {
+                            engine: invocation.engine,
+                            code,
+                        },
+                    ));
+                }
                 self.result.halted |= !child.cancelled;
                 if !child.cancelled {
                     metrics.host_failure = Some(execution::diagnostic::HostFailure::from_child(
@@ -1528,13 +1547,29 @@ mod native {
             reply: ObservationReply,
             metrics: &mut WorkStepMetrics,
         ) -> Option<crate::commands::work::InspectionResponse> {
-            let ObservationReply::Output {
-                engine,
-                bytes,
-                limit,
-            } = reply
-            else {
-                return Some(crate::commands::work::InspectionResponse::TimedOut);
+            let (engine, bytes, limit) = match reply {
+                ObservationReply::Output {
+                    engine,
+                    bytes,
+                    limit,
+                } => (engine, bytes, limit),
+                ObservationReply::TimedOut => {
+                    return Some(crate::commands::work::InspectionResponse::TimedOut);
+                }
+                ObservationReply::InvocationFailed(failure) => {
+                    return Some(crate::commands::work::InspectionResponse::InvocationFailed(
+                        failure,
+                    ));
+                }
+            };
+            let invalid = || {
+                crate::commands::work::InspectionResponse::InvocationFailed(
+                    crate::commands::work::state::InvocationFailure::InvalidResponse {
+                        engine,
+                        revision: lk_core::rss_original::digest(&bytes),
+                        bytes: bytes.len(),
+                    },
+                )
             };
             let output = match execution::observation::decode_response(engine, &bytes, limit) {
                 Ok(output) => output,
@@ -1543,11 +1578,10 @@ mod native {
                         error.downcast_ref::<crate::commands::work::state::OutputCapacity>()
                     {
                         metrics.result_json_bytes = Some(capacity.actual_bytes);
-                        if let Err(error) =
-                            execution::observation::validate_evidence_response(engine, &bytes)
+                        if execution::observation::validate_evidence_response(engine, &bytes)
+                            .is_err()
                         {
-                            self.failure("bounded work receipt", error);
-                            return None;
+                            return Some(invalid());
                         }
                         return Some(crate::commands::work::InspectionResponse::Capacity(
                             capacity.clone(),
@@ -1556,8 +1590,7 @@ mod native {
                     metrics.host_failure = Some(execution::diagnostic::HostFailure::from_response(
                         engine, &bytes,
                     ));
-                    self.failure("bounded work receipt", error);
-                    return None;
+                    return Some(invalid());
                 }
             };
             metrics.result_json_bytes = Some(
@@ -1572,11 +1605,9 @@ mod native {
                         .downcast_ref::<crate::commands::work::state::OutputCapacity>()
                         .is_some()
                 }))
-                && let Err(error) =
-                    execution::observation::validate_evidence_response(engine, &bytes)
+                && execution::observation::validate_evidence_response(engine, &bytes).is_err()
             {
-                self.failure("bounded work receipt", error);
-                return None;
+                return Some(invalid());
             }
             let candidate = |output, text_violation| {
                 Some(crate::commands::work::InspectionResponse::Complete(
@@ -1620,8 +1651,7 @@ mod native {
                             capacity.clone(),
                         ));
                     }
-                    self.failure("bounded work receipt", error);
-                    None
+                    Some(invalid())
                 }
             }
         }
@@ -1673,6 +1703,18 @@ mod native {
         ) -> ObservationStep {
             use crate::commands::work::InspectionRecordOutcome;
             match result {
+                Ok(InspectionRecordOutcome::InvocationFailed(reason)) => {
+                    metrics.outcome = WorkOutcome::Failed;
+                    self.inspection_deferred.insert(id.into(), reason.clone());
+                    self.queue_admitted.clear();
+                    self.deferred(
+                        "bounded invocation held",
+                        format!(
+                            "{node}: {reason}; use lore work retry {id} {node} after diagnosis"
+                        ),
+                    );
+                    ObservationStep::InvocationFailed
+                }
                 Ok(InspectionRecordOutcome::TimedOut { remaining }) => {
                     metrics.outcome = WorkOutcome::Failed;
                     if remaining > 0 {
@@ -1730,6 +1772,7 @@ mod native {
                             ("bounded observation evidence", reason)
                         }
                         InspectionRecordOutcome::Recorded(_)
+                        | InspectionRecordOutcome::InvocationFailed(_)
                         | InspectionRecordOutcome::TimedOut { .. }
                         | InspectionRecordOutcome::Refined { .. } => unreachable!(),
                     };
@@ -2159,6 +2202,8 @@ mod native {
                 );
             }
             let mut accepted = current && !cancelled;
+            let mut usable = false;
+            let mut held = false;
             let mut replies = Vec::new();
             let mut returned = Vec::new();
             for ((mut turn, attempt), engine) in turns.into_iter().zip(attempts).zip(engines) {
@@ -2188,6 +2233,28 @@ mod native {
                             node_id: turn.node_id.clone(),
                             request: turn.request.clone(),
                             response: crate::commands::work::InspectionResponse::TimedOut,
+                        });
+                        returned.push(turn);
+                        continue;
+                    }
+                    Ok(child) if child.failed_exit().is_some() => {
+                        turn.metrics.host_failure =
+                            Some(execution::diagnostic::HostFailure::from_child(
+                                engine,
+                                execution::diagnostic::Phase::Invocation,
+                                &child,
+                            ));
+                        turn.metrics.outcome = WorkOutcome::Failed;
+                        replies.push(crate::commands::work::InspectionReply {
+                            work_id: turn.work_id.clone(),
+                            node_id: turn.node_id.clone(),
+                            request: turn.request.clone(),
+                            response: crate::commands::work::InspectionResponse::InvocationFailed(
+                                crate::commands::work::state::InvocationFailure::Exited {
+                                    engine,
+                                    code: child.failed_exit().expect("numeric failed exit"),
+                                },
+                            ),
                         });
                         returned.push(turn);
                         continue;
@@ -2258,6 +2325,11 @@ mod native {
                             if matches!(step, ObservationStep::Failed) {
                                 accepted = false;
                             }
+                            usable |= !matches!(
+                                step,
+                                ObservationStep::InvocationFailed | ObservationStep::Failed
+                            );
+                            held |= matches!(step, ObservationStep::InvocationFailed);
                             self.record_work_step(turn.metrics);
                         }
                     }
@@ -2275,7 +2347,10 @@ mod native {
                     }
                 }
             }
-            accepted
+            if usable && held {
+                self.queue_replan = true;
+            }
+            accepted && usable
         }
 
         fn record_uninvoked_observations(&mut self, turns: Vec<ObservationTurn>) {
@@ -2934,6 +3009,7 @@ mod native {
                     | ObservationStep::Refined
                     | ObservationStep::Retry => WorkStep::Pending,
                     ObservationStep::Deferred(reason) => WorkStep::Deferred(reason),
+                    ObservationStep::InvocationFailed => WorkStep::Failed,
                     ObservationStep::Failed => WorkStep::Failed,
                 },
                 crate::commands::work::NativeStep::Finalization {

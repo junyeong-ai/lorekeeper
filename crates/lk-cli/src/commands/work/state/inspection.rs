@@ -265,7 +265,7 @@ impl Work {
         {
             return Ok(Some(reason));
         }
-        super::timeouts::InspectionTimeouts::load(root, self, &captured.nodes)?
+        super::attempts::InspectionAttempts::load(root, self, &captured.nodes)?
             .map(|timeouts| timeouts.reason(request, contract))
             .transpose()
             .map(Option::flatten)
@@ -287,7 +287,7 @@ impl Work {
             .map(|raw| ObservationRejections::decode(raw, self, &evaluated.nodes))
             .transpose()?;
         let progress = evaluated.progress()?;
-        let timeouts = super::timeouts::InspectionTimeouts::load(root, self, &evaluated.nodes)?;
+        let timeouts = super::attempts::InspectionAttempts::load(root, self, &evaluated.nodes)?;
         for id in &progress.ready {
             if progress.ready.first() != Some(id)
                 && !actions
