@@ -3616,7 +3616,9 @@ mod native {
                     }
                 }
             }
-            let screening_ok = if screenings.is_empty() {
+            let has_screenings = !screenings.is_empty();
+            let has_observations = !observations.is_empty();
+            let screening_ok = if !has_screenings {
                 true
             } else {
                 self.settle_screening_attempts(
@@ -3628,7 +3630,7 @@ mod native {
                 )
                 .await
             };
-            let observation_ok = if observations.is_empty() {
+            let observation_ok = if !has_observations {
                 true
             } else {
                 self.settle_observation_attempts(
@@ -3640,7 +3642,9 @@ mod native {
                 )
                 .await
             };
-            screening_ok && observation_ok
+            !self.result.halted
+                && !self.result.cancelled
+                && (has_screenings && screening_ok || has_observations && observation_ok)
         }
 
         async fn settle_screening_attempts(
@@ -3660,6 +3664,8 @@ mod native {
                 );
             }
             let mut accepted = current && !cancelled;
+            let mut usable = false;
+            let mut held = false;
             let mut replies = Vec::new();
             let mut metrics = Vec::new();
             for ((turn, attempt), engine) in turns.into_iter().zip(attempts).zip(engines) {
@@ -3673,6 +3679,21 @@ mod native {
                 } = turn;
                 step.agent_duration_ms = Some(attempt.duration_ms);
                 self.result.semantic_duration_ms += attempt.duration_ms;
+                let failed_reply =
+                    |failure| crate::commands::work::ScreeningResponse::InvocationFailed {
+                        request: request.clone(),
+                        contract_revision: contract_revision.clone(),
+                        failure,
+                    };
+                let invalid_reply = |bytes: &[u8]| {
+                    failed_reply(
+                        crate::commands::work::state::InvocationFailure::InvalidResponse {
+                            engine,
+                            revision: lk_core::rss_original::digest(bytes),
+                            bytes: bytes.len(),
+                        },
+                    )
+                };
                 let decoded = if cancelled || !current {
                     step.outcome = if cancelled {
                         WorkOutcome::Cancelled
@@ -3707,9 +3728,9 @@ mod native {
                                                 rejection: error.downcast_ref::<crate::commands::work::ScreeningRejection>().expect("typed rejection").clone(),
                                             })
                                         }
-                                        Err(error) => {
-                                            self.failure("candidate screening", error);
-                                            None
+                                        Err(_) => {
+                                            step.host_failure = Some(execution::diagnostic::HostFailure::from_response(engine, &child.stdout));
+                                            Some(invalid_reply(&child.stdout))
                                         }
                                     }
                                 }
@@ -3719,10 +3740,24 @@ mod native {
                                             engine, &child.stdout,
                                         ));
                                     }
-                                    self.failure("candidate screening", error);
-                                    None
+                                    Some(invalid_reply(&child.stdout))
                                 }
                             }
+                        }
+                        Ok(child) if child.failed_exit().is_some() => {
+                            step.outcome = WorkOutcome::Failed;
+                            step.host_failure =
+                                Some(execution::diagnostic::HostFailure::from_child(
+                                    engine,
+                                    execution::diagnostic::Phase::Invocation,
+                                    &child,
+                                ));
+                            Some(failed_reply(
+                                crate::commands::work::state::InvocationFailure::Exited {
+                                    engine,
+                                    code: child.failed_exit().expect("numeric failed exit"),
+                                },
+                            ))
                         }
                         Ok(child) => {
                             step.outcome = WorkOutcome::Failed;
@@ -3803,12 +3838,23 @@ mod native {
                                     + if index == 0 { shared_duration_ms } else { 0 },
                             );
                             match record.result {
+                                Ok(
+                                    crate::commands::work::ScreeningRecordOutcome::InvocationFailed(
+                                        reason,
+                                    ),
+                                ) => {
+                                    step.outcome = WorkOutcome::Failed;
+                                    held = true;
+                                    self.queue_admitted.clear();
+                                    self.deferred("candidate invocation held", reason);
+                                }
                                 Ok(crate::commands::work::ScreeningRecordOutcome::Deferred(
                                     reason,
                                 )) => {
                                     self.result.work_telemetry.retained_progress.action_receipts +=
                                         1;
                                     step.outcome = WorkOutcome::Rejected;
+                                    usable = true;
                                     self.queue_replan = true;
                                     self.queue_admitted.clear();
                                     self.record(
@@ -3821,6 +3867,7 @@ mod native {
                                     completed,
                                 )) if completed > reply.completed_batches => {
                                     step.outcome = WorkOutcome::Recorded;
+                                    usable = true;
                                     self.record("candidate screening", StageState::Completed, Some(format!("{completed}/{} screening batches recorded; card decisions are not full-body assessments", reply.batches)));
                                     self.queue_replan |= completed == reply.batches;
                                 }
@@ -3849,7 +3896,10 @@ mod native {
                 }
                 self.record_work_step(step);
             }
-            accepted
+            if usable && held {
+                self.queue_replan = true;
+            }
+            accepted && usable
         }
 
         async fn queue_dispatches(&mut self) -> miette::Result<QueuePlan> {

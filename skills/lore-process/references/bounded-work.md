@@ -129,9 +129,17 @@ complete canonical request still hashes to the original input revision. They
 require explicit action and keep their exact saved receipts; this does not approve
 an unmatched contract. Changed inputs do not inherit that hold. New-policy Work
 continues to match the exact current request and native contract.
-Existing v1 rejection receipts remain readable without rewriting; new receipts use
-`screening-rejections-v2`, which earlier readers refuse. Corrupt receipts, malformed
-reply shapes, failed fresh scope validation and unknown failures still stop.
+Existing v1/v2 rejection receipts remain readable without rewriting; new receipts use
+`screening-rejections-v3`, which earlier readers refuse. Its operational attempts are
+separate from semantic rejections. Confirmed numeric nonzero exits and unusable remote
+replies hold that canonical packet across contract changes. Unknown candidates remain
+incomplete; independent targets and successful wave peers keep their progress. A wave
+with only invocation failures ends this run without pausing the scheduled operation.
+After diagnosis, preview `work select-retry --task-id ID --batch-id BATCH --dry-run`,
+then run it without `--dry-run` to clear only that operational attempt. Semantic
+rejections and paid decisions remain intact; failures grant no progress or refinement.
+Corrupt receipts, failed fresh scope validation, signal/cleanup and unknown failures
+still stop.
 Screening receipts and standalone `select-record` inputs require unique object fields
 at every typed nesting level. Legacy whitespace and field ordering remain valid.
 
@@ -571,11 +579,9 @@ or malformed staging remains an error; it is not silently overwritten.
 ## Native run measurements
 
 `lore run process --json` and other native jobs include `work_steps` for evidence,
-screening, finalization and interactive discovery/audit. The first 1024 steps are
+screening, finalization and discovery. The first 1024 steps are
 retained per run; `work_steps_omitted` counts later steps. Cached refusals and
 already-complete work can have no invocation, so this array is not a call ledger.
-An interactive `returned` outcome means the host exited successfully, not that an
-observation, assessment or publication was verified.
 
 `finalization_admissions` separately records native queue-planning checks for prepared
 Root or Frontier finalization. Each entry names the Work, task, Work subject revision,
@@ -633,12 +639,12 @@ It describes dispatched requests, not observed peak live-child concurrency.
 | Fields | Meaning |
 | --- | --- |
 | `role`, `work_id`, `node_id`, `node_kind`, `selection_id`, `batch_id` | Exact selected work or screening identities; unavailable identities are `null` |
-| `request_json_bytes`, `result_json_bytes` | Compact UTF-8 JSON of the prepared request and decoded response (including a native observation/action envelope but excluding Rust-supplied identity), excluding prompts and host envelopes; tool-enabled native extraction/synthesis response bytes are measured, while ordinary interactive audit response bytes remain unobserved and `null` |
+| `request_json_bytes`, `result_json_bytes` | Compact UTF-8 JSON of the prepared request and decoded response (including a native observation/action envelope but excluding Rust-supplied identity), excluding prompts and host envelopes; native discovery, screening and finalization response bytes are measured |
 | `preparation_duration_ms`, `preparation_from_queue_plan` | Additional local preparation of the selected request or completed root; a screening request carried from the same queue checkpoint has `null` duration and `true` reuse |
 | `agent_duration_ms` | Supervised invocation attempt wall time, including a failed or cancelled attempt; never server inference time |
 | `revalidation_record_duration_ms` | Fresh input validation and recording together; role-level aggregates below separate reconstruction from serial recording |
 | `verification_duration_ms` | Finalizer completion and sealed-result verification |
-| `outcome` | `recorded`, `staged`, `restaged`, `already-complete`, `rejected`, `failed`, `cancelled` or interactive `returned` |
+| `outcome` | `recorded`, `staged`, `restaged`, `already-complete`, `rejected`, `failed` or `cancelled` |
 
 Native evidence request bytes describe the native presentation after invocation
 preparation. If preflight stops earlier, they can describe the canonical prepared

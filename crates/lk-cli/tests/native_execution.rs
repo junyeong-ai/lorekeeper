@@ -4126,35 +4126,32 @@ fn native_screening_refuses_model_owned_identity_without_rebinding_or_losing_met
             let original = std::fs::read(&target).unwrap();
             let (output, report) = fixture.run("process");
             assert!(!output.status.success(), "{report}");
-            assert_eq!(report["halted"], true);
+            assert_eq!(report["halted"], false);
             let steps = report["work_steps"].as_array().unwrap();
             let step = steps
                 .iter()
                 .find(|step| step["role"] == "screening")
                 .unwrap();
-            assert_eq!(step["outcome"], "rejected");
+            assert_eq!(step["outcome"], "failed");
             assert!(
                 step["result_json_bytes"]
                     .as_u64()
                     .is_some_and(|size| size > 0)
             );
-            assert!(step["revalidation_record_duration_ms"].is_null());
+            assert!(step["revalidation_record_duration_ms"].is_u64());
             let selection = step["selection_id"].as_str().unwrap();
             let detail = report["stages"]
                 .as_array()
                 .unwrap()
                 .iter()
-                .find(|stage| stage["name"] == "candidate screening" && stage["state"] == "failed")
+                .find(|stage| {
+                    stage["name"] == "candidate invocation held" && stage["state"] == "failed"
+                })
                 .unwrap()["detail"]
                 .as_str()
                 .unwrap();
-            assert!(
-                detail.contains(&format!(
-                    "selection_id (string, {} Unicode scalars",
-                    if deleted { 62 } else { 64 }
-                )),
-                "{detail}"
-            );
+            assert!(detail.contains("unusable response"), "{detail}");
+            assert_eq!(step["host_failure"]["phase"], "response");
             assert!(!detail.contains(selection));
             let progress =
                 execution_json(&fixture, &["work", "select", "--task-id", &task.task_id]);
@@ -7370,7 +7367,7 @@ MIXED
             }
             let (_, report) = fixture.run("process");
             assert_eq!(report["semantic_calls"], count, "{report}");
-            assert_eq!(report["halted"], failed_role.is_some(), "{report}");
+            assert_eq!(report["halted"], false, "{report}");
             let steps = report["work_steps"].as_array().unwrap();
             if failed_role.is_some() {
                 for step in steps {
@@ -7476,12 +7473,12 @@ fn native_screening_wave_overlaps_distinct_tasks_and_shares_fresh_capture_on_bot
 }
 
 #[test]
-fn native_screening_ambiguous_fields_are_fatal_and_preserve_independent_peers() {
+fn native_screening_ambiguous_remote_fields_are_held_and_preserve_independent_peers() {
     for engine in ["codex", "claude-code"] {
         let fixture = parallel_screening_fixture(engine, "duplicate-field", 2);
         let (_, report) = fixture.run("process");
         assert_eq!(report["semantic_calls"], 2, "{report}");
-        assert_eq!(report["halted"], true, "{report}");
+        assert_eq!(report["halted"], false, "{report}");
         assert_eq!(screening_receipts(&fixture), 1, "{report}");
         assert_eq!(
             report["work_steps"]
@@ -7501,21 +7498,106 @@ fn native_screening_ambiguous_fields_are_fatal_and_preserve_independent_peers() 
 
 #[test]
 fn native_screening_wave_preserves_independent_response_when_a_peer_fails() {
-    for mode in ["failed", "malformed"] {
-        let fixture = parallel_screening_fixture("codex", mode, 2);
-        let (_, report) = fixture.run("process");
-        assert_eq!(report["semantic_calls"], 2);
-        assert_eq!(screening_receipts(&fixture), 1, "{mode}: {report}");
-        assert!(report["halted"].as_bool().unwrap());
-        assert_eq!(
-            report["work_steps"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .filter(|step| step["outcome"] == "recorded")
-                .count(),
-            1
+    for engine in ["codex", "claude-code"] {
+        for mode in ["failed", "malformed"] {
+            let fixture = parallel_screening_fixture(engine, mode, 2);
+            let (_, report) = fixture.run("process");
+            assert_eq!(report["semantic_calls"], 2);
+            assert_eq!(screening_receipts(&fixture), 1, "{mode}: {report}");
+            assert_eq!(report["halted"], false, "{report}");
+            assert_eq!(
+                report["retained_progress"]["action_receipts"], 0,
+                "{report}"
+            );
+            assert_eq!(
+                report["work_steps"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|step| step["outcome"] == "recorded")
+                    .count(),
+                1
+            );
+        }
+    }
+}
+
+#[test]
+fn failed_only_screening_wave_stops_without_progress_and_requires_exact_explicit_retry() {
+    for engine in ["codex", "claude-code"] {
+        let fixture = parallel_screening_fixture(engine, "failed", 2);
+        let agent = fixture.root().join("agent executable");
+        let body = std::fs::read_to_string(&agent).unwrap().replace(
+            "if leader and mode=='failed': raise SystemExit(51)",
+            "if mode=='failed': raise SystemExit(51)",
         );
+        std::fs::write(agent, body).unwrap();
+        let (_, report) = fixture.run("process");
+        assert_eq!(report["semantic_calls"], 2, "{report}");
+        assert_eq!(report["halted"], false, "{report}");
+        assert_eq!(
+            report["retained_progress"]["action_receipts"], 0,
+            "{report}"
+        );
+        assert_eq!(screening_receipts(&fixture), 0);
+        let (_, repeated) = fixture.run("process");
+        assert_eq!(repeated["semantic_calls"], 0, "{repeated}");
+        assert_eq!(repeated["halted"], false, "{repeated}");
+        let status = execution_json(&fixture, &["queue", "status", "--json"]);
+        let task = status["data"]["tasks"][0]["task_id"].as_str().unwrap();
+        let selected = execution_json(&fixture, &["work", "select", "--task-id", task]);
+        let batch = selected["request"]["batch_id"].as_str().unwrap();
+        let before = walkdir::WalkDir::new(fixture.root().join("vault/.lorekeeper/queue"))
+            .into_iter()
+            .map(Result::unwrap)
+            .filter(|entry| entry.file_type().is_file())
+            .map(|entry| {
+                (
+                    entry.path().to_owned(),
+                    std::fs::read(entry.path()).unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        execution_json(
+            &fixture,
+            &[
+                "work",
+                "select-retry",
+                "--task-id",
+                task,
+                "--batch-id",
+                batch,
+                "--dry-run",
+            ],
+        );
+        for (path, bytes) in &before {
+            assert_eq!(&std::fs::read(path).unwrap(), bytes);
+        }
+        execution_json(
+            &fixture,
+            &[
+                "work",
+                "select-retry",
+                "--task-id",
+                task,
+                "--batch-id",
+                batch,
+            ],
+        );
+        let rejected = fixture
+            .command()
+            .args([
+                "work",
+                "select-retry",
+                "--task-id",
+                task,
+                "--batch-id",
+                batch,
+            ])
+            .output()
+            .unwrap();
+        assert!(!rejected.status.success());
+        assert_eq!(screening_receipts(&fixture), 0);
     }
 }
 

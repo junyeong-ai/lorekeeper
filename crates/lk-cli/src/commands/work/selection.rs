@@ -2241,7 +2241,8 @@ mod tests {
             .join(selection.directory.join("rejections.json"));
         let raw = std::fs::read_to_string(&path).unwrap();
         let mut legacy: Value = serde_json::from_str(&raw).unwrap();
-        assert_eq!(legacy["schema"], "screening-rejections-v2");
+        assert_eq!(legacy["schema"], "screening-rejections-v3");
+        legacy.as_object_mut().unwrap().remove("attempts");
         legacy["schema"] = json!("screening-rejections-v1");
         legacy["batches"][request["batch_id"].as_str().unwrap()]["rejection"]
             .as_object_mut()
@@ -2289,6 +2290,176 @@ mod tests {
                 .record_rejection(&session, &fixture.pages(), &request, &contract, rejected)
                 .is_err()
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn operational_screening_retry_preserves_semantic_rejections_and_paid_decisions() {
+        let fixture = Fixture::new(2);
+        let selection = fixture.selection(8192, 8192);
+        fixture.create(&selection);
+        let request = selection.prepare(&fixture.root).unwrap().1.unwrap();
+        let contract = "c".repeat(64);
+        let path = fixture
+            .root
+            .join(selection.directory.join("rejections.json"));
+        {
+            let session = MutationSession::acquire(&fixture.root).unwrap();
+            selection
+                .record_rejection(
+                    &session,
+                    &fixture.pages(),
+                    &request,
+                    &contract,
+                    ScreeningRejection::ReferenceCoverage {
+                        missing: 1,
+                        duplicate: 0,
+                        unknown: 0,
+                        response_revision: "d".repeat(64),
+                    },
+                )
+                .unwrap();
+            selection
+                .record_failed_attempt(
+                    &session,
+                    &fixture.pages(),
+                    &request,
+                    &contract,
+                    super::super::state::InvocationFailure::Exited {
+                        engine: lk_core::execution::AgentEngine::Codex,
+                        code: 1,
+                    },
+                )
+                .unwrap();
+        }
+        let held = std::fs::read(&path).unwrap();
+        let semantic: Value = serde_json::from_slice::<Value>(&held).unwrap()["batches"].clone();
+        assert!(
+            selection
+                .rejection_reason(&fixture.root, &request, &"e".repeat(64))
+                .unwrap()
+                .unwrap()
+                .contains("select-retry")
+        );
+        let batch = request["batch_id"].as_str().unwrap();
+        let retry = selection
+            .plan_retry(&fixture.root, &fixture.pages(), batch)
+            .unwrap();
+        retry.validate_addresses(&fixture.root).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), held);
+        {
+            let session = MutationSession::acquire(&fixture.root).unwrap();
+            session.apply(retry).unwrap();
+        }
+        assert_eq!(
+            serde_json::from_slice::<Value>(&std::fs::read(&path).unwrap()).unwrap()["batches"],
+            semantic
+        );
+        assert!(
+            selection
+                .rejection_reason(&fixture.root, &request, &"e".repeat(64))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            selection
+                .rejection_reason(&fixture.root, &request, &contract)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            selection
+                .plan_retry(&fixture.root, &fixture.pages(), batch)
+                .is_err()
+        );
+        fixture
+            .record(
+                &selection,
+                answer(&request, ScreeningDecision::Inspect),
+                None,
+            )
+            .unwrap();
+        let paid = std::fs::read(fixture.root.join(selection.receipt_path(0).unwrap())).unwrap();
+        assert!(selection.prepare(&fixture.root).unwrap().1.is_none());
+        assert!(
+            selection
+                .plan_retry(&fixture.root, &fixture.pages(), batch)
+                .is_err()
+        );
+        assert_eq!(
+            std::fs::read(fixture.root.join(selection.receipt_path(0).unwrap())).unwrap(),
+            paid
+        );
+        std::fs::write(&path, held).unwrap();
+        assert!(selection.prepare(&fixture.root).unwrap().1.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn operational_screening_state_rejects_corruption_and_guards_changed_pages() {
+        let fixture = Fixture::new(2);
+        let selection = fixture.selection(8192, 8192);
+        fixture.create(&selection);
+        let request = selection.prepare(&fixture.root).unwrap().1.unwrap();
+        {
+            let session = MutationSession::acquire(&fixture.root).unwrap();
+            selection
+                .record_failed_attempt(
+                    &session,
+                    &fixture.pages(),
+                    &request,
+                    &"c".repeat(64),
+                    super::super::state::InvocationFailure::Exited {
+                        engine: lk_core::execution::AgentEngine::Codex,
+                        code: 1,
+                    },
+                )
+                .unwrap();
+        }
+        let path = fixture
+            .root
+            .join(selection.directory.join("rejections.json"));
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let batch = request["batch_id"].as_str().unwrap();
+        for field in [
+            "canonical_revision",
+            "request_revision",
+            "contract_revision",
+        ] {
+            let mut value: Value = serde_json::from_str(&raw).unwrap();
+            value["attempts"][batch][field] = json!("invalid");
+            let bytes = value.to_string();
+            std::fs::write(&path, &bytes).unwrap();
+            assert!(selection.prepare(&fixture.root).is_err());
+            assert!(
+                selection
+                    .plan_retry(&fixture.root, &fixture.pages(), batch)
+                    .is_err()
+            );
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), bytes);
+        }
+        let value: Value = serde_json::from_str(&raw).unwrap();
+        let key = serde_json::to_string(batch).unwrap();
+        let duplicate = raw.replacen(
+            "\"attempts\":{",
+            &format!("\"attempts\":{{{key}:{},", value["attempts"][batch]),
+            1,
+        );
+        assert_ne!(duplicate, raw);
+        std::fs::write(&path, duplicate).unwrap();
+        assert!(selection.prepare(&fixture.root).is_err());
+        std::fs::write(&path, &raw).unwrap();
+        let plan = selection
+            .plan_retry(&fixture.root, &fixture.pages(), batch)
+            .unwrap();
+        std::fs::write(
+            fixture.root.join("wiki/documents/source.md"),
+            "Changed source",
+        )
+        .unwrap();
+        let session = MutationSession::acquire(&fixture.root).unwrap();
+        assert!(session.apply(plan).is_err());
+        assert_eq!(std::fs::read_to_string(path).unwrap(), raw);
     }
 
     #[test]
@@ -2373,7 +2544,7 @@ mod tests {
     }
 
     #[test]
-    fn rejection_receipts_refuse_duplicate_fields_and_batches_in_both_versions() {
+    fn rejection_receipts_refuse_duplicate_fields_and_batches_in_all_versions() {
         let fixture = Fixture::new(2);
         let selection = fixture.selection(8192, 8192);
         fixture.create(&selection);
@@ -2402,10 +2573,14 @@ mod tests {
         let original: Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         let batch = request["batch_id"].as_str().unwrap();
-        for legacy in [false, true] {
+        for version in [1, 2, 3] {
+            let legacy = version == 1;
             let mut valid = original.clone();
+            valid["schema"] = json!(format!("screening-rejections-v{version}"));
+            if version < 3 {
+                valid.as_object_mut().unwrap().remove("attempts");
+            }
             if legacy {
-                valid["schema"] = json!("screening-rejections-v1");
                 valid["batches"][batch]["rejection"]
                     .as_object_mut()
                     .unwrap()

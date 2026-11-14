@@ -77,6 +77,15 @@ pub enum WorkCommand {
         #[arg(long)]
         previous_revision: Option<String>,
     },
+    /// Clear only a current candidate packet's operational hold after diagnosing its failure
+    SelectRetry {
+        #[arg(long)]
+        task_id: String,
+        #[arg(long)]
+        batch_id: String,
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Plan complete retained-source observations for an oversized screening context
     SourcePlan {
         /// Exact retained concept-extraction task identifier
@@ -1471,6 +1480,11 @@ pub(super) fn prepare_screenings(
 #[derive(Clone)]
 pub(super) enum ScreeningResponse {
     Decisions(Value),
+    InvocationFailed {
+        request: Value,
+        contract_revision: String,
+        failure: state::InvocationFailure,
+    },
     Rejected {
         request: Value,
         contract_revision: String,
@@ -1481,6 +1495,7 @@ pub(super) enum ScreeningResponse {
 pub(super) enum ScreeningRecordOutcome {
     Recorded(usize),
     Deferred(String),
+    InvocationFailed(String),
 }
 
 pub(super) struct ScreeningRecord {
@@ -1519,6 +1534,21 @@ pub(super) fn record_screenings(
             let result = (|| {
                 let screening = screening?;
                 match output {
+                    ScreeningResponse::InvocationFailed {
+                        request,
+                        contract_revision,
+                        failure,
+                    } => {
+                        let reason = failure.to_string();
+                        screening.selection.record_failed_attempt(
+                            session,
+                            &screening.inventory.pages,
+                            &request,
+                            &contract_revision,
+                            failure,
+                        )?;
+                        Ok(ScreeningRecordOutcome::InvocationFailed(reason))
+                    }
                     ScreeningResponse::Decisions(output) => Ok(ScreeningRecordOutcome::Recorded(
                         screening
                             .selection
@@ -3856,6 +3886,38 @@ pub async fn run(opts: &GlobalOptions, command: WorkCommand) -> miette::Result<(
     let (config, config_revision) = load_config_with_revision(&find_config(opts)?)?;
     let root = config.vault.root_path().canonicalize().into_diagnostic()?;
     let output = match command {
+        #[cfg(unix)]
+        WorkCommand::SelectRetry {
+            task_id,
+            batch_id,
+            dry_run,
+        } => {
+            let prepare = |root: &Path| {
+                let ScreeningPreparation::Candidates(screening) =
+                    current_screening(root, &config, &config_revision, &task_id)?
+                else {
+                    return Err(miette::miette!(
+                        "current task requires its exact candidate selection"
+                    ));
+                };
+                screening
+                    .selection
+                    .plan_retry(root, &screening.inventory.pages, &batch_id)
+            };
+            if dry_run {
+                prepare(&root)?
+                    .validate_addresses(&root)
+                    .into_diagnostic()?;
+            } else {
+                let session = super::publication::acquire_mutation_now(&root)?;
+                session.apply(prepare(session.root())?).into_diagnostic()?;
+            }
+            json!({"task_id":task_id,"batch_id":batch_id,"dry_run":dry_run})
+        }
+        #[cfg(not(unix))]
+        WorkCommand::SelectRetry { .. } => {
+            return Err(miette::miette!("native screening retries require Unix"));
+        }
         WorkCommand::Cost { task_id } => {
             match current_screening(&root, &config, &config_revision, &task_id)? {
                 ScreeningPreparation::Capacity { capacity, .. } => return Err(capacity.into()),

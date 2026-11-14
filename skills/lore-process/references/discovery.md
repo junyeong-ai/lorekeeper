@@ -121,8 +121,10 @@ Unknown or deferred candidates block extraction completion. To reassess a record
 batch, obtain its exact current packet with `work select --task-id ID --batch-id BATCH_ID`.
 This read-only lookup also returns its `receipt.revision`. Submit the reconsidered
 whole batch using `select-record --previous-revision RECEIPT_REV`; ordinary retries
-cannot overwrite earlier decisions. Do not reconstruct packets from the manifest or
-copy new guards onto old decisions.
+cannot overwrite earlier decisions. After diagnosing a failed native invocation,
+`work select-retry --task-id ID --batch-id BATCH_ID`, optionally with `--dry-run`,
+clears only its current operational hold. It never changes paid decisions or semantic
+rejections. Do not reconstruct packets from the manifest or copy new guards onto old decisions.
 
 An empty candidate inventory needs no screening model response. Let `work select`
 record the empty selection, then continue to the full retained-source read. No matches

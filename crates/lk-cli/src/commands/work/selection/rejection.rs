@@ -96,6 +96,26 @@ struct Rejections {
     selection_id: String,
     #[serde(deserialize_with = "crate::commands::work::receipt::unique_entries")]
     batches: BTreeMap<String, Rejection>,
+    #[serde(deserialize_with = "crate::commands::work::receipt::unique_entries")]
+    attempts: BTreeMap<String, FailedAttempt>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FailedAttempt {
+    canonical_revision: String,
+    request_revision: String,
+    contract_revision: String,
+    failure: super::super::state::InvocationFailure,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PreviousRejections {
+    schema: String,
+    selection_id: String,
+    #[serde(deserialize_with = "crate::commands::work::receipt::unique_entries")]
+    batches: BTreeMap<String, Rejection>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -140,6 +160,11 @@ fn require_revision(revision: &str) -> miette::Result<()> {
 
 impl Rejections {
     fn decode(raw: &str, selection: &Selection) -> miette::Result<Self> {
+        if raw.len() > (selection.manifest.batches.len() + 1).saturating_mul(2048) {
+            return Err(fail(
+                "screening attempts exceed their declared storage bound",
+            ));
+        }
         #[derive(Deserialize)]
         struct Header {
             schema: String,
@@ -153,7 +178,7 @@ impl Rejections {
                     return Err(fail("invalid legacy screening rejection schema"));
                 }
                 Self {
-                    schema: "screening-rejections-v2".into(),
+                    schema: "screening-rejections-v3".into(),
                     selection_id: legacy.selection_id,
                     batches: legacy
                         .batches
@@ -175,18 +200,45 @@ impl Rejections {
                             )
                         })
                         .collect(),
+                    attempts: BTreeMap::new(),
                 }
             }
             "screening-rejections-v2" => {
+                let previous: PreviousRejections =
+                    crate::commands::work::receipt::decode(raw).into_diagnostic()?;
+                if previous.schema != "screening-rejections-v2" {
+                    return Err(fail("invalid prior screening rejection schema"));
+                }
+                Self {
+                    schema: "screening-rejections-v3".into(),
+                    selection_id: previous.selection_id,
+                    batches: previous.batches,
+                    attempts: BTreeMap::new(),
+                }
+            }
+            "screening-rejections-v3" => {
                 crate::commands::work::receipt::decode(raw).into_diagnostic()?
             }
             _ => return Err(fail("invalid screening rejection schema")),
         };
-        if receipt.schema != "screening-rejections-v2"
+        if receipt.schema != "screening-rejections-v3"
             || receipt.selection_id != selection.id
-            || receipt.batches.is_empty()
+            || receipt.batches.is_empty() && receipt.attempts.is_empty()
         {
             return Err(fail("invalid screening rejection identity or schema"));
+        }
+        for (batch, attempt) in &receipt.attempts {
+            let index = (0..selection.manifest.batches.len())
+                .find(|index| selection.batch_id(*index).is_ok_and(|id| &id == batch))
+                .ok_or_else(|| fail("screening attempt names an unknown batch"))?;
+            let request = selection.request_for(&selection.manifest.batches[index], index)?;
+            require_revision(&attempt.contract_revision)?;
+            attempt.failure.validate()?;
+            if attempt.canonical_revision != digest(&request)?
+                || attempt.request_revision != digest(&(&request, &attempt.contract_revision))?
+            {
+                return Err(fail("invalid screening attempt binding"));
+            }
         }
         for (batch, rejected) in &receipt.batches {
             let index = (0..selection.manifest.batches.len())
@@ -241,11 +293,15 @@ impl Selection {
             return Err(fail("screening request has no batch"));
         };
         let revision = digest(&(request, contract))?;
+        let canonical = digest(request)?;
         Ok(receipt
             .batches
             .get(batch)
             .filter(|rejected| rejected.request_revision == revision)
-            .map(|rejected| rejected.rejection.to_string()))
+            .map(|rejected| rejected.rejection.to_string())
+            .or_else(|| receipt.attempts.get(batch)
+                .filter(|attempt| attempt.canonical_revision == canonical)
+                .map(|attempt| format!("{}; diagnose the host, then use lore work select-retry --task-id {} --batch-id {batch}", attempt.failure, self.manifest.binding.task_id))))
     }
 
     pub fn record_rejection(
@@ -256,22 +312,95 @@ impl Selection {
         contract: &str,
         rejection: ScreeningRejection,
     ) -> miette::Result<()> {
-        let root = session.root();
+        let batch = request["batch_id"]
+            .as_str()
+            .ok_or_else(|| fail("screening request has no batch"))?;
+        let plan = self.plan_update(session.root(), pages, request, |receipt| {
+            receipt.batches.insert(
+                batch.into(),
+                Rejection {
+                    input_revision: request["input_revision"]
+                        .as_str()
+                        .expect("validated request")
+                        .into(),
+                    request_revision: digest(&(request, contract))?,
+                    contract_revision: contract.into(),
+                    rejection,
+                },
+            );
+            Ok(())
+        })?;
+        session.apply(plan).into_diagnostic()
+    }
+
+    #[cfg(unix)]
+    pub fn record_failed_attempt(
+        &self,
+        session: &MutationSession,
+        pages: &BTreeMap<PathBuf, String>,
+        request: &Value,
+        contract: &str,
+        failure: super::super::state::InvocationFailure,
+    ) -> miette::Result<()> {
+        let batch = request["batch_id"]
+            .as_str()
+            .ok_or_else(|| fail("screening request has no batch"))?;
+        let plan = self.plan_update(session.root(), pages, request, |receipt| {
+            if receipt.attempts.contains_key(batch) {
+                return Err(fail("screening packet already has an operational hold"));
+            }
+            receipt.attempts.insert(
+                batch.into(),
+                FailedAttempt {
+                    canonical_revision: digest(request)?,
+                    request_revision: digest(&(request, contract))?,
+                    contract_revision: contract.into(),
+                    failure,
+                },
+            );
+            Ok(())
+        })?;
+        session.apply(plan).into_diagnostic()
+    }
+
+    #[cfg(unix)]
+    pub fn plan_retry(
+        &self,
+        root: &Path,
+        pages: &BTreeMap<PathBuf, String>,
+        batch: &str,
+    ) -> miette::Result<MutationPlan> {
+        let request = self.packet(root, batch)?;
+        self.plan_update(root, pages, &request, |receipt| {
+            if receipt.attempts.remove(batch).is_none() {
+                return Err(fail("screening packet has no current operational hold"));
+            }
+            Ok(())
+        })
+    }
+
+    fn plan_update(
+        &self,
+        root: &Path,
+        pages: &BTreeMap<PathBuf, String>,
+        request: &Value,
+        update: impl FnOnce(&mut Rejections) -> miette::Result<()>,
+    ) -> miette::Result<MutationPlan> {
         let captured = self.capture_ledger(root)?;
         let batch = request["batch_id"]
             .as_str()
             .ok_or_else(|| fail("screening request has no batch"))?;
         if self.packet(root, batch)? != *request {
-            return Err(fail("screening rejection request changed before recording"));
+            return Err(fail(
+                "screening request changed before recording its attempt",
+            ));
         }
         let index = (0..self.manifest.batches.len())
             .find(|index| self.batch_id(*index).is_ok_and(|id| id == batch))
             .expect("validated batch");
         let output_path = self.receipt_path(index)?;
         if captured.raw.contains_key(&output_path) {
-            return Err(fail(
-                "screening rejection cannot replace recorded decisions",
-            ));
+            return Err(fail("screening attempt cannot replace recorded decisions"));
         }
         let path = self.rejection_path();
         let before = captured.raw.get(&path).cloned();
@@ -280,24 +409,19 @@ impl Selection {
             .map(|raw| Rejections::decode(raw, self))
             .transpose()?
             .unwrap_or_else(|| Rejections {
-                schema: "screening-rejections-v2".into(),
+                schema: "screening-rejections-v3".into(),
                 selection_id: self.id.clone(),
                 batches: BTreeMap::new(),
+                attempts: BTreeMap::new(),
             });
-        receipt.batches.insert(
-            batch.into(),
-            Rejection {
-                input_revision: request["input_revision"]
-                    .as_str()
-                    .expect("validated request")
-                    .into(),
-                request_revision: digest(&(request, contract))?,
-                contract_revision: contract.into(),
-                rejection,
-            },
-        );
-        let after = encoded(&receipt)?;
-        Rejections::decode(&after, self)?;
+        update(&mut receipt)?;
+        let after = if receipt.batches.is_empty() && receipt.attempts.is_empty() {
+            None
+        } else {
+            let after = encoded(&receipt)?;
+            Rejections::decode(&after, self)?;
+            Some(after)
+        };
         let mut plan = MutationPlan::default();
         self.guard_pages(root, pages, &mut plan)?;
         plan.require_absent(output_path);
@@ -306,8 +430,12 @@ impl Selection {
                 plan.require_unchanged(guard, bytes);
             }
         }
-        plan.publish_expected(root, path, before, after)
-            .into_diagnostic()?;
-        session.apply(plan).into_diagnostic()
+        if let Some(after) = after {
+            plan.publish_expected(root, path, before, after)
+                .into_diagnostic()?;
+        } else if let Some(before) = before {
+            plan.remove(path, before);
+        }
+        Ok(plan)
     }
 }

@@ -20,7 +20,6 @@ mod refinement;
 mod retention;
 #[cfg(unix)]
 pub(crate) use attempts::AttemptUpdate;
-#[cfg(unix)]
 pub(crate) use attempts::InvocationFailure;
 pub(crate) use evidence::ObservationEvidenceError;
 use evidence::validate_output_evidence;

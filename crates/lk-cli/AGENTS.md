@@ -128,8 +128,8 @@ deferred subcommands expose their names eagerly for name-only discovery.
   disjoint value bytes and remaining metadata/envelope; count canonical completion
   bytes separately. This diagnostic never changes the native request or receipt key.
   Compact request/decoded-result bytes exclude prompts and host envelopes; tool-enabled
-  native result request/response bytes are measured; ordinary interactive discovery
-  responses remain unobserved. Revalidation and recording share one measured operation.
+  native result request/response bytes are measured. Revalidation and recording share
+  one measured operation.
   Parallel invocation durations are summed and can exceed elapsed job time. Failed
   structured hosts retain only fixed diagnostic fields, JSON types/sizes and recognized
   status tokens. Keep version preflight, invocation and response phases distinct;
@@ -422,7 +422,8 @@ deferred subcommands expose their names eagerly for name-only discovery.
   receipts from their original JSON with unique fields at every nesting level. Reject
   duplicate decoded keys before host status checks, semantic assembly or cleanup;
   converting to a generic value first
-  erases that ambiguity. Malformed replies remain fatal and create no local hold.
+  erases that ambiguity. Malformed remote replies never become semantic values;
+  tool-free roles may retain an exact operational failure. Corrupt stored state refuses.
 - Evidence observers return only a typed observation body or processing-action reason.
   Rust binds native work/node/input and screening selection/batch/input identities from
   the supervised invocation; reject model-supplied identity fields without adopting or
@@ -436,10 +437,17 @@ deferred subcommands expose their names eagerly for name-only discovery.
   rejection journals an exact request/contract-bound receipt, records no decisions and
   defers only that task; unchanged requests spend no calls. Reasons obey compact UTF-8
   JSON string bytes, including quotes/escapes, not character count. Read existing
-  screening-rejections-v1 without rewriting them; new receipts use strict typed v2
-  dispositions. Earlier readers refuse v2 rather than ignore it. Changed
-  requests/contracts can be reconsidered. Malformed replies, corrupt receipts and failed
-  fresh scope validation remain failures. Standalone full-path `select-record`,
+  screening-rejections-v1/v2 without rewriting them; new receipts use strict v3 with
+  separate semantic dispositions and per-packet operational attempts. Earlier readers
+  refuse v3. Semantic rejections match their request/contract; operational failures
+  match the canonical packet across contract changes. Confirmed numeric nonzero exits
+  and unusable tool-free replies hold the selection at that packet; unknown candidates
+  remain incomplete and independent targets continue. Successful current receipts take
+  precedence. `work select-retry --task-id ID --batch-id BATCH` clears only its current
+  operational attempt, with fresh scope/page guards; `--dry-run` writes nothing. Failures
+  earn no semantic progress; failed-only waves end this run without an operation pause.
+  Corrupt receipts, signal/cleanup errors and failed fresh scope validation stay fatal.
+  Standalone full-path `select-record`,
   selection identities and existing paid decisions remain unchanged.
 - Native new questions contain only semantic text/evidence; Rust supplies IDs and
   retains inherited active questions unchanged unless an exact local question key is
