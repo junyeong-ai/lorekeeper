@@ -317,7 +317,7 @@ fn whole_section_failures_are_held_without_repeating_or_creating_semantic_progre
         for (behavior, kind) in [
             ("exit 51", "exited"),
             ("printf 'invalid response'", "invalid-response"),
-            ("sleep 3", "timed-out"),
+            ("exec sleep 30", "timed-out"),
         ] {
             let fixture = Fixture::new(
                 engine,

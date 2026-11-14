@@ -5188,7 +5188,7 @@ fn a_failed_host_stops_period_planning_and_preserves_final_read_checks() {
 
 #[test]
 fn deadline_preserves_pending_work_and_releases_the_workflow() {
-    let fixture = Fixture::new("codex", 1, "while :; do sleep 1; done");
+    let fixture = Fixture::new("codex", 1, "exec sleep 30");
     fixture.ingest();
     let (output, result) = fixture.run("process");
     assert!(!output.status.success());
