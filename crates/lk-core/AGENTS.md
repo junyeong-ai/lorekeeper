@@ -14,6 +14,8 @@ config loading and the shared filesystem primitives intentionally perform I/O.
   and the optional operational automation policy. Preserve
   the separate complete byte revision for live workflow pinning. Direct deserialization
   has no loaded policy revision; it must not fabricate one from resolved paths.
+  Null `execution` and global/profile `work` containers mean their defaults;
+  other supplied values still pass the ordinary typed field validation.
 - Optional typed `execution.stages` references existing profiles. Omission and an
   empty mapping retain the existing semantic policy; normalize only this new empty
   field without changing the v1 profile/model identity rules. Nonempty routing and

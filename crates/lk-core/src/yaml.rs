@@ -6,6 +6,14 @@
 
 use serde::Deserialize;
 
+pub(crate) fn default_on_null<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    Option::<T>::deserialize(deserializer).map(Option::unwrap_or_default)
+}
+
 pub fn from_str<'de, T: Deserialize<'de>>(input: &'de str) -> Result<T, serde_saphyr::Error> {
     let options = serde_saphyr::options! {
         strict_booleans: true,

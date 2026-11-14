@@ -52,7 +52,7 @@ pub struct Config {
     pub synthesis: SynthesisConfig,
     #[serde(default)]
     pub llm: LlmConfig,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::yaml::default_on_null")]
     pub execution: crate::execution::ExecutionConfig,
     /// Concept extraction and categorization settings.
     #[serde(default)]
@@ -1922,13 +1922,13 @@ mod tests {
                     format!("{base}execution: {{work: {work}}}\n")
                 }
             };
-            let default = if profile { "{}" } else { "null" };
             for (before, after) in [
                 (
-                    default,
+                    "null",
                     "{max_calls: 9, max_parallel: 2, max_screening_batches: 1, max_consecutive_calls: 8}",
                 ),
-                ("{max_calls: 9}", default),
+                ("{}", "{max_calls: 9}"),
+                ("{max_calls: 9}", "null"),
             ] {
                 std::fs::write(&path, config(before)).unwrap();
                 let old = Config::load(&path)

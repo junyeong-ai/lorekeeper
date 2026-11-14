@@ -103,6 +103,7 @@ pub struct ExecutionConfig {
     pub operations: BTreeMap<ExecutionOperation, String>,
     #[serde(default, deserialize_with = "stage_profiles")]
     pub stages: BTreeMap<ExecutionStage, String>,
+    #[serde(deserialize_with = "crate::yaml::default_on_null")]
     pub work: SemanticWorkConfig,
     pub automation: Option<AutomationConfig>,
     #[serde(skip)]
@@ -253,7 +254,7 @@ impl ClaudeCodeEffort {
 #[serde(tag = "engine", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum ExecutionProfile {
     ClaudeCode {
-        #[serde(default)]
+        #[serde(default, deserialize_with = "crate::yaml::default_on_null")]
         work: SemanticWorkOverrides,
         #[serde(default = "claude_executable")]
         executable: PathBuf,
@@ -266,7 +267,7 @@ pub enum ExecutionProfile {
         timeout_seconds: NonZeroU64,
     },
     Codex {
-        #[serde(default)]
+        #[serde(default, deserialize_with = "crate::yaml::default_on_null")]
         work: SemanticWorkOverrides,
         #[serde(default = "codex_executable")]
         executable: PathBuf,
@@ -664,7 +665,15 @@ mod tests {
 
     #[test]
     fn semantic_work_defaults_and_valid_boundaries_are_explicit() {
-        for body in ["{}", "work: {}", "work: null"] {
+        for body in [
+            "{}",
+            "work: {}",
+            "work: null",
+            "work: ~",
+            "work:",
+            "profiles: {x: {engine: codex, timeout_seconds: 30, work: null}}",
+            "profiles: {x: {engine: claude-code, timeout_seconds: 30, work: null}}",
+        ] {
             let config: ExecutionConfig = crate::yaml::from_str(body).unwrap();
             config.validate().unwrap();
             assert_eq!(config.work.max_input_bytes, 262_144);
