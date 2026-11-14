@@ -183,7 +183,7 @@ assert request['kind']=='audit-discovery', 'fixed output identity must not launc
 with (root/'discovery-calls').open('a') as stream: stream.write('discovery\n')
 for path in (root/'reviews').glob('*.md'):
     shutil.copyfile(path,root/'vault/wiki/explorations'/path.name)
-value={'subjects':[{'subject_ref':subject['subject_ref'],'queries':[{'query':'private absent capacity fixture','phrase':True,'spacing':False}]} for subject in request['subjects']]}
+value={'subjects':[{'subject_ref':subject['subject_ref'],'status':'complete','reason':None,'queries':[{'query':'private absent capacity fixture','phrase':True,'spacing':False}]} for subject in request['subjects']]}
 if '--output-last-message' in sys.argv:
     Path(sys.argv[sys.argv.index('--output-last-message')+1]).write_text(json.dumps(value))
 if '--json-schema' in sys.argv:

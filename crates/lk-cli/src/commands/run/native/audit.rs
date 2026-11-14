@@ -289,7 +289,7 @@ impl Runner<'_> {
             slots.truncate(count);
             let mut metrics = WorkStepMetrics::new(WorkRole::Finalizer);
             metrics.stages = vec![ExecutionStage::Audit];
-            let Some(response) = self
+            let Some(ResultReply::Complete(response)) = self
                 .request_result(&request, &execution::audit::schema(), &mut metrics)
                 .await
             else {

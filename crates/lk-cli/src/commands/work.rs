@@ -14,6 +14,7 @@ mod discovery;
 pub(super) mod generation;
 #[cfg(unix)]
 pub(super) mod native;
+pub(super) mod preparation;
 mod publication;
 mod receipt;
 mod resources;
@@ -83,6 +84,20 @@ pub enum WorkCommand {
         task_id: String,
         #[arg(long)]
         batch_id: String,
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Clear one retained preparation hold without invoking an agent
+    RetryPreparation {
+        #[arg(long, value_enum)]
+        stage: preparation::Stage,
+        #[arg(long, required_unless_present = "path", conflicts_with = "path")]
+        task_id: Option<String>,
+        #[arg(long, required_unless_present = "task_id", conflicts_with = "task_id")]
+        path: Option<String>,
+        /// Exact retained preparation input hash reported by the failed run
+        #[arg(long)]
+        input_revision: String,
         #[arg(long)]
         dry_run: bool,
     },
@@ -2403,7 +2418,13 @@ pub(super) fn audit_processing_hold_controlled(
         return Err(error);
     }
     if candidate.discovery.is_none() {
-        return Ok(None);
+        let binding = preparation::Binding::audit_discovery(
+            &candidate.path,
+            &candidate.file_revision,
+            &json!({}),
+            &json!({}),
+        )?;
+        return Ok(binding.held(root)?.map(AuditProcessingHold::Action));
     }
     if let Some(progress) = candidate
         .discovery
@@ -2437,6 +2458,20 @@ pub(super) fn audit_processing_hold_controlled(
                     "complete audit discovery needs {} packets, above max_screening_batches {}; all candidates remain retained",
                     admission.required_batches, admission.maximum_batches
                 ))));
+            }
+            if let Some(request) = packet.request {
+                let native = super::execution::preparation::screening_request(
+                    &request,
+                    &packet.request_revision.expect("prepared packet revision"),
+                )?;
+                let binding = preparation::Binding::audit_screening(
+                    &request,
+                    &native,
+                    &super::execution::preparation::screening_schema(),
+                )?;
+                if let Some(reason) = binding.held(root)? {
+                    return Ok(Some(AuditProcessingHold::Action(reason)));
+                }
             }
         }
         return Ok(None);
@@ -3886,6 +3921,71 @@ pub async fn run(opts: &GlobalOptions, command: WorkCommand) -> miette::Result<(
     let (config, config_revision) = load_config_with_revision(&find_config(opts)?)?;
     let root = config.vault.root_path().canonicalize().into_diagnostic()?;
     let output = match command {
+        #[cfg(unix)]
+        WorkCommand::RetryPreparation {
+            stage,
+            task_id,
+            path,
+            input_revision,
+            dry_run,
+        } => {
+            let prepare = |root: &Path| {
+                use preparation::{Key, Stage};
+                let key = match (stage, &task_id, &path) {
+                    (Stage::ExtractionDiscovery | Stage::WholeSection, Some(task_id), None) => {
+                        let task = crate::commands::queue::current_task(root, task_id)?;
+                        match stage {
+                            Stage::ExtractionDiscovery
+                                if task.kind == lk_queue::TaskKind::ExtractConcepts =>
+                            {
+                                Key::ExtractionDiscovery {
+                                    task_id: task.task_id,
+                                    cache_hash: task.cache_hash,
+                                }
+                            }
+                            Stage::WholeSection
+                                if super::execution::finalization::supports(task.kind) =>
+                            {
+                                Key::WholeSection {
+                                    task_id: task.task_id,
+                                    cache_hash: task.cache_hash,
+                                }
+                            }
+                            _ => {
+                                return Err(miette::miette!(
+                                    "preparation stage does not match the current task kind"
+                                ));
+                            }
+                        }
+                    }
+                    (Stage::AuditDiscovery, None, Some(path)) => {
+                        Key::AuditDiscovery { path: path.clone() }
+                    }
+                    (Stage::AuditScreening, None, Some(path)) => {
+                        Key::AuditScreening { path: path.clone() }
+                    }
+                    _ => {
+                        return Err(miette::miette!(
+                            "queue preparation requires --task-id; audit preparation requires --path"
+                        ));
+                    }
+                };
+                preparation::plan_retry(root, &key, &input_revision)
+            };
+            if dry_run {
+                prepare(&root)?
+                    .validate_addresses(&root)
+                    .into_diagnostic()?;
+            } else {
+                let session = super::publication::acquire_mutation_now(&root)?;
+                session.apply(prepare(session.root())?).into_diagnostic()?;
+            }
+            json!({"task_id":task_id,"path":path,"input_revision":input_revision,"dry_run":dry_run})
+        }
+        #[cfg(not(unix))]
+        WorkCommand::RetryPreparation { .. } => {
+            return Err(miette::miette!("native preparation retries require Unix"));
+        }
         #[cfg(unix)]
         WorkCommand::SelectRetry {
             task_id,

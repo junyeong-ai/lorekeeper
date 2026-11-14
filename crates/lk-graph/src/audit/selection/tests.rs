@@ -350,6 +350,39 @@ fn packet_status_requires_the_exact_assigned_receipt_and_distinguishes_input_dri
 }
 
 #[test]
+fn packet_guard_pins_the_validated_subject_and_candidate_bytes() {
+    for subject in [true, false] {
+        let fixture = Fixture::new(2);
+        let packet = fixture.packet(1, false);
+        let request = packet.request.as_ref().unwrap();
+        let mut mutation = MutationPlan::default();
+        assert!(matches!(
+            guard_packet(
+                &fixture.root,
+                &fixture.dirs,
+                &fixture.candidate(),
+                request,
+                &mut mutation,
+                &ReadControl::default()
+            )
+            .unwrap(),
+            PacketStatus::Unrecorded
+        ));
+        mutation.create(".lorekeeper/guard-proof.json", "must remain absent".into());
+        let path = if subject {
+            SUBJECT
+        } else {
+            &request.candidates[0].candidate.path
+        };
+        let before = std::fs::read_to_string(fixture.root.join(path)).unwrap();
+        fixture.write(path, &(before + "\nA changed authored scope.\n"));
+        let session = MutationSession::acquire(&fixture.root).unwrap();
+        assert!(session.apply(mutation).is_err());
+        assert!(!fixture.root.join(".lorekeeper/guard-proof.json").exists());
+    }
+}
+
+#[test]
 fn scope_capacity_counts_the_complete_roster_without_discarding_paid_decisions() {
     let fixture = Fixture::new(5);
     let mut limits = fixture.limits();

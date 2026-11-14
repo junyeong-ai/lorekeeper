@@ -49,12 +49,14 @@ else:
 with (root/'screen-calls.jsonl').open('a') as stream:
     stream.write(json.dumps({'request':hashlib.sha256(json.dumps(request,sort_keys=True).encode()).hexdigest(),
         'keys':[card['candidate']['path'] for card in request['candidates']]})+'\n')
-response={'decisions':[{'candidate_ref':card['candidate_ref'],
+if mode=='failed': raise SystemExit(51)
+response={'status':'complete','reason':None,'decisions':[{'candidate_ref':card['candidate_ref'],
     'decision':('defer' if mode=='defer-first' and card['candidate']['path'].endswith('/candidate-00.md') else 'not-selected'),
     'reason':'The declared scope is inapplicable, or its explicit prerequisite is unresolved.'}
     for card in request['candidates']]}
 if mode=='missing': response['decisions']=[]
 if mode=='other-packet': response['decisions'][0]['candidate_ref']='unassigned'
+if mode=='action': response={'status':'needs-action','decisions':None,'reason':'A required candidate read needs an explicit decision.'}
 if '--output-last-message' in sys.argv:
     Path(sys.argv[sys.argv.index('--output-last-message')+1]).write_text(json.dumps(response))
 if '--json-schema' in sys.argv:
@@ -241,27 +243,28 @@ fn native_audit_screening_keeps_defer_and_advances_later_unknown_candidates() {
 #[test]
 fn native_audit_screening_requires_complete_unique_returned_candidates() {
     for engine in ["codex", "claude-code"] {
-        for mode in ["missing", "other-packet"] {
+        for mode in ["missing", "other-packet", "failed", "action"] {
             let fixture = fixture(engine, 3, mode, false, RECORD_AUDIT);
             let (_, report) = fixture.run("knowledge");
-            assert_eq!(report["halted"], true, "{mode}: {report}");
+            assert_eq!(report["halted"], false, "{mode}: {report}");
             assert_eq!(report["semantic_calls"], 1, "{report}");
             assert!(
                 report["stages"]
                     .as_array()
                     .unwrap()
                     .iter()
-                    .any(|stage| stage["name"] == "audit screening response"
+                    .any(|stage| stage["name"] == "audit screening input held"
                         && stage["state"] == "failed"),
                 "{report}"
             );
             assert_eq!(packet(&fixture)["progress"]["unknown"], 3);
-            if mode == "missing" {
-                let (_, repeated) = fixture.run("knowledge");
-                assert_eq!(repeated["halted"], true, "{repeated}");
-                assert_eq!(repeated["semantic_calls"], 1, "{repeated}");
-                assert_eq!(calls(&fixture)[0]["request"], calls(&fixture)[1]["request"]);
-            }
+            let (_, repeated) = fixture.run("knowledge");
+            assert_eq!(repeated["halted"], false, "{repeated}");
+            assert_eq!(
+                calls(&fixture).len(),
+                1,
+                "the held packet must not be invoked again: {repeated}"
+            );
         }
     }
 }

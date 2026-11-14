@@ -30,7 +30,13 @@ Do not bypass the preflight or record an assessment to hide an unresolved violat
 
 ## Related-document discovery
 
-For `discover`, prepare search scope only for the exact selected subjects, then return.
+For standalone `discover`, prepare search scope only for the exact selected subjects,
+then return. Native `audit-discovery` receives revision-pinned subject references and
+uses read-only tools. Return each subject_ref with `status: complete`, `queries` and
+`reason: null`, or `status: needs-action`, `queries: null` and a nonblank reason within
+256 compact JSON bytes. Rust revalidates and records the recipes; the worker writes no
+files or CLI receipts. Native batches preserve all subjects across exact byte-bounded
+prefixes; the minimum reply bound makes no lexical or quality claim.
 For standalone maintenance, do this before reading the expanded audit inputs when
 `candidate.discovery` is null. Native maintenance performs discovery before partitioning.
 
@@ -68,15 +74,20 @@ assessments or performs repairs.
 
 Run `lore wiki audit-candidates SUBJECT` for the next bounded packet. Copy its top-level
 `request_revision` to the submission's `packet_revision`, and `request.subject` to `path`.
-In native `screen`, read the assigned request file and copy the prompt's supplied
-`packet_revision`; do not fetch another packet. Read the subject's revision-pinned scope
-through `wiki read` and judge
-every assigned card independently. A card is a discovery preview, not evidence of a
+Native `audit-screening` uses read-only tools for the exact supplied subject and
+relevant candidate bodies. Return `{status: complete, reason: null, decisions: [...]}`
+using each assigned `candidate_ref`, decision and bounded reason; do not return paths
+or packet identities. If a required read cannot be completed, return
+`{status: needs-action, decisions: null, reason: "..."}` with a nonblank reason within
+256 compact JSON bytes. Rust owns packet binding, revalidation and publication.
+
+For standalone `screen`, read the subject's revision-pinned scope through `wiki read`
+and judge every assigned card independently. A card is a discovery preview, not evidence of a
 completed source read. Use `inspect` for potentially applicable or uncertain scope,
 `not-selected` for inapplicable scope, or `defer` for an explicit unresolved prerequisite.
 Mandatory evidence and direct links remain required regardless of these decisions.
 
-Submit `lore wiki audit-select --file FILE` with the exact assigned keys and revisions:
+Standalone screening submits `lore wiki audit-select --file FILE` with the exact assigned keys and revisions:
 
 ```json
 {
@@ -93,9 +104,8 @@ Submit `lore wiki audit-select --file FILE` with the exact assigned keys and rev
 ```
 
 Include exactly one reasoned decision per assigned card, preserving order. Keep each
-reason within `max_reason_json_bytes`, including JSON quotes and escapes. Return after
-recording one native packet; the controller verifies its receipt and selects later work.
-Standalone maintenance may request subsequent packets until no unknown candidates remain.
+reason within `max_reason_json_bytes`, including JSON quotes and escapes. Standalone
+maintenance may request subsequent packets until no unknown candidates remain.
 When `refresh` is returned without a request, submit that exact metadata-only object;
 it refreshes the current inventory without another semantic decision.
 
@@ -281,6 +291,15 @@ and owns result files, replanning, publication and final checks. Return judgment
 no repeated intake, reconstructed guards, result-file writes, `work finish` or `audit-record`.
 
 ## Native processing state
+
+Read-only discovery/screening invocation failures and explicit needs-action replies
+hold their exact inputs without marking an audit complete. Successful independent
+results remain retained. Contract changes alone never retry these preparation holds.
+After diagnosis, use `lore work retry-preparation --stage audit-discovery --path PATH
+--input-revision HASH`, or stage `audit-screening`, with the reported retained hash.
+Preview with `--dry-run`. The command clears only that attempt, invokes no agent and
+preserves paid decisions and semantic assessments. Corrupt stored state, local I/O,
+signal/cleanup and tool-enabled failures remain fatal.
 
 An unchanged whole-input `needs-action` is held without another invocation, independent
 of batch peers and response order. Changed input or assessment rules reopen eligibility;

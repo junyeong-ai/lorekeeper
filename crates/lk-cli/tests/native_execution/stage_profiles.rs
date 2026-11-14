@@ -258,7 +258,7 @@ value={{'subjects':[]}}
 for subject in request['subjects']:
     raw=(root/'vault'/subject['path']).read_text()
     title=next(line.removeprefix('title: ') for line in raw.splitlines() if line.startswith('title: '))
-    value['subjects'].append({{'subject_ref':subject['subject_ref'],'queries':[{{'query':title,'phrase':True,'spacing':False}}]}})
+    value['subjects'].append({{'subject_ref':subject['subject_ref'],'status':'complete','reason':None,'queries':[{{'query':title,'phrase':True,'spacing':False}}]}})
 Path(sys.argv[sys.argv.index('--output-last-message')+1]).write_text(json.dumps(value))
 (root/'discovery-finished').write_text('complete')
 DISCOVER

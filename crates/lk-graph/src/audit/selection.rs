@@ -1006,6 +1006,28 @@ pub fn packet_status(
     expected: &ScreeningRequest,
     read: &ReadControl,
 ) -> Result<PacketStatus, GraphError> {
+    capture_packet_status(root, dirs, candidate, expected, None, read)
+}
+
+pub fn guard_packet(
+    root: &Path,
+    dirs: &lk_core::config::VaultDirs,
+    candidate: &AuditCandidate,
+    expected: &ScreeningRequest,
+    mutation: &mut MutationPlan,
+    read: &ReadControl,
+) -> Result<PacketStatus, GraphError> {
+    capture_packet_status(root, dirs, candidate, expected, Some(mutation), read)
+}
+
+fn capture_packet_status(
+    root: &Path,
+    dirs: &lk_core::config::VaultDirs,
+    candidate: &AuditCandidate,
+    expected: &ScreeningRequest,
+    mutation: Option<&mut MutationPlan>,
+    read: &ReadControl,
+) -> Result<PacketStatus, GraphError> {
     let Some(progress) = candidate
         .discovery
         .as_ref()
@@ -1064,6 +1086,13 @@ pub fn packet_status(
     if revision(&current)? != revision(expected)? {
         Ok(PacketStatus::Changed)
     } else {
+        if let Some(mutation) = mutation {
+            captured.guard(root, mutation, read)?;
+            super::guard_candidate_controlled(mutation, root, candidate, read)?;
+            for (path, raw) in &progress.guards {
+                mutation.require_unchanged(path, raw.as_ref().clone());
+            }
+        }
         Ok(PacketStatus::Unrecorded)
     }
 }

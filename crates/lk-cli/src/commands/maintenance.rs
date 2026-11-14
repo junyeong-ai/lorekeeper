@@ -64,30 +64,35 @@ pub async fn run(
         .try_exists()
         .map_err(|error| miette::miette!("inspect work store: {error}"))?;
     let audit_actions_present = super::audit::action::present(&vault_root)?;
+    let audit_preparation_present = super::work::preparation::audit_present(&vault_root)?;
     let audit_selections_present = lk_graph::audit::selection::present(&vault_root)
         .map_err(|error| miette::miette!("{error}"))?;
     #[cfg(unix)]
-    let work_lease =
-        if (work_present || audit_actions_present || audit_selections_present) && !dry_run {
-            let lease = super::workflow::WorkflowLease::prepare_selected(
-                opts,
-                &config,
-                &vault_root,
-                config_path.clone(),
-                config_revision.clone(),
-            )?;
-            lease.root_pin().validate()?;
-            match lease.try_lock() {
-                Ok(()) => {
-                    lease.root_pin().validate()?;
-                    Some(lease)
-                }
-                Err(std::fs::TryLockError::WouldBlock) => None,
-                Err(error) => return Err(miette::miette!("work retention lease: {error}")),
+    let work_lease = if (work_present
+        || audit_actions_present
+        || audit_selections_present
+        || audit_preparation_present)
+        && !dry_run
+    {
+        let lease = super::workflow::WorkflowLease::prepare_selected(
+            opts,
+            &config,
+            &vault_root,
+            config_path.clone(),
+            config_revision.clone(),
+        )?;
+        lease.root_pin().validate()?;
+        match lease.try_lock() {
+            Ok(()) => {
+                lease.root_pin().validate()?;
+                Some(lease)
             }
-        } else {
-            None
-        };
+            Err(std::fs::TryLockError::WouldBlock) => None,
+            Err(error) => return Err(miette::miette!("work retention lease: {error}")),
+        }
+    } else {
+        None
+    };
     #[cfg(unix)]
     let work_available = dry_run || work_lease.is_some();
     #[cfg(not(unix))]
@@ -179,6 +184,11 @@ pub async fn run(
                 "{prefix}audit actions: retained; exclusive Unix workflow access is unavailable."
             );
         }
+    }
+    if audit_preparation_present && work_available {
+        let removed =
+            super::work::preparation::prune_absent_audits(&vault_root, _mutation.as_ref())?;
+        eprintln!("{prefix}audit preparation: pruned {removed} attempts for absent subjects.");
     }
 
     // 1. Prune ingest log

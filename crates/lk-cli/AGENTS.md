@@ -34,8 +34,8 @@ deferred subcommands expose their names eagerly for name-only discovery.
   node/task kind before each invocation; never route from prompts or paths. Independent
   read waves retain per-request host/timeout/decoder association; generation batches
   require the same resolved profile name. Reuse the shared engine adapters and
-  both-engine installation claims. Interactive returned-host telemetry is not retained
-  semantic progress or publication proof.
+  both-engine installation claims. Host success alone is neither retained semantic
+  progress nor publication proof.
 - Revalidate pinned configuration/root and cancellation after awaited host-version
   preflight, before reserving a turn or counting/invoking a semantic call.
 - `commands/workflow.rs` is a Unix foreground coordinator for long LLM consumers, not a
@@ -391,6 +391,23 @@ deferred subcommands expose their names eagerly for name-only discovery.
   their own receipts. Preserve revision-pinned subject reads: title-only selection is
   insufficient. Keep recipes registered during a host read, defer changed packet scope,
   and count only newly recorded recipes/packets as retained progress.
+  Discovery replies cover every assigned subject with complete queries or an explicit
+  needs-action; audit screening returns complete decisions or needs-action. Prepare a
+  fitting prefix from exact input bytes and minimum complete-reply bytes, retaining
+  all remaining subjects. This wire feasibility bound supplies no lexical queries.
+  Confirmed timeouts/numeric exits and invalid remote responses from read-only hosts
+  retain input-bound operational attempts; local transport I/O/kind, signal/cleanup,
+  unknown errors and tool-enabled failures stay fatal. Four closed preparation owners
+  are extraction discovery, audit discovery, audit screening and whole sections. Their
+  latest per-parent attempts stay separate from semantic actions and paid decisions;
+  unchanged input holds survive instruction-contract changes. Only semantic needs-action
+  earns action progress; an all-failed invocation wave ends this run without an operation
+  pause. Queue pruning retains pending task/cache attempts; maintenance removes audit
+  attempts only for absent subjects under workflow coordination.
+  `work retry-preparation` requires its stage, task/path selector and exact reported input
+  revision. It removes only that retained attempt under current task/subject guards;
+  dry runs write/recover nothing. Clearing metadata never invokes a host, grants
+  refinement or replaces the full ordinary admission before a later call.
 - Native inspection/reduction and screening are structured inference roles
   (`execution/observation.rs`); bounded single-section finalization uses
   `execution/finalization.rs`. Rust selects applicable shared generation rules through

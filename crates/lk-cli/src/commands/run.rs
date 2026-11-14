@@ -273,6 +273,11 @@ mod native {
         InvocationFailed(crate::commands::work::state::InvocationFailure),
     }
 
+    enum ResultReply {
+        Complete(serde_json::Value),
+        InvocationFailed(crate::commands::work::state::InvocationFailure),
+    }
+
     enum ObservationStep {
         Recorded,
         Retry,
@@ -1463,7 +1468,6 @@ mod native {
             };
             if !child.success {
                 if child.termination == execution::ChildTermination::TimedOut
-                    && matches!(metrics.role, WorkRole::Evidence)
                     && self.configuration_is_current()
                 {
                     metrics.outcome = WorkOutcome::Failed;
@@ -1472,10 +1476,17 @@ mod native {
                         execution::diagnostic::Phase::Invocation,
                         &child,
                     ));
-                    return Some(ObservationReply::TimedOut);
+                    return Some(if matches!(metrics.role, WorkRole::Evidence) {
+                        ObservationReply::TimedOut
+                    } else {
+                        ObservationReply::InvocationFailed(
+                            crate::commands::work::state::InvocationFailure::TimedOut {
+                                engine: invocation.engine,
+                            },
+                        )
+                    });
                 }
-                if matches!(metrics.role, WorkRole::Evidence)
-                    && let Some(code) = child.failed_exit()
+                if let Some(code) = child.failed_exit()
                     && self.configuration_is_current()
                 {
                     metrics.outcome = WorkOutcome::Failed;
@@ -2415,7 +2426,7 @@ mod native {
             request: &serde_json::Value,
             schema: &serde_json::Value,
             metrics: &mut WorkStepMetrics,
-        ) -> Option<serde_json::Value> {
+        ) -> Option<ResultReply> {
             metrics.request_json_bytes = Some(
                 serde_json::to_vec(request)
                     .expect("request serializes")
@@ -2527,6 +2538,22 @@ mod native {
                     execution::diagnostic::Phase::Invocation,
                     &child,
                 ));
+                if matches!(access, execution::AgentAccess::ReadOnly) {
+                    let engine = self.agent_profile(metrics).engine();
+                    if let Some(code) = child.failed_exit() {
+                        return Some(ResultReply::InvocationFailed(
+                            crate::commands::work::state::InvocationFailure::Exited {
+                                engine,
+                                code,
+                            },
+                        ));
+                    }
+                    if child.termination == execution::ChildTermination::TimedOut {
+                        return Some(ResultReply::InvocationFailed(
+                            crate::commands::work::state::InvocationFailure::TimedOut { engine },
+                        ));
+                    }
+                }
                 self.failure(
                     "native result host",
                     child.detail.unwrap_or_else(|| "host failed".into()),
@@ -2546,21 +2573,23 @@ mod native {
                             .expect("response serializes")
                             .len(),
                     );
-                    Some(value)
+                    Some(ResultReply::Complete(value))
                 }
                 Err(error) => {
                     metrics.outcome = WorkOutcome::Failed;
                     if self.agent_profile(metrics).engine()
                         == lk_core::execution::AgentEngine::ClaudeCode
-                        && error
-                            .downcast_ref::<crate::commands::work::state::OutputCapacity>()
-                            .is_none()
                     {
                         metrics.host_failure =
                             Some(execution::diagnostic::HostFailure::from_response(
                                 lk_core::execution::AgentEngine::ClaudeCode,
                                 &child.stdout,
                             ));
+                    }
+                    if matches!(access, execution::AgentAccess::ReadOnly)
+                        && let execution::result::ResponseError::Remote { failure, .. } = error
+                    {
+                        return Some(ResultReply::InvocationFailed(failure));
                     }
                     self.failure("native result response", error);
                     None
@@ -2579,7 +2608,8 @@ mod native {
             } else {
                 crate::commands::work::generation::schema()
             };
-            let Some(response) = self.request_result(&result.request, &schema, metrics).await
+            let Some(ResultReply::Complete(response)) =
+                self.request_result(&result.request, &schema, metrics).await
             else {
                 return WorkStep::Failed;
             };
@@ -2677,7 +2707,7 @@ mod native {
                     }
                 };
             metrics.preparation_duration_ms = Some(started.elapsed().as_millis() as u64);
-            let Some(value) = self
+            let Some(ResultReply::Complete(value)) = self
                 .request_result(
                     &request,
                     &crate::commands::work::generation::schema(),
@@ -2816,21 +2846,47 @@ mod native {
             section: crate::commands::work::section::Section,
             metrics: &mut WorkStepMetrics,
         ) -> WorkStep {
-            let Some(ObservationReply::Output { engine, bytes, .. }) = self
+            let response = match self
                 .request_observation(section.request.clone(), metrics)
                 .await
-            else {
-                return WorkStep::Failed;
-            };
-            let (response, bytes) =
-                match execution::finalization::decode(engine, &bytes, section.max_response_bytes) {
-                    Ok(response) => response,
-                    Err(error) => {
-                        self.failure("whole-section response", error);
-                        return WorkStep::Failed;
+            {
+                Some(ObservationReply::InvocationFailed(failure)) => Err(failure),
+                Some(ObservationReply::Output { engine, bytes, .. }) => {
+                    match execution::finalization::decode(
+                        engine,
+                        &bytes,
+                        section.max_response_bytes,
+                    )
+                    .and_then(|(response, size)| {
+                        section.validate_response(&response)?;
+                        Ok((response, size))
+                    }) {
+                        Ok((response, size)) => {
+                            metrics.result_json_bytes = Some(size);
+                            Ok(response)
+                        }
+                        Err(error) => {
+                            metrics.result_json_bytes = error
+                                .downcast_ref::<crate::commands::work::state::OutputCapacity>()
+                                .map(|capacity| capacity.actual_bytes);
+                            metrics.host_failure = Some(
+                                execution::diagnostic::HostFailure::from_response(engine, &bytes),
+                            );
+                            Err(
+                                crate::commands::work::state::InvocationFailure::InvalidResponse {
+                                    engine,
+                                    revision: lk_core::rss_original::digest(&bytes),
+                                    bytes: bytes.len(),
+                                },
+                            )
+                        }
                     }
-                };
-            metrics.result_json_bytes = Some(bytes);
+                }
+                Some(ObservationReply::TimedOut) => unreachable!(
+                    "whole sections retain failures without an inspection timeout allowance"
+                ),
+                None => return WorkStep::Failed,
+            };
             let started = Instant::now();
             let Some((session, _)) = self.mutation_session("whole-section publication").await
             else {
@@ -2838,6 +2894,30 @@ mod native {
                     metrics.outcome = WorkOutcome::Cancelled;
                 }
                 return WorkStep::Failed;
+            };
+            let response = match response {
+                Ok(response) => response,
+                Err(failure) => {
+                    let result = crate::commands::work::section::hold(
+                        &session,
+                        &self.config,
+                        &self.config_revision,
+                        section,
+                        failure,
+                    );
+                    metrics.revalidation_record_duration_ms =
+                        Some(started.elapsed().as_millis() as u64);
+                    metrics.outcome = WorkOutcome::Failed;
+                    match result {
+                        Ok(reason) => {
+                            self.deferred("whole-section invocation held", reason);
+                        }
+                        Err(error) => {
+                            self.failure("whole-section attempt recording", error);
+                        }
+                    }
+                    return WorkStep::Failed;
+                }
             };
             let result = crate::commands::work::section::finish(
                 &session,
@@ -2879,7 +2959,7 @@ mod native {
             section: crate::commands::work::SectionFinalization,
             metrics: &mut WorkStepMetrics,
         ) -> WorkStep {
-            let Some(value) = self
+            let Some(ResultReply::Complete(value)) = self
                 .request_result(
                     &section.request,
                     &execution::finalization::schema(),
@@ -3744,7 +3824,10 @@ mod native {
                                 }
                             }
                         }
-                        Ok(child) if child.failed_exit().is_some() => {
+                        Ok(child)
+                            if child.failed_exit().is_some()
+                                || child.termination == execution::ChildTermination::TimedOut =>
+                        {
                             step.outcome = WorkOutcome::Failed;
                             step.host_failure =
                                 Some(execution::diagnostic::HostFailure::from_child(
@@ -3752,12 +3835,18 @@ mod native {
                                     execution::diagnostic::Phase::Invocation,
                                     &child,
                                 ));
-                            Some(failed_reply(
-                                crate::commands::work::state::InvocationFailure::Exited {
+                            let failure = match child.failed_exit() {
+                                Some(code) => {
+                                    crate::commands::work::state::InvocationFailure::Exited {
+                                        engine,
+                                        code,
+                                    }
+                                }
+                                None => crate::commands::work::state::InvocationFailure::TimedOut {
                                     engine,
-                                    code: child.failed_exit().expect("numeric failed exit"),
                                 },
-                            ))
+                            };
+                            Some(failed_reply(failure))
                         }
                         Ok(child) => {
                             step.outcome = WorkOutcome::Failed;
@@ -4038,10 +4127,15 @@ mod native {
                         &self.config_revision,
                         task,
                     )? {
-                        jobs.insert(
-                            target.clone(),
-                            QueueDispatch::Discovery { task: task.clone() },
-                        );
+                        if let Some(reason) = self.extraction_discovery_hold(task)? {
+                            keys.remove(target);
+                            deferred.insert(target.clone(), vec![reason]);
+                        } else {
+                            jobs.insert(
+                                target.clone(),
+                                QueueDispatch::Discovery { task: task.clone() },
+                            );
+                        }
                     } else {
                         materialize.push(task.clone());
                     }
@@ -5072,27 +5166,74 @@ mod native {
                     };
                     continue;
                 }
-                let mut metrics = WorkStepMetrics::new(WorkRole::Screening);
-                let response = self
-                    .request_result(
-                        &native,
-                        &execution::preparation::screening_schema(),
-                        &mut metrics,
-                    )
-                    .await;
-                let Some(response) = response else {
-                    self.record_work_step(metrics);
-                    return None;
-                };
-                let output = match execution::preparation::screening_output(
-                    response,
-                    &request,
-                    packet_revision,
+                let schema = execution::preparation::screening_schema();
+                let binding = match crate::commands::work::preparation::Binding::audit_screening(
+                    &request, &native, &schema,
                 ) {
-                    Ok(output) => output,
+                    Ok(binding) => binding,
                     Err(error) => {
+                        self.failure("audit screening binding", error);
+                        return None;
+                    }
+                };
+                match binding.held(&self.root) {
+                    Ok(Some(reason)) => {
+                        self.defer_audit_screening(&candidate, reason);
+                        plan = match self.audit_plan(paths) {
+                            Ok(plan) => plan,
+                            Err(error) => {
+                                self.failure("audit screening replanning", error);
+                                return None;
+                            }
+                        };
+                        continue;
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        self.failure("audit screening hold", error);
+                        return None;
+                    }
+                }
+                let mut metrics = WorkStepMetrics::new(WorkRole::Screening);
+                let response = self.request_result(&native, &schema, &mut metrics).await;
+                let output = match response {
+                    Some(ResultReply::Complete(response)) => {
+                        match execution::preparation::screening_output(
+                            response.clone(),
+                            &request,
+                            packet_revision,
+                        ) {
+                            Ok(execution::preparation::Outcome::Complete(output)) => Ok(output),
+                            Ok(execution::preparation::Outcome::NeedsAction(reason)) => Err(
+                                crate::commands::work::preparation::Disposition::NeedsAction {
+                                    reason,
+                                },
+                            ),
+                            Err(_) => Err(self.invalid_preparation_response(&response, &metrics)),
+                        }
+                    }
+                    Some(ResultReply::InvocationFailed(failure)) => Err(
+                        crate::commands::work::preparation::Disposition::InvocationFailed {
+                            failure,
+                        },
+                    ),
+                    None => {
                         self.record_work_step(metrics);
-                        self.failure("audit screening response", error);
+                        return None;
+                    }
+                };
+                let output = match output {
+                    Ok(output) => output,
+                    Err(disposition) => {
+                        self.hold_audit_screening(
+                            &candidate.path,
+                            &request,
+                            &binding,
+                            disposition,
+                            &mut metrics,
+                        )
+                        .await;
+                        self.record_work_step(metrics);
                         return None;
                     }
                 };
@@ -5192,13 +5333,16 @@ mod native {
                     return None;
                 }
             };
-            let missing = plan
-                .candidates
-                .iter()
-                .filter(|candidate| candidate.discovery.is_none())
-                .map(|candidate| candidate.path.clone())
-                .collect::<Vec<_>>();
-            if !missing.is_empty() {
+            loop {
+                let missing = plan
+                    .candidates
+                    .iter()
+                    .filter(|candidate| candidate.discovery.is_none())
+                    .map(|candidate| candidate.path.clone())
+                    .collect::<Vec<_>>();
+                if missing.is_empty() {
+                    break;
+                }
                 if !self.discover_audit(&missing).await {
                     return None;
                 }
@@ -5209,17 +5353,6 @@ mod native {
                         return None;
                     }
                 };
-                if plan
-                    .candidates
-                    .iter()
-                    .any(|candidate| candidate.discovery.is_none())
-                {
-                    self.failure(
-                        "related-document discovery",
-                        "selected subjects lack current recorded search queries",
-                    );
-                    return None;
-                }
             }
             self.screen_audit_inputs(paths, plan).await
         }

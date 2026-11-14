@@ -262,6 +262,12 @@ timeout allowance. To suspend a known failed input without another host call, us
 changes paid observations, configuration, usage or semantic holds. Keep operational
 records with their Work; published-Work retention owns their cleanup.
 
+Tool-free whole-section invocation failures retain the task's exact preparation input,
+separate from semantic section actions. After diagnosis, use `work retry-preparation
+--stage whole-section --task-id ID --input-revision HASH`, optionally with `--dry-run`.
+The hash comes from the retained failure reported by the run. This clears only that
+operational attempt, without invoking an agent or changing observations or semantic holds.
+
 On Unix, for queue or audit Work with an exact current inspection action, an operator can explicitly
 refine that unfinished node without changing its canonical plan or configuration.
 Use a fresh `lore workflow -- COMMAND` with the original selected configuration and
@@ -339,14 +345,13 @@ reserved next target; changed phase bindings, publication and writer-wait replan
 in-process admission. With `execution.work.max_parallel` above its default 1, ready
 evidence requests and distinct-target screening can run concurrently within the
 remaining call budget. Compatible screening and evidence requests share a contiguous
-fair prefix; serial finalizers and interactive work remain boundaries. Requests in a
+fair prefix; discovery and finalizers remain serial boundaries. Requests in a
 wave never depend on another request in that wave. Preparation and recording use
 separate fresh captures, sharing extraction discovery and loading each Work once
 within their own checkpoint. Each node record reevaluates current dependencies and
 retains its own durable journal transition. Recording checks each exact scope.
 Changed evidence
-refuses an old response. Interactive sessions and finalizers remain serial, as does
-canonical publication.
+refuses an old response. Discovery, finalization and canonical publication remain serial.
 Whole-input queue tasks are batched
 within the evidence input budget with at most one task per target; publication
 refreshes selection before another task on that page. The call budget can leave

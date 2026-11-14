@@ -220,6 +220,10 @@ fn prepare_with_classifier(
     )];
     let mut selection_directories = Vec::new();
     if complete {
+        removed.push((
+            "native preparation attempt(s)",
+            super::super::work::preparation::plan_prune_queue(root, &retained_pending, &mut plan)?,
+        ));
         #[cfg(unix)]
         {
             removed.push((

@@ -33,6 +33,9 @@ mod audit_screening;
 #[path = "native_execution/automation.rs"]
 mod automation;
 
+#[path = "native_execution/preparation.rs"]
+mod preparation;
+
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -250,10 +253,10 @@ if request.get('kind')=='audit-discovery':
         raw=(root/'vault'/subject['path']).read_text()
         title=next((line.removeprefix('title: ') for line in raw.splitlines() if line.startswith('title: ')),Path(subject['path']).stem)
         query=(root/'audit-query').read_text() if (root/'audit-query').exists() else title
-        rows.append({'subject_ref':subject['subject_ref'],'queries':[{'query':query,'phrase':True,'spacing':False}]})
+        rows.append({'subject_ref':subject['subject_ref'],'status':'complete','reason':None,'queries':[{'query':query,'phrase':True,'spacing':False}]})
     value={'subjects':rows}
 elif request.get('kind')=='audit-screening':
-    value={'decisions':[{'candidate_ref':card['candidate_ref'],'decision':'inspect','reason':'Explicit fixture decision to inspect the complete candidate scope.'} for card in request['candidates']]}
+    value={'status':'complete','reason':None,'decisions':[{'candidate_ref':card['candidate_ref'],'decision':'inspect','reason':'Explicit fixture decision to inspect the complete candidate scope.'} for card in request['candidates']]}
 else:
     assert request['schema']=='native-audit-results-v1'
     assert {item['source'] for item in request['contracts']} == {'lore-wiki/references/maintenance.md','lore-wiki/references/curation.md'}
@@ -719,7 +722,7 @@ prompt=Path(os.environ['TEST_INTERACTIVE_INPUT']).read_text() if Path(os.environ
 if '\nNative request:\n' not in prompt: raise SystemExit(100)
 request=json.loads(prompt.split('\nNative request:\n',1)[1])
 if request.get('kind')!='audit-discovery': raise SystemExit(100)
-value={'subjects':[{'subject_ref':subject['subject_ref'],
+value={'subjects':[{'subject_ref':subject['subject_ref'],'status':'complete','reason':None,
     'queries':[{'query':'transactional outbox' if subject['path'].endswith('/a.md') else 'Independent subject b','phrase':True,'spacing':False}]}
     for subject in request['subjects']]}
 if (root/'corrupt-after-discovery').exists():
@@ -3075,7 +3078,7 @@ if '\nNative request:\n' in prompt:
         if (root/'require-unplanned-discovery').exists():
             assert not (root/'vault/.lorekeeper/work').exists(), 'discovery must precede bounded planning'
         assert (root/'vault'/prepared['subjects'][0]['path']).is_file()
-        value={'subjects':[{'subject_ref':subject['subject_ref'],'queries':[{'query':'transactional outbox','phrase':True,'spacing':False}]} for subject in prepared['subjects']]}
+        value={'subjects':[{'subject_ref':subject['subject_ref'],'status':'complete','reason':None,'queries':[{'query':'transactional outbox','phrase':True,'spacing':False}]} for subject in prepared['subjects']]}
         (root/'discovery-called').write_text('returned')
         if '--output-last-message' in sys.argv:
             Path(sys.argv[sys.argv.index('--output-last-message')+1]).write_text(json.dumps(value))
@@ -7525,79 +7528,91 @@ fn native_screening_wave_preserves_independent_response_when_a_peer_fails() {
 #[test]
 fn failed_only_screening_wave_stops_without_progress_and_requires_exact_explicit_retry() {
     for engine in ["codex", "claude-code"] {
-        let fixture = parallel_screening_fixture(engine, "failed", 2);
-        let agent = fixture.root().join("agent executable");
-        let body = std::fs::read_to_string(&agent).unwrap().replace(
-            "if leader and mode=='failed': raise SystemExit(51)",
-            "if mode=='failed': raise SystemExit(51)",
-        );
-        std::fs::write(agent, body).unwrap();
-        let (_, report) = fixture.run("process");
-        assert_eq!(report["semantic_calls"], 2, "{report}");
-        assert_eq!(report["halted"], false, "{report}");
-        assert_eq!(
-            report["retained_progress"]["action_receipts"], 0,
-            "{report}"
-        );
-        assert_eq!(screening_receipts(&fixture), 0);
-        let (_, repeated) = fixture.run("process");
-        assert_eq!(repeated["semantic_calls"], 0, "{repeated}");
-        assert_eq!(repeated["halted"], false, "{repeated}");
-        let status = execution_json(&fixture, &["queue", "status", "--json"]);
-        let task = status["data"]["tasks"][0]["task_id"].as_str().unwrap();
-        let selected = execution_json(&fixture, &["work", "select", "--task-id", task]);
-        let batch = selected["request"]["batch_id"].as_str().unwrap();
-        let before = walkdir::WalkDir::new(fixture.root().join("vault/.lorekeeper/queue"))
-            .into_iter()
-            .map(Result::unwrap)
-            .filter(|entry| entry.file_type().is_file())
-            .map(|entry| {
-                (
-                    entry.path().to_owned(),
-                    std::fs::read(entry.path()).unwrap(),
-                )
-            })
-            .collect::<Vec<_>>();
-        execution_json(
-            &fixture,
-            &[
-                "work",
-                "select-retry",
-                "--task-id",
-                task,
-                "--batch-id",
-                batch,
-                "--dry-run",
-            ],
-        );
-        for (path, bytes) in &before {
-            assert_eq!(&std::fs::read(path).unwrap(), bytes);
+        for timeout in [false, true] {
+            let fixture = parallel_screening_fixture(engine, "failed", 2);
+            let agent = fixture.root().join("agent executable");
+            let body = std::fs::read_to_string(&agent).unwrap().replace(
+                "if leader and mode=='failed': raise SystemExit(51)",
+                if timeout {
+                    "if mode=='failed': time.sleep(3)"
+                } else {
+                    "if mode=='failed': raise SystemExit(51)"
+                },
+            );
+            std::fs::write(agent, body).unwrap();
+            if timeout {
+                let config = std::fs::read_to_string(&fixture.config)
+                    .unwrap()
+                    .replace("timeout_seconds: 30", "timeout_seconds: 1");
+                std::fs::write(&fixture.config, config).unwrap();
+            }
+            let (_, report) = fixture.run("process");
+            assert_eq!(report["semantic_calls"], 2, "{report}");
+            assert_eq!(report["halted"], false, "{report}");
+            assert_eq!(
+                report["retained_progress"]["action_receipts"], 0,
+                "{report}"
+            );
+            assert_eq!(screening_receipts(&fixture), 0);
+            let (_, repeated) = fixture.run("process");
+            assert_eq!(repeated["semantic_calls"], 0, "{repeated}");
+            assert_eq!(repeated["halted"], false, "{repeated}");
+            let status = execution_json(&fixture, &["queue", "status", "--json"]);
+            let task = status["data"]["tasks"][0]["task_id"].as_str().unwrap();
+            let selected = execution_json(&fixture, &["work", "select", "--task-id", task]);
+            let batch = selected["request"]["batch_id"].as_str().unwrap();
+            let before = walkdir::WalkDir::new(fixture.root().join("vault/.lorekeeper/queue"))
+                .into_iter()
+                .map(Result::unwrap)
+                .filter(|entry| entry.file_type().is_file())
+                .map(|entry| {
+                    (
+                        entry.path().to_owned(),
+                        std::fs::read(entry.path()).unwrap(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            execution_json(
+                &fixture,
+                &[
+                    "work",
+                    "select-retry",
+                    "--task-id",
+                    task,
+                    "--batch-id",
+                    batch,
+                    "--dry-run",
+                ],
+            );
+            for (path, bytes) in &before {
+                assert_eq!(&std::fs::read(path).unwrap(), bytes);
+            }
+            execution_json(
+                &fixture,
+                &[
+                    "work",
+                    "select-retry",
+                    "--task-id",
+                    task,
+                    "--batch-id",
+                    batch,
+                ],
+            );
+            let rejected = fixture
+                .command()
+                .args([
+                    "work",
+                    "select-retry",
+                    "--task-id",
+                    task,
+                    "--batch-id",
+                    batch,
+                ])
+                .output()
+                .unwrap();
+            assert!(!rejected.status.success());
+            assert_eq!(screening_receipts(&fixture), 0);
         }
-        execution_json(
-            &fixture,
-            &[
-                "work",
-                "select-retry",
-                "--task-id",
-                task,
-                "--batch-id",
-                batch,
-            ],
-        );
-        let rejected = fixture
-            .command()
-            .args([
-                "work",
-                "select-retry",
-                "--task-id",
-                task,
-                "--batch-id",
-                batch,
-            ])
-            .output()
-            .unwrap();
-        assert!(!rejected.status.success());
-        assert_eq!(screening_receipts(&fixture), 0);
     }
 }
 

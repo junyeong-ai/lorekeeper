@@ -10,6 +10,7 @@ pub(in crate::commands) struct Section {
     pub max_response_bytes: usize,
     prepared: Prepared,
     result: lk_queue::SectionResult,
+    binding: super::preparation::Binding,
 }
 
 pub(in crate::commands) enum Preparation {
@@ -19,6 +20,19 @@ pub(in crate::commands) enum Preparation {
         request_bytes: usize,
         max_input_bytes: usize,
     },
+}
+
+impl Section {
+    pub fn validate_response(
+        &self,
+        response: &crate::commands::execution::finalization::SectionResponse,
+    ) -> miette::Result<()> {
+        if let crate::commands::execution::finalization::SectionResponse::Complete(body) = response
+        {
+            super::validate_section_response(&self.request, body)?;
+        }
+        Ok(())
+    }
 }
 
 use super::action::{Action, SECTION, digest};
@@ -125,12 +139,73 @@ pub(in crate::commands) fn prepare_controlled(
         }
         return Ok(Preparation::NeedsAction(action.reason));
     }
+    let binding = super::preparation::Binding::build(
+        super::preparation::Key::WholeSection {
+            task_id: task.task_id,
+            cache_hash: task.cache_hash,
+        },
+        task.target.vault_path,
+        result.target_revision.clone(),
+        &json!({"work":request["work"],"events":request["events"]}),
+        &request,
+        &crate::commands::execution::finalization::schema(),
+    )?;
+    if let Some(reason) = binding.held(&root)? {
+        return Ok(Preparation::NeedsAction(reason));
+    }
     Ok(Preparation::Ready(Box::new(Section {
         request,
         max_response_bytes,
         prepared,
         result,
+        binding,
     })))
+}
+
+pub(in crate::commands) fn hold(
+    session: &lk_vault::MutationSession,
+    config: &lk_core::config::Config,
+    config_revision: &str,
+    section: Section,
+    failure: super::state::InvocationFailure,
+) -> miette::Result<String> {
+    let read = section.prepared.read_control().clone();
+    let Preparation::Ready(current) = prepare_controlled(
+        session.root(),
+        config,
+        config_revision,
+        &section.result.task_id,
+        &read,
+    )?
+    else {
+        return Err(miette::miette!(
+            "section needs fresh preparation before retaining its invocation failure"
+        ));
+    };
+    if current.request != section.request {
+        return Err(miette::miette!(
+            "section inputs changed before retaining its invocation failure"
+        ));
+    }
+    let mut plan = current.binding.plan_record(
+        session.root(),
+        super::preparation::Disposition::InvocationFailed { failure },
+    )?;
+    current.prepared.guard_pages(&mut plan);
+    let _queue =
+        crate::commands::queue::claim_writer(&session.root().join(".lorekeeper/queue"), false)?;
+    let task = crate::commands::queue::current_task_controlled(
+        session.root(),
+        &section.result.task_id,
+        &read,
+    )?;
+    crate::commands::queue::guard_current_task(session.root(), &task, &mut plan)?;
+    read.check().into_diagnostic()?;
+    session.apply(plan).into_diagnostic()?;
+    current
+        .binding
+        .held(session.root())?
+        .ok_or_else(|| miette::miette!("section hold changed after recording"))
 }
 
 pub(in crate::commands) fn finish(

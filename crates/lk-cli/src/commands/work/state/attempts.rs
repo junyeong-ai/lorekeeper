@@ -14,6 +14,9 @@ fn storage_bound(nodes: &[Node]) -> miette::Result<usize> {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 pub(crate) enum InvocationFailure {
+    TimedOut {
+        engine: lk_core::execution::AgentEngine,
+    },
     Exited {
         engine: lk_core::execution::AgentEngine,
         code: i32,
@@ -43,6 +46,7 @@ impl InvocationFailure {
 impl std::fmt::Display for InvocationFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::TimedOut { .. } => f.write_str("native invocation reached its session timeout"),
             Self::Exited { code, .. } => write!(
                 f,
                 "native invocation exited with status {code}; no provider cause was classified"

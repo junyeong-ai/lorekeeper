@@ -39,8 +39,15 @@ and choosing the recipes again. Empty recipes are valid for an eventual empty ex
 publishing any concepts requires at least one query. Never invent generic queries merely
 to satisfy that count.
 
-Native runs receive typed discovery queries; Rust revalidates the current task and
-records its recipes. A recipe registered during that read remains authoritative.
+Native `extraction-discovery` requests are read-only. Return one subject_ref entry
+with `status: complete`, `queries` and `reason: null`, or `status: needs-action`,
+`queries: null` and a nonblank reason within 256 compact JSON bytes. Return semantic
+values only; Rust revalidates the current task and records its recipes. A recipe
+registered during that read remains authoritative. Unchanged failed inputs remain held
+across instruction changes; diagnose the failure before using `work retry-preparation
+--stage extraction-discovery --task-id ID --input-revision HASH`, optionally with
+`--dry-run`. Use the retained input hash reported by the run. This clears only its
+preparation hold and invokes no agent.
 Ordinary selected/manual processing continues with `lore work context --task-id ID`.
 An explicit `--discovery-file FILE` accepts `{"queries":[...]}` for context capture;
 in progressive mode these must equal recipes already recorded with `work discover`.
