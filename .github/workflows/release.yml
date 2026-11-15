@@ -52,7 +52,7 @@ jobs:
           channel=$(awk -F'"' '/^[[:space:]]*channel[[:space:]]*=/ { print $2; exit }' rust-toolchain.toml)
           [ -n "$channel" ] || { echo "rust-toolchain.toml declares no channel" >&2; exit 1; }
           echo "channel=$channel" >> "$GITHUB_OUTPUT"
-      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master commit (2026-10-16)
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master commit (2026-11-15)
         with:
           toolchain: ${{ steps.toolchain.outputs.channel }}
       - name: Compare
@@ -112,7 +112,7 @@ jobs:
           channel=$(awk -F'"' '/^[[:space:]]*channel[[:space:]]*=/ { print $2; exit }' rust-toolchain.toml)
           [ -n "$channel" ] || { echo "rust-toolchain.toml declares no channel" >&2; exit 1; }
           echo "channel=$channel" >> "$GITHUB_OUTPUT"
-      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master commit (2026-10-16)
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master commit (2026-11-15)
         with:
           toolchain: ${{ steps.toolchain.outputs.channel }}
           targets: ${{ matrix.target }}
