@@ -114,6 +114,11 @@ paths:
   Carry that same cancellation control through selected review/evidence reads and
   fresh publication guards. Ephemeral prepared captures may retain the control outside
   semantic identity; automation duration and call budgets are not cancellation flags.
+- Mixed queue read waves share complete discovery/review inputs for their separate
+  screening/evidence query sets inside one post-host mutation session. Evaluate
+  ledgers and Work state after owned writes. Any first-role recording error discards
+  the shared view before reacquiring/recovering and freshly recording remaining paid
+  peers. Charge shared discovery I/O and duration once.
 - Finalization shares one fresh capture for status and preparation in the same local
   checkpoint. Preparation includes that capture; verification measures sealed-result
   checks separately. Never reuse this capture after a host call or writer wait.

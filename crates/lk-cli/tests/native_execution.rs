@@ -7306,13 +7306,24 @@ fn native_evidence_wave_records_siblings_and_preserves_valid_independent_replies
 #[test]
 fn native_read_only_queue_wave_fills_mixed_roles_in_fair_prefix_order() {
     for engine in ["codex", "claude-code"] {
-        for (with_synthesis, failed_role) in [
-            (false, None),
-            (true, None),
-            (false, Some("screening")),
-            (false, Some("evidence")),
+        for (with_synthesis, failed_role, progressive) in [
+            (false, None, false),
+            (false, None, true),
+            (true, None, true),
+            (false, Some("screening"), true),
+            (false, Some("evidence"), true),
+            (false, Some("corrupt-screening"), true),
         ] {
             let fixture = parallel_screening_fixture(engine, "good", 3);
+            if progressive {
+                let candidate = fixture.root().join("vault/wiki/documents/candidate-000.md");
+                let raw = std::fs::read_to_string(&candidate).unwrap();
+                std::fs::write(
+                    &candidate,
+                    raw + &"Detailed transactional outbox evidence.\n".repeat(3000),
+                )
+                .unwrap();
+            }
             let queue = fixture.root().join("vault/.lorekeeper/queue/fixture.jsonl");
             let mut tasks = lk_queue::read_tasks_snapshot(&queue).unwrap().1.tasks;
             let mut input = tasks[0].input.clone();
@@ -7322,7 +7333,8 @@ fn native_read_only_queue_wave_fills_mixed_roles_in_fair_prefix_order() {
             );
             let mut request: lk_queue::ExtractConceptsRequest =
                 serde_json::from_value(serde_json::Value::Object(input)).unwrap();
-            request.text = "A transactional outbox retains exact source evidence.\n".repeat(3000);
+            request.text = "A transactional outbox retains exact source evidence.\n"
+                .repeat(if progressive { 16 } else { 3000 });
             request.target.vault_path = "wiki/documents/source-v.md".into();
             let task = lk_queue::QueueLlmClient::new(queue.parent().unwrap().to_path_buf())
                 .build_task("ext", lk_queue::TaskKind::ExtractConcepts, request);
@@ -7336,7 +7348,7 @@ fn native_read_only_queue_wave_fills_mixed_roles_in_fair_prefix_order() {
             tasks.push(task.clone());
             lk_queue::write_tasks_atomic(&queue, &tasks).unwrap();
             let file = fixture.root().join("third-discovery.json");
-            std::fs::write(&file,serde_json::to_vec(&serde_json::json!({"target_revision":lk_core::concept::file_revision(&raw),"queries":[{"query":"transactional outbox","phrase":true,"spacing":false}]})).unwrap()).unwrap();
+            std::fs::write(&file,serde_json::to_vec(&serde_json::json!({"target_revision":lk_core::concept::file_revision(&raw),"queries":[{"query":if progressive {"Detailed transactional outbox evidence"} else {"transactional outbox"},"phrase":true,"spacing":false}]})).unwrap()).unwrap();
             execution_json(
                 &fixture,
                 &[
@@ -7387,6 +7399,13 @@ if failed==('screening' if screen else 'evidence'):
     peers=[json.loads(path.read_text()) for path in root.glob('mixed-*.json')]
     identities=sorted(peer['selection_id'] for peer in peers if 'candidates' in peer)
     if not screen or identity==identities[0]: raise SystemExit(51)
+if failed=='corrupt-screening' and screen:
+    peers=[json.loads(path.read_text()) for path in root.glob('mixed-*.json')]
+    identities=sorted(peer['selection_id'] for peer in peers if 'candidates' in peer)
+    if identity==identities[0]:
+        manifests=list((root/'vault/.lorekeeper/queue/selection').glob('*/'+identity+'/manifest.json'))
+        assert len(manifests)==1
+        manifests[0].write_text('{}\n')
 if screen:
     output={'decisions':[{'candidate_ref':card['candidate_ref'],'decision':'not-selected','reason':'Card-scoped exclusion.'} for card in request['candidates']]}
 else:
@@ -7411,13 +7430,38 @@ MIXED
                     &[("reader", other)],
                 );
             }
+            if progressive {
+                let turn =
+                    execution_json(&fixture, &["work", "select", "--task-id", &task.task_id]);
+                let decisions = fixture.root().join("third-decisions.json");
+                std::fs::write(
+                    &decisions,
+                    serde_json::to_vec(&screening_decisions(&turn["request"], false)).unwrap(),
+                )
+                .unwrap();
+                execution_json(
+                    &fixture,
+                    &[
+                        "work",
+                        "select-record",
+                        "--task-id",
+                        &task.task_id,
+                        "--file",
+                        decisions.to_str().unwrap(),
+                    ],
+                );
+            }
             let (_, report) = fixture.run("process");
             assert_eq!(report["semantic_calls"], count, "{report}");
-            assert_eq!(report["halted"], false, "{report}");
+            assert_eq!(
+                report["halted"],
+                failed_role == Some("corrupt-screening"),
+                "{report}"
+            );
             let steps = report["work_steps"].as_array().unwrap();
             if failed_role.is_some() {
                 for step in steps {
-                    if step["outcome"] == "failed" {
+                    if step["outcome"] == "failed" && failed_role != Some("corrupt-screening") {
                         assert_eq!(step["host_failure"]["phase"], "invocation");
                         assert_eq!(step["host_failure"]["engine"], step["execution"]["engine"]);
                         assert_eq!(step["host_failure"]["exit_code"], 51);
@@ -7439,7 +7483,7 @@ MIXED
                     .iter()
                     .filter(|step| step["role"] == "screening" && step["outcome"] == "recorded")
                     .count(),
-                if failed_role == Some("screening") {
+                if matches!(failed_role, Some("screening" | "corrupt-screening")) {
                     1
                 } else {
                     2
@@ -7454,6 +7498,21 @@ MIXED
                 if failed_role == Some("evidence") {
                     0
                 } else if with_synthesis {
+                    2
+                } else {
+                    1
+                },
+                "{report}"
+            );
+            let captures = report["screening_revalidation_io"]["captures"]
+                .as_u64()
+                .unwrap()
+                + report["evidence_revalidation_io"]["captures"]
+                    .as_u64()
+                    .unwrap();
+            assert_eq!(
+                captures,
+                if failed_role == Some("corrupt-screening") {
                     2
                 } else {
                     1

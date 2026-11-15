@@ -1413,17 +1413,49 @@ impl Screening {
     }
 }
 
-fn map_current_screenings<T>(
+struct ScreeningCapture {
+    reviews: lk_vault::ReviewInventory,
+    captures: std::collections::BTreeMap<
+        Vec<lk_core::discovery::DiscoveryQuery>,
+        lk_vault::DiscoveryCapture,
+    >,
+    metrics: lk_vault::DiscoveryCaptureMetrics,
+    duration_ms: u64,
+}
+
+impl ScreeningCapture {
+    fn load(
+        root: &Path,
+        config: &lk_core::config::Config,
+        queries: &[Vec<lk_core::discovery::DiscoveryQuery>],
+        read: &lk_vault::ReadControl,
+    ) -> miette::Result<Self> {
+        let started = std::time::Instant::now();
+        let mut reviews =
+            lk_vault::ReviewInventory::load_controlled(root, &config.vault.dirs, read)
+                .into_diagnostic()?;
+        let (captures, metrics) = lk_vault::capture_discovery_batch_with_inventory(
+            root,
+            &config.vault.dirs,
+            queries,
+            &mut reviews,
+            read,
+        )
+        .into_diagnostic()?;
+        Ok(Self {
+            reviews,
+            captures: queries.iter().cloned().zip(captures).collect(),
+            metrics,
+            duration_ms: started.elapsed().as_millis() as u64,
+        })
+    }
+}
+
+fn current_screening_queries(
     root: &Path,
-    config: &lk_core::config::Config,
-    config_revision: &str,
     task_ids: &[&str],
-    mut visit: impl FnMut(miette::Result<Screening>) -> T,
-    read: &lk_vault::ReadControl,
-) -> miette::Result<(Vec<T>, lk_vault::DiscoveryCaptureMetrics, u64)> {
-    read.check().into_diagnostic()?;
-    let started_at = std::time::Instant::now();
-    let queries = task_ids
+) -> miette::Result<Vec<Vec<lk_core::discovery::DiscoveryQuery>>> {
+    task_ids
         .iter()
         .map(|task_id| {
             let task = super::queue::select_task(
@@ -1435,22 +1467,44 @@ fn map_current_screenings<T>(
                 miette::miette!("candidate screening requires current explicit discovery")
             })
         })
+        .collect()
+}
+
+fn map_current_screenings<T>(
+    root: &Path,
+    config: &lk_core::config::Config,
+    config_revision: &str,
+    task_ids: &[&str],
+    capture: Option<&mut ScreeningCapture>,
+    mut visit: impl FnMut(miette::Result<Screening>) -> T,
+    read: &lk_vault::ReadControl,
+) -> miette::Result<(Vec<T>, lk_vault::DiscoveryCaptureMetrics, u64)> {
+    read.check().into_diagnostic()?;
+    let started_at = std::time::Instant::now();
+    let queries = current_screening_queries(root, task_ids)?;
+    let query_duration_ms = started_at.elapsed().as_millis() as u64;
+    let mut local;
+    let capture = match capture {
+        Some(capture) => capture,
+        None => {
+            local = ScreeningCapture::load(root, config, &queries, read)?;
+            &mut local
+        }
+    };
+    let captures = queries
+        .iter()
+        .map(|queries| {
+            capture.captures.get(queries).cloned().ok_or_else(|| {
+                miette::miette!("discovery queries changed within the recording checkpoint")
+            })
+        })
         .collect::<miette::Result<Vec<_>>>()?;
-    let mut reviews = lk_vault::ReviewInventory::load_controlled(root, &config.vault.dirs, read)
-        .into_diagnostic()?;
-    let (captures, metrics) = lk_vault::capture_discovery_batch_with_inventory(
-        root,
-        &config.vault.dirs,
-        &queries,
-        &mut reviews,
-        read,
-    )
-    .into_diagnostic()?;
-    let mut duration_ms = started_at.elapsed().as_millis() as u64;
+    let metrics = std::mem::take(&mut capture.metrics);
+    let mut duration_ms = query_duration_ms + std::mem::take(&mut capture.duration_ms);
     let values = task_ids
         .iter()
         .zip(captures)
-        .map(|(task_id, capture)| {
+        .map(|(task_id, current)| {
             let started_at = std::time::Instant::now();
             let screening = (|| {
                 read.check().into_diagnostic()?;
@@ -1458,8 +1512,8 @@ fn map_current_screenings<T>(
                     root,
                     config,
                     task_id,
-                    capture,
-                    &mut reviews,
+                    current,
+                    &mut capture.reviews,
                     read,
                 )?;
                 screening_with_inventory(root, config, config_revision, inventory)?
@@ -1490,6 +1544,7 @@ pub(super) fn prepare_screenings(
         config,
         config_revision,
         task_ids,
+        None,
         |screening| {
             let screening = screening?;
             if let Some(reason) = screening.selection.admission_reason(config, root)? {
@@ -1538,11 +1593,12 @@ pub(super) struct RecordedScreenings {
 }
 
 #[cfg(unix)]
-pub(super) fn record_screenings(
+fn record_screenings_with_capture(
     session: &lk_vault::MutationSession,
     config: &lk_core::config::Config,
     config_revision: &str,
     replies: Vec<(&str, ScreeningResponse)>,
+    capture: Option<&mut ScreeningCapture>,
     read: &lk_vault::ReadControl,
 ) -> miette::Result<RecordedScreenings> {
     let contract = selection::computation::resolved_contract(config)?;
@@ -1556,6 +1612,7 @@ pub(super) fn record_screenings(
         config,
         config_revision,
         &task_ids,
+        capture,
         |screening| {
             let output = outputs.next().expect("one output per selected task");
             let started_at = std::time::Instant::now();
@@ -1617,6 +1674,112 @@ pub(super) fn record_screenings(
         discovery_io,
         revalidation_duration_ms,
     })
+}
+
+#[cfg(unix)]
+pub(super) enum InspectionRecording {
+    Recorded(miette::Result<RecordedInspections>),
+    Recapture(Vec<InspectionReply>),
+}
+
+#[cfg(unix)]
+pub(super) struct ReadWaveRecords {
+    pub screenings: miette::Result<RecordedScreenings>,
+    pub screening_duration_ms: u64,
+    pub inspections: InspectionRecording,
+    pub inspection_duration_ms: u64,
+}
+
+#[cfg(unix)]
+pub(super) fn record_read_wave(
+    session: &lk_vault::MutationSession,
+    config: &lk_core::config::Config,
+    config_revision: &str,
+    screenings: Vec<(&str, ScreeningResponse)>,
+    inspections: Vec<InspectionReply>,
+    read: &lk_vault::ReadControl,
+) -> ReadWaveRecords {
+    let started = std::time::Instant::now();
+    let captured = (|| {
+        let tasks = screenings.iter().map(|(task, _)| *task).collect::<Vec<_>>();
+        let mut queries = current_screening_queries(session.root(), &tasks)?;
+        let inspection_queries = inspections
+            .iter()
+            .filter(|reply| {
+                reply.request["context"]["purpose"]["extraction_scope"]["policy"]
+                    == "progressive-evidence-v1"
+            })
+            .map(|reply| {
+                reply.request["context"]["subject"]["task_id"]
+                    .as_str()
+                    .ok_or_else(|| {
+                        miette::miette!("progressive work requires a queue task subject")
+                    })
+            })
+            .collect::<miette::Result<Vec<_>>>()
+            .and_then(|tasks| current_screening_queries(session.root(), &tasks));
+        if let Ok(inspection_queries) = &inspection_queries {
+            queries.extend(inspection_queries.iter().cloned());
+        }
+        let mut capture = ScreeningCapture::load(session.root(), config, &queries, read)?;
+        capture.duration_ms = started.elapsed().as_millis() as u64;
+        Ok::<_, miette::Report>((capture, inspection_queries.map(|_| ())))
+    })();
+    let (mut capture, inspection_queries) = match captured {
+        Ok(captured) => captured,
+        Err(error) => {
+            return ReadWaveRecords {
+                screenings: Err(error),
+                screening_duration_ms: started.elapsed().as_millis() as u64,
+                inspections: InspectionRecording::Recapture(inspections),
+                inspection_duration_ms: 0,
+            };
+        }
+    };
+    let screenings = record_screenings_with_capture(
+        session,
+        config,
+        config_revision,
+        screenings,
+        Some(&mut capture),
+        read,
+    );
+    let screening_duration_ms = started.elapsed().as_millis() as u64;
+    let started = std::time::Instant::now();
+    let inspections = if !screenings
+        .as_ref()
+        .is_ok_and(|records| records.records.iter().all(|record| record.result.is_ok()))
+    {
+        InspectionRecording::Recapture(inspections)
+    } else {
+        InspectionRecording::Recorded(inspection_queries.and_then(|()| {
+            record_inspections_with_capture(
+                session,
+                config,
+                config_revision,
+                inspections,
+                Some(&mut capture),
+                read,
+            )
+        }))
+    };
+    ReadWaveRecords {
+        screenings,
+        screening_duration_ms,
+        inspections,
+        inspection_duration_ms: started.elapsed().as_millis() as u64,
+    }
+}
+
+#[cfg(unix)]
+pub(super) fn record_screenings(
+    session: &lk_vault::MutationSession,
+    config: &lk_core::config::Config,
+    config_revision: &str,
+    replies: Vec<(&str, ScreeningResponse)>,
+    read: &lk_vault::ReadControl,
+) -> miette::Result<RecordedScreenings> {
+    record_screenings_with_capture(session, config, config_revision, replies, None, read)
 }
 
 fn record_screening(
@@ -2746,6 +2909,7 @@ fn load_inspection_works(
     config: &lk_core::config::Config,
     config_revision: &str,
     ids: &[&str],
+    capture: Option<&mut ScreeningCapture>,
     read: &lk_vault::ReadControl,
 ) -> miette::Result<InspectionWorks> {
     let started = std::time::Instant::now();
@@ -2789,6 +2953,7 @@ fn load_inspection_works(
             config,
             config_revision,
             &task_ids,
+            capture,
             |screening| {
                 let work = work_iter.next().expect("one capture per work");
                 (|| {
@@ -2856,6 +3021,7 @@ pub(super) fn prepare_inspections_batch(
         config,
         config_revision,
         &ids.into_iter().collect::<Vec<_>>(),
+        None,
         read,
     )?;
     let turns = demands
@@ -2874,11 +3040,12 @@ pub(super) fn prepare_inspections_batch(
 }
 
 #[cfg(unix)]
-pub(super) fn record_inspections(
+fn record_inspections_with_capture(
     session: &lk_vault::MutationSession,
     config: &lk_core::config::Config,
     config_revision: &str,
     replies: Vec<InspectionReply>,
+    capture: Option<&mut ScreeningCapture>,
     read: &lk_vault::ReadControl,
 ) -> miette::Result<RecordedInspections> {
     let root = session.root();
@@ -2886,8 +3053,19 @@ pub(super) fn record_inspections(
         .iter()
         .map(|reply| reply.work_id.as_str())
         .collect::<Vec<_>>();
-    let loaded = load_inspection_works(root, config, config_revision, &ids, read)?;
+    let loaded = load_inspection_works(root, config, config_revision, &ids, capture, read)?;
     record_prepared_inspections(session, loaded, replies, read)
+}
+
+#[cfg(unix)]
+pub(super) fn record_inspections(
+    session: &lk_vault::MutationSession,
+    config: &lk_core::config::Config,
+    config_revision: &str,
+    replies: Vec<InspectionReply>,
+    read: &lk_vault::ReadControl,
+) -> miette::Result<RecordedInspections> {
+    record_inspections_with_capture(session, config, config_revision, replies, None, read)
 }
 
 #[cfg(unix)]
@@ -6270,6 +6448,7 @@ mod tests {
             &config,
             &config_revision,
             &[&task.task_id, &task.task_id],
+            None,
             |screening| {
                 let accepted = screening.is_ok();
                 cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -6451,6 +6630,7 @@ mod tests {
                     &config,
                     &config_revision,
                     &[&id],
+                    None,
                     &lk_vault::ReadControl::default(),
                 )
                 .unwrap()

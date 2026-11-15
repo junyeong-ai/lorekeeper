@@ -292,6 +292,18 @@ mod native {
         requests: std::collections::VecDeque<serde_json::Value>,
     }
 
+    struct DecodedScreenings {
+        accepted: bool,
+        replies: Vec<ScreeningReply>,
+        metrics: Vec<WorkStepMetrics>,
+    }
+
+    struct DecodedObservations {
+        accepted: bool,
+        replies: Vec<crate::commands::work::InspectionReply>,
+        returned: Vec<ObservationTurn>,
+    }
+
     struct ObservationTurn {
         work_id: String,
         node_id: String,
@@ -1667,22 +1679,15 @@ mod native {
             }
         }
 
-        async fn record_observation_batch(
+        fn track_inspection_recording(
             &mut self,
-            replies: Vec<crate::commands::work::InspectionReply>,
-        ) -> Option<(
+            recorded: miette::Result<crate::commands::work::RecordedInspections>,
+            total_duration_ms: u64,
+        ) -> (
             miette::Result<crate::commands::work::RecordedInspections>,
             u64,
-        )> {
-            let started = Instant::now();
-            let (session, _) = self.recording_session("bounded work receipt").await?;
-            match crate::commands::work::record_inspections(
-                &session,
-                &self.config,
-                &self.config_revision,
-                replies,
-                self.supervisor.read_control(),
-            ) {
+        ) {
+            match recorded {
                 Ok(recorded) => {
                     let record_ms = recorded
                         .records
@@ -1696,12 +1701,30 @@ mod native {
                     self.result.work_telemetry.evidence_revalidation_duration_ms +=
                         recorded.revalidation_duration_ms;
                     self.result.work_telemetry.evidence_record_duration_ms += record_ms;
-                    let shared_ms =
-                        (started.elapsed().as_millis() as u64).saturating_sub(record_ms);
-                    Some((Ok(recorded), shared_ms))
+                    let shared_ms = total_duration_ms.saturating_sub(record_ms);
+                    (Ok(recorded), shared_ms)
                 }
-                Err(error) => Some((Err(error), started.elapsed().as_millis() as u64)),
+                Err(error) => (Err(error), total_duration_ms),
             }
+        }
+
+        async fn record_observation_batch(
+            &mut self,
+            replies: Vec<crate::commands::work::InspectionReply>,
+        ) -> Option<(
+            miette::Result<crate::commands::work::RecordedInspections>,
+            u64,
+        )> {
+            let started = Instant::now();
+            let (session, _) = self.recording_session("bounded work receipt").await?;
+            let recorded = crate::commands::work::record_inspections(
+                &session,
+                &self.config,
+                &self.config_revision,
+                replies,
+                self.supervisor.read_control(),
+            );
+            Some(self.track_inspection_recording(recorded, started.elapsed().as_millis() as u64))
         }
 
         fn finish_observation_record(
@@ -2190,14 +2213,14 @@ mod native {
             )
         }
 
-        async fn settle_observation_attempts(
+        fn decode_observation_attempts(
             &mut self,
             turns: Vec<ObservationTurn>,
             attempts: Vec<execution::ChildAttempt>,
             engines: Vec<lk_core::execution::AgentEngine>,
             result_limit: usize,
             cancelled: bool,
-        ) -> bool {
+        ) -> DecodedObservations {
             let current = self.configuration_is_current();
             if cancelled {
                 self.record(
@@ -2209,8 +2232,6 @@ mod native {
                 );
             }
             let mut accepted = current && !cancelled;
-            let mut usable = false;
-            let mut held = false;
             let mut replies = Vec::new();
             let mut returned = Vec::new();
             for ((mut turn, attempt), engine) in turns.into_iter().zip(attempts).zip(engines) {
@@ -2314,8 +2335,29 @@ mod native {
                 });
                 returned.push(turn);
             }
-            if !replies.is_empty() {
-                match self.record_observation_batch(replies).await {
+            DecodedObservations {
+                accepted,
+                replies,
+                returned,
+            }
+        }
+        fn finish_observation_attempts(
+            &mut self,
+            decoded: DecodedObservations,
+            recorded: Option<(
+                miette::Result<crate::commands::work::RecordedInspections>,
+                u64,
+            )>,
+        ) -> bool {
+            let DecodedObservations {
+                mut accepted,
+                replies: _,
+                mut returned,
+            } = decoded;
+            let mut usable = false;
+            let mut held = false;
+            if !returned.is_empty() {
+                match recorded {
                     Some((Ok(recorded), shared_ms)) => {
                         for (index, (mut turn, record)) in
                             returned.into_iter().zip(recorded.records).enumerate()
@@ -2358,6 +2400,24 @@ mod native {
                 self.queue_replan = true;
             }
             accepted && usable
+        }
+        async fn settle_observation_attempts(
+            &mut self,
+            turns: Vec<ObservationTurn>,
+            attempts: Vec<execution::ChildAttempt>,
+            engines: Vec<lk_core::execution::AgentEngine>,
+            result_limit: usize,
+            cancelled: bool,
+        ) -> bool {
+            let mut decoded =
+                self.decode_observation_attempts(turns, attempts, engines, result_limit, cancelled);
+            let replies = std::mem::take(&mut decoded.replies);
+            let recorded = if replies.is_empty() {
+                None
+            } else {
+                self.record_observation_batch(replies).await
+            };
+            self.finish_observation_attempts(decoded, recorded)
         }
 
         fn record_uninvoked_observations(&mut self, turns: Vec<ObservationTurn>) {
@@ -3691,6 +3751,23 @@ mod native {
             }
             let has_screenings = !screenings.is_empty();
             let has_observations = !observations.is_empty();
+            if has_screenings && has_observations {
+                let screenings = self.decode_screening_attempts(
+                    screenings,
+                    screened,
+                    screening_engines,
+                    budget.max_result_bytes,
+                    cancelled,
+                );
+                let observations = self.decode_observation_attempts(
+                    observations,
+                    observed,
+                    observation_engines,
+                    budget.max_result_bytes,
+                    cancelled,
+                );
+                return self.settle_read_wave(screenings, observations).await;
+            }
             let screening_ok = if !has_screenings {
                 true
             } else {
@@ -3720,14 +3797,14 @@ mod native {
                 && (has_screenings && screening_ok || has_observations && observation_ok)
         }
 
-        async fn settle_screening_attempts(
+        fn decode_screening_attempts(
             &mut self,
             turns: Vec<ScreeningAttempt>,
             attempts: Vec<execution::ChildAttempt>,
             engines: Vec<lk_core::execution::AgentEngine>,
             result_limit: usize,
             cancelled: bool,
-        ) -> bool {
+        ) -> DecodedScreenings {
             let current = self.configuration_is_current();
             if cancelled {
                 self.record(
@@ -3737,8 +3814,6 @@ mod native {
                 );
             }
             let mut accepted = current && !cancelled;
-            let mut usable = false;
-            let mut held = false;
             let mut replies = Vec::new();
             let mut metrics = Vec::new();
             for ((turn, attempt), engine) in turns.into_iter().zip(attempts).zip(engines) {
@@ -3873,27 +3948,28 @@ mod native {
                 }
                 metrics.push(step);
             }
-            if !replies.is_empty() {
-                let started_at = Instant::now();
-                let recorded = if let Some((session, _)) =
-                    self.recording_session("candidate screening").await
-                {
-                    crate::commands::work::record_screenings(
-                        &session,
-                        &self.config,
-                        &self.config_revision,
-                        replies
-                            .iter()
-                            .map(|reply| (reply.task_id.as_str(), reply.output.clone()))
-                            .collect(),
-                        self.supervisor.read_control(),
-                    )
-                } else {
-                    Err(miette::miette!(
-                        "candidate screening could not acquire writer access"
-                    ))
-                };
-                let total_duration_ms = started_at.elapsed().as_millis() as u64;
+            DecodedScreenings {
+                accepted,
+                replies,
+                metrics,
+            }
+        }
+        fn finish_screening_attempts(
+            &mut self,
+            decoded: DecodedScreenings,
+            recorded: Option<(
+                miette::Result<crate::commands::work::RecordedScreenings>,
+                u64,
+            )>,
+        ) -> bool {
+            let DecodedScreenings {
+                mut accepted,
+                replies,
+                mut metrics,
+            } = decoded;
+            let mut usable = false;
+            let mut held = false;
+            if let Some((recorded, total_duration_ms)) = recorded {
                 match recorded {
                     Ok(recorded) => {
                         self.result
@@ -3982,6 +4058,116 @@ mod native {
                 self.queue_replan = true;
             }
             accepted && usable
+        }
+        async fn record_screening_batch(
+            &mut self,
+            replies: &[ScreeningReply],
+        ) -> Option<(
+            miette::Result<crate::commands::work::RecordedScreenings>,
+            u64,
+        )> {
+            if replies.is_empty() {
+                return None;
+            }
+            let started = Instant::now();
+            let recorded =
+                if let Some((session, _)) = self.recording_session("candidate screening").await {
+                    crate::commands::work::record_screenings(
+                        &session,
+                        &self.config,
+                        &self.config_revision,
+                        replies
+                            .iter()
+                            .map(|reply| (reply.task_id.as_str(), reply.output.clone()))
+                            .collect(),
+                        self.supervisor.read_control(),
+                    )
+                } else {
+                    Err(miette::miette!(
+                        "candidate screening could not acquire writer access"
+                    ))
+                };
+            Some((recorded, started.elapsed().as_millis() as u64))
+        }
+
+        async fn settle_read_wave(
+            &mut self,
+            screenings: DecodedScreenings,
+            mut observations: DecodedObservations,
+        ) -> bool {
+            use crate::commands::work::InspectionRecording;
+            let replies = std::mem::take(&mut observations.replies);
+            let (recorded_screenings, recorded_inspections, inspection_duration_ms) =
+                if screenings.replies.is_empty() || replies.is_empty() {
+                    (
+                        self.record_screening_batch(&screenings.replies).await,
+                        InspectionRecording::Recapture(replies),
+                        0,
+                    )
+                } else {
+                    let started = Instant::now();
+                    if let Some((session, _)) = self.recording_session("queue read receipts").await
+                    {
+                        let wait_ms = started.elapsed().as_millis() as u64;
+                        let recorded = crate::commands::work::record_read_wave(
+                            &session,
+                            &self.config,
+                            &self.config_revision,
+                            screenings
+                                .replies
+                                .iter()
+                                .map(|reply| (reply.task_id.as_str(), reply.output.clone()))
+                                .collect(),
+                            replies,
+                            self.supervisor.read_control(),
+                        );
+                        (
+                            Some((
+                                recorded.screenings,
+                                recorded.screening_duration_ms + wait_ms,
+                            )),
+                            recorded.inspections,
+                            recorded.inspection_duration_ms,
+                        )
+                    } else {
+                        (
+                            Some((
+                                Err(miette::miette!(
+                                    "queue read receipts could not acquire writer access"
+                                )),
+                                started.elapsed().as_millis() as u64,
+                            )),
+                            InspectionRecording::Recapture(replies),
+                            0,
+                        )
+                    }
+                };
+            let screening_ok = self.finish_screening_attempts(screenings, recorded_screenings);
+            let recorded = match recorded_inspections {
+                InspectionRecording::Recorded(recorded) => {
+                    Some(self.track_inspection_recording(recorded, inspection_duration_ms))
+                }
+                InspectionRecording::Recapture(replies) if replies.is_empty() => None,
+                InspectionRecording::Recapture(replies) => {
+                    self.record_observation_batch(replies).await
+                }
+            };
+            let observation_ok = self.finish_observation_attempts(observations, recorded);
+            !self.result.halted && !self.result.cancelled && (screening_ok || observation_ok)
+        }
+
+        async fn settle_screening_attempts(
+            &mut self,
+            turns: Vec<ScreeningAttempt>,
+            attempts: Vec<execution::ChildAttempt>,
+            engines: Vec<lk_core::execution::AgentEngine>,
+            result_limit: usize,
+            cancelled: bool,
+        ) -> bool {
+            let decoded =
+                self.decode_screening_attempts(turns, attempts, engines, result_limit, cancelled);
+            let recorded = self.record_screening_batch(&decoded.replies).await;
+            self.finish_screening_attempts(decoded, recorded)
         }
 
         async fn queue_dispatches(&mut self) -> miette::Result<QueuePlan> {
