@@ -299,7 +299,7 @@ impl Installation {
             .map_err(|e| DistError::io(format!("write {}", path.display()), e))
     }
 
-    /// Write the skills this binary carries to one level, and remove any it has retired.
+    /// Deploy carried skills, pruning retired skills only at the user level.
     pub fn deploy_skills(&self, level: SkillLevel) -> Result<Deployed, DeployFailure> {
         let prune = Prune::for_level(level);
         let root = self.skills_dir(level).ok_or_else(|| DeployFailure {
@@ -312,25 +312,22 @@ impl Installation {
                 error,
             })?;
         let mut removed = Vec::new();
-        for retired in self
-            .retired_skills(level)
-            .map_err(|error| DeployFailure {
+        if prune.sweeps() {
+            for retired in self.retired_skills(level).map_err(|error| DeployFailure {
                 done: Deployed::default(),
                 error,
-            })?
-            .into_iter()
-            .filter(|_| prune.sweeps())
-        {
-            if let Err(e) = std::fs::remove_dir_all(&retired) {
-                return Err(DeployFailure {
-                    done: Deployed {
-                        written: Vec::new(),
-                        removed,
-                    },
-                    error: DistError::io(format!("remove {}", retired.display()), e),
-                });
+            })? {
+                if let Err(e) = std::fs::remove_dir_all(&retired) {
+                    return Err(DeployFailure {
+                        done: Deployed {
+                            written: Vec::new(),
+                            removed,
+                        },
+                        error: DistError::io(format!("remove {}", retired.display()), e),
+                    });
+                }
+                removed.push(retired);
             }
-            removed.push(retired);
         }
         let mut written = Vec::new();
         for name in skill_names() {
@@ -1038,6 +1035,56 @@ mod boundary_tests {
             assert!(!dir.join("SKILL.md").is_symlink());
         }
     }
+    #[test]
+    fn project_deployment_ignores_inaccessible_retired_payloads() {
+        use std::os::unix::fs::PermissionsExt;
+        for engine in [AgentEngine::ClaudeCode, AgentEngine::Codex] {
+            let temporary = tempfile::tempdir().unwrap();
+            let installation = Installation::at(
+                temporary.path().join("lore"),
+                temporary.path().join("data"),
+                temporary.path().join("config"),
+                None,
+                Some(temporary.path().join("project")),
+            )
+            .for_engine(engine);
+            installation.deploy_skills(SkillLevel::Project).unwrap();
+            let root = installation.skills_dir(SkillLevel::Project).unwrap();
+            let retired = root.join("lore-retired");
+            std::fs::create_dir(&retired).unwrap();
+            std::fs::write(retired.join("SKILL.md"), "private project instructions").unwrap();
+            installation
+                .record_deployed(
+                    SkillLevel::Project,
+                    &[skill_names(), vec!["lore-retired"]].concat(),
+                )
+                .unwrap();
+            let current = root.join(skill_names()[0]).join("SKILL.md");
+            std::fs::write(&current, "previous").unwrap();
+            std::fs::set_permissions(&retired, std::fs::Permissions::from_mode(0o000)).unwrap();
+            let inaccessible = std::fs::symlink_metadata(retired.join("SKILL.md")).is_err();
+            let inspection = installation.retired_skills(SkillLevel::Project);
+            let deployment = installation.deploy_skills(SkillLevel::Project);
+            std::fs::set_permissions(&retired, std::fs::Permissions::from_mode(0o755)).unwrap();
+            if inaccessible {
+                assert!(inspection.is_err());
+            }
+            let deployment = deployment.unwrap();
+            assert!(deployment.removed.is_empty());
+            assert_eq!(deployment.written.len(), skill_names().len());
+            let expected = skill_files_for(engine, skill_names()[0]);
+            let expected = expected
+                .iter()
+                .find(|file| file.relative == "SKILL.md")
+                .unwrap();
+            assert_eq!(std::fs::read_to_string(current).unwrap(), expected.contents);
+            assert_eq!(
+                std::fs::read_to_string(retired.join("SKILL.md")).unwrap(),
+                "private project instructions"
+            );
+        }
+    }
+
     #[test]
     fn failed_retirement_inspection_preserves_payloads_and_ownership() {
         use std::os::unix::fs::PermissionsExt;
