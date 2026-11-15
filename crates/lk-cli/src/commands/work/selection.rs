@@ -438,20 +438,21 @@ impl Selection {
         } else {
             json!({"role":role})
         };
-        let mut selection = Self::build(
+        let selection = Self::build(
             binding.clone(),
             minimal_context,
             capture,
             max_input_bytes,
             max_result_bytes,
         )?;
-        selection.manifest.source_context_revision = digest(source_context)?;
-        selection.manifest.source_context = source_context.clone();
+        let context_bytes =
+            encoded(source_context)?.len() - encoded(&selection.manifest.source_context)?.len();
+        let input_base = encoded(&selection.request_for(&[], 0)?)?.len() + context_bytes;
         if selection.manifest.candidates.is_empty() {
-            return Ok(encoded(&selection.request_for(&[], 0)?)?.len() <= max_input_bytes);
+            return Ok(input_base <= max_input_bytes);
         }
         for index in 0..selection.manifest.candidates.len() {
-            if encoded(&selection.request_for(&[index], 0)?)?.len() > max_input_bytes {
+            if input_base + encoded(&selection.candidate_card(index))?.len() - 1 > max_input_bytes {
                 return Ok(false);
             }
         }
@@ -527,6 +528,8 @@ impl Selection {
         let max_result_bytes = self.manifest.max_result_bytes;
         self.manifest.max_reason_json_bytes = 256;
         self.manifest.batches.clear();
+        let result_base = encoded(&self.output_shape(&[], ""))?.len() + self.receipt_overhead();
+        let mut sizes = Vec::with_capacity(self.manifest.candidates.len());
         for index in 0..self.manifest.candidates.len() {
             let size = encoded(&self.output_shape(&[index], ""))?.len() + self.receipt_overhead();
             if size >= max_result_bytes {
@@ -539,35 +542,59 @@ impl Selection {
             let available = max_result_bytes - size;
             self.manifest.max_reason_json_bytes =
                 self.manifest.max_reason_json_bytes.min(available + 2);
+            sizes.push((
+                encoded(&self.candidate_card(index))?.len() - 1,
+                size - result_base,
+            ));
         }
+        let input_base = encoded(&self.request_for(&[], 0)?)?.len();
+        let capacity = |input_bytes, result_bytes| {
+            if input_bytes > max_input_bytes {
+                Some(ScreeningCapacity::Input {
+                    required_bytes: input_bytes,
+                    max_bytes: max_input_bytes,
+                })
+            } else if result_bytes > max_result_bytes {
+                Some(ScreeningCapacity::Result {
+                    required_bytes: result_bytes,
+                    max_bytes: max_result_bytes,
+                })
+            } else {
+                None
+            }
+        };
         let mut batch = Vec::new();
-        for index in 0..self.manifest.candidates.len() {
-            let mut prospective = batch.clone();
-            prospective.push(index);
-            if let Some(capacity) = self.capacity(&prospective)? {
+        let mut input_bytes = input_base;
+        let mut result_bytes = result_base;
+        for (index, (card_bytes, decision_bytes)) in sizes.into_iter().enumerate() {
+            let decision_bytes = decision_bytes + self.manifest.max_reason_json_bytes - 2;
+            let comma = usize::from(!batch.is_empty());
+            let mut input = input_bytes + card_bytes + comma;
+            let mut result = result_bytes + decision_bytes + comma;
+            if let Some(error) = capacity(input, result) {
                 if batch.is_empty() {
-                    return Err(capacity.into());
+                    return Err(error.into());
                 }
                 self.manifest.batches.push(std::mem::take(&mut batch));
-                prospective = vec![index];
-                if let Some(capacity) = self.capacity(&prospective)? {
-                    return Err(capacity.into());
+                input = input_base + card_bytes;
+                result = result_base + decision_bytes;
+                if let Some(error) = capacity(input, result) {
+                    return Err(error.into());
                 }
             }
-            batch = prospective;
+            batch.push(index);
+            input_bytes = input;
+            result_bytes = result;
         }
         if !batch.is_empty() {
             self.manifest.batches.push(batch);
         }
-        if self.manifest.candidates.is_empty() {
-            let required_bytes = encoded(&self.request_for(&[], 0)?)?.len();
-            if required_bytes > max_input_bytes {
-                return Err(ScreeningCapacity::Input {
-                    required_bytes,
-                    max_bytes: max_input_bytes,
-                }
-                .into());
+        if self.manifest.candidates.is_empty() && input_base > max_input_bytes {
+            return Err(ScreeningCapacity::Input {
+                required_bytes: input_base,
+                max_bytes: max_input_bytes,
             }
+            .into());
         }
         Ok(())
     }
@@ -593,20 +620,22 @@ impl Selection {
             .join(format!("{}.json", self.batch_id(index)?)))
     }
 
+    fn candidate_card(&self, index: usize) -> Value {
+        let candidate = &self.manifest.candidates[index];
+        json!({
+            "candidate_key":candidate.owner,
+            "path":candidate.path,
+            "file_revision":candidate.file_revision,
+            "source_revision":candidate.source_revision,
+            "query_indexes":candidate.query_indexes,
+            "card":candidate.card,
+        })
+    }
+
     fn request_for(&self, indexes: &[usize], batch: usize) -> miette::Result<Value> {
         let cards = indexes
             .iter()
-            .map(|index| {
-                let candidate = &self.manifest.candidates[*index];
-                json!({
-                    "candidate_key":candidate.owner,
-                    "path":candidate.path,
-                    "file_revision":candidate.file_revision,
-                    "source_revision":candidate.source_revision,
-                    "query_indexes":candidate.query_indexes,
-                    "card":candidate.card,
-                })
-            })
+            .map(|index| self.candidate_card(*index))
             .collect::<Vec<_>>();
         let mut request = json!({
             "policy":computation::request_policy(self.manifest.receipt_policy),"selection_id":self.id,"batch_id":self.batch_id(batch)?,
@@ -1481,6 +1510,57 @@ mod tests {
     }
 
     #[test]
+    fn screening_packet_layout_preserves_canonical_requests() {
+        let fixture = Fixture::new(128);
+        std::fs::write(
+            fixture.root.join("wiki/concepts/candidate-unicode.md"),
+            "---\ntype: concept\ntitle: Candidate 한글\n---\nCandidate \"quote\" \\ slash \t tab.\n",
+        ).unwrap();
+        let mut capture = fixture.capture();
+        capture.revision = "fixture-capture-revision".into();
+        let context = json!({"role":"complete-retained-input",
+            "text":"한글 \"quote\" \\ slash \n newline \t tab".repeat(1024)});
+        let mut layouts = Vec::new();
+        for (input, result) in [(131072, 4096), (100000, 8192), (131072, 1024)] {
+            for computed in [false, true] {
+                let mut selection = Selection::build(
+                    fixture.binding(&capture),
+                    context.clone(),
+                    &capture,
+                    input,
+                    result,
+                )
+                .unwrap();
+                if computed {
+                    selection = selection.prefer_computed_receipts(&fixture.root).unwrap();
+                }
+                let mut requests = Vec::new();
+                let mut assigned = Vec::<usize>::new();
+                for (batch, indexes) in selection.manifest.batches.iter().enumerate() {
+                    assert!(selection.capacity(indexes).unwrap().is_none());
+                    assigned.extend(indexes);
+                    if let Some(next) = indexes
+                        .last()
+                        .filter(|index| **index + 1 < capture.candidates.len())
+                    {
+                        let mut extended = indexes.clone();
+                        extended.push(next + 1);
+                        assert!(selection.capacity(&extended).unwrap().is_some());
+                    }
+                    requests.push(selection.request_for(indexes, batch).unwrap());
+                }
+                assert_eq!(assigned, (0..capture.candidates.len()).collect::<Vec<_>>());
+                layouts.push(json!({"manifest":selection.manifest,"requests":requests}));
+            }
+        }
+        let actual = digest(&layouts).unwrap();
+        assert_eq!(
+            actual,
+            "81ce87c6a21dc051f5fec0570a9aea3abf05268b0fe86504c02930bda04e98ed"
+        );
+    }
+
+    #[test]
     fn metadata_only_capacity_is_typed_without_clipping_the_complete_recipe() {
         let fixture = Fixture::new(0);
         let queries = (b'A'..=b'I')
@@ -2019,6 +2099,59 @@ mod tests {
         assert!(Selection::source_fits(&binding, &large, &capture, 4096, 128).is_err());
         let incomplete = json!({"role":"partial-source","text":"source"});
         assert!(Selection::source_fits(&binding, &incomplete, &capture, 4096, 8192).is_err());
+        for candidates in [0, 2] {
+            let fixture = Fixture::new(candidates);
+            let capture = fixture.capture();
+            let context = json!({
+                "role": if candidates == 0 {"no-candidates"} else {"complete-retained-input"},
+                "source_revision":"captured-source",
+                "text":"한글 \"quote\" \\ slash \n newline \u{1}".repeat(16),
+            });
+            for result in [1024, 10000] {
+                let selection = Selection::build(
+                    fixture.binding(&capture),
+                    context.clone(),
+                    &capture,
+                    8192,
+                    result,
+                )
+                .unwrap();
+                let required = if candidates == 0 {
+                    encoded(&selection.request_for(&[], 0).unwrap())
+                        .unwrap()
+                        .len()
+                } else {
+                    (0..candidates)
+                        .map(|index| {
+                            encoded(&selection.request_for(&[index], 0).unwrap())
+                                .unwrap()
+                                .len()
+                        })
+                        .max()
+                        .unwrap()
+                };
+                assert!(
+                    Selection::source_fits(
+                        &fixture.binding(&capture),
+                        &context,
+                        &capture,
+                        required,
+                        result
+                    )
+                    .unwrap()
+                );
+                assert!(
+                    !Selection::source_fits(
+                        &fixture.binding(&capture),
+                        &context,
+                        &capture,
+                        required - 1,
+                        result
+                    )
+                    .unwrap()
+                );
+            }
+        }
     }
 
     #[test]
