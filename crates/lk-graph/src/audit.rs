@@ -356,23 +356,25 @@ pub fn verify_batch(
     )
 }
 
-fn resolve_subject<'a>(
+fn resolve_subject_path(
     root: &Path,
     original: &AuditCandidate,
-    candidates: &'a BTreeMap<String, AuditCandidate>,
+    mut current_kind: impl FnMut(&str) -> Result<Option<AuditSubjectKind>, GraphError>,
     merges: Option<&WorkflowMerges>,
-) -> Result<&'a AuditCandidate, GraphError> {
+    read: &lk_vault::ReadControl,
+) -> Result<String, GraphError> {
     let mut path = original.path.clone();
     let mut visited = BTreeSet::new();
     loop {
+        read.check().map_err(GraphError::from)?;
         if !visited.insert(path.clone()) {
             return Err(error("audit merge chain contains a cycle"));
         }
-        if let Some(candidate) = candidates.get(&path) {
-            if candidate.kind != original.kind {
+        if let Some(kind) = current_kind(&path)? {
+            if kind != original.kind {
                 return Err(error(format!("audit subject kind changed: {path}")));
             }
-            return Ok(candidate);
+            return Ok(path);
         }
         if original.kind != AuditSubjectKind::Concept {
             return Err(error(format!(
@@ -429,17 +431,49 @@ pub fn resolve_batch_subjects_controlled(
 ) -> Result<Vec<AuditCandidate>, GraphError> {
     read.check().map_err(GraphError::from)?;
     let (_, receipts) = load_controlled(root, read)?;
-    let candidates = inputs_controlled(root, dirs, pages, &receipts, read)?
-        .into_iter()
-        .map(|candidate| (candidate.path.clone(), candidate))
+    let kinds = subject_kinds(pages, dirs);
+    let by_path = pages
+        .iter()
+        .map(|page| (page.path.as_path(), page))
         .collect::<BTreeMap<_, _>>();
     let merges = receipts
         .last_merges
         .as_ref()
         .filter(|merges| merges.workflow_id == *workflow_id);
-    batch
+    let paths = batch
         .iter()
-        .map(|original| resolve_subject(root, original, &candidates, merges).cloned())
+        .map(|original| {
+            resolve_subject_path(
+                root,
+                original,
+                |path| {
+                    let path = Path::new(path);
+                    if is_subject_address(path, dirs)
+                        && let Some(page) = by_path.get(path)
+                    {
+                        page.require_readable()?;
+                    }
+                    Ok(kinds.get(path).copied())
+                },
+                merges,
+                read,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let selection = paths.iter().map(String::as_str).collect();
+    let candidates =
+        inputs_selected_controlled(root, dirs, pages, &receipts, Some(&selection), read)?
+            .into_iter()
+            .map(|candidate| (candidate.path.clone(), candidate))
+            .collect::<BTreeMap<_, _>>();
+    paths
+        .iter()
+        .map(|path| {
+            candidates
+                .get(path)
+                .cloned()
+                .ok_or_else(|| error(format!("audit subject is no longer current: {path}")))
+        })
         .collect()
 }
 
@@ -488,7 +522,14 @@ pub fn verify_batch_with_readiness_controlled(
     let mut currentness = BTreeMap::new();
     for original in batch {
         read.check().map_err(GraphError::from)?;
-        let candidate = resolve_subject(root, original, &candidates, merges)?;
+        let path = resolve_subject_path(
+            root,
+            original,
+            |path| Ok(candidates.get(path).map(|candidate| candidate.kind)),
+            merges,
+            read,
+        )?;
+        let candidate = &candidates[&path];
         let current = match currentness.get(&candidate.path) {
             Some(current) => *current,
             None => {
@@ -3486,6 +3527,25 @@ mod tests {
         assert_eq!(selected.coverage_scope, AuditCoverageScope::Selection);
         assert_eq!(selected.total, 1);
         assert_eq!(selected.reviewed_current, 1);
+        let resolved = resolve_batch_subjects(
+            root.path(),
+            &dirs,
+            &files,
+            &[
+                selected.candidates[0].clone(),
+                selected.candidates[0].clone(),
+            ],
+            &lk_core::execution::WorkflowId::from_bytes([7; 16]),
+        )
+        .unwrap();
+        assert_eq!(resolved.len(), 2);
+        for candidate in resolved {
+            assert_eq!(candidate.path, a);
+            assert_eq!(
+                candidate.input_revision,
+                selected.candidates[0].input_revision
+            );
+        }
         assert!(
             plan(root.path(), &dirs, &files, 1, u64::MAX)
                 .err()
