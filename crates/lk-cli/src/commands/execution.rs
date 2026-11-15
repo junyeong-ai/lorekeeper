@@ -1244,7 +1244,11 @@ Path(os.environ['TEST_ROOT'],'received.json').write_text(json.dumps(request,ensu
     async fn closed_stdin_never_hides_unsettled_output_or_cancellation() {
         for (script, reason, termination) in [
             ("exec sleep 30", None, ChildTermination::IoFailed),
-            ("sleep 30 & exit 51", None, ChildTermination::IoFailed),
+            (
+                "trap '' TERM; sleep 30 & exit 51",
+                None,
+                ChildTermination::IoFailed,
+            ),
             (
                 "printf '%02048d' 0; exec sleep 30",
                 None,
