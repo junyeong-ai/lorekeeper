@@ -3,10 +3,11 @@ updates:
   - package-ecosystem: cargo
     directory: /
     schedule:
-      interval: weekly
-      day: monday
-      time: "06:00"
+      interval: cron
+      cronjob: "0 6 * * *"
       timezone: Asia/Seoul
+    cooldown:
+      exclude: ["*"]
     open-pull-requests-limit: 10
     ignore:
       # htmd's public DOM and serializer traits require this parser family to move together.
@@ -25,23 +26,15 @@ updates:
   - package-ecosystem: github-actions
     directory: /
     schedule:
-      interval: weekly
-      day: monday
-      time: "06:00"
+      interval: cron
+      cronjob: "0 6 * * *"
       timezone: Asia/Seoul
+    cooldown:
+      exclude: ["*"]
     open-pull-requests-limit: 5
     groups:
       actions:
         patterns: ["*"]
-    # Every `uses:` is pinned to a commit SHA with the tag in a trailing comment, which is
-    # the form Dependabot reads and rewrites — so this ecosystem is what moves those pins,
-    # and nothing else does.
-    #
-    # `dtolnay/rust-toolchain` used to be excluded here on the grounds that the MSRV job
-    # pins it to the declared rust-version. That confuses two different things: the pin
-    # Dependabot moves is the ACTION's version, while the MSRV is a `toolchain:` input it
-    # never reads. The exclusion therefore froze the action itself — the one place a
-    # supply-chain fix would have to arrive — while protecting nothing.
     commit-message:
       prefix: ci
       include: scope
