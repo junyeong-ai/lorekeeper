@@ -4109,6 +4109,11 @@ mod native {
                     if let Some((session, _)) = self.recording_session("queue read receipts").await
                     {
                         let wait_ms = started.elapsed().as_millis() as u64;
+                        let pin = crate::commands::ConfigurationPin::from_loaded(
+                            self.opts.config.as_ref().expect("resolved config").clone(),
+                            self.config_revision.clone(),
+                        );
+                        let root_pin = self.lease.as_ref().expect("owned workflow").root_pin();
                         let recorded = crate::commands::work::record_read_wave(
                             &session,
                             &self.config,
@@ -4119,13 +4124,16 @@ mod native {
                                 .map(|reply| (reply.task_id.as_str(), reply.output.clone()))
                                 .collect(),
                             replies,
+                            || {
+                                pin.validate()?;
+                                root_pin.validate()
+                            },
                             self.supervisor.read_control(),
                         );
                         (
-                            Some((
-                                recorded.screenings,
-                                recorded.screening_duration_ms + wait_ms,
-                            )),
+                            recorded.screenings.map(|screenings| {
+                                (screenings, recorded.screening_duration_ms + wait_ms)
+                            }),
                             recorded.inspections,
                             recorded.inspection_duration_ms,
                         )
@@ -4144,6 +4152,11 @@ mod native {
                 };
             let screening_ok = self.finish_screening_attempts(screenings, recorded_screenings);
             let recorded = match recorded_inspections {
+                InspectionRecording::Invalidated(error) => {
+                    self.configuration_failed = true;
+                    self.failure("configuration", error);
+                    None
+                }
                 InspectionRecording::Recorded(recorded) => {
                     Some(self.track_inspection_recording(recorded, inspection_duration_ms))
                 }

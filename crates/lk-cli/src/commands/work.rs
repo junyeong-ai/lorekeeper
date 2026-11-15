@@ -1680,11 +1680,12 @@ fn record_screenings_with_capture(
 pub(super) enum InspectionRecording {
     Recorded(miette::Result<RecordedInspections>),
     Recapture(Vec<InspectionReply>),
+    Invalidated(miette::Report),
 }
 
 #[cfg(unix)]
 pub(super) struct ReadWaveRecords {
-    pub screenings: miette::Result<RecordedScreenings>,
+    pub screenings: Option<miette::Result<RecordedScreenings>>,
     pub screening_duration_ms: u64,
     pub inspections: InspectionRecording,
     pub inspection_duration_ms: u64,
@@ -1697,6 +1698,7 @@ pub(super) fn record_read_wave(
     config_revision: &str,
     screenings: Vec<(&str, ScreeningResponse)>,
     inspections: Vec<InspectionReply>,
+    validate_context: impl Fn() -> miette::Result<()>,
     read: &lk_vault::ReadControl,
 ) -> ReadWaveRecords {
     let started = std::time::Instant::now();
@@ -1729,13 +1731,21 @@ pub(super) fn record_read_wave(
         Ok(captured) => captured,
         Err(error) => {
             return ReadWaveRecords {
-                screenings: Err(error),
+                screenings: Some(Err(error)),
                 screening_duration_ms: started.elapsed().as_millis() as u64,
                 inspections: InspectionRecording::Recapture(inspections),
                 inspection_duration_ms: 0,
             };
         }
     };
+    if let Err(error) = validate_context() {
+        return ReadWaveRecords {
+            screenings: None,
+            screening_duration_ms: started.elapsed().as_millis() as u64,
+            inspections: InspectionRecording::Invalidated(error),
+            inspection_duration_ms: 0,
+        };
+    }
     let screenings = record_screenings_with_capture(
         session,
         config,
@@ -1751,6 +1761,8 @@ pub(super) fn record_read_wave(
         .is_ok_and(|records| records.records.iter().all(|record| record.result.is_ok()))
     {
         InspectionRecording::Recapture(inspections)
+    } else if let Err(error) = validate_context() {
+        InspectionRecording::Invalidated(error)
     } else {
         InspectionRecording::Recorded(inspection_queries.and_then(|()| {
             record_inspections_with_capture(
@@ -1764,7 +1776,7 @@ pub(super) fn record_read_wave(
         }))
     };
     ReadWaveRecords {
-        screenings,
+        screenings: Some(screenings),
         screening_duration_ms,
         inspections,
         inspection_duration_ms: started.elapsed().as_millis() as u64,
@@ -6284,6 +6296,192 @@ mod tests {
                 assert!(!root.join(".lorekeeper/mutation").join(file).exists());
             }
             assert!(!root.join(".lorekeeper/knowledge-audit.json").exists());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mixed_recording_refuses_changed_configuration_and_root_at_role_boundaries() {
+        for (drift, phase) in [
+            (None, 0),
+            (Some("config"), 1),
+            (Some("config"), 2),
+            (Some("root"), 1),
+            (Some("root"), 2),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let base = directory.path().canonicalize().unwrap();
+            let root = base.join("vault");
+            let alternate = base.join("alternate");
+            std::fs::create_dir(&root).unwrap();
+            std::fs::create_dir(&alternate).unwrap();
+            let selector = base.join("selected-vault");
+            std::os::unix::fs::symlink(&root, &selector).unwrap();
+            let config_path = base.join("config.yaml");
+            std::fs::write(&config_path, "vault:\n  root: selected-vault\n  locale: en\nidentity: {name: Tester, email: tester@example.com}\nsources:\n  notes:\n    type: manual\n    params: {inbox_dir: inbox}\n    concept_policy: supported-new\nexecution:\n  default_profile: reader\n  profiles:\n    reader:\n      engine: codex\n      timeout_seconds: 30\n      work: {extraction_context: progressive, max_input_bytes: 16384, max_result_bytes: 4096}\n").unwrap();
+            let (mut config, revision) =
+                lk_core::config::Config::load_with_revision(&config_path).unwrap();
+            config.execution.select_profile("reader").unwrap();
+            let task = lk_queue::QueueLlmClient::new(root.join(".lorekeeper/queue")).build_task(
+                "ext",
+                lk_queue::TaskKind::ExtractConcepts,
+                lk_queue::ExtractConceptsRequest {
+                    concept_policy: lk_core::config::ConceptPolicy::SupportedNew,
+                    rss_original: None,
+                    text: "Candidate source evidence.".into(),
+                    source_id: "notes".into(),
+                    source_type: lk_core::config::SourceType::Manual,
+                    date: jiff::civil::date(2026, 10, 22),
+                    focus: None,
+                    locale: lk_core::i18n::Locale::En,
+                    categories: vec![],
+                    target: lk_queue::TaskTarget {
+                        vault_path: "wiki/documents/source.md".into(),
+                        kind: lk_queue::TargetKind::DocumentConcepts,
+                        anchor: "## Related Concepts".into(),
+                    },
+                },
+            );
+            let raw = format!(
+                "---\ntype: document\nllm_inputs:\n  concepts: {}\n---\n## Content\nCandidate source evidence.\n\n## Related Concepts\n",
+                task.cache_hash
+            );
+            write(&root, &task.target.vault_path, &raw);
+            write(
+                &root,
+                "wiki/concepts/candidate.md",
+                "---\ntype: concept\ntitle: Candidate\n---\n## Synthesis\nCandidate evidence.\n",
+            );
+            write(
+                &root,
+                "wiki/documents/audit.md",
+                "---\ntype: document\ntitle: Independent\n---\n## Content\nIndependent audit observation.\n",
+            );
+            write(
+                &root,
+                ".lorekeeper/queue/fixture.jsonl",
+                &serde_json::to_string(&task).unwrap(),
+            );
+            let session = MutationSession::acquire(&root).unwrap();
+            discovery::record(
+                &session,
+                &task.task_id,
+                discovery::DiscoveryRequest {
+                    target_revision: file_revision(&raw),
+                    queries: vec![lk_core::discovery::DiscoveryQuery {
+                        query: "Candidate".into(),
+                        phrase: true,
+                        spacing: false,
+                    }],
+                },
+            )
+            .unwrap();
+            let screening = current_screening(&root, &config, &revision, &task.task_id)
+                .unwrap()
+                .into_candidates()
+                .unwrap();
+            screening
+                .selection
+                .create(&session, &screening.inventory.pages)
+                .unwrap();
+            let request = screening.selection.prepare(&root).unwrap().1.unwrap();
+            let decisions = request["candidates"].as_array().unwrap().iter().map(|card| json!({
+                "candidate_key":card["candidate_key"],"decision":"not-selected","reason":"Card-scoped exclusion."
+            })).collect::<Vec<_>>();
+            let screen = ScreeningResponse::Decisions(json!({
+                "selection_id":request["selection_id"],"batch_id":request["batch_id"],
+                "input_revision":request["input_revision"],"decisions":decisions,
+            }));
+            let prepared = resources::audit(&root, &config, "wiki/documents/audit.md").unwrap();
+            let work = Work::create(
+                &session,
+                &prepared.resources,
+                &prepared.revision(&revision).unwrap(),
+                prepared.context.clone(),
+                limits(&config).unwrap(),
+            )
+            .unwrap();
+            let input = work
+                .prepare_inspections(&root, &prepared.resources, 1)
+                .unwrap()
+                .1
+                .remove(0);
+            let reply = InspectionReply {
+                work_id: work.plan.id.clone(),
+                node_id: input["node_id"].as_str().unwrap().into(),
+                request: input,
+                response: InspectionResponse::NeedsAction(
+                    "Independent evidence requires reassessment.".into(),
+                ),
+            };
+            let before = work_snapshot(&root, &work.plan.id);
+            let pin =
+                super::super::ConfigurationPin::from_loaded(config_path.clone(), revision.clone());
+            let root_pin = super::super::workflow::VaultRootPin::capture(&selector, &root).unwrap();
+            let checks = std::cell::Cell::new(0);
+            let records = record_read_wave(
+                &session,
+                &config,
+                &revision,
+                vec![(&task.task_id, screen)],
+                vec![reply],
+                || {
+                    checks.set(checks.get() + 1);
+                    if checks.get() == phase {
+                        match drift {
+                            Some("config") => {
+                                let raw = std::fs::read_to_string(&config_path).unwrap();
+                                std::fs::write(&config_path, raw + "# changed selection\n")
+                                    .unwrap();
+                            }
+                            Some("root") => {
+                                std::fs::remove_file(&selector).unwrap();
+                                std::os::unix::fs::symlink(&alternate, &selector).unwrap();
+                            }
+                            _ => unreachable!(),
+                        }
+                    }
+                    pin.validate()?;
+                    root_pin.validate()
+                },
+                &lk_vault::ReadControl::default(),
+            );
+            if phase == 1 {
+                assert!(records.screenings.is_none());
+            } else {
+                let records = records.screenings.unwrap().unwrap();
+                assert!(matches!(
+                    records.records[0].result,
+                    Ok(ScreeningRecordOutcome::Recorded(1))
+                ));
+            }
+            if drift.is_some() {
+                assert!(matches!(
+                    records.inspections,
+                    InspectionRecording::Invalidated(_)
+                ));
+                assert_eq!(work_snapshot(&root, &work.plan.id), before);
+            } else {
+                let InspectionRecording::Recorded(records) = records.inspections else {
+                    panic!("current evidence must record");
+                };
+                assert!(matches!(
+                    records.unwrap().records[0].result,
+                    Ok(InspectionRecordOutcome::Deferred(_))
+                ));
+                assert_ne!(work_snapshot(&root, &work.plan.id), before);
+            }
+            assert_eq!(
+                screening
+                    .selection
+                    .ledger(&root)
+                    .unwrap()
+                    .progress
+                    .completed_batches,
+                usize::from(phase != 1)
+            );
+            assert!(std::fs::read_dir(&alternate).unwrap().next().is_none());
+            assert!(!root.join(".lorekeeper/mutation/pending.json").exists());
         }
     }
 
