@@ -43,6 +43,9 @@ paths:
   admitted exact queue Work or screening phase. Reserve the durable fair turn once;
   continuation requires an in-process exact phase token and freshly prepared inputs.
   Charge every attempted host including parallel peers against the same total budget.
+  A peer's completed screening refreshes preparation without resetting unchanged
+  bindings or their remaining allowances. Reprepare admitted targets first and retain
+  only exact current bindings; changed targets return to their durable fair position.
   Publication, changed phase bindings, deferral and writer-wait replanning discard
   admission; restart/cancellation retain the already reserved next target.
 - `execution.work.max_parallel` defaults to 1 and bounds simultaneous dependency-ready

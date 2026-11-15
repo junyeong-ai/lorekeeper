@@ -7305,15 +7305,24 @@ fn native_evidence_wave_records_siblings_and_preserves_valid_independent_replies
 
 #[test]
 fn native_read_only_queue_wave_fills_mixed_roles_in_fair_prefix_order() {
+    #[derive(Clone, Copy)]
+    enum ReplanCase {
+        SamePhase,
+        ChangedPhase,
+    }
     for engine in ["codex", "claude-code"] {
-        for (with_synthesis, failed_role, progressive) in [
-            (false, None, false),
-            (false, None, true),
-            (true, None, true),
-            (false, Some("screening"), true),
-            (false, Some("evidence"), true),
-            (false, Some("corrupt-screening"), true),
+        for (with_synthesis, failed_role, progressive, replan) in [
+            (false, None, false, None),
+            (false, None, true, None),
+            (false, None, true, Some(ReplanCase::SamePhase)),
+            (false, None, true, Some(ReplanCase::ChangedPhase)),
+            (true, None, true, None),
+            (false, Some("screening"), true, None),
+            (false, Some("evidence"), true, None),
+            (false, Some("corrupt-screening"), true, None),
         ] {
+            let continuation = replan.is_some();
+            let same_phase = matches!(replan, Some(ReplanCase::SamePhase));
             let fixture = parallel_screening_fixture(engine, "good", 3);
             if progressive {
                 let candidate = fixture.root().join("vault/wiki/documents/candidate-000.md");
@@ -7333,8 +7342,14 @@ fn native_read_only_queue_wave_fills_mixed_roles_in_fair_prefix_order() {
             );
             let mut request: lk_queue::ExtractConceptsRequest =
                 serde_json::from_value(serde_json::Value::Object(input)).unwrap();
-            request.text = "A transactional outbox retains exact source evidence.\n"
-                .repeat(if progressive { 16 } else { 3000 });
+            request.text =
+                "A transactional outbox retains exact source evidence.\n".repeat(if continuation {
+                    1800
+                } else if progressive {
+                    16
+                } else {
+                    3000
+                });
             request.target.vault_path = "wiki/documents/source-v.md".into();
             let task = lk_queue::QueueLlmClient::new(queue.parent().unwrap().to_path_buf())
                 .build_task("ext", lk_queue::TaskKind::ExtractConcepts, request);
@@ -7364,7 +7379,17 @@ fn native_read_only_queue_wave_fills_mixed_roles_in_fair_prefix_order() {
                 .unwrap()
                 .replace("max_parallel: 2", "max_parallel: 3");
             std::fs::write(&fixture.config, config).unwrap();
-            let count = if with_synthesis { 4 } else { 3 };
+            let count = if same_phase || with_synthesis { 4 } else { 3 };
+            if continuation {
+                let config = std::fs::read_to_string(&fixture.config)
+                    .unwrap()
+                    .replace("max_calls: 3", &format!("max_calls: {count}"))
+                    .replace(
+                        "max_parallel: 3",
+                        "max_parallel: 2, max_consecutive_calls: 2",
+                    );
+                std::fs::write(&fixture.config, config).unwrap();
+            }
             if with_synthesis {
                 write_synthesis_pair(&fixture, "mixed-synthesis", None, 3000);
                 execution_json(&fixture, &["graph", "--json", "backlinks-sync"]);
@@ -7374,7 +7399,11 @@ fn native_read_only_queue_wave_fills_mixed_roles_in_fair_prefix_order() {
                     .replace("max_parallel: 3", "max_parallel: 4");
                 std::fs::write(&fixture.config, config).unwrap();
             }
-            std::fs::write(fixture.root().join("mixed-expected"), count.to_string()).unwrap();
+            std::fs::write(
+                fixture.root().join("mixed-expected"),
+                if continuation { 2 } else { count }.to_string(),
+            )
+            .unwrap();
             std::fs::write(fixture.root().join("mixed-fail"), failed_role.unwrap_or("")).unwrap();
             let behavior = r#"
 export TEST_READ_ONLY_INPUT="$TEST_EXECUTION_ROOT/read-only-request-$$"
@@ -7430,7 +7459,39 @@ MIXED
                     &[("reader", other)],
                 );
             }
-            if progressive {
+            if matches!(replan, Some(ReplanCase::ChangedPhase)) {
+                let source = execution_json(
+                    &fixture,
+                    &["work", "source-plan", "--task-id", &task.task_id],
+                );
+                let id = source["work_id"].as_str().unwrap();
+                loop {
+                    let status = execution_json(&fixture, &["work", "status", id]);
+                    if status["total"].as_u64().unwrap() - status["completed"].as_u64().unwrap()
+                        == 1
+                    {
+                        break;
+                    }
+                    let node = status["ready"][0].as_str().unwrap();
+                    let request = execution_json(&fixture, &["work", "read", id, node]);
+                    let observation = fixture.root().join("source-observation.json");
+                    std::fs::write(
+                        &observation,
+                        serde_json::to_vec(&serde_json::json!({
+                            "work_id":id,"node_id":node,"input_revision":request["input_revision"],
+                            "summary":"Observation of this exact retained source request.",
+                            "findings":[],"source_questions":[],"unresolved":[],"resolutions":[]
+                        }))
+                        .unwrap(),
+                    )
+                    .unwrap();
+                    execution_json(
+                        &fixture,
+                        &["work", "record", "--file", observation.to_str().unwrap()],
+                    );
+                }
+            }
+            if progressive && !continuation {
                 let turn =
                     execution_json(&fixture, &["work", "select", "--task-id", &task.task_id]);
                 let decisions = fixture.root().join("third-decisions.json");
@@ -7459,6 +7520,32 @@ MIXED
                 "{report}"
             );
             let steps = report["work_steps"].as_array().unwrap();
+            if continuation {
+                assert_eq!(steps.len(), count, "{report}");
+                assert!(steps.iter().all(|step| step["outcome"] == "recorded"));
+                assert_eq!(steps[0]["role"], "screening");
+                let work_id = &steps[1]["work_id"];
+                for step in &steps[1..count - 1] {
+                    assert_eq!(step["role"], "evidence", "{report}");
+                    assert_eq!(&step["work_id"], work_id, "{report}");
+                }
+                assert_eq!(steps[count - 1]["role"], "screening", "{report}");
+                let cursor: serde_json::Value = serde_json::from_slice(
+                    &std::fs::read(
+                        fixture
+                            .root()
+                            .join("vault/.lorekeeper/execution-cursor.json"),
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+                assert_eq!(cursor["queue"], "wiki/documents/source-two.md");
+                assert_eq!(
+                    screening_settlement(&fixture)["data"]["pending_mutation"],
+                    false
+                );
+                continue;
+            }
             if failed_role.is_some() {
                 for step in steps {
                     if step["outcome"] == "failed" && failed_role != Some("corrupt-screening") {

@@ -385,6 +385,26 @@ mod native {
         )
     }
 
+    #[derive(Default, PartialEq, Eq)]
+    enum QueueReplan {
+        #[default]
+        None,
+        Refresh,
+        Invalidate,
+    }
+
+    impl QueueReplan {
+        fn is_requested(&self) -> bool {
+            *self != Self::None
+        }
+
+        fn refresh(&mut self) {
+            if *self == Self::None {
+                *self = Self::Refresh;
+            }
+        }
+    }
+
     enum QueueDispatch {
         Discovery {
             task: lk_queue::QueueTask,
@@ -709,7 +729,7 @@ mod native {
         audit_batch: Option<Vec<lk_graph::audit::AuditCandidate>>,
         queue_turn: Option<QueueTurn>,
         queue_admitted: scheduler::AdmittedTurns,
-        queue_replan: bool,
+        queue_replan: QueueReplan,
         writer_access_failed: bool,
         started_at: Instant,
         result: JobResult,
@@ -1436,7 +1456,7 @@ mod native {
                 };
                 if binding.identity != actual {
                     self.queue_admitted.clear();
-                    self.queue_replan = true;
+                    self.queue_replan = QueueReplan::Invalidate;
                     self.record(
                         "queue phase refresh",
                         StageState::Skipped,
@@ -1759,7 +1779,7 @@ mod native {
                             "inspection {node} exhausted its timeout allowance; diagnose the host, then use lore work retry {id} {node}"
                         );
                         self.inspection_deferred.insert(id.into(), reason.clone());
-                        self.queue_replan = true;
+                        self.queue_replan = QueueReplan::Invalidate;
                         self.queue_admitted.clear();
                         self.deferred("bounded inspection timeout", &reason);
                         ObservationStep::Deferred(reason)
@@ -1768,7 +1788,7 @@ mod native {
                 Ok(InspectionRecordOutcome::Refined { added_nodes }) => {
                     metrics.outcome = WorkOutcome::Refined;
                     self.result.work_telemetry.retained_progress.action_receipts += 1;
-                    self.queue_replan = true;
+                    self.queue_replan = QueueReplan::Invalidate;
                     self.record("bounded inspection refinement", StageState::Completed,
                         Some(format!("{node}: retained native refinement request and added {added_nodes} observation nodes; no observation recorded")));
                     ObservationStep::Refined
@@ -1959,7 +1979,7 @@ mod native {
             };
             if waited {
                 self.queue_admitted.clear();
-                self.queue_replan = true;
+                self.queue_replan = QueueReplan::Invalidate;
                 self.record("queue input refresh", StageState::Skipped, Some("writer access became available; preparing current inputs before invocation".into()));
                 return false;
             }
@@ -2397,7 +2417,7 @@ mod native {
                 }
             }
             if usable && held {
-                self.queue_replan = true;
+                self.queue_replan = QueueReplan::Invalidate;
             }
             accepted && usable
         }
@@ -2721,7 +2741,7 @@ mod native {
                     );
                     self.queue_admitted.clear();
                     self.queue_turn = None;
-                    self.queue_replan = true;
+                    self.queue_replan = QueueReplan::Invalidate;
                     WorkStep::Replan
                 }
                 Err(error) => {
@@ -2851,7 +2871,7 @@ mod native {
             } else if recovered {
                 self.queue_admitted.clear();
                 self.queue_turn = None;
-                self.queue_replan = true;
+                self.queue_replan = QueueReplan::Invalidate;
                 WorkStep::Replan
             } else if deferred {
                 WorkStep::Deferred("selected tasks require explicit actions".into())
@@ -3238,7 +3258,7 @@ mod native {
                 }
                 crate::commands::work::NativeFinalization::Ready(section) => section,
                 crate::commands::work::NativeFinalization::Replan => {
-                    self.queue_replan = true;
+                    self.queue_replan = QueueReplan::Invalidate;
                     return WorkStep::Failed;
                 }
             };
@@ -3333,16 +3353,16 @@ mod native {
             for (index, (target, before)) in targets.iter().zip(prepared).enumerate() {
                 let expected = jobs[target].binding(target).expect("screening binding");
                 if expected.identity != format!("screening:{}", before.selection_id) {
-                    self.queue_replan = true;
+                    self.queue_replan = QueueReplan::Invalidate;
                     return Ok(None);
                 }
                 let request = match before.state {
                     crate::commands::work::ScreeningState::Complete => {
-                        self.queue_replan = true;
+                        self.queue_replan = QueueReplan::Invalidate;
                         return Ok(None);
                     }
                     crate::commands::work::ScreeningState::Deferred(reason) => {
-                        self.queue_replan = true;
+                        self.queue_replan = QueueReplan::Invalidate;
                         self.deferred("candidate screening", reason);
                         return Ok(None);
                     }
@@ -3521,7 +3541,7 @@ mod native {
                         Ok(captured) => captured,
                         Err(error) if crate::commands::work::state::is_input_capacity(&error) => {
                             self.deferred("bounded work capacity", error);
-                            self.queue_replan = true;
+                            self.queue_replan = QueueReplan::Invalidate;
                             self.queue_admitted.clear();
                             return true;
                         }
@@ -3545,7 +3565,7 @@ mod native {
                             metrics.preparation_duration_ms = preparation_duration_ms;
                             metrics.outcome = WorkOutcome::AlreadyComplete;
                             self.record_work_step(metrics);
-                            self.queue_replan = true;
+                            self.queue_replan = QueueReplan::Invalidate;
                             self.queue_admitted.clear();
                         } else {
                             for (target, task) in completed {
@@ -3590,7 +3610,7 @@ mod native {
                             Ok(Some(reason)) => {
                                 self.inspection_deferred.insert(id.clone(), reason.clone());
                                 self.deferred("bounded work action", reason);
-                                self.queue_replan = true;
+                                self.queue_replan = QueueReplan::Invalidate;
                                 break;
                             }
                             Ok(None) => {}
@@ -3671,7 +3691,7 @@ mod native {
                 };
                 if waited {
                     self.queue_admitted.clear();
-                    self.queue_replan = true;
+                    self.queue_replan = QueueReplan::Invalidate;
                     self.record("queue input refresh",StageState::Skipped,Some("writer access became available; preparing current inputs before invocation".into()));
                     self.record_uninvoked_queue_reads(turns, WorkOutcome::Rejected);
                     return true;
@@ -4013,7 +4033,7 @@ mod native {
                                         1;
                                     step.outcome = WorkOutcome::Rejected;
                                     usable = true;
-                                    self.queue_replan = true;
+                                    self.queue_replan = QueueReplan::Invalidate;
                                     self.queue_admitted.clear();
                                     self.record(
                                         "candidate screening",
@@ -4027,7 +4047,9 @@ mod native {
                                     step.outcome = WorkOutcome::Recorded;
                                     usable = true;
                                     self.record("candidate screening", StageState::Completed, Some(format!("{completed}/{} screening batches recorded; card decisions are not full-body assessments", reply.batches)));
-                                    self.queue_replan |= completed == reply.batches;
+                                    if completed == reply.batches {
+                                        self.queue_replan.refresh();
+                                    }
                                 }
                                 Ok(_) => {
                                     accepted = false;
@@ -4055,7 +4077,7 @@ mod native {
                 self.record_work_step(step);
             }
             if usable && held {
-                self.queue_replan = true;
+                self.queue_replan = QueueReplan::Invalidate;
             }
             accepted && usable
         }
@@ -4194,10 +4216,13 @@ mod native {
                     jobs.insert(target, QueueDispatch::WholeInput { tasks, inputs });
                 }
             }
-            let (session, _) = self
+            let (session, waited) = self
                 .mutation_session("queue planning")
                 .await
                 .ok_or_else(|| miette::miette!("queue planning did not acquire writer access"))?;
+            if waited {
+                self.queue_admitted.clear();
+            }
             let recovered = crate::commands::queue::rejections::recover_sections_controlled(
                 &session,
                 &self.config,
@@ -4270,7 +4295,25 @@ mod native {
                     needs_application,
                 });
             }
-            let order = scheduler::order(session.root(), scheduler::Stage::Queue, &keys)?;
+            let admitted = self
+                .queue_admitted
+                .remaining_bindings()
+                .cloned()
+                .collect::<Vec<_>>();
+            let mut order = Vec::new();
+            for binding in &admitted {
+                if targets.contains_key(&binding.target) {
+                    order.push(binding.target.clone());
+                } else {
+                    self.queue_admitted.clear_binding(binding);
+                }
+            }
+            let continuation_count = order.len();
+            order.extend(scheduler::order(
+                session.root(),
+                scheduler::Stage::Queue,
+                &keys,
+            )?);
             let independent_limit = budget
                 .max_parallel
                 .min(self.remaining_calls(budget))
@@ -4278,23 +4321,35 @@ mod native {
             let mut next = 0;
             while next < order.len() {
                 self.supervisor.read_control().check().into_diagnostic()?;
+                if jobs.contains_key(&order[next]) || !keys.contains(&order[next]) {
+                    next += 1;
+                    continue;
+                }
+                let continuing = next < continuation_count;
+                let end = if continuing {
+                    continuation_count
+                } else {
+                    order.len()
+                };
                 let batch = is_whole_input_batch_candidate(
                     targets[&order[next]].kind,
                     budget.extraction_context,
                 );
-                let limit = if batch && jobs.is_empty() {
+                let limit = if !continuing && batch && jobs.is_empty() {
                     MAX_PREPARED_QUEUE_TARGETS
                 } else {
                     independent_limit.saturating_sub(jobs.len())
                 };
-                let count = order[next..]
+                let count = order[next..end]
                     .iter()
                     .take(limit)
                     .take_while(|target| {
-                        is_whole_input_batch_candidate(
-                            targets[*target].kind,
-                            budget.extraction_context,
-                        ) == batch
+                        !jobs.contains_key(*target)
+                            && keys.contains(*target)
+                            && is_whole_input_batch_candidate(
+                                targets[*target].kind,
+                                budget.extraction_context,
+                            ) == batch
                     })
                     .count();
                 let window = &order[next..next + count];
@@ -4523,8 +4578,26 @@ mod native {
                     }
                 }
                 flush(&mut batch, &mut jobs);
+                if continuing {
+                    for target in window {
+                        let binding = admitted
+                            .iter()
+                            .find(|binding| &binding.target == target)
+                            .expect("continued target was admitted");
+                        if jobs
+                            .get(target)
+                            .and_then(|job| job.binding(target))
+                            .as_ref()
+                            != Some(binding)
+                        {
+                            self.queue_admitted.clear_binding(binding);
+                            jobs.remove(target);
+                        }
+                    }
+                }
                 if !jobs.is_empty()
                     && (jobs.len() >= independent_limit
+                        || continuing && next == continuation_count
                         || jobs.values().any(|job| !job.is_read_only()))
                 {
                     break;
@@ -4598,12 +4671,14 @@ mod native {
 
         async fn dispatch_queue(&mut self) -> bool {
             'planning: loop {
-                self.queue_replan = false;
+                let replan = std::mem::take(&mut self.queue_replan);
                 if self.result.halted || self.result.cancelled || !self.configuration_is_current() {
                     return false;
                 }
                 self.queue_turn = None;
-                self.queue_admitted.clear();
+                if replan != QueueReplan::Refresh {
+                    self.queue_admitted.clear();
+                }
                 let started_at = Instant::now();
                 let acquisition_before = self.result.mutation_access.duration_ms;
                 let before = self.result.queue_planning;
@@ -4681,7 +4756,7 @@ mod native {
                         if !self.queue_read_wave(&selected, &mut jobs, keys).await {
                             return false;
                         }
-                        if self.queue_replan
+                        if self.queue_replan.is_requested()
                             || jobs.values().any(|job| match job {
                                 QueueDispatch::Partitioned { id, .. }
                                 | QueueDispatch::Source { id } => {
@@ -4712,7 +4787,9 @@ mod native {
                                 WorkStep::Staged => {}
                                 WorkStep::Deferred(_) => continue 'planning,
                                 WorkStep::Replan => continue 'planning,
-                                WorkStep::Failed if self.queue_replan => continue 'planning,
+                                WorkStep::Failed if self.queue_replan.is_requested() => {
+                                    continue 'planning;
+                                }
                                 WorkStep::Failed => return false,
                                 WorkStep::Pending => {
                                     unreachable!("single section has no evidence nodes")
@@ -4721,7 +4798,7 @@ mod native {
                         }
                         QueueDispatch::Discovery { task } => {
                             if !self.discover_extraction(task).await {
-                                if self.queue_replan {
+                                if self.queue_replan.is_requested() {
                                     continue 'planning;
                                 }
                                 return false;
@@ -4737,7 +4814,9 @@ mod native {
                                 WorkStep::Staged => {}
                                 WorkStep::Deferred(_) => continue 'planning,
                                 WorkStep::Replan => continue 'planning,
-                                WorkStep::Failed if self.queue_replan => continue 'planning,
+                                WorkStep::Failed if self.queue_replan.is_requested() => {
+                                    continue 'planning;
+                                }
                                 WorkStep::Failed => return false,
                                 WorkStep::Pending => {
                                     unreachable!("frontier finalization has no pending inspection")
@@ -4749,7 +4828,9 @@ mod native {
                                 WorkStep::Pending => continue,
                                 WorkStep::Deferred(_) => continue 'planning,
                                 WorkStep::Replan => continue 'planning,
-                                WorkStep::Failed if self.queue_replan => continue 'planning,
+                                WorkStep::Failed if self.queue_replan.is_requested() => {
+                                    continue 'planning;
+                                }
                                 WorkStep::Failed => return false,
                                 WorkStep::Staged => {}
                             }
@@ -4766,7 +4847,9 @@ mod native {
                                 WorkStep::Replan => {
                                     generation_deferred = true;
                                 }
-                                WorkStep::Failed if self.queue_replan => continue 'planning,
+                                WorkStep::Failed if self.queue_replan.is_requested() => {
+                                    continue 'planning;
+                                }
                                 WorkStep::Failed => return false,
                                 WorkStep::Pending => {
                                     unreachable!("whole input has no pending nodes")
@@ -6262,7 +6345,7 @@ mod native {
             audit_deferred_paths: std::collections::BTreeSet::new(),
             audit_batch: None,
             queue_turn: None,
-            queue_replan: false,
+            queue_replan: QueueReplan::None,
             writer_access_failed: false,
             started_at: Instant::now(),
             result: JobResult::new(operation),

@@ -324,7 +324,7 @@ impl Runner<'_> {
             Ok(false) => {
                 metrics.outcome = WorkOutcome::Rejected;
                 self.record_work_step(metrics);
-                self.queue_replan = true;
+                self.queue_replan = QueueReplan::Invalidate;
                 return true;
             }
             Err(error) => {
