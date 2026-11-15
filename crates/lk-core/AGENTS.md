@@ -117,6 +117,10 @@ config loading and the shared filesystem primitives intentionally perform I/O.
 
 ## Durable files (`fs.rs`)
 
+- `resolve_resource` resolves existing aliases and appends missing path components.
+  It propagates filesystem errors and rejects dangling links; use it for authoritative
+  resource selection rather than `canonical_prefix`'s lexical fallback.
+
 - `open_lock_file` opens or exclusively creates a persistent regular coordinator
   without truncation, parent provisioning or lock acquisition. Preserve each
   caller's access and creation mode; Unix no-follow/nonblocking opens reject

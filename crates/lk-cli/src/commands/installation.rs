@@ -237,6 +237,7 @@ fn print_report(report: &InstallationReport) {
         SchemaState::Unconfigured => row("schema", "no vault configured", None),
         SchemaState::Current { path } => row("schema", "current", Some(path)),
         SchemaState::Missing { path } => row("schema", "never generated", Some(path)),
+        SchemaState::Unavailable { path } => row("schema", "unavailable", Some(path)),
         SchemaState::Stale { path, generator } => row(
             "schema",
             &match generator {
@@ -248,6 +249,10 @@ fn print_report(report: &InstallationReport) {
     }
 
     let repair = report.repair();
+    if report.has_filesystem_issues() {
+        eprintln!("\nresolve filesystem access or directory layout conflicts and rerun `{repair}`");
+        return;
+    }
     match report.stale() {
         0 => eprintln!("\nevery deployed copy matches this binary"),
         1 => eprintln!("\none does not — `{repair}` rewrites it"),
@@ -268,13 +273,17 @@ fn print_group(label: &str, group: &lk_dist::DeployedGroup) {
     }
     row(
         label,
-        &format!("{stale} of {total} to rewrite"),
+        &format!("{stale} of {total} not current"),
         Some(&group.location),
     );
     for artifact in group.stale() {
         let why = match artifact.state {
             lk_dist::ArtifactState::Absent => "absent",
             lk_dist::ArtifactState::Retired => "retired — this binary no longer carries it",
+            lk_dist::ArtifactState::Unavailable => "unavailable — inspect filesystem access",
+            lk_dist::ArtifactState::InvalidLayout => {
+                "invalid layout — resolve directory links or type conflicts"
+            }
             _ => "differs",
         };
         eprintln!("  {:<18} · {} ({why})", "", artifact.name);
@@ -303,6 +312,20 @@ async fn deploy(
         skills,
         false,
     )?;
+    for engine in AgentTarget::Both.engines() {
+        let selected = installation.for_engine(*engine);
+        let levels: Vec<SkillLevel> = if agent.engines().contains(engine) {
+            match skills {
+                Some(scope) => scope.level().into_iter().collect(),
+                None => selected.deployed_skill_levels(),
+            }
+        } else {
+            Vec::new()
+        };
+        selected
+            .validate_deployment(&levels)
+            .map_err(|error| miette::miette!("{error}"))?;
+    }
     for engine in agent.engines() {
         let selected = installation.for_engine(*engine);
         let installation = &selected;

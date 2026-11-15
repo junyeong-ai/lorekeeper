@@ -29,7 +29,10 @@ or deletion. Resolve native directory identity and selected-path ancestry; prote
 vault containers, selected configuration ancestors and held coordinator files, while allowing owned project skills below
 the vault. Strict optional config discovery distinguishes absence from invalid selection;
 recheck config and vault identity after confirmation. Explicit config-directory purge
-authorizes only that removal; other owned trees still protect the selected config. Delegate byte coherence/target/release validation to lk-dist.
+authorizes only that removal; other owned trees still protect the selected config. Delegate byte coherence/target/release validation to lk-dist. Preflight all selected
+artifact trees under the acquired claims before payload writes or pruning. Coherence
+keeps unavailable inspection and invalid directory layout distinct from changed bytes;
+neither is advice to force a redeploy.
 Unix dispatch retains shared installation claims on absolute selected destinations;
 schedule rendering creates no files and does not acquire installation claims.
 Mutators exclusively claim changed resources and the selected vault workflow before

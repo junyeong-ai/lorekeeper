@@ -12,6 +12,10 @@ lives in `lk-cli/commands/installation.rs`.
 - Write carried files exactly, then prune individual uncarried paths only where
   ownership permits. Never recursively replace a user config directory or skill
   tree. Config deployment preserves user config files.
+- Selected resource roots may resolve aliases. Manifest-derived directories must be real
+  directories; validate every selected payload before writes or pruning. Use the same
+  boundary for deployment and coherence checks. Final carried entries may be safely
+  replaced atomically without following their old contents.
 - Prune by actual same-file identity and `symlink_metadata`, not case-folded names
   or canonicalization guesses. A symlink must not survive as a carried regular file;
   hardlink/case-insensitive aliases must not delete the file just deployed.
@@ -31,7 +35,10 @@ lives in `lk-cli/commands/installation.rs`.
 
 Compare artifact bytes and required executable bits, not whole Unix modes or release
 strings. Platforms without Unix executable bits do not fabricate a mismatch.
-`ArtifactState` distinguishes Current/Modified/Absent/Retired; declined optional
+`ArtifactState` distinguishes Current/Modified/Absent/Retired/Unavailable/InvalidLayout.
+Unreadable traversal is unavailable, never current; unsupported directory layouts
+need deliberate filesystem repair before deployment. Read regular files through the
+shared nonblocking/no-follow opener before reading bytes. Declined optional
 groups are not drift. `SchemaState` receives the actual selected config and generated
 schema expectation. The installation report owns repair guidance: a schema-only
 mismatch needs schema repair, not a reinstall.

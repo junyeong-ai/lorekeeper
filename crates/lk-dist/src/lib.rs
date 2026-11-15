@@ -22,6 +22,7 @@ mod embedded;
 mod layout;
 mod release;
 mod target;
+mod tree;
 mod update;
 mod verify;
 

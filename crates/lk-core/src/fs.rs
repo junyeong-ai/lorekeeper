@@ -263,6 +263,48 @@ fn sync_parent(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Resolve existing aliases and append absent components without hiding filesystem errors.
+/// Dangling links are invalid rather than absent resource roots.
+pub fn resolve_resource(path: &Path) -> std::io::Result<PathBuf> {
+    let selected = std::path::absolute(path)?;
+    let mut ancestor = selected.as_path();
+    let mut missing = Vec::new();
+    loop {
+        match ancestor.canonicalize() {
+            Ok(mut resolved) => {
+                for component in missing.into_iter().rev() {
+                    if component == ".." {
+                        resolved.pop();
+                    } else {
+                        resolved.push(component);
+                    }
+                }
+                return Ok(resolved);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                match std::fs::symlink_metadata(ancestor) {
+                    Ok(_) => {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "filesystem resource is a broken symlink",
+                        ));
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error),
+                }
+            }
+            Err(error) => return Err(error),
+        }
+        let component = ancestor.components().next_back().ok_or_else(|| {
+            std::io::Error::other("filesystem resource has no resolvable ancestor")
+        })?;
+        missing.push(component.as_os_str().to_os_string());
+        ancestor = ancestor.parent().ok_or_else(|| {
+            std::io::Error::other("filesystem resource has no resolvable ancestor")
+        })?;
+    }
+}
+
 /// Canonicalize the longest EXISTING ancestor of `path` (resolving symlinks there) and
 /// re-attach the not-yet-existent remainder, so two paths that share a real, possibly
 /// symlinked ancestor are compared on the same canonical basis even when neither fully

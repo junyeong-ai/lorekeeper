@@ -1,3 +1,5 @@
+#[cfg(unix)]
+use lk_core::fs::resolve_resource;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -707,46 +709,6 @@ fn destination_request(path: &Path, mode: Mode) -> miette::Result<Request> {
         lk_dist::sha256_hex(name.as_encoded_bytes())
     ));
     Ok(Request { path, scope, mode })
-}
-
-pub(super) fn resolve_resource(path: &Path) -> std::io::Result<PathBuf> {
-    let selected = std::path::absolute(path)?;
-    let mut ancestor = selected.as_path();
-    let mut missing = Vec::new();
-    loop {
-        match ancestor.canonicalize() {
-            Ok(mut resolved) => {
-                for component in missing.into_iter().rev() {
-                    if component == ".." {
-                        resolved.pop();
-                    } else {
-                        resolved.push(component);
-                    }
-                }
-                return Ok(resolved);
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                match std::fs::symlink_metadata(ancestor) {
-                    Ok(_) => {
-                        return Err(std::io::Error::new(
-                            std::io::ErrorKind::InvalidInput,
-                            "installation resource is a broken symlink",
-                        ));
-                    }
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(error) => return Err(error),
-                }
-            }
-            Err(error) => return Err(error),
-        }
-        let component = ancestor.components().next_back().ok_or_else(|| {
-            std::io::Error::other("installation resource has no resolvable ancestor")
-        })?;
-        missing.push(component.as_os_str().to_os_string());
-        ancestor = ancestor.parent().ok_or_else(|| {
-            std::io::Error::other("installation resource has no resolvable ancestor")
-        })?;
-    }
 }
 
 #[cfg(unix)]

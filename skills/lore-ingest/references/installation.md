@@ -62,7 +62,12 @@ lore self status
 ```
 
 `self status` compares carried artifact bytes and the selected schema; it does
-not establish source access or semantic completion. `self update` replaces the
+not establish source access or semantic completion. `unavailable` means inspection
+failed; `invalid-layout` means a derived directory is a link or another unsupported
+entry. Resolve the reported filesystem problem and rerun `self status` before
+deploying. Selected data/skill-location root aliases remain supported; directories
+below them must be real directories. Deployment refuses invalid layouts before
+writing or pruning and never follows a derived directory link to repair it. `self update` replaces the
 binary, redeploys its interactive/runtime skills, templates and config examples,
 and synchronizes the generated schema. `self deploy` repairs carried copies from
 the current binary without downloading another release. Follow the reported repair;

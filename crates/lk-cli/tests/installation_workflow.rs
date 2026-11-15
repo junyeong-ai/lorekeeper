@@ -1304,3 +1304,161 @@ fn uninstall_allows_explicit_purge_of_the_selected_config_directory() {
     assert!(!fixture.config_home.join("lorekeeper").exists());
     assert_eq!(std::fs::read(root.join("note.md")).unwrap(), b"user note");
 }
+
+#[test]
+fn deployment_boundaries_and_unavailable_status_preserve_user_data() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    use std::time::Duration;
+
+    let fixture = Fixture::new();
+    assert_success(&fixture.deploy());
+    let skill = fixture.data_dir.join("skills/codex/lore-process");
+    let outside = fixture.directory.path().join("outside");
+    std::fs::create_dir(&outside).unwrap();
+    std::fs::write(outside.join("custom.md"), "keep").unwrap();
+    std::fs::remove_dir_all(skill.join("references")).unwrap();
+    symlink(&outside, skill.join("references")).unwrap();
+    let interactive = fixture.home.join(".agents/skills/lore-day/SKILL.md");
+    std::fs::create_dir_all(interactive.parent().unwrap()).unwrap();
+    std::fs::write(&interactive, "previous").unwrap();
+    let refused = fixture
+        .command(&fixture.config)
+        .args(["self", "deploy", "--skills", "user", "--agent", "codex"])
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    assert_eq!(std::fs::read_to_string(&interactive).unwrap(), "previous");
+    assert_eq!(
+        std::fs::read_to_string(outside.join("custom.md")).unwrap(),
+        "keep"
+    );
+    assert!(!outside.join("bounded-work.md").exists());
+    std::fs::remove_file(skill.join("references")).unwrap();
+    assert_success(&fixture.deploy());
+
+    let entry = skill.join("SKILL.md");
+    std::fs::remove_file(&entry).unwrap();
+    assert!(
+        Command::new("mkfifo")
+            .arg(&entry)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let mut command = assert_cmd::Command::from_std(fixture.command(&fixture.config));
+    command
+        .args(["self", "status", "--json"])
+        .timeout(Duration::from_secs(30));
+    let result = command.assert().code(1);
+    let report: serde_json::Value = serde_json::from_slice(&result.get_output().stdout).unwrap();
+    let group = report["runtime_skills"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|group| group[0] == "codex/lore-process")
+        .unwrap();
+    let artifact = group[1]["artifacts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|artifact| artifact["name"] == "SKILL.md")
+        .unwrap();
+    assert_eq!(artifact["state"], "modified");
+    assert_success(&fixture.deploy());
+    assert!(std::fs::symlink_metadata(&entry).unwrap().is_file());
+
+    let interactive_root = fixture.home.join(".agents/skills");
+    std::fs::remove_file(&interactive).unwrap();
+    std::fs::remove_dir_all(&interactive_root).unwrap();
+    assert_success(
+        &fixture
+            .command(&fixture.config)
+            .args(["self", "deploy", "--skills", "user", "--agent", "codex"])
+            .output()
+            .unwrap(),
+    );
+    let selected = interactive_root.join("lore-process");
+    std::fs::write(selected.join("EXTRA.md"), "extra").unwrap();
+    std::fs::set_permissions(&selected, std::fs::Permissions::from_mode(0o111)).unwrap();
+    let readable = std::fs::read_dir(&selected).is_ok();
+    let output = fixture
+        .command(&fixture.config)
+        .args(["self", "status", "--json"])
+        .output()
+        .unwrap();
+    std::fs::set_permissions(&selected, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let group = report["skills"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|group| group[0] == "codex/user")
+        .unwrap();
+    let artifact = group[1]["artifacts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|artifact| artifact["name"] == "lore-process")
+        .unwrap();
+    assert_eq!(
+        artifact["state"],
+        if readable { "modified" } else { "unavailable" }
+    );
+}
+
+#[test]
+fn schema_and_installation_records_never_open_nonregular_streams() {
+    use std::time::Duration;
+    let fixture = Fixture::new();
+    assert_success(&fixture.deploy());
+    let schema = fixture.directory.path().join("first/wiki/AGENTS.md");
+    let saved = std::fs::read(&schema).unwrap();
+    std::fs::remove_file(&schema).unwrap();
+    assert!(
+        Command::new("mkfifo")
+            .arg(&schema)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let mut command = assert_cmd::Command::from_std(fixture.command(&fixture.config));
+    command
+        .args(["self", "status", "--json"])
+        .timeout(Duration::from_secs(30));
+    let result = command.assert().code(1);
+    let report: serde_json::Value = serde_json::from_slice(&result.get_output().stdout).unwrap();
+    assert_eq!(report["schema"]["state"], "unavailable");
+    std::fs::remove_file(&schema).unwrap();
+    std::fs::write(&schema, saved).unwrap();
+
+    let record = fixture.config_home.join("lorekeeper/data-dir");
+    std::fs::remove_file(&record).unwrap();
+    assert!(
+        Command::new("mkfifo")
+            .arg(&record)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let mut selected = fixture.command(&fixture.config);
+    selected
+        .env_remove("LORE_INSTALL_DATA_DIR")
+        .args(["self", "status", "--json"]);
+    assert_cmd::Command::from_std(selected)
+        .timeout(Duration::from_secs(30))
+        .assert()
+        .code(1);
+    let mut explicit = fixture.command(&fixture.config);
+    explicit
+        .env_remove("LORE_INSTALL_DATA_DIR")
+        .args(["self", "status", "--data-dir"])
+        .arg(&fixture.data_dir)
+        .arg("--json");
+    assert_cmd::Command::from_std(explicit)
+        .timeout(Duration::from_secs(30))
+        .assert()
+        .success();
+    assert_success(&fixture.deploy());
+    assert!(std::fs::symlink_metadata(record).unwrap().is_file());
+}

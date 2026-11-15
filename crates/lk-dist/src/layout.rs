@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use crate::DistError;
 use crate::embedded::{EmbeddedFile, config_files, skill_files_for, skill_names, template_files};
+use crate::tree::ArtifactTree;
 
 /// Where a set of agent skills is deployed.
 ///
@@ -42,6 +43,10 @@ pub struct Installation {
 impl Installation {
     /// The installation the running binary belongs to.
     pub fn detect() -> Result<Self, DistError> {
+        Self::detect_selected(None)
+    }
+
+    fn detect_selected(override_dir: Option<PathBuf>) -> Result<Self, DistError> {
         let binary =
             std::env::current_exe().map_err(|e| DistError::io("locating the running binary", e))?;
         // Follows a shim: a version manager puts one on `PATH` and the real file is what a
@@ -51,7 +56,10 @@ impl Installation {
             .map_err(|e| DistError::io("locating the installation project directory", e))?;
         let home = home_dir().map(|path| absolute_path(&path)).transpose()?;
         let config_dir = absolute_path(&config_dir(home.as_deref()))?;
-        let data_dir = absolute_path(&data_dir(home.as_deref()))?;
+        let data_dir = match override_dir {
+            Some(path) => absolute_path(&path)?,
+            None => absolute_path(&data_dir(home.as_deref())?)?,
+        };
         Ok(Self {
             data_dir,
             config_dir,
@@ -68,10 +76,7 @@ impl Installation {
     /// again here is how an empty value became `Some("")`, which resolved the user skill level
     /// to a RELATIVE `.claude/skills` and deployed into whatever directory the command ran in.
     pub fn detect_with_data_dir(data_dir: PathBuf) -> Result<Self, DistError> {
-        Ok(Self {
-            data_dir: absolute_path(&data_dir)?,
-            ..Self::detect()?
-        })
+        Self::detect_selected(Some(data_dir))
     }
 
     pub fn at(
@@ -114,7 +119,19 @@ impl Installation {
     pub fn deploy_runtime_skills(&self) -> Result<PathBuf, DistError> {
         let root = self.runtime_skills_dir();
         for name in skill_names() {
-            write_tree(&root.join(name), &skill_files_for(self.engine, name))?;
+            ArtifactTree::build(
+                &self.data_dir,
+                &root.join(name),
+                &skill_files_for(self.engine, name),
+            )?;
+        }
+        for name in skill_names() {
+            write_tree_with(
+                &self.data_dir,
+                &root.join(name),
+                &skill_files_for(self.engine, name),
+                Prune::Sweep,
+            )?;
         }
         Ok(root)
     }
@@ -178,9 +195,15 @@ impl Installation {
                 let Some(dir) = self.skills_dir(*level) else {
                     return false;
                 };
-                let deployed = skill_names()
-                    .iter()
-                    .any(|name| dir.join(name).join("SKILL.md").is_file());
+                let deployed = skill_names().iter().any(|name| {
+                    let skill = dir.join(name);
+                    match std::fs::symlink_metadata(&skill) {
+                        Ok(metadata) if !metadata.is_dir() => true,
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+                        Err(_) => true,
+                        Ok(_) => !matches!(std::fs::symlink_metadata(skill.join("SKILL.md")), Err(error) if error.kind() == std::io::ErrorKind::NotFound),
+                    }
+                });
                 // Run from the home directory, both levels name the same place. Counting it
                 // twice reported one drifted file as two and deployed the same tree twice.
                 deployed && seen.insert(dir.canonicalize().unwrap_or(dir))
@@ -188,69 +211,79 @@ impl Installation {
             .collect()
     }
 
-    /// Skill directories under `level` that this binary does not carry.
-    ///
-    /// A skill dropped or renamed between releases is invisible to a comparison that iterates
-    /// what the binary HAS, so an agent keeps loading `/lore-retired` and following instructions
-    /// for commands that no longer exist — the same failure the file-level prune inside a skill
-    /// exists to prevent, one level up. The `lore-` prefix bounds it to this tool's namespace,
-    /// so a skill someone else wrote is never touched.
-    pub fn retired_skills(&self, level: SkillLevel) -> Vec<PathBuf> {
+    /// Retired names come from this level's deployment record, never a naming prefix.
+    /// Failed inspection preserves ownership and refuses cleanup.
+    pub fn retired_skills(&self, level: SkillLevel) -> Result<Vec<PathBuf>, DistError> {
         let Some(root) = self.skills_dir(level) else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
         let carried = skill_names();
-        let mut retired: Vec<PathBuf> = self
-            .deployed_record(level)
-            .into_iter()
-            .filter(|name| !carried.contains(&name.as_str()))
-            .map(|name| root.join(name))
-            .filter(|path| path.join("SKILL.md").is_file())
-            .collect();
+        let mut retired = Vec::new();
+        for name in self.deployed_record(level)? {
+            if carried.contains(&name.as_str()) {
+                continue;
+            }
+            let path = root.join(name);
+            match std::fs::symlink_metadata(path.join("SKILL.md")) {
+                Ok(_) => retired.push(path),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(DistError::io(
+                        format!("inspect retired skill {}", path.display()),
+                        error,
+                    ));
+                }
+            }
+        }
         retired.sort();
-        retired
+        Ok(retired)
     }
 
-    /// The skill names the last deploy wrote.
-    ///
-    /// The only thing on disk that distinguishes a directory THIS TOOL created from one the
-    /// user wrote. A name prefix cannot: `lore-` is the natural prefix for a skill someone
-    /// writes about this tool, and it is the prefix the documentation trains them on — pruning
-    /// on it deleted a hand-written `lore-standup/` recursively, unannounced, on the first
-    /// unattended `self update`.
-    ///
-    /// Per LEVEL, and written only for a level actually deployed to, because the record is a
-    /// claim about what happened rather than about what the binary holds. A record of the
-    /// CARRIED set let a `--skills none` install assert six skills it had deployed nowhere, and
-    /// let a name written at one level authorise a removal at another — the same "a prefix is
-    /// not provenance" argument one step in. An installation with no record for a level prunes
-    /// nothing there, which is the right answer for one this tool has not written to.
-    fn deployed_record(&self, level: SkillLevel) -> Vec<String> {
+    /// Ownership is recorded per engine and level. An absent legacy record grants no
+    /// removal authority; an unreadable or malformed record is an error.
+    fn deployed_record(&self, level: SkillLevel) -> Result<Vec<String>, DistError> {
         let prefix = format!("{}/{}:", self.engine.as_str(), level.as_str());
-        std::fs::read_to_string(self.config_dir.join(DEPLOYED_SKILLS_RECORD))
-            .map(|body| {
-                body.lines()
-                    .filter_map(|line| line.trim().strip_prefix(prefix.as_str()))
-                    .filter(|name| !name.is_empty())
-                    .map(str::to_owned)
-                    .collect()
-            })
-            .unwrap_or_default()
+        let path = self.config_dir.join(DEPLOYED_SKILLS_RECORD);
+        let body = match crate::tree::load_text(&path) {
+            Ok(body) => body,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(DistError::io(format!("read {}", path.display()), error)),
+        };
+        let names: Vec<String> = body
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix(prefix.as_str()))
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+            .collect();
+        for name in &names {
+            let mut parts = Path::new(name).components();
+            if !matches!(parts.next(), Some(std::path::Component::Normal(_)))
+                || parts.next().is_some()
+            {
+                return Err(DistError::Unsupported(format!(
+                    "invalid deployed skill name in {}",
+                    path.display()
+                )));
+            }
+        }
+        Ok(names)
     }
 
     /// Replace this level's entries, leaving every other level's alone.
     fn record_deployed(&self, level: SkillLevel, names: &[&str]) -> Result<(), DistError> {
         let path = self.config_dir.join(DEPLOYED_SKILLS_RECORD);
         let prefix = format!("{}/{}:", self.engine.as_str(), level.as_str());
-        let mut lines: Vec<String> = std::fs::read_to_string(&path)
-            .map(|body| {
-                body.lines()
-                    .map(str::trim)
-                    .filter(|line| !line.is_empty() && !line.starts_with(prefix.as_str()))
-                    .map(str::to_owned)
-                    .collect()
-            })
-            .unwrap_or_default();
+        let body = match crate::tree::load_text(&path) {
+            Ok(body) => body,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(error) => return Err(DistError::io(format!("read {}", path.display()), error)),
+        };
+        let mut lines: Vec<String> = body
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with(prefix.as_str()))
+            .map(str::to_owned)
+            .collect();
         lines.extend(names.iter().map(|name| format!("{prefix}{name}")));
         lines.sort();
 
@@ -273,9 +306,18 @@ impl Installation {
             done: Deployed::default(),
             error: DistError::Unsupported(self.no_such_level(level)),
         })?;
+        self.validate_skill_trees(level)
+            .map_err(|error| DeployFailure {
+                done: Deployed::default(),
+                error,
+            })?;
         let mut removed = Vec::new();
         for retired in self
             .retired_skills(level)
+            .map_err(|error| DeployFailure {
+                done: Deployed::default(),
+                error,
+            })?
             .into_iter()
             .filter(|_| prune.sweeps())
         {
@@ -293,7 +335,9 @@ impl Installation {
         let mut written = Vec::new();
         for name in skill_names() {
             let dir = root.join(name);
-            if let Err(error) = write_tree_with(&dir, &skill_files_for(self.engine, name), prune) {
+            if let Err(error) =
+                write_tree_with(&root, &dir, &skill_files_for(self.engine, name), prune)
+            {
                 return Err(DeployFailure {
                     done: Deployed { written, removed },
                     error,
@@ -314,6 +358,40 @@ impl Installation {
         Ok(Deployed { written, removed })
     }
 
+    /// Validate every selected payload before any deployment writes or removals.
+    pub fn validate_deployment(&self, levels: &[SkillLevel]) -> Result<(), DistError> {
+        for &level in levels {
+            self.validate_skill_trees(level)?;
+        }
+        let root = self.runtime_skills_dir();
+        for name in skill_names() {
+            ArtifactTree::build(
+                &self.data_dir,
+                &root.join(name),
+                &skill_files_for(self.engine, name),
+            )?;
+        }
+        ArtifactTree::build(&self.data_dir, &self.templates_dir(), &template_files())?;
+        ArtifactTree::build(&self.config_dir, &self.config_dir, &config_files())?;
+        Ok(())
+    }
+
+    fn validate_skill_trees(&self, level: SkillLevel) -> Result<(), DistError> {
+        let root = self
+            .skills_dir(level)
+            .ok_or_else(|| DistError::Unsupported(self.no_such_level(level)))?;
+        self.deployed_record(level)?;
+        for name in skill_names() {
+            ArtifactTree::build(&root, &root.join(name), &skill_files_for(self.engine, name))?;
+        }
+        if Prune::for_level(level).sweeps() {
+            for retired in self.retired_skills(level)? {
+                ArtifactTree::build(&root, &retired, &[])?;
+            }
+        }
+        Ok(())
+    }
+
     /// Why an installation scope cannot be resolved.
     pub fn skills_reason(&self, level: SkillLevel) -> String {
         self.no_such_level(level)
@@ -325,7 +403,7 @@ impl Installation {
 
     pub fn deploy_templates(&self) -> Result<PathBuf, DistError> {
         let dir = self.templates_dir();
-        write_tree(&dir, &template_files())?;
+        write_tree_with(&self.data_dir, &dir, &template_files(), Prune::Sweep)?;
         Ok(dir)
     }
 
@@ -335,13 +413,7 @@ impl Installation {
     /// own `config.yaml`, which this does not own and must not remove.
     pub fn deploy_config_examples(&self) -> Result<PathBuf, DistError> {
         let dir = self.config_dir.clone();
-        std::fs::create_dir_all(&dir)
-            .map_err(|e| DistError::io(format!("create {}", dir.display()), e))?;
-        for file in config_files() {
-            let path = dir.join(file.relative);
-            lk_core::fs::write_atomic(&path, file.contents.as_bytes(), Some(file.mode))
-                .map_err(|e| DistError::io(format!("write {}", path.display()), e))?;
-        }
+        write_tree_with(&dir, &dir, &config_files(), Prune::Leave)?;
         Ok(dir)
     }
 }
@@ -421,21 +493,24 @@ pub(crate) fn write_tree_for_tests(dir: &Path, files: &[EmbeddedFile]) -> Result
     write_tree(dir, files)
 }
 
+#[cfg(test)]
 fn write_tree(dir: &Path, files: &[EmbeddedFile]) -> Result<(), DistError> {
-    write_tree_with(dir, files, Prune::Sweep)
+    write_tree_with(dir, dir, files, Prune::Sweep)
 }
 
-fn write_tree_with(dir: &Path, files: &[EmbeddedFile], prune: Prune) -> Result<(), DistError> {
-    std::fs::create_dir_all(dir)
-        .map_err(|e| DistError::io(format!("create {}", dir.display()), e))?;
+fn write_tree_with(
+    root: &Path,
+    dir: &Path,
+    files: &[EmbeddedFile],
+    prune: Prune,
+) -> Result<(), DistError> {
+    let tree = ArtifactTree::build(root, dir, files)?;
+    tree.provision()?;
+    let dir = tree.directory();
 
     let mut expected = std::collections::BTreeSet::new();
     for file in files {
         let path = dir.join(file.relative);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| DistError::io(format!("create {}", parent.display()), e))?;
-        }
         lk_core::fs::write_atomic(&path, file.contents.as_bytes(), Some(file.mode))
             .map_err(|e| DistError::io(format!("write {}", path.display()), e))?;
         expected.insert(identity(&path));
@@ -444,7 +519,11 @@ fn write_tree_with(dir: &Path, files: &[EmbeddedFile], prune: Prune) -> Result<(
     if !prune.sweeps() {
         return Ok(());
     }
-    for entry in walkdir::WalkDir::new(dir).contents_first(true).into_iter() {
+    for entry in walkdir::WalkDir::new(dir)
+        .follow_root_links(false)
+        .contents_first(true)
+        .into_iter()
+    {
         let entry =
             entry.map_err(|e| DistError::io(format!("read {}", dir.display()), e.into()))?;
         let path = entry.path();
@@ -532,18 +611,23 @@ const DATA_DIR_RECORD: &str = "data-dir";
 /// tool created from one the user did.
 const DEPLOYED_SKILLS_RECORD: &str = "deployed-skills";
 
-fn data_dir(home: Option<&Path>) -> PathBuf {
+fn data_dir(home: Option<&Path>) -> Result<PathBuf, DistError> {
     if let Some(explicit) = std::env::var_os("LORE_INSTALL_DATA_DIR").filter(|v| !v.is_empty()) {
-        return PathBuf::from(explicit);
+        return Ok(PathBuf::from(explicit));
     }
     // What the last deploy actually used. Below the environment, which is an explicit
     // instruction for this run, and above the defaults, which are only a guess.
-    if let Some(recorded) = std::fs::read_to_string(config_dir(home).join(DATA_DIR_RECORD))
-        .ok()
-        .map(|line| line.trim().to_string())
-        .filter(|line| !line.is_empty())
-    {
-        return PathBuf::from(recorded);
+    let path = config_dir(home).join(DATA_DIR_RECORD);
+    match crate::tree::load_text(&path) {
+        Ok(recorded) if !recorded.trim().is_empty() => return Ok(PathBuf::from(recorded.trim())),
+        Ok(_) => {
+            return Err(DistError::Unsupported(format!(
+                "empty installation data directory record: {}",
+                path.display()
+            )));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(DistError::io(format!("read {}", path.display()), error)),
     }
     let base = std::env::var_os("XDG_DATA_HOME")
         .filter(|v| !v.is_empty())
@@ -557,7 +641,7 @@ fn data_dir(home: Option<&Path>) -> PathBuf {
         })
         .or_else(|| home.map(|h| h.join(".local").join("share")))
         .unwrap_or_else(|| PathBuf::from(".local").join("share"));
-    base.join("lorekeeper")
+    Ok(base.join("lorekeeper"))
 }
 
 fn config_dir(home: Option<&Path>) -> PathBuf {
@@ -706,7 +790,12 @@ mod tests {
         );
 
         // Nothing recorded yet: an installation this tool has not written to loses nothing.
-        assert!(installation.retired_skills(SkillLevel::User).is_empty());
+        assert!(
+            installation
+                .retired_skills(SkillLevel::User)
+                .unwrap()
+                .is_empty()
+        );
 
         std::fs::create_dir_all(&config).unwrap();
         installation
@@ -716,13 +805,18 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            installation.retired_skills(SkillLevel::User),
+            installation.retired_skills(SkillLevel::User).unwrap(),
             [root.join("lore-retired")]
         );
 
         // The record is per level. A name written at one level authorises nothing at another —
         // the directory there was never this tool's to remove.
-        assert!(installation.retired_skills(SkillLevel::Project).is_empty());
+        assert!(
+            installation
+                .retired_skills(SkillLevel::Project)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     /// The record is a claim about what was WRITTEN. Recording the carried set instead let an
@@ -740,7 +834,12 @@ mod tests {
         );
         installation.remember().unwrap();
         assert!(!config.join(DEPLOYED_SKILLS_RECORD).exists());
-        assert!(installation.retired_skills(SkillLevel::User).is_empty());
+        assert!(
+            installation
+                .retired_skills(SkillLevel::User)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     /// An agent loads a symlink exactly like a file, and `walkdir` does not follow one — so a
@@ -799,7 +898,7 @@ mod tests {
         let codex = installation.for_engine(AgentEngine::Codex);
         installation.deploy_skills(SkillLevel::User).unwrap();
         assert!(codex.deployed_skill_levels().is_empty());
-        assert!(codex.deployed_record(SkillLevel::User).is_empty());
+        assert!(codex.deployed_record(SkillLevel::User).unwrap().is_empty());
         codex.deploy_skills(SkillLevel::User).unwrap();
         let root = codex.skills_dir(SkillLevel::User).unwrap();
         assert!(root.ends_with(".agents/skills"));
@@ -807,8 +906,8 @@ mod tests {
         let page = lk_core::frontmatter::parse_page(&source).unwrap();
         assert_eq!(page.frontmatter.get("name").unwrap(), "lore-process");
         assert_eq!(
-            installation.deployed_record(SkillLevel::User),
-            codex.deployed_record(SkillLevel::User)
+            installation.deployed_record(SkillLevel::User).unwrap(),
+            codex.deployed_record(SkillLevel::User).unwrap()
         );
     }
 
@@ -840,5 +939,177 @@ mod tests {
                 "in-progress canonical instructions"
             );
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod boundary_tests {
+    use super::*;
+
+    #[test]
+    fn derived_links_refuse_before_writing_or_pruning_in_both_scopes() {
+        let files = [
+            EmbeddedFile {
+                relative: "SKILL.md",
+                contents: "new",
+                mode: 0o644,
+            },
+            EmbeddedFile {
+                relative: "references/a.md",
+                contents: "reference",
+                mode: 0o644,
+            },
+        ];
+        for prune in [Prune::Sweep, Prune::Leave] {
+            for placement in ["root", "parent", "internal"] {
+                let temporary = tempfile::tempdir().unwrap();
+                let root = temporary.path().join("selected");
+                let dir = root.join("skill");
+                let outside = temporary.path().join("outside");
+                std::fs::create_dir(&root).unwrap();
+                std::fs::create_dir(&outside).unwrap();
+                std::fs::write(outside.join("custom.md"), "keep").unwrap();
+                if placement == "root" {
+                    std::os::unix::fs::symlink(&outside, &dir).unwrap();
+                } else {
+                    std::fs::create_dir(&dir).unwrap();
+                    std::fs::write(dir.join("SKILL.md"), "previous").unwrap();
+                    let target = if placement == "internal" {
+                        let internal = dir.join("shared");
+                        std::fs::create_dir(&internal).unwrap();
+                        internal
+                    } else {
+                        outside.clone()
+                    };
+                    std::os::unix::fs::symlink(target, dir.join("references")).unwrap();
+                }
+                assert!(matches!(
+                    write_tree_with(&root, &dir, &files, prune),
+                    Err(DistError::Unsupported(_))
+                ));
+                assert_eq!(
+                    std::fs::read_to_string(outside.join("custom.md")).unwrap(),
+                    "keep"
+                );
+                assert!(!outside.join("SKILL.md").exists());
+                if placement != "root" {
+                    assert_eq!(
+                        std::fs::read_to_string(dir.join("SKILL.md")).unwrap(),
+                        "previous"
+                    );
+                    assert!(dir.join("references").is_symlink());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn selected_root_and_leaf_aliases_preserve_external_originals() {
+        for hardlink in [false, true] {
+            let temporary = tempfile::tempdir().unwrap();
+            let root = temporary.path().join("actual");
+            let alias = temporary.path().join("별칭 space");
+            let dir = root.join("skill");
+            let original = temporary.path().join("original.md");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(&original, "original").unwrap();
+            std::os::unix::fs::symlink(&root, &alias).unwrap();
+            if hardlink {
+                std::fs::hard_link(&original, dir.join("SKILL.md")).unwrap();
+            } else {
+                std::os::unix::fs::symlink(&original, dir.join("SKILL.md")).unwrap();
+            }
+            write_tree_with(
+                &alias,
+                &alias.join("skill"),
+                &[EmbeddedFile {
+                    relative: "SKILL.md",
+                    contents: "new",
+                    mode: 0o644,
+                }],
+                Prune::Sweep,
+            )
+            .unwrap();
+            assert_eq!(std::fs::read_to_string(&original).unwrap(), "original");
+            assert_eq!(
+                std::fs::read_to_string(dir.join("SKILL.md")).unwrap(),
+                "new"
+            );
+            assert!(!dir.join("SKILL.md").is_symlink());
+        }
+    }
+    #[test]
+    fn failed_retirement_inspection_preserves_payloads_and_ownership() {
+        use std::os::unix::fs::PermissionsExt;
+        let temporary = tempfile::tempdir().unwrap();
+        let installation = Installation::at(
+            temporary.path().join("lore"),
+            temporary.path().join("data"),
+            temporary.path().join("config"),
+            Some(temporary.path().join("home")),
+            None,
+        );
+        installation.deploy_skills(SkillLevel::User).unwrap();
+        let root = installation.skills_dir(SkillLevel::User).unwrap();
+        let retired = root.join("lore-retired");
+        std::fs::create_dir(&retired).unwrap();
+        std::fs::write(retired.join("SKILL.md"), "old").unwrap();
+        installation
+            .record_deployed(
+                SkillLevel::User,
+                &[skill_names(), vec!["lore-retired"]].concat(),
+            )
+            .unwrap();
+        let record = installation.config_dir.join(DEPLOYED_SKILLS_RECORD);
+        let before = std::fs::read(&record).unwrap();
+        let current = root.join(skill_names()[0]).join("SKILL.md");
+        std::fs::write(&current, "previous").unwrap();
+        std::fs::set_permissions(&retired, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let unavailable = std::fs::symlink_metadata(retired.join("SKILL.md")).is_err();
+        let result = installation.retired_skills(SkillLevel::User);
+        let deployment = if unavailable {
+            Some(installation.deploy_skills(SkillLevel::User))
+        } else {
+            None
+        };
+        std::fs::set_permissions(&retired, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if unavailable {
+            assert!(result.is_err());
+            let failure = deployment.unwrap().unwrap_err();
+            assert!(failure.done.written.is_empty() && failure.done.removed.is_empty());
+        } else {
+            assert!(result.unwrap().contains(&retired));
+        }
+        assert_eq!(std::fs::read(&record).unwrap(), before);
+        assert_eq!(std::fs::read_to_string(current).unwrap(), "previous");
+        assert!(retired.join("SKILL.md").exists());
+    }
+
+    #[test]
+    fn a_dangling_derived_skill_stays_visible_but_empty_scopes_do_not_deploy() {
+        let temporary = tempfile::tempdir().unwrap();
+        let installation = Installation::at(
+            temporary.path().join("lore"),
+            temporary.path().join("data"),
+            temporary.path().join("config"),
+            Some(temporary.path().join("home")),
+            None,
+        );
+        let root = installation.skills_dir(SkillLevel::User).unwrap();
+        std::fs::create_dir_all(root.join("lore-day")).unwrap();
+        assert!(installation.deployed_skill_levels().is_empty());
+        std::os::unix::fs::symlink(temporary.path().join("missing"), root.join("lore-process"))
+            .unwrap();
+        assert_eq!(installation.deployed_skill_levels(), vec![SkillLevel::User]);
+        let report =
+            crate::InstallationReport::build(&installation, crate::SchemaState::Unconfigured);
+        let artifact = report.skills[0]
+            .1
+            .artifacts
+            .iter()
+            .find(|a| a.name == "lore-process")
+            .unwrap();
+        assert_eq!(artifact.state, crate::ArtifactState::InvalidLayout);
+        assert!(report.has_filesystem_issues());
     }
 }

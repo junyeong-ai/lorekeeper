@@ -4,7 +4,9 @@ use std::path::{Path, PathBuf};
 
 use lk_dist::Installation;
 
-use super::{AgentTarget, Protection, protection::resolve_resource};
+use lk_core::fs::resolve_resource;
+
+use super::{AgentTarget, Protection};
 
 #[cfg(unix)]
 #[derive(Debug, PartialEq, Eq, Hash)]
