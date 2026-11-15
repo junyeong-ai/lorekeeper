@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The same real external-tool contract test runs locally and in CI. Runtime admits
-# >=0.66 without an upper bound; the gate pins the floor and its nearest predecessor.
+# >=0.69 without an upper bound; the gate pins the floor and its nearest predecessor.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -20,20 +20,20 @@ else
         Darwin-*)
             target=universal-apple-darwin
             extension=tar.gz
-            supported_sha=1c012442c94d084c53a038c30db53357a2a12deb86d9d11f9854bc6d241a6adf
-            unsupported_sha=2b64abc346fa98c6cae3744bdc7d980bf4719266723df9f3cf5bf4740cf1c894
+            supported_sha=5c19932c6a35a64cfe50982c4d5a1924167f69d9bdd76168624ca90731de7027
+            unsupported_sha=cb50a1ac25625e0cf5c97f3728dc693d740ffc172d58f89a3c34fe22b2c1364f
             ;;
         Linux-x86_64)
             target=x86_64-unknown-linux-musl
             extension=tar.gz
-            supported_sha=c4a716eab8c043746fc46edec86afe940ee566a177db0f31d0d9a12ebb29a92b
-            unsupported_sha=5174348d65123219e5b097387093b945fdf4fa8b47818b92772e4b6e7560b993
+            supported_sha=c4a5a034bdb0f3c65a6e8c3f14d8e8e9c8032ae95ce55bed756f7057c2dc6d17
+            unsupported_sha=191f5d4cb89e9b02c7cddfa4d2d2dfa5a7db90e8bd7e065b820ff018faf60677
             ;;
         MINGW*-x86_64|MSYS*-x86_64)
             target=x86_64-pc-windows-msvc
             extension=zip
-            supported_sha=a566a841d48050bcdca5b8de4c7d1187a47b5a385fccc81b4f0bd04bb13d0263
-            unsupported_sha=897814596613063d3b6cb5d03040fb37f11e6203907672dad12fcb905300fc2c
+            supported_sha=6cf6b17a8ccbed78debbc2ae20e56e7087f83a8fc160a57051ed13adf9d55de7
+            unsupported_sha=44530846fe657307ee7542bd4a5c14ded9019a5814b16088793b31ec328c8f2e
             ;;
         *)
             echo "No pinned Nodex pair for this host; supply both absolute binary paths" >&2
@@ -41,14 +41,14 @@ else
             ;;
     esac
     stage="$(mktemp -d)"
-    for version in 0.65.0 0.66.0; do
+    for version in 0.68.0 0.69.0; do
         directory="$stage/$version"
         mkdir "$directory"
         archive="$directory/nodex.$extension"
         curl --fail --silent --show-error --location --retry 3 --output "$archive" \
             "https://github.com/junyeong-ai/nodex/releases/download/v$version/nodex-v$version-$target.$extension"
         expected="$supported_sha"
-        [ "$version" != 0.65.0 ] || expected="$unsupported_sha"
+        [ "$version" != 0.68.0 ] || expected="$unsupported_sha"
         if command -v sha256sum >/dev/null 2>&1; then
             actual="$(sha256sum "$archive" | awk '{print $1}')"
         else
@@ -64,7 +64,7 @@ else
             tar -xzOf "$archive" nodex > "$binary"
             chmod 700 "$binary"
         fi
-        if [ "$version" = 0.66.0 ]; then supported="$binary"; else unsupported="$binary"; fi
+        if [ "$version" = 0.69.0 ]; then supported="$binary"; else unsupported="$binary"; fi
     done
 fi
 

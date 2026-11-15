@@ -151,8 +151,12 @@ Use parser/token-state behavior, not regex replacement of arbitrary markup.
 
 - Read the declared public graph, NEVER substitute filesystem discovery. Require
   nodex.toml and a current compatible public index. Current subprocess compatibility
-  is `>=0.66`, checked publicly; an explicit executable applies to every call,
+  is `>=0.69`, checked publicly; an explicit executable applies to every call,
   without fallback or changing the repository's own version pin.
+- Collection uses `check` for fresh scope diagnostics. The selected binary,
+  repository configuration and its external validator programs are trusted execution
+  inputs; validator startup/protocol failures refuse collection. Rule verdicts stay
+  distinct from observation completeness.
 - Deleted records live in Nodex's Git-backed `history` diagnostics, not current
   inventory. A retired path may be reused, and a restored ID is current again.
   Neither a history row nor inventory absence authorizes deleting vault evidence.

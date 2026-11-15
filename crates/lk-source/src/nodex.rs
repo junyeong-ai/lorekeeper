@@ -92,7 +92,7 @@ const INITIAL_REACH: usize = 500;
 /// `lookback_hours` the operator meant differently — not something the adapter can settle
 /// by asking again.
 const MAX_REACH: usize = 64_000;
-const NODEX_COMPATIBILITY: &str = ">=0.66";
+const NODEX_COMPATIBILITY: &str = ">=0.69";
 const INVENTORY_FIELDS: &str = "id,title,kind,status,path,created,updated,reviewed,supersedes,superseded_by,implements,related,covers,tags";
 
 /// One document, as `nodex query recent` reports it.
@@ -1002,7 +1002,7 @@ printf '%s' '{"ok":true,"data":{"items":[]},"snapshot":{"verification":"content"
                 "-C",
                 root.path().to_str().unwrap(),
                 "--check-version",
-                ">=0.66",
+                ">=0.69",
                 "--today",
                 "2026-10-17",
                 "query",
@@ -1051,8 +1051,8 @@ include = ["docs/**/*.md"]
 [kinds]
 allowed = ["generic"]
 [statuses]
-allowed = ["draft", "active", "superseded", "archived"]
-terminal = ["superseded", "archived"]
+allowed = ["draft", "active"]
+terminal = []
 initial = "draft"
 [[identity.kind_rules]]
 glob = "docs/**"
@@ -1457,6 +1457,43 @@ exit "$rc"
         assert_eq!(current[0].title, "Restored Beta");
         assert!(current[0].body.contains("Current body."));
         assert_eq!(current[0].metadata["path"], "docs/restored.md");
+
+        let maintained_policy = format!(
+            "{history_policy}\n[[statuses.flow]]\n[statuses.flow.transitions]\ndraft = [\"active\"]\nactive = []\n"
+        );
+        std::fs::write(&config_path, &maintained_policy).unwrap();
+        let built = std::process::Command::new(&supported)
+            .arg("-C")
+            .arg(root.path())
+            .arg("build")
+            .output()
+            .unwrap();
+        assert!(
+            built.status.success(),
+            "{}",
+            String::from_utf8_lossy(&built.stdout)
+        );
+        let maintained_graph = std::fs::read(&graph_path).unwrap();
+        let maintained = NodexSource.extract(&missing, &ctx).await.unwrap();
+        assert_eq!(maintained.len(), 1);
+        assert_eq!(maintained[0].metadata["source_record"]["status"], "active");
+        assert_eq!(maintained[0].body, current[0].body);
+        assert_eq!(std::fs::read(&graph_path).unwrap(), maintained_graph);
+
+        let external_policy = format!(
+            "{maintained_policy}\n[[rules.external]]\nname = \"fixture-protocol\"\ncommand = [{}, \"--version\"]\nkinds = [\"generic\"]\nseverity = \"error\"\n",
+            serde_json::to_string(&supported).unwrap(),
+        );
+        std::fs::write(&config_path, &external_policy).unwrap();
+        let error = NodexSource
+            .extract(&missing, &ctx)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("CONFIG_ERROR"), "{error}");
+        assert!(error.contains("external/fixture-protocol"), "{error}");
+        assert_eq!(std::fs::read(&graph_path).unwrap(), maintained_graph);
+        std::fs::write(&config_path, &history_policy).unwrap();
         assert_eq!(
             std::fs::read_to_string(&config_path).unwrap(),
             history_policy

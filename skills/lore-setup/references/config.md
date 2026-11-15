@@ -454,13 +454,18 @@ Legacy pages without verified document identity require explicit migration; a ma
 path alone cannot authorize overwriting a curated synthesis. Missing inventory entries
 do not imply deletion, archival or false claims.
 
-The adapter requires nodex `>=0.66`, with no upper version bound. A newer binary
+The adapter requires nodex `>=0.69`, with no upper version bound. A newer binary
 must still satisfy the same public response and currentness checks. Lore's installer and
 `lore self update --version` select Lore versions, not nodex versions.
 Set a source's optional `params.executable` to a compatible binary's absolute path.
 Omitted, it uses
 `nodex` on PATH. The value is one executable path, with no shell arguments, `~` or
 variable expansion; an explicit failure never retries another binary.
+
+Collection runs `nodex check` for fresh scope diagnostics. Trust the selected
+binary, repository configuration and any declared external validator programs;
+those programs may execute during collection. Validator startup or protocol failure
+refuses collection, while unrelated rule verdicts remain separate from source coverage.
 
 The repository must permit the selected version and already hold an index current for
 it. Binary selection does not override a project version pin or rebuild its index.
@@ -488,7 +493,7 @@ For a missing source document, use the selected Nodex binary's read-only diagnos
 | Which documents were retired? | `nodex -C /absolute/repo history` — lists removed documents whose IDs are no longer present, not moves or an ID changed in place |
 
 These diagnostics do not add documents to the current collection, approve their claims,
-or authorize deletion of imported pages. Nodex 0.66 returns history as `items` with
+or authorize deletion of imported pages. Nodex returns history as `items` with
 the last recorded blob and typed `removal`; use `git cat-file -p BLOB` to read that
 revision. A reused path can name a different current document, and restoring the
 old ID removes it from the unfiltered retirement list. A shallow, grafted or
