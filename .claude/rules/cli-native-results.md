@@ -23,6 +23,9 @@ paths:
   their own receipts. Preserve revision-pinned subject reads: title-only selection is
   insufficient. Keep recipes registered during a host read, defer changed packet scope,
   and count only newly recorded recipes/packets as retained progress.
+  The host adapter owns file-reading tools: Claude uses Read and Codex uses shell reads
+  in its read-only sandbox. Role requests specify scope without prohibiting that read
+  path. These readers never invoke Lore commands or publish their own results.
   Discovery replies cover every assigned subject with complete queries or an explicit
   needs-action; audit screening returns complete decisions or needs-action. Prepare a
   fitting prefix from exact input bytes and minimum complete-reply bytes, retaining

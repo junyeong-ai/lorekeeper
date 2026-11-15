@@ -39,15 +39,19 @@ request=json.loads(prompt.split('\nNative request:\n',1)[1])
 if request.get('kind')!='audit-screening': raise SystemExit(100)
 mode=(root/'screen-mode').read_text()
 assert mode!='forbid', 'capacity admission must not invoke a screening host'
-assert (root/'vault'/request['subject']['path']).is_file()
+subject=Path(request['subject']['path']).read_bytes()
 if '--sandbox' in sys.argv:
     assert sys.argv[sys.argv.index('--sandbox')+1]=='read-only'
+    assert 'Use read-only shell commands to read' in prompt
 else:
     assert '--safe-mode' in sys.argv
     assert sys.argv[sys.argv.index('--tools')+1]=='Read'
     assert 'Bash(' not in ' '.join(sys.argv)
+    assert 'Use the Read tool only' in prompt
+assert 'Do not run CLI commands' not in prompt
 with (root/'screen-calls.jsonl').open('a') as stream:
     stream.write(json.dumps({'request':hashlib.sha256(json.dumps(request,sort_keys=True).encode()).hexdigest(),
+        'subject_text':subject.decode('utf-8'),
         'keys':[card['candidate']['path'] for card in request['candidates']]})+'\n')
 if mode=='failed': raise SystemExit(51)
 response={'status':'complete','reason':None,'decisions':[{'candidate_ref':card['candidate_ref'],
@@ -196,6 +200,8 @@ fn native_audit_screening_resumes_partial_packets_without_repeating_paid_decisio
         assert_eq!(complete["progress"]["unknown"], 0);
         let recorded = calls(&fixture);
         assert_eq!(recorded.len(), 2);
+        let subject = std::fs::read_to_string(fixture.root().join("vault").join(SUBJECT)).unwrap();
+        assert!(recorded.iter().all(|call| call["subject_text"] == subject));
         let keys = recorded
             .iter()
             .flat_map(|call| call["keys"].as_array().unwrap())
