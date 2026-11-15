@@ -1298,65 +1298,101 @@ fn invalid_review_evidence_blocks_knowledge_before_launching_agent() {
 }
 
 #[test]
-fn selected_review_drift_blocks_audit_completion_without_becoming_a_global_health_failure() {
-    let fixture = Fixture::new("codex", 30, RECORD_AUDIT);
-    std::fs::write(
-        &fixture.config,
-        std::fs::read_to_string(&fixture.config).unwrap() + "graph:\n  audit:\n    batch_size: 1\n",
-    )
-    .unwrap();
-    write_audit_concept(&fixture, "a");
-    write_review_attention(&fixture, "wiki/concepts/a.md", false);
-    let (output, result) = fixture.run("knowledge");
-    assert!(!output.status.success());
-    assert_eq!(result["review_health"]["needs_reassessment"], 1);
-    assert_eq!(result["review_health"]["invalid"], 0);
-    assert!(result["audit"].is_null());
-    let stages = result["stages"].as_array().unwrap();
-    assert!(
-        stages.iter().any(|stage| {
-            stage["name"] == "whole audit publication" && stage["state"] == "failed"
-        })
-    );
-    assert!(
-        stages
-            .iter()
-            .filter(|stage| stage["name"] == "knowledge review health")
-            .all(|stage| stage["state"] == "completed")
-    );
-    let plan = fixture
-        .command()
-        .args(["wiki", "audit-plan", "--limit", "2"])
-        .output()
-        .unwrap();
-    assert!(plan.status.success());
-    let plan: serde_json::Value = serde_json::from_slice(&plan.stdout).unwrap();
-    assert_eq!(plan["reviewed_current"], 0);
-    assert_eq!(plan["unreviewed"], 2);
-    assert_eq!(plan["candidates"].as_array().unwrap().len(), 2);
-    for kind in ["concept", "document"] {
-        assert_eq!(plan["counts_by_kind"][kind]["total"], 1);
-        assert_eq!(plan["counts_by_kind"][kind]["unreviewed"], 1);
-        assert_eq!(plan["counts_by_kind"][kind]["reviewed_current"], 0);
+fn scoped_review_reassessment_preserves_independent_scheduled_audits() {
+    for engine in ["codex", "claude-code"] {
+        let fixture = Fixture::new(engine, 30, RECORD_AUDIT);
+        let config = std::fs::read_to_string(&fixture.config)
+            .unwrap()
+            .replace("execution:\n", "execution:\n  automation: {process_schedule: '0,15,30,45 * * * *', max_calls_per_day: null, max_run_seconds: 60}\n")
+            + "graph:\n  audit:\n    batch_size: 2\n";
+        std::fs::write(&fixture.config, config).unwrap();
+        write_audit_concept(&fixture, "a");
+        write_review_attention(&fixture, "wiki/concepts/a.md", false);
+        record_discovery(&fixture, "wiki/documents/reviewed.md");
+        let output = fixture
+            .command()
+            .args(["run", "knowledge", "--scheduled", "--json"])
+            .output()
+            .unwrap();
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(!output.status.success(), "{report}");
+        let runs = report["runs"].as_array().unwrap();
+        assert!(runs.iter().all(|run| run["halted"] == false), "{report}");
+        assert_eq!(
+            runs.iter()
+                .map(|run| run["semantic_calls"].as_u64().unwrap())
+                .sum::<u64>(),
+            1,
+            "{report}"
+        );
+        let result = &runs[0];
+        assert_eq!(result["review_health"]["needs_reassessment"], 1);
+        assert_eq!(result["review_health"]["invalid"], 0);
+        assert_eq!(result["audit"].as_array().unwrap().len(), 1, "{report}");
+        assert_eq!(
+            result["audit"][0]["assessed_path"],
+            "wiki/documents/reviewed.md"
+        );
+        let stages = result["stages"].as_array().unwrap();
+        assert!(
+            stages
+                .iter()
+                .any(|stage| stage["name"] == "whole audit publication"
+                    && stage["state"] == "completed"),
+            "{report}"
+        );
+        assert!(
+            stages
+                .iter()
+                .filter(|stage| stage["name"] == "knowledge review health")
+                .all(|stage| stage["state"] == "completed"),
+            "{report}"
+        );
+        let state = fixture.root().join("vault/.lorekeeper");
+        let usage: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(state.join("automation-usage.json")).unwrap())
+                .unwrap();
+        assert!(usage["paused"].as_object().unwrap().is_empty(), "{usage}");
+        let action = state.join("audit-actions").join(format!(
+            "{}.json",
+            lk_core::concept::file_revision("wiki/concepts/a.md")
+        ));
+        let before = std::fs::read(&action).unwrap();
+        let output = fixture
+            .command()
+            .args(["run", "knowledge", "--scheduled", "--json"])
+            .output()
+            .unwrap();
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(!output.status.success(), "{report}");
+        assert!(
+            report["runs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|run| run["halted"] == false && run["semantic_calls"] == 0),
+            "{report}"
+        );
+        assert_eq!(std::fs::read(&action).unwrap(), before);
+        let after: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(state.join("automation-usage.json")).unwrap())
+                .unwrap();
+        assert_eq!(after["reserved_calls"], usage["reserved_calls"]);
+        assert!(after["paused"].as_object().unwrap().is_empty());
+        let plan = fixture
+            .command()
+            .args(["wiki", "audit-plan", "--limit", "2"])
+            .output()
+            .unwrap();
+        assert!(plan.status.success());
+        let plan: serde_json::Value = serde_json::from_slice(&plan.stdout).unwrap();
+        assert_eq!(plan["reviewed_current"], 1);
+        assert_eq!(plan["unreviewed"], 1);
+        assert_eq!(plan["candidates"].as_array().unwrap().len(), 1);
+        assert_eq!(plan["candidates"][0]["path"], "wiki/concepts/a.md");
+        assert_eq!(plan["counts_by_kind"]["concept"]["unreviewed"], 1);
+        assert_eq!(plan["counts_by_kind"]["document"]["reviewed_current"], 1);
     }
-    let subjects = plan["candidates"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|candidate| {
-            (
-                candidate["kind"].as_str().unwrap(),
-                candidate["path"].as_str().unwrap(),
-            )
-        })
-        .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(
-        subjects,
-        std::collections::BTreeSet::from([
-            ("concept", "wiki/concepts/a.md"),
-            ("document", "wiki/documents/reviewed.md"),
-        ])
-    );
 }
 
 const RECORD_BOUNDED_AUDIT: &str = r#"

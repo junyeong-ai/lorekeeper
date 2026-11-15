@@ -387,6 +387,9 @@ fn guard_prepared(
                 error
             }
         })?;
+    if matches!(prepared.subject, Subject::Audit { .. }) {
+        prepared.validate_audit_result(&result)?;
+    }
     work.plan_publication(mutation, root, &result)?;
     prepared.guard_pages(mutation);
     Ok(true)
@@ -1733,6 +1736,52 @@ pub(super) fn guard_audit_controlled(
     )
 }
 
+#[cfg(unix)]
+pub(super) fn record_audit_controlled(
+    session: &lk_vault::MutationSession,
+    config: &lk_core::config::Config,
+    config_revision: &str,
+    id: &str,
+    read: &lk_vault::ReadControl,
+) -> miette::Result<Vec<String>> {
+    let root = session.root();
+    let (work, prepared) = load_controlled(root, config, config_revision, id, read)?;
+    let directory = Path::new(".lorekeeper/work").join(id);
+    let final_path = directory.join("final.json");
+    let (final_raw, final_result) = state::load_result(root, &final_path)?
+        .ok_or_else(|| miette::miette!("work final result is missing"))?;
+    let path = directory.join("assessment.json");
+    let (raw, result) = state::load_result(root, &path)?
+        .ok_or_else(|| miette::miette!("staged audit assessment is missing"))?;
+    if result != final_result {
+        return Err(miette::miette!(
+            "staged result differs from the verified sealed result; retained for inspection"
+        ));
+    }
+    work.guard_completion(
+        &mut lk_vault::MutationPlan::default(),
+        root,
+        &prepared.resources,
+        &result,
+    )?;
+    let assessment = prepared.validate_audit_result(&result)?;
+    super::audit::record_controlled(
+        session,
+        config,
+        config_revision,
+        lk_graph::audit::AuditResults {
+            assessments: vec![assessment],
+        },
+        |_, mutation| {
+            prepared.guard_pages(mutation);
+            mutation.require_unchanged(final_path.clone(), final_raw.clone());
+            mutation.require_unchanged(path.clone(), raw.clone());
+            Ok(())
+        },
+        read,
+    )
+}
+
 fn load(
     root: &Path,
     config: &lk_core::config::Config,
@@ -2507,8 +2556,17 @@ pub(super) fn audit_processing_hold_controlled(
         Err(error) => return Err(error),
     };
     let planned = work.is_planned(root)?;
-    if planned && is_finished_prepared(root, config, config_revision, &work, &prepared)? {
-        return Ok(None);
+    if planned {
+        match is_finished_prepared(root, config, config_revision, &work, &prepared) {
+            Ok(true) => return Ok(None),
+            Ok(false) => {}
+            Err(error) => {
+                return match super::audit::assessment_blocker(&error) {
+                    Some(reason) => Ok(Some(AuditProcessingHold::Action(reason))),
+                    None => Err(error),
+                };
+            }
+        }
     }
     if let Some(reason) = audit::processing_hold(root, config_revision, candidate, &prepared)? {
         return Ok(Some(AuditProcessingHold::Action(reason)));
@@ -3230,24 +3288,31 @@ fn prepare_native_finalization_from_capture(
     frontier: bool,
 ) -> miette::Result<FinalizationCheckpoint> {
     let started_at = std::time::Instant::now();
-    let finished = is_finished_prepared(root, config, config_revision, work, prepared)?;
+    let finished = match is_finished_prepared(root, config, config_revision, work, prepared) {
+        Ok(finished) => Ok(finished),
+        Err(error) => match super::audit::assessment_blocker(&error) {
+            Some(reason) => Err(reason),
+            None => return Err(error),
+        },
+    };
     let verification_duration_ms = started_at.elapsed().as_millis() as u64;
     let started_at = std::time::Instant::now();
-    let state = if finished {
-        NativeFinalization::Finished
-    } else if frontier {
-        match prepare_frontier_finalization(root, config, work, prepared)? {
-            Some(preparation) => NativeFinalization::Ready(preparation),
-            None => NativeFinalization::Replan,
+    let state = match finished {
+        Err(reason) => NativeFinalization::Ready(FinalizationPreparation::NeedsAction(reason)),
+        Ok(true) => NativeFinalization::Finished,
+        Ok(false) if frontier => {
+            match prepare_frontier_finalization(root, config, work, prepared)? {
+                Some(preparation) => NativeFinalization::Ready(preparation),
+                None => NativeFinalization::Replan,
+            }
         }
-    } else {
-        NativeFinalization::Ready(prepare_finalization_from_capture(
+        Ok(false) => NativeFinalization::Ready(prepare_finalization_from_capture(
             root,
             config,
             config_revision,
             work,
             prepared,
-        )?)
+        )?),
     };
     Ok(FinalizationCheckpoint {
         state,
@@ -3769,7 +3834,20 @@ fn is_finished_prepared(
                     &result,
                     &mut guards,
                 ) {
-                    Ok(()) => Ok(true),
+                    Ok(()) => {
+                        if matches!(prepared.subject, Subject::Audit { .. }) {
+                            if let Some((_, staged)) =
+                                state::load_result(root, &directory.join("assessment.json"))?
+                                && staged != result
+                            {
+                                return Err(miette::miette!(
+                                    "staged result differs from the verified sealed result; retained for inspection"
+                                ));
+                            }
+                            prepared.validate_audit_result(&result)?;
+                        }
+                        Ok(true)
+                    }
                     Err(error)
                         if error
                             .downcast_ref::<super::queue::application::PublicationRejection>()
@@ -3853,12 +3931,19 @@ pub(super) fn restage_finished(
             .join(id)
             .join("assessment.json"),
     };
-    if let Some((_, existing)) = state::load_result(root, &path)? {
-        if existing != result {
-            return Err(miette::miette!(
-                "staged result differs from the verified sealed result; retained for inspection"
-            ));
-        }
+    let existing = state::load_result(root, &path)?;
+    if existing
+        .as_ref()
+        .is_some_and(|(_, staged)| *staged != result)
+    {
+        return Err(miette::miette!(
+            "staged result differs from the verified sealed result; retained for inspection"
+        ));
+    }
+    if matches!(prepared.subject, Subject::Audit { .. }) {
+        prepared.validate_audit_result(&result)?;
+    }
+    if existing.is_some() {
         return Ok(());
     }
     mutation

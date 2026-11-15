@@ -21,6 +21,8 @@ use std::path::PathBuf;
 
 #[derive(Debug, thiserror::Error)]
 pub enum GraphError {
+    #[error(transparent)]
+    AuditAssessment(#[from] audit::AuditAssessmentError),
     #[error("audit screening inputs changed; reread the current subject and candidate cards")]
     AuditScreeningChanged,
     #[error(

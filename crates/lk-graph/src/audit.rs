@@ -61,6 +61,58 @@ pub struct AuditResults {
     pub assessments: Vec<AuditAssessment>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum AuditAssessmentError {
+    #[error(
+        "audit scoped review is not current: {review} ({state:?}); reassess or repair before recording"
+    )]
+    ReviewNotCurrent {
+        review: String,
+        state: AuditReviewState,
+    },
+    #[error("audit follow-up requires a current open scoped review")]
+    FollowUpWithoutOpenReview,
+    #[error("audit review must currently assess this subject")]
+    UnscopedReview { review: String },
+}
+
+/// Validate scoped review obligations independently of assessment input identity.
+pub fn validate_assessment_reviews(
+    reviews: &[AuditReviewDependency],
+    assessment: &AuditAssessment,
+) -> Result<(), AuditAssessmentError> {
+    for path in &assessment.reviews {
+        if !reviews.iter().any(|review| review.path == *path) {
+            return Err(AuditAssessmentError::UnscopedReview {
+                review: path.clone(),
+            });
+        }
+    }
+    if let Some(review) = reviews
+        .iter()
+        .find(|review| {
+            matches!(
+                review.state,
+                AuditReviewState::Missing | AuditReviewState::Invalid
+            )
+        })
+        .or_else(|| reviews.iter().find(|review| !review.state.is_current()))
+    {
+        return Err(AuditAssessmentError::ReviewNotCurrent {
+            review: review.path.clone(),
+            state: review.state,
+        });
+    }
+    if assessment.disposition == AuditDisposition::FollowUp
+        && !reviews
+            .iter()
+            .any(|review| review.state == AuditReviewState::Open)
+    {
+        return Err(AuditAssessmentError::FollowUpWithoutOpenReview);
+    }
+    Ok(())
+}
+
 #[derive(Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Receipts {
@@ -2550,35 +2602,7 @@ pub fn record_with_guard_controlled(
         let candidate = candidates
             .get(&assessment.path)
             .ok_or_else(|| error("audit target is not an exact concept or document address"))?;
-        if let Some(review) = candidate
-            .reviews
-            .iter()
-            .find(|review| !review.state.is_current())
-        {
-            return Err(error(format!(
-                "audit scoped review is not current: {} ({:?}); reassess or repair before recording",
-                review.path, review.state
-            )));
-        }
-        if assessment.disposition == AuditDisposition::FollowUp
-            && !candidate
-                .reviews
-                .iter()
-                .any(|review| review.state == AuditReviewState::Open)
-        {
-            return Err(error(
-                "audit follow-up requires a current open scoped review",
-            ));
-        }
-        for path in &assessment.reviews {
-            if !candidate
-                .reviews
-                .iter()
-                .any(|review| review.path == *path && review.state.is_current())
-            {
-                return Err(error("audit review must currently assess this subject"));
-            }
-        }
+        validate_assessment_reviews(&candidate.reviews, &assessment)?;
         assessment.reviews = candidate
             .reviews
             .iter()
@@ -2649,6 +2673,36 @@ mod tests {
     }
     fn scan(root: &Path) -> Vec<ScannedPage> {
         crate::scan::scan_vault(root, false).unwrap()
+    }
+
+    #[test]
+    fn invalid_review_dependencies_take_priority_over_reassessment() {
+        let assessment = AuditAssessment {
+            path: "wiki/concepts/subject.md".into(),
+            file_revision: "file".into(),
+            input_revision: "input".into(),
+            disposition: AuditDisposition::Reviewed,
+            reason: "Scoped assessment.".into(),
+            reviews: Vec::new(),
+        };
+        for state in [AuditReviewState::Missing, AuditReviewState::Invalid] {
+            let mut reviews =
+                [AuditReviewState::NeedsReassessment, state].map(|state| AuditReviewDependency {
+                    path: format!("wiki/explorations/{state:?}.md"),
+                    file_revision: None,
+                    source_revision: None,
+                    state,
+                    errors: Vec::new(),
+                    evidence: Vec::new(),
+                });
+            for _ in 0..2 {
+                assert!(matches!(
+                    validate_assessment_reviews(&reviews, &assessment),
+                    Err(AuditAssessmentError::ReviewNotCurrent { state: actual, .. }) if actual == state
+                ));
+                reviews.reverse();
+            }
+        }
     }
 
     #[test]

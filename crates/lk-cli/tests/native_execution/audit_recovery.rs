@@ -184,6 +184,143 @@ fn bounded_audit_actions_are_guarded_and_unchanged_holds_spend_no_calls() {
 }
 
 #[test]
+fn bounded_review_refusals_preserve_sealed_state_and_independent_progress() {
+    for engine in ["codex", "claude-code"] {
+        let fixture = bounded_audit_fixture(engine, 64, RECORD_BOUNDED_AUDIT);
+        write_review_attention_at(
+            &fixture,
+            "wiki/concepts/large.md",
+            false,
+            "wiki/review-input.md",
+        );
+        record_discovery(&fixture, "wiki/concepts/large.md");
+        let (output, report) = fixture.run("knowledge");
+        assert!(!output.status.success(), "{report}");
+        assert_eq!(report["halted"], false, "{report}");
+        let calls = bounded_calls(&fixture);
+        let finalizer = calls
+            .iter()
+            .find(|call| call["action"] == "finish")
+            .unwrap();
+        let id = finalizer["work_id"].as_str().unwrap();
+        let work = fixture.root().join("vault/.lorekeeper/work").join(id);
+        let action = work.join("finalization-action.json");
+        let action_before = std::fs::read(&action).unwrap();
+        for name in [
+            "final.json",
+            "assessment.json",
+            "seal.json",
+            "frontier-seal.json",
+        ] {
+            assert!(!work.join(name).exists(), "{name}");
+        }
+        let (_, report) = fixture.run("knowledge");
+        assert_eq!(report["halted"], false, "{report}");
+        assert_eq!(report["semantic_calls"], 0, "{report}");
+        assert_eq!(std::fs::read(&action).unwrap(), action_before);
+
+        let output = fixture
+            .command()
+            .args(["work", "result", id])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let completed: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let subject = &completed["context"]["subject"];
+        let assessment = serde_json::json!({"assessments":[{
+            "path":subject["path"],
+            "file_revision":subject["file_revision"],
+            "input_revision":subject["input_revision"],
+            "disposition":"reviewed",
+            "reason":"Structural completion with an outstanding scoped review.",
+            "reviews":completed["context"]["purpose"]["review_dependencies"]
+        }]});
+        let file = fixture.root().join("assessment.json");
+        std::fs::write(&file, serde_json::to_vec(&assessment).unwrap()).unwrap();
+        let output = fixture
+            .command()
+            .args(["work", "finish", id, "--file"])
+            .arg(file)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(work.join("final.json").exists());
+        assert!(work.join("seal.json").exists());
+        let originals = walkdir::WalkDir::new(&work)
+            .into_iter()
+            .map(Result::unwrap)
+            .filter(|entry| entry.file_type().is_file())
+            .map(|entry| {
+                (
+                    entry.path().to_owned(),
+                    std::fs::read(entry.path()).unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let config = std::fs::read(&fixture.config).unwrap();
+        let (_, report) = fixture.run("knowledge");
+        assert_eq!(report["halted"], false, "{report}");
+        assert_eq!(report["semantic_calls"], 0, "{report}");
+        assert_eq!(report["audit_deferred_count"], 1, "{report}");
+        assert_eq!(bounded_calls(&fixture).len(), calls.len());
+
+        write_audit_concept(&fixture, "second");
+        let second = fixture.root().join("vault/wiki/concepts/second.md");
+        let body = std::fs::read_to_string(&second).unwrap()
+            + &"\nAn independent source clause remains fully assigned.\n".repeat(180);
+        std::fs::write(second, body).unwrap();
+        record_discovery(&fixture, "wiki/concepts/second.md");
+        let (_, report) = fixture.run("knowledge");
+        assert_eq!(report["halted"], false, "{report}");
+        assert_eq!(
+            report["audit"][0]["assessed_path"], "wiki/concepts/second.md",
+            "{report}"
+        );
+        assert_eq!(report["audit"].as_array().unwrap().len(), 1, "{report}");
+        assert!(report["semantic_calls"].as_u64().unwrap() > 0, "{report}");
+        assert_eq!(
+            bounded_calls(&fixture)
+                .iter()
+                .filter(|call| call["work_id"] == id)
+                .count(),
+            calls.len()
+        );
+        assert_eq!(std::fs::read(&fixture.config).unwrap(), config);
+        for (path, bytes) in &originals {
+            assert_eq!(&std::fs::read(path).unwrap(), bytes);
+        }
+        for (name, damaged) in [
+            ("assessment.json", Some("{}")),
+            ("seal.json", Some("{}")),
+            ("seal.json", None),
+        ] {
+            let path = work.join(name);
+            let before = std::fs::read(&path).unwrap();
+            match damaged {
+                Some(raw) => std::fs::write(&path, raw).unwrap(),
+                None => std::fs::remove_file(&path).unwrap(),
+            }
+            let (_, report) = fixture.run("knowledge");
+            assert_eq!(report["halted"], true, "{name}: {report}");
+            assert_eq!(report["semantic_calls"], 0, "{name}: {report}");
+            assert_eq!(
+                std::fs::read(&path).ok(),
+                damaged.map(|raw| raw.as_bytes().to_vec())
+            );
+            std::fs::write(path, before).unwrap();
+        }
+    }
+}
+
+#[test]
 fn bounded_audit_requires_a_structured_assessment_after_host_success() {
     for engine in ["codex", "claude-code"] {
         let fixture = bounded_audit_fixture(engine, 64, RECORD_BOUNDED_AUDIT);

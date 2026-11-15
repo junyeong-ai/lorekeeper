@@ -257,6 +257,9 @@ later queued publications can invalidate a draft or reopen an assessment. Report
 audit progress can coexist with unrelated unfinished queue work; only the controller
 determines the overall job outcome.
 Unrelated `needs-reassessment` records remain backlog without expanding this batch.
+If a selected review still needs reassessment, or follow-up lacks a current open
+review, return `needs-action`. The native controller retains an exact subject hold,
+skips unchanged calls and continues independent subjects without pausing the operation.
 Invalid records or a blocked repair are failures; preserve their tasks and report
 them. The native audit verifier requires current scoped reviews; an unchanged open
 finding with a current scoped review remains a valid follow-up assessment.

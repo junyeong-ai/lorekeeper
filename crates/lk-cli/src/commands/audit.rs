@@ -7,6 +7,29 @@ use super::queue::readiness::InputReadiness;
 
 pub(super) mod action;
 
+#[cfg(unix)]
+pub(super) fn assessment_blocker(error: &miette::Report) -> Option<String> {
+    use lk_graph::audit::{AuditAssessmentError, AuditReviewState};
+
+    match error.downcast_ref::<lk_graph::GraphError>()? {
+        lk_graph::GraphError::AuditAssessment(
+            AuditAssessmentError::ReviewNotCurrent {
+                state: AuditReviewState::NeedsReassessment,
+                ..
+            }
+            | AuditAssessmentError::FollowUpWithoutOpenReview,
+        ) => Some(error.to_string()),
+        _ => None,
+    }
+}
+
+fn into_graph_error(error: miette::Report) -> lk_graph::GraphError {
+    match error.downcast::<lk_graph::GraphError>() {
+        Ok(error) => error,
+        Err(error) => lk_graph::GraphError::Io(error.to_string()),
+    }
+}
+
 pub(super) fn adopt_discovery(
     config: &lk_core::config::Config,
     config_revision: &str,
@@ -155,12 +178,10 @@ pub(super) fn record_controlled(
             if let Some(readiness) = readiness.take() {
                 let guarded = readiness.guard(root, mutation);
                 read.check().map_err(lk_graph::GraphError::from)?;
-                guarded.map_err(|error| lk_graph::GraphError::Io(error.to_string()))?;
+                guarded.map_err(into_graph_error)?;
             }
-            guard(assessment, mutation)
-                .map_err(|error| lk_graph::GraphError::Io(error.to_string()))?;
-            action::guard_completed(root, &assessment.path, mutation)
-                .map_err(|error| lk_graph::GraphError::Io(error.to_string()))?;
+            guard(assessment, mutation).map_err(into_graph_error)?;
+            action::guard_completed(root, &assessment.path, mutation).map_err(into_graph_error)?;
             super::work::guard_audit_controlled(
                 root,
                 config,
@@ -176,11 +197,11 @@ pub(super) fn record_controlled(
                     lk_graph::audit::AuditReadCoverage::WholeInput
                 }
             })
-            .map_err(|error| lk_graph::GraphError::Io(error.to_string()))
+            .map_err(into_graph_error)
         },
         read,
     )
-    .map_err(|error| miette::miette!("{error}"))
+    .map_err(miette::Report::msg)
 }
 
 pub(super) const MAX_DEFERRED_DETAILS: usize = 100;

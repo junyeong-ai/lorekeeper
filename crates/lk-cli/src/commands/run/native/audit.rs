@@ -197,23 +197,40 @@ impl Runner<'_> {
                 };
                 match outcome {
                     WorkStep::Staged => {
-                        let assessment = self
-                            .root
-                            .join(".lorekeeper/work")
-                            .join(work)
-                            .join("assessment.json");
-                        let Some(path) = assessment.to_str() else {
-                            self.failure("audit publication", "assessment path is not UTF-8");
+                        let Some((session, _)) =
+                            self.mutation_session("bounded audit publication").await
+                        else {
                             return;
                         };
-                        if !self
-                            .native(
-                                "bounded audit publication",
-                                &["wiki", "audit-record", "--file", path],
-                            )
-                            .await
-                        {
-                            return;
+                        let recorded = crate::commands::work::record_audit_controlled(
+                            &session,
+                            &self.config,
+                            &self.config_revision,
+                            work,
+                            self.supervisor.read_control(),
+                        );
+                        drop(session);
+                        match recorded {
+                            Ok(_) => {
+                                self.record(
+                                    "bounded audit publication",
+                                    StageState::Completed,
+                                    None,
+                                );
+                            }
+                            Err(error) => {
+                                let Some(reason) =
+                                    crate::commands::audit::assessment_blocker(&error)
+                                else {
+                                    self.failure("bounded audit publication", error);
+                                    return;
+                                };
+                                self.deferred("bounded audit assessment", reason);
+                                for index in &slots[0] {
+                                    pending.remove(index);
+                                }
+                                continue;
+                            }
                         }
                         for index in &slots[0] {
                             self.audit_batch
@@ -399,22 +416,28 @@ impl Runner<'_> {
                         return;
                     }
                 }
-                match judgment {
+                let assessment = match judgment {
                     Judgment::Complete {
                         disposition,
                         reason,
-                    } => {
-                        let assessment = match fresh.assessment(disposition, reason) {
-                            Ok(assessment) => assessment,
-                            Err(error) => {
+                    } => match fresh.assessment(disposition, reason) {
+                        Ok(assessment) => Ok(assessment),
+                        Err(error) => match crate::commands::audit::assessment_blocker(&error) {
+                            Some(reason) => Err(reason),
+                            None => {
                                 self.record_work_step(metrics);
                                 self.failure("audit assembly", error);
                                 return;
                             }
-                        };
+                        },
+                    },
+                    Judgment::NeedsAction(reason) => Err(reason),
+                };
+                match assessment {
+                    Ok(assessment) => {
                         completed.push((assessment, fresh, indices));
                     }
-                    Judgment::NeedsAction(reason) => {
+                    Err(reason) => {
                         if let Err(error) = action_readiness.require_ready(&candidate) {
                             self.record_work_step(metrics);
                             self.failure("audit action readiness", error);

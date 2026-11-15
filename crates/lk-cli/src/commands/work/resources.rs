@@ -33,6 +33,7 @@ pub(super) struct Prepared {
     pub resources: Vec<SemanticResource>,
     pub pages: BTreeMap<PathBuf, String>,
     pub(super) absent_pages: BTreeSet<PathBuf>,
+    audit_reviews: Option<Vec<lk_graph::audit::AuditReviewDependency>>,
 }
 
 pub(super) struct SelectionInventory {
@@ -47,6 +48,52 @@ pub(super) struct SelectionInventory {
 }
 
 impl Prepared {
+    pub fn validate_audit_result(
+        &self,
+        result: &Value,
+    ) -> miette::Result<lk_graph::audit::AuditAssessment> {
+        let Subject::Audit {
+            path,
+            file_revision,
+            input_revision,
+        } = &self.subject
+        else {
+            return Err(miette::miette!("audit result requires an audit subject"));
+        };
+        let mut results: lk_graph::audit::AuditResults =
+            serde_json::from_value(result.clone()).into_diagnostic()?;
+        let [assessment] = results.assessments.as_slice() else {
+            return Err(miette::miette!(
+                "completed audit Work requires exactly one assessment"
+            ));
+        };
+        if assessment.path != *path
+            || assessment.file_revision != *file_revision
+            || assessment.input_revision != *input_revision
+            || assessment.reason.trim().is_empty()
+        {
+            return Err(miette::miette!(
+                "audit assessment differs from its captured subject"
+            ));
+        }
+        let dependencies: Vec<String> =
+            serde_json::from_value(self.context["purpose"]["review_dependencies"].clone())
+                .into_diagnostic()?;
+        if assessment.reviews != dependencies {
+            return Err(miette::miette!(
+                "final assessment must list all exact current scoped review dependencies"
+            ));
+        }
+        let reviews = self
+            .audit_reviews
+            .as_deref()
+            .ok_or_else(|| miette::miette!("audit capture has no scoped review inventory"))?;
+        lk_graph::audit::validate_assessment_reviews(reviews, assessment)
+            .map_err(lk_graph::GraphError::from)
+            .map_err(miette::Report::msg)?;
+        Ok(results.assessments.remove(0))
+    }
+
     pub fn read_control(&self) -> &lk_vault::ReadControl {
         &self.read
     }
@@ -245,6 +292,7 @@ impl<'a> Capture<'a> {
             resources: self.resources.into_values().collect(),
             pages: self.pages,
             absent_pages: self.absent_pages,
+            audit_reviews: None,
         }
     }
 }
@@ -1114,7 +1162,9 @@ fn capture_audit_scope_controlled(
         context["purpose"]["audit_selection"] =
             serde_json::to_value(reference).into_diagnostic()?;
     }
-    Ok(captured.finish(subject, context, config))
+    let mut prepared = captured.finish(subject, context, config);
+    prepared.audit_reviews = Some(candidate.reviews.clone());
+    Ok(prepared)
 }
 
 #[cfg(test)]
@@ -1726,6 +1776,55 @@ mod tests {
         let empty = selection_inventory(&root, &config, &task.task_id, &[]).unwrap();
         assert!(empty.capture.candidates.is_empty());
         assert_same_prepared(&shared.source, &empty.source);
+    }
+
+    #[test]
+    fn audit_result_dependencies_are_validated_before_semantic_review_holds() {
+        let path = "wiki/documents/subject.md";
+        let review = "wiki/explorations/review.md";
+        let prepared = Prepared {
+            read: lk_vault::ReadControl::default(),
+            semantic_config_revision: None,
+            subject: Subject::Audit {
+                path: path.into(),
+                file_revision: "file".into(),
+                input_revision: "input".into(),
+            },
+            context: json!({"purpose":{"review_dependencies":[review]}}),
+            resources: Vec::new(),
+            pages: BTreeMap::new(),
+            absent_pages: BTreeSet::new(),
+            audit_reviews: Some(vec![lk_graph::audit::AuditReviewDependency {
+                path: review.into(),
+                file_revision: None,
+                source_revision: None,
+                state: lk_graph::audit::AuditReviewState::NeedsReassessment,
+                errors: Vec::new(),
+                evidence: Vec::new(),
+            }]),
+        };
+        let mut result = json!({"assessments":[{
+            "path":path, "file_revision":"file", "input_revision":"input",
+            "disposition":"reviewed", "reason":"Captured scoped assessment.", "reviews":[]
+        }]});
+        let error = prepared.validate_audit_result(&result).err().unwrap();
+        assert!(error.downcast_ref::<lk_graph::GraphError>().is_none());
+        assert!(
+            error
+                .to_string()
+                .contains("must list all exact current scoped review dependencies")
+        );
+        result["assessments"][0]["reviews"] = json!([review]);
+        let error = prepared.validate_audit_result(&result).err().unwrap();
+        assert!(matches!(
+            error.downcast_ref::<lk_graph::GraphError>(),
+            Some(lk_graph::GraphError::AuditAssessment(
+                lk_graph::audit::AuditAssessmentError::ReviewNotCurrent {
+                    state: lk_graph::audit::AuditReviewState::NeedsReassessment,
+                    ..
+                }
+            ))
+        ));
     }
 
     #[test]

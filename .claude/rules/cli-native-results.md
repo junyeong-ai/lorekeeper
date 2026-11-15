@@ -127,6 +127,12 @@ paths:
 - Deferred audit subjects remain unassessed; verify receipts only for the other selected
   subjects and retain an incomplete overall result. Corrupt or unknown-scope state
   stops.
+  Validate scoped review obligations before sealing a native assessment. A remaining
+  needs-reassessment review or follow-up without a current open review becomes an
+  exact subject action; independent subjects continue without pausing the operation.
+  For existing sealed results, verify completion and staged-result integrity first,
+  then derive the same zero-call hold without rewriting retained Work. Missing,
+  invalid or unreadable dependencies remain fatal, even alongside a stale review.
 - A section `needs-action` response records an exact request-bound action receipt;
   unchanged requests defer before invocation, while independent work continues. Changed
   requests can be reconsidered; valid sealed results restage before checking the

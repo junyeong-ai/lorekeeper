@@ -3159,6 +3159,10 @@ mod native {
                     metrics.revalidation_record_duration_ms =
                         Some(started_at.elapsed().as_millis() as u64);
                     if let Err(error) = restaged {
+                        if let Some(reason) = crate::commands::audit::assessment_blocker(&error) {
+                            self.record_work_step(metrics);
+                            return WorkStep::Deferred(reason);
+                        }
                         self.record_work_step(metrics);
                         self.failure("bounded work completion", error);
                         return WorkStep::Failed;

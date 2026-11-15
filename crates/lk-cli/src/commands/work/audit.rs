@@ -81,9 +81,14 @@ pub(super) fn assemble(
             let mut assessment = assessment(prepared)?;
             assessment.disposition = disposition;
             assessment.reason = reason;
-            Ok(super::generation::Outcome::Complete(
-                json!({"assessments":[assessment]}),
-            ))
+            let result = json!({"assessments":[assessment]});
+            match prepared.validate_audit_result(&result) {
+                Ok(_) => Ok(super::generation::Outcome::Complete(result)),
+                Err(error) => match crate::commands::audit::assessment_blocker(&error) {
+                    Some(reason) => Ok(super::generation::Outcome::NeedsAction(reason)),
+                    None => Err(error),
+                },
+            }
         }
     }
 }
@@ -127,11 +132,13 @@ impl WholeSubject {
         disposition: lk_graph::audit::AuditDisposition,
         reason: String,
     ) -> miette::Result<lk_graph::audit::AuditAssessment> {
-        Ok(lk_graph::audit::AuditAssessment {
+        let assessment = lk_graph::audit::AuditAssessment {
             disposition,
             reason,
             ..assessment(&self.prepared)?
-        })
+        };
+        self.prepared
+            .validate_audit_result(&json!({"assessments":[assessment]}))
     }
 
     pub fn plan_hold(
