@@ -173,7 +173,7 @@ belong to exploration reviews, not a machine-persisted callout inferred by locat
   Report discarded anchor sections rather than pretending their evidence remained.
 - Generated Sources is a bounded, stable discovery instruction; complete citations
   live in the rebuildable prepared SQLite view. Migrate only exact legacy generated
-  lists recognized by the shared structural classifier; retain/report custom Sources
+  lists recognized by `lk-core::concept_sources`; retain/report custom Sources
   prose. Compact/custom bodies have no prior complete set: added/removed deltas are
   null, never invented empty lists. Merge uses the same ownership classifier.
   `source_revision` remains exact: the one-time body migration reopens affected audit

@@ -30,6 +30,8 @@ paths:
   missing/invalid visibility, stable path ties, scope/filter/facet/pagination meaning.
   Search rejects an empty query and a zero limit. Do not reintroduce full
   corpus metadata decode/sort for SQL browse or load concept vocabulary there.
+- Semantic search and discovery share the exact generated-content projection.
+  Raw body queries and revision-pinned reads retain complete Markdown.
 - Concept filenames are addresses, not necessarily IDs or implicit aliases. Use
   exact public resolution and return the resolved canonical title.
 - Evidence/review discovery defaults to read-only JSON. Evidence archive is a writer.

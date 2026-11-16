@@ -66,6 +66,9 @@ config loading and the shared filesystem primitives intentionally perform I/O.
 - Concept categories are optional, validated IDs/labels. Discovery metadata retains
   each page's actual category, not the configured display label. Unknown extracted
   categories are dropped observably by the pipeline.
+- `concept_sources` owns generated Sources rendering and exact presentation ownership.
+  Compact instructions are distinct from authored bodies and legacy citation lists;
+  line-ending normalization never broadens the accepted content grammar.
 
 ## Markdown and links (`link.rs`, `markdown.rs`, `text.rs`)
 

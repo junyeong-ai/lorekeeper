@@ -9,7 +9,7 @@ use crate::search::{MatchProjection, Page, SearchOptions, SearchResult, fold_nam
 use crate::{MutationSession, VaultError, VerifiedFileRevision};
 
 pub(super) const INDEX_PATH: &str = ".lorekeeper/search.sqlite";
-const VERSION: i32 = 30;
+const VERSION: i32 = 31;
 
 #[derive(Serialize)]
 pub struct SearchSnapshot {
@@ -351,6 +351,7 @@ fn prepare_search_inner(
                 .map_err(|error| VaultError::Serialization(error.to_string()))?;
             let intro = super::search::excerpt(
                 &page.page.body,
+                page.concept,
                 super::search::MatchField::Catalog,
                 &[],
                 &[],
@@ -636,11 +637,13 @@ pub(super) fn search(
             Ok(())
         })?;
     let mut result = collector.finish(options, &spellings, &terms);
-    let mut body = transaction.prepare("SELECT body FROM pages WHERE path = ?1")?;
+    let mut body = transaction.prepare("SELECT body, concept FROM pages WHERE path = ?1")?;
     for hit in &mut result.hits {
-        let captured: String = body.query_row([&hit.path], |row| row.get(0))?;
+        let (captured, concept): (String, bool) =
+            body.query_row([&hit.path], |row| Ok((row.get(0)?, row.get(1)?)))?;
         let excerpt = super::search::excerpt_details(
             &captured,
+            concept,
             hit.matched,
             &terms,
             &spellings,
@@ -1151,6 +1154,271 @@ pub(super) fn visit_body_pages(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn semantic_search_and_discovery_exclude_only_owned_sources_instructions() {
+        use std::collections::BTreeSet;
+
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let mut expected = BTreeSet::new();
+        for locale in lk_core::i18n::Locale::ALL {
+            for (index, newline) in ["\n", "\r\n", "\r"].into_iter().enumerate() {
+                for authored in [false, true] {
+                    let path = format!(
+                        "wiki/concepts/generated-{}-{index}-{authored}.md",
+                        locale.tag()
+                    );
+                    let prose = if authored {
+                        "한글🙂 The actual PATH value selects executable directories."
+                    } else {
+                        "An ordinary semantic paragraph."
+                    };
+                    let body = format!(
+                        "## {}\n\n{}\n\n## Details\n{prose}\n",
+                        locale.strings().concept_sources,
+                        lk_core::concept_sources::render(*locale),
+                    )
+                    .replace('\n', newline);
+                    let content = format!(
+                        "---\ntype: concept\ntitle: Generated owner {} {index} {authored}\n---\n\n{body}",
+                        locale.tag(),
+                    );
+                    write(root.path(), &path, &content);
+                    if authored {
+                        expected.insert(path);
+                    }
+                }
+            }
+        }
+        let generated = lk_core::concept_sources::render(lk_core::i18n::Locale::En);
+        for (name, format, body, matches) in [
+            ("legacy", "", format!("## Sources\n{generated}\n"), false),
+            (
+                "document",
+                "type: document\n",
+                format!("## Sources\n{generated}\n"),
+                true,
+            ),
+            (
+                "custom",
+                "type: concept\n",
+                format!("## Sources\n{generated}\nAuthored explanation.\n"),
+                true,
+            ),
+            (
+                "duplicate",
+                "type: concept\n",
+                format!("## Sources\n{generated}\n\n## Sources\n{generated}\n"),
+                true,
+            ),
+            (
+                "fenced",
+                "type: concept\n",
+                format!("## Details\n```markdown\n## Sources\n{generated}\n```\n"),
+                true,
+            ),
+            (
+                "nested",
+                "type: concept\n",
+                format!(
+                    "## Details\n{}\n",
+                    format!("## Sources\n{generated}")
+                        .lines()
+                        .map(|line| format!("> {line}"))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                ),
+                true,
+            ),
+            (
+                "other-heading",
+                "type: concept\n",
+                format!("## Details\n{generated}\n"),
+                true,
+            ),
+            (
+                "legacy-citations",
+                "type: concept\n",
+                "## Sources\n- [PATH guidance](../../daily/example.md)\n".into(),
+                true,
+            ),
+            (
+                "alias",
+                "type: concept\naliases: [PATH]\n",
+                format!("## Sources\n{generated}\n"),
+                true,
+            ),
+            (
+                "locator",
+                "type: concept\n",
+                format!(
+                    "## Intro\nAn ordinary statement.\n\n## Sources\n{generated}\n\n## Details\nThe actual PATH value.\n"
+                ),
+                true,
+            ),
+        ] {
+            let path = format!("wiki/concepts/{name}.md");
+            write(
+                root.path(),
+                &path,
+                &format!("---\n{format}title: {name}\n---\n{body}"),
+            );
+            if matches {
+                expected.insert(path);
+            }
+        }
+        let query = lk_core::discovery::DiscoveryQuery {
+            query: "PATH".into(),
+            phrase: false,
+            spacing: false,
+        };
+        let live_discovery =
+            crate::discover_queries(root.path(), &dirs, std::slice::from_ref(&query)).unwrap();
+        let capture =
+            crate::capture_discovery(root.path(), &dirs, std::slice::from_ref(&query)).unwrap();
+        assert_eq!(
+            capture
+                .candidates
+                .iter()
+                .map(|candidate| candidate.path.clone())
+                .collect::<BTreeSet<_>>(),
+            expected
+        );
+        for candidate in &capture.candidates {
+            if candidate.path.contains("/generated-") {
+                assert_eq!(
+                    candidate.card.matches[0].preview.section,
+                    Some(2),
+                    "{}",
+                    candidate.path
+                );
+                assert!(
+                    candidate.card.matches[0]
+                        .preview
+                        .text
+                        .text
+                        .contains("actual PATH")
+                );
+                let view = crate::inspect_document(
+                    root.path(),
+                    Path::new(&candidate.path),
+                    &crate::DocumentOptions {
+                        section: candidate.card.matches[0].preview.section,
+                        offset: 0,
+                        limit: 1024,
+                        revision: Some(&candidate.file_revision),
+                    },
+                )
+                .unwrap();
+                assert!(view.content.unwrap().text.contains("actual PATH"));
+            }
+        }
+        let mut options = SearchOptions {
+            query: Some("PATH"),
+            limit: 100,
+            ..Default::default()
+        };
+        let live = crate::search(root.path(), &dirs, &options).unwrap();
+        assert_eq!(
+            live.hits
+                .iter()
+                .map(|hit| hit.path.clone())
+                .collect::<BTreeSet<_>>(),
+            expected
+        );
+        for hit in &live.hits {
+            if hit.path.contains("/generated-") {
+                assert_eq!(hit.excerpt_kind, crate::ExcerptKind::Opening);
+                assert!(hit.excerpt.contains("actual PATH"));
+            }
+        }
+        let locator = live
+            .hits
+            .iter()
+            .find(|hit| hit.path == "wiki/concepts/locator.md")
+            .unwrap();
+        assert_eq!(locator.excerpt_section, Some(3));
+        assert!(locator.excerpt.contains("actual PATH"));
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let snapshot = prepare_search(&session, &dirs).unwrap();
+        options.snapshot = Some(&snapshot.snapshot);
+        let mut indexed = crate::search(root.path(), &dirs, &options).unwrap();
+        assert_eq!(
+            indexed.snapshot.as_deref(),
+            Some(snapshot.snapshot.as_str())
+        );
+        indexed.snapshot = None;
+        assert_eq!(
+            serde_json::to_value(&live).unwrap(),
+            serde_json::to_value(&indexed).unwrap()
+        );
+        assert_eq!(
+            crate::discover_queries(root.path(), &dirs, &[query]).unwrap(),
+            live_discovery
+        );
+        for query in ["Sources", "출처", "EXACT_CONCEPT_PATH", "snapshot"] {
+            let mut options = SearchOptions {
+                query: Some(query),
+                limit: 100,
+                ..Default::default()
+            };
+            let live = crate::search(root.path(), &dirs, &options).unwrap();
+            assert!(
+                live.hits
+                    .iter()
+                    .all(|hit| !hit.path.contains("/generated-")),
+                "{query}"
+            );
+            options.snapshot = Some(&snapshot.snapshot);
+            let mut indexed = crate::search(root.path(), &dirs, &options).unwrap();
+            assert_eq!(
+                indexed.snapshot.as_deref(),
+                Some(snapshot.snapshot.as_str())
+            );
+            indexed.snapshot = None;
+            assert_eq!(
+                serde_json::to_value(&live).unwrap(),
+                serde_json::to_value(&indexed).unwrap()
+            );
+        }
+        let introductions = crate::search(
+            root.path(),
+            &dirs,
+            &SearchOptions {
+                query: Some("Generated owner"),
+                snapshot: Some(&snapshot.snapshot),
+                limit: 100,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(introductions.total, 12);
+        assert!(
+            introductions
+                .hits
+                .iter()
+                .all(|hit| !hit.excerpt.contains("EXACT_CONCEPT_PATH"))
+        );
+        let raw = crate::search_body(
+            root.path(),
+            &dirs,
+            &crate::BodySearchOptions {
+                search: SearchOptions {
+                    query: Some("EXACT_CONCEPT_PATH"),
+                    limit: 100,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            raw.hits
+                .iter()
+                .any(|hit| hit.path == "wiki/concepts/generated-en-0-false.md")
+        );
+    }
 
     #[cfg(unix)]
     #[test]

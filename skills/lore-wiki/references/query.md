@@ -76,7 +76,9 @@ lexical within each language: when pages may state the subject in either, query 
 language's term separately. Markdown formatting
 and soft line breaks preserve a phrase; parsed HTML text is searchable too, with
 table cells and blocks kept separate. Markup, destinations, scripts and styles
-do not contribute text. Separate blocks and separate aliases do not
+do not contribute text. Concepts' exact generated Sources guidance is excluded from
+semantic matches and previews; authored Sources and code examples remain searchable.
+Use `--body` to search complete raw Markdown. Separate blocks and separate aliases do not
 combine into one. Use `--phrase` when separate words are too broad (for example
 `"API 토큰"`). Use `--spacing` to ignore whitespace within a visible block (for example
 `"인증정보"`); combine both for a compound phrase. These are explicit lexical operators,

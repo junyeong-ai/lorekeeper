@@ -443,7 +443,7 @@ fn capture_discovery_batch_inner(
             |mut page, _| {
                 read.check()?;
                 let started_at = measured.then(std::time::Instant::now);
-                let document = search::VisibleDocument::from_body(&page.page.body);
+                let document = search::VisibleDocument::build(&page.page.body, page.concept);
                 page.projection = Some(search::MatchProjection::from_document(&document));
                 let matches = {
                     let matcher = search::PageMatcher::from_page(&page);
@@ -783,6 +783,7 @@ fn query_revision(
 ) -> Result<String, VaultError> {
     Ok(file_revision(&serialized(&(
         DISCOVERY_CAPTURE_POLICY,
+        search::KNOWLEDGE_TEXT_POLICY,
         query,
         identity,
         spellings.iter().collect::<BTreeSet<_>>(),

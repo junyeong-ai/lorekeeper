@@ -74,10 +74,7 @@ pub fn classify(body: &str, concept: &Path) -> SourcesBody {
             "- {}",
             link::md_link(&value.text, &link::relative_dest(concept, &path))
         );
-        let source = path
-            .with_extension("")
-            .to_string_lossy()
-            .replace(std::path::MAIN_SEPARATOR, "/");
+        let source = crate::vault_path::address(&path.with_extension(""));
         if canonical != *line || sources.last().is_some_and(|previous| previous >= &source) {
             return SourcesBody::Authored;
         }

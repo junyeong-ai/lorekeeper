@@ -99,7 +99,8 @@ Claude Code에서는 `/lore-wiki query 재시도 정책을 정한 근거는?`, C
 | 소스 설정 / 수집·스케줄 / 남은 의미 작업 | `lore-setup` / `lore-ingest` / `lore-process` |
 | 오늘 할 일·지식 브리핑·완료 기록 | `lore-day` — 개인 보드는 선택 사항 |
 
-CLI 검색도 가능합니다. 아래 경로는 실제 검색 결과로 바꾸세요.
+기본 검색은 개념의 자동 출처 안내문을 제외하며, `--body`로 원문을 검색할 수 있습니다.
+아래 경로는 실제 검색 결과로 바꾸세요.
 
 ```bash
 lore wiki search "재시도" --json

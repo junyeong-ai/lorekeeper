@@ -18,23 +18,35 @@ fn markdown_offset(content: &str) -> Option<usize> {
 /// checked only after CommonMark establishes a root-level H2.
 fn find_section(content: &str, heading: &str) -> Option<std::ops::Range<usize>> {
     let offset = markdown_offset(content)?;
+    let body = &content[offset..];
+    let headings = lk_core::markdown::root_headings(body);
+    let (_, range) = section_ranges(body, heading, &headings)?;
+    Some(offset + range.start..offset + range.end)
+}
+
+/// Exact owned heading and body ranges from an already parsed Markdown body.
+pub(crate) fn section_ranges(
+    body: &str,
+    heading: &str,
+    headings: &[lk_core::markdown::MarkdownHeading],
+) -> Option<(std::ops::Range<usize>, std::ops::Range<usize>)> {
     let target = format!("## {heading}");
-    let mut found: Option<std::ops::Range<usize>> = None;
-    for heading in lk_core::markdown::root_headings(&content[offset..]) {
+    let mut found: Option<(std::ops::Range<usize>, std::ops::Range<usize>)> = None;
+    for heading in headings {
         if heading.level != HeadingLevel::H2 {
             continue;
         }
-        let range = offset + heading.range.start..offset + heading.range.end;
-        if let Some(section) = &mut found
-            && section.end == content.len()
+        let range = &heading.range;
+        if let Some((_, section)) = &mut found
+            && section.end == body.len()
         {
             section.end = range.start;
         }
-        if content[range.clone()].trim_end() == target {
+        if body[range.clone()].trim_end() == target {
             if found.is_some() {
                 return None;
             }
-            found = Some(range.end..content.len());
+            found = Some((range.clone(), range.end..body.len()));
         }
     }
     found

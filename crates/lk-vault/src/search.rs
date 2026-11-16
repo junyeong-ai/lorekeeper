@@ -27,6 +27,7 @@ use unicode_normalization::UnicodeNormalization;
 use crate::VaultError;
 
 pub(super) const REVIEW_PREVIEW_LIMIT: usize = 3;
+pub(super) const KNOWLEDGE_TEXT_POLICY: &str = "knowledge-text-v1";
 
 /// Where a query matched a page, from the strongest claim to the weakest. The derived
 /// ordering is the search's ranking.
@@ -1066,8 +1067,14 @@ impl<'a> SearchCollector<'a> {
                 let source_file = source_file_preview(&entry.page, &mut metadata_issues);
                 let source_url = source_url_preview(&entry.page, &mut metadata_issues);
                 let knowledge_review = knowledge_review_preview(&entry.page, &mut metadata_issues);
-                let excerpt =
-                    excerpt_details(&entry.page.body, matched, terms, spellings, spacing_match);
+                let excerpt = excerpt_details(
+                    &entry.page.body,
+                    entry.concept,
+                    matched,
+                    terms,
+                    spellings,
+                    spacing_match,
+                );
                 SearchHit {
                     excerpt: excerpt.text,
                     excerpt_kind: excerpt.kind,
@@ -1408,7 +1415,7 @@ impl Page {
     pub(super) fn match_projection(&self) -> std::borrow::Cow<'_, MatchProjection> {
         match &self.projection {
             Some(projection) => std::borrow::Cow::Borrowed(projection),
-            None => std::borrow::Cow::Owned(MatchProjection::from_body(&self.page.body)),
+            None => std::borrow::Cow::Owned(MatchProjection::build(&self.page.body, self.concept)),
         }
     }
     pub(super) fn created_date(&self) -> Option<jiff::civil::Date> {
@@ -1558,8 +1565,8 @@ fn declared_names<'a>(title: &'a str, aliases: &'a [String]) -> impl Iterator<It
 }
 
 impl MatchProjection {
-    fn from_body(body: &str) -> Self {
-        let document = VisibleDocument::from_body(body);
+    fn build(body: &str, concept: bool) -> Self {
+        let document = VisibleDocument::build(body, concept);
         Self::from_document(&document)
     }
 
@@ -1679,11 +1686,12 @@ fn contains_spacing_term(text: &str, term: &str) -> bool {
 /// to explain why it is here.
 pub(super) fn excerpt(
     body: &str,
+    concept: bool,
     matched: MatchField,
     terms: &[String],
     spellings: &[String],
 ) -> String {
-    excerpt_details(body, matched, terms, spellings, false).text
+    excerpt_details(body, concept, matched, terms, spellings, false).text
 }
 
 pub(super) struct SearchExcerpt {
@@ -1694,12 +1702,13 @@ pub(super) struct SearchExcerpt {
 
 pub(super) fn excerpt_details(
     body: &str,
+    concept: bool,
     matched: MatchField,
     terms: &[String],
     spellings: &[String],
     spacing: bool,
 ) -> SearchExcerpt {
-    let document = VisibleDocument::from_body(body);
+    let document = VisibleDocument::build(body, concept);
     if matched != MatchField::Text {
         let text = document
             .opening
@@ -1774,7 +1783,7 @@ fn first_match_end(block: &str, terms: &[String], spellings: &[String], spacing:
 
 #[cfg(test)]
 fn search_text(body: &str) -> String {
-    VisibleDocument::from_body(body).text()
+    VisibleDocument::build(body, false).text()
 }
 
 pub(super) struct VisibleBlock {
@@ -1791,10 +1800,38 @@ pub(super) struct VisibleDocument {
 }
 
 impl VisibleDocument {
-    pub fn from_body(body: &str) -> Self {
+    pub fn build(body: &str, concept: bool) -> Self {
+        let headings = lk_core::markdown::root_headings(body)
+            .into_iter()
+            .filter(|heading| heading.level == pulldown_cmark::HeadingLevel::H2)
+            .collect::<Vec<_>>();
+        let excluded = if concept {
+            generated_sources_ranges(body, &headings)
+        } else {
+            Vec::new()
+        };
+        let section = headings
+            .iter()
+            .enumerate()
+            .find(|(_, heading)| {
+                !excluded
+                    .iter()
+                    .any(|range| range.contains(&heading.range.start))
+            })
+            .map(|(index, heading)| {
+                heading.range.end
+                    ..headings
+                        .get(index + 1)
+                        .map_or(body.len(), |next| next.range.start)
+            });
         let markdown = lk_core::markdown::MarkdownInput::from_text(body);
         let events: Vec<_> = markdown
             .offset_events(lk_core::markdown::OPTIONS)
+            .filter(|(_, range)| {
+                !excluded
+                    .iter()
+                    .any(|owned| owned.start <= range.start && range.end <= owned.end)
+            })
             .filter_map(|(event, range)| {
                 // Footnote markers navigate to separately searchable blocks; their
                 // identifiers and generated numbering are not authored prose.
@@ -1807,7 +1844,6 @@ impl VisibleDocument {
                 Some((event, range))
             })
             .collect();
-        let section = crate::section::first_section_range(body);
         let has_html = events
             .iter()
             .any(|(event, _)| matches!(event, Event::Html(_) | Event::InlineHtml(_)));
@@ -1869,6 +1905,19 @@ impl VisibleDocument {
             .collect::<Vec<_>>()
             .join("\n")
     }
+}
+
+fn generated_sources_ranges(
+    body: &str,
+    headings: &[lk_core::markdown::MarkdownHeading],
+) -> Vec<Range<usize>> {
+    crate::section::section_headings(|strings| strings.concept_sources)
+        .filter_map(|name| {
+            let (heading, section) = crate::section::section_ranges(body, name, headings)?;
+            lk_core::concept_sources::is_compact(&body[section.clone()])
+                .then_some(heading.start..section.end)
+        })
+        .collect()
 }
 
 fn html_opening(
@@ -2541,7 +2590,7 @@ mod tests {
             for suffix in ["", "\n<span></span>\n"] {
                 let body = format!("{body}{suffix}");
                 assert_eq!(search_text(&body), expected, "{body}");
-                assert_eq!(MatchProjection::from_body(&body).summary, "alpha beta.");
+                assert_eq!(MatchProjection::build(&body, false).summary, "alpha beta.");
             }
         }
         assert_eq!(
@@ -3213,7 +3262,10 @@ mod tests {
             assert_eq!(
                 PageMatcher::build(
                     vec!["Other"],
-                    Cow::Owned(MatchProjection::from_body(&format!("## Summary\n{body}"))),
+                    Cow::Owned(MatchProjection::build(
+                        &format!("## Summary\n{body}"),
+                        false
+                    )),
                 )
                 .match_page(&terms, None, &spellings),
                 expected,
@@ -3223,7 +3275,7 @@ mod tests {
         assert_eq!(
             PageMatcher::build(
                 vec!["Knowledge", "Graph"],
-                Cow::Owned(MatchProjection::from_body(""))
+                Cow::Owned(MatchProjection::build("", false))
             )
             .match_page(&terms, None, &spellings),
             None
@@ -3231,7 +3283,7 @@ mod tests {
         assert_eq!(
             PageMatcher::build(
                 vec!["Knowledge\t  Graph"],
-                Cow::Owned(MatchProjection::from_body(""))
+                Cow::Owned(MatchProjection::build("", false))
             )
             .match_page(&terms, None, &spellings),
             Some(MatchField::Name)
@@ -3553,7 +3605,7 @@ mod tests {
             "Unrelated context sentence. ".repeat(12)
         );
         let terms = ["helios".to_string()];
-        let excerpt = excerpt_details(&body, MatchField::Text, &terms, &[], false);
+        let excerpt = excerpt_details(&body, false, MatchField::Text, &terms, &[], false);
         assert_eq!(excerpt.kind, ExcerptKind::MatchedBlock);
         assert!(excerpt.text.starts_with('…'), "{}", excerpt.text);
         assert!(

@@ -99,7 +99,8 @@ In Claude Code, ask `/lore-wiki query What evidence led to the retry policy?`; i
 | Configure sources / collect and schedule / process pending semantic work | `lore-setup` / `lore-ingest` / `lore-process` |
 | Daily tasks, knowledge brief and completion notes | `lore-day` — the personal board is optional |
 
-You can also search through the CLI. Replace the example path with an actual search result.
+CLI search excludes concepts' exact generated Sources guidance; `--body` searches raw Markdown.
+Replace the example path with an actual search result.
 
 ```bash
 lore wiki search "retry" --json

@@ -141,6 +141,10 @@ canonical; SQLite navigation is derived.
   A generated DOM boundary marker verifies closed preambles; it never maps HTML text to
   source positions. Unproven openings are unavailable; whole visible HTML stays searchable.
   ASCII-alphanumeric term edges require boundaries, CJK allows attached particles.
+- Semantic retrieval excludes only exact generator-owned compact Sources sections on
+  concept pages. Custom Sources, legacy citation lists and other page roles retain
+  their text. Live matching, indexed text, openings, excerpts and discovery cards share
+  this projection; original bytes and document section locators remain authoritative.
 - Browse filters/facets/pagination have distinct counts: facets before metadata/date
   filters, total after, pagination last. Each facet pages distinct values in exact-value
   order, independently of hit pagination. Search previews at most 3 scoped reviews;
@@ -171,7 +175,7 @@ canonical; SQLite navigation is derived.
   verifies real addresses without reading every concept body.
 
 Discovery query fingerprints derive from the effective live/indexed matcher plans,
-including resolved spellings. Card capture returns the same fingerprints and shares
+including resolved spellings and the knowledge-text policy. Card capture returns the same fingerprints and shares
 preferred public-address selection. These local identities do not alter legacy
 capture serialization or replace full candidate-byte publication guards.
 
