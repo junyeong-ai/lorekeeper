@@ -479,19 +479,29 @@ fn compare_tree(root: &Path, dir: &Path, files: &[EmbeddedFile], prune: Prune) -
     // differing only in case keeps that entry's spelling, so a path comparison here would count
     // the file the deploy correctly KEPT as an extra — reporting drift forever while naming a
     // repair that cannot remove it. The two are one rule and must not be two.
-    let expected: std::collections::BTreeSet<crate::layout::FileIdentity> = files
+    let expected: std::io::Result<std::collections::HashSet<crate::layout::FileIdentity>> = files
         .iter()
         .map(|file| crate::layout::identity(&dir.join(file.relative)))
         .collect();
+    let Ok(expected) = expected else {
+        return ArtifactState::Unavailable;
+    };
     for entry in walkdir::WalkDir::new(dir).follow_root_links(false) {
         let Ok(entry) = entry else {
             return ArtifactState::Unavailable;
         };
         // Everything that is not a directory, symlinks included: a link an agent can load is a
         // file to that agent, and `walkdir` does not follow one.
-        if !entry.file_type().is_dir() && !expected.contains(&crate::layout::identity(entry.path()))
-        {
-            return ArtifactState::Modified;
+        if !entry.file_type().is_dir() {
+            if !entry.file_type().is_file() {
+                return ArtifactState::Modified;
+            }
+            let Ok(identity) = crate::layout::identity(entry.path()) else {
+                return ArtifactState::Unavailable;
+            };
+            if !expected.contains(&identity) {
+                return ArtifactState::Modified;
+            }
         }
     }
     ArtifactState::Current
@@ -581,6 +591,60 @@ mod tests {
                 &dir,
                 &[file("SKILL.md", "skill"), file("references/a.md", "ref")]
             ),
+            ArtifactState::Current
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires an elevated Windows NTFS host with per-directory case sensitivity"]
+    fn case_sensitive_windows_extras_are_detected_and_pruned() {
+        let temporary = tempfile::tempdir().unwrap();
+        let dir = temporary.path().join("skill");
+        let references = dir.join("references");
+        std::fs::create_dir_all(&references).unwrap();
+        // Configure only this disposable directory. A missing OS/filesystem capability or
+        // insufficient privilege is a failed gate, never permission to skip the regression.
+        let configured = std::process::Command::new("fsutil.exe")
+            .args(["file", "setCaseSensitiveInfo"])
+            .arg(&references)
+            .arg("enable")
+            .output()
+            .unwrap();
+        assert!(
+            configured.status.success(),
+            "cannot enable case sensitivity for the private test directory: {}{}",
+            String::from_utf8_lossy(&configured.stdout),
+            String::from_utf8_lossy(&configured.stderr)
+        );
+        let carried = [
+            file("SKILL.md", "skill"),
+            file("references/config.md", "reference"),
+        ];
+        crate::layout::write_tree_for_tests(&dir, &carried).unwrap();
+        let extra = references.join("CONFIG.md");
+        std::fs::write(&extra, "uncarried").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(references.join("config.md")).unwrap(),
+            "reference",
+            "the fixture must actually distinguish the two case variants"
+        );
+        assert_eq!(
+            compare_tree_sweeping(&dir, &carried),
+            ArtifactState::Modified
+        );
+
+        crate::layout::write_tree_for_tests(&dir, &carried).unwrap();
+        assert_eq!(
+            std::fs::symlink_metadata(&extra).unwrap_err().kind(),
+            std::io::ErrorKind::NotFound
+        );
+        assert_eq!(
+            std::fs::read_to_string(references.join("config.md")).unwrap(),
+            "reference"
+        );
+        assert_eq!(
+            compare_tree_sweeping(&dir, &carried),
             ArtifactState::Current
         );
     }

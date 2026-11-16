@@ -505,12 +505,15 @@ fn write_tree_with(
     tree.provision()?;
     let dir = tree.directory();
 
-    let mut expected = std::collections::BTreeSet::new();
+    let mut expected = std::collections::HashSet::new();
     for file in files {
         let path = dir.join(file.relative);
         lk_core::fs::write_atomic(&path, file.contents.as_bytes(), Some(file.mode))
             .map_err(|e| DistError::io(format!("write {}", path.display()), e))?;
-        expected.insert(identity(&path));
+        expected.insert(
+            identity(&path)
+                .map_err(|error| DistError::io(format!("identify {}", path.display()), error))?,
+        );
     }
 
     if !prune.sweeps() {
@@ -531,9 +534,15 @@ fn write_tree_with(
             // Only when nothing is left in it — a directory the set still uses keeps its
             // contents, and `contents_first` means its files have already been decided.
             let _ = std::fs::remove_dir(path);
-        } else if !expected.contains(&identity(path)) {
-            std::fs::remove_file(path)
-                .map_err(|e| DistError::io(format!("remove {}", path.display()), e))?;
+        } else {
+            let carried = entry.file_type().is_file()
+                && expected.contains(&identity(path).map_err(|error| {
+                    DistError::io(format!("identify {}", path.display()), error)
+                })?);
+            if !carried {
+                std::fs::remove_file(path)
+                    .map_err(|e| DistError::io(format!("remove {}", path.display()), e))?;
+            }
         }
     }
     Ok(())
@@ -545,34 +554,27 @@ fn write_tree_with(
 /// Windows, so the path read back by the walk is not the path that was written — and the prune
 /// would delete the file it had just created, report success, and leave a skill pointing at a
 /// reference that is gone. `canonicalize` cannot answer this: macOS `realpath` resolves symlinks
-/// and leaves case exactly as it was given. The inode does answer it, exactly, and needs no
-/// probe of the volume's behaviour. CI runs a case-sensitive volume, so no gate here could have
-/// caught this.
+/// and leaves case exactly as it was given. Filesystem identities preserve both aliases and
+/// distinct case-sensitive names. Callers exclude nonregular entries before comparing them.
 #[cfg(unix)]
-pub(crate) fn identity(path: &Path) -> FileIdentity {
+pub(crate) fn identity(path: &Path) -> std::io::Result<FileIdentity> {
     use std::os::unix::fs::MetadataExt;
-    // `symlink_metadata`, so a link is ITSELF rather than what it names. Following it put a
-    // symlink pointing at a carried file into the expected set, where it survived the prune and
-    // was then skipped by the comparison — an agent loads it exactly like a real file.
-    match std::fs::symlink_metadata(path) {
-        Ok(meta) => FileIdentity::OnDisk(meta.dev(), meta.ino()),
-        // Only for a path nothing wrote, which the prune then removes as it should.
-        Err(_) => FileIdentity::Named(path.to_path_buf()),
-    }
+    let metadata = std::fs::symlink_metadata(path)?;
+    Ok(FileIdentity(metadata.dev(), metadata.ino()))
 }
 
-/// Windows has no inode `std` exposes on stable, and NTFS folds case, so the name compared
-/// without case is the same answer.
 #[cfg(not(unix))]
-pub(crate) fn identity(path: &Path) -> FileIdentity {
-    FileIdentity::Named(PathBuf::from(path.to_string_lossy().to_lowercase()))
+pub(crate) fn identity(path: &Path) -> std::io::Result<FileIdentity> {
+    // Keep the handle open while its identity is retained; Windows can reuse file indices
+    // after close. The shared opener rejects leaf symlinks and other nonregular entries.
+    same_file::Handle::from_file(lk_core::fs::open_regular_file(path)?)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum FileIdentity {
-    OnDisk(u64, u64),
-    Named(PathBuf),
-}
+#[cfg(unix)]
+#[derive(Debug, PartialEq, Eq, Hash)]
+pub(crate) struct FileIdentity(u64, u64);
+#[cfg(not(unix))]
+pub(crate) type FileIdentity = same_file::Handle;
 
 fn absolute_path(path: &Path) -> Result<PathBuf, DistError> {
     std::path::absolute(path).map_err(|error| {
@@ -728,9 +730,7 @@ mod tests {
     }
 
     /// The prune compares files, not names. A hardlink is two names for one file on every
-    /// filesystem, so it proves the mechanism without needing a case-folding volume — which CI
-    /// deliberately does not run, and which is where the bug this closes only ever appeared.
-    #[cfg(unix)]
+    /// filesystem, including Windows, so their equality must follow filesystem identity.
     #[test]
     fn one_file_under_two_names_is_one_identity() {
         let tmp = tempfile::tempdir().unwrap();
@@ -739,8 +739,11 @@ mod tests {
         std::fs::write(&first, "carried").unwrap();
         std::fs::hard_link(&first, &second).unwrap();
 
-        assert_eq!(identity(&first), identity(&second));
-        assert_ne!(identity(&first), identity(&tmp.path().join("absent.md")));
+        assert_eq!(identity(&first).unwrap(), identity(&second).unwrap());
+        assert_eq!(
+            identity(&tmp.path().join("absent.md")).unwrap_err().kind(),
+            std::io::ErrorKind::NotFound
+        );
     }
 
     #[cfg(unix)]
@@ -851,8 +854,8 @@ mod tests {
         std::os::unix::fs::symlink("SKILL.md", dir.join("EXTRA.md")).unwrap();
 
         assert_ne!(
-            identity(&dir.join("EXTRA.md")),
-            identity(&dir.join("SKILL.md")),
+            identity(&dir.join("EXTRA.md")).unwrap(),
+            identity(&dir.join("SKILL.md")).unwrap(),
             "a link is itself, not what it names"
         );
         write_tree(&dir, &carried).unwrap();

@@ -21,6 +21,9 @@ flate2 = { workspace = true }
 thiserror = { workspace = true }
 walkdir = { workspace = true }
 
+[target.'cfg(not(unix))'.dependencies]
+same-file = { workspace = true }
+
 [dev-dependencies]
 tempfile = { workspace = true }
 

@@ -1559,6 +1559,7 @@ dependencies = [
  "lk-core",
  "lk-vault",
  "reqwest",
+ "same-file",
  "semver",
  "serde",
  "serde_json",

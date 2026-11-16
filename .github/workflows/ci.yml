@@ -208,6 +208,8 @@ jobs:
         run: |
           cargo test --locked -p lk-dist --lib tree::tests
           cargo test --locked -p lk-dist --lib coherence::tests
+          cargo test --locked -p lk-dist --lib layout::tests::one_file_under_two_names_is_one_identity -- --exact
+          cargo test --locked -p lk-dist --lib coherence::tests::case_sensitive_windows_extras_are_detected_and_pruned -- --ignored --exact
       - name: Verify retained extraction inputs on Windows
         run: cargo test --locked -p lore --lib commands::extract::verify::tests
       - name: Verify URI reference resolution on Windows
