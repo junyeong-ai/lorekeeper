@@ -7723,7 +7723,7 @@ fn failed_only_screening_wave_stops_without_progress_and_requires_exact_explicit
             let body = std::fs::read_to_string(&agent).unwrap().replace(
                 "if leader and mode=='failed': raise SystemExit(51)",
                 if timeout {
-                    "if mode=='failed': time.sleep(3)"
+                    "if mode=='failed': time.sleep(30)"
                 } else {
                     "if mode=='failed': raise SystemExit(51)"
                 },
@@ -7732,7 +7732,7 @@ fn failed_only_screening_wave_stops_without_progress_and_requires_exact_explicit
             if timeout {
                 let config = std::fs::read_to_string(&fixture.config)
                     .unwrap()
-                    .replace("timeout_seconds: 30", "timeout_seconds: 1");
+                    .replace("timeout_seconds: 30", "timeout_seconds: 3");
                 std::fs::write(&fixture.config, config).unwrap();
             }
             let (_, report) = fixture.run("process");
@@ -7743,6 +7743,20 @@ fn failed_only_screening_wave_stops_without_progress_and_requires_exact_explicit
                 "{report}"
             );
             assert_eq!(screening_receipts(&fixture), 0);
+            let steps = report["work_steps"].as_array().unwrap();
+            assert_eq!(steps.len(), 2, "{report}");
+            for step in steps {
+                let failure = &step["host_failure"];
+                assert_eq!(failure["phase"], "invocation", "{report}");
+                assert_eq!(
+                    failure["termination"],
+                    if timeout { "timed-out" } else { "exited" },
+                    "{report}"
+                );
+                if !timeout {
+                    assert_eq!(failure["exit_code"], 51, "{report}");
+                }
+            }
             let (_, repeated) = fixture.run("process");
             assert_eq!(repeated["semantic_calls"], 0, "{repeated}");
             assert_eq!(repeated["halted"], false, "{repeated}");
