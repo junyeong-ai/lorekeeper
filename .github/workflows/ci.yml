@@ -205,6 +205,7 @@ jobs:
       - name: Verify typed collection history on Windows
         run: cargo test --locked -p lk-vault --lib log::tests::latest_attempt_keeps_typed_partial_reach_separate_from_publication_and_legacy -- --exact
       - name: Verify deployment boundaries and artifact inspection on Windows
+        shell: bash
         run: |
           cargo test --locked -p lk-dist --lib tree::tests
           cargo test --locked -p lk-dist --lib coherence::tests
