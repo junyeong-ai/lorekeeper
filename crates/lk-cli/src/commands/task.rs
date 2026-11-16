@@ -489,15 +489,16 @@ impl IntentPlane {
     }
 
     fn acquire(opts: &GlobalOptions, exclusive: bool) -> miette::Result<Self> {
-        let config = load_config(&find_config(opts)?)?;
+        let config_path = find_config(opts)?;
+        let (config, revision) = super::load_config_with_revision(&config_path)?;
+        let pin = super::ConfigurationPin::from_loaded(config_path, revision);
         let tasks = tasks_config(&config)?;
-        let vault_root = config.vault.root_path();
+        let mut vault_root = config.vault.root_path();
         let zone = config.vault.timezone();
         let now = jiff::Timestamp::now();
         let board_path =
             lk_core::vault_path::VaultPath::task_board(&config.vault.dirs, &tasks.board)
                 .to_string();
-        let full = vault_root.join(&board_path);
 
         // Claimed BEFORE the board is read, so the read and the write it decides are one
         // critical section rather than two.
@@ -514,10 +515,14 @@ impl IntentPlane {
                 std::fs::create_dir_all(&vault_root).map_err(|e| miette::miette!("{e}"))?;
                 let claim = lk_vault::MutationClaim::acquire_waiting(&vault_root)
                     .map_err(|e| miette::miette!("{e}"))?;
+                vault_root = claim.root().to_path_buf();
+                pin.validate()?;
                 guard = Some(
                     lk_task::PlaneLock::hold(&vault_root).map_err(|e| miette::miette!("{e}"))?,
                 );
+                pin.validate()?;
                 mutation = Some(claim.into_session().map_err(|e| miette::miette!("{e}"))?);
+                pin.validate()?;
             }
             false => {
                 if let Err(why) = lk_task::PlaneLock::is_holdable(&vault_root) {
@@ -526,6 +531,7 @@ impl IntentPlane {
             }
         }
 
+        let full = vault_root.join(&board_path);
         // An absent board is an empty one, not an error: the first `lore task add` creates the
         // page, exactly as the first ingest creates a daily page.
         let read_as = match std::fs::read(&full) {

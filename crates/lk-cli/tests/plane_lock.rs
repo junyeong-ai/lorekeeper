@@ -211,6 +211,177 @@ fn a_plane_that_cannot_be_held_refuses_writes_and_serves_reads() {
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn task_writers_keep_claimed_root_and_refuse_inherited_drift_before_recovery() {
+    use std::os::unix::fs::symlink;
+    use std::process::{Child, Stdio};
+    use std::time::{Duration, Instant};
+
+    struct WaitingChild(Option<Child>);
+
+    impl Drop for WaitingChild {
+        fn drop(&mut self) {
+            if let Some(child) = &mut self.0 {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum Change {
+        Vault,
+        Alias,
+        Configuration,
+    }
+
+    for (inherited, change) in [
+        (false, Change::Vault),
+        (true, Change::Vault),
+        (true, Change::Alias),
+        (true, Change::Configuration),
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = vault(tmp.path());
+        let first = tmp.path().join("vault");
+        let second = tmp.path().join("other-vault");
+        std::fs::create_dir(&second).unwrap();
+        let selected = tmp.path().join("selected");
+        let equivalent = tmp.path().join("equivalent");
+        symlink(&first, &selected).unwrap();
+        symlink(&first, &equivalent).unwrap();
+        let raw = std::fs::read_to_string(&config)
+            .unwrap()
+            .replace(
+                &format!("root: {}/vault", tmp.path().display()),
+                &format!("root: {}", selected.display()),
+            )
+            .replace(
+                "    board: tasks.md\n",
+                "    board: tasks.md\n    propose_from: [s1]\n",
+            );
+        std::fs::write(&config, &raw).unwrap();
+        let today = jiff::Timestamp::now()
+            .to_zoned(jiff::tz::TimeZone::UTC)
+            .date();
+        for (root, title, origin) in [
+            (&first, "Owned proposal", "owned"),
+            (&second, "Foreign proposal", "foreign"),
+        ] {
+            lk_task::Judged::new(root)
+                .add(
+                    today,
+                    &lk_task::Candidate {
+                        source_id: "s1".into(),
+                        summary: title.into(),
+                        url: format!("https://example.test/{origin}"),
+                    },
+                )
+                .unwrap();
+        }
+        let judged = format!(".lorekeeper/proposals/judged/{today}.jsonl");
+        let owned_before = std::fs::read(first.join(&judged)).unwrap();
+        let foreign_before = std::fs::read(second.join(&judged)).unwrap();
+        let plane = lk_task::PlaneLock::hold(&first).unwrap();
+        let mut recovery = lk_vault::MutationPlan::default();
+        recovery.create("recovered-intent.txt", "Owned recovery".into());
+        let journal = first.join(".lorekeeper/mutation/pending.json");
+        std::fs::create_dir_all(journal.parent().unwrap()).unwrap();
+        let pending =
+            serde_json::to_vec(&serde_json::json!({"version":1,"plan":recovery})).unwrap();
+        std::fs::write(&journal, &pending).unwrap();
+        let mut command = Command::new(env!("CARGO_BIN_EXE_lore"));
+        for (key, _) in std::env::vars_os() {
+            if key.to_string_lossy().starts_with("LORE_") {
+                command.env_remove(key);
+            }
+        }
+        command
+            .env("LORE_INSTALL_DATA_DIR", tmp.path().join("data"))
+            .arg("--config")
+            .arg(&config);
+        if inherited {
+            command
+                .args(["workflow", "--"])
+                .arg(env!("CARGO_BIN_EXE_lore"));
+        }
+        let mut child = WaitingChild(Some(
+            command
+                .args(["task", "propose"])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap(),
+        ));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            assert!(child.0.as_mut().unwrap().try_wait().unwrap().is_none());
+            match lk_vault::MutationClaim::acquire(&first) {
+                Err(lk_vault::VaultError::MutationBusy) => break,
+                Ok(claim) => drop(claim),
+                Err(error) => panic!("mutation claim probe: {error}"),
+            }
+            assert!(
+                Instant::now() < deadline,
+                "child did not acquire the vault claim"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        match change {
+            Change::Vault | Change::Alias => {
+                std::fs::remove_file(&selected).unwrap();
+                symlink(
+                    if matches!(change, Change::Alias) {
+                        &equivalent
+                    } else {
+                        &second
+                    },
+                    &selected,
+                )
+                .unwrap();
+            }
+            Change::Configuration => {
+                std::fs::write(&config, raw + "# changed configuration\n").unwrap();
+            }
+        }
+        drop(plane);
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while child.0.as_mut().unwrap().try_wait().unwrap().is_none() {
+            assert!(Instant::now() < deadline, "task writer did not finish");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let output = child.0.take().unwrap().wait_with_output().unwrap();
+        let board = lk_core::vault_path::VaultPath::task_board(
+            &lk_core::config::VaultDirs::default(),
+            "tasks.md",
+        )
+        .to_string();
+        let refused = inherited && !matches!(change, Change::Alias);
+        assert_eq!(output.status.success(), !refused, "{}", said(&output));
+        assert_eq!(std::fs::read(second.join(&judged)).unwrap(), foreign_before);
+        assert!(!second.join(&board).exists());
+        assert!(!second.join("recovered-intent.txt").exists());
+        if refused {
+            assert!(said(&output).contains("changed"), "{}", said(&output));
+            assert_eq!(std::fs::read(&journal).unwrap(), pending);
+            assert_eq!(std::fs::read(first.join(&judged)).unwrap(), owned_before);
+            assert!(!first.join(&board).exists());
+            assert!(!first.join("recovered-intent.txt").exists());
+        } else {
+            let page = std::fs::read_to_string(first.join(&board)).unwrap();
+            assert!(page.contains("Owned proposal"), "{page}");
+            assert!(!page.contains("Foreign proposal"), "{page}");
+            assert!(!first.join(&judged).exists());
+            assert!(!journal.exists());
+            assert_eq!(
+                std::fs::read_to_string(first.join("recovered-intent.txt")).unwrap(),
+                "Owned recovery"
+            );
+        }
+    }
+}
+
 /// A view that could not be written to says so, rather than reporting a quiet day over a vault
 /// where the nightly close, every command and the reminder timer are all being turned away.
 #[test]
