@@ -527,7 +527,8 @@ fn concept_has_authored_body(root: &Path, path: &Path) -> Result<bool, GraphErro
     let mut body = parsed.body;
     for heading in lk_vault::section_headings(|strings| strings.concept_sources) {
         if let Some(sources) = lk_vault::section_body(&body, heading)
-            && crate::sources::classify(sources, path) != crate::sources::SourcesBody::Authored
+            && lk_core::concept_sources::classify(sources, path)
+                != lk_core::concept_sources::SourcesBody::Authored
         {
             body = lk_vault::replace_section(&body, heading, "");
         }
@@ -890,7 +891,7 @@ mod tests {
                     "---\ntitle: Topic\n---\n# Topic\n\n## {}\n\n## {}\n\n{}\n\n## {}\n",
                     strings.concept_synthesis,
                     strings.concept_sources,
-                    crate::sources::render(*locale),
+                    lk_core::concept_sources::render(*locale),
                     strings.related
                 ),
             );
@@ -2001,7 +2002,7 @@ mod tests {
             let generated = format!(
                 "---\nid: a\n---\n# a\n\n## {}\n\n{}\n",
                 locale.strings().concept_sources,
-                crate::sources::render(*locale)
+                lk_core::concept_sources::render(*locale)
             );
             write(root, "wiki/concepts/a.md", &generated);
             assert!(

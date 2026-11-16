@@ -1,5 +1,6 @@
 pub mod captured_file;
 pub mod concept;
+pub mod concept_sources;
 pub mod config;
 pub mod content;
 pub mod cron;

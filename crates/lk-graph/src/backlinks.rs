@@ -836,12 +836,13 @@ fn plan_concept_backlinks_inner(
             continue;
         };
 
-        let sources_body = crate::sources::classify(sources_section.body, &page.path);
+        let sources_body = lk_core::concept_sources::classify(sources_section.body, &page.path);
         let existing_set = match &sources_body {
-            crate::sources::SourcesBody::Legacy(sources) => {
+            lk_core::concept_sources::SourcesBody::Legacy(sources) => {
                 Some(sources.iter().map(String::as_str).collect::<BTreeSet<_>>())
             }
-            crate::sources::SourcesBody::Compact | crate::sources::SourcesBody::Authored => None,
+            lk_core::concept_sources::SourcesBody::Compact
+            | lk_core::concept_sources::SourcesBody::Authored => None,
         };
         let desired_set: BTreeSet<&str> = sources.iter().map(String::as_str).collect();
 
@@ -974,7 +975,7 @@ fn plan_concept_backlinks_inner(
         // the command still exits non-zero — including for the synthesis it can no longer be
         // owed, since a task naming a page that cannot receive the result would fail every
         // drain forever.
-        let sources_content = if sources_body == crate::sources::SourcesBody::Authored {
+        let sources_content = if sources_body == lk_core::concept_sources::SourcesBody::Authored {
             report.preserved_sources.push(page.path.clone());
             raw.clone()
         } else {
@@ -985,7 +986,7 @@ fn plan_concept_backlinks_inner(
             replace_section(
                 &raw,
                 sources_section.heading,
-                crate::sources::render(*locale),
+                lk_core::concept_sources::render(*locale),
             )
         };
         let Some(updated_content) = set_source_count(&sources_content, desired_count).and_then(
@@ -2607,7 +2608,7 @@ mod tests {
             stem,
             source_lines.len(),
             llm_inputs,
-            crate::sources::render(lk_core::i18n::Locale::Ko),
+            lk_core::concept_sources::render(lk_core::i18n::Locale::Ko),
         );
     }
 
@@ -2653,11 +2654,11 @@ mod tests {
 
     fn assert_compact_sources(content: &str, heading: &str) {
         assert_eq!(
-            crate::sources::classify(
+            lk_core::concept_sources::classify(
                 section_body(content, heading).unwrap(),
                 Path::new("wiki/concepts/topic.md")
             ),
-            crate::sources::SourcesBody::Compact
+            lk_core::concept_sources::SourcesBody::Compact
         );
     }
 
@@ -3104,7 +3105,7 @@ mod tests {
         let content = std::fs::read_to_string(&path).unwrap();
         assert_eq!(
             section_body(&content, "Sources").unwrap().trim(),
-            crate::sources::render(lk_core::i18n::Locale::En)
+            lk_core::concept_sources::render(lk_core::i18n::Locale::En)
         );
     }
 

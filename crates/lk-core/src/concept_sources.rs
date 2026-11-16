@@ -2,18 +2,18 @@
 //! never citation authority: current evidence always comes from source links in backlinks.
 use std::path::Path;
 
-use lk_core::i18n::Locale;
-use lk_core::link;
+use crate::i18n::Locale;
+use crate::link;
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum SourcesBody {
+pub enum SourcesBody {
     /// An exact legacy generated list, whose complete prior addresses can support a diff.
     Legacy(Vec<String>),
     Compact,
     Authored,
 }
 
-pub(crate) fn render(locale: Locale) -> &'static str {
+pub fn render(locale: Locale) -> &'static str {
     match locale {
         Locale::Ko => {
             "<!-- lorekeeper:concept-sources:v1 -->\n\n전체 출처는 `lore wiki prepare`로 스냅샷 ID를 받은 다음 `lore wiki citations EXACT_CONCEPT_PATH --snapshot ID`로 조회합니다."
@@ -24,16 +24,26 @@ pub(crate) fn render(locale: Locale) -> &'static str {
     }
 }
 
+pub fn is_compact(body: &str) -> bool {
+    let text = crate::markdown::lines_with_endings(body.trim_matches(['\r', '\n']))
+        .map(|line| line.trim_end_matches(['\r', '\n']))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Locale::ALL.iter().any(|locale| render(*locale) == text)
+}
+
 /// Permit the empty scaffold and known compact bodies. A legacy body must round-trip
 /// every complete line through the shared link parser and exact old renderer grammar,
 /// including relative-address encoding, escaped labels and sorted unique addresses.
 /// Mixed prose, code-wrapped links, indentation, link titles and anchors are authored
 /// content; inline-code text inside an emitted link's label remains part of that label.
-pub(crate) fn classify(body: &str, concept: &Path) -> SourcesBody {
+pub fn classify(body: &str, concept: &Path) -> SourcesBody {
     if body.trim().is_empty() {
         return SourcesBody::Legacy(Vec::new());
     }
-    let lines = body.lines().collect::<Vec<_>>();
+    let lines = crate::markdown::lines_with_endings(body)
+        .map(|line| line.trim_end_matches(['\r', '\n']))
+        .collect::<Vec<_>>();
     let first = lines
         .iter()
         .position(|line| !line.is_empty())
@@ -44,7 +54,7 @@ pub(crate) fn classify(body: &str, concept: &Path) -> SourcesBody {
         .expect("nonblank body");
     let lines = &lines[first..=last];
     let text = lines.join("\n");
-    if Locale::ALL.iter().any(|locale| render(*locale) == text) {
+    if is_compact(&text) {
         return SourcesBody::Compact;
     }
     let mut sources = Vec::new();
@@ -64,7 +74,10 @@ pub(crate) fn classify(body: &str, concept: &Path) -> SourcesBody {
             "- {}",
             link::md_link(&value.text, &link::relative_dest(concept, &path))
         );
-        let source = crate::scan::page_id(&path);
+        let source = path
+            .with_extension("")
+            .to_string_lossy()
+            .replace(std::path::MAIN_SEPARATOR, "/");
         if canonical != *line || sources.last().is_some_and(|previous| previous >= &source) {
             return SourcesBody::Authored;
         }
@@ -115,14 +128,11 @@ mod tests {
         );
         assert_eq!(classify("\n\n", concept), SourcesBody::Legacy(Vec::new()));
         for locale in Locale::ALL {
-            assert_eq!(
-                classify(&format!("\n{}\n\n", render(*locale)), concept),
-                SourcesBody::Compact
-            );
-            assert_eq!(
-                classify(&render(*locale).replace('\n', "\r\n"), concept),
-                SourcesBody::Compact
-            );
+            for newline in ["\n", "\r\n", "\r"] {
+                let body = format!("\n{}\n\n", render(*locale)).replace('\n', newline);
+                assert!(is_compact(&body));
+                assert_eq!(classify(&body, concept), SourcesBody::Compact);
+            }
         }
         for authored in [
             format!("  {first}"),
@@ -139,6 +149,7 @@ mod tests {
             "<!-- lorekeeper:concept-sources:v1 -->\nAuthored explanation.".into(),
             format!("{}\nAuthored explanation.", render(Locale::En)),
         ] {
+            assert!(!is_compact(&authored));
             assert_eq!(
                 classify(&authored, concept),
                 SourcesBody::Authored,
