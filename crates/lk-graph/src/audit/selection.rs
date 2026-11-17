@@ -364,10 +364,11 @@ pub(super) struct SelectionInputs<'a> {
     pub subject_revision: &'a str,
     pub queries: &'a [DiscoveryQuery],
     pub matches: &'a [Citation],
-    pub evidence: &'a [Citation],
-    pub direct: &'a [Citation],
-    pub scoped_reviews: &'a [AuditReviewDependency],
 }
+
+/// A decision's purpose is the subject as its screener reads it: the page's address and
+/// authored revision. Evidence, direct links, the subject's reviews and the recipe's
+/// other queries are not shown to a screener and stay outside every candidate key.
 pub(super) fn project(
     root: &Path,
     inputs: SelectionInputs<'_>,
@@ -381,22 +382,12 @@ pub(super) fn project(
         subject_revision,
         queries,
         matches,
-        evidence,
-        direct,
-        scoped_reviews,
     } = inputs;
     let purpose = revision(&(
         POLICY,
         lk_vault::DISCOVERY_CAPTURE_POLICY,
         subject,
         subject_revision,
-        queries,
-        evidence,
-        direct,
-        scoped_reviews
-            .iter()
-            .map(AuditReviewDependency::identity)
-            .collect::<Vec<_>>(),
     ))?;
     let mut roster = BTreeMap::new();
     for citation in matches {

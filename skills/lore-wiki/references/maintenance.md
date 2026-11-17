@@ -109,8 +109,12 @@ maintenance may request subsequent packets until no unknown candidates remain.
 When `refresh` is returned without a request, submit that exact metadata-only object;
 it refreshes the current inventory without another semantic decision.
 
-Unchanged decisions survive pagination and newly discovered candidates. Changed candidate
-scope, query meaning or subject purpose requires fresh decisions. Unknown and deferred
+Unchanged decisions survive pagination and newly discovered candidates. A decision binds
+the subject's authored revision and its own candidate: that page's authored revision,
+matched queries and scoped reviews. New citations to the subject, edits of pages it
+links, its reviews and the recipe's other queries keep recorded decisions; re-recording
+changed queries for an unchanged subject asks only about candidates whose own matched
+queries changed. A changed subject, candidate or query meaning requires fresh decisions. Unknown and deferred
 candidates prevent completed assessment. Native runs continue later unknown candidates but
 never automatically reassess a defer; use `audit-candidates SUBJECT --reassess` only for an
 explicitly authorized reassessment and copy its `reassess: true` into the submission.

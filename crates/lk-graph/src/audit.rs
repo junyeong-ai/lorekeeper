@@ -250,12 +250,18 @@ fn record_discovery_guarded(
     {
         return Ok(false);
     }
-    let selection = receipts
+    // Decisions bind the subject revision and each candidate's own matched queries, so a
+    // screened recipe keeps its state when only the query list changes. An identical
+    // recipe is unchanged, including a legacy one.
+    let selection = match receipts
         .discovery
         .get(&request.path)
-        .filter(|plan| plan.subject_revision == revision && plan.queries == queries)
-        .map(|plan| plan.selection.clone())
-        .unwrap_or(policy);
+        .filter(|plan| plan.subject_revision == revision)
+    {
+        Some(plan) if plan.queries == queries => plan.selection.clone(),
+        Some(plan) => policy.map(|policy| plan.selection.clone().unwrap_or(policy)),
+        None => policy,
+    };
     receipts.discovery.insert(
         request.path.clone(),
         DiscoveryPlan {
@@ -1946,9 +1952,6 @@ fn inputs_controlled(
                             subject_revision: &revision,
                             queries: &plan.queries,
                             matches: &matches,
-                            evidence: &citations,
-                            direct: &related_pages,
-                            scoped_reviews: &scoped_reviews,
                         },
                         selection,
                         &discovered,

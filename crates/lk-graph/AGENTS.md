@@ -56,8 +56,12 @@ and CLI discovery, not a second graph authority.
 
 - Screened discovery keeps immutable candidate states and bounded decision packets.
   Global planning uses complete compact inventories; selected boundaries capture cards
-  and exact bytes. Reuse binds the subject purpose, verified owner/public address,
-  authored revision, matched query semantics and scoped reviews. Unknown or deferred
+  and exact bytes. A decision binds what its screener reads: the subject's address and
+  authored revision, and the candidate's verified owner, public address, authored
+  revision, matched query semantics and scoped reviews. Subject evidence, direct
+  links, subject reviews and the recipe's other queries stay outside every key, so a
+  new citation or an added query keeps recorded decisions; re-recorded queries for an
+  unchanged subject keep the screening state. Unknown or deferred
   candidates prevent assessment. Excluding discovery context never excludes mandatory
   evidence or direct links; excluded candidate bytes remain publication guards.
   Evidence-associated card reviews bind identity and input guards without becoming

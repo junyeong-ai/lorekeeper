@@ -822,6 +822,118 @@ fn candidate_decisions_resume_without_repeating_unchanged_inputs() {
 }
 
 #[test]
+fn decisions_bind_the_read_subject_not_its_evidence_or_other_queries() {
+    let fixture = Fixture::new(3);
+    let hub = "wiki/concepts/hub.md";
+    let body =
+        "---\ntype: concept\ntitle: Hub\n---\n## Synthesis\nThe hub states a rollout rule.\n";
+    fixture.write(hub, body);
+    let cite = |name: &str, note: &str| {
+        fixture.write(
+            &format!("wiki/documents/{name}.md"),
+            &format!("---\ntype: document\n---\n{note}\n\n## Related Concepts\n- [Hub](../concepts/hub.md)\n"),
+        );
+    };
+    cite("source-a", "A first observation.");
+    let discover = |raw: &str, queries: &[&str]| {
+        crate::audit::record_discovery(
+            &MutationSession::acquire(&fixture.root).unwrap(),
+            &fixture.dirs,
+            &fixture.pages(),
+            crate::audit::AuditDiscoveryRequest {
+                path: hub.into(),
+                file_revision: file_revision(raw),
+                queries: queries
+                    .iter()
+                    .map(|query| DiscoveryQuery {
+                        query: (*query).into(),
+                        phrase: false,
+                        spacing: false,
+                    })
+                    .collect(),
+            },
+        )
+        .unwrap();
+    };
+    let packet = || {
+        candidates(
+            &fixture.root,
+            &fixture.dirs,
+            &fixture.pages(),
+            hub,
+            fixture.limits(),
+            false,
+            &ReadControl::default(),
+        )
+        .unwrap()
+    };
+    let subject = || {
+        crate::audit::load_selected_inputs(
+            &fixture.root,
+            &fixture.dirs,
+            &fixture.pages(),
+            &[hub.into()],
+        )
+        .unwrap()
+        .remove(0)
+    };
+    discover(body, &["screen protocol"]);
+    let first = packet();
+    assert_eq!(first.progress.unknown, 3);
+    assert!(
+        fixture
+            .record(output(&first, ScreeningDecision::NotSelected))
+            .unwrap()
+    );
+    let decided = subject();
+
+    cite("source-a", "A revised observation.");
+    cite("source-b", "A new citing source.");
+    let cited = subject();
+    assert_eq!(cited.evidence.len(), 2);
+    assert_ne!(cited.input_revision, decided.input_revision);
+    let progress = cited.discovery.unwrap().selection.unwrap();
+    assert_eq!(
+        progress.purpose_revision,
+        decided
+            .discovery
+            .unwrap()
+            .selection
+            .unwrap()
+            .purpose_revision
+    );
+    assert!(
+        progress.is_ready(),
+        "new and revised citations keep every candidate decision"
+    );
+
+    fixture.write(
+        "wiki/documents/other.md",
+        "---\ntype: document\n---\nA retention schedule applies.\n",
+    );
+    discover(body, &["screen protocol", "retention schedule"]);
+    let widened = packet();
+    assert_eq!(
+        (
+            widened.progress.total,
+            widened.progress.not_selected,
+            widened.progress.unknown
+        ),
+        (4, 3, 1),
+        "an added query asks only about the candidate it adds"
+    );
+
+    let changed = body.replace("a rollout rule", "a different rule");
+    fixture.write(hub, &changed);
+    discover(&changed, &["screen protocol"]);
+    assert_eq!(
+        packet().progress.unknown,
+        3,
+        "a changed subject is read anew"
+    );
+}
+
+#[test]
 fn deferred_cards_do_not_repeat_or_hide_later_unknown_candidates() {
     let fixture = Fixture::new(3);
     let first = fixture.packet(1, false);
