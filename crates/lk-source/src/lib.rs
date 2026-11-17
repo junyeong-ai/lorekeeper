@@ -250,7 +250,7 @@ impl ExtractContext {
         let days_forward = lookahead_hours.div_ceil(24) as i32;
 
         let midnight = |date: jiff::civil::Date| -> Result<jiff::Timestamp, SourceError> {
-            date.to_zoned(self.timezone.clone())
+            date.to_zoned_datetime(self.timezone.clone())
                 .map(|z| z.timestamp())
                 .map_err(|e| SourceError::Parse(format!("day boundary {date}: {e}")))
         };
@@ -901,7 +901,7 @@ mod tests {
             .unwrap();
 
         let expect_midnight =
-            |date: jiff::civil::Date| date.to_zoned(tz.clone()).unwrap().timestamp();
+            |date: jiff::civil::Date| date.to_zoned_datetime(tz.clone()).unwrap().timestamp();
         assert_eq!(min, expect_midnight(jiff::civil::date(2026, 11, 1)));
         assert_eq!(max, expect_midnight(jiff::civil::date(2026, 11, 3)));
         // The hour-arithmetic result this replaces would have been 05:00Z, an hour late.

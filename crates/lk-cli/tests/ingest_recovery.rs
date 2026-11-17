@@ -24,7 +24,7 @@ fn invoke_command(config: &std::path::Path, args: &[&str]) -> Output {
 fn source_recovery_does_not_authenticate_without_eligible_closed_days() {
     let temp = tempfile::tempdir().unwrap();
     let today = jiff::Timestamp::now()
-        .to_zoned(jiff::tz::TimeZone::UTC)
+        .to_zoned_datetime(jiff::tz::TimeZone::UTC)
         .date();
     let config = temp.path().join("config.yaml");
     std::fs::write(&config, format!(
@@ -46,7 +46,7 @@ fn source_recovery_does_not_authenticate_without_eligible_closed_days() {
 fn credential_failure_fixture(include_mail: bool) -> (tempfile::TempDir, std::path::PathBuf) {
     let temp = tempfile::tempdir().unwrap();
     let start = jiff::Timestamp::now()
-        .to_zoned(jiff::tz::TimeZone::UTC)
+        .to_zoned_datetime(jiff::tz::TimeZone::UTC)
         .date()
         .yesterday()
         .unwrap();
@@ -189,7 +189,7 @@ fn personal_period_refuses_changed_filtered_inputs_and_accepts_unchanged_refinem
     let zone = jiff::tz::TimeZone::UTC;
     let at = day
         .at(12, 0, 0, 0)
-        .to_zoned(zone.clone())
+        .to_zoned_datetime(zone.clone())
         .unwrap()
         .timestamp();
     let log = lk_task::TransitionLog::new(&root);
@@ -295,7 +295,7 @@ fn source_recovery_resumes_bounded_days_without_reprocessing_the_manual_inbox() 
     )
     .unwrap();
     let today = jiff::Timestamp::now()
-        .to_zoned(jiff::tz::TimeZone::UTC)
+        .to_zoned_datetime(jiff::tz::TimeZone::UTC)
         .date();
     let start = today.checked_sub(jiff::Span::new().days(3)).unwrap();
     let config = temp.path().join("config.yaml");
@@ -352,7 +352,7 @@ fn source_recovery_resumes_bounded_days_without_reprocessing_the_manual_inbox() 
 fn failed_source_does_not_prevent_independent_coverage_and_unsupported_sources_are_not_replayed() {
     let temp = tempfile::tempdir().unwrap();
     let today = jiff::Timestamp::now()
-        .to_zoned(jiff::tz::TimeZone::UTC)
+        .to_zoned_datetime(jiff::tz::TimeZone::UTC)
         .date();
     let start = today.yesterday().unwrap();
     let config = temp.path().join("config.yaml");
@@ -386,7 +386,7 @@ fn failed_source_does_not_prevent_independent_coverage_and_unsupported_sources_a
 fn historical_ingest_does_not_write_current_intent_snapshots_but_today_still_does() {
     let temp = tempfile::tempdir().unwrap();
     let today = jiff::Timestamp::now()
-        .to_zoned(jiff::tz::TimeZone::UTC)
+        .to_zoned_datetime(jiff::tz::TimeZone::UTC)
         .date();
     let past = today.yesterday().unwrap().to_string();
     let config = temp.path().join("config.yaml");
@@ -425,7 +425,7 @@ fn personal_period_requires_worklog_for_known_filtered_contributions_on_an_earli
     let zone = jiff::tz::TimeZone::UTC;
     let at = day
         .at(12, 0, 0, 0)
-        .to_zoned(zone.clone())
+        .to_zoned_datetime(zone.clone())
         .unwrap()
         .timestamp();
     task_history::record(

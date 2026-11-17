@@ -86,14 +86,14 @@ impl Source for TasksSource {
         let start = dates
             .first()
             .ok_or_else(|| SourceError::Parse("empty task window".into()))?
-            .to_zoned(ctx.timezone.clone())
+            .to_zoned_datetime(ctx.timezone.clone())
             .map_err(|e| SourceError::Parse(e.to_string()))?
             .timestamp();
         let end = ctx
             .target_date
             .tomorrow()
             .map_err(|e| SourceError::Parse(e.to_string()))?
-            .to_zoned(ctx.timezone.clone())
+            .to_zoned_datetime(ctx.timezone.clone())
             .map_err(|e| SourceError::Parse(e.to_string()))?
             .timestamp();
         for date in dates {
@@ -162,7 +162,7 @@ mod tests {
     fn at(hour: i8) -> jiff::Timestamp {
         jiff::civil::date(2026, 8, 19)
             .at(hour, 0, 0, 0)
-            .to_zoned(jiff::tz::TimeZone::UTC)
+            .to_zoned_datetime(jiff::tz::TimeZone::UTC)
             .unwrap()
             .timestamp()
     }
@@ -220,11 +220,11 @@ mod tests {
         assert!(observation.items.is_empty());
         assert_eq!(observation.outcome, crate::ObservationOutcome::Observed);
         let expected_start = jiff::civil::date(2026, 10, 31)
-            .to_zoned(ctx.timezone.clone())
+            .to_zoned_datetime(ctx.timezone.clone())
             .unwrap()
             .timestamp();
         let expected_end = jiff::civil::date(2026, 11, 2)
-            .to_zoned(ctx.timezone.clone())
+            .to_zoned_datetime(ctx.timezone.clone())
             .unwrap()
             .timestamp();
         assert_eq!(
@@ -265,7 +265,7 @@ mod tests {
         let log = lk_task::TransitionLog::new(tmp.path());
         let yesterday = jiff::civil::date(2026, 8, 18)
             .at(22, 0, 0, 0)
-            .to_zoned(jiff::tz::TimeZone::UTC)
+            .to_zoned_datetime(jiff::tz::TimeZone::UTC)
             .unwrap()
             .timestamp();
         record_history(

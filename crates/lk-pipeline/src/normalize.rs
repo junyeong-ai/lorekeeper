@@ -10,7 +10,7 @@ pub fn normalize_events(
     items
         .into_iter()
         .map(|item| {
-            let zoned = item.timestamp.to_zoned(timezone.clone());
+            let zoned = item.timestamp.to_zoned_datetime(timezone.clone());
             let date = zoned.date();
 
             // Wire padding is not part of a title. Bodies retain literal source

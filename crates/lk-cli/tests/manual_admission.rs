@@ -589,7 +589,7 @@ async fn nested_owner_projection_refusal_preserves_that_owner_and_admits_later_f
     let loaded = lk_core::config::Config::load(&config).unwrap();
     let context = lk_source::ExtractContext {
         target_date: jiff::Timestamp::now()
-            .to_zoned(jiff::tz::TimeZone::UTC)
+            .to_zoned_datetime(jiff::tz::TimeZone::UTC)
             .date(),
         timezone: jiff::tz::TimeZone::UTC,
         locale: loaded.vault.locale(),

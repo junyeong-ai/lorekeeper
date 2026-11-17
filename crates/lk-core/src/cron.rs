@@ -120,9 +120,9 @@ pub fn next_fire_after(
     let schedule = Schedule::parse(expr)?;
     // Start at the next whole minute after `after`.
     let mut cursor = after
-        .to_zoned(tz.clone())
+        .to_zoned_datetime(tz.clone())
         .round(
-            jiff::ZonedRound::new()
+            jiff::ZonedDateTimeRound::new()
                 .smallest(jiff::Unit::Minute)
                 .mode(jiff::RoundMode::Trunc),
         )

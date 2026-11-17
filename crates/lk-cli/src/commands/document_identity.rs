@@ -443,7 +443,9 @@ async fn observe(
     .map_err(failure)?;
     let timezone = config.vault.timezone();
     let ctx = lk_source::ExtractContext {
-        target_date: jiff::Timestamp::now().to_zoned(timezone.clone()).date(),
+        target_date: jiff::Timestamp::now()
+            .to_zoned_datetime(timezone.clone())
+            .date(),
         timezone: timezone.clone(),
         locale: config.vault.locale(),
         identity: config.identity.clone(),

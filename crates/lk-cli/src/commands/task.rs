@@ -600,7 +600,7 @@ impl IntentPlane {
             board,
             config: tasks,
             locale: config.vault.locale(),
-            today: now.to_zoned(zone.clone()).date(),
+            today: now.to_zoned_datetime(zone.clone()).date(),
             now,
             vault_root,
             board_path: PathBuf::from(board_path),
@@ -1260,7 +1260,8 @@ async fn remind(plane: &IntentPlane, cmd: RemindCommand) -> miette::Result<()> {
                 .map_err(|e| miette::miette!("{e}"))?;
             eprintln!(
                 "{id}  {}  {text}",
-                at.to_zoned(plane.zone.clone()).strftime("%F %H:%M")
+                at.to_zoned_datetime(plane.zone.clone())
+                    .strftime("%F %H:%M")
             );
             Ok(())
         }
@@ -1272,7 +1273,7 @@ async fn remind(plane: &IntentPlane, cmd: RemindCommand) -> miette::Result<()> {
                     .map(|reminder| {
                         serde_json::json!({
                             "id": reminder.id.as_str(),
-                            "at": reminder.at.to_zoned(plane.zone.clone()).strftime("%FT%H:%M").to_string(),
+                            "at": reminder.at.to_zoned_datetime(plane.zone.clone()).strftime("%FT%H:%M").to_string(),
                             "text": reminder.text,
                             "task": reminder.task.as_ref().map(|id| id.as_str()),
                         })
@@ -1290,7 +1291,7 @@ async fn remind(plane: &IntentPlane, cmd: RemindCommand) -> miette::Result<()> {
                     reminder.id,
                     reminder
                         .at
-                        .to_zoned(plane.zone.clone())
+                        .to_zoned_datetime(plane.zone.clone())
                         .strftime("%F %H:%M"),
                     reminder.text
                 );
@@ -1414,7 +1415,7 @@ fn parse_moment(text: &str, plane: &IntentPlane) -> miette::Result<jiff::Timesta
         }
     };
     civil
-        .to_zoned(plane.zone.clone())
+        .to_zoned_datetime(plane.zone.clone())
         .map(|zoned| zoned.timestamp())
         .map_err(|e| {
             miette::miette!(

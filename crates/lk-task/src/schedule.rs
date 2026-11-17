@@ -66,7 +66,7 @@ impl Schedule {
                     .file(&key)
                     .read::<Appointment>()?
                     .into_iter()
-                    .filter(|a| a.at.to_zoned(zone.clone()).date() == date),
+                    .filter(|a| a.at.to_zoned_datetime(zone.clone()).date() == date),
             );
         }
         held.sort_by(|a, b| a.at.cmp(&b.at).then_with(|| a.title.cmp(&b.title)));
@@ -99,7 +99,7 @@ mod tests {
     fn at(hour: i8) -> jiff::Timestamp {
         jiff::civil::date(2026, 8, 19)
             .at(hour, 0, 0, 0)
-            .to_zoned(jiff::tz::TimeZone::UTC)
+            .to_zoned_datetime(jiff::tz::TimeZone::UTC)
             .unwrap()
             .timestamp()
     }

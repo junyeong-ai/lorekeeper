@@ -702,7 +702,7 @@ mod tests {
             );
             let context = ExtractContext {
                 target_date: jiff::Timestamp::now()
-                    .to_zoned(jiff::tz::TimeZone::UTC)
+                    .to_zoned_datetime(jiff::tz::TimeZone::UTC)
                     .date(),
                 timezone: jiff::tz::TimeZone::UTC,
                 locale: config.vault.locale(),

@@ -81,7 +81,7 @@ pub async fn run(
     let config_path = find_config(opts)?;
     let (config, revision) = load_config_with_revision(&config_path)?;
     let today = jiff::Timestamp::now()
-        .to_zoned(config.vault.timezone())
+        .to_zoned_datetime(config.vault.timezone())
         .date();
     // Validate opt-in before provider authentication or identity requests.
     let unverified = plan(&config, today, &BTreeMap::new())?;

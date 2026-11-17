@@ -72,8 +72,10 @@ pub async fn run(opts: &super::GlobalOptions, json: bool) -> miette::Result<()> 
 
     // The deterministic half of extraction currency: whether the repository moved under the
     // paths each manifest declared. Judging the extracted knowledge needs `/lore-extract audit`.
-    let extracts =
-        super::extract::survey(&vault_root, now.to_zoned(config.vault.timezone()).date())?;
+    let extracts = super::extract::survey(
+        &vault_root,
+        now.to_zoned_datetime(config.vault.timezone()).date(),
+    )?;
     if !extracts.is_empty() {
         let tally = super::extract::tally(&extracts);
         subsystems.push(Subsystem {

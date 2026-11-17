@@ -149,7 +149,7 @@ fn source_recovery_binds_observed_site_and_principal_instead_of_rotating_credent
     let old_site = make_server();
     let new_site = make_server();
     let day = jiff::Timestamp::now()
-        .to_zoned(jiff::tz::TimeZone::UTC)
+        .to_zoned_datetime(jiff::tz::TimeZone::UTC)
         .date()
         .yesterday()
         .unwrap();
@@ -255,7 +255,7 @@ fn source_recovery_refuses_a_different_collection_than_its_planned_identity() {
         ("application/json", body.to_string())
     });
     let day = jiff::Timestamp::now()
-        .to_zoned(jiff::tz::TimeZone::UTC)
+        .to_zoned_datetime(jiff::tz::TimeZone::UTC)
         .date()
         .yesterday()
         .unwrap();
@@ -309,7 +309,10 @@ fn disabled_extraction_retains_document_and_rss_evidence_until_reactivated() {
         let vault = temp.path().join("vault");
         let config = temp.path().join("config.yaml");
         let at: jiff::Timestamp = "2020-01-02T12:00:00Z".parse().unwrap();
-        let date = at.to_zoned(jiff::tz::TimeZone::UTC).date().to_string();
+        let date = at
+            .to_zoned_datetime(jiff::tz::TimeZone::UTC)
+            .date()
+            .to_string();
         let server = LocalServer::new(move |url| {
             assert_eq!(url.path(), "/feed.xml");
             (
@@ -519,7 +522,10 @@ fn incomplete_confluence_projection_preserves_published_pages_and_requests() {
     let config = temp.path().join("config.yaml");
     let credentials = temp.path().join("credentials.json");
     let at = jiff::Timestamp::now();
-    let date = at.to_zoned(jiff::tz::TimeZone::UTC).date().to_string();
+    let date = at
+        .to_zoned_datetime(jiff::tz::TimeZone::UTC)
+        .date()
+        .to_string();
     let response_kind = Arc::new(AtomicUsize::new(0));
     let selected_kind = response_kind.clone();
     let server = LocalServer::new(move |url| {
@@ -614,7 +620,10 @@ fn partial_daily_refetch_preserves_pages_queue_and_work_observations() {
     let config = temp.path().join("config.yaml");
     let credentials = temp.path().join("credentials.json");
     let at = jiff::Timestamp::now();
-    let date = at.to_zoned(jiff::tz::TimeZone::UTC).date().to_string();
+    let date = at
+        .to_zoned_datetime(jiff::tz::TimeZone::UTC)
+        .date()
+        .to_string();
     let changed = Arc::new(AtomicBool::new(false));
     let has_changed = changed.clone();
     let server = LocalServer::new(move |url| {
@@ -753,7 +762,10 @@ fn partial_streaming_refetch_accumulates_new_events_without_dropping_retained_on
     let vault = temp.path().join("vault");
     let config = temp.path().join("config.yaml");
     let at = jiff::Timestamp::now() - jiff::SignedDuration::from_hours(1);
-    let date = at.to_zoned(jiff::tz::TimeZone::UTC).date().to_string();
+    let date = at
+        .to_zoned_datetime(jiff::tz::TimeZone::UTC)
+        .date()
+        .to_string();
     let changed = Arc::new(AtomicBool::new(false));
     let has_changed = changed.clone();
     let server = LocalServer::new(move |url| {

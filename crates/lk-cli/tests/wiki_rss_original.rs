@@ -155,7 +155,7 @@ fn rss_ingest_preserves_original_before_page_and_dry_run_stores_nothing() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let date = timestamp.to_zoned(jiff::tz::TimeZone::UTC).date();
+    let date = timestamp.to_zoned_datetime(jiff::tz::TimeZone::UTC).date();
     let page = std::path::PathBuf::from(format!("daily/feed/{date}.md"));
     let original = lk_vault::inspect_rss_original(&root, &page, &Default::default())
         .unwrap()

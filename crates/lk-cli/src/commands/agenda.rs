@@ -57,7 +57,7 @@ pub async fn run(opts: &GlobalOptions, date: Option<String>, json: bool) -> miet
             for appointment in appointments {
                 let clock = appointment
                     .at
-                    .to_zoned(plane.zone.clone())
+                    .to_zoned_datetime(plane.zone.clone())
                     .strftime("%H:%M");
                 eprintln!("  {clock}  {}", appointment.title);
             }
@@ -173,7 +173,7 @@ fn emit_json(plane: &IntentPlane, actually_today: jiff::civil::Date) -> miette::
             serde_json::json!({
                 "at": appointment
                     .at
-                    .to_zoned(plane.zone.clone())
+                    .to_zoned_datetime(plane.zone.clone())
                     .strftime("%FT%H:%M")
                     .to_string(),
                 "title": appointment.title,
@@ -187,7 +187,7 @@ fn emit_json(plane: &IntentPlane, actually_today: jiff::civil::Date) -> miette::
         |reminder| {
             serde_json::json!({
                 "id": reminder.id.as_str(),
-                "at": reminder.at.to_zoned(plane.zone.clone()).strftime("%FT%H:%M").to_string(),
+                "at": reminder.at.to_zoned_datetime(plane.zone.clone()).strftime("%FT%H:%M").to_string(),
                 "text": reminder.text,
                 "task": reminder.task.as_ref().map(|id| id.as_str().to_string()),
             })
@@ -208,7 +208,7 @@ fn emit_json(plane: &IntentPlane, actually_today: jiff::civil::Date) -> miette::
             "timezone": plane.zone.iana_name().map(str::to_string).unwrap_or_else(|| {
                 plane
                     .today
-                    .to_zoned(plane.zone.clone())
+                    .to_zoned_datetime(plane.zone.clone())
                     .map(|day| day.strftime("%:z").to_string())
                     .unwrap_or_else(|_| plane.zone.to_offset(plane.now).to_string())
             }),

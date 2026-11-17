@@ -223,7 +223,7 @@ mod tests {
     fn now() -> jiff::Timestamp {
         today()
             .at(9, 0, 0, 0)
-            .to_zoned(jiff::tz::TimeZone::UTC)
+            .to_zoned_datetime(jiff::tz::TimeZone::UTC)
             .unwrap()
             .timestamp()
     }
@@ -476,7 +476,7 @@ mod tests {
         let log = crate::log::TransitionLog::new(tmp.path());
         let earlier = jiff::civil::date(2026, 8, 5)
             .at(9, 0, 0, 0)
-            .to_zoned(jiff::tz::TimeZone::UTC)
+            .to_zoned_datetime(jiff::tz::TimeZone::UTC)
             .unwrap()
             .timestamp();
         log.record(
@@ -525,7 +525,7 @@ mod tests {
             .tomorrow()
             .unwrap()
             .at(9, 0, 0, 0)
-            .to_zoned(jiff::tz::TimeZone::UTC)
+            .to_zoned_datetime(jiff::tz::TimeZone::UTC)
             .unwrap()
             .timestamp();
         log.record(

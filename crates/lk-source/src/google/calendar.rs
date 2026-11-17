@@ -451,7 +451,7 @@ fn map_event(
         } else if let Some(d) = st.date.as_deref() {
             d.parse::<jiff::civil::Date>()
                 .ok()
-                .and_then(|date| date.to_zoned(timezone.clone()).ok())
+                .and_then(|date| date.to_zoned_datetime(timezone.clone()).ok())
                 .map(|z| z.timestamp())
         } else {
             None

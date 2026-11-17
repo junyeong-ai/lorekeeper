@@ -748,9 +748,9 @@ fn published_windows(
     };
     let tz = config.vault.timezone();
     let closed_end = started_at
-        .to_zoned(tz.clone())
+        .to_zoned_datetime(tz.clone())
         .date()
-        .to_zoned(tz.clone())
+        .to_zoned_datetime(tz.clone())
         .map_err(|e| miette::miette!("collection coverage timezone: {e}"))?
         .timestamp();
     let mut accepted = Vec::new();
@@ -768,9 +768,9 @@ fn published_windows(
         if start >= end {
             continue;
         }
-        let mut first = start.to_zoned(tz.clone()).date();
+        let mut first = start.to_zoned_datetime(tz.clone()).date();
         let midnight = first
-            .to_zoned(tz.clone())
+            .to_zoned_datetime(tz.clone())
             .map_err(|e| miette::miette!("collection coverage start: {e}"))?
             .timestamp();
         if start > midnight {
@@ -778,7 +778,7 @@ fn published_windows(
                 .tomorrow()
                 .map_err(|e| miette::miette!("collection coverage date: {e}"))?;
         }
-        let mut last = end.to_zoned(tz.clone()).date();
+        let mut last = end.to_zoned_datetime(tz.clone()).date();
         if batch.targeted {
             first = first.max(batch.requested_day);
             last = last.min(
@@ -1287,14 +1287,14 @@ fn closing_day_ready(
     let tz = config.vault.timezone();
     let start = period
         .end
-        .to_zoned(tz.clone())
+        .to_zoned_datetime(tz.clone())
         .map_err(|e| e.to_string())?
         .timestamp();
     let end = period
         .end
         .checked_add(jiff::Span::new().days(1))
         .map_err(|e| e.to_string())?
-        .to_zoned(tz)
+        .to_zoned_datetime(tz)
         .map_err(|e| e.to_string())?
         .timestamp();
     let scopes = current_source_scopes(config).map_err(|error| error.to_string())?;
@@ -1510,13 +1510,13 @@ fn personal_work_logs_ready(
     for (day, input) in work_logs {
         let tz = config.vault.timezone();
         let start = day
-            .to_zoned(tz.clone())
+            .to_zoned_datetime(tz.clone())
             .map_err(|error| error.to_string())?
             .timestamp();
         let end = day
             .tomorrow()
             .map_err(|error| error.to_string())?
-            .to_zoned(tz)
+            .to_zoned_datetime(tz)
             .map_err(|error| error.to_string())?
             .timestamp();
         if matches!(input, WorkLogInput::Absent) {

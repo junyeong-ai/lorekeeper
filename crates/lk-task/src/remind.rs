@@ -115,7 +115,7 @@ mod tests {
     fn at(hour: i8) -> jiff::Timestamp {
         jiff::civil::date(2026, 8, 19)
             .at(hour, 0, 0, 0)
-            .to_zoned(jiff::tz::TimeZone::UTC)
+            .to_zoned_datetime(jiff::tz::TimeZone::UTC)
             .unwrap()
             .timestamp()
     }

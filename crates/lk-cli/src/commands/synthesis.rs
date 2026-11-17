@@ -88,7 +88,7 @@ pub async fn run(
     let pin = super::ConfigurationPin::from_loaded(config_path, revision);
     let vault_root = config.vault.root_path();
     let tz = config.vault.timezone();
-    let today = jiff::Timestamp::now().to_zoned(tz).date();
+    let today = jiff::Timestamp::now().to_zoned_datetime(tz).date();
 
     if let Period::Pending {
         status: true, json, ..

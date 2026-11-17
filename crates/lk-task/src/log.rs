@@ -517,7 +517,7 @@ impl TransitionLog {
             std::collections::BTreeMap::new();
         for transition in transitions {
             by_date
-                .entry(transition.at.to_zoned(zone.clone()).date())
+                .entry(transition.at.to_zoned_datetime(zone.clone()).date())
                 .or_default()
                 .push(transition);
         }
@@ -567,7 +567,7 @@ mod tests {
     fn at(hour: i8) -> jiff::Timestamp {
         jiff::civil::date(2026, 8, 19)
             .at(hour, 0, 0, 0)
-            .to_zoned(jiff::tz::TimeZone::UTC)
+            .to_zoned_datetime(jiff::tz::TimeZone::UTC)
             .unwrap()
             .timestamp()
     }

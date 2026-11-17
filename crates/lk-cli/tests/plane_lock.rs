@@ -93,7 +93,7 @@ fn task_writers_recover_history_and_board_together_and_preserve_intentional_reop
     let config = vault(tmp.path());
     let root = tmp.path().join("vault");
     let today = jiff::Timestamp::now()
-        .to_zoned(jiff::tz::TimeZone::UTC)
+        .to_zoned_datetime(jiff::tz::TimeZone::UTC)
         .date();
     let yesterday = today.yesterday().unwrap();
     let id = "7k2p".parse().unwrap();
@@ -114,7 +114,7 @@ fn task_writers_recover_history_and_board_together_and_preserve_intentional_reop
         "Ship docs",
         yesterday
             .at(12, 0, 0, 0)
-            .to_zoned(jiff::tz::TimeZone::UTC)
+            .to_zoned_datetime(jiff::tz::TimeZone::UTC)
             .unwrap()
             .timestamp(),
     )
@@ -263,7 +263,7 @@ fn task_writers_keep_claimed_root_and_refuse_inherited_drift_before_recovery() {
             );
         std::fs::write(&config, &raw).unwrap();
         let today = jiff::Timestamp::now()
-            .to_zoned(jiff::tz::TimeZone::UTC)
+            .to_zoned_datetime(jiff::tz::TimeZone::UTC)
             .date();
         for (root, title, origin) in [
             (&first, "Owned proposal", "owned"),

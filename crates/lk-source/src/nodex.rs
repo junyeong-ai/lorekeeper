@@ -249,7 +249,7 @@ impl Source for NodexSource {
         // to whole days; the upper one is the target day itself, since nothing dated after it
         // is knowledge yet and the pipeline would drop it anyway.
         let (start, _) = ctx.day_window(p.lookback_hours, 0)?;
-        let first_day = start.to_zoned(ctx.timezone.clone()).date();
+        let first_day = start.to_zoned_datetime(ctx.timezone.clone()).date();
         let last_day = ctx.target_date;
 
         let executable = p
@@ -883,7 +883,7 @@ fn build_document_observation(
             )
         }),
         timestamp: date
-            .to_zoned(ctx.timezone.clone())
+            .to_zoned_datetime(ctx.timezone.clone())
             .map_err(|e| {
                 SourceError::Parse(format!("{} declares an impossible date: {e}", item.id))
             })?
@@ -1733,7 +1733,7 @@ exit "$rc"
         assert_eq!(
             historical
                 .timestamp
-                .to_zoned(ctx.timezone)
+                .to_zoned_datetime(ctx.timezone)
                 .date()
                 .to_string(),
             "2026-09-01"

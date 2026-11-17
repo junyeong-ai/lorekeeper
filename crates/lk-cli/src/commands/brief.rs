@@ -14,7 +14,7 @@ use super::{GlobalOptions, find_config, load_config};
 pub async fn run(opts: &GlobalOptions, date: Option<String>, json: bool) -> miette::Result<()> {
     let config = load_config(&find_config(opts)?)?;
     let zone = config.vault.timezone();
-    let today = jiff::Zoned::now().with_time_zone(zone).date();
+    let today = jiff::ZonedDateTime::now().with_time_zone(zone).date();
     let date = super::parse_date(date.as_deref(), today)?;
 
     let brief = lk_vault::build_brief(&config.vault.root_path(), &config.vault.dirs, date)

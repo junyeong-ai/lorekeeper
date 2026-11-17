@@ -169,7 +169,7 @@ async fn run_with_identity(
     };
 
     let tz = config.vault.timezone();
-    let today = jiff::Timestamp::now().to_zoned(tz.clone()).date();
+    let today = jiff::Timestamp::now().to_zoned_datetime(tz.clone()).date();
     let target_date = if date_str.is_some() {
         Some(parse_date(date_str.as_deref(), today)?)
     } else {

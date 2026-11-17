@@ -441,7 +441,7 @@ fn build_windowed_cql(base: &str, min: jiff::Timestamp, max: jiff::Timestamp) ->
 /// `yyyy/MM/dd` — CQL's date-only literal. Rendered in UTC because this is only a coarse
 /// bound; no downstream decision depends on which calendar day it names.
 fn format_cql_date(ts: jiff::Timestamp) -> String {
-    let z = ts.to_zoned(jiff::tz::TimeZone::UTC);
+    let z = ts.to_zoned_datetime(jiff::tz::TimeZone::UTC);
     format!("{:04}/{:02}/{:02}", z.year(), z.month(), z.day())
 }
 
@@ -863,7 +863,9 @@ mod tests {
         // Baker Island (UTC-12) through Line Islands (UTC+14) bound the inhabited range.
         for offset in -12..=14 {
             let start_of_day = |d: jiff::civil::Date| {
-                d.to_zoned(jiff::tz::TimeZone::UTC).unwrap().timestamp()
+                d.to_zoned_datetime(jiff::tz::TimeZone::UTC)
+                    .unwrap()
+                    .timestamp()
                     - jiff::SignedDuration::from_hours(offset)
             };
             assert!(

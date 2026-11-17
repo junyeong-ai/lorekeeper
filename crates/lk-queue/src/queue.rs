@@ -625,7 +625,7 @@ impl QueueLlmClient {
         let run_id = format!(
             "{}-pid{}-{}",
             jiff::Timestamp::now()
-                .to_zoned(jiff::tz::TimeZone::UTC)
+                .to_zoned_datetime(jiff::tz::TimeZone::UTC)
                 .strftime("%Y-%m-%dT%H-%M-%SZ"),
             std::process::id(),
             SEQ.fetch_add(1, Ordering::Relaxed),

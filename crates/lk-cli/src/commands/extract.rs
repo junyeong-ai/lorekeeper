@@ -265,7 +265,7 @@ pub async fn run(opts: &super::GlobalOptions, cmd: ExtractCommand) -> miette::Re
         ExtractCommand::Verify { project, json } => return verify::run(opts, project, json),
     };
     let config = load_config(&find_config(opts)?)?;
-    let today = jiff::Zoned::now()
+    let today = jiff::ZonedDateTime::now()
         .with_time_zone(config.vault.timezone())
         .date();
     let reports = survey(&config.vault.root_path(), today)?;

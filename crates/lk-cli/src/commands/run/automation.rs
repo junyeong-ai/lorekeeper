@@ -120,7 +120,7 @@ pub(super) struct Control {
 
 fn today() -> Date {
     jiff::Timestamp::now()
-        .to_zoned(jiff::tz::TimeZone::UTC)
+        .to_zoned_datetime(jiff::tz::TimeZone::UTC)
         .date()
 }
 

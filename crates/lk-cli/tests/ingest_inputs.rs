@@ -114,7 +114,7 @@ async fn first_admission_turn_also_rotates_when_collected_items_fit_but_planning
     let loaded = lk_core::config::Config::load(&path).unwrap();
     let context = lk_source::ExtractContext {
         target_date: jiff::Timestamp::now()
-            .to_zoned(jiff::tz::TimeZone::UTC)
+            .to_zoned_datetime(jiff::tz::TimeZone::UTC)
             .date(),
         timezone: jiff::tz::TimeZone::UTC,
         locale: loaded.vault.locale(),
@@ -190,7 +190,7 @@ fn preview_filtered_and_historical_ingest_preserve_the_full_run_turn() {
     }
 
     let today = jiff::Timestamp::now()
-        .to_zoned(jiff::tz::TimeZone::UTC)
+        .to_zoned_datetime(jiff::tz::TimeZone::UTC)
         .date()
         .to_string();
     let _ = run(&config, &["ingest", "--date", &today]);
