@@ -39,14 +39,9 @@ Do not bypass the preflight or record an assessment to hide an unresolved violat
 ## Related-document discovery
 
 For standalone `discover`, prepare search scope only for the exact selected subjects,
-then return. Native `audit-discovery` receives revision-pinned subject references and
-uses read-only tools. Return each subject_ref with `status: complete`, `queries` and
-`reason: null`, or `status: needs-action`, `queries: null` and a nonblank reason within
-256 compact JSON bytes. Rust revalidates and records the recipes; the worker writes no
-files or CLI receipts. Native batches preserve all subjects across exact byte-bounded
-prefixes; the minimum reply bound makes no lexical or quality claim.
-For standalone maintenance, do this before reading the expanded audit inputs when
-`candidate.discovery` is null. Native maintenance performs discovery before partitioning.
+then return. For standalone maintenance, do this before reading the expanded audit
+inputs when `candidate.discovery` is null. Native maintenance performs discovery and
+candidate screening itself.
 
 Read the selected subject's declared names, scope and outline with revision-checked
 `wiki read`. Choose distinguishing queries for its claims and conditions, including
@@ -82,12 +77,6 @@ assessments or performs repairs.
 
 Run `lore wiki audit-candidates SUBJECT` for the next bounded packet. Copy its top-level
 `request_revision` to the submission's `packet_revision`, and `request.subject` to `path`.
-Native `audit-screening` uses read-only tools for the exact supplied subject and
-relevant candidate bodies. Return `{status: complete, reason: null, decisions: [...]}`
-using each assigned `candidate_ref`, decision and bounded reason; do not return paths
-or packet identities. If a required read cannot be completed, return
-`{status: needs-action, decisions: null, reason: "..."}` with a nonblank reason within
-256 compact JSON bytes. Rust owns packet binding, revalidation and publication.
 
 For standalone `screen`, read the subject's revision-pinned scope through `wiki read`
 and judge every assigned card independently. A card is a discovery preview, not evidence of a
@@ -149,14 +138,9 @@ The final audit reads every admitted body; screening creates no citation or comp
    coverage is `reviewed_current` of `total`; `excluded_by_kind` only counts the others.
    An excluded document stays auditable through its exact `--path`, where it needs no
    corresponding concept to be selectable.
-   Native selection defers subjects with unfinished semantic work in their actual
-   subject/evidence/context/review pages and can select later ready subjects without
-   draining unrelated queue work. Newly discovered context can also block a selected
-   assessment. `audit-record` rechecks these inputs under the publication locks.
-   Native admission also skips an exact current processing hold, allowing
-   later ready subjects within the same subject limit. It preserves held results and
-   pending order; an all-held selection stays deferred. This execution check uses the
-   selected profile and is additional to the read-only `--ready` input preview.
+   A subject with unfinished semantic work in its actual subject, evidence, context or
+   review pages is not ready, and newly discovered context can also block a selected
+   assessment; `audit-record` rechecks these inputs under the publication locks.
    Complete authored pages need no synthetic completion markers. Do not clear an
    owned input or bypass a blocker to record a receipt; report it for later processing.
    `--ready` adds `readiness` to the ordinary plan. Automatic selection skips blocked
@@ -166,8 +150,7 @@ The final audit reads every admitted body; screening creates no citation or comp
    checked scope. `scope: encountered` describes automatic selection, not the whole
    corpus; `scope: selection` describes explicit subjects. This read-only preview
    does not reserve turns, acquire a workflow, authenticate, run structural preflight
-   or certify discovery/evidence reading. Native admission and publication recheck
-   readiness. Omit `--ready` when only the original assessment-coverage plan is needed.
+   or certify discovery/evidence reading; publication rechecks readiness. Omit `--ready` when only the original assessment-coverage plan is needed.
    Check `input.status` before reading: `oversized` retains the exact candidates
    because their complete page, scoped review/evidence and selected RSS payload bytes exceed
    `graph.audit.max_input_bytes`. Report the measured bytes and configured bound;
@@ -304,25 +287,14 @@ no repeated intake, reconstructed guards, result-file writes, `work finish` or `
 
 ## Native processing state
 
-Read-only discovery/screening invocation failures and explicit needs-action replies
-hold their exact inputs without marking an audit complete. A confirmed timeout or
-numeric nonzero exit of a tool-enabled whole or bounded assessment holds each subject's
-exact context the same way. Successful independent results remain retained. Contract
-changes alone never retry these preparation holds. After diagnosis, use `lore work
-retry-preparation --stage audit-discovery --path PATH --input-revision HASH`, or stage
-`audit-screening` or `audit-assessment`, with the reported retained hash. Preview with
-`--dry-run`. The command clears only that attempt, invokes no agent and preserves paid
-decisions and semantic assessments. Corrupt stored state, local I/O, signal/cleanup and
-unusable tool-enabled replies remain fatal.
-
-An unchanged whole-input `needs-action` is held without another invocation, independent
-of batch peers and response order. Changed input or assessment rules reopen eligibility;
-creating an unfinished Work plan alone does not clear the hold. A valid explicit
-assessment clears its whole-input hold in the same publication journal. Input-changing
-repairs, including this workflow's guarded concept merges, get one fresh replan per
-original selected subject within the current call budget; repeated drift defers that
-subject. Existing Work and paid outputs remain unchanged. Durable open reviews are
-valid `follow-up` judgments, distinct from unfinished processing.
+Native discovery, screening and assessment failures hold their exact inputs without
+marking an audit complete; clear one with `lore work retry-preparation --stage
+audit-discovery|audit-screening|audit-assessment --path PATH --input-revision HASH` as
+[bounded work](../../lore-process/references/bounded-work.md#native-holds-and-retries)
+describes. An unchanged whole-input `needs-action` stays held until its input or the
+assessment rules change; a valid explicit assessment clears it in the same publication
+journal. Durable open reviews are valid `follow-up` judgments, distinct from
+unfinished processing.
 
 ## Operating budget and measurement
 
@@ -346,10 +318,9 @@ Measure a small run before selecting a campaign size or schedule. `audit_progres
 reports before/after coverage counts; `semantic_calls` counts agent invocation attempts.
 One invocation can make multiple model requests and tool calls, so `execution.work.max_calls`
 does not cap provider requests, tokens or billing. `duration_ms` includes waiting and
-cleanup; campaigns report total and per-batch time. `semantic_duration_ms` measures
-the sum of the batch's agent invocation wall times, including failed or cancelled
-attempts. Concurrent evidence observers can make that sum exceed elapsed job time;
-it is not provider processing time or billed cost.
+cleanup; campaigns report total and per-batch time. The
+[run report](../../lore-process/references/run-report.md#timing) explains the other
+duration fields.
 
 Compare actual completions, calls and elapsed time with first-time/changed backlog
 and incoming work. `batch_size` bounds selected subjects, not successful completion

@@ -68,12 +68,8 @@ resolve section headings before inspecting pages.
    Report every proposed citation: a link is a claim of evidence. After authorized
    repairs, run `lore graph backlinks-sync` to queue affected concept rewrites.
    For a mistaken existing citation, compare the complete source context with the
-   concept's identity before proposing retraction. Within authorized repair work,
-   use `lore graph retract-citation <origin.md> <concept.md> --revision <origin file_revision>
-   --concept-revision <concept file_revision> --dry-run`, retaining both revisions
-   from those reads. Then omit `--dry-run` after reviewing the preview. It archives the
-   prior evidence and refuses prose links or touching pending work. Process the
-   affected synthesis through `/lore-process` and its full Finalize sequence.
+   concept's identity before proposing retraction. Within authorized repair work, follow
+   [citation correction](../../lore-process/references/recovery.md#citation-correction).
    A rejected alternative can still be useful evidence; disagreement alone is not
    a reason to remove a citation.
 3. **Contradictions** — run `lore wiki reviews` first. Review open records and records
@@ -153,8 +149,8 @@ resolve section headings before inspecting pages.
    - **Synonyms, abbreviations, plurals, and short forms**: layer 1 compares names, so by
      construction it cannot see two DIFFERENT names for one thing — an acronym and its
      expansion (`rag` ↔ `retrieval-augmented-generation`, `k8s` ↔ `kubernetes`), a plural
-     (`doc-hub` ↔ `docs-hub`), or a team's shorthand and the full id (`enterprise-prd` ↔
-     `oy-gemini-enterprise-prd`).
+     (`doc-hub` ↔ `docs-hub`), or a team's shorthand and the full id (`billing-prd` ↔
+     `acme-billing-prd`).
      Use `lore wiki snapshot` for an existing captured vocabulary, or `lore wiki prepare`
      when current membership is required. Browse a bounded page with
      `lore wiki browse --snapshot ID --type concept --knowledge-status all --limit 50 --json`.
