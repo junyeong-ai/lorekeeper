@@ -84,8 +84,11 @@ Tool-free inspect/reduce session timeouts get one automatic retry per exact requ
 native contract; two confirmed timeouts hold the node. Confirmed numeric nonzero exits
 and unusable replies hold the exact input across contract changes. A wave with only
 invocation failures ends the run without pausing the scheduled operation; independent
-successful results stay saved. Signal exits, unknown failures, failed process cleanup
-and unusable tool-enabled replies remain fatal.
+successful results stay saved. A confirmed timeout or numeric nonzero exit of a
+tool-enabled result host or section finalizer holds each task of its exact request and
+ends the run the same way; inputs the host changed before failing are prepared afresh.
+Signal exits, unknown failures, failed process cleanup and unusable tool-enabled
+replies remain fatal.
 
 A native reply with blank text or evidence outside its assigned ranges is recorded as a
 rejection in `observation-rejections.json`, and a reply over its result allowance as a

@@ -2,7 +2,9 @@
 name: lore-ingest
 description: Runs Lorekeeper collection and operations for configured sources or manual
   inboxes, including period synthesis, schedules, installation updates, backups and
-  maintenance. Collection queues semantic work; lore-process completes it.
+  maintenance. Collection queues semantic work; lore-process completes it. Use when the
+  operator explicitly invokes it to collect or backfill sources, register or change
+  schedules, or update, repair, back up or move an installation.
 metadata:
   version: 0.138.0
 ---
@@ -54,8 +56,9 @@ manual/nodex/RSS/Drive cannot acquire authorship from mentions or inclusion alon
   nonzero for overdue sources; `--strict` also reports never-collected sources.
 - `lore doctor` reports defects/unreadable pages and credentials in known issuer
   formats. Editing source text is not credential rotation; use the issuer.
-- `lore queue prune` alone retires classified queue work. Maintenance preserves
-  each source's latest collection state and permanent streaming evidence logs.
+- `lore queue prune`, also run by `lore maintenance --prune-queue`, alone retires
+  classified queue work. Maintenance preserves each source's latest collection state
+  and permanent streaming evidence logs.
 - `lore self status` checks deployed artifacts; `self deploy` restores copies from
   the running binary. `self update` refuses pending semantic work. Do not overwrite
   intentional local artifact edits without accounting for them. Unix installation

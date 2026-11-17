@@ -10,11 +10,11 @@
 
 ## Install
 
-For a new Unix installation, follow the [README quick start](../../../README.en.md#quick-start).
+For a new Unix installation, follow the [README quick start](https://github.com/junyeong-ai/lorekeeper/blob/main/README.en.md#quick-start).
 The shell installer accepts `--version`, `--install-dir`, `--data-dir`,
 `--skill user|project|none`, `--agent claude-code|codex|both` and `--from-source`;
 use its `--help` for the full contract. Source builds use the repository's pinned
-Rust toolchain; see the README's [development commands](../../../README.en.md#further-reading-and-development).
+Rust toolchain; see the README's [development commands](https://github.com/junyeong-ai/lorekeeper/blob/main/README.en.md#further-reading-and-development).
 
 For Windows x86_64, run the PowerShell installer:
 
@@ -80,16 +80,9 @@ storage inspection errors, nor active installation claims. An explicit `--versio
 can select an older release. Use `--verify-attestations` when attestation verification
 is required; a version string alone does not establish artifact provenance.
 
-Unix CLI commands hold shared claims on their selected binary/runtime/skills.
-Native runs and participating workflow children retain protection across collection
-and inference. Updates reacquire exclusive protection and recheck config, binary
-bytes and queue state after downloading. Adjacent `.lorekeeper-*.lock` files are
-persistent coordination state; never unlink them during execution or cache cleanup.
-Installation paths are resolved without provisioning before admission. Participating
-commands must use the updated binary for this guarantee; older binaries retain their
-own preparation behavior. Nonregular or symlink lock files refuse access without
-automatic removal or repair.
-Their creation requires write access to the resource's parent directory.
+Unix CLI commands hold shared claims on their selected binary, runtime and skills,
+and updates take exclusive ones. Adjacent `.lorekeeper-*.lock` files are persistent
+coordination state; never unlink them during execution or cache cleanup.
 
 Bootstrap scripts, `cargo install`, manual binary replacement and older binaries
 do not participate in installation locking. Before those paths, pause schedules
@@ -173,7 +166,6 @@ directory; a selected config under another owned tree still refuses removal. Kee
 the selected configuration and vault unchanged through confirmation. Uninstall does not relocate data or unregister OS jobs. Unregister schedules explicitly before removal;
 see the scheduling reference for the platform procedure.
 
-Use the installed executable from version 0.120.1 or newer for guarded removal.
-The standalone removal scripts refuse without deleting files. Their path and
-keep-data options do not run; they cannot establish native configuration and
-installation protection when the executable is absent.
+Remove an installation with `lore self uninstall`. The standalone removal scripts
+refuse without deleting files; they cannot establish native configuration and
+installation protection without the executable.

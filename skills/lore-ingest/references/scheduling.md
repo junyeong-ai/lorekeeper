@@ -1,5 +1,20 @@
 # Scheduling native jobs
 
+## Contents
+
+- [Registration and verification](#registration-and-verification)
+- [Emitted commands](#emitted-commands)
+- [Automation budget](#automation-budget)
+- [Pauses and holds](#pauses-and-holds)
+- [Execution profiles](#execution-profiles)
+- [Daily and period recovery](#daily-and-period-recovery)
+- [Knowledge jobs](#knowledge-jobs)
+- [Workflow leases](#workflow-leases)
+- [Runtime skills and environment](#runtime-skills-and-environment)
+- [Timing and notifications](#timing-and-notifications)
+
+## Registration and verification
+
 `lore schedule` prints definitions; OS registration is separate. On macOS use
 `lore schedule --format launchd --bin /absolute/path/to/lore`. On Linux review its
 cron output and merge with `crontab -e`; piping into `crontab -` replaces other jobs.
@@ -16,6 +31,8 @@ read-only `lore queue check`; inspect actual vault access and termination separa
 from unfinished-queue status. A permission prompt awaiting the user is not a passed check.
 This probes only the command's read paths, not source access or a complete pipeline run.
 
+## Emitted commands
+
 The scheduler emits native commands:
 
 - `ingest.schedule`: `lore run daily --wait`.
@@ -23,6 +40,8 @@ The scheduler emits native commands:
 - Period schedules: `lore synthesis PERIOD --previous --defer --wait-for-vault`.
 - Maintenance: `lore maintenance --prune-queue --wait-for-vault`.
 - A configured task board: `lore task remind notify` every five minutes.
+
+## Automation budget
 
 With `execution.automation`, schedules add `--scheduled --json` to daily/process/
 knowledge jobs and add one process job at `automation.process_schedule`. Process and
@@ -55,42 +74,43 @@ Reservations are durable before host launch and survive
 restart/config changes; they count outer agent attempts, not internal model requests,
 tokens or billing. Separate waiting and execution limits bound acquisition and new-call admission,
 not completion of an active host, source collection or paid-result recording.
-Unknown/corrupt accounting refuses semantic execution. Fatal inference failures pause
-that operation's semantic phase across restarts and day rollover. Reviews needing
-reassessment keep completion nonzero without pausing automation; invalid reviews and
-failed reads remain fatal. Daily checks reviews before and after period publication.
-Daily source collection still runs before this pause check.
-Process and knowledge report a known pause before waiting for the workflow lease.
-After repairing the cause, explicit `lore run OPERATION --scheduled --resume --json` clears only its pause;
-it preserves usage, rejected proposals and exact semantic holds. Unchanged holds
-spend no calls, including exhausted per-node timeout allowances. Tool-free Inspect/Reduce
-session timeouts receive one automatic retry per exact request and native contract;
-repeated timeouts defer that node without pausing independent work. Diagnose its host
-before using `lore work retry WORK NODE` to clear its operational hold. Confirmed numeric
-nonzero exits and unusable replies from these tool-free roles also hold their exact input,
-without pausing the operation or earning semantic progress. A confirmed timeout or numeric
-nonzero exit of a tool-enabled finalizer likewise holds only its exact request and ends
-that run without a pause: clear a queue task with `lore work retry-generation` and an audit
-subject with `lore work retry-preparation --stage audit-assessment`. Contract changes alone
-never retry those failures. Signal exits, cleanup failures and unknown state remain fatal.
 An exhausted daily allowance waits for a later UTC day or an explicitly
 changed configured limit; a new process never grants a fresh allowance.
 Without this policy, schedules and the one-batch defaults remain unchanged.
 Ordinary manual `lore run` without `--scheduled` uses its normal batch/work budgets
 outside this shared allowance and pause. Use `--scheduled` for a policy-controlled
 manual trigger too; add `--wait` when it should wait for the workflow lease.
+
+## Pauses and holds
+
+Unknown or corrupt accounting refuses semantic execution. Fatal inference failures
+pause that operation's semantic phase across restarts and day rollover. Daily source
+collection still runs before this pause check; process and knowledge report a known
+pause before waiting for the workflow lease. Reviews needing reassessment keep
+completion nonzero without pausing automation; invalid reviews and failed reads remain
+fatal. Daily checks reviews before and after period publication.
 `lore status --json` reports the current UTC-day reservations, remaining configured
 allowance and paused operations without changing the ledger. Each pause names the
 failed stage that stopped its job and a bounded detail; the job's `--json` report keeps
 the complete stage list. Read that cause before `--resume`. Unreadable accounting
 is unavailable, never a zero-use success. This snapshot does not verify OS registration
 or guarantee progress while the computer is off, asleep or out of agent allowance.
+After repairing the cause, explicit `lore run OPERATION --scheduled --resume --json`
+clears only its pause; it preserves usage, rejected proposals and exact semantic holds.
+Unchanged holds spend no calls. A failed invocation of one request holds only that
+exact input, without pausing the operation or earning semantic progress;
+[bounded work](../../lore-process/references/bounded-work.md#native-holds-and-retries)
+lists those holds and the commands that clear them.
+
+## Execution profiles
 
 Queue-mode scheduled jobs require an explicit execution profile. Selection is CLI
 `--profile`, then `execution.operations`, then `execution.default_profile`.
 An unavailable host, authentication error or denied action never switches hosts.
 Native run outcomes distinguish completed, skipped, failed and cancelled stages;
 `--json` reserves stdout for that report and sends stage output to stderr.
+
+## Daily and period recovery
 
 Daily collection waits for the short vault writer before semantic processing. A
 partial source failure still permits independent queue/reconciliation stages;
@@ -113,6 +133,8 @@ Changing the activation date or vault timezone restarts only the recovery cursor
 existing intents remain. A prior intent in another timezone still requires an
 explicit request under the intended timezone before it can process.
 
+## Knowledge jobs
+
 Knowledge jobs reserve their semantic budget for ready audit subjects before
 draining unrelated queue work. The selected subject's actual evidence, context and
 review inputs must have completed owned semantic work; unfinished scoped tasks or
@@ -121,6 +143,8 @@ blocker. `audit_deferred` reports encountered blockers. The runner verifies sele
 assessments before releasing their workflow. Final completion also requires global
 reconciliation and checks; completed audits do not turn an
 unfinished global queue into a successful job.
+
+## Workflow leases
 
 The native runner holds the cooperative Unix workflow lease through semantic
 reading and publication within each retained unit. Native daily jobs collect first, then fence publication
@@ -140,6 +164,8 @@ the pinned configuration before journal recovery and prepares current inputs aft
 waiting. Recording after a host call validates fresh scope before publication.
 Other storage errors remain failures; waiting never retries a model invocation.
 
+## Runtime skills and environment
+
 Unattended skills come from the binary's data directory, independently of user or
 project interactive deployment. The runtime verifies every required packaged file.
 Claude loads explicit plugins and dependency permissions; Codex reads exact
@@ -151,6 +177,8 @@ generation directory, and relevant existing `CLAUDE_CONFIG_DIR` or `CODEX_HOME`
 directories. They do not copy credential values. Explicit standard proxy variables
 retain casing and empty values; endpoint URLs must be credential-free and contain
 no query, fragment or non-root path. Regenerate definitions when these change.
+
+## Timing and notifications
 
 Calendar triggers use host local time; page dates use vault timezone. Launchd
 coalesces missed runs after sleep; cron skips them. Neither backfills every missed

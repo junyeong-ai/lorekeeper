@@ -2,25 +2,23 @@
 
 ## Contents
 
-- Publication and original bundles
+- [Publication and original bundles](#publication-and-original-bundles)
 - [Manual inbox batches](#manual-inbox-batches)
 - [Semantic completion](#semantic-completion)
 - [Refetch and replay](#refetch-and-replay)
 - [Missing-date recovery](#missing-date-recovery)
+
+## Publication and original bundles
 
 Each source's pages and new semantic requests share a recoverable mutation journal.
 Individual file replacement is atomic; the full run contains separate publication batches.
 After failure, use retained inputs and pending journals where available. A remote refetch
 may return edited, deleted or expired events, so it does not establish exact historical
 replay. Failed planning discards that source's buffered requests. Native jobs do not
-commit vault edits automatically; review and commit them separately.
-
-Ordinary full runs for today reserve their first source under a short mutation claim
-before collection, recovering pending journals before recording the next turn.
-Acquisition and planning follow that rotation so repeated capacity failures cannot
-always exclude the same later source. The claim is released before source I/O.
-Filtered and historical runs leave this turn unchanged; dry runs only preview it.
-Rejected sources still fail the job and retain their inputs.
+commit vault edits automatically; review and commit them separately. Ordinary full
+runs rotate which source goes first, so repeated capacity failures cannot always
+exclude the same later source; rejected sources still fail the job and retain their
+inputs.
 
 1. **Collect observations** without holding the vault writer lock. Acquisition includes
    fetch, retries and local preprocessing within each source's configured budget.
@@ -74,24 +72,24 @@ and other unsupported resource constructs are reported as incomplete coverage an
 keep the entry for retry; HTML `base`, implicit Obsidian basename lookup and local
 raw-HTML links in Markdown are refused. Inspect `unsupported` before assuming a
 self-contained export. Each entry is a separate observation, not an atomic inbox
-snapshot. Default capture limits are 32 MiB per entry, 64 MiB per member, 2048 members,
-32 dependency levels and 8192 member records per source. `ingest.originals` configures entry/member/source acquisition limits, with a default
-256 MiB per source and a fixed 512 MiB ingest envelope. Captures use private temporary
-files; manual derived text has a separate 256 MiB source envelope.
-`ingest.inputs` independently bounds cumulative serialized observations and projected
-planning input (default 64 MiB per source, 256 MiB per run), including retained streaming
-events. Failed admission preserves that stage's remaining capacity for independent
+snapshot. `ingest.originals` configures entry, member and per-source acquisition limits
+([defaults](../../lore-setup/references/config.md#document-preprocessing)); fixed limits
+allow 2048 members, 32 dependency levels and 8192 member records per source, a 512 MiB
+ingest envelope and a separate 256 MiB manual derived-text envelope per source. Captures
+use private temporary files. `ingest.inputs`
+([configuration](../../lore-setup/references/config.md#configuration-outline))
+independently bounds cumulative serialized observations and projected planning input,
+including retained streaming events. Failed admission preserves that stage's remaining capacity for independent
 sources and keeps the source's inbox entries. These limits do not cap process memory or native
 decoder allocations. Split unlinked batches, provide smaller self-contained exports or
 deliberately adjust the corresponding configured limit; input is never clipped to fit.
 
 RSS originals retain immutable pre-classification adapter-collected text, not the
-provider's HTTP/XML bytes. New bound extraction requires explicit article IDs and
-payload revisions for each reported concept; omission is not citation retraction.
-Original payload admission retains the 64 MiB source and 256 MiB run bounds. An
-oversized source releases its planning reservation so later fitting sources can proceed.
-Legacy event logs are retained observations, not proof of a page's historical input.
-Use the [query reference](../../lore-wiki/references/query.md) to inspect exact originals.
+provider's HTTP/XML bytes. Original payload admission retains the 64 MiB source and
+256 MiB run bounds. An oversized source releases its planning reservation so later
+fitting sources can proceed. Use the
+[query reference](../../lore-wiki/references/query.md#evidence-lifecycle-and-originals)
+to inspect exact originals and their evidential limits.
 
 ## Manual inbox batches
 
