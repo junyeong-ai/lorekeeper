@@ -129,7 +129,7 @@ const PARSER_IDENTITIES: &[(&str, &str)] = &[
     ("minijinja", "3.1.0"),
     ("percent-encoding", "2.3.2"),
     ("pulldown-cmark", "0.13.6"),
-    ("pulldown-cmark-to-cmark", "23.0.1"),
+    ("pulldown-cmark-to-cmark", "23.0.3"),
     ("selectors", "0.41.0"),
     ("serde", "1.0.229"),
     ("serde-saphyr", "2.1.1"),
